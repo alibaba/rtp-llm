@@ -75,12 +75,9 @@ class ChatGlm45Renderer(ReasoningToolBaseRenderer):
     def _create_reasoning_parser(
         self, request: ChatCompletionRequest
     ) -> Optional[ReasoningParser]:
-        # 模板注入了 think 锚点就意味着模型会输出思考内容，此时即便请求侧
-        # thinking_mode 为 DISABLED 也必须建解析器，否则思考块会泄漏进可见回复。
+        # 推理模型即便 DISABLED / 无锚点也可能自发输出 <think>，故一律建解析器
+        # 剥离。force_reasoning 只由锚点决定，非锚点走非 force，避免吞掉可见回复。
         anchored = self._resolve_think_anchor(request)
-        if not anchored and not self.in_think_mode(request):
-            return None
-
         return ReasoningParser(model_type="glm45", force_reasoning=anchored)
 
 

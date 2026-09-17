@@ -21,6 +21,7 @@ from rtp_llm.openai.api_datatype import (
 )
 from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
 from rtp_llm.openai.renderers.custom_renderer import (
+    EMITS_REASONING_STREAM_BY_MODEL_TYPE,
     CustomChatRenderer,
     RendererParams,
     StreamStatus,
@@ -941,12 +942,18 @@ class CreateReasoningParserTest(TestCase):
         """recorded_anchor 模拟 endpoint 在渲染时记下的锚点状态。
 
         None 表示没有走过 endpoint（例如 dash_sc / raw 链路），此时 renderer
-        必须自己回退到渲染探测。
+        必须自己回退到渲染探测。真实 request 用 PrivateAttr 存锚点（get/set 可用），
+        Mock 必须显式背书，否则 _record_prompt_think_anchor 的 set 是空操作、
+        _resolve_think_anchor 的回退渲染永远读到 None。
         """
         request = Mock()
         request.tools = tools
         request.logprobs = None
-        request.prompt_has_think_anchor = Mock(return_value=recorded_anchor)
+        anchor_box = {"value": recorded_anchor}
+        request.prompt_has_think_anchor = Mock(side_effect=lambda: anchor_box["value"])
+        request.set_prompt_has_think_anchor = Mock(
+            side_effect=lambda value: anchor_box.__setitem__("value", value)
+        )
         return request
 
     def _make_renderer(
@@ -960,6 +967,18 @@ class CreateReasoningParserTest(TestCase):
         renderer = Mock(spec=renderer_cls)
         renderer.think_start_tag = self.THINK_START_TAG
         renderer.in_think_mode = Mock(return_value=in_think_mode)
+        renderer._prompt_ends_with_think_anchor = (
+            renderer_cls._prompt_ends_with_think_anchor.__get__(renderer)
+        )
+        renderer._record_prompt_think_anchor = (
+            renderer_cls._record_prompt_think_anchor.__get__(renderer)
+        )
+        renderer._resolve_think_anchor = renderer_cls._resolve_think_anchor.__get__(
+            renderer
+        )
+        renderer._create_reasoning_parser = (
+            renderer_cls._create_reasoning_parser.__get__(renderer)
+        )
         if render_raises:
             renderer.render_chat = Mock(side_effect=RuntimeError("render failed"))
         else:
@@ -971,16 +990,14 @@ class CreateReasoningParserTest(TestCase):
                 prompt = f"user hello\n{prompt_tail}"
             rendered = Mock()
             rendered.rendered_prompt = prompt
-            renderer.render_chat = Mock(return_value=rendered)
-        renderer._create_reasoning_parser = (
-            renderer_cls._create_reasoning_parser.__get__(renderer)
-        )
-        renderer._prompt_ends_with_think_anchor = (
-            renderer_cls._prompt_ends_with_think_anchor.__get__(renderer)
-        )
-        renderer._resolve_think_anchor = renderer_cls._resolve_think_anchor.__get__(
-            renderer
-        )
+
+            # 真实 render_chat 会就它产出的 prompt 记录锚点，_resolve_think_anchor
+            # 的回退分支再读取该记录；Mock 必须复刻这一步，否则 anchored 永远为 False。
+            def _fake_render_chat(request, _prompt=prompt, _rendered=rendered):
+                renderer._record_prompt_think_anchor(request, _prompt)
+                return _rendered
+
+            renderer.render_chat = Mock(side_effect=_fake_render_chat)
         return renderer
 
     def _assert_forces_reasoning(self, parser, expected):
@@ -993,17 +1010,24 @@ class CreateReasoningParserTest(TestCase):
             self.assertEqual(reasoning_text, "")
             self.assertEqual(normal_text, self.TAGLESS_REPLY)
 
-    def _check(self, renderer_cls, expected_forced, render_raises=False):
+    def _check(self, renderer_cls, always_forces, render_raises=False):
         # render_chat 抛异常时锚点无从探测，anchored 恒为 False。
+        # 每个用例为 (anchored, in_think_mode, forced, expect_parser)。
+        # DISABLED+未锚点：非 kimi 仍建**非 force** parser 以剥离自发 think；
+        # kimi 恒 force，保留守卫返回 None（否则会吞掉无结束标记的可见回复）。
         if render_raises:
-            cases = [(False, True, expected_forced)]
+            cases = [
+                (False, True, always_forces, True),
+                (False, False, False, not always_forces),
+            ]
         else:
             cases = [
-                (True, False, True),
-                (True, True, True),
-                (False, True, expected_forced),
+                (True, False, True, True),
+                (True, True, True, True),
+                (False, True, always_forces, True),
+                (False, False, False, not always_forces),
             ]
-        for anchored, in_think_mode, forced in cases:
+        for anchored, in_think_mode, forced, expect_parser in cases:
             with self.subTest(anchored=anchored, in_think_mode=in_think_mode):
                 renderer = self._make_renderer(
                     renderer_cls,
@@ -1012,18 +1036,11 @@ class CreateReasoningParserTest(TestCase):
                     render_raises=render_raises,
                 )
                 parser = renderer._create_reasoning_parser(self._make_request())
-                self.assertIsNotNone(parser)
-                self._assert_forces_reasoning(parser, forced)
-
-    def _check_returns_none(self, renderer_cls, render_raises=False):
-        """既未锚定又未开启 thinking_mode 时不应创建解析器。"""
-        renderer = self._make_renderer(
-            renderer_cls,
-            anchored=False,
-            in_think_mode=False,
-            render_raises=render_raises,
-        )
-        self.assertIsNone(renderer._create_reasoning_parser(self._make_request()))
+                if expect_parser:
+                    self.assertIsNotNone(parser)
+                    self._assert_forces_reasoning(parser, forced)
+                else:
+                    self.assertIsNone(parser)
 
     def _all_renderers(self):
         from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
@@ -1036,7 +1053,8 @@ class CreateReasoningParserTest(TestCase):
             QwenReasoningToolRenderer,
         )
 
-        # 第二项：在「已开启 thinking_mode 但未锚定」时是否仍强制解析。
+        # 第二项 always_forces：True=kimi（恒 force 且保留 DISABLED 守卫），
+        # False=qwen/deepseek/glm（仅锚定时 force，且恒建 parser）。
         return [
             (Qwen3CoderRenderer, False),
             (QwenReasoningToolRenderer, False),
@@ -1048,17 +1066,16 @@ class CreateReasoningParserTest(TestCase):
         ]
 
     def test_anchored_creates_parser_even_when_thinking_disabled(self):
-        for renderer_cls, expected_forced in self._all_renderers():
+        for renderer_cls, always_forces in self._all_renderers():
             with self.subTest(renderer=renderer_cls.__name__):
-                self._check(renderer_cls, expected_forced)
-                self._check_returns_none(renderer_cls)
+                self._check(renderer_cls, always_forces)
 
     def test_render_failure_falls_back_to_thinking_mode(self):
-        """render_chat 抛异常时应退化为仅按 thinking_mode 判断，而非整体失败。"""
-        for renderer_cls, expected_forced in self._all_renderers():
+        """render_chat 抛异常时应退化而非整体失败：kimi 回落到仅按 thinking_mode
+        判断（DISABLED 返回 None），非 kimi 仍恒建非 force parser。"""
+        for renderer_cls, always_forces in self._all_renderers():
             with self.subTest(renderer=renderer_cls.__name__):
-                self._check(renderer_cls, expected_forced, render_raises=True)
-                self._check_returns_none(renderer_cls, render_raises=True)
+                self._check(renderer_cls, always_forces, render_raises=True)
 
     def test_bare_think_anchor_without_trailing_newline_is_detected(self):
         """DeepSeek encoding 只追加裸 `<think>`，而默认 think_start_tag 是 `<think>\\n`。
@@ -1097,9 +1114,10 @@ class CreateReasoningParserTest(TestCase):
                     self._assert_forces_reasoning(parser, True)
 
     def test_closed_empty_think_block_is_not_an_anchor(self):
-        """模板关闭 think 时注入的是 `<think></think>` 空块（对照 B），不能判定为
-        anchored，否则 DISABLED 请求会平白多出一个解析器。"""
-        for renderer_cls, _ in self._all_renderers():
+        """模板关闭 think 时注入的是 `<think></think>` 空块（Dart/diversion 形态），
+        不能判定为 anchored：非 kimi 走**非 force** parser（剥离自发 think 但不吞
+        可见回复）；kimi 既未锚定又未开 think，仍返回 None。"""
+        for renderer_cls, always_forces in self._all_renderers():
             with self.subTest(renderer=renderer_cls.__name__):
                 renderer = self._make_renderer(
                     renderer_cls,
@@ -1107,9 +1125,12 @@ class CreateReasoningParserTest(TestCase):
                     in_think_mode=False,
                     prompt_tail="<think></think>",
                 )
-                self.assertIsNone(
-                    renderer._create_reasoning_parser(self._make_request())
-                )
+                parser = renderer._create_reasoning_parser(self._make_request())
+                if always_forces:
+                    self.assertIsNone(parser)
+                else:
+                    self.assertIsNotNone(parser)
+                    self._assert_forces_reasoning(parser, False)
 
     def test_recorded_anchor_is_used_without_rendering_again(self):
         """endpoint 渲染时已记下锚点状态，renderer 不得再渲染一次。
@@ -1117,7 +1138,7 @@ class CreateReasoningParserTest(TestCase):
         回归背景：早先的实现在每次 _create_reasoning_parser 里重渲染一遍 prompt，
         给带 tools 的请求平白加了一次完整 jinja 渲染加编码。
         """
-        for renderer_cls, expected_forced in self._all_renderers():
+        for renderer_cls, always_forces in self._all_renderers():
             for recorded in (True, False):
                 with self.subTest(renderer=renderer_cls.__name__, recorded=recorded):
                     renderer = self._make_renderer(
@@ -1131,7 +1152,7 @@ class CreateReasoningParserTest(TestCase):
                     renderer.render_chat.assert_not_called()
                     self.assertIsNotNone(parser)
                     self._assert_forces_reasoning(
-                        parser, True if recorded else expected_forced
+                        parser, True if recorded else always_forces
                     )
 
     def test_recorded_anchor_builds_parser_when_thinking_disabled(self):
@@ -1156,13 +1177,18 @@ class CreateReasoningParserTest(TestCase):
 class NeedsReasoningToolStatusTest(TestCase):
     """状态列表门控：解析器只在门控放行时才会被创建。
 
-    案例一的失效链有两道门：门控与工厂方法。早先只修了工厂方法，门控仍然是
-    `tools or in_think_mode`，于是「模板有锚点 + DISABLED + 无 tools」的请求走
-    普通状态对象，解析器根本不会被创建，思考块照旧泄漏。
+    门控为**叠加**判据：`tools or emits_reasoning_stream or in_think_mode or 记录到
+    开放锚点`。新增的 emits_reasoning_stream 项让推理 renderer 即便 DISABLED / 无锚点
+    也放行（critic / Dart / diversion 自发 think 得以剥离）；保留 in_think_mode 项是
+    为了 ENABLED 且经委托拆分 think 的非推理 renderer（如 model_type="qwen" 的
+    QwenRenderer）不被回归。相比旧门控只增不减，原本放行的不会被关掉。
     """
 
-    def _make_renderer(self, in_think_mode):
+    def _make_renderer(self, emits_reasoning_stream, in_think_mode=False):
         renderer = Mock(spec=CustomChatRenderer)
+        # Mock(spec=cls) 不会复制真实类属性值，能力位与 in_think_mode 都需显式设置，
+        # 否则 in_think_mode 会变成恒真的自动 Mock，门控永远打开。
+        renderer.emits_reasoning_stream = emits_reasoning_stream
         renderer.in_think_mode = Mock(return_value=in_think_mode)
         renderer._effective_tools = CustomChatRenderer._effective_tools.__get__(
             renderer
@@ -1179,37 +1205,43 @@ class NeedsReasoningToolStatusTest(TestCase):
         request.prompt_has_think_anchor = Mock(return_value=recorded_anchor)
         return request
 
+    def test_reasoning_capability_alone_opens_the_gate(self):
+        # critic / Dart / diversion 形态：推理 renderer + DISABLED + 无 tools + 无开放锚点。
+        renderer = self._make_renderer(emits_reasoning_stream=True)
+        self.assertTrue(
+            renderer.needs_reasoning_tool_status(
+                self._make_request(recorded_anchor=False)
+            )
+        )
+
+    def test_think_mode_alone_opens_the_gate(self):
+        # model_type="qwen" 形态：非推理 renderer 但 ENABLED（in_think_mode=True），
+        # 依赖委托拆分 think，门控必须照常打开（叠加判据不回归该项）。
+        renderer = self._make_renderer(emits_reasoning_stream=False, in_think_mode=True)
+        self.assertTrue(
+            renderer.needs_reasoning_tool_status(
+                self._make_request(recorded_anchor=False)
+            )
+        )
+
     def test_anchor_alone_opens_the_gate(self):
-        renderer = self._make_renderer(in_think_mode=False)
+        # 兜底：推理模型误用非推理 renderer 时，记录到的开放锚点仍放行。
+        renderer = self._make_renderer(emits_reasoning_stream=False)
         self.assertTrue(
             renderer.needs_reasoning_tool_status(
                 self._make_request(recorded_anchor=True)
             )
         )
 
-    def test_tools_or_think_mode_still_open_the_gate(self):
+    def test_tools_open_the_gate(self):
+        renderer = self._make_renderer(emits_reasoning_stream=False)
         self.assertTrue(
-            self._make_renderer(in_think_mode=True).needs_reasoning_tool_status(
-                self._make_request()
-            )
-        )
-        self.assertTrue(
-            self._make_renderer(in_think_mode=False).needs_reasoning_tool_status(
-                self._make_request(tools=["a tool"])
-            )
+            renderer.needs_reasoning_tool_status(self._make_request(tools=["a tool"]))
         )
 
-    def test_disabled_tools_do_not_open_the_gate(self):
-        # tool_choice=none 时工具不可用，门控只应看 think 与锚点。
-        renderer = self._make_renderer(in_think_mode=False)
-        self.assertFalse(
-            renderer.needs_reasoning_tool_status(
-                self._make_request(tools=["a tool"], tool_choice="none")
-            )
-        )
-
-    def test_plain_request_keeps_the_gate_shut(self):
-        renderer = self._make_renderer(in_think_mode=False)
+    def test_non_reasoning_plain_request_keeps_the_gate_shut(self):
+        # explain 形态：非推理 renderer + 无 tools + 无锚点。
+        renderer = self._make_renderer(emits_reasoning_stream=False)
         for recorded in (None, False):
             with self.subTest(recorded=recorded):
                 self.assertFalse(
@@ -1218,12 +1250,103 @@ class NeedsReasoningToolStatusTest(TestCase):
                     )
                 )
 
+    def test_disabled_tools_do_not_open_the_gate(self):
+        # tool_choice=none 时工具不可用，非推理 renderer 门控应保持关闭。
+        renderer = self._make_renderer(emits_reasoning_stream=False)
+        self.assertFalse(
+            renderer.needs_reasoning_tool_status(
+                self._make_request(tools=["a tool"], tool_choice="none")
+            )
+        )
+
     def test_unknown_anchor_does_not_open_the_gate(self):
-        """未探测过（None）不能当成有锚点：那会让门控在无 tools 无 think 的常见
+        """未探测过（None）不能当成有锚点：那会让非推理 renderer 在无 tools 的常见
         路径上放行，等于把渲染成本加回来。"""
-        renderer = self._make_renderer(in_think_mode=False)
+        renderer = self._make_renderer(emits_reasoning_stream=False)
         request = self._make_request(recorded_anchor=None)
         self.assertFalse(renderer.needs_reasoning_tool_status(request))
+
+
+class EmitsReasoningStreamCapabilityTest(TestCase):
+    """能力位 emits_reasoning_stream 的类级分派：推理家族（ReasoningToolBaseRenderer
+    子类）为 True，非推理（CustomChatRenderer / QwenRenderer）为 False，
+    Qwen35Renderer 经 MRO 从推理家族继承为 True。"""
+
+    def test_reasoning_family_class_attribute_is_true(self):
+        from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
+        from rtp_llm.openai.renderers.deepseekv31_renderer import DeepseekV31Renderer
+        from rtp_llm.openai.renderers.kimik2_renderer import KimiK2Renderer
+        from rtp_llm.openai.renderers.qwen3_code_renderer import Qwen3CoderRenderer
+        from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
+            QwenReasoningToolRenderer,
+        )
+
+        for cls in (
+            ReasoningToolBaseRenderer,
+            QwenReasoningToolRenderer,
+            Qwen3CoderRenderer,
+            DeepseekV31Renderer,
+            ChatGlm45Renderer,
+            KimiK2Renderer,
+        ):
+            with self.subTest(renderer=cls.__name__):
+                self.assertTrue(cls.emits_reasoning_stream)
+
+    def test_non_reasoning_class_attribute_is_false(self):
+        from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
+
+        self.assertFalse(CustomChatRenderer.emits_reasoning_stream)
+        self.assertFalse(QwenRenderer.emits_reasoning_stream)
+
+    def test_qwen35_renderer_is_reasoning_via_mro(self):
+        from rtp_llm.openai.renderers.qwen35_renderer import Qwen35Renderer
+
+        self.assertTrue(Qwen35Renderer.emits_reasoning_stream)
+
+    def test_model_type_override_wins_over_class_attribute(self):
+        """qwen_tool shares QwenReasoningToolRenderer with the qwen_3 reasoning
+        family, but it is the Qwen2/Qwen2.5 tool-calling variant: the class
+        attribute would classify the deployment as a reasoning family and skip
+        the clamp that protects a Qwen2 template from the begin="" envelope."""
+        from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
+            QwenReasoningToolRenderer,
+        )
+
+        self.assertTrue(
+            EMITS_REASONING_STREAM_BY_MODEL_TYPE.get(
+                "qwen_3", QwenReasoningToolRenderer.emits_reasoning_stream
+            )
+        )
+        self.assertFalse(
+            EMITS_REASONING_STREAM_BY_MODEL_TYPE.get(
+                "qwen_tool", QwenReasoningToolRenderer.emits_reasoning_stream
+            )
+        )
+
+    def test_instance_resolves_capability_from_model_type(self):
+        """The override must be applied per instance, so two deployments that
+        share a renderer class can disagree."""
+
+        class ToolRenderer(ReasoningToolBaseRenderer):
+            def _setup_chat_template(self):
+                self.chat_template = "test"
+
+        resolved = {}
+        for model_type in ("qwen_3", "qwen_tool"):
+            renderer = ToolRenderer(
+                tokenizer=Mock(),
+                renderer_params=RendererParams(
+                    model_type=model_type,
+                    max_seq_len=2048,
+                    eos_token_id=0,
+                    stop_word_ids_list=[],
+                ),
+                generate_env_config=GenerateEnvConfig(),
+            )
+            resolved[model_type] = renderer.emits_reasoning_stream
+
+        self.assertTrue(resolved["qwen_3"])
+        self.assertFalse(resolved["qwen_tool"])
 
 
 class ReasoningStatusWithLogprobsTest(IsolatedAsyncioTestCase):
@@ -1264,6 +1387,9 @@ class RenderChatRecordsThinkAnchorTest(TestCase):
     def _make_renderer(self, prompt):
         renderer = Mock(spec=ReasoningToolBaseRenderer)
         renderer.think_start_tag = self.THINK_START_TAG
+        # 隔离锚点这一项：能力位与 in_think_mode 都置 False，门控只可能由记录到的锚点打开。
+        renderer.emits_reasoning_stream = False
+        renderer.in_think_mode = Mock(return_value=False)
         for name in (
             "_prompt_ends_with_think_anchor",
             "_record_prompt_think_anchor",
@@ -1304,7 +1430,6 @@ class RenderChatRecordsThinkAnchorTest(TestCase):
 
     def test_recorded_anchor_opens_the_gate_without_a_second_render(self):
         renderer = self._make_renderer(f"user hi\n{self.THINK_START_TAG}")
-        renderer.in_think_mode = Mock(return_value=False)
         request = self._make_request()
 
         self.assertFalse(renderer.needs_reasoning_tool_status(request))
@@ -1373,6 +1498,9 @@ class ToolChoiceNoneTest(TestCase):
 
     def test_gate_ignores_disabled_tools(self):
         renderer = Mock(spec=CustomChatRenderer)
+        # 非推理 renderer：能力位与 in_think_mode 均置 False，门控只由有效 tools 决定
+        # （Mock(spec) 不复制类属性值，且 in_think_mode 不设会变成恒真自动 Mock）。
+        renderer.emits_reasoning_stream = False
         renderer.in_think_mode = Mock(return_value=False)
         for name in ("_effective_tools", "needs_reasoning_tool_status"):
             setattr(renderer, name, getattr(CustomChatRenderer, name).__get__(renderer))

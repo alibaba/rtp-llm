@@ -338,7 +338,39 @@ class RenderedInputs:
             )
 
 
+# Deployment-level overrides for the ``emits_reasoning_stream`` capability,
+# keyed by ``RendererParams.model_type``. The class attribute below classifies
+# the *renderer family*, but a family is mapped from several model types and the
+# same type can front checkpoints with different capabilities, so the class
+# alone misclassifies two shapes:
+# - ``qwen_tool`` shares QwenReasoningToolRenderer with the qwen_3 reasoning
+#   family, yet it is the Qwen2/Qwen2.5 tool-calling variant
+#   (``register_model("qwen_tool", QWenV2)``, and the qwen25 smoke tasks serve
+#   Qwen2.5-Instruct under it). Without the override a request-forced
+#   enable_thinking on that deployment keeps compiling the ``begin=""`` ENABLED
+#   envelope and masks EOS forever.
+# - ``qwen3_vl``/``qwen3_vl_moe`` are Qwen2VLRenderer and therefore inherit
+#   False, but the family has thinking checkpoints. They are intentionally NOT
+#   overridden here: the same names also front ``Qwen3-VL-*``
+#   Instruct checkpoints, so declaring either value would be wrong for the other
+#   deployment; their template injects a think anchor whenever thinking is on,
+#   which is what opens the gate for them today.
+# Never derive this from generate_env_config's think_start_tag / think_end_tag
+# defaults: those are non-empty, so deriving from them is True for every
+# deployment including genuinely non-reasoning models.
+EMITS_REASONING_STREAM_BY_MODEL_TYPE: Dict[str, bool] = {
+    "qwen_tool": False,
+}
+
+
 class CustomChatRenderer:
+    # Whether this renderer's model spontaneously emits <think> blocks.
+    # Subclasses under ReasoningToolBaseRenderer set this True. It is the sole
+    # capability signal for think handling. See
+    # EMITS_REASONING_STREAM_BY_MODEL_TYPE for per-deployment overrides, which
+    # the instance attribute below resolves in __init__.
+    emits_reasoning_stream: bool = False
+
     def __init__(
         self,
         tokenizer: BaseTokenizer,
@@ -376,6 +408,11 @@ class CustomChatRenderer:
 
         self.tokenizer = tokenizer
         self.model_type = renderer_params.model_type
+        # Resolve the capability per deployment, so a model type that shares a
+        # renderer class with another family can override the class default.
+        self.emits_reasoning_stream = EMITS_REASONING_STREAM_BY_MODEL_TYPE.get(
+            self.model_type, type(self).emits_reasoning_stream
+        )
         self.max_seq_len = renderer_params.max_seq_len
         self.eos_token_id = renderer_params.eos_token_id
         self.stop_words_id_list = renderer_params.stop_word_ids_list
@@ -1221,18 +1258,26 @@ class CustomChatRenderer:
     def needs_reasoning_tool_status(self, request: ChatCompletionRequest) -> bool:
         """Whether the response path needs the tool/reasoning-aware status object.
 
-        The anchor term is what stops a template-injected think block from
-        leaking: with thinking_mode DISABLED and no tools the request config
-        alone says "nothing to parse", while the model is in fact going to
-        think. Only the flag recorded during rendering is consulted here, and
-        every render path fills it in (see _record_prompt_think_anchor), so the
-        gate never renders the prompt itself. A request that no code path has
-        rendered yet keeps the gate shut, which is also why
-        _resolve_think_anchor's fallback render is a safety net for other
-        callers rather than the gate's decision path.
+        Openers, in order:
+        - effective tools: a detector is needed;
+        - ``emits_reasoning_stream``: a reasoning renderer may spontaneously emit
+          a <think> block even when the request says DISABLED, so the gate must
+          open regardless of thinking_mode or anchor — otherwise the think block
+          leaks into the visible reply (critic / Dart / diversion);
+        - ``in_think_mode``: ENABLED requests on a renderer that delegates think
+          splitting (e.g. QwenRenderer routes to its internal reasoning renderer)
+          must keep opening the gate;
+        - recorded open anchor: safety net for a reasoning model mistakenly served
+          by a non-reasoning renderer.
+
+        The capability term is purely additive over the previous gate, so nothing
+        that opened before ever closes here. Only the flag recorded during
+        rendering is consulted; the gate never renders the prompt itself (every
+        render path fills the flag in via _record_prompt_think_anchor).
         """
         return bool(
             self._effective_tools(request)
+            or self.emits_reasoning_stream
             or self.in_think_mode(request)
             or request.prompt_has_think_anchor() is True
         )
@@ -1261,10 +1306,22 @@ class CustomChatRenderer:
             enable_think_mode = False
             initial_in_think_mode = False
         else:
-            # Keep fixed enabled/disabled modes on the legacy renderer hooks.
-            # Some reasoning renderers parse thinking before this base class.
+            # The resolved generate_config is authoritative for *routing*: a
+            # request-level enable_thinking must not reopen the state machine
+            # when the endpoint clamped the resolved mode back to DISABLED,
+            # otherwise the reply would be pushed into reasoning_content while
+            # the model was told not to think. The hooks stay in the loop
+            # because some reasoning renderers parse thinking before this base
+            # class and opt out here (QwenRenderer returns False from both).
+            #
+            # ``enable_think_mode`` deliberately stays request-derived: it is
+            # not a routing switch, it only gates whether the usage reports
+            # reasoning_tokens.
             enable_think_mode = bool(self.in_think_mode(request))
-            initial_in_think_mode = bool(self.should_process_think(request))
+            initial_in_think_mode = (
+                bool(self.should_process_think(request))
+                and resolved_thinking_mode == ThinkingMode.ENABLED
+            )
         think_status_list = [
             ThinkStatus(
                 enable_think_mode=enable_think_mode,
