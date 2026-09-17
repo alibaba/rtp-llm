@@ -324,6 +324,40 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             value = value.view(
                 1, value.shape[0], self.local_num_v_heads, self.head_v_dim
             )
+        backend = os.getenv("RTP_QWEN35_GDN_PREFILL_BACKEND", "native")
+        if backend not in ("native", "flashinfer"):
+            raise ValueError(f"Unknown GDN prefill backend: {backend}")
+        if backend == "flashinfer":
+            # Explicit opt-in: unsupported dtype/architecture/layout is an error,
+            # so a candidate comparison cannot silently measure the old backend.
+            from rtp_llm.models_py.triton_kernels.fla.flashinfer_prefill import (
+                flashinfer_gdn_prefill,
+                store_flashinfer_ssm_state,
+            )
+
+            attn_out, final_state, checkpoints, starts = flashinfer_gdn_prefill(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                cu_seqlens_without_padding,
+                initial_state=initial_states,
+                checkpoint_interval=seq_size_per_block,
+            )
+            if ssm_states is not None:
+                store_flashinfer_ssm_state(
+                    checkpoints,
+                    starts,
+                    final_state,
+                    attn_inputs.prefix_lengths_device,
+                    cu_seqlens_without_padding,
+                    attn_inputs.kv_cache_kernel_block_id_device,
+                    ssm_states,
+                    seq_size_per_block,
+                    mixed_qkv.shape[0],
+                )
+            return attn_out.squeeze(0)
         use_flydsl_chunk_gdn = (
             is_flydsl_chunk_gdn_enabled()
             and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)

@@ -202,7 +202,15 @@ def store_ssm_state_to_block_map_kernel(
             BLOCK_V,
             CONV_STRIDE_TOKEN,
         )
-    elif chunk > 0 and (chunk + 1) * CHUNK_SIZE % SEQ_SIZE_PER_BLOCK == 0:
+    # A non-aligned prefix can put the last full checkpoint and the final
+    # partial chunk in the same cache block. Only the final state owns that
+    # slot; allowing both CTAs to store causes a data race.
+    elif (
+        chunk > 0
+        and (chunk + 1) * CHUNK_SIZE % SEQ_SIZE_PER_BLOCK == 0
+        and (prefix + (chunk + 1) * CHUNK_SIZE - 1) // SEQ_SIZE_PER_BLOCK
+        != (prefix + input_len - 1) // SEQ_SIZE_PER_BLOCK
+    ):
         source_ptr = (
             h
             + linear_offset_64(i_c + 1, SSM_PER_BATCH)
