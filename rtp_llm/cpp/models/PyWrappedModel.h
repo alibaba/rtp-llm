@@ -162,6 +162,7 @@ private:
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     bool use_spec_decoding_{false};
     bool has_mtp_hidden_buffer_{false};
+    bool use_mori_ep_{false};
     bool enable_device_perf_{false};
     bool check_nan_{false};
 
@@ -216,6 +217,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                    GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE :
                                                    GenerationPrefillCudaGraphStatus::NOT_REQUESTED),
     use_spec_decoding_(use_spec_decoding),
+    use_mori_ep_(params.moe_config.use_mori_ep),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
     check_nan_(params.profile_debug_logging_config.check_nan) {
 
@@ -406,6 +408,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK CUDA graph input hidden width must be positive, got %ld", width);
             graph_params.input_hidden_size = static_cast<size_t>(width);
         }
+        // Mori EP low-latency dispatch caps the per-rank token count; buckets that
+        // exceed this stay disabled so lazy capture never allocates beyond it.
+        if (params.moe_config.use_mori_ep) {
+            graph_params.mori_max_tokens = params.moe_config.ll_num_max_token;
+        }
         graph_params.model_data_type            = dtype;
         graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
@@ -470,6 +477,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
 
+        const bool is_normal_generation_model =
+            !is_prefill_cuda_graph_mode && !use_spec_decoding && params.sp_config.type == SP_TYPE_NONE;
+        graph_params.lazy_capture = use_mori_ep_ && is_normal_generation_model;
         auto graph_runner =
             std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
         {
@@ -547,6 +557,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                 generation_prefill_cuda_graph_params.generation_prefill_cuda_graph_max_requests =
                     params.hw_kernel_config.generation_prefill_cuda_graph_max_requests;
                 generation_prefill_cuda_graph_params.generation_prefill_cuda_graph_pad_token_id = 0;
+                generation_prefill_cuda_graph_params.lazy_capture = use_mori_ep_;
                 try {
                     generation_prefill_graph_runner_.reset(CudaGraphRunner::initializeCapture(
                         std::make_unique<CudaGraphRunner>(generation_prefill_cuda_graph_params, py_instance)));

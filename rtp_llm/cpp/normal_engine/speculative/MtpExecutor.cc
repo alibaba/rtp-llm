@@ -304,12 +304,12 @@ bool MtpExecutor::finishDSparkPrefillCachePublication(const GptModelInputs&     
         try {
             return model->waitCacheStorePublication();
         } catch (const std::exception& e) {
-            RTP_LLM_LOG_ERROR("DSpARK %s cache-store publication wait threw on TP rank %d: %s", role, tp_rank_, e.what());
+            RTP_LLM_LOG_ERROR(
+                "DSpARK %s cache-store publication wait threw on TP rank %d: %s", role, tp_rank_, e.what());
             return std::string("wait threw: ") + e.what();
         } catch (...) {
-            RTP_LLM_LOG_ERROR("DSpARK %s cache-store publication wait threw on TP rank %d: unknown exception",
-                              role,
-                              tp_rank_);
+            RTP_LLM_LOG_ERROR(
+                "DSpARK %s cache-store publication wait threw on TP rank %d: unknown exception", role, tp_rank_);
             return std::string("wait threw an unknown exception");
         }
     };
@@ -807,6 +807,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.moe_config       = params.moe_config;
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -815,13 +816,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params,
-                                        params.py_model,
-                                        false,
-                                        true,
-                                        DSparkModelRole::NONE,
-                                        true,
-                                        dspark_prefill_commit_only_));
+        model_.reset(new PyWrappedModel(
+            model_init_params, params.py_model, false, true, DSparkModelRole::NONE, true, dspark_prefill_commit_only_));
     }
 
     // when warmup, cache manager maybe nullptr
@@ -867,6 +863,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 std::make_optional(0),
                                 mtp_params->model_config_.hc_mult});
         model_params.metrics_reporter = metrics_reporter_;
+        model_params.moe_config       = mtp_params->moe_config;
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
@@ -1066,9 +1063,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 try {
                     const auto error = model->waitCacheStorePublication();
                     if (!error.empty()) {
-                        RTP_LLM_LOG_ERROR("DSpARK local %s cache-store drain on prefill exit failed: %s",
-                                          name,
-                                          error.c_str());
+                        RTP_LLM_LOG_ERROR(
+                            "DSpARK local %s cache-store drain on prefill exit failed: %s", name, error.c_str());
                     }
                 } catch (const std::exception& e) {
                     RTP_LLM_LOG_ERROR("DSpARK local %s cache-store drain threw on prefill exit: %s", name, e.what());
@@ -1084,9 +1080,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         void disarm() {
             armed = false;
         }
-    } cache_store_drain_guard{is_dspark_ && !model_input.warmup && model_input.pd_separation,
-                              model_.get(),
-                              sp_prefill_draft_model_.get()};
+    } cache_store_drain_guard{
+        is_dspark_ && !model_input.warmup && model_input.pd_separation, model_.get(), sp_prefill_draft_model_.get()};
 
     // release model input before forward
     releaseAllModelBuffers();
@@ -2917,7 +2912,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         state.accept_tokens_gpu = accept_tokens_gpu_all.narrow(0, idx, 1);
         state.propose_tokens_gpu =
             propose_tokens_gpu_all.defined() ? propose_tokens_gpu_all.narrow(0, idx, 1) : torch::Tensor();
-        state.next_seq_len_gpu       = next_seq_len_all.narrow(0, idx, 1);
+        state.next_seq_len_gpu = next_seq_len_all.narrow(0, idx, 1);
         state.next_position_ids_gpu =
             next_position_ids_all.defined() ? next_position_ids_all.narrow(0, idx, 1) : torch::Tensor();
         state.next_kv_cache_block_id_gpu =

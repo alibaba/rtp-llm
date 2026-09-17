@@ -193,7 +193,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         p_v = tl.make_block_ptr(
             v, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
         )
-        b_v = tl.load(p_v, boundary_check=(0, 1)) - b_v
+        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero") - b_v
 
         if SAVE_NEW_VALUE:
             p_v = tl.make_block_ptr(
@@ -340,6 +340,8 @@ def chunk_gated_delta_rule_fwd_h(
     save_new_value: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
     state_dtype: Optional[torch.dtype] = None,
+    chunk_indices: Optional[torch.Tensor] = None,
+    chunk_offsets: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
@@ -395,20 +397,15 @@ def chunk_gated_delta_rule_fwd_h(
     H = u.shape[-2]
     BT = chunk_size
 
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, chunk_size)
-        if cu_seqlens is not None
-        else None
-    )
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = (
-            len(cu_seqlens) - 1,
-            len(chunk_indices),
-            prepare_chunk_offsets(cu_seqlens, BT),
-        )
+        if chunk_offsets is None:
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
+        N, NT = len(cu_seqlens) - 1, len(chunk_indices)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     # Generic Triton fallback: the kernel accumulates ``b_h*`` in fp32 and

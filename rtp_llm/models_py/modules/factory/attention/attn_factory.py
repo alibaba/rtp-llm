@@ -196,11 +196,9 @@ def _is_fmha_impl_disabled(
     # RoPE+KV writer, so both switches are part of this backend's contract.
     elif impl_class_name == "AiterPrefillImplTriton":
         return not (fmha_config.use_triton_pa and fmha_config.use_asm_pa)
-    # Aiter ASM / CK paged prefill.
-    elif (
-        "AiterPrefillImplAsm" in impl_class_name
-        or "AiterPrefillImplPaged" in impl_class_name
-    ):
+    elif "AiterPrefillImplPaged" in impl_class_name:
+        return not fmha_config.use_aiter_pa
+    elif "AiterPrefillImplAsm" in impl_class_name:
         return not fmha_config.use_asm_pa
     # Aiter ASM decode — disabled when triton PA is enabled (triton PA takes priority)
     elif "AiterDecodeImplAsm" in impl_class_name:
@@ -255,7 +253,6 @@ def get_fmha_impl(
         if not _implementation_allows_cuda_graph_selection_mode(impl, selection_mode):
             continue
 
-        # Skip if this FMHA implementation is disabled in config
         if _is_fmha_impl_disabled(impl_class_name, fmha_config):
             continue
 

@@ -147,6 +147,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.moe_config       = params.moe_config;
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");

@@ -84,6 +84,11 @@ class ExpertForwardPayload:
     expert_ids_are_local: bool = False
     router_context: object | None = None
     gate_payload: Optional[ExpertGatePayload] = None
+    valid_token_count: Optional[torch.Tensor] = None
+    # Optional router-private combine context (e.g. Mori global dispatch ids)
+    # carried with the payload so a captured forward is self-contained and does
+    # not rely on cross-call router instance state.
+    combine_indices: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -94,6 +99,7 @@ class CombineForwardPayload:
 
     fused_expert_output: torch.Tensor
     router_context: object | None = None
+    combine_indices: Optional[torch.Tensor] = None
 
 
 def should_skip_tp_allreduce(
@@ -164,6 +170,10 @@ class FusedMoeDataRouter(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not support fused gate packing"
         )
+
+    @property
+    def max_inp_tokens(self) -> Optional[int]:
+        return None
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -334,8 +344,78 @@ class FusedMoe(torch.nn.Module):
         extra_finalize_args: Optional[FinalizeArgs] = None,
         skip_tp_allreduce: bool = False,
     ) -> torch.Tensor:
-
         self._validate_skip_tp_allreduce(skip_tp_allreduce)
+        max_inp_tokens = self.router.max_inp_tokens
+        if max_inp_tokens is not None and hidden_states.shape[0] > max_inp_tokens:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("FusedMoe graph input exceeds router capacity")
+            outputs = []
+            token_count = hidden_states.shape[0]
+            for start in range(0, token_count, max_inp_tokens):
+                end = min(start + max_inp_tokens, token_count)
+                chunk_extra_expert_args = (
+                    {
+                        key: (
+                            value[start:end]
+                            if isinstance(value, torch.Tensor)
+                            and value.ndim > 0
+                            and value.shape[0] == token_count
+                            else value
+                        )
+                        for key, value in extra_expert_args.items()
+                    }
+                    if extra_expert_args is not None
+                    else None
+                )
+                outputs.append(
+                    self._forward_single(
+                        hidden_states[start:end],
+                        topk_weights[start:end],
+                        topk_ids[start:end],
+                        activation=activation,
+                        expert_map=expert_map,
+                        a1_scale=a1_scale,
+                        a2_scale=a2_scale,
+                        apply_router_weight_on_input=apply_router_weight_on_input,
+                        extra_expert_args=chunk_extra_expert_args,
+                        extra_finalize_args=(
+                            dict(extra_finalize_args)
+                            if extra_finalize_args is not None
+                            else None
+                        ),
+                        skip_tp_allreduce=skip_tp_allreduce,
+                    )
+                )
+            return torch.cat(outputs, dim=0)
+
+        return self._forward_single(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            activation=activation,
+            expert_map=expert_map,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            extra_expert_args=extra_expert_args,
+            extra_finalize_args=extra_finalize_args,
+            skip_tp_allreduce=skip_tp_allreduce,
+        )
+
+    def _forward_single(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
+        skip_tp_allreduce: bool = False,
+    ) -> torch.Tensor:
         a1 = hidden_states
 
         expert_payload = self.router.prepare(
@@ -409,6 +489,9 @@ class FusedMoe(torch.nn.Module):
                 extra_expert_args=extra_expert_args,
             )
         combine_payload.router_context = expert_payload.router_context
+
+        if combine_payload.combine_indices is None:
+            combine_payload.combine_indices = expert_payload.combine_indices
 
         if (
             expert_payload.expert_topk_weights is None

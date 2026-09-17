@@ -34,23 +34,34 @@ struct CudaGraphState {
     int                              graph_token_capacity{0};
     int                              graph_request_capacity{0};
     int                              captured_backend_batch_size{0};
+    int                              lazy_capture_key{-1};
     GenerationPrefillCudaGraphStatus generation_prefill_status{GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
 };
 
+// Decision returned by GraphBase::plan for the current request.
+enum class GraphRunDecision {
+    Replay,
+    CaptureAfterEager,
+    Eager,
+};
+
 struct GraphParams {
-    bool             enable_cuda_graph            = false;
-    bool             enable_cuda_graph_debug_mode = false;
-    bool             is_prefill_cuda_graph_mode   = false;
-    bool             is_target_verify             = false;
-    CudaGraphRole    role                         = CudaGraphRole::AUTO;
-    int              max_seq_len                  = 0;
-    int              tokens_per_block             = 0;  // physical kv block size
-    int              kernel_tokens_per_block      = 0;  // must be explicitly configured
-    int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
-    int              sp_steps               = 0;
-    size_t           max_context_batch_size = 128;
-    std::size_t      hidden_size            = 0;
-    c10::ScalarType  model_data_type        = c10::ScalarType::Float;
+    bool          enable_cuda_graph            = false;
+    bool          enable_cuda_graph_debug_mode = false;
+    bool          is_prefill_cuda_graph_mode   = false;
+    bool          is_target_verify             = false;
+    CudaGraphRole role                         = CudaGraphRole::AUTO;
+    // Lazy capture is supported only for decode/target-verify and generation-prefill roles.
+    bool             lazy_capture            = false;
+    int              max_seq_len             = 0;
+    int              tokens_per_block        = 0;  // physical kv block size
+    int              kernel_tokens_per_block = 0;  // must be explicitly configured
+    int              num_tokens_per_bs       = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
+    int              sp_steps                = 0;
+    int              mori_max_tokens         = 0;
+    size_t           max_context_batch_size  = 128;
+    std::size_t      hidden_size             = 0;
+    c10::ScalarType  model_data_type         = c10::ScalarType::Float;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
     int64_t          hc_mult                                    = 1;
@@ -95,6 +106,13 @@ public:
     // Refresh only captured kv_cache_kernel_block_id state and FlashInfer plan
     // buffers after page-table changes. Other captured fields stay untouched.
     virtual void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {}
+
+    // Lazy-capture entry points (used when GraphParams::lazy_capture is true):
+    // plan() selects a bucket for the request and returns the run decision;
+    // captureCurrentBucket() captures the bucket selected by the most recent plan() call,
+    // and must be invoked only after the eager forward for that request has fully completed.
+    virtual GraphRunDecision plan(const PyModelInputs& inputs, CudaGraphState& state) = 0;
+    virtual bool             captureCurrentBucket(const CudaGraphState& state)        = 0;
 
     py::object py_instance_;
 };
