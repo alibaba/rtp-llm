@@ -933,6 +933,72 @@ class OpenaiGenerateConfigTest(TestCase):
             )
         )
 
+    def test_forced_thinking_on_reasoning_renderer_without_anchor_is_not_clamped(self):
+        """Reasoning renderers legitimately emit <think> without a template anchor
+        (R1-style). The clamp must exempt them: request-forced ENABLED stays
+        ENABLED so the envelope + budget are still compiled."""
+        request = ChatCompletionRequest(messages=[], enable_thinking=True)
+        # No prompt anchor recorded.
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 0  # service default DISABLED
+        model_config = ModelConfig()
+        model_config.generate_env_config = generate_env_config
+        model_config.render_config = RenderConfig()
+        model_config.special_tokens = SpecialTokens()
+        model_config.max_seq_len = 1024
+        model_config.template_type = None
+        model_config.model_name = ""
+        model_config.ckpt_path = ""
+
+        endpoint = OpenaiEndpoint(
+            model_config=model_config,
+            misc_config=PyMiscellaneousConfig(),
+            vit_config=VitConfig(),
+            tokenizer=self.tokenizer,
+            backend_rpc_server_visitor=None,
+        )
+        # Swap in a reasoning renderer (emits_reasoning_stream=True by class).
+        reasoning_renderer = Mock(spec=CustomChatRenderer)
+        reasoning_renderer.emits_reasoning_stream = True
+        reasoning_renderer.default_thinking_mode = ThinkingMode.DISABLED
+        reasoning_renderer.resolve_thinking_mode = Mock(return_value=ThinkingMode.ENABLED)
+        reasoning_renderer.get_reasoning_format = Mock(
+            return_value=ReasoningFormat(tag_begin="", tag_end="</think>\n\n")
+        )
+        reasoning_renderer.apply_chat_completion_constraints = Mock()
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            config = endpoint._extract_generation_config(
+                request, input_ids=[1, 2, 3], renderer=reasoning_renderer
+            )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+        self.assertFalse(
+            any(
+                "clamping to DISABLED" in str(call)
+                for call in mock_logging.warning.call_args_list
+            )
+        )
+
+    def test_service_level_enabled_on_non_reasoning_renderer_is_not_clamped(self):
+        """Service-level ENABLED is trusted (deployer declares the model can
+        think). Non-reasoning renderer + no request-level override + no anchor
+        must still compile the envelope."""
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            config = self._generate_config_with_stop_word(
+                enable_thinking=None, env_think_mode="enabled"
+            )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+        self.assertFalse(
+            any(
+                "clamping to DISABLED" in str(call)
+                for call in mock_logging.warning.call_args_list
+            )
+        )
+
     def test_adaptive_thinking_requires_begin_token_ids(self):
         """ADAPTIVE 靠 begin 标记探测思考是否开始；begin 标记为空意味着模型没有
         任何合法路径结束思考，必须在 validate 阶段拒绝（案例二的结构性隐患）。"""

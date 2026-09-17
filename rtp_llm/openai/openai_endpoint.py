@@ -228,22 +228,26 @@ class OpenaiEndpoint(object):
 
         Prefers the flag recorded while rendering; falls back to a token-level
         comparison against the prompt tail so callers that pass input_ids but no
-        recorded flag still resolve correctly.
+        recorded flag still resolve correctly. The token-level fallback mirrors
+        the text predicate's ``rstrip("\\n")`` semantics so the two paths never
+        disagree about whether the anchor is present (Qwen templates end with
+        ``<think>\\n`` while DeepSeek appends a bare ``<think>``).
         """
         anchor_state = (
             request.prompt_has_think_anchor() if request is not None else None
         )
         if anchor_state is not None:
             return anchor_state
+        if input_ids is None:
+            return False
         think_start_tag = normalize_think_tag(self.generate_env_config.think_start_tag)
-        begin_ids = config.begin_think_token_ids or self.tokenizer.encode(
-            think_start_tag, add_special_tokens=False
-        )
-        return bool(
-            begin_ids
-            and input_ids is not None
-            and input_ids[-len(begin_ids) :] == begin_ids
-        )
+        anchor = think_start_tag.rstrip("\n")
+        if not anchor:
+            return False
+        begin_ids = self.tokenizer.encode(anchor, add_special_tokens=False)
+        if not begin_ids:
+            return False
+        return input_ids[-len(begin_ids) :] == begin_ids
 
     def _reasoning_format_for_prompt(
         self,
