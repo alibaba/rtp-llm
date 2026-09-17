@@ -204,6 +204,42 @@ class IncrementalPredictionTest {
         assertEquals(2, fullCalls[0]);
     }
 
+    @Test
+    void appendCursorKeepsLatestAndOvershootPredecessorAndRecomputesOlderPrefixes() {
+        var policy = new BatchDeliveryStrategy(
+                () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
+                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).projectionPolicy();
+        int[] appended = {0};
+        int[] recomputed = {0};
+        var predictions = new RouteProjection.Predictions() {
+            public long itemDurationMs(GroupPlanner.Item item) { return 11; }
+            public double batchPlanningDurationMs(List<GroupPlanner.Item> items) { return items.size() * 10.25; }
+            public long batchDurationMs(List<GroupPlanner.Item> items) {
+                recomputed[0]++;
+                return (long) Math.ceil(batchPlanningDurationMs(items));
+            }
+            public PrefillTimePredictor.BatchPrediction newBatchPrediction() {
+                return (tokens, hit) -> ++appended[0] * 10.25;
+            }
+        };
+        var items = List.of(item(1, 100, 0, 100_000), item(2, 100, 0, 100_000),
+                item(3, 100, 0, 100_000), item(4, 100, 0, 100_000));
+        var cursor = policy.planning(predictions);
+        assertEquals(41, cursor.durationMs(items, 3)); // Jump directly over several prefixes.
+        assertEquals(41, cursor.durationMs(items, 3)); // Probe boundary reached: no further appends.
+        assertEquals(4, appended[0]);
+        assertEquals(41, cursor.predictedPrefixMs(4).orElseThrow());
+        assertEquals(30.75, cursor.predictedPrefixMs(3).orElseThrow());
+        assertTrue(cursor.predictedPrefixMs(2).isEmpty());
+        assertTrue(cursor.predictedPrefixMs(0).isEmpty());
+        assertTrue(cursor.predictedPrefixMs(5).isEmpty());
+        var selected = items.subList(0, 2);
+        var plan = new GroupPlanner.Plan<>(selected, new GroupPlanner.Shape(2, 100, 200, 200),
+                1000, 1000, false, java.util.OptionalDouble.empty(), GroupPlanner.BATCH_FULL);
+        assertEquals(21, policy.service(plan, predictions, cursor).totalDurationMs());
+        assertEquals(1, recomputed[0]);
+    }
+
     private static GroupPlanner.Item item(long id, long input, int priority, long expires) {
         return new GroupPlanner.Item(id, priority, id, 1000, expires, input, input / 3);
     }

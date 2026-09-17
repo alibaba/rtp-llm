@@ -940,7 +940,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         private static final class AppendPlanning implements RouteProjection.GroupPlanning {
             private final PrefillTimePredictor.BatchPrediction prediction;
             private int size;
-            private double[] durations = new double[8];
+            private double latestPredictionMs;
+            private double previousPredictionMs;
 
             private AppendPlanning(PrefillTimePredictor.BatchPrediction prediction) {
                 this.prediction = prediction;
@@ -953,19 +954,25 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 }
                 while (size <= through) {
                     GroupPlanner.Item item = prefix.get(size);
-                    if (size == durations.length) {
-                        durations = java.util.Arrays.copyOf(durations, size * 2);
-                    }
-                    durations[size++] = prediction.append(item.seqLen(), item.hitCache());
+                    double next = prediction.append(item.seqLen(), item.hitCache());
+                    previousPredictionMs = latestPredictionMs;
+                    latestPredictionMs = next;
+                    size++;
                 }
-                return durations[through];
+                return latestPredictionMs;
             }
 
             @Override
             public java.util.OptionalDouble predictedPrefixMs(int prefixSize) {
-                return prefixSize > 0 && prefixSize <= size
-                        ? java.util.OptionalDouble.of(durations[prefixSize - 1])
-                        : java.util.OptionalDouble.empty();
+                // Selection uses the latest prefix, or the preceding one when
+                // the last append exceeded the budget. Other callers recompute.
+                if (prefixSize > 0 && prefixSize == size) {
+                    return java.util.OptionalDouble.of(latestPredictionMs);
+                }
+                if (prefixSize > 0 && prefixSize == size - 1) {
+                    return java.util.OptionalDouble.of(previousPredictionMs);
+                }
+                return java.util.OptionalDouble.empty();
             }
         }
 

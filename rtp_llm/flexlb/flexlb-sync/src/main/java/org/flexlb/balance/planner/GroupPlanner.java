@@ -211,33 +211,35 @@ public final class GroupPlanner {
             picked = List.of(head);
         }
         long headTokens = Math.max(0L, access.seqLen(head));
-        Shape shape = new Shape(1, headTokens, headTokens, headTokens);
+        long maxSeqLen = headTokens;
+        long paddedTokens = headTokens;
+        long kvTokens = headTokens;
         long windowOpenedAtMs = access.enqueuedAtMs(head);
         boolean predictionEnabled = predictor != null
                 && constraints.predictedExecutionBudgetMs() > 0L;
-        OptionalDouble selectedPredictionMs = OptionalDouble.empty();
+        double selectedPredictionMs = 0.0;
         boolean predictionBoundaryTriggered = false;
         if (predictionEnabled) {
-            double predictedMs = requireValidPrediction(predictor.append(head, picked));
-            selectedPredictionMs = OptionalDouble.of(predictedMs);
+            selectedPredictionMs = requireValidPrediction(predictor.append(head, picked));
             predictionBoundaryTriggered = predictionDispatchBoundaryReached(
-                    predictedMs, constraints.predictedExecutionBudgetMs());
-        }
-        if (!mayGrow || predictionBoundaryTriggered) {
-            return new Selection<>(picked, shape, windowOpenedAtMs,
-                    predictionBoundaryTriggered, selectedPredictionMs);
+                    selectedPredictionMs, constraints.predictedExecutionBudgetMs());
         }
 
-        while (ordered.hasNext()
+        while (mayGrow && ordered.hasNext()
                 && picked.size() < maxRequests
                 && !predictionBoundaryTriggered) {
             T item = ordered.next();
-
-            Shape candidate = shape.add(access.seqLen(item));
-            if (!candidate.fitsCompute(constraints.batchTokenCapacity())) {
+            long itemTokens = Math.max(0L, access.seqLen(item));
+            long nextMaxSeqLen = Math.max(maxSeqLen, itemTokens);
+            long nextPaddedTokens = Shape.saturatedMultiply(nextMaxSeqLen, picked.size() + 1);
+            long nextKvTokens = saturatedAdd(kvTokens, itemTokens);
+            if (constraints.batchTokenCapacity() <= 0L
+                    || nextPaddedTokens >= constraints.batchTokenCapacity()) {
                 break;
             }
-            if (!candidate.fitsKv(constraints.batchKvCapacity())) {
+            if (constraints.batchKvCapacity() != Long.MAX_VALUE
+                    && (constraints.batchKvCapacity() < 0L
+                        || nextKvTokens > constraints.batchKvCapacity())) {
                 break;
             }
 
@@ -252,23 +254,20 @@ public final class GroupPlanner {
                     picked.remove(picked.size() - 1);
                     break;
                 }
-                selectedPredictionMs = OptionalDouble.of(predictedMs);
-                if (predictionDispatchBoundaryReached(
-                        predictedMs, constraints.predictedExecutionBudgetMs())) {
-                    shape = candidate;
-                    windowOpenedAtMs = Math.min(
-                            windowOpenedAtMs, access.enqueuedAtMs(item));
-                    predictionBoundaryTriggered = true;
-                    break;
-                }
+                selectedPredictionMs = predictedMs;
+                predictionBoundaryTriggered = predictionDispatchBoundaryReached(
+                        predictedMs, constraints.predictedExecutionBudgetMs());
             }
-            shape = candidate;
-            windowOpenedAtMs = Math.min(
-                    windowOpenedAtMs, access.enqueuedAtMs(item));
+            maxSeqLen = nextMaxSeqLen;
+            paddedTokens = nextPaddedTokens;
+            kvTokens = nextKvTokens;
+            windowOpenedAtMs = Math.min(windowOpenedAtMs, access.enqueuedAtMs(item));
         }
 
-        return new Selection<>(picked, shape, windowOpenedAtMs,
-                predictionBoundaryTriggered, selectedPredictionMs);
+        return new Selection<>(picked,
+                new Shape(picked.size(), maxSeqLen, paddedTokens, kvTokens), windowOpenedAtMs,
+                predictionBoundaryTriggered,
+                predictionEnabled ? OptionalDouble.of(selectedPredictionMs) : OptionalDouble.empty());
     }
 
     /** Evaluate one selection against an explicit clock value. */
