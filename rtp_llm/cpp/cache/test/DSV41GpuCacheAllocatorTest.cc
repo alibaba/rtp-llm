@@ -187,7 +187,11 @@ protected:
         return value;
     }
 
-    BatchKVCacheResourcePtr resource(size_t count, DSV41ReplayMode mode = DSV41ReplayMode::FULL, bool allocate = true) {
+    // Fixed (pair/SWA) pages default to the last index, matching a checkpoint at
+    // the end of the materialized data. A mid-data checkpoint (end < count*128)
+    // needs its page at the checkpoint's own index: pass fixed_page explicitly.
+    BatchKVCacheResourcePtr resource(size_t count, DSV41ReplayMode mode = DSV41ReplayMode::FULL, bool allocate = true,
+                                     int fixed_page = -1) {
         auto batch = std::make_shared<BatchKVCacheResource>();
         batch->resetBatchSize(1);
         batch->initGroups(6, 43, config_.layer_to_group_id, 1, config_.group_types, config_.layer_region_to_group_id);
@@ -210,7 +214,7 @@ protected:
                 if (group < 4)
                     std::copy(ids.begin(), ids.end(), mapping.begin());
                 else
-                    mapping[group_count - 1] = ids.front();
+                    mapping[fixed_page < 0 ? group_count - 1 : static_cast<size_t>(fixed_page)] = ids.front();
                 result.mutableBlockIds(group).assign(std::move(mapping));
             }
         }
@@ -353,7 +357,8 @@ TEST_F(DSV41GpuCacheAllocatorTest, ValidKvBlocksDoNotRequireCompleteTailAndStale
     free(incomplete);
 
     // The checkpoint covers only the first block; the suffix beyond it is not published.
-    auto stale = resource(2);
+    // Its fixed pages sit at the checkpoint's own index, not the last one.
+    auto stale = resource(2, DSV41ReplayMode::FULL, true, 0);
     fill(stale, 29);
     ready(stale, 1);
     allocator_->insertIntoCache(InsertInfo{stale, tokens(385), false});
@@ -516,7 +521,8 @@ TEST_F(DSV41GpuCacheAllocatorTest, MemoryTransferKeepsGpuCheckpointOnFailureAndP
 }
 
 TEST_F(DSV41GpuCacheAllocatorTest, GpuDataHitsDoNotHideEarlierMemoryExecutionCheckpoint) {
-    auto source = resource(2, DSV41ReplayMode::BOUNDED_CHECKPOINT_V1);
+    // The checkpoint ends mid-data (first block): its fixed pages sit at index 0.
+    auto source = resource(2, DSV41ReplayMode::BOUNDED_CHECKPOINT_V1, true, 0);
     fill(source, 83);
     const auto expected        = bytes(source->cacheResource(), 1);
     auto&      source_resource = source->cacheResource(0);
