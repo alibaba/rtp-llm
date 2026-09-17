@@ -430,13 +430,13 @@ class CompactReaderGpuTest(unittest.TestCase):
 
     def test_gather_workspace_is_bounded_before_allocation(self):
         pages, _ = _fixture(CacheRegion.SWA)
-        with self.assertRaisesRegex(ValueError, "64 MiB"):
+        with self.assertRaisesRegex(ValueError, "1 GiB"):
             gather_compact(
                 pages,
                 _ints([[1]]),
-                _ints([0] * 129),
-                torch.zeros((129, 512), dtype=torch.int32, device="cuda"),
-                _ints([128] * 129),
+                _ints([0] * 1024),
+                torch.zeros((1024, 512), dtype=torch.int32, device="cuda"),
+                _ints([128] * 1024),
                 output_dtype=torch.float32,
             )
 

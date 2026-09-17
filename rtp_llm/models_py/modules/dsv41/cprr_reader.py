@@ -53,7 +53,7 @@ def _received(received, page):
     ):
         raise ValueError("received pages must match all eight rank-local strides")
     if received.numel() > MAX_GATHER_BYTES:
-        raise ValueError("CPRR receive workspace exceeds 64 MiB; tile selected pages")
+        raise ValueError("CPRR receive workspace exceeds 1 GiB; tile selected pages")
 
 
 def _separate(output, *inputs):
@@ -100,7 +100,7 @@ def restore_cprr_swa(
     _integer_tensor(rank_page_ids, (layout.cp_size, requests), device)
     shape = (requests + 1, page.page_stride_bytes)
     if (requests + 1) * page.page_stride_bytes > MAX_GATHER_BYTES:
-        raise ValueError("restored SWA workspace exceeds 64 MiB; tile requests")
+        raise ValueError("restored SWA workspace exceeds 1 GiB; tile requests")
     if output is None:
         output = CompactPages(
             torch.empty(shape, dtype=torch.uint8, device=device),

@@ -72,11 +72,13 @@ from rtp_llm.models_py.modules.dsv41.indexer import (
     QUERY_TILE,
     SPARSE_BLOCK,
     IndexSelection,
+    candidate_score_plan,
     score_candidate_tile,
 )
 from rtp_llm.models_py.modules.dsv41.math import grouped_wo_a
 from rtp_llm.models_py.modules.dsv41.source_indexer import (
     SOURCE_QUERY_TILE,
+    index_source_plan,
     prepare_index_source,
     score_index_source,
 )
@@ -517,6 +519,9 @@ class V41CPAttentionContext(V41AttentionContext):
         context._framework_context = framework
         context.framework_query_rows = framework.query_rows
         context.framework_row_indices = torch.full_like(context.parent_row_indices, -1)
+        # One indexed upload for the whole slice; per-row device writes cost a
+        # forced host sync each (2,048 scalar HtoD copies for a 16K request).
+        framework_offsets, framework_locals = [], []
         for offset, (position, _) in enumerate(rows):
             if framework.start <= position < framework.end:
                 rank, local = divmod(
@@ -527,7 +532,12 @@ class V41CPAttentionContext(V41AttentionContext):
                     raise ValueError(
                         "CP retained tail changed ownership of a current input row"
                     )
-                context.framework_row_indices[offset] = local
+                framework_offsets.append(offset)
+                framework_locals.append(local)
+        if framework_offsets:
+            context.framework_row_indices[framework_offsets] = torch.tensor(
+                framework_locals, dtype=torch.int64, device=device
+            )
         if decoder_only:
             context.published_sources = set(self.published_sources)
         return context
@@ -656,7 +666,7 @@ class V41CPAttentionContext(V41AttentionContext):
     def _record_gather(self, receive_bytes, live_bytes):
         if live_bytes > MAX_GATHER_BYTES:
             raise ValueError(
-                "CP receive lifetime exceeds 64 MiB; reduce the source tile"
+                "CP receive lifetime exceeds 1 GiB; reduce the source tile"
             )
         self.max_receive_bytes = max(self.max_receive_bytes, receive_bytes)
         self.max_gather_live_bytes = max(self.max_gather_live_bytes, live_bytes)
@@ -1459,8 +1469,21 @@ def begin_cp_request(
             block_count = (
                 context.end + layout.token_block_size - 1
             ) // layout.token_block_size
-            for logical in range(cp_ctx.cp_rank, block_count, 8):
-                context._physical(table, logical // 8, pool)
+            logicals = [
+                logical // 8 for logical in range(cp_ctx.cp_rank, block_count, 8)
+            ]
+            # One batched read per table instead of a forced scalar sync per
+            # logical page; the checks and their order match _physical.
+            row = table[0].cpu().tolist()
+            for logical in logicals:
+                if not 0 <= logical < table.shape[1]:
+                    raise ValueError(
+                        "CP fixed state is missing its canonical checkpoint page"
+                    )
+                if not 0 < row[logical] < pool.shape[0]:
+                    raise ValueError(
+                        "CP fixed state requires an allocated rank-local page"
+                    )
     for owner in GLOBAL_OWNERS:
         global_slot, index_slot = RegionSlot(CacheRegion.GLOBAL, owner), RegionSlot(
             CacheRegion.INDEX_K, owner
@@ -1662,6 +1685,24 @@ def _score_queries(attention, hidden, qr, context):
         else range(0, max(1, context.end // source.ratio), _INDEX_ROWS)
     )
     candidates = context.selection_for(20).candidate_blocks if layer > 20 else None
+    # (first,last) row plans are invariant across the source tile scans below.
+    query_tiles = []
+    for first in range(0, hidden.shape[0], query_tile):
+        last = min(first + query_tile, hidden.shape[0])
+        query_rows = context.query_row_indices(first, last)
+        count = last - first if query_rows is None else query_rows.numel()
+        local_visible = _query_rows(visible[first:last], query_rows)
+        query_tiles.append((first, last, query_rows, count, local_visible))
+    if layer > 20:
+        sparse_rows = torch.arange(
+            SPARSE_BLOCK, dtype=torch.int32, device=hidden.device
+        )
+        candidate_ids = torch.arange(
+            CANDIDATE_BLOCKS, dtype=torch.int32, device=hidden.device
+        )
+        candidate_starts = candidate_ids * SPARSE_BLOCK
+        request_ids = torch.arange(query_tile, dtype=torch.int32, device=hidden.device)
+        candidate_plan = candidate_score_plan(hidden.device)
     for source_first in source_tiles:
         restored = lease = None
         if layer <= 20:
@@ -1671,20 +1712,16 @@ def _score_queries(attention, hidden, qr, context):
             restored, lease = context.gather_paged(
                 slot, source_first, source_last, layer
             )
-            prepared_source = (
-                prepare_index_source(
+            if context.attention_query_rows:
+                prepared_source = prepare_index_source(
                     restored.pages,
                     restored.page_table,
                     capacity=source_last - source_first,
                 )
-                if context.attention_query_rows
-                else None
-            )
-        for first in range(0, hidden.shape[0], query_tile):
-            last = min(first + query_tile, hidden.shape[0])
-            query_rows = context.query_row_indices(first, last)
-            count = last - first if query_rows is None else query_rows.numel()
-            local_visible = _query_rows(visible[first:last], query_rows)
+                source_plan = index_source_plan(hidden.device, source_first)
+            else:
+                prepared_source = source_plan = None
+        for first, last, query_rows, count, local_visible in query_tiles:
             if layer <= 20:
                 if not count:
                     continue
@@ -1698,14 +1735,12 @@ def _score_queries(attention, hidden, qr, context):
                     tile_visible,
                     layer=layer,
                     position_offset=source_first,
+                    plan=source_plan,
                 )
                 scores = replace(scores, visible_lengths=local_visible)
             else:
                 chosen = candidates[first:last]
-                row = torch.arange(
-                    SPARSE_BLOCK, dtype=torch.int32, device=hidden.device
-                )
-                actual = (chosen[:, :, None] * SPARSE_BLOCK + row).flatten(1)
+                actual = (chosen[:, :, None] * SPARSE_BLOCK + sparse_rows).flatten(1)
                 actual = torch.where(
                     (chosen[:, :, None] >= 0).expand(-1, -1, SPARSE_BLOCK).flatten(1)
                     & (actual < visible[first:last, None]),
@@ -1759,24 +1794,19 @@ def _score_queries(attention, hidden, qr, context):
                 actual = _query_rows(actual, query_rows)
                 pages, table = _packed_pages(values, context._page_specs[slot])
                 tile_visible = (chosen >= 0).sum(-1, dtype=torch.int32) * SPARSE_BLOCK
-                ids = torch.arange(
-                    CANDIDATE_BLOCKS, dtype=torch.int32, device=hidden.device
-                )[None, :].expand(count, -1)
                 ids = torch.where(
-                    ids * SPARSE_BLOCK < tile_visible[:, None], ids, -1
+                    candidate_starts < tile_visible[:, None], candidate_ids, -1
                 ).contiguous()
-                request_ids = torch.arange(
-                    count, dtype=torch.int32, device=hidden.device
-                )
                 scores = score_candidate_tile(
                     _query_rows(query[first:last], query_rows).contiguous(),
                     _query_rows(weights[first:last], query_rows).contiguous(),
                     pages,
                     table,
-                    request_ids,
+                    request_ids[:count],
                     tile_visible,
                     ids,
                     layer=layer,
+                    plan=candidate_plan,
                 )
                 original = torch.full_like(scores.positions, -1)
                 original[:, : actual.shape[1]].copy_(actual)
@@ -1789,19 +1819,20 @@ def _score_queries(attention, hidden, qr, context):
             top[first] = scores.topk(top.get(first))
             if layer == 20:
                 blocks[first] = scores.block_topk(blocks.get(first))
-            status[first] = torch.maximum(
-                status.get(first, torch.zeros_like(scores.status)), scores.status
+            status[first] = (
+                torch.maximum(status[first], scores.status)
+                if first in status
+                else scores.status
             )
             calls += 1
             max_logits = max(max_logits, scores.logits.numel())
             max_packed = max(max_packed, scores.packed_kv_bytes)
-            ReaderResult(scores.logits, scores.status).check()
             if layer > 20:
                 del values, pages, table
             del scores
         if lease is not None:
             context.release(lease, layer)
-            del restored, lease, prepared_source
+            del restored, lease, prepared_source, source_plan
     topk = torch.full(
         (context.query_rows, INDEX_TOPK), -1, dtype=torch.int32, device=hidden.device
     )
@@ -1829,6 +1860,8 @@ def _score_queries(attention, hidden, qr, context):
                 query_rows,
                 blocks[first].ordered_positions(),
             )
+    # One synchronous status check per layer, after every tile merged above.
+    ReaderResult(topk, query_status).check()
     context.publish_selection(
         IndexSelection(
             topk,

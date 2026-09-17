@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -71,6 +72,30 @@ def prepare_index_source(
     )
 
 
+@dataclass(frozen=True)
+class SourceScorePlan:
+    """Loop-invariant position/block geometry for one source tile's scorers."""
+
+    position_offset: int
+    positions: torch.Tensor
+    shifted_positions: torch.Tensor
+    block_starts: torch.Tensor
+    shifted_blocks: torch.Tensor
+
+
+def index_source_plan(device, position_offset: int) -> SourceScorePlan:
+    """Precompute the arange/offset tensors shared by a source tile's scorers."""
+    positions = torch.arange(_SOURCE_ROWS, dtype=torch.int32, device=device)[None, :]
+    blocks = torch.arange(CANDIDATE_BLOCKS, dtype=torch.int32, device=device)[None, :]
+    return SourceScorePlan(
+        position_offset,
+        positions,
+        positions + position_offset,
+        blocks * SPARSE_BLOCK,
+        blocks + position_offset // SPARSE_BLOCK,
+    )
+
+
 def score_index_source(
     query: torch.Tensor,
     weights: torch.Tensor,
@@ -79,6 +104,7 @@ def score_index_source(
     *,
     layer: int,
     position_offset: int = 0,
+    plan: Optional[SourceScorePlan] = None,
 ) -> IndexScoreTile:
     """Score a contiguous source prefix with the pinned dense FP4 native API.
 
@@ -117,6 +143,13 @@ def score_index_source(
     ):
         raise ValueError("source position offset must be an aligned model-context prefix")
     _integer(visible_lengths, (count,), query.device)
+    if plan is None:
+        plan = index_source_plan(query.device, position_offset)
+    elif (
+        plan.position_offset != position_offset
+        or plan.positions.device != query.device
+    ):
+        raise ValueError("source score plan does not match this scoring call")
     import deep_gemm
 
     encoded = encode_compact(query.view(-1, 128), CacheRegion.INDEX_K)
@@ -140,21 +173,15 @@ def score_index_source(
         schedule_meta=metadata,
     )
     del encoded, payload, scales, metadata
-    positions = torch.arange(_SOURCE_ROWS, dtype=torch.int32, device=query.device)[
-        None, :
-    ]
-    masked = positions >= lengths[:, None]
+    masked = plan.positions >= lengths[:, None]
     numeric_error = (~masked & ~torch.isfinite(logits)).any(-1)
     masked |= numeric_error[:, None]
     status = (invalid | numeric_error).to(torch.int32)
-    positions = torch.where(masked, -1, positions + position_offset)
+    positions = torch.where(masked, -1, plan.shifted_positions)
     logits.masked_fill_(masked, -torch.inf)
-    blocks = torch.arange(CANDIDATE_BLOCKS, dtype=torch.int32, device=query.device)[
-        None, :
-    ]
     blocks = torch.where(
-        blocks * SPARSE_BLOCK < lengths[:, None],
-        blocks + position_offset // SPARSE_BLOCK,
+        plan.block_starts < lengths[:, None],
+        plan.shifted_blocks,
         -1,
     )
     return IndexScoreTile(

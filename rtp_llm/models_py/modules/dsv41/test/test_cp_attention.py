@@ -457,8 +457,16 @@ def _swa_read_batches(rank, device):
                         else:
                             assert compact is None
                         del compact
+                # The live-byte guard budget is 1 GiB (512-row production
+                # reads account ~830 MiB); no single in-fixture query reaches
+                # it, so trip the guard directly instead of through a query.
+                try:
+                    context._record_gather(0, cp_attention.MAX_GATHER_BYTES + 1)
+                except ValueError as error:
+                    assert "1 GiB" in str(error), str(error)
+                else:
+                    raise AssertionError(f"{label} accepted 1 GiB")
                 for query_count, binding, message in (
-                    (40, initial, "64 MiB"),
                     (
                         1,
                         replace(
@@ -918,6 +926,46 @@ def _pair_checkpoint_restore(rank, device):
 
 
 @torch.inference_mode()
+def _score_status_check(rank, device):
+    # A nonzero scorer status in any tile must fail the one per-layer status
+    # check before the selection is published.
+    layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
+    identity = ReplayConfig(ReplayMode.FULL).cache_identity("score-status", layout)
+    framework = _framework_pages(layout, rank, device)
+    models = _models(layout, device)
+    cp = _metadata((1000, 1028), (0, 0), rank, device)
+    context = begin_cp_request(
+        cp,
+        0,
+        request_id="score-status",
+        identity=identity,
+        layout=layout,
+        max_tokens=2048,
+        **framework,
+    )
+    local = _hidden(context.start, context.end, 0, device).index_select(
+        0, (context.positions - context.start).long()
+    ).contiguous()
+    local.masked_fill_(~context.valid[:, None], torch.nan)
+    scorer = cp_attention.score_index_source
+
+    def nonzero_status(*args, **kwargs):
+        scores = scorer(*args, **kwargs)
+        return replace(scores, status=torch.ones_like(scores.status))
+
+    try:
+        with patch.object(cp_attention, "score_index_source", nonzero_status):
+            models[2](local, context)
+    except RuntimeError as error:
+        assert "rejected metadata: status=[1]" in str(error)
+    else:
+        raise AssertionError("nonzero index status accepted")
+    assert context.cache.poisoned and 2 not in context.completed_layers
+    assert 2 not in context.selections
+    return {"rejected_status": [1]}
+
+
+@torch.inference_mode()
 def _run_rank():
     rank, device = int(os.environ["RANK"]), torch.device(
         "cuda", int(os.environ["LOCAL_RANK"])
@@ -942,6 +990,7 @@ def _run_rank():
     swa_index_cache = _swa_index_cache_reads(rank, device)
     selected_reads = _selected_query_transport(rank, device)
     pair_checkpoints = _pair_checkpoint_restore(rank, device)
+    score_status = _score_status_check(rank, device)
     layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
     identity = ReplayConfig(ReplayMode.FULL).cache_identity(
         "cp8-attention-integration", layout
@@ -1149,6 +1198,7 @@ def _run_rank():
         swa_reads=swa_reads,
         swa_index_cache=swa_index_cache,
         selected_reads=selected_reads,
+        score_status=score_status,
         rejected_read_queries=rejected_batches,
     )
     destination = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")

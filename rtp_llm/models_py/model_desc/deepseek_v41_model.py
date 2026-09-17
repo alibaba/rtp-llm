@@ -554,12 +554,23 @@ class DeepSeekV41Model(GptModelBase):
                     (global_pages, owners[layer].global_kv.page_table),
                     (index_pages, owners[layer].index_table),
                 ):
+                    # One batched read per table instead of a forced scalar
+                    # sync per logical page; checks match _page_id.
+                    row = table[0].cpu().tolist()
                     for logical in range(
                         start // self.layout.token_block_size,
                         (end + self.layout.token_block_size - 1)
                         // self.layout.token_block_size,
                     ):
-                        page_id = self._page_id(table, logical, pages.data)
+                        if logical < 0 or logical >= table.shape[1]:
+                            raise ValueError(
+                                "V4.1 execution boundary has no allocated physical page"
+                            )
+                        page_id = row[logical]
+                        if not 0 < page_id < pages.data.shape[0]:
+                            raise ValueError(
+                                "V4.1 execution requires an allocated nonzero page"
+                            )
                         key = (pages.data.data_ptr(), page_id)
                         if key in occupied:
                             raise ValueError(
@@ -657,23 +668,42 @@ class DeepSeekV41Model(GptModelBase):
             writable = []
             current = (end - 1) // self.layout.reuse_unit
             for slot, pool in self._raw_pages.items():
-                logical_pages = (current,)
-                if slot.region != CacheRegion.SWA:
+                if slot.region == CacheRegion.SWA:
+                    logical_pages = [current]
+                else:
                     first_block = start // self.layout.token_block_size
                     last_block = (end - 1) // self.layout.token_block_size
-                    logical_pages = (
+                    logical_pages = [
                         block // self.layout.cp_size
                         for block in range(first_block, last_block + 1)
                         if block % self.layout.cp_size == self._cp_rank
+                    ]
+                # One batched read per table instead of a forced scalar sync
+                # per logical page; the checks and their order match _page_id.
+                row = tables[slot][0].cpu().tolist()
+                for logical in logical_pages:
+                    if logical < 0 or logical >= tables[slot].shape[1]:
+                        raise ValueError(
+                            "V4.1 execution boundary has no allocated physical page"
+                        )
+                    page_id = row[logical]
+                    if not 0 < page_id < pool.shape[0]:
+                        raise ValueError(
+                            "V4.1 execution requires an allocated nonzero page"
+                        )
+                    writable.append((pool, page_id))
+            for layer, pool in self._pair_pools.items():
+                row = pair_tables[layer][0].cpu().tolist()
+                if current < 0 or current >= pair_tables[layer].shape[1]:
+                    raise ValueError(
+                        "V4.1 execution boundary has no allocated physical page"
                     )
-                writable.extend(
-                    (pool, self._page_id(tables[slot], logical, pool))
-                    for logical in logical_pages
-                )
-            writable.extend(
-                (pool, self._page_id(pair_tables[layer], current, pool))
-                for layer, pool in self._pair_pools.items()
-            )
+                page_id = row[current]
+                if not 0 < page_id < pool.shape[0]:
+                    raise ValueError(
+                        "V4.1 execution requires an allocated nonzero page"
+                    )
+                writable.append((pool, page_id))
             for pool, physical in writable:
                 key = (pool.data_ptr(), physical)
                 if key in occupied:

@@ -210,6 +210,22 @@ def _validate(query, weights, pages, page_table, request_ids, visible_lengths, l
     return source
 
 
+@dataclass(frozen=True)
+class CandidateScorePlan:
+    """Loop-invariant slot geometry for repeated candidate tile scoring."""
+
+    packed_slots: torch.Tensor
+    offsets: torch.Tensor
+
+
+def candidate_score_plan(device) -> CandidateScorePlan:
+    """Precompute the arange tensors shared by candidate tile scorers."""
+    return CandidateScorePlan(
+        torch.arange(CANDIDATE_BLOCKS, dtype=torch.int32, device=device)[None, :],
+        torch.arange(SPARSE_BLOCK, dtype=torch.int32, device=device),
+    )
+
+
 def score_candidate_tile(
     query: torch.Tensor,
     weights: torch.Tensor,
@@ -220,6 +236,7 @@ def score_candidate_tile(
     candidate_blocks: torch.Tensor,
     *,
     layer: int,
+    plan: Optional[CandidateScorePlan] = None,
 ) -> IndexScoreTile:
     """Score only selected logical blocks; refresh metadata on every replay.
 
@@ -247,6 +264,13 @@ def score_candidate_tile(
             visible_lengths,
             torch.empty_like(visible_lengths),
         )
+    if plan is None:
+        plan = candidate_score_plan(query.device)
+    elif (
+        plan.packed_slots.device != query.device
+        or plan.offsets.device != query.device
+    ):
+        raise ValueError("candidate score plan does not match this scoring call")
     import deep_gemm
 
     encoded = encode_compact(query.view(-1, 128), CacheRegion.INDEX_K)
@@ -302,9 +326,7 @@ def score_candidate_tile(
         num_warps=4,
     )
     packed_count = (candidates >= 0).sum(-1, dtype=torch.int32)
-    packed_slots = torch.arange(
-        CANDIDATE_BLOCKS, dtype=torch.int32, device=query.device
-    )[None, :].expand(rows, -1)
+    packed_slots = plan.packed_slots.expand(rows, -1)
     packed_candidates = torch.where(
         packed_slots < packed_count[:, None], packed_slots, -1
     ).contiguous()
@@ -334,7 +356,7 @@ def score_candidate_tile(
         CANDIDATE_BLOCKS,
         SPARSE_BLOCK,
     )
-    offsets = torch.arange(SPARSE_BLOCK, dtype=torch.int32, device=query.device)
+    offsets = plan.offsets
     positions = (candidates[:, :, None] * SPARSE_BLOCK + offsets).flatten(1)
     valid_positions = (
         (candidates[:, :, None] >= 0).expand(-1, -1, SPARSE_BLOCK).flatten(1)

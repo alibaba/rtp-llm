@@ -219,7 +219,7 @@ def gather_compact(
     dim = ENCODINGS[pages.region].head_dim
     item_bytes = 2 if output_dtype == torch.bfloat16 else 4
     if rows * slots * dim * item_bytes > MAX_GATHER_BYTES:
-        raise ValueError("gather exceeds 64 MiB workspace; tile the query rows")
+        raise ValueError("gather exceeds 1 GiB workspace; tile the query rows")
     output = _output_tensor(output, (rows, slots, dim), output_dtype, device)
     status = _output_tensor(status, (rows, slots), torch.int32, device)
     _separate_outputs(
