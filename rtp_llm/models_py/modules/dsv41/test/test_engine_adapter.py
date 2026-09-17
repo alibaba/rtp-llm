@@ -1,6 +1,7 @@
 """Standard adapter metadata and physical-pool contracts, not engine acceptance."""
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,7 @@ import torch
 from fixture import flash_config
 from torch import nn
 
+from rtp_llm.config.dsv41_config import derive_checkpoint_revision
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import build_model_config
@@ -161,6 +163,16 @@ def request_fixture(starts=(0,), lengths=(2,), ready=(False,), ids=(101,), fake=
     return inputs, rows
 
 
+def _write_checkpoint(folder, raw=None):
+    root = Path(folder)
+    (root / "config.json").write_text(
+        json.dumps(raw if raw is not None else flash_config()), encoding="utf-8"
+    )
+    (root / "model.safetensors.index.json").write_text(
+        '{"weight_map": {}}', encoding="utf-8"
+    )
+
+
 class EngineAdapterContractTest(unittest.TestCase):
     def test_dspark_proposal_without_vit_skips_multimodal_hooks(self):
         model = DeepSeekV41DSpark.__new__(DeepSeekV41DSpark)
@@ -168,10 +180,27 @@ class EngineAdapterContractTest(unittest.TestCase):
         model.vit_config = None
         self.assertIsNone(model._as_multimodal_model())
 
+    def test_create_config_revision_defaults_to_content_derivation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _write_checkpoint(folder)
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("DSV41_HF_REVISION", None)
+                config = DeepSeekV41._create_config(folder)
+            self.assertEqual(
+                config.dsv41_model_revision, derive_checkpoint_revision(folder)
+            )
+
+    def test_create_config_revision_env_override(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _write_checkpoint(folder)
+            with patch.dict(os.environ, {"DSV41_HF_REVISION": "b" * 40}):
+                config = DeepSeekV41._create_config(folder)
+            self.assertEqual(config.dsv41_model_revision, "b" * 40)
+
     def test_standard_config_preserves_mixed_checkpoint_and_typed_cache(self):
         raw = flash_config()
         with tempfile.TemporaryDirectory() as folder:
-            (Path(folder) / "config.json").write_text(json.dumps(raw))
+            _write_checkpoint(folder, raw)
             config = DeepSeekV41._create_config(folder)
             model_args = ModelArgs()
             model_args.ckpt_path = model_args.tokenizer_path = folder
@@ -194,7 +223,7 @@ class EngineAdapterContractTest(unittest.TestCase):
 
     def test_v41_precision_rejects_generic_weight_or_cache_overrides(self):
         with tempfile.TemporaryDirectory() as folder:
-            (Path(folder) / "config.json").write_text(json.dumps(flash_config()))
+            _write_checkpoint(folder)
             config = DeepSeekV41._create_config(folder)
             cache = KVCacheConfig()
             with self.assertRaisesRegex(ValueError, "BF16"):

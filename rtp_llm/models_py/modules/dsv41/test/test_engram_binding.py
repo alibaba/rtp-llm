@@ -12,7 +12,7 @@ from pathlib import Path
 
 import torch
 from host_cuda_test_support import cpu_lookup_reference
-from rtp_llm.config.dsv41_config import V41Config
+from rtp_llm.config.dsv41_config import V41Config, derive_checkpoint_revision
 from rtp_llm.model_loader.host_shared_cuda import SharedEngramLookup
 from rtp_llm.models_py.modules.dsv41.engram import (
     Engram,
@@ -34,7 +34,8 @@ class FullHostEngramBindingTest(unittest.TestCase):
         cls.lookup = SharedEngramLookup.from_checkpoint(
             cls.checkpoint,
             os.environ["DSV41_ENGRAM_STORE_ROOT"],
-            os.environ["DSV41_HF_REVISION"],
+            os.environ.get("DSV41_HF_REVISION")
+            or derive_checkpoint_revision(cls.checkpoint),
             device=0,
         )
         try:

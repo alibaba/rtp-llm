@@ -1,14 +1,38 @@
 """Validated metadata for the DeepSeek-V4.1-Flash release checkpoint."""
 
-# Registered immutable revision of the V4.1-Flash checkpoint. Launch resolves
-# it by default; DSV41_HF_REVISION / --revision stays an optional override.
-REGISTERED_V41_REVISION = "2bc89ac599031fa673cab993f1df02fc4a98c673"
-
 import copy
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+
+
+def derive_checkpoint_revision(checkpoint: str | Path) -> str:
+    """Derive the immutable V4.1 checkpoint identity from directory content.
+
+    The registered checkpoint is a read-only mount without usable HF revision
+    markers (no refs/, .no_exist/ or _commit_hash), so its identity is the
+    first 40 hex digits of sha256 over the bound config and weight-index
+    bytes. Any content change changes the derived identity.
+    """
+    root = Path(checkpoint)
+    digest = hashlib.sha256()
+    for name in ("config.json", "model.safetensors.index.json"):
+        payload = (root / name).read_bytes()
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest()[:40]
+
+
+def resolve_checkpoint_revision(checkpoint: str | Path, override: str | None = None) -> str:
+    """Resolve the model revision: explicit override, else content-derived."""
+    revision = override if override else derive_checkpoint_revision(checkpoint)
+    if len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
+        raise ValueError("DSV41_HF_REVISION must identify the immutable checkpoint")
+    return revision
 
 
 def _positive_int(value: Any, name: str) -> int:

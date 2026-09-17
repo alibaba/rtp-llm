@@ -4,7 +4,7 @@ import os
 
 import torch
 
-from rtp_llm.config.dsv41_config import REGISTERED_V41_REVISION, V41Config
+from rtp_llm.config.dsv41_config import V41Config, resolve_checkpoint_revision
 from rtp_llm.config.dsv41_weights import (
     V41TensorSpec,
     build_v41_manifest,
@@ -246,15 +246,14 @@ class DeepSeekV41(DeepSeekV2):
         t = parsed.text
         config = V41ModelConfig()
         config.dsv41_config = parsed
-        revision = os.environ.get("DSV41_HF_REVISION") or REGISTERED_V41_REVISION
-        if len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
-            raise ValueError("DSV41_HF_REVISION must identify the immutable checkpoint")
+        config.dsv41_model_revision = resolve_checkpoint_revision(
+            ckpt_path, os.environ.get("DSV41_HF_REVISION")
+        )
         mode = os.environ.get("DSV41_REPLAY_MODE", "full")
         if mode not in ("full", "bounded_checkpoint_v1"):
             raise ValueError(
                 "DSV41_REPLAY_MODE must identify a supported replay policy"
             )
-        config.dsv41_model_revision = revision
         config.dsv41_replay_mode = mode
         config.dsv41_tail_policy_version = 1
         config.model_type = "deepseek_v41"

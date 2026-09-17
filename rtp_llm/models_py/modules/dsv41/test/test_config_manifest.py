@@ -1,8 +1,15 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from fixture import flash_config
 
-from rtp_llm.config.dsv41_config import V41Config
+from rtp_llm.config.dsv41_config import (
+    V41Config,
+    derive_checkpoint_revision,
+    resolve_checkpoint_revision,
+)
 from rtp_llm.config.dsv41_weights import build_v41_manifest, validate_inventory
 
 
@@ -22,6 +29,47 @@ class ConfigManifestTest(unittest.TestCase):
         config.validate_parallelism(tp_size=4, ep_size=8)
         with self.assertRaisesRegex(ValueError, "o_groups"):
             config.validate_parallelism(tp_size=16, ep_size=16)
+
+    def test_derived_revision_tracks_checkpoint_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config.json").write_text(
+                json.dumps(flash_config()), encoding="utf-8"
+            )
+            (root / "model.safetensors.index.json").write_text(
+                '{"weight_map": {}}', encoding="utf-8"
+            )
+            first = derive_checkpoint_revision(root)
+            self.assertEqual(first, derive_checkpoint_revision(root))
+            self.assertEqual(len(first), 40)
+            self.assertTrue(all(c in "0123456789abcdef" for c in first))
+            (root / "model.safetensors.index.json").write_text(
+                '{"weight_map": {"layers.0.attn.wq.weight": "model-00001.safetensors"}}',
+                encoding="utf-8",
+            )
+            second = derive_checkpoint_revision(root)
+            self.assertNotEqual(first, second)
+            changed = flash_config()
+            changed["bos_token_id"] = 3
+            (root / "config.json").write_text(json.dumps(changed), encoding="utf-8")
+            self.assertNotEqual(second, derive_checkpoint_revision(root))
+
+    def test_resolve_revision_explicit_override_and_derived(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config.json").write_text(
+                json.dumps(flash_config()), encoding="utf-8"
+            )
+            (root / "model.safetensors.index.json").write_text(
+                '{"weight_map": {}}', encoding="utf-8"
+            )
+            self.assertEqual(
+                resolve_checkpoint_revision(root), derive_checkpoint_revision(root)
+            )
+            override = "a" * 40
+            self.assertEqual(resolve_checkpoint_revision(root, override), override)
+            with self.assertRaisesRegex(ValueError, "immutable checkpoint"):
+                resolve_checkpoint_revision(root, "not-a-40-hex-revision")
 
     def test_invalid_contracts_fail(self):
         for field, value in (
