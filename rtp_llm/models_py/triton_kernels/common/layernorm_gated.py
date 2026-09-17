@@ -5,6 +5,7 @@
 # This backward pass is faster for dimensions up to 8k, but after that it's much slower due to register spilling.
 # The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
 
+import os
 from typing import Optional
 
 import torch
@@ -197,6 +198,24 @@ class RmsNormGated(torch.nn.Module):
             x.shape, self.weight.shape
         )
 
+        if os.getenv("RTP_QWEN35_TILED_PREFILL_RMSNORM", "0") == "1":
+            from rtp_llm.models_py.triton_kernels.common.gated_rmsnorm_prefill import (
+                gated_rmsnorm_prefill,
+                supports_gated_rmsnorm_prefill,
+            )
+
+            if supports_gated_rmsnorm_prefill(
+                x, gate, self.weight, self.bias, self.group_size
+            ):
+                return gated_rmsnorm_prefill(
+                    x,
+                    gate,
+                    self.weight,
+                    self.bias,
+                    self.eps,
+                    self.group_size,
+                    self.activation,
+                )
         return layer_norm_fwd(
             x,
             self.weight,
