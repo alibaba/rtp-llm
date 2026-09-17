@@ -165,8 +165,11 @@ class _BatchedAttention(nn.Module):
 class DeepSeekV41Model(GptModelBase):
     """Consume engine request IDs, execution lengths and state-ready metadata.
 
-    For a nonzero execution start, ``v41_state_ready`` certifies all target SWA
-    and ratio2 carry at that boundary. The engine must also privatize every page
+    ``v41_state_ready`` certifies only a restored checkpoint boundary: it
+    authorizes normalizing empty pair checkpoint regions at that start. On
+    continuous decode steps the pair page headers self-prove the model's own
+    materialization (the ``_read_pair`` stored-position/valid byte checks), so
+    no engine flag gates those steps. The engine must also privatize every page
     written by this forward; a global/index data hit alone cannot set the flag.
     ``v41_is_fake`` identifies scheduler placeholders whose rows must be invalid.
     They participate in the target's collectives without accessing request KV.
@@ -463,10 +466,8 @@ class DeepSeekV41Model(GptModelBase):
                     raise ValueError("V4.1 fake request rows must all be invalid")
                 first = last
                 continue
-            if end > self._max_tokens or (start and not ready[batch]):
-                raise ValueError(
-                    "V4.1 execution requires restored state at its admitted start"
-                )
+            if end > self._max_tokens:
+                raise ValueError("V4.1 execution exceeds the model context")
             if not length:
                 continue
             if not bool(rows.valid[first:last].all()):
@@ -646,8 +647,8 @@ class DeepSeekV41Model(GptModelBase):
                 raise ValueError("V4.1 canonical row validity differs from CP mapping")
             start = cp_context.prefix_lengths_host[batch]
             end = start + cp_context.input_lengths_global_host[batch]
-            if end > self._max_tokens or (start and not ready[batch]):
-                raise ValueError("V4.1 CP execution requires complete restored state")
+            if end > self._max_tokens:
+                raise ValueError("V4.1 CP execution exceeds the model context")
             tables = {
                 slot: self._table(attn, batch, slot.owner_layer, _REGIONS[slot.region])
                 for slot in self._raw_pages

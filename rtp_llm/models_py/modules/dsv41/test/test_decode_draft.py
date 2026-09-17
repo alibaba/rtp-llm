@@ -394,6 +394,35 @@ class DraftDecodeGpuTest(unittest.TestCase):
             for stage, pages in model._pages.items():
                 torch.testing.assert_close(pages.data, expected[stage], rtol=0, atol=0)
 
+    def test_continuous_decode_derives_draft_ranges_without_engine_certificate(self):
+        with torch.inference_mode():
+            model, inputs, context = self.fixture(5, (127, 0), (5, 0))
+            inputs.v41_state_ready = torch.tensor([False, False])
+            inputs.v41_execution_context = torch.tensor(
+                [[0, 64, 64, 64], [0, 0, 0, 0]], dtype=torch.int64
+            )
+            inputs.v41_swa_ranges = torch.tensor(
+                [[[0, 64, 0]] * 43, [[0, 0, 0]] * 43], dtype=torch.int64
+            )
+            context.prepare_model_inputs(inputs)
+            start = 127
+            begin = max(start - model.layout.swa_entries, 0)
+            for stage in range(3):
+                binding = context.swa[stage]
+                self.assertEqual(int(binding.valid_starts[0]), begin)
+                self.assertEqual(int(binding.valid_ends[0]), start)
+                self.assertEqual(int(context.floors[stage][0]), 0)
+
+    def test_boundary_certificate_with_incomplete_draft_interval_is_rejected(self):
+        with torch.inference_mode():
+            model, inputs, context = self.fixture(5, (127, 0), (5, 0))
+            inputs.v41_swa_ranges = torch.tensor(
+                [[[0, 127, 0]] * 40 + [[0, 127, 1]] * 3, [[0, 0, 0]] * 43],
+                dtype=torch.int64,
+            )
+            with self.assertRaisesRegex(ValueError, "incomplete SWA interval"):
+                context.prepare_model_inputs(inputs)
+
 
 if __name__ == "__main__":
     unittest.main()

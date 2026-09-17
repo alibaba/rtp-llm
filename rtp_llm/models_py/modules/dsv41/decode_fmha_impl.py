@@ -309,25 +309,18 @@ class V41DecodeFmhaImpl:
             raise ValueError("live decode request IDs must be unique")
         if any(
             not masked
-            and (
-                rid < 0
-                or start < 0
-                or start >= self.context.max_tokens
-                or (start > 0 and not restored)
-            )
-            for rid, start, masked, restored in zip(ids, starts, fake, ready)
+            and (rid < 0 or start < 0 or start >= self.context.max_tokens)
+            for rid, start, masked in zip(ids, starts, fake)
         ):
-            raise ValueError(
-                "decode Graph needs complete state at every live request start"
-            )
-        return ids, starts, fake
+            raise ValueError("decode Graph live request starts are out of range")
+        return ids, starts, fake, ready
 
     @torch.inference_mode()
     def prepare_model_inputs(self, inputs):
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("prepare original model inputs before graph replay")
         self._warmup_sparse_indexer()
-        ids, starts, fake = self._request_metadata(inputs)
+        ids, starts, fake, ready = self._request_metadata(inputs)
         batch = len(ids)
         rows = V41ModelRows.from_model_inputs(inputs)
         row_valid = rows.valid.view(batch, self.query_width)
@@ -356,13 +349,27 @@ class V41DecodeFmhaImpl:
         for index, (start, masked) in enumerate(zip(starts, fake)):
             if masked:
                 continue
-            if execution[index][1] != start or execution[index][2] != start:
-                raise ValueError(
-                    "decode Graph cannot skip an incomplete execution boundary"
-                )
-            for layer in range(43 if self.layout.draft_enabled else 40):
-                if start == 0:
-                    ranges[index][layer] = [0, 0, 0]
+            layers = range(43 if self.layout.draft_enabled else 40)
+            # Recovery boundary (first step after a restore): the engine
+            # certificate is validated and seeds the bindings. Continuous
+            # decode: the pair page headers self-prove the model's own
+            # materialization, so the SWA window is derived locally and the
+            # static checkpoint-shaped engine inputs are not consulted.
+            boundary = (
+                ready[index]
+                and execution[index][1] == start
+                and execution[index][2] == start
+                and all(ranges[index][layer][1] == start for layer in layers)
+            )
+            if not boundary:
+                for layer in layers:
+                    ranges[index][layer] = [
+                        max(0, start - self.layout.swa_entries),
+                        start,
+                        0,
+                    ]
+                continue
+            for layer in layers:
                 begin, end, floor = ranges[index][layer]
                 if (
                     begin < 0
@@ -493,8 +500,8 @@ class V41DecodeFmhaImpl:
                 destination_min=0,
                 zero_inactive=True,
             )
-            # Active requests have passed ready and exact execution/SWA boundary
-            # validation above; zero memory checkpoints omit the absolute header.
+            # Only live requests whose previous page holds real bytes enter
+            # normalization; zero memory checkpoints omit the absolute header.
             previous = self._previous_pages[group]
             normalize_empty_pair_checkpoint(
                 pool.index_select(0, previous.clamp(0, pool.shape[0] - 1).long()),

@@ -207,13 +207,28 @@ class V41DraftFmhaImpl:
             if (
                 rid < 0
                 or start <= 0
-                or not ready[index]
                 or not 0 < counts[index] <= self.query_width
                 or start + counts[index] > self.model.config.max_seq_len
-                or execution[index][1] != start
-                or execution[index][2] != start
             ):
                 raise ValueError("draft requires complete canonical target/draft state")
+            # Recovery boundary: validate the engine certificate and seed the
+            # bindings from it. Continuous decode: the target pair page headers
+            # already self-prove the materialization, so derive the draft SWA
+            # window locally instead of consuming the static engine inputs.
+            boundary = (
+                ready[index]
+                and execution[index][1] == start
+                and execution[index][2] == start
+                and all(end == start for _, end, _ in ranges[index][40:43])
+            )
+            if not boundary:
+                for stage in range(3):
+                    ranges[index][40 + stage] = [
+                        max(start - self.model.layout.swa_entries, 0),
+                        start,
+                        0,
+                    ]
+                continue
             for begin, end, floor in ranges[index][40:43]:
                 if (
                     begin < 0

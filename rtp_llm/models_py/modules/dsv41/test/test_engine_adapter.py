@@ -269,11 +269,23 @@ class EngineAdapterContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "compact pool geometry"):
             model.initialize(SimpleNamespace(kv_cache=cache, is_speculative=False))
 
-    def test_global_hits_do_not_replace_execution_state(self):
+    def test_continuous_decode_readiness_derives_from_pair_bytes(self):
         model, _ = framework_fixture()
-        inputs, rows = request_fixture(starts=(128,))
+        inputs, rows = request_fixture(starts=(128,), ready=(False,))
+        for layer, pool in model._pair_pools.items():
+            _write_pair(
+                _pair_view(pool, 1, 1),
+                PairCarry.empty(layer, "101", model.identity, 128),
+            )
+        requests = model._requests(inputs, rows)
+        self.assertEqual(requests[0].context.start, 128)
+        self.assertEqual(requests[0].context.end, 130)
+
+    def test_continuous_decode_rejects_mismatched_pair_bytes(self):
+        model, _ = framework_fixture()
+        inputs, rows = request_fixture(starts=(128,), ready=(False,))
         before = model._pages[RegionSlot(CacheRegion.SWA, 0)].data.clone()
-        with self.assertRaisesRegex(ValueError, "restored state"):
+        with self.assertRaisesRegex(ValueError, "execution boundary"):
             model._requests(inputs, rows)
         torch.testing.assert_close(
             model._pages[RegionSlot(CacheRegion.SWA, 0)].data, before

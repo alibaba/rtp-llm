@@ -279,6 +279,38 @@ class DecodeFmhaGpuTest(unittest.TestCase):
                         self.assertEqual(int(pair.positions[0]), start + retained)
                         self.assertEqual(int(pair.valid[0]), (start + retained) % 2)
 
+    def test_continuous_decode_derives_ranges_without_engine_certificate(self):
+        with torch.inference_mode():
+            _, model = self.model(1)
+            inputs = self.inputs(model, 1, 127, 100)
+            inputs.v41_state_ready = torch.tensor([False, False])
+            inputs.v41_execution_context = torch.tensor(
+                [[0, 64, 64, 64], [0, 0, 0, 0]], dtype=torch.int64
+            )
+            inputs.v41_swa_ranges = torch.tensor(
+                [[[0, 64, 0]] * 43, [[0, 0, 0]] * 43], dtype=torch.int64
+            )
+            impl = V41DecodeFmhaImpl(model, inputs, query_width=1)
+            impl.prepare_model_inputs(inputs)
+            start = 127
+            begin = max(0, start - model.layout.swa_entries)
+            for layer in range(40):
+                binding = impl.context.swa[layer]
+                self.assertEqual(int(binding.valid_starts[0]), begin)
+                self.assertEqual(int(binding.valid_ends[0]), start)
+                self.assertEqual(int(impl._floors[layer][0]), 0)
+
+    def test_boundary_certificate_with_malformed_ranges_is_rejected(self):
+        with torch.inference_mode():
+            _, model = self.model(1)
+            inputs = self.inputs(model, 1, 127, 100)
+            inputs.v41_swa_ranges = torch.tensor(
+                [[[0, 127, 1]] * 43, [[0, 0, 0]] * 43], dtype=torch.int64
+            )
+            impl = V41DecodeFmhaImpl(model, inputs, query_width=1)
+            with self.assertRaisesRegex(ValueError, "exact complete SWA ranges"):
+                impl.prepare_model_inputs(inputs)
+
 
 if __name__ == "__main__":
     unittest.main()
