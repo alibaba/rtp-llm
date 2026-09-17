@@ -1227,6 +1227,8 @@ def test_remote_setup_eviction_uses_venv_lock():
     assert "evict_locked_venvs -mmin +360" in command
     assert "evict_locked_venvs -mmin +60" in command
     assert "restored rtp_llm/libs from runtime libs archive" in command
+    assert 'exec 9>"$_rtp_venv_lock"; flock -s 9 || exit $?;' in command
+    assert "export RTP_LLM_VENV_LOCK_FD=9;" in command
 
 
 def test_remote_setup_and_pytest_keep_heartbeat_alive_during_long_work(tmp_path):
@@ -1306,9 +1308,8 @@ def test_dependency_install_does_not_inherit_runtime_libraries(profile_library_p
     if profile_library_path:
         setup_env["LD_LIBRARY_PATH"] = profile_library_path
     command = remote_exec_rtp.build_remote_setup_command(Path("."), setup_env=setup_env)
-    invocation = command.split(
-        "if [ -f internal_source/ci/prepare_venv.py ]; then ", 1
-    )[1].split(">logs/prepare_venv.out", 1)[0]
+    invocation = command.split("export RTP_LLM_RUNTIME_LD_LIBRARY_PATH=", 1)[1]
+    invocation = invocation.split("; ", 1)[1].split(">logs/prepare_venv.out", 1)[0]
     args = shlex.split(invocation)
     python_index = args.index("/opt/conda310/bin/python")
     # Run an environment probe in place of the installer, with the exact
@@ -1329,6 +1330,10 @@ def test_dependency_install_does_not_inherit_runtime_libraries(profile_library_p
         "RTP_LLM_REQUIRE_ACCELERATOR": "1",
     }
     assert runtime_env["LD_LIBRARY_PATH"] == "/opt/conda310/lib:/opt/rocm/lib"
+    assert (
+        'export RTP_LLM_RUNTIME_LD_LIBRARY_PATH="${_rocm_native_library_path:+${_rocm_native_library_path}:}${LD_LIBRARY_PATH:-}";'
+        in command
+    )
     assert "export LD_LIBRARY_PATH=" in command
     if profile_library_path:
         assert f"export LD_LIBRARY_PATH={profile_library_path};" in command

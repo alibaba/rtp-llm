@@ -473,6 +473,15 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         "  source internal_source/ci/prepare_rocm_deps.sh >&2 || exit $?; "
         "fi; "
         "if [ -f internal_source/ci/prepare_venv.py ]; then "
+        # Keep a shared lease for this entire action, including JIT and pytest.
+        # The installer upgrades the inherited descriptor only when repair is
+        # needed. Eviction and another installer cannot delete an in-use venv.
+        f"  _rtp_venv_lock=$(env -u LD_LIBRARY_PATH {prepare_env_prefix}"
+        "/opt/conda310/bin/python internal_source/ci/prepare_venv.py --print-lock-path) || exit $?; "
+        '  mkdir -p "$(dirname "$_rtp_venv_lock")" || exit $?; '
+        '  exec 9>"$_rtp_venv_lock"; flock -s 9 || exit $?; '
+        "  export RTP_LLM_VENV_LOCK_FD=9; "
+        '  export RTP_LLM_RUNTIME_LD_LIBRARY_PATH="${_rocm_native_library_path:+${_rocm_native_library_path}:}${LD_LIBRARY_PATH:-}"; '
         # Dependency installers invoke system Git, whose Kerberos libraries
         # cannot use Conda's OpenSSL (EVP_KDF_ctrl / OPENSSL_1_1_1b). Keep the
         # test runtime library path in the parent shell, not the installer.
@@ -485,6 +494,7 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         '        >> "$RTP_REMOTE_HEARTBEAT_FILE" 2>/dev/null || true; '
         "    fi; sleep 5; done) & PV_HB_PID=$!; "
         '  wait "$PV_PID"; PV_RC=$?; wait "$PV_HB_PID" 2>/dev/null || true; '
+        "  unset RTP_LLM_VENV_LOCK_FD; "
         '  OUT=$(cat logs/prepare_venv.out); '
         '  if [ "$PV_RC" -ne 0 ]; then '
         "    cat logs/prepare_venv.err >&2; "
