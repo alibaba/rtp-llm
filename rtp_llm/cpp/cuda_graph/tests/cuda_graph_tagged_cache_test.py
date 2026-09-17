@@ -785,7 +785,11 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         # the legacy dedicated-process contract under pytest as well.
         if os.environ.get("RTP_LLM_RUN_DIRTY_CAPTURE_TEST") != "1":
             result = subprocess.run(
-                [sys.executable, "-m", "unittest", self.id()],
+                [
+                    sys.executable,
+                    os.path.abspath(__file__),
+                    f"{type(self).__name__}.{self._testMethodName}",
+                ],
                 env={**os.environ, "RTP_LLM_RUN_DIRTY_CAPTURE_TEST": "1"},
             )
             self.assertEqual(result.returncode, 0, "isolated dirty-capture test failed")
