@@ -83,3 +83,6 @@ docs/index/dist/
 
 # Local analysis reports
 *_analysis_report.md
+
+# Workflow-local state (v3 delivery lanes)
+.humanize/
