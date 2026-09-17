@@ -173,28 +173,15 @@ class DeepSelectGpuTest(unittest.TestCase):
                 str(Path(destination) / "deepselect_trace.json")
             )
 
-
-class DeepSelectFusedGpuTest(DeepSelectGpuTest):
-    def setUp(self):
-        self.fused = patch.dict(os.environ, {"DSV41_DEEPSELECT_FUSED_CHECKED": "1"})
-        self.fused.start()
-        self.addCleanup(self.fused.stop)
-
-    def test_fused_matches_checked_values_with_strided_input_and_default_end(self):
+    def test_strided_input_matches_sorted_baseline_values(self):
         for dtype in (torch.bfloat16, torch.float32):
             values = torch.randn((3, 2049), device="cuda", dtype=dtype)[:, 1::2]
             values[0, 17] = torch.inf
             values[1, 23] = -torch.inf
-            with patch.dict(os.environ, {"DSV41_DEEPSELECT_FUSED_CHECKED": "0"}):
-                baseline = topk(values, 37, sorted_index=True)
             actual = topk(values, 37, sorted_index=True)
             self.validate_selection(values, actual, [1024] * 3, 37)
-            torch.testing.assert_close(
-                actual.values.sort().values, baseline.values.sort().values, rtol=0, atol=0
-            )
-            torch.testing.assert_close(actual.status, baseline.status, rtol=0, atol=0)
 
-    def test_fused_rejects_malformed_vendor_output_before_gather(self):
+    def test_rejects_malformed_vendor_output_before_gather(self):
         import deep_select
 
         values = torch.arange(521, device="cuda", dtype=torch.float32)[None, :]
@@ -210,7 +197,7 @@ class DeepSelectFusedGpuTest(DeepSelectGpuTest):
                 self.assertTrue((result.indices == -1).all())
                 self.assertTrue((result.values == -torch.inf).all())
 
-    def test_fused_graph_recovers_after_nan_and_invalid_end(self):
+    def test_graph_recovers_after_nan_and_invalid_end(self):
         values = torch.randn((3, 16384), device="cuda", dtype=torch.bfloat16)
         ends = torch.full((3,), 16384, device="cuda", dtype=torch.int32)
         output = torch.empty((3, 512), device="cuda", dtype=torch.int32)

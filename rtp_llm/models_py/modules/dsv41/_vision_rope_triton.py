@@ -30,7 +30,7 @@ Source: Dao-AILab/flash-attention a9a3170fc98cbd22a4cc870937b390f3d483f1eb,
 flash_attn/ops/triton/rotary.py. Keep the official FP32 multiply/add rounding.
 """
 
-import os
+
 
 import torch
 import triton
@@ -69,8 +69,7 @@ def _vision_qk_rotary_kernel(
 
 def _enabled_or_supported(q, k, cos, sin):
     return (
-        os.environ.get("DSV41_VISION_ROPE", "1") == "1"
-        and not torch.is_grad_enabled()
+        not torch.is_grad_enabled()
         and q.is_cuda
         and q.dtype == k.dtype == torch.bfloat16
         and q.ndim == 3

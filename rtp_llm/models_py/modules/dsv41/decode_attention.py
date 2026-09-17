@@ -6,8 +6,6 @@ start of the captured target forward. The existing target blocks, Engram, MoE
 and aux selection remain caller-owned. No alternate GraphRunner is created.
 """
 
-import os
-
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -23,7 +21,6 @@ from rtp_llm.models_py.modules.dsv41.cache_layout import (
 from rtp_llm.models_py.modules.dsv41.compact_reader import (
     GlobalBinding,
     SwaBinding,
-    compact_attention,
 )
 from rtp_llm.models_py.modules.dsv41.compact_writer import write_compact
 from rtp_llm.models_py.modules.dsv41.decode_compressor import (
@@ -300,15 +297,9 @@ class V41DecodeAttention(nn.Module):
         ):
             raise ValueError("decode owner and target graph use different cache layouts")
         self.context = context
-        backend = os.environ.get("DSV41_ATTENTION_BACKEND", "native")
-        if backend == "native":
-            self.reader = compact_attention
-        elif backend == "flashmla":
-            from rtp_llm.models_py.modules.dsv41.flashmla import flashmla_compact_attention
+        from rtp_llm.models_py.modules.dsv41.flashmla import flashmla_compact_attention
 
-            self.reader = flashmla_compact_attention
-        else:
-            raise ValueError("unknown V4.1 decode attention backend")
+        self.reader = flashmla_compact_attention
         self.compressor = (
             V41DecodeOwnerCompressor.from_owner(
                 attention.compressor,

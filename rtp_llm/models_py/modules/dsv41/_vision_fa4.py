@@ -2,7 +2,6 @@
 
 from functools import lru_cache
 import logging
-import os
 
 import torch
 
@@ -25,7 +24,7 @@ def vision_fa4_status():
     """Report the optional dependency result, including the cached import failure."""
     function, reason = _load_fa4()
     return {
-        "enabled": os.environ.get("DSV41_VISION_FA4", "1") == "1",
+        "enabled": True,
         "available": function is not None,
         "unavailable_reason": reason,
         "patch_counts": [8649],
@@ -36,8 +35,7 @@ def _enabled_or_supported(q, k, v):
     # Smaller images favor cuDNN once the FA4 Python launch cost is included;
     # on SM100 FA4 also measured slower than cuDNN at every grid, so it stays (10, 3).
     return (
-        os.environ.get("DSV41_VISION_FA4", "1") == "1"
-        and not torch.is_grad_enabled()
+        not torch.is_grad_enabled()
         and q.is_cuda
         and q.dtype == k.dtype == v.dtype == torch.bfloat16
         and q.shape == k.shape == v.shape == (8649, 16, 64)

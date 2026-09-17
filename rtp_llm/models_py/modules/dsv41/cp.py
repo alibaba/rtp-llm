@@ -8,7 +8,6 @@ receive storage is scoped to a source tile and its consumers.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, fields, replace
 
 import torch
@@ -47,7 +46,6 @@ from rtp_llm.models_py.modules.dsv41.compact_reader import (
     CompactPages,
     GlobalBinding,
     SwaBinding,
-    compact_attention,
 )
 from rtp_llm.models_py.modules.dsv41.compact_writer import encode_compact
 from rtp_llm.models_py.modules.dsv41.compressor import (
@@ -117,7 +115,6 @@ def _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank):
         pool.is_cuda
         and pool.stride(1) == 1
         and torch.cuda.get_device_capability(pool.device)[0] == 10
-        and os.environ.get("DSV41_CP_FUSED_SELECTED", "1") == "1"
     ):
         from rtp_llm.models_py.modules.dsv41._cp_gather_triton import (
             gather_selected_kernel,
@@ -243,10 +240,7 @@ class V41CPAttentionContext(V41AttentionContext):
         self._restore_host = tuple(mapping)
         query_owners = {flat // self.local_count for flat in mapping}
         self.single_query_owner = (
-            next(iter(query_owners))
-            if len(query_owners) == 1
-            and os.environ.get("DSV41_CP_SINGLE_OWNER_TRANSPORT", "1") != "0"
-            else None
+            next(iter(query_owners)) if len(query_owners) == 1 else None
         )
         device = self.query_device
         model_rows = sorted(
@@ -256,15 +250,10 @@ class V41CPAttentionContext(V41AttentionContext):
         )
         self._real_local_rows = tuple(model_rows)
         self._query_row_plans = {}
-        self.attention_query_rows = (
-            len(model_rows)
-            if os.environ.get("DSV41_CP_COMPACT_QUERY_ROWS", "1") != "0"
-            else self.local_count
-        )
+        self.attention_query_rows = len(model_rows)
         self.model_row_indices = (
             torch.tensor(model_rows, dtype=torch.int64, device=device)
             if len(model_rows) != self.local_count
-            and os.environ.get("DSV41_CP_COMPACT_MODEL_ROWS", "1") != "0"
             else None
         )
         self._restore = torch.tensor(mapping, dtype=torch.int64, device=device)
@@ -1039,11 +1028,9 @@ class V41CPAttentionContext(V41AttentionContext):
                 query_owner : query_owner + 1, first:last
             ]
         # SWA query indices depend on request-scoped state and tile bounds, never
-        # on the layer; per-tile reuse across layers is bitwise identical and on
-        # by default, the env remaining only as a diagnostic override.
+        # on the layer; per-tile reuse across layers is bitwise identical.
         plan_key = (first, last, query_owner)
-        cache_indices = os.environ.get("DSV41_SWA_INDEX_CACHE", "1") == "1"
-        plan = self._swa_index_plans.get(plan_key) if cache_indices else None
+        plan = self._swa_index_plans.get(plan_key)
         if plan is None:
             offsets = torch.arange(1 - SWA_WINDOW, 1, device=self.query_device)
             wanted = (query_positions[:, :, None] + offsets).reshape(-1)
@@ -1076,8 +1063,7 @@ class V41CPAttentionContext(V41AttentionContext):
                 ),
                 {},
             ]
-            if cache_indices:
-                self._swa_index_plans[plan_key] = plan
+            self._swa_index_plans[plan_key] = plan
         (
             offsets,
             wanted,
@@ -1136,7 +1122,7 @@ class V41CPAttentionContext(V41AttentionContext):
                 return None
             values = values.index_select(0, query_rows)
             count = query_rows.numel()
-        final = plan[1].get(count) if cache_indices else None
+        final = plan[1].get(count)
         if final is None:
             positions = self._rank_positions[self.cp.cp_rank, first:last]
             if query_rows is not None:
@@ -1150,22 +1136,17 @@ class V41CPAttentionContext(V41AttentionContext):
                 0,
             ).to(torch.int32)
             valid_ends = (positions + 1).clamp_min(0).to(torch.int32)
-            if cache_indices:
-                page_indices = _swa_query_page_indices(
-                    positions, spec, self.replay_floor
-                )
-                plan[1][count] = (
-                    positions,
-                    page_ids,
-                    valid_starts,
-                    valid_ends,
-                    page_indices,
-                )
-                pages = _swa_query_pages(
-                    values, positions, spec, self.replay_floor, indices=page_indices
-                )
-            else:
-                pages = _swa_query_pages(values, positions, spec, self.replay_floor)
+            page_indices = _swa_query_page_indices(positions, spec, self.replay_floor)
+            plan[1][count] = (
+                positions,
+                page_ids,
+                valid_starts,
+                valid_ends,
+                page_indices,
+            )
+            pages = _swa_query_pages(
+                values, positions, spec, self.replay_floor, indices=page_indices
+            )
         else:
             positions, page_ids, valid_starts, valid_ends, page_indices = final
             pages = _swa_query_pages(
@@ -1896,31 +1877,19 @@ def forward_cp_attention(attention, hidden, context):
         and attention.compressor.layout != context.cache.layout
     ):
         raise ValueError("CP compressor and framework cache layouts differ")
-    backend = os.environ.get("DSV41_ATTENTION_BACKEND", "native")
-    if backend not in ("native", "flashmla"):
-        raise ValueError("unknown V4.1 attention backend; no silent fallback")
-    read_queries = int(os.environ.get("DSV41_CP_READ_QUERIES", _READ_QUERIES))
-    # The cap tracks the 1 GiB gather-live-byte budget (512 rows x SWA_WINDOW x
-    # 528B x 24 transient ~= 830 MiB). 512 is the measured optimum and the code
-    # default (see _READ_QUERIES); the env stays only as a diagnostic override.
-    if not 1 <= read_queries <= 512:
-        raise ValueError("CP attention query batch must be between 1 and 512")
+    # 512-row read tiles are the measured optimum tracking the 1 GiB
+    # gather-live-byte budget (512 rows x SWA_WINDOW x 528B x 24 transient ~=
+    # 830 MiB; see _READ_QUERIES). Single-owner transport stages a 64-row owner
+    # batch on top of the per-gather live-byte accounting.
+    read_queries = _READ_QUERIES
     if context.single_query_owner is not None:
-        owner_batch = int(os.environ.get("DSV41_CP_SINGLE_OWNER_READ_QUERIES", "64"))
-        if owner_batch not in (32, 64, 128):
-            raise ValueError("CP single-owner query batch must be 32, 64 or 128")
-        # Reader staging is additional to the per-gather live-byte accounting.
-        read_queries = min(owner_batch, 8 * read_queries)
+        read_queries = min(64, 8 * read_queries)
     # The 8192-row source tile is the measured optimum (GB200 p13 A/B
     # 2026-09-17: 512 vs 2048 vs 8192 same-wheel back-to-back arms; 8192 wins
-    # the 16K composition counts and the 64K unprofiled latency, ties 16K) and
-    # the code default; the gather live-byte accounting in _record_gather
-    # bounds the tile by the 1 GiB budget. The env stays only as a diagnostic
-    # override. Validated here (before the poisoned-on-failure body) like
-    # read_queries.
-    source_rows = int(os.environ.get("DSV41_CP_SOURCE_ROWS", _SOURCE_ROWS))
-    if source_rows < 2 or source_rows % 2:
-        raise ValueError("CP source tile must be a positive even row count")
+    # the 16K composition counts and the 64K unprofiled latency, ties 16K); the
+    # gather live-byte accounting in _record_gather bounds the tile by the
+    # 1 GiB budget.
+    source_rows = _SOURCE_ROWS
     try:
         model_positions = context.pack_model_rows(context.positions)
         qr, query, kv = (
@@ -1989,19 +1958,16 @@ def forward_cp_attention(attention, hidden, context):
                 global_indices = torch.where(selected >= 0, dense, -1).contiguous()
             elif not count:
                 continue
-            reader = compact_attention
-            if backend == "flashmla":
-                from rtp_llm.models_py.modules.dsv41.flashmla import (
-                    flashmla_compact_attention,
-                )
+            from rtp_llm.models_py.modules.dsv41.flashmla import (
+                flashmla_compact_attention,
+            )
 
-                reader = flashmla_compact_attention
             positions = torch.where(
                 _query_rows(context.valid[first:last], query_rows),
                 _query_rows(context.positions[first:last], query_rows),
                 -1,
             ).to(torch.int32)
-            result = reader(
+            result = flashmla_compact_attention(
                 _query_rows(query[first:last], query_rows).contiguous(),
                 torch.arange(count, dtype=torch.int32, device=hidden.device),
                 positions,
@@ -2036,7 +2002,7 @@ def forward_cp_attention(attention, hidden, context):
         context.observations.append(
             {
                 "layer": attention.layer,
-                "reader_backend": backend,
+                "reader_backend": "flashmla",
                 "query_identity": context.query_identity,
                 "query_rows": hidden.shape[0],
                 "model_rows": context.model_query_rows,
@@ -2051,7 +2017,7 @@ def forward_cp_attention(attention, hidden, context):
                     if attention.source.scores_queries
                     else 0
                 ),
-                "cp_size": 8,
+                "cp_size": context.cp.cp_size,
                 "gather_count": context.gather_count,
                 "max_receive_bytes": context.max_receive_bytes,
                 "max_gather_live_bytes": context.max_gather_live_bytes,

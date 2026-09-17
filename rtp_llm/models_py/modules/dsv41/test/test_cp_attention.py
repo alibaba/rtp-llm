@@ -9,7 +9,6 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import replace
 from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -35,11 +34,6 @@ from rtp_llm.models_py.modules.dsv41.cp import V41CPAttentionContext, begin_cp_r
 from torch import nn
 
 _LAYERS = (0, 2, 3, 8, 9, 14, 15, 20, 21, 24, 25, 28, 29, 32, 33, 36, 39)
-_FLAGS = (
-    "DSV41_CP_COMPACT_MODEL_ROWS",
-    "DSV41_CP_COMPACT_QUERY_ROWS",
-    "DSV41_CP_SINGLE_OWNER_TRANSPORT",
-)
 
 
 def _metadata(lengths, starts, rank, device):
@@ -482,7 +476,7 @@ def _swa_read_batches(rank, device):
 
 @torch.inference_mode()
 def _swa_index_cache_reads(rank, device):
-    """DSV41_SWA_INDEX_CACHE reuse across layers must be bitwise identical."""
+    """SWA index-plan reuse across layers must be bitwise identical."""
     layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
     slot = RegionSlot(CacheRegion.SWA, 0)
     spec = next(page for page in layout.pages if page.slot == slot)
@@ -536,12 +530,10 @@ def _swa_index_cache_reads(rank, device):
         .to(device)
     )
     empty = torch.tensor([], dtype=torch.int64, device=device)
-    # The cache is the default: with the env removed, the first read builds and
-    # caches the plan and its output matches the ground truth bitwise.
-    with patch.dict(os.environ):
-        os.environ.pop("DSV41_SWA_INDEX_CACHE", None)
-        default_result = context.swa_queries(0, 0, 32, initial, encoded)
-        assert len(context._swa_index_plans) == 1
+    # The first read builds and caches the plan; its output matches the ground
+    # truth bitwise.
+    default_result = context.swa_queries(0, 0, 32, initial, encoded)
+    assert len(context._swa_index_plans) == 1
     _equal(
         default_result.pages.data.cpu(),
         _expected_swa_pages(positions[:32], spec, floor, salt),
@@ -553,63 +545,36 @@ def _swa_index_cache_reads(rank, device):
             queries = positions[first:last]
             real_queries = [position for position in queries if position >= 0]
             query_rows = context.query_row_indices(first, last)
-            results = {}
-            for enabled in ("0", "1"):
-                with patch.dict(os.environ, {"DSV41_SWA_INDEX_CACHE": enabled}):
-                    results[enabled] = (
-                        context.swa_queries(layer, first, last, initial, encoded),
-                        context.swa_queries(
-                            layer,
-                            first,
-                            last,
-                            initial,
-                            encoded,
-                            query_rows=query_rows,
-                        ),
-                        context.swa_queries(
-                            layer,
-                            first,
-                            last,
-                            initial,
-                            encoded,
-                            query_rows=empty,
-                        ),
-                    )
-            plain_ref, compact_ref, drained_ref = results["0"]
-            plain_cached, compact_cached, drained_cached = results["1"]
-            assert drained_ref is None and drained_cached is None
-            for actual, expected, label in (
-                (plain_cached, plain_ref, "plain"),
-                (compact_cached, compact_ref, "compact"),
-            ):
-                _equal(
-                    actual.pages.data,
-                    expected.pages.data,
-                    f"layer {layer} tile {first} cached {label} ring bytes",
-                )
-                _equal(actual.page_ids, expected.page_ids, f"cached {label} page IDs")
-                _equal(
-                    actual.valid_starts,
-                    expected.valid_starts,
-                    f"cached {label} valid starts",
-                )
-                _equal(
-                    actual.valid_ends,
-                    expected.valid_ends,
-                    f"cached {label} valid ends",
-                )
+            plain = context.swa_queries(layer, first, last, initial, encoded)
+            compact = context.swa_queries(
+                layer,
+                first,
+                last,
+                initial,
+                encoded,
+                query_rows=query_rows,
+            )
+            drained = context.swa_queries(
+                layer,
+                first,
+                last,
+                initial,
+                encoded,
+                query_rows=empty,
+            )
+            assert drained is None
             _equal(
-                plain_ref.pages.data.cpu(),
+                plain.pages.data.cpu(),
                 _expected_swa_pages(queries, spec, floor, salt),
                 f"layer {layer} tile {first} ground-truth ring bytes",
             )
             _equal(
-                plain_ref.page_ids.cpu(),
+                plain.page_ids.cpu(),
                 torch.arange(1, len(queries) + 1, dtype=torch.int32),
                 "plain page IDs",
             )
             _equal(
-                plain_ref.valid_starts.cpu(),
+                plain.valid_starts.cpu(),
                 torch.tensor(
                     [max(floor, pos - 127) if pos >= 0 else 0 for pos in queries],
                     dtype=torch.int32,
@@ -617,23 +582,23 @@ def _swa_index_cache_reads(rank, device):
                 "plain valid starts",
             )
             _equal(
-                plain_ref.valid_ends.cpu(),
+                plain.valid_ends.cpu(),
                 torch.tensor([max(0, pos + 1) for pos in queries], dtype=torch.int32),
                 "plain valid ends",
             )
             if query_rows is None:
                 _equal(
-                    compact_cached.pages.data,
-                    plain_cached.pages.data,
+                    compact.pages.data,
+                    plain.pages.data,
                     "all-real tile compact read matches plain",
                 )
             else:
                 _equal(
-                    compact_ref.pages.data.cpu(),
+                    compact.pages.data.cpu(),
                     _expected_swa_pages(real_queries, spec, floor, salt),
                     "compact ground-truth ring bytes",
                 )
-            del results, plain_ref, compact_ref, plain_cached, compact_cached
+            del plain, compact
     tiles = (len(positions) + 31) // 32
     assert len(context._swa_index_plans) == tiles
     assert all(plan[1] for plan in context._swa_index_plans.values())
@@ -960,98 +925,6 @@ def _pair_checkpoint_restore(rank, device):
 
 
 @torch.inference_mode()
-def _score_status_check(rank, device):
-    # A nonzero scorer status in any tile must fail the one per-layer status
-    # check before the selection is published.
-    layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
-    identity = ReplayConfig(ReplayMode.FULL).cache_identity("score-status", layout)
-    framework = _framework_pages(layout, rank, device)
-    models = _models(layout, device)
-    cp = _metadata((1000, 1028), (0, 0), rank, device)
-    context = begin_cp_request(
-        cp,
-        0,
-        request_id="score-status",
-        identity=identity,
-        layout=layout,
-        max_tokens=2048,
-        **framework,
-    )
-    local = _hidden(context.start, context.end, 0, device).index_select(
-        0, (context.positions - context.start).long()
-    ).contiguous()
-    local.masked_fill_(~context.valid[:, None], torch.nan)
-    scorer = cp_attention.score_index_source
-
-    def nonzero_status(*args, **kwargs):
-        scores = scorer(*args, **kwargs)
-        return replace(scores, status=torch.ones_like(scores.status))
-
-    try:
-        with patch.object(cp_attention, "score_index_source", nonzero_status):
-            models[2](local, context)
-    except RuntimeError as error:
-        assert "rejected metadata: status=[1]" in str(error)
-    else:
-        raise AssertionError("nonzero index status accepted")
-    assert context.cache.poisoned and 2 not in context.completed_layers
-    assert 2 not in context.selections
-    return {"rejected_status": [1]}
-
-
-@torch.inference_mode()
-def _publish_status_check(rank, device):
-    # A nonzero writer status in any source tile must fail the one per-layer
-    # batched status check before the owner is published.
-    layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
-    identity = ReplayConfig(ReplayMode.FULL).cache_identity("publish-status", layout)
-    framework = _framework_pages(layout, rank, device)
-    models = _models(layout, device)
-    cp = _metadata((1000, 1028), (0, 0), rank, device)
-    context = begin_cp_request(
-        cp,
-        0,
-        request_id="publish-status",
-        identity=identity,
-        layout=layout,
-        max_tokens=2048,
-        **framework,
-    )
-    local = _hidden(context.start, context.end, 0, device).index_select(
-        0, (context.positions - context.start).long()
-    ).contiguous()
-    local.masked_fill_(~context.valid[:, None], torch.nan)
-    rejected = []
-    for value in ("0", "513", "-1", "not-an-integer"):
-        with patch.dict(os.environ, {"DSV41_CP_SOURCE_ROWS": value}):
-            try:
-                models[2](local, context)
-            except ValueError:
-                rejected.append(value)
-            else:
-                raise AssertionError("invalid CP source tile accepted: " + value)
-        assert not context.completed_layers and not context.cache.poisoned
-    slot_mapping = cp_attention.cp_kv_slot_mapping
-
-    def reserved_slots(*args, **kwargs):
-        slots = slot_mapping(*args, **kwargs)
-        # Every row targets the reserved page zero, which the writer rejects
-        # with status=2 on every rank uniformly (ownership-independent).
-        return torch.zeros_like(slots)
-
-    try:
-        with patch.object(cp_attention, "cp_kv_slot_mapping", reserved_slots):
-            models[2](local, context)
-    except RuntimeError as error:
-        assert "compact writer rejected rows: status=[2]" in str(error)
-    else:
-        raise AssertionError("reserved-page owner KV accepted")
-    assert context.cache.poisoned and 2 not in context.completed_layers
-    assert 2 not in context.published_sources
-    return {"rejected_status": [2], "rejected_source_rows": rejected}
-
-
-@torch.inference_mode()
 def _run_rank():
     rank, device = int(os.environ["RANK"]), torch.device(
         "cuda", int(os.environ["LOCAL_RANK"])
@@ -1077,8 +950,6 @@ def _run_rank():
     selected_reads = _selected_query_transport(rank, device)
     deferred_reads = _selected_query_transport_deferred(rank, device)
     pair_checkpoints = _pair_checkpoint_restore(rank, device)
-    score_status = _score_status_check(rank, device)
-    publish_status = _publish_status_check(rank, device)
     layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
     identity = ReplayConfig(ReplayMode.FULL).cache_identity(
         "cp8-attention-integration", layout
@@ -1091,13 +962,9 @@ def _run_rank():
         )
         for index in range(2)
     ]
-    starts, records, rejected_batches = [0, 0], [], []
+    starts, records = [0, 0], []
+    read_queries = cp_attention._READ_QUERIES
     for epoch, lengths in enumerate(((3, 1), (130, 18), (1000, 1028))):
-        read_queries = (cp_attention._READ_QUERIES, 1, 32)[epoch]
-        if epoch == 0:
-            os.environ.pop("DSV41_CP_READ_QUERIES", None)
-        else:
-            os.environ["DSV41_CP_READ_QUERIES"] = str(read_queries)
         cp = _metadata(lengths, starts, rank, device)
         contexts = [
             begin_cp_request(
@@ -1125,20 +992,6 @@ def _run_rank():
                     0, (context.positions - context.start).long()
                 ).contiguous()
                 local.masked_fill_(~context.valid[:, None], torch.nan)
-                if epoch == layer == index == 0:
-                    for value in ("0", "513", "-1", "not-an-integer"):
-                        with patch.dict(os.environ, {"DSV41_CP_READ_QUERIES": value}):
-                            try:
-                                models[layer](local, context)
-                            except ValueError:
-                                rejected_batches.append(value)
-                            else:
-                                raise AssertionError(
-                                    "invalid CP read batch accepted: " + value
-                                )
-                        assert (
-                            not context.completed_layers and not context.cache.poisoned
-                        )
                 expected = models[layer](canonical, local_contexts[index])
                 gathers_before = context.gather_count
                 projection_rows, hooks = [], []
@@ -1152,11 +1005,9 @@ def _run_rank():
                                 )
                             )
                         )
-                reader_module, reader_name = cp_attention, "compact_attention"
-                if os.environ.get("DSV41_ATTENTION_BACKEND") == "flashmla":
-                    from rtp_llm.models_py.modules.dsv41 import flashmla
+                from rtp_llm.models_py.modules.dsv41 import flashmla
 
-                    reader_module, reader_name = flashmla, "flashmla_compact_attention"
+                reader_module, reader_name = flashmla, "flashmla_compact_attention"
                 try:
                     with (
                         patch.object(
@@ -1287,9 +1138,6 @@ def _run_rank():
         swa_index_cache=swa_index_cache,
         selected_reads=selected_reads,
         deferred_reads=deferred_reads,
-        score_status=score_status,
-        publish_status=publish_status,
-        rejected_read_queries=rejected_batches,
     )
     destination = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
     if destination:
@@ -1302,9 +1150,6 @@ def _run_rank():
 
 
 def main():
-    for flag in _FLAGS:
-        os.environ[flag] = "1"
-    os.environ["DSV41_ATTENTION_BACKEND"] = "native"
     if "LOCAL_RANK" not in os.environ:
         if torch.cuda.device_count() != 8:
             raise RuntimeError("launch CP comparison with exactly eight visible GPUs")

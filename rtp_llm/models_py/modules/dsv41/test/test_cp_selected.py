@@ -1,6 +1,5 @@
 """Exact compact CP bytes, owner errors and changing page maps on one GPU."""
 
-import os
 import unittest
 from unittest.mock import patch
 
@@ -14,11 +13,6 @@ class CPSelectedRowsTest(unittest.TestCase):
     def setUpClass(cls):
         if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
             raise unittest.SkipTest("Blackwell CUDA is required")
-
-    def setUp(self):
-        env = patch.dict(os.environ, {"DSV41_CP_FUSED_SELECTED": "1"})
-        env.start()
-        self.addCleanup(env.stop)
 
     @staticmethod
     def fixture(entries, entry_bytes, rank, limit=1048576, salt=11):
@@ -79,7 +73,9 @@ class CPSelectedRowsTest(unittest.TestCase):
                         rtol=0,
                         atol=0,
                     )
-                    with patch.dict(os.environ, {"DSV41_CP_FUSED_SELECTED": "0"}):
+                    with patch(
+                        "torch.cuda.get_device_capability", lambda *a, **k: (9, 0)
+                    ):
                         legacy = _selected_local_rows(
                             pool, table, wanted, entries, entry_bytes, rank
                         )
@@ -107,7 +103,7 @@ class CPSelectedRowsTest(unittest.TestCase):
                     rtol=0,
                     atol=0,
                 )
-                with patch.dict(os.environ, {"DSV41_CP_FUSED_SELECTED": "0"}):
+                with patch("torch.cuda.get_device_capability", lambda *a, **k: (9, 0)):
                     legacy = _selected_local_rows(
                         pool, table, wanted, entries, entry_bytes, rank
                     )

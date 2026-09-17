@@ -1,7 +1,5 @@
 """Engram hashing from explicit canonical request history, without slot state."""
 
-import os
-
 import numpy as np
 import torch
 from sympy import isprime
@@ -216,8 +214,7 @@ class Engram(nn.Module):
         from rtp_llm.models_py.modules.dsv41.linear import V41Block32Linear
 
         return (
-            os.environ.get("DSV41_ENGRAM_GATHER_QUANT", "1") == "1"
-            and type(self.projection) is V41Block32Linear
+            type(self.projection) is V41Block32Linear
             and isinstance(self.shared_lookup, SharedEngramLookup)
             and self.projection.weight.device
             == torch.device("cuda", self.shared_lookup.device)

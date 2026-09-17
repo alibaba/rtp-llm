@@ -6,7 +6,6 @@ shard publication. Graph scheduling remains caller integration work. No legacy
 reader fallback is selected. The local allocator is for component execution.
 """
 
-import os
 from dataclasses import dataclass, field, replace
 from typing import Optional
 
@@ -25,7 +24,6 @@ from rtp_llm.models_py.modules.dsv41.compact_reader import (
     CompactPages,
     GlobalBinding,
     SwaBinding,
-    compact_attention,
 )
 from rtp_llm.models_py.modules.dsv41.compact_writer import write_compact
 from rtp_llm.models_py.modules.dsv41.compressor import (
@@ -563,9 +561,6 @@ class V41Attention(nn.Module):
         positions = torch.arange(
             context.start, context.end, dtype=torch.int64, device=hidden.device
         )
-        backend = os.environ.get("DSV41_ATTENTION_BACKEND", "native")
-        if backend not in ("native", "flashmla"):
-            raise ValueError("unknown V4.1 attention backend; no silent fallback")
         try:
             qr, query, kv = self._project(hidden, positions)
             if self.source.writes_global:
@@ -578,10 +573,9 @@ class V41Attention(nn.Module):
                 if self.source.ratio
                 else None
             )
-            if backend == "flashmla":
-                from rtp_llm.models_py.modules.dsv41.flashmla import (
-                    flashmla_compact_attention,
-                )
+            from rtp_llm.models_py.modules.dsv41.flashmla import (
+                flashmla_compact_attention,
+            )
             outputs = []
             # Earlier queries must read the old ring before later writes wrap it.
             tile_rows = min(QUERY_TILE, swa.pages.entries_per_page - SWA_WINDOW + 1)
@@ -603,10 +597,8 @@ class V41Attention(nn.Module):
                     )
                 )
                 swa.valid_ends.fill_(valid_end)
-                reader = compact_attention
+                reader = flashmla_compact_attention
                 reader_swa, reader_global = swa, global_kv
-                if backend == "flashmla":
-                    reader = flashmla_compact_attention
                 result = reader(
                     query[first:last].contiguous(),
                     torch.zeros_like(pos, dtype=torch.int32),
@@ -636,7 +628,7 @@ class V41Attention(nn.Module):
             context.observations.append(
                 {
                     "layer": self.layer,
-                    "reader_backend": backend,
+                    "reader_backend": "flashmla",
                     "query_identity": context.query_identity,
                     "query_rows": hidden.shape[0],
                     "source_rows": hidden.shape[0] if self.source.writes_global else 0,

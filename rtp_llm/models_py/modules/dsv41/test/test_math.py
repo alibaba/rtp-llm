@@ -1,6 +1,5 @@
 import os
 import unittest
-from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
@@ -108,27 +107,26 @@ class MathTest(unittest.TestCase):
         if self.device.type != "cuda":
             self.skipTest("TileLang split/Sinkhorn requires CUDA")
         torch.manual_seed(83)
-        with patch.dict(os.environ, {"DSV41_HC_SPLIT_SINKHORN": "1"}):
-            for shape, iterations, eps in (
-                ((1, 4, 5120), 20, 1e-6),
-                ((1, 31, 4, 5120), 20, 1e-6),
-                ((2, 3, 4, 5120), 1, 1e-6),
-                ((7, 4, 5120), 3, 1e-4),
-            ):
-                with self.subTest(shape=shape, iterations=iterations, eps=eps):
-                    hidden = torch.randn(shape, device=self.device).bfloat16()
-                    weight = torch.randn(24, 4 * 5120, device=self.device) * 0.02
-                    scale = torch.tensor([0.13, 0.27, 0.31], device=self.device)
-                    base = torch.randn(24, device=self.device)
-                    actual = _math.hc_mixes(
-                        hidden, weight, scale, base, iterations, hc_eps=eps
-                    )
-                    expected = reference_hc_mixes(
-                        hidden, weight, scale, base, iterations, eps
-                    )
-                    for left, right in zip(actual, expected):
-                        self.assertEqual(left.dtype, torch.float32)
-                        torch.testing.assert_close(left, right, atol=2e-6, rtol=2e-5)
+        for shape, iterations, eps in (
+            ((1, 4, 5120), 20, 1e-6),
+            ((1, 31, 4, 5120), 20, 1e-6),
+            ((2, 3, 4, 5120), 1, 1e-6),
+            ((7, 4, 5120), 3, 1e-4),
+        ):
+            with self.subTest(shape=shape, iterations=iterations, eps=eps):
+                hidden = torch.randn(shape, device=self.device).bfloat16()
+                weight = torch.randn(24, 4 * 5120, device=self.device) * 0.02
+                scale = torch.tensor([0.13, 0.27, 0.31], device=self.device)
+                base = torch.randn(24, device=self.device)
+                actual = _math.hc_mixes(
+                    hidden, weight, scale, base, iterations, hc_eps=eps
+                )
+                expected = reference_hc_mixes(
+                    hidden, weight, scale, base, iterations, eps
+                )
+                for left, right in zip(actual, expected):
+                    self.assertEqual(left.dtype, torch.float32)
+                    torch.testing.assert_close(left, right, atol=2e-6, rtol=2e-5)
 
     @torch.inference_mode()
     def test_hc_split_sinkhorn_graph_uses_updated_inputs(self):
@@ -138,34 +136,32 @@ class MathTest(unittest.TestCase):
         weight = torch.randn(24, 4 * 5120, device=self.device) * 0.02
         scale = torch.tensor([0.13, 0.27, 0.31], device=self.device)
         base = torch.randn(24, device=self.device)
-        with patch.dict(os.environ, {"DSV41_HC_SPLIT_SINKHORN": "1"}):
-            stream = torch.cuda.Stream()
-            stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(stream):
-                _math.hc_mixes(hidden, weight, scale, base)
-            torch.cuda.current_stream().wait_stream(stream)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, stream=stream):
-                actual = _math.hc_mixes(hidden, weight, scale, base)
-            pointers = [value.data_ptr() for value in actual]
-            for step in range(3):
-                hidden.normal_()
-                weight.mul_(-1)
-                scale.fill_(0.5 + step)
-                base.fill_(step - 1)
-                graph.replay()
-                expected = reference_hc_mixes(hidden, weight, scale, base)
-                self.assertEqual([value.data_ptr() for value in actual], pointers)
-                for left, right in zip(actual, expected):
-                    torch.testing.assert_close(left, right, atol=2e-6, rtol=2e-5)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            _math.hc_mixes(hidden, weight, scale, base)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            actual = _math.hc_mixes(hidden, weight, scale, base)
+        pointers = [value.data_ptr() for value in actual]
+        for step in range(3):
+            hidden.normal_()
+            weight.mul_(-1)
+            scale.fill_(0.5 + step)
+            base.fill_(step - 1)
+            graph.replay()
+            expected = reference_hc_mixes(hidden, weight, scale, base)
+            self.assertEqual([value.data_ptr() for value in actual], pointers)
+            for left, right in zip(actual, expected):
+                torch.testing.assert_close(left, right, atol=2e-6, rtol=2e-5)
 
     def test_hc_split_sinkhorn_preserves_gradient_fallback(self):
         hidden = torch.randn(3, 4, 17, device=self.device, requires_grad=True)
         weight = torch.randn(24, 4 * 17, device=self.device)
         scale = torch.ones(3, device=self.device)
         base = torch.zeros(24, device=self.device)
-        with patch.dict(os.environ, {"DSV41_HC_SPLIT_SINKHORN": "1"}):
-            actual = _math.hc_mixes(hidden, weight, scale, base)
+        actual = _math.hc_mixes(hidden, weight, scale, base)
         expected = reference_hc_mixes(hidden, weight, scale, base)
         for left, right in zip(actual, expected):
             self.assertTrue(left.requires_grad)
@@ -206,65 +202,51 @@ class MathTest(unittest.TestCase):
             torch.manual_seed(83 + index)
             hidden = torch.randn(*shape, device=self.device).bfloat16()
             weight = (torch.randn(shape[-1], device=self.device) * 0.5 + 1).bfloat16()
-            with patch.dict(os.environ, {"DSV41_RMSNORM_NATIVE": "0"}):
-                reference = rms_norm(hidden, weight)
             expected = (
                 hidden.float()
                 * torch.rsqrt(hidden.float().square().mean(-1, keepdim=True) + 1e-20)
                 * weight.float()
             ).to(hidden.dtype)
-            self.assertTrue(torch.equal(reference, expected))
-            with patch.dict(os.environ, {"DSV41_RMSNORM_NATIVE": "1"}):
-                native = rms_norm(hidden, weight)
+            native = rms_norm(hidden, weight)
             ai = native.view(torch.int16).to(torch.int32)
-            bi = reference.view(torch.int16).to(torch.int32)
+            bi = expected.view(torch.int16).to(torch.int32)
             ulp = (
                 torch.where(ai >= 0, ai, -32768 - ai)
                 - torch.where(bi >= 0, bi, -32768 - bi)
             ).abs()
-            exact = (native == reference).float().mean().item()
+            exact = (native == expected).float().mean().item()
             self.assertGreaterEqual(exact, 0.999, (shape, exact))
             self.assertLessEqual(int(ulp.max().item()), 1, (shape, int(ulp.max())))
 
     @torch.inference_mode()
     def test_rms_norm_native_default_on(self):
-        # R4-3: with the env absent the native kernel is the default path;
-        # the result must equal the explicit env=1 arm.
+        # R4-3: the native kernel is the code-default path on Blackwell CUDA13.
         if self.device.type != "cuda" or torch.cuda.get_device_capability(0)[0] != 10:
             self.skipTest("native rmsnorm requires a Blackwell CUDA device")
         torch.manual_seed(91)
         hidden = torch.randn(2048, 512, device=self.device).bfloat16()
         weight = (torch.randn(512, device=self.device) * 0.5 + 1).bfloat16()
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("DSV41_RMSNORM_NATIVE", None)
-            self.assertTrue(_math._rms_norm_native_supported(hidden, weight))
-            defaulted = rms_norm(hidden, weight)
-        with patch.dict(os.environ, {"DSV41_RMSNORM_NATIVE": "1"}):
-            explicit = rms_norm(hidden, weight)
-        self.assertTrue(torch.equal(defaulted, explicit))
+        self.assertTrue(_math._rms_norm_native_supported(hidden, weight))
 
     @torch.inference_mode()
     def test_rms_norm_native_fallbacks(self):
         hidden = torch.randn(4, 5120, device=self.device).bfloat16()
         weight = torch.randn(5120, device=self.device).bfloat16()
-        with patch.dict(os.environ, {"DSV41_RMSNORM_NATIVE": "1"}):
-            if self.device.type == "cuda" and torch.cuda.get_device_capability(0)[0] == 10:
-                self.assertTrue(_math._rms_norm_native_supported(hidden, weight))
-                self.assertFalse(
-                    _math._rms_norm_native_supported(hidden, weight.float())
-                )
-                self.assertFalse(
-                    _math._rms_norm_native_supported(hidden.float(), weight)
-                )
-                wide = torch.randn(4, 10240, device=self.device).bfloat16()
-                self.assertFalse(
-                    _math._rms_norm_native_supported(wide[:, :5120], weight)
-                )
-                self.assertFalse(
-                    _math._rms_norm_native_supported(hidden, weight.cpu())
-                )
-        with patch.dict(os.environ, {"DSV41_RMSNORM_NATIVE": "0"}):
-            self.assertFalse(_math._rms_norm_native_supported(hidden, weight))
+        if self.device.type == "cuda" and torch.cuda.get_device_capability(0)[0] == 10:
+            self.assertTrue(_math._rms_norm_native_supported(hidden, weight))
+            self.assertFalse(
+                _math._rms_norm_native_supported(hidden, weight.float())
+            )
+            self.assertFalse(
+                _math._rms_norm_native_supported(hidden.float(), weight)
+            )
+            wide = torch.randn(4, 10240, device=self.device).bfloat16()
+            self.assertFalse(
+                _math._rms_norm_native_supported(wide[:, :5120], weight)
+            )
+            self.assertFalse(
+                _math._rms_norm_native_supported(hidden, weight.cpu())
+            )
         mixed = rms_norm(hidden, weight.float())
         expected = (
             hidden.float()
