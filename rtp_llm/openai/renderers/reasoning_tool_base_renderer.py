@@ -24,6 +24,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RendererParams,
     StreamResponseObject,
     StreamStatus,
+    ThinkStatus,
 )
 from rtp_llm.openai.renderers.sglang_helpers.format_convert_helper import (
     rtp_tools_to_sglang_tools,
@@ -63,6 +64,9 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
     提供工具调用的通用逻辑，子类需要实现具体的检测器创建逻辑
     """
 
+    # 推理家族：模型会自发输出 <think> 块，think 处理判据以此为准。
+    emits_reasoning_stream: bool = True
+
     def __init__(
         self,
         tokenizer: BaseTokenizer,
@@ -100,10 +104,26 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         """创建Resoning解析器，子类可选实现"""
         return None
 
-    def _effective_tools(
-        self, request: ChatCompletionRequest
-    ) -> Optional[List[GPTToolDefinition]]:
-        return request.tools
+    def _resolve_think_anchor(self, request: ChatCompletionRequest) -> bool:
+        """Whether the template injected a think anchor at the end of the prompt.
+
+        Both the endpoint and render_chat record this while rendering, so the
+        common path costs nothing. Requests that reach this point unrecorded
+        (constructed by a caller that renders elsewhere) fall back to rendering
+        here, which is why this stays tolerant of render failures; the probed
+        value is cached on the request so sibling renderers reuse it.
+        """
+        recorded = request.prompt_has_think_anchor()
+        if recorded is not None:
+            return recorded
+        try:
+            rendered_result = self.render_chat(request)
+        except Exception as e:
+            logging.error(f"Failed to render chat while resolving think anchor: {e}")
+            return False
+        anchor = self._prompt_ends_with_think_anchor(rendered_result.rendered_prompt)
+        request.set_prompt_has_think_anchor(anchor)
+        return anchor
 
     @override
     def should_process_think(self, request: ChatCompletionRequest):
@@ -115,7 +135,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         self, n: int, request: ChatCompletionRequest
     ) -> List[StreamStatus]:
         """创建状态列表"""
-        if (request.tools or self.in_think_mode(request)) and not request.logprobs:
+        if self.needs_reasoning_tool_status(request):
             return [
                 ReasoningToolStreamStatus(
                     request,
@@ -124,15 +144,48 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 )
                 for _ in range(n)
             ]
-        else:
-            # logprobs模式下使用普通StreamStatus
-            return [StreamStatus(request) for _ in range(n)]
+        return [StreamStatus(request) for _ in range(n)]
+
+    @override
+    async def _flush_buffer(
+        self,
+        buffer_list: List[StreamStatus],
+        stop_words_str: List[str],
+        is_streaming: bool,
+        think_status_list: List[ThinkStatus],
+    ):
+        """Release parser-held tail text before the final flush.
+
+        ``parse_streaming_increment`` parks text that is a strict prefix of a
+        think tag until it can decide whether the tag completes. If generation
+        stops right there (a reply ending in ``<``, or truncated by max_tokens or
+        a stop word) nothing else drains that buffer, so the tail would silently
+        disappear from the response. Hand the released text to the normal delta
+        path so it goes through stop-word truncation and logprobs like any other
+        chunk.
+        """
+        for status in buffer_list:
+            if not isinstance(status, ReasoningToolStreamStatus):
+                continue
+            parser = status.reasoning_parser
+            if parser is None:
+                continue
+            _, normal_text = parser.flush()
+            if normal_text:
+                status.delta_output_string = (
+                    status.delta_output_string or ""
+                ) + normal_text
+        return await super()._flush_buffer(
+            buffer_list, stop_words_str, is_streaming, think_status_list
+        )
 
     @override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         """渲染聊天请求"""
         prompt: str = self._build_prompt(request)
         input_ids: List[int] = self.tokenizer.encode(prompt)
+        # 渲染即记录锚点：响应侧的门控只认这个标记，非 endpoint 链路也必须填。
+        self._record_prompt_think_anchor(request, prompt)
         return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
 
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
@@ -161,6 +214,10 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             and isinstance(request.extra_configs.chat_template_kwargs, dict)
         ):
             context.update(request.extra_configs.chat_template_kwargs)
+
+        # Apply after all user-controlled template kwargs so tool_choice=none
+        # cannot reintroduce tools into the model prompt.
+        self._normalize_tools_context(request, context)
 
         # 创建Jinja2环境
         env = Environment(

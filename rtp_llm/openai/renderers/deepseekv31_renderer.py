@@ -147,6 +147,8 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
         ):
             context.update(request.extra_configs.chat_template_kwargs)
 
+        self._normalize_tools_context(request, context)
+
         # 兼容一下enable_thinking的行为, 让用户指定enable_thinking时, thinking也能生效
         if context.get("enable_thinking") == True:
             context["thinking"] = context["enable_thinking"]
@@ -155,7 +157,7 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
             context["bos_token"] = self.tokenizer.bos_token
 
         # 带有tools的情况默认不开启thinking
-        if request.tools:
+        if context.get("tools"):
             context["thinking"] = False
 
         # 创建Jinja2环境
@@ -176,7 +178,7 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
     def _create_detector(
         self, request: ChatCompletionRequest
     ) -> Optional[BaseFormatDetector]:
-        if request.tools:
+        if self._effective_tools(request):
             return DeepSeekV31Detector()
         else:
             return None
@@ -185,18 +187,10 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
     def _create_reasoning_parser(
         self, request: ChatCompletionRequest
     ) -> Optional[ReasoningParser]:
-        if not self.in_think_mode(request):
-            return None
-
-        try:
-            rendered_result = self.render_chat(request)
-            if rendered_result.rendered_prompt.endswith("<think>"):
-                return ReasoningParser(model_type="deepseek-v3", force_reasoning=True)
-        except Exception as e:
-            logging.error(f"Failed to render chat in _create_reasoning_parser: {e}")
-            return None
-
-        return None
+        # 推理模型即便 DISABLED / 无锚点也可能自发输出 <think>，故一律建解析器
+        # 剥离。force_reasoning 只由锚点决定，非锚点走非 force，避免吞掉可见回复。
+        anchored = self._resolve_think_anchor(request)
+        return ReasoningParser(model_type="deepseek-v3", force_reasoning=anchored)
 
 
 register_renderer("deepseek_v31", DeepseekV31Renderer)

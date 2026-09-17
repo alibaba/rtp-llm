@@ -1,6 +1,9 @@
+import hashlib
 import itertools
 import json
 import logging
+import threading
+from collections import OrderedDict
 from functools import partial
 from typing import Any, AsyncGenerator, List, Optional
 
@@ -21,7 +24,11 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
+from rtp_llm.config.response_format import (
+    ResponseFormat,
+    normalize_think_tag,
+    prompt_ends_with_think_anchor,
+)
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -55,6 +62,62 @@ from rtp_llm.utils.complete_response_async_generator import (
 )
 
 _INT32_MAX = 2_147_483_647
+
+# check-then-set 的去重状态在共享 renderer 上可能被并发线程同时读写；
+# 这不是热路径（每个配置组合至多走一次），加锁的代价可以忽略。
+_THINK_WARN_LOCK = threading.Lock()
+_THINK_WARN_CACHE_SIZE = 128
+
+
+def _warn_once_per_renderer(
+    renderer: CustomChatRenderer, warn_key: tuple, message: str, *args: Any
+) -> bool:
+    """按有界去重键在 renderer 上告警一次，返回本次是否真的输出了告警。
+
+    同一个 renderer 实例会按请求切换模板（user_template / template_key /
+    tool-use 变体），只按 renderer 去重会把后续模板的告警一起抑制掉；而
+    逐请求告警又会被固定携带参数的客户端按 QPS 放大成日志噪声。故键由调用方
+    按“同一类可复现的配置组合”构造，缓存有界以免模板体被无限保留。
+    """
+    with _THINK_WARN_LOCK:
+        warned_keys = getattr(renderer, "_think_warned_keys", None)
+        if not isinstance(warned_keys, OrderedDict):
+            warned_keys = OrderedDict()
+            renderer._think_warned_keys = warned_keys
+        should_warn = warn_key not in warned_keys
+        if should_warn:
+            warned_keys[warn_key] = None
+            if len(warned_keys) > _THINK_WARN_CACHE_SIZE:
+                warned_keys.popitem(last=False)
+        else:
+            warned_keys.move_to_end(warn_key)
+    if should_warn:
+        logging.warning(message, *args)
+    return should_warn
+
+
+def _request_value_digest(value: Any) -> Optional[bytes]:
+    if value is None:
+        return None
+    return hashlib.sha256(str(value).encode("utf-8", errors="replace")).digest()
+
+
+def _enabled_without_anchor_warn_key(
+    request: Optional[ChatCompletionRequest], think_start_tag: str
+) -> tuple:
+    """告警去重键：(tag, 模板标识)。
+
+    同一个 renderer 实例会按请求切换模板（user_template / template_key /
+    tool-use 变体），只按 renderer+tag 去重会把后续模板的告警一起抑制掉。
+    """
+    return (
+        think_start_tag,
+        _request_value_digest(getattr(request, "user_template", None)),
+        _request_value_digest(getattr(request, "template_key", None)),
+        bool(getattr(request, "functions", None)),
+        bool(getattr(request, "tools", None)),
+        _request_value_digest(getattr(request, "tool_choice", None)),
+    )
 
 
 def _positive_int_or_none(value: Optional[int]) -> Optional[int]:
@@ -182,11 +245,57 @@ class OpenaiEndpoint(object):
     ) -> List[List[int]]:
         return [i for i, _ in itertools.groupby(sorted(stop_words_list))]
 
+    def _request_prompt_has_think_anchor(
+        self,
+        config: GenerateConfig,
+        input_ids: Optional[List[int]],
+        request: Optional[ChatCompletionRequest] = None,
+    ) -> bool:
+        """Whether the rendered prompt ends with an open think start tag.
+
+        Prefers the flag recorded while rendering; falls back to a token-level
+        comparison against the prompt tail so callers that pass input_ids but no
+        recorded flag still resolve correctly.
+
+        The fallback compares every token form the anchor can take -- the
+        configured ``begin_think_token_ids`` first, then both the raw tag and the
+        tag stripped of trailing newlines -- because the text predicate
+        ``prompt_ends_with_think_anchor`` tolerates trailing newlines while the
+        tag holds a single value (Qwen templates end with ``<think>\\n`` while
+        DeepSeek appends a bare ``<think>``). Comparing only one form would let
+        the endpoint and the renderers disagree about the same prompt.
+        """
+        if request is not None:
+            anchor_state = request.prompt_has_think_anchor()
+            if anchor_state is not None:
+                return anchor_state
+        if input_ids is None:
+            return False
+        return any(
+            input_ids[-len(begin_ids) :] == begin_ids
+            for begin_ids in self._think_anchor_id_variants(config)
+        )
+
+    def _think_anchor_id_variants(self, config: GenerateConfig) -> List[List[int]]:
+        """Token forms of the open think anchor, longest first."""
+        think_start_tag = normalize_think_tag(self.generate_env_config.think_start_tag)
+        variants: List[List[int]] = []
+        if config.begin_think_token_ids:
+            variants.append(list(config.begin_think_token_ids))
+        for text in (think_start_tag, think_start_tag.rstrip("\n")):
+            if not text:
+                continue
+            ids = self.tokenizer.encode(text, add_special_tokens=False)
+            if ids and ids not in variants:
+                variants.append(ids)
+        return sorted(variants, key=len, reverse=True)
+
     def _reasoning_format_for_prompt(
         self,
         config: GenerateConfig,
         renderer: CustomChatRenderer,
         input_ids: Optional[List[int]],
+        request: Optional[ChatCompletionRequest] = None,
     ) -> Optional[ReasoningFormat]:
         if config.thinking_mode not in (
             ThinkingMode.ENABLED,
@@ -195,16 +304,34 @@ class OpenaiEndpoint(object):
             return None
 
         base_format = renderer.get_reasoning_format()
-        if config.thinking_mode == ThinkingMode.ENABLED:
-            return base_format
         think_start_tag = normalize_think_tag(self.generate_env_config.think_start_tag)
-        begin_ids = config.begin_think_token_ids or self.tokenizer.encode(
-            think_start_tag, add_special_tokens=False
-        )
-        prompt_has_begin = bool(
-            begin_ids
-            and input_ids is not None
-            and input_ids[-len(begin_ids) :] == begin_ids
+        if config.thinking_mode == ThinkingMode.ENABLED:
+            anchored = self._request_prompt_has_think_anchor(config, input_ids, request)
+
+            if anchored:
+                return base_format
+
+            # R1-style models may legitimately use fixed thinking without an
+            # anchor. Warn once per bounded template identity, without retaining
+            # request-controlled template bodies for the renderer lifetime.
+            _warn_once_per_renderer(
+                renderer,
+                _enabled_without_anchor_warn_key(request, think_start_tag),
+                "thinking_mode=ENABLED but the rendered prompt does not end with "
+                "the think start tag %r, so the model may never emit the think end "
+                "tag. Pass enable_thinking=false in chat_template_kwargs, or use a "
+                "template that injects the anchor.",
+                think_start_tag,
+            )
+            return base_format
+
+        # ADAPTIVE keeps the token-level comparison as the last resort (it decides
+        # from the first generated token, so it has to agree with what the decoder
+        # sees), but resolves it through the same helper as ENABLED: the recorded
+        # flag and the bare-tag/newline variants keep the two modes consistent
+        # about the same prompt.
+        prompt_has_begin = self._request_prompt_has_think_anchor(
+            config, input_ids, request
         )
         if config.thinking_mode == ThinkingMode.ADAPTIVE and prompt_has_begin:
             config.thinking_mode = ThinkingMode.ENABLED
@@ -327,10 +454,56 @@ class OpenaiEndpoint(object):
             and isinstance(request.extra_configs.max_thinking_tokens, int)
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
+            config._max_thinking_tokens_was_explicit = True
         if request.thinking_budget is not None:
             budget = int(request.thinking_budget)
             config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
+            config._max_thinking_tokens_was_explicit = True
         config.thinking_mode = renderer.resolve_thinking_mode(request)
+        if (
+            config.thinking_mode == ThinkingMode.ENABLED
+            and renderer.default_thinking_mode != ThinkingMode.ENABLED
+            and not renderer.emits_reasoning_stream
+            and not self._request_prompt_has_think_anchor(config, input_ids, request)
+        ):
+            # A fixed-ENABLED think envelope compiles with begin="" and masks EOS
+            # until the model emits the think end tag. That is only reachable for
+            # models that actually produce a reasoning stream (they emit
+            # </think>) or when the template opened a <think> anchor. When the
+            # service did not declare thinking on and a request force-enables it
+            # on a non-reasoning renderer whose prompt has no anchor (e.g. passing
+            # enable_thinking=true to a Qwen2 template that ignores it), the model
+            # cannot emit the end tag, so the grammar masks EOS forever and the
+            # reply repeats until the length cap. Clamp back to DISABLED and let
+            # the model answer normally.
+            #
+            # ``default_thinking_mode != ENABLED`` deliberately also covers an
+            # ADAPTIVE service: adaptive compiles an ``or(think, no_think)``
+            # envelope, but once a request forces ENABLED the envelope is the
+            # fixed one, so ADAPTIVE carries the same hazard here. A service-level
+            # ENABLED is trusted as the deployer declaring the model can think,
+            # so it is never clamped.
+            #
+            # The warning is deduped per (renderer type, model type, declared
+            # mode): the condition depends on nothing request-specific, so a
+            # client that always sends enable_thinking=true would otherwise log
+            # one line per request.
+            _warn_once_per_renderer(
+                renderer,
+                (
+                    "clamped_forced_enabled",
+                    type(renderer).__name__,
+                    getattr(renderer, "model_type", None),
+                    renderer.default_thinking_mode,
+                ),
+                "thinking_mode=ENABLED was force-enabled by the request on a "
+                "non-reasoning renderer (%s, model_type=%s) whose rendered prompt "
+                "has no <think> anchor; the model cannot emit the think end tag, so "
+                "clamping to DISABLED to avoid masking EOS.",
+                type(renderer).__name__,
+                getattr(renderer, "model_type", None),
+            )
+            config.thinking_mode = ThinkingMode.DISABLED
         config.in_think_mode = config.thinking_mode == ThinkingMode.ENABLED
         if config.thinking_mode == ThinkingMode.DISABLED:
             config.max_thinking_tokens = 0
@@ -352,7 +525,7 @@ class OpenaiEndpoint(object):
                 else config.thinking_mode == ThinkingMode.ENABLED
             ),
             reasoning_format=self._reasoning_format_for_prompt(
-                config, renderer, input_ids
+                config, renderer, input_ids, request
             ),
         )
         if request.debug_info:
@@ -633,6 +806,15 @@ class OpenaiEndpoint(object):
         if prepopulate_str != "":
             rendered_input.rendered_prompt += prepopulate_str
             rendered_input.input_ids += self.tokenizer.encode(prepopulate_str)
+        # Record the anchor once, after prepopulation: a prefill appended behind
+        # the anchor means the model is no longer starting from a think block.
+        # The response path reads this instead of rendering the prompt again.
+        chat_request.set_prompt_has_think_anchor(
+            prompt_ends_with_think_anchor(
+                rendered_input.rendered_prompt,
+                normalize_think_tag(self.generate_env_config.think_start_tag),
+            )
+        )
         return rendered_input
 
     def chat_completion(
@@ -709,6 +891,8 @@ class OpenaiEndpoint(object):
         generate_config = self._extract_generation_config(
             chat_request, rendered_input.input_ids, renderer
         )
+        # 与单请求入口共享同一契约：tool_choice 强制的结构化约束必须落到批量链路。
+        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
 
         if generate_config.return_prompt_logits and rendered_input.multimodal_inputs:
             raise FtRuntimeException(

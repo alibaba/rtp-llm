@@ -141,12 +141,19 @@ def _resolved_thinking_mode(config: Any) -> "ThinkingMode":
 
     from rtp_llm.config.generate_config import ThinkingMode
 
-    if config.thinking_mode == ThinkingMode.ADAPTIVE:
+    if (
+        getattr(config, "thinking_mode", ThinkingMode.UNSPECIFIED)
+        == ThinkingMode.ADAPTIVE
+    ):
         return ThinkingMode.ADAPTIVE
-    return ThinkingMode.ENABLED if config.in_think_mode else ThinkingMode.DISABLED
+    return (
+        ThinkingMode.ENABLED
+        if getattr(config, "in_think_mode", False)
+        else ThinkingMode.DISABLED
+    )
 
 
-def _uses_reasoning_envelope(config: Any) -> bool:
+def uses_reasoning_envelope(config: Any) -> bool:
     from rtp_llm.config.generate_config import ThinkingMode
 
     return _resolved_thinking_mode(config) in (
@@ -267,7 +274,7 @@ def prepare_response_format(
 
     if config._reasoning_envelope_applied:
         final_constraint = config._reasoning_final_constraint
-        if _uses_reasoning_envelope(config):
+        if uses_reasoning_envelope(config):
             validate_engine_ready(config)
             return final_constraint
         restore_final_constraint(config, final_constraint)
@@ -275,10 +282,79 @@ def prepare_response_format(
 
     plan = ResponseFormatPlan.compile(config, reasoning_format=reasoning_format)
     plan.apply_to_config(config)
-    if _uses_reasoning_envelope(config):
+    if uses_reasoning_envelope(config):
         config._reasoning_envelope_applied = True
         config._reasoning_final_constraint = plan.final_constraint
+        config._reasoning_format = reasoning_format
     return plan.final_constraint
+
+
+def recompile_reasoning_envelope(config: Any) -> None:
+    """Rebuild an installed reasoning envelope after its budget changes.
+
+    Prompt length is only known at the Python backend boundary, after the
+    request-level grammar has been compiled and before ``trans_input`` creates
+    the protobuf. Keep the saved final constraint and reasoning syntax as the
+    source for a fresh envelope so the scalar budget and the grammar consumed
+    by the engine cannot diverge. These private attributes are intentionally
+    not needed after RPC serialization.
+    """
+
+    if not config._reasoning_envelope_applied:
+        validate_engine_ready(config)
+        return
+
+    reasoning_format = config._reasoning_format
+    if reasoning_format is None:
+        raise FtRuntimeException(
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+            "installed reasoning grammar is missing its reasoning format",
+        )
+    final_constraint = config._reasoning_final_constraint
+    restore_final_constraint(config, final_constraint)
+    prepare_response_format(config, reasoning_format=reasoning_format)
+
+
+def update_reasoning_envelope_budget(config: Any, budget: int) -> bool:
+    """Patch the installed reasoning envelope's budget in place.
+
+    The boundary clamp changes exactly one scalar of the compiled grammar (the
+    reasoning segment's ``max_tokens``). Rebuilding the whole envelope for a
+    two-token difference is per-request overhead, so patch the installed
+    structural_tag instead; the scalar is not part of normalization, so the
+    grammar stays engine-ready. Returns False when the installed envelope is
+    not the compiler's shape, and the caller falls back to a full recompile.
+    """
+
+    value = getattr(config, "structural_tag", None)
+    if not isinstance(value, dict):
+        return False
+    node = _find_reasoning_budget_node(value)
+    if node is None:
+        return False
+    node["max_tokens"] = budget
+    return True
+
+
+def _find_reasoning_budget_node(node: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(node, dict):
+        content = node.get("content")
+        if (
+            node.get("type") == "tag"
+            and isinstance(content, dict)
+            and "max_tokens" in content
+        ):
+            return content
+        children = list(node.values())
+    elif isinstance(node, list):
+        children = node
+    else:
+        return None
+    for child in children:
+        found = _find_reasoning_budget_node(child)
+        if found is not None:
+            return found
+    return None
 
 
 def validate_engine_ready(config: Any) -> None:
@@ -307,6 +383,7 @@ def restore_final_constraint(
     config.response_format = None
     config._reasoning_envelope_applied = False
     config._reasoning_final_constraint = None
+    config._reasoning_format = None
     if constraint is None:
         GrammarConstraint.clear_from_config(config)
     else:

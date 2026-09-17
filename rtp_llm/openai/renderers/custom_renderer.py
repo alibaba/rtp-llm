@@ -16,7 +16,10 @@ from rtp_llm.config.generate_config import (
     thinking_mode_from_value,
 )
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
-from rtp_llm.config.response_format import normalize_think_tag
+from rtp_llm.config.response_format import (
+    normalize_think_tag,
+    prompt_ends_with_think_anchor,
+)
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -32,6 +35,7 @@ from rtp_llm.openai.api_datatype import (
     CompletionTokensDetails,
     DeltaMessage,
     FinisheReason,
+    GPTToolDefinition,
     PromptTokensDetails,
     RendererInfo,
     RoleEnum,
@@ -94,6 +98,34 @@ def _get_think_config(generate_env_config):
     think_start_tag = normalize_think_tag(generate_env_config.think_start_tag)
     think_end_tag = normalize_think_tag(generate_env_config.think_end_tag)
     return think_mode, think_start_tag, think_end_tag
+
+
+def _strip_boundary_special_ids(tokenizer, word: str, ids: List[int]) -> List[int]:
+    """去掉 legacy 回退编码包在词两端的特殊 token。
+
+    旧式 encode() 默认会追加 BOS/EOS，包着特殊 token 的序列在生成输出中
+    永不出现，注册成停止序列等于静默失效。裁剪时至少保留一个 id，避免把
+    <|endoftext|> 这类本身就是特殊 token 的停止词裁空。
+
+    返回新列表，不修改入参：调用方可能共享传入的 ids。
+    """
+    ids = list(ids)
+    if len(ids) <= 1:
+        return ids
+    special_tokens = getattr(tokenizer, "all_special_tokens", None)
+    if not isinstance(special_tokens, (list, tuple)) or not special_tokens:
+        return ids
+    special_token_ids = tokenizer.convert_tokens_to_ids(list(special_tokens))
+    special_ids = set(special_token_ids)
+    if word in special_tokens:
+        word_id = tokenizer.convert_tokens_to_ids(word)
+        if isinstance(word_id, int) and word_id in ids:
+            return [word_id]
+    while len(ids) > 1 and ids[0] in special_ids:
+        ids.pop(0)
+    while len(ids) > 1 and ids[-1] in special_ids:
+        ids.pop()
+    return ids
 
 
 class StreamStatus:
@@ -309,7 +341,39 @@ class RenderedInputs:
             )
 
 
+# Deployment-level overrides for the ``emits_reasoning_stream`` capability,
+# keyed by ``RendererParams.model_type``. The class attribute below classifies
+# the *renderer family*, but a family is mapped from several model types and the
+# same type can front checkpoints with different capabilities, so the class
+# alone misclassifies two shapes:
+# - ``qwen_tool`` shares QwenReasoningToolRenderer with the qwen_3 reasoning
+#   family, yet it is the Qwen2/Qwen2.5 tool-calling variant
+#   (``register_model("qwen_tool", QWenV2)``, and the qwen25 smoke tasks serve
+#   Qwen2.5-Instruct under it). Without the override a request-forced
+#   enable_thinking on that deployment keeps compiling the ``begin=""`` ENABLED
+#   envelope and masks EOS forever.
+# - ``qwen3_vl``/``qwen3_vl_moe`` are Qwen2VLRenderer and therefore inherit
+#   False, but the family has thinking checkpoints. They are intentionally NOT
+#   overridden here: the same names also front ``Qwen3-VL-*``
+#   Instruct checkpoints, so declaring either value would be wrong for the other
+#   deployment; their template injects a think anchor whenever thinking is on,
+#   which is what opens the gate for them today.
+# Never derive this from generate_env_config's think_start_tag / think_end_tag
+# defaults: those are non-empty, so deriving from them is True for every
+# deployment including genuinely non-reasoning models.
+EMITS_REASONING_STREAM_BY_MODEL_TYPE: Dict[str, bool] = {
+    "qwen_tool": False,
+}
+
+
 class CustomChatRenderer:
+    # Whether this renderer's model spontaneously emits <think> blocks.
+    # Subclasses under ReasoningToolBaseRenderer set this True. It is the sole
+    # capability signal for think handling. See
+    # EMITS_REASONING_STREAM_BY_MODEL_TYPE for per-deployment overrides, which
+    # the instance attribute below resolves in __init__.
+    emits_reasoning_stream: bool = False
+
     def __init__(
         self,
         tokenizer: BaseTokenizer,
@@ -347,6 +411,11 @@ class CustomChatRenderer:
 
         self.tokenizer = tokenizer
         self.model_type = renderer_params.model_type
+        # Resolve the capability per deployment, so a model type that shares a
+        # renderer class with another family can override the class default.
+        self.emits_reasoning_stream = EMITS_REASONING_STREAM_BY_MODEL_TYPE.get(
+            self.model_type, type(self).emits_reasoning_stream
+        )
         self.max_seq_len = renderer_params.max_seq_len
         self.eos_token_id = renderer_params.eos_token_id
         self.stop_words_id_list = renderer_params.stop_word_ids_list
@@ -401,8 +470,32 @@ class CustomChatRenderer:
                 ids_list.append(self.tokenizer.encode(word, add_special_tokens=True))
         return ids_list
 
+    def encode_extra_stop_words(self, words: List[str]) -> List[List[int]]:
+        # 停止词必须按当前 tokenizer 反查：写死 id 会在词表不同的 ckpt 上把
+        # 无关 token 变成停止序列。tokenize_words 走 convert_tokens_to_ids，
+        # 对多 token 串会退化成 unk，故此处用 encode。
+        ids_list = []
+        for word in words:
+            try:
+                ids = self.tokenizer.encode(word, add_special_tokens=False)
+            except TypeError:
+                if not getattr(self, "_legacy_tokenizer_warned", False):
+                    self._legacy_tokenizer_warned = True
+                    logging.warning(
+                        "tokenizer %s does not accept add_special_tokens; stop "
+                        "words fall back to plain encode with boundary special "
+                        "tokens trimmed",
+                        type(self.tokenizer).__name__,
+                    )
+                ids = _strip_boundary_special_ids(
+                    self.tokenizer, word, list(self.tokenizer.encode(word))
+                )
+            if ids:
+                ids_list.append(list(ids))
+        return ids_list
+
     def get_all_extra_stop_word_ids_list(self) -> List[List[int]]:
-        ids_list_from_words = self.tokenize_words(self.extra_stop_words)
+        ids_list_from_words = self.encode_extra_stop_words(self.extra_stop_words)
         return self.extra_stop_word_ids_list + ids_list_from_words
 
     def _check_all_finished(self, status_list) -> bool:
@@ -1126,6 +1219,72 @@ class CustomChatRenderer:
         # 留出方法给子类重写, 避免重复的think处理
         return self.in_think_mode(request)
 
+    def _prompt_ends_with_think_anchor(self, rendered_prompt: str) -> bool:
+        return prompt_ends_with_think_anchor(rendered_prompt, self.think_start_tag)
+
+    def _record_prompt_think_anchor(
+        self, request: ChatCompletionRequest, rendered_prompt: str
+    ) -> None:
+        """Record whether the rendered prompt ends with the think anchor.
+
+        The endpoint records this too, but it appends prefill after rendering
+        and re-records afterwards. Here only requests that have never been
+        inspected are filled in, so render paths outside the endpoint
+        (raw/dash_sc style callers) still reach the same gate decision.
+        """
+        if request.prompt_has_think_anchor() is None:
+            request.set_prompt_has_think_anchor(
+                self._prompt_ends_with_think_anchor(rendered_prompt)
+            )
+
+    def _effective_tools(
+        self, request: ChatCompletionRequest
+    ) -> Optional[List[GPTToolDefinition]]:
+        # 工具列表按请求语义收敛：tool_choice=none 时模型不得调用任何工具。
+        if getattr(request, "tool_choice", None) == "none":
+            return None
+        return request.tools
+
+    def _normalize_tools_context(
+        self, request: ChatCompletionRequest, context: Dict[str, Any]
+    ) -> None:
+        """Make the rendered tools match the request's effective tool policy."""
+
+        tools = self._effective_tools(request)
+        if not tools:
+            context.pop("tools", None)
+            return
+        context["tools"] = [
+            tool.model_dump(exclude_none=True, mode="json") for tool in tools
+        ]
+
+    def needs_reasoning_tool_status(self, request: ChatCompletionRequest) -> bool:
+        """Whether the response path needs the tool/reasoning-aware status object.
+
+        Openers, in order:
+        - effective tools: a detector is needed;
+        - ``emits_reasoning_stream``: a reasoning renderer may spontaneously emit
+          a <think> block even when the request says DISABLED, so the gate must
+          open regardless of thinking_mode or anchor — otherwise the think block
+          leaks into the visible reply (critic / Dart / diversion);
+        - ``in_think_mode``: ENABLED requests on a renderer that delegates think
+          splitting (e.g. QwenRenderer routes to its internal reasoning renderer)
+          must keep opening the gate;
+        - recorded open anchor: safety net for a reasoning model mistakenly served
+          by a non-reasoning renderer.
+
+        The capability term is purely additive over the previous gate, so nothing
+        that opened before ever closes here. Only the flag recorded during
+        rendering is consulted; the gate never renders the prompt itself (every
+        render path fills the flag in via _record_prompt_think_anchor).
+        """
+        return bool(
+            self._effective_tools(request)
+            or self.emits_reasoning_stream
+            or self.in_think_mode(request)
+            or request.prompt_has_think_anchor() is True
+        )
+
     async def render_response_stream(
         self,
         output_generator: AsyncGenerator[GenerateOutputs, None],
@@ -1150,10 +1309,22 @@ class CustomChatRenderer:
             enable_think_mode = False
             initial_in_think_mode = False
         else:
-            # Keep fixed enabled/disabled modes on the legacy renderer hooks.
-            # Some reasoning renderers parse thinking before this base class.
+            # The resolved generate_config is authoritative for *routing*: a
+            # request-level enable_thinking must not reopen the state machine
+            # when the endpoint clamped the resolved mode back to DISABLED,
+            # otherwise the reply would be pushed into reasoning_content while
+            # the model was told not to think. The hooks stay in the loop
+            # because some reasoning renderers parse thinking before this base
+            # class and opt out here (QwenRenderer returns False from both).
+            #
+            # ``enable_think_mode`` deliberately stays request-derived: it is
+            # not a routing switch, it only gates whether the usage reports
+            # reasoning_tokens.
             enable_think_mode = bool(self.in_think_mode(request))
-            initial_in_think_mode = bool(self.should_process_think(request))
+            initial_in_think_mode = (
+                bool(self.should_process_think(request))
+                and resolved_thinking_mode == ThinkingMode.ENABLED
+            )
         think_status_list = [
             ThinkStatus(
                 enable_think_mode=enable_think_mode,

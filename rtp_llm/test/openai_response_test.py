@@ -3,9 +3,11 @@ import copy
 import functools
 import json
 import os
+import threading
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, Callable, List
-from unittest import IsolatedAsyncioTestCase, main
+from unittest import IsolatedAsyncioTestCase, TestCase, main
+from unittest.mock import Mock, patch
 
 import torch
 from typing_extensions import override
@@ -41,7 +43,7 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     ToolCall,
 )
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint, _request_value_digest
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers import custom_renderer
 from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
@@ -518,6 +520,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             chat_template_kwargs={"thinking_mode": request_mode},
             stream=True,
         )
+        # The thinking template opened a <think> anchor, so a request that
+        # force-enables thinking is honored (the model can emit </think>).
+        request.set_prompt_has_think_anchor(True)
         config = endpoint._extract_generation_config(
             request, input_ids=[], renderer=renderer
         )
@@ -802,6 +807,120 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
         self.assertFalse(delta.reasoning_content)
         self.assertEqual(delta.content, "answer")
+
+    def _create_qwen_reasoning_renderer(self, model_type, think_mode=0):
+        tokenizer = BaseTokenizer(f"{self.test_data_path}/qwen3_30b/tokenizer/")
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = think_mode
+        renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            RendererParams(
+                model_type=model_type,
+                max_seq_len=MAX_SEQ_LEN,
+                eos_token_id=tokenizer.eos_token_id or 0,
+                stop_word_ids_list=[],
+            ),
+            generate_env_config=generate_env_config,
+            render_config=RenderConfig(),
+        )
+        return tokenizer, renderer
+
+    async def _render_plain_request(self, renderer, tokenizer, output_ids):
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")], stream=True
+        )
+        stream = renderer.render_response_stream(
+            fake_output_generator_mtp(
+                output_ids,
+                MAX_SEQ_LEN,
+                tokenizer.eos_token_id or 0,
+                10,
+                tokens_per_chunk=3,
+            ),
+            request,
+            GenerateConfig(is_streaming=True),
+        )
+        chunks = [
+            chunk
+            async for chunk in OpenaiEndpoint._complete_stream_response(stream, None)
+        ]
+        return merge_stream_responses(chunks).choices[0].delta
+
+    async def test_disabled_reasoning_renderer_strips_spontaneous_think_without_tools(
+        self,
+    ):
+        """critic shape: THINK_MODE=0, no tools, no anchor — the model still
+        emits a think block and it must not reach the visible reply."""
+        tokenizer, renderer = self._create_qwen_reasoning_renderer("qwen_3")
+        output_ids = tokenizer.encode(
+            "<think>好的</think>\n\n文本内容", add_special_tokens=False
+        )
+
+        delta = await self._render_plain_request(renderer, tokenizer, output_ids)
+
+        self.assertEqual(delta.content.strip(), "文本内容")
+        self.assertEqual(delta.reasoning_content.strip(), "好的")
+
+    async def test_disabled_reasoning_renderer_keeps_plain_answer_intact(self):
+        """The widened gate must not eat a reply that never opened a think block."""
+        tokenizer, renderer = self._create_qwen_reasoning_renderer("qwen_3")
+        output_ids = tokenizer.encode("文本内容", add_special_tokens=False)
+
+        delta = await self._render_plain_request(renderer, tokenizer, output_ids)
+
+        self.assertEqual(delta.content.strip(), "文本内容")
+        self.assertFalse(delta.reasoning_content)
+
+    async def test_stream_tail_partial_think_tag_is_not_dropped(self):
+        """A reply truncated right after `<` parks that character in the parser
+        until it can tell whether a tag completes; at end of stream it must be
+        released instead of vanishing from the reply."""
+        tokenizer, renderer = self._create_qwen_reasoning_renderer("qwen_3")
+        output_ids = tokenizer.encode("文本内容<", add_special_tokens=False)
+
+        delta = await self._render_plain_request(renderer, tokenizer, output_ids)
+
+        self.assertEqual(delta.content, "文本内容<")
+        self.assertFalse(delta.reasoning_content)
+
+    async def _render_clamped_forced_thinking(self, output_text):
+        """Non-reasoning renderer + request-forced thinking + no anchor: the
+        endpoint clamps the resolved mode back to DISABLED."""
+        tokenizer, renderer, endpoint = self._create_base_thinking_endpoint("disabled")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            enable_thinking=True,
+            stream=True,
+        )
+        config = endpoint._extract_generation_config(
+            request, input_ids=[], renderer=renderer
+        )
+        output_ids = tokenizer.encode(output_text, add_special_tokens=False)
+        stream = renderer.render_response_stream(
+            fake_output_generator_mtp(
+                output_ids,
+                MAX_SEQ_LEN,
+                tokenizer.eos_token_id or 0,
+                10,
+                tokens_per_chunk=3,
+            ),
+            request,
+            config,
+        )
+        chunks = [
+            chunk
+            async for chunk in OpenaiEndpoint._complete_stream_response(stream, None)
+        ]
+        return config, merge_stream_responses(chunks).choices[0].delta
+
+    async def test_clamped_forced_thinking_keeps_the_answer_visible(self):
+        """The clamp must reach the response path: routing the reply into
+        reasoning_content would leave `content` empty for the clamped case."""
+        config, delta = await self._render_clamped_forced_thinking("answer")
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertEqual(delta.content, "answer")
+        self.assertFalse(delta.reasoning_content)
 
     async def test_adaptive_truncated_think_prefix_is_flushed_as_content(self):
         tokenizer, renderer = self._create_adaptive_qwen_renderer()
@@ -1403,12 +1522,21 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         def _assert_tool_call_response(
             self,
             response_delta,
-            expected_content="<think>\n好的\n</think>\n\n文本内容\n",
+            expected_content="文本内容",
         ):
-            """断言工具调用响应的内容"""
+            """断言工具调用响应的内容。
+
+            DISABLED（think_mode=0）下推理模型仍会自发吐 <think>，能力驱动剥离（P0-B）
+            把它归入 reasoning_content、content 只留干净正文——与 ENABLED 的
+            QwenThinkTestSuite 一致。旧行为让 think 泄漏进 content，正是
+            critic/Dart/diversion 的泄漏形态。
+            """
             assert (
                 response_delta.content.strip() == expected_content.strip()
             ), f"Content mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.reasoning_content.strip() == "好的"
+            ), f"reasoning_content mismatch. Full response_delta: {response_delta}"
             assert (
                 response_delta.tool_calls is not None
             ), f"tool_calls is None. Full response_delta: {response_delta}"
@@ -3204,6 +3332,183 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             [expected_raw_output],
             f"raw_output_collected mismatch\nFull raw_output_collected: {raw_output_collected}\nAll debug_info_chunks: {debug_info_chunks}",
         )
+
+
+class BatchChatConstraintsTest(TestCase):
+    """批量入口必须与单请求入口共享 renderer 约束：tool_choice 强制的结构化
+    约束不能只在普通 chat 链路生效，否则批量请求会退化为无约束解码。"""
+
+    def _make_endpoint(self):
+        endpoint = object.__new__(OpenaiEndpoint)
+        endpoint.generate_env_config = GenerateEnvConfig()
+        renderer = Mock()
+        renderer.apply_chat_completion_constraints = Mock(
+            side_effect=lambda request, config: config.structural_tag.update(
+                {"type": "structural_tag"}
+            )
+        )
+        endpoint.chat_renderer = renderer
+        endpoint.template_renderer = renderer
+        endpoint.tokenizer = Mock()
+        endpoint.tokenizer.encode = Mock(return_value=[1, 2, 3])
+        rendered = Mock()
+        rendered.input_ids = [1, 2, 3]
+        rendered.multimodal_inputs = None
+        endpoint.render_chat = Mock(return_value=rendered)
+        config = GenerateConfig()
+        config.structural_tag = {"format": {"type": "tag"}}
+        endpoint._extract_generation_config = Mock(return_value=config)
+        endpoint._prepare_chat_input = OpenaiEndpoint._prepare_chat_input.__get__(
+            endpoint
+        )
+        return endpoint, renderer, config
+
+    def _make_request(self):
+        tool = GPTToolDefinition(
+            type="function",
+            function=GPTFunctionDefinition(
+                name="get_weather",
+                description="Get weather",
+                parameters={"type": "object"},
+            ),
+        )
+        return ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hi")],
+            tools=[tool],
+            tool_choice="required",
+        )
+
+    def test_prepare_chat_input_applies_renderer_constraints(self):
+        endpoint, renderer, config = self._make_endpoint()
+        request = self._make_request()
+
+        gen_input, generate_config = endpoint._prepare_chat_input(7, request)
+
+        renderer.apply_chat_completion_constraints.assert_called_once_with(
+            request, config
+        )
+        self.assertIs(generate_config, config)
+        self.assertEqual(generate_config.structural_tag["type"], "structural_tag")
+        self.assertEqual(gen_input.request_id, 7)
+
+
+class EnabledWithoutAnchorWarningTest(TestCase):
+    """ENABLED 且模板无锚点是合法配置（R1 风格）：告警不能逐请求刷日志。"""
+
+    def _make_endpoint(self):
+        endpoint = object.__new__(OpenaiEndpoint)
+        endpoint.generate_env_config = GenerateEnvConfig()
+        endpoint.generate_env_config.think_start_tag = "<think>"
+        endpoint.tokenizer = Mock()
+        endpoint.tokenizer.encode = Mock(return_value=[])
+        endpoint._reasoning_format_for_prompt = (
+            OpenaiEndpoint._reasoning_format_for_prompt.__get__(endpoint)
+        )
+        renderer = Mock()
+        renderer.get_reasoning_format = Mock(return_value=Mock())
+        return endpoint, renderer
+
+    def _make_request(self, user_template=None, template_key=None):
+        return ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hi")],
+            user_template=user_template,
+            template_key=template_key,
+        )
+
+    def test_warning_is_emitted_once_per_tag(self):
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            for _ in range(3):
+                endpoint._reasoning_format_for_prompt(config, renderer, [1, 2, 3])
+
+        self.assertEqual(mock_logging.warning.call_count, 1)
+
+    def test_switching_templates_on_one_renderer_warns_per_template(self):
+        """template_renderer 实例按请求切换模板（user_template/template_key）：
+        去重键必须带上模板标识，否则后一个无锚点模板的告警会被前一个抑制。"""
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+        request_a = self._make_request(user_template="template-a")
+        request_b = self._make_request(user_template="template-b")
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request_a)
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request_b)
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request_a)
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request_b)
+
+        self.assertEqual(mock_logging.warning.call_count, 2)
+
+    def test_named_template_key_is_part_of_the_dedup_key(self):
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            for template_key in ("default", "tool_use", "default", "tool_use"):
+                endpoint._reasoning_format_for_prompt(
+                    config,
+                    renderer,
+                    [1],
+                    self._make_request(template_key=template_key),
+                )
+
+        self.assertEqual(mock_logging.warning.call_count, 2)
+
+    def test_concurrent_first_requests_warn_once(self):
+        """gate 的 check-then-set 必须原子：并发首请求不能各刷一条告警。"""
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+        request = self._make_request(user_template="template-a")
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            threads = [
+                threading.Thread(
+                    target=endpoint._reasoning_format_for_prompt,
+                    args=(config, renderer, [1], request),
+                )
+                for _ in range(8)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(mock_logging.warning.call_count, 1)
+
+    def test_anchored_enabled_request_skips_tokenizer_and_warning_lock(self):
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+        request = self._make_request(user_template="anchored-template")
+        request.set_prompt_has_think_anchor(True)
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request)
+
+        endpoint.tokenizer.encode.assert_not_called()
+        mock_logging.warning.assert_not_called()
+
+    def test_warning_cache_is_bounded_and_does_not_retain_template_bodies(self):
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+
+        with patch("rtp_llm.openai.openai_endpoint.logging"):
+            for index in range(160):
+                endpoint._reasoning_format_for_prompt(
+                    config,
+                    renderer,
+                    [1],
+                    self._make_request(user_template=f"template-{index}"),
+                )
+
+        cache = renderer._think_warned_keys
+        self.assertEqual(len(cache), 128)
+        # 去重键存的是模板摘要（bytes），断言必须落在摘要上：最新模板在缓存里、
+        # 最旧模板已被 LRU 淘汰，才能钉住淘汰语义。
+        template_digests = [key[1] for key in cache]
+        self.assertIn(_request_value_digest("template-159"), template_digests)
+        self.assertNotIn(_request_value_digest("template-0"), template_digests)
 
 
 if __name__ == "__main__":

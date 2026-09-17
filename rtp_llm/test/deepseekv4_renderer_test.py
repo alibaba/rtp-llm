@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
+from rtp_llm.config.response_format_compiler import validate_engine_ready
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
@@ -78,6 +79,8 @@ def _make_renderer(encoding_module):
     renderer.tokenizer = FakeTokenizer()
     renderer.think_mode = False
     renderer.default_thinking_mode = ThinkingMode.DISABLED
+    renderer.think_start_tag = "<think>\n"
+    renderer.think_end_tag = "</think>"
     return renderer
 
 
@@ -190,7 +193,7 @@ class DeepseekV4ToolChoiceConstraintTest(TestCase):
 
         self.renderer.apply_chat_completion_constraints(request, config)
 
-        tag = json.loads(config.structural_tag)
+        tag = config.structural_tag
         invoke_info = DeepSeekV4Detector().structure_info()("search")
         self.assertEqual(
             [item["begin"] for item in tag["format"]["content"]["tags"]],
@@ -208,13 +211,30 @@ class DeepseekV4ToolChoiceConstraintTest(TestCase):
 
         self.renderer.apply_chat_completion_constraints(request, config)
 
-        tag = json.loads(config.structural_tag)
+        tag = config.structural_tag
         get_info = DeepSeekV4Detector().structure_info()
         self.assertEqual(
             [item["begin"] for item in tag["format"]["content"]["tags"]],
             [get_info("get_weather").begin, get_info("search").begin],
         )
         self.assertIs(tag["format"]["content"]["stop_after_first"], False)
+
+    def test_constraint_is_canonical_and_engine_ready(self):
+        """约束必须以规范化字典写入：trans_input 在序列化前会断言约束已规范化，
+        字符串形式（旧行为）会在 validate_engine_ready 处被拒绝。"""
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Weather?"}],
+            tools=_rtp_tools(),
+            tool_choice="required",
+        )
+        config = GenerateConfig()
+
+        self.renderer.apply_chat_completion_constraints(request, config)
+
+        self.assertIsInstance(config.structural_tag, dict)
+        self.assertEqual(config.structural_tag["type"], "structural_tag")
+        # 不抛异常即证明通过 endpoint -> trans_input 的序列化边界。
+        validate_engine_ready(config)
 
     def test_forced_tool_choice_rejects_existing_grammar_constraints(self):
         request = ChatCompletionRequest(
@@ -479,7 +499,7 @@ class DeepseekV4RendererTest(TestCase):
 
         rendered = self.renderer.render_chat(request)
         self.renderer.apply_chat_completion_constraints(request, config)
-        tag = json.loads(config.structural_tag)
+        tag = config.structural_tag
 
         self.assertIn("search", rendered.rendered_prompt)
         self.assertNotIn("get_weather", rendered.rendered_prompt)

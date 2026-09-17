@@ -16,7 +16,7 @@ without checkpoint weights or a GPU.
 """
 
 from unittest import TestCase, main
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
 import torch
 from PIL import Image
@@ -28,6 +28,7 @@ from rtp_llm.multimodal.multimodal_mixins.kimi_k25.kimi_k25_vit import (
     KimiK25ImageEmbedding,
 )
 from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
     ChatMessage,
     ContentPart,
     ContentPartTypeEnum,
@@ -155,6 +156,30 @@ class KimiK25RendererVideoGuardTest(TestCase):
         rewritten, mm_input = renderer._collect_and_rewrite([msg])
         self.assertEqual(len(rewritten), 1)
         self.assertEqual(mm_input.urls, ["http://example.com/i.png"])
+
+    def test_multimodal_render_records_think_anchor(self):
+        renderer = self._make_renderer()
+        renderer.think_start_tag = "<think>\n"
+        renderer._build_prompt = Mock(return_value="user prompt\n<think>\n")
+        renderer.tokenizer = Mock()
+        renderer.tokenizer.encode = Mock(return_value=[1, 2, 3])
+        request = ChatCompletionRequest(
+            messages=[
+                ChatMessage(
+                    role=RoleEnum.user,
+                    content=[
+                        ContentPart(
+                            type=ContentPartTypeEnum.image_url,
+                            image_url=ImageURL(url="http://example.com/i.png"),
+                        )
+                    ],
+                )
+            ]
+        )
+
+        renderer.render_chat(request)
+
+        self.assertIs(request.prompt_has_think_anchor(), True)
 
 
 class KimiK25VisionProcessorVideoGuardTest(TestCase):

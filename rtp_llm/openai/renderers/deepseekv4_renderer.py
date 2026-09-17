@@ -9,6 +9,7 @@ from typing_extensions import override
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -336,9 +337,9 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                 "tool_choice forced tool-call decoding conflicts with existing "
                 f"grammar constraint(s): {', '.join(conflicts)}",
             )
-        config.structural_tag = json.dumps(
-            structural_tag, ensure_ascii=False, separators=(",", ":")
-        )
+        # 经 GrammarConstraint 写入规范化字典：引擎序列化前会断言约束已规范化
+        # （字符串形式会在 trans_input 的 validate_engine_ready 处被拒绝）。
+        GrammarConstraint("structural_tag", structural_tag).apply_to_config(config)
 
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
         """
@@ -836,27 +837,10 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
     def _create_reasoning_parser(
         self, request: ChatCompletionRequest
     ) -> Optional[ReasoningParser]:
-        """
-        Create reasoning parser if in thinking mode.
-
-        Args:
-            request: Chat completion request
-
-        Returns:
-            ReasoningParser if thinking mode is enabled, None otherwise
-        """
-        if not self.in_think_mode(request):
-            return None
-
-        try:
-            # Check if the rendered prompt should use thinking mode
-            rendered_result = self.render_chat(request)
-            if "<think>" in rendered_result.rendered_prompt:
-                return ReasoningParser(model_type="deepseek-v3", force_reasoning=True)
-        except Exception:
-            return None
-
-        return None
+        # 推理模型即便 DISABLED / 无锚点也可能自发输出 <think>，故一律建解析器
+        # 剥离。force_reasoning 只由锚点决定，非锚点走非 force，避免吞掉可见回复。
+        anchored = self._resolve_think_anchor(request)
+        return ReasoningParser(model_type="deepseek-v3", force_reasoning=anchored)
 
 
 register_renderer("deepseek_v4", DeepseekV4Renderer)

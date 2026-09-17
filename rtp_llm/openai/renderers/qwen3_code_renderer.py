@@ -1,5 +1,4 @@
 import json
-import logging
 from typing import Optional
 
 from jinja2 import Environment
@@ -27,7 +26,7 @@ class Qwen3CoderRenderer(ReasoningToolBaseRenderer):
         self, request: ChatCompletionRequest
     ) -> Optional[BaseFormatDetector]:
         """创建Qwen3Coder检测器"""
-        if request.tools:
+        if self._effective_tools(request):
             return Qwen3CoderDetector()
         else:
             return None
@@ -65,16 +64,12 @@ class Qwen3CoderRenderer(ReasoningToolBaseRenderer):
     def _create_reasoning_parser(
         self, request: ChatCompletionRequest
     ) -> Optional[ReasoningParser]:
-        if not self.in_think_mode(request):
-            return None
-
-        try:
-            rendered_result = self.render_chat(request)
-            if rendered_result.rendered_prompt.endswith(self.think_start_tag):
-                return ReasoningParser(model_type="qwen3-thinking")
-        except Exception as e:
-            logging.error(f"Failed to render chat in _create_reasoning_parser: {e}")
-        return ReasoningParser(model_type="qwen3")
+        # 推理模型即便 DISABLED / 无锚点也可能自发输出 <think>，故一律建解析器
+        # 剥离。force 变体只由锚点决定：仅开放锚点存在时用 qwen3-thinking，其余
+        # 一律非 force 的 qwen3，避免吞掉无 </think> 的可见回复（Dart/diversion
+        # 是闭合空 think，必须走非 force）。
+        anchored = self._resolve_think_anchor(request)
+        return ReasoningParser(model_type="qwen3-thinking" if anchored else "qwen3")
 
 
 register_renderer("qwen3_coder_moe", Qwen3CoderRenderer)
