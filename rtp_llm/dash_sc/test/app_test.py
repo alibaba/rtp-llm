@@ -82,11 +82,21 @@ class DeriveEchoPrefixIdsTest(TestCase):
 class CreateProxyServicerOnLoopTest(TestCase):
     def test_constructs_inside_running_loop(self) -> None:
         created_loops = []
+        received_configs = []
         sentinel = object()
+        sentinel_config = object()
 
         def fake_servicer(**kwargs):
             created_loops.append(asyncio.get_running_loop())
-            self.assertEqual(kwargs, {"rank_id": 7, "server_id": "42"})
+            self.assertEqual(
+                kwargs,
+                {
+                    "rank_id": 7,
+                    "server_id": "42",
+                    "dash_sc_grpc_config": sentinel_config,
+                },
+            )
+            received_configs.append(kwargs["dash_sc_grpc_config"])
             return sentinel
 
         async def run():
@@ -95,12 +105,14 @@ class CreateProxyServicerOnLoopTest(TestCase):
                 servicer = await _create_proxy_servicer_on_loop(
                     rank_id=7,
                     server_id="42",
+                    dash_sc_grpc_config=sentinel_config,
                 )
             return loop, servicer
 
         loop, servicer = asyncio.run(run())
         self.assertIs(servicer, sentinel)
         self.assertEqual(created_loops, [loop])
+        self.assertEqual(received_configs, [sentinel_config])
 
 
 class ProxyModeEnvTest(TestCase):

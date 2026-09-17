@@ -27,15 +27,29 @@ from rtp_llm.dash_sc.grpc_metrics import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.service_route import create_service_discovery_from_env
+from rtp_llm.server.server_args.grpc_group_args import (
+    DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES,
+)
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
 _FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
+    ("grpc.max_send_message_length", DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES),
+    ("grpc.max_receive_message_length", DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES),
     ("grpc.keepalive_time_ms", 30000),
     ("grpc.keepalive_timeout_ms", 10000),
     ("grpc.keepalive_permit_without_calls", 0),
     ("grpc.http2.max_pings_without_data", 0),
 ]
 _CHANNEL_CLEANUP_INTERVAL_S = 60
+
+
+def _forward_channel_options(dash_sc_grpc_config=None) -> list[tuple[str, int]]:
+    """Build proxy outbound options, with explicit client config taking priority."""
+    merged = dict(_FORWARD_CHANNEL_OPTS)
+    if dash_sc_grpc_config is not None:
+        for key, value in dash_sc_grpc_config.get_client_config().items():
+            merged[str(key)] = int(value)
+    return sorted(merged.items())
 
 
 def _is_stream_done(resp: predict_v2_pb2.ModelStreamInferResponse) -> bool:
@@ -97,9 +111,10 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         *,
         rank_id: Optional[int] = None,
         server_id: str = "",
+        dash_sc_grpc_config=None,
     ):
         self._channel_pool = GrpcHostChannelPool(
-            options=_FORWARD_CHANNEL_OPTS,
+            options=_forward_channel_options(dash_sc_grpc_config),
             cleanup_interval=_CHANNEL_CLEANUP_INTERVAL_S,
         )
         self._discovery = create_service_discovery_from_env()

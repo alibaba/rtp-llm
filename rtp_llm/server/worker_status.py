@@ -72,9 +72,12 @@ class ServerStatus(BaseModel):
 
     @model_validator(mode="before")
     def validate_role(cls, values: Dict[str, Any]):
+        values = dict(values)
         role = values.get("role")
         if isinstance(role, str):
             values["role"] = getattr(RoleType, role)
+        elif isinstance(role, RoleType):
+            values["role"] = role
         else:
             raise ValueError(f"Invalid role: {role}, expected str")
         return values

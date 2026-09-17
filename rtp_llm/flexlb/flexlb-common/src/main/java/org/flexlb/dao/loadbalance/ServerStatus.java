@@ -26,6 +26,9 @@ public class ServerStatus {
     @JsonProperty("group")
     private String group;
 
+    @JsonProperty("worker_instance")
+    private String workerInstance;
+
     @JsonProperty("debug_info")
     private DebugInfo debugInfo;
 

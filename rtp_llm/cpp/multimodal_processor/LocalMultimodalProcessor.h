@@ -10,7 +10,9 @@ public:
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port = "") {
+                                                      std::string                                 ip_port    = "",
+                                                      int64_t                                     request_id = 0,
+                                                      grpc::ServerContext* server_context = nullptr) {
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
@@ -41,10 +43,18 @@ private:
                     }
                     mm_preprocess_config.append(crop_positions);
                     mm_preprocess_config.append(mm_input.mm_preprocess_config.mm_timeout_ms);
+                    mm_preprocess_config.append(mm_input.mm_preprocess_config.max_long_side_pixel);
                     mm_preprocess_configs.push_back(mm_preprocess_config);
                 }
 
-                auto res = mm_process_engine_.attr("mm_embedding_cpp")(urls, types, tensors, mm_preprocess_configs);
+                auto res = mm_process_engine_.attr("mm_embedding_cpp")(
+                    urls,
+                    types,
+                    tensors,
+                    mm_preprocess_configs,
+                    request_id,
+                    dashScopeMetadata(server_context, "x-dashscope-uid"),
+                    dashScopeMetadata(server_context, "x-dashscope-service"));
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MultimodalOutput           mm_embedding_res;
@@ -52,7 +62,14 @@ private:
                 for (auto& emb : mm_embedding_vec) {
                     mm_features.emplace_back(convertPyObjectToTensor(emb));
                 }
-                mm_embedding_res.mm_features               = mm_features;
+                mm_embedding_res.mm_features = mm_features;
+                if (py::hasattr(res, "feature_hashes") && !res.attr("feature_hashes").is_none()) {
+                    std::vector<torch::Tensor> hashes;
+                    for (auto& value : convertPyObjectToVec(res.attr("feature_hashes"))) {
+                        hashes.emplace_back(convertPyObjectToTensor(value));
+                    }
+                    mm_embedding_res.mm_feature_hashes = std::move(hashes);
+                }
                 auto                       position_id_vec = res.attr("position_ids");
                 std::vector<torch::Tensor> position_ids;
                 if (!position_id_vec.is_none()) {
