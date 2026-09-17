@@ -276,18 +276,8 @@ public class DefaultBatchDispatcher {
                 new AtomicReference<>(PermitPhase.PREPARED);
 
         @Override
-        public void submitBatch(
-                List<ScheduledRequest> exactItems,
-                long batchId,
-                long predictedMs,
-                String decisionReason,
-                BiConsumer<ScheduledRequest, DeliveryResult> observer) {
-            DispatchTask submittedTask = dispatchTask(
-                    exactItems,
-                    batchId,
-                    predictedMs,
-                    decisionReason,
-                    observer);
+        public void submit(BatchDeliveryStrategy.Delivery delivery) {
+            Objects.requireNonNull(delivery, "delivery");
             if (!phase.compareAndSet(
                     PermitPhase.PREPARED, PermitPhase.SUBMITTED)) {
                 throw new IllegalStateException(
@@ -297,7 +287,12 @@ public class DefaultBatchDispatcher {
             try {
                 dispatchExecutor.execute(() -> {
                     try {
-                        doDispatch(submittedTask);
+                        delivery.run((items, batchId, predictedMs, reason, observer) ->
+                                doDispatch(dispatchTask(items, batchId, predictedMs, reason, observer)));
+                    } catch (Throwable deliveryFailure) {
+                        // Delivery owns admission cleanup; do not infer a
+                        // second per-request outcome from task failure.
+                        Logger.error("Batch delivery task failed", deliveryFailure);
                     } finally {
                         finishSubmitted();
                     }

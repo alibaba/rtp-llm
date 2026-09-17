@@ -76,10 +76,9 @@ class PdfusionSchedulingTest {
         DeliveryStrategy delivery = batch
                 ? new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.accepted(
                         new BatchDeliveryStrategy.PreparedSubmission() {
-                            public void submitBatch(List<ScheduledRequest> items, long id, long predicted,
-                                    String reason, BiConsumer<ScheduledRequest, DeliveryResult> observer) {
-                                items.forEach(item -> observer.accept(item,
-                                        DeliveryResult.delivered()));
+                            public void submit(BatchDeliveryStrategy.Delivery delivery) {
+                                delivery.run((items, id, predicted, reason, observer) ->
+                                        items.forEach(item -> observer.accept(item, DeliveryResult.delivered())));
                             }
                             public void close() { }
                         }), new AtomicLong()::incrementAndGet,

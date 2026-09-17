@@ -71,7 +71,8 @@ class RequestSlotTerminalSettlementTest {
         var inactivity = mock(ExpirationTimer.InactivityDeadline.class);
         assertTrue(slot.installInactivityDeadline(inactivity));
 
-        slot.onInactivityDeadline(inactivity, slot.createdAtMs() + 60_000L);
+        slot.onInactivityDeadline(inactivity,
+                RequestLifecycleTestSupport.<Long>inspect(slot, "inactivityExpiresAtMsLocked"));
         RequestState ended = slot.snapshot();
         assertEquals(RequestState.Phase.CANCELLED, ended.state());
         assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(slot, "isTerminalRecordLocked"));
@@ -96,7 +97,8 @@ class RequestSlotTerminalSettlementTest {
         Response delivered = f.slot().future().join();
         assertTrue(delivered.isSuccess());
 
-        f.slot().expireInactiveRequest(f.slot().createdAtMs() + 60_000L);
+        f.slot().expireInactiveRequest(
+                RequestLifecycleTestSupport.<Long>inspect(f.slot(), "inactivityExpiresAtMsLocked"));
 
         assertEquals(RequestState.Phase.TIMED_OUT, f.slot().snapshot().state());
         assertSame(delivered, f.slot().future().join());

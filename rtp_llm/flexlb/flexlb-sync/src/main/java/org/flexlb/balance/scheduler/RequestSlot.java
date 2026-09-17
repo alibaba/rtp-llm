@@ -523,24 +523,44 @@ public final class RequestSlot {
                 : CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST);
     }
 
-    /** Atomically hand off the prepared endpoint ownership and record this dispatch. */
-    synchronized DeliveryClaim claimDelivery(ScheduledRequest exact, DeliveryClaimKind kind,
+    /** Atomically arbitrate expiry against the one endpoint-ownership handoff. */
+    DeliveryClaim claimDelivery(ScheduledRequest exact, DeliveryClaimKind kind,
             long correlationId, BooleanSupplier transferToEndpoint) {
-        if (kind == DeliveryClaimKind.NONE || kind == DeliveryClaimKind.BATCH_ENQUEUE && correlationId <= 0L) {
-            throw new IllegalArgumentException("invalid delivery identity");
+        TerminalAction expired;
+        boolean cleanup;
+        synchronized (this) {
+            if (kind == DeliveryClaimKind.NONE || kind == DeliveryClaimKind.BATCH_ENQUEUE && correlationId <= 0L) {
+                throw new IllegalArgumentException("invalid delivery identity");
+            }
+            if (!ownsPreparedDeliveryLocked(exact)) { return null; }
+            // Read time under the same lock as the claim. Timer execution can
+            // lag, so an unconsumed timer is not proof that this item is live.
+            long nowMs = System.currentTimeMillis();
+            if (requestInactiveLocked(nowMs)) {
+                expired = decideInactivityLocked(nowMs);
+            } else if (exact.requestExpired(nowMs)) {
+                recordCancellationLocked(CancelReason.DEADLINE_EXCEEDED,
+                        "request scheduling deadline exceeded before delivery");
+                expired = tryTerminateCancellationLocked();
+            } else {
+                ensureTransitionAllowedLocked(RequestState.Phase.DISPATCHING);
+                if (!transferToEndpoint.getAsBoolean()) {
+                    throw new IllegalStateException("endpoint ownership lost for request " + requestId);
+                }
+                DeliveryClaim claim = new DeliveryClaim(this, exact, kind, correlationId);
+                deliveryClaimKind = kind;
+                batchId = correlationId;
+                if (kind == DeliveryClaimKind.BATCH_ENQUEUE) { batchEnqueueStartedAtMs = nowMs; }
+                transitionLocked(RequestState.Phase.DISPATCHING,
+                        kind == DeliveryClaimKind.BATCH_ENQUEUE ? "batch enqueue started" : "route decision delivery started");
+                return claim;
+            }
+            cleanup = cleanupProgress != null && cleanupProgress.expired;
         }
-        if (!ownsPreparedDeliveryLocked(exact)) { return null; }
-        ensureTransitionAllowedLocked(RequestState.Phase.DISPATCHING);
-        if (!transferToEndpoint.getAsBoolean()) {
-            throw new IllegalStateException("endpoint ownership lost for request " + requestId);
-        }
-        DeliveryClaim claim = new DeliveryClaim(this, exact, kind, correlationId);
-        deliveryClaimKind = kind;
-        batchId = correlationId;
-        if (kind == DeliveryClaimKind.BATCH_ENQUEUE) { batchEnqueueStartedAtMs = System.currentTimeMillis(); }
-        transitionLocked(RequestState.Phase.DISPATCHING,
-                kind == DeliveryClaimKind.BATCH_ENQUEUE ? "batch enqueue started" : "route decision delivery started");
-        return claim;
+        // Endpoint cleanup and response callbacks must never run under Slot's lock.
+        if (cleanup) { resumeCleanup(); }
+        else { terminalCleanup.submitTerminal(expired); }
+        return null;
     }
 
     /** Queue publication makes an exact item claimable even while admission still pins its resources. */
@@ -1150,7 +1170,7 @@ public final class RequestSlot {
         return ownsResourceTrackingLocked() && inactivityDeadline == null
                 && (cleanupProgress == null || !cleanupProgress.expired)
                 && pendingAdmissionCancelReason == null && inactivityTimeoutMs > 0L
-                ? OptionalLong.of(deadlineAfter(lastWorkerStatusAtMs, inactivityTimeoutMs))
+                ? OptionalLong.of(inactivityExpiresAtMsLocked())
                 : OptionalLong.empty();
     }
 
@@ -1220,7 +1240,21 @@ public final class RequestSlot {
 
     private boolean requestInactiveLocked(long nowMs) {
         return inactivityTimeoutMs > 0L
-                && nowMs >= deadlineAfter(lastWorkerStatusAtMs, inactivityTimeoutMs);
+                && nowMs >= inactivityExpiresAtMsLocked();
+    }
+
+    /**
+     * Before batch handoff, silence is measured from registration/status.
+     * Handoff starts one bounded Engine-observation window; ACK does not renew
+     * it. Afterwards only matching Worker facts extend it. Reuse the canonical
+     * handoff timestamp rather than introducing another dispatch state/timer.
+     */
+    private long inactivityExpiresAtMsLocked() {
+        long observedSince = lastWorkerStatusAtMs;
+        if (deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE) {
+            observedSince = Math.max(observedSince, batchEnqueueStartedAtMs);
+        }
+        return deadlineAfter(observedSince, inactivityTimeoutMs);
     }
 
     // ── 可见性期限：预测、Engine 证据、疑似丢失诊断 ──
