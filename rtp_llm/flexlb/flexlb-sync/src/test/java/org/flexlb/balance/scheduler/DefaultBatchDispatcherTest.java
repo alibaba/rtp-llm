@@ -743,23 +743,34 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
-    void preparedSubmissionRejectsInvalidTaskWithoutConsumingPermit() {
-        PrefillEndpoint endpoint = createPrefillEndpoint();
-        ScheduledRequest item = createScheduledRequest(
-                1L, 500, 200, endpoint);
+    void preparedSubmissionRejectsMissingDeliveryWithoutConsumingPermit() {
         PreparedSubmission submission = reservePermit();
-
-        assertThrows(IllegalArgumentException.class,
-                () -> submit(submission, List.of(), 1L, 100, "empty", callback));
-        assertThrows(IllegalArgumentException.class,
-                () -> submit(submission, List.of(item), 0L, 100, "id", callback));
-        assertThrows(IllegalArgumentException.class,
-                () -> submit(submission, List.of(item), 1L, -1, "prediction", callback));
-        assertThrows(NullPointerException.class,
-                () -> submit(submission, List.of(item), 1L, 100, null, callback));
-
+        assertThrows(NullPointerException.class, () -> submission.submit(null));
         submission.close();
         reservePermit().close();
+    }
+
+    @Test
+    void invalidFinalBatchFailsBeforeRpcOnTheDeliveryThread() throws Exception {
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, createPrefillEndpoint());
+        CompletableFuture<Void> checked = new CompletableFuture<>();
+        reservePermit().submit(sender -> {
+            try {
+                assertThrows(IllegalArgumentException.class,
+                        () -> sender.sendBatch(List.of(), 1L, 100, "empty", callback));
+                assertThrows(IllegalArgumentException.class,
+                        () -> sender.sendBatch(List.of(item), 0L, 100, "id", callback));
+                assertThrows(IllegalArgumentException.class,
+                        () -> sender.sendBatch(List.of(item), 1L, -1, "prediction", callback));
+                assertThrows(NullPointerException.class,
+                        () -> sender.sendBatch(List.of(item), 1L, 100, null, callback));
+                checked.complete(null);
+            } catch (Throwable failure) {
+                checked.completeExceptionally(failure);
+            }
+        });
+        checked.get(5, TimeUnit.SECONDS);
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
     }
 
     @Test
@@ -904,8 +915,8 @@ class DefaultBatchDispatcherTest {
                         String reason,
                         BiConsumer<ScheduledRequest,
                                 DeliveryResult> observer) {
-        reservePermit().submitBatch(
-                items, batchId, predictedMs, reason, observer);
+        reservePermit().submit(sender -> sender.sendBatch(
+                items, batchId, predictedMs, reason, observer));
     }
 
     private static void submit(
@@ -915,8 +926,8 @@ class DefaultBatchDispatcherTest {
             long predictedMs,
             String reason,
             BiConsumer<ScheduledRequest, DeliveryResult> observer) {
-        submission.submitBatch(
-                items, batchId, predictedMs, reason, observer);
+        submission.submit(sender -> sender.sendBatch(
+                items, batchId, predictedMs, reason, observer));
     }
 
     private static void awaitAvailable(

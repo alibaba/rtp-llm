@@ -48,6 +48,7 @@ class RequestInactivityTest {
     private DecodeEndpoint decode;
     private DeliveryClaim claim;
     private long registeredAtMs;
+    private long handedOffAtMs;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -75,6 +76,8 @@ class RequestInactivityTest {
         RequestLifecycleTestSupport.bind(registry, registered);
         claim = RequestLifecycleTestSupport.claimBatch(registry, item, 1L, () -> true);
         assertNotNull(claim);
+        handedOffAtMs = (long) org.springframework.test.util.ReflectionTestUtils
+                .getField(slot, "batchEnqueueStartedAtMs");
     }
 
     @AfterEach
@@ -121,11 +124,11 @@ class RequestInactivityTest {
 
     @Test
     void missingDeliveryReplyExpiresPurelyLocally() throws Exception {
-        registry.expireInactiveRequest(slot, registeredAtMs + TIMEOUT_MS - 1L);
+        registry.expireInactiveRequest(slot, handedOffAtMs + TIMEOUT_MS - 1L);
         assertFalse(item.future().isDone(), "no transport callback has confirmed delivery");
         assertLiveAndCharged();
 
-        registry.expireInactiveRequest(slot, registeredAtMs + TIMEOUT_MS);
+        registry.expireInactiveRequest(slot, handedOffAtMs + TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
         assertFalse(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
 
@@ -139,7 +142,7 @@ class RequestInactivityTest {
     void uncertainDeliveryKeepsOnlyABoundedConfirmationWait(DeliveryResult.Status outcome) throws Exception {
         claim.complete(new DeliveryResult(outcome, new IllegalStateException("reply was lost")));
         assertLiveAndCharged();
-        registry.expireInactiveRequest(slot, registeredAtMs + TIMEOUT_MS);
+        registry.expireInactiveRequest(slot, handedOffAtMs + TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
         assertFalse(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
     }
@@ -154,7 +157,7 @@ class RequestInactivityTest {
         synchronized (slot) {
             assertEquals(CancelReason.CLIENT_CANCELLED, RequestLifecycleTestSupport.<CancelReason>inspect(slot, "requireCancellationFirstCauseLocked"));
         }
-        registry.expireInactiveRequest(slot, registeredAtMs + TIMEOUT_MS);
+        registry.expireInactiveRequest(slot, handedOffAtMs + TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.CANCELLED);
         registry.expireInactiveRequest(slot, registeredAtMs + 2L * TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.CANCELLED);
@@ -189,7 +192,7 @@ class RequestInactivityTest {
     @ParameterizedTest
     @EnumSource(value = RoleType.class, names = {"PREFILL", "DECODE"})
     void statusBeforeCancellationCheckInvalidatesTheEarlierExpirationDecision(RoleType source) {
-        long originalDeadline = registeredAtMs + TIMEOUT_MS;
+        long originalDeadline = handedOffAtMs + TIMEOUT_MS;
         synchronized (slot) {
             assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(slot, "requestInactiveLocked", originalDeadline), "the timer's earlier observation is expired");
         }

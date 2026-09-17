@@ -127,7 +127,8 @@ class RequestConfirmationTimeoutTest {
             assertEquals(1, decode.routingView().engineCapacityUsed());
 
             if (waiting != ConfirmationWait.AUTOMATIC_TIMER) {
-                requests.expireInactiveRequest(slot, slot.createdAtMs() + TIMEOUT_MS);
+                requests.expireInactiveRequest(slot,
+                        RequestLifecycleTestSupport.<Long>inspect(slot, "inactivityExpiresAtMsLocked"));
             }
 
             // AUTOMATIC_TIMER relies only on ExpirationTimer; no manual expiry entry point runs.

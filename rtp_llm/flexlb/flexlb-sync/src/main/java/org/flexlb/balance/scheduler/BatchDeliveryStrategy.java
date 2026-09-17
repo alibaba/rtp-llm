@@ -203,7 +203,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             BatchTransaction batch,
             String decisionReason,
             int remainingQueueDepth,
-            WorkSnapshot precedingWork) {
+            WorkSnapshot precedingWork,
+            BatchSender sender) {
         List<ScheduledRequest> original = batch.items();
         List<ClaimedMember> claimed = new ArrayList<>(original.size());
         DispatchGate gate = null;
@@ -243,8 +244,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 }
                 gate = new DispatchGate(
                         claimed, requests);
-                batch.submit(
-                        submitted,
+                batch.send(
+                        sender, submitted,
                         deliveredPredictionMs,
                         decisionReason,
                         remainingQueueDepth,
@@ -388,6 +389,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         private enum Phase {
             PREPARED,
             COMMITTED,
+            SUBMITTED,
             INFLIGHT,
             TERMINAL
         }
@@ -405,7 +407,9 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         private PrefillTimePredictor.Evaluator evaluator;
         private ScheduledRequest blockedItem;
         private CapacityBoundary blockedResult;
-        private Phase phase;
+        // After SUBMITTED, only the accepted executor task advances this
+        // transaction. Scheduler abort/close may observe it but cannot reclaim it.
+        private volatile Phase phase;
 
         private BatchTransaction(
                 BatchDeliveryStrategy owner,
@@ -557,24 +561,44 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         public synchronized void handoff(
                 String decisionReason, int remainingQueueDepth,
                 WorkSnapshot precedingWork) {
-            requirePhase(Phase.COMMITTED, "deliver");
+            requirePhase(Phase.COMMITTED, "submit delivery");
+            Objects.requireNonNull(precedingWork, "precedingWork");
+            phase = Phase.SUBMITTED;
             try {
-                owner.deliverCommitted(
-                        this, decisionReason, remainingQueueDepth,
-                        Objects.requireNonNull(precedingWork, "precedingWork"));
+                // The strategy retains admission ownership while waiting for
+                // an executor. Request claims are acquired only when it runs.
+                submission.submit(sender -> deliver(
+                        decisionReason, remainingQueueDepth, precedingWork, sender));
             } catch (Throwable failure) {
-                if (phase != Phase.COMMITTED) {
-                    throw propagate(failure);
-                }
-                Throwable cleanup = owner.failCommitted(this, failure);
-                if (cleanup != null && cleanup != failure) {
-                    failure.addSuppressed(cleanup);
-                }
-                phase = Phase.TERMINAL;
+                failUnsentDelivery(failure);
                 throw propagate(failure);
             }
-            if (phase == Phase.COMMITTED) {
+        }
+
+        private void deliver(
+                String decisionReason, int remainingQueueDepth,
+                WorkSnapshot precedingWork, BatchSender sender) {
+            requirePhase(Phase.SUBMITTED, "deliver");
+            try {
+                owner.deliverCommitted(this, decisionReason, remainingQueueDepth,
+                        precedingWork, sender);
+            } catch (Throwable failure) {
+                failUnsentDelivery(failure);
+                throw propagate(failure);
+            }
+            if (phase == Phase.SUBMITTED) {
                 phase = Phase.TERMINAL;
+            }
+        }
+
+        private void failUnsentDelivery(Throwable failure) {
+            if (phase != Phase.SUBMITTED) {
+                return;
+            }
+            Throwable cleanup = owner.failCommitted(this, failure);
+            phase = Phase.TERMINAL;
+            if (cleanup != null && cleanup != failure) {
+                failure.addSuppressed(cleanup);
             }
         }
 
@@ -618,22 +642,23 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         boolean transferToEndpoint(ScheduledRequest exactItem) {
-            requirePhase(Phase.COMMITTED, "transfer admission");
+            requirePhase(Phase.SUBMITTED, "transfer admission");
             return committedAdmission.transferToEndpoint(exactItem);
         }
 
-        private void submit(
+        private void send(
+                BatchSender sender,
                 List<ScheduledRequest> exactItems,
                 long exactPredictionMs,
                 String decisionReason,
                 int remainingQueueDepth,
                 BiConsumer<ScheduledRequest, DeliveryResult> observer) {
-            requirePhase(Phase.COMMITTED, "submit");
+            requirePhase(Phase.SUBMITTED, "send");
             if (remainingQueueDepth < 0) {
                 throw new IllegalArgumentException(
                         "remainingQueueDepth must be non-negative");
             }
-            submission.submitBatch(
+            sender.sendBatch(
                     exactItems,
                     batchId,
                     exactPredictionMs,
@@ -642,12 +667,12 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         private void transportAccepted() {
-            requirePhase(Phase.COMMITTED, "accept transport");
+            requirePhase(Phase.SUBMITTED, "accept transport");
             phase = Phase.INFLIGHT;
         }
 
         private void transportFailed() {
-            requirePhase(Phase.COMMITTED, "fail transport");
+            requirePhase(Phase.SUBMITTED, "fail transport");
             phase = Phase.TERMINAL;
         }
 
@@ -734,21 +759,32 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     /**
-     * One dispatch-capacity permit prepared before the canonical commit.
-     * A successful submit transfers ownership to the dispatcher, making the
-     * following close a no-op. Closing an unused permit releases its capacity;
-     * repeated submission is an invariant violation.
+     * One executor-capacity permit prepared before commit. Successful submission
+     * transfers the permit to the executor; close then becomes a no-op. The
+     * strategy still owns the batch admission until Delivery runs and settles it.
      */
     public interface PreparedSubmission extends AutoCloseable {
-        void submitBatch(
+        void submit(Delivery delivery);
+
+        @Override
+        void close();
+    }
+
+    /** Runs once on the dispatch executor, with no further queue before send. */
+    @FunctionalInterface
+    public interface Delivery {
+        void run(BatchSender sender);
+    }
+
+    /** Transport consumes the strategy's final batch; it never selects members. */
+    @FunctionalInterface
+    public interface BatchSender {
+        void sendBatch(
                 List<ScheduledRequest> exactItems,
                 long batchId,
                 long predictedMs,
                 String decisionReason,
                 BiConsumer<ScheduledRequest, DeliveryResult> observer);
-
-        @Override
-        void close();
     }
 
     private record ClaimedMember(
