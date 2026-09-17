@@ -60,7 +60,26 @@ final class WhaleMockMonitor implements AutoCloseable {
         metrics.forEach((name, value) -> {
             if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
             monitor.report(name, tags, value.doubleValue());
+            if (name.equals("rtp_llm_first_token_latency_us")
+                    && "ROLE_TYPE_PREFILL".equals(labels.get("role"))) {
+                String alias = "py_rtp_response_first_token_rt";
+                if (registered.add(alias)) monitor.register(alias, FlexMetricType.GAUGE);
+                monitor.report(alias, dashboardTags(labels), value.doubleValue() / 1000.0);
+            }
         });
+    }
+
+    // Keep the platform's normal selection tags. The P/D distinction on these
+    // dashboard aliases comes from hippo_role alone, not mock-only source or
+    // logical-engine labels.
+    private static FlexMetricTags dashboardTags(Map<String, String> labels) {
+        Map<String, String> dashboard = new HashMap<>();
+        for (String key : java.util.List.of(
+                "hippo_app", "hippo_group", "hippo_role", "host_ip", "container_ip", "dp_rank")) {
+            String value = labels.get(key);
+            if (value != null) dashboard.put(key, value);
+        }
+        return new FlexMetricTags.ImmutableFlexMetricTags(dashboard);
     }
 
     synchronized void reportScheduler(Map<String, Number> metrics, Map<String, String> labels) {
@@ -102,13 +121,11 @@ final class WhaleMockMonitor implements AutoCloseable {
             double successQps = deltas.getOrDefault("mock_completed_requests_total", 0L) / seconds;
             monitor.report(name, tags, successQps);
             if (noFetch) {
-                // Dashboard-compatible alias for the synthetic no-Fetch path.
-                // Keep the source tag so it cannot be mistaken for frontend success.
+                // Dashboard-compatible alias for successful Decode terminals.
+                // hippo_role separates it from the frontend's response rate.
                 String alias = "py_rtp_success_qps_metric";
                 if (registered.add(alias)) monitor.register(alias, FlexMetricType.QPS);
-                var aliasLabels = new HashMap<>(labels);
-                aliasLabels.put("success_source", "mock_decode");
-                monitor.report(alias, new FlexMetricTags.ImmutableFlexMetricTags(aliasLabels),
+                monitor.report(alias, dashboardTags(labels),
                         deltas.getOrDefault("mock_completed_requests_total", 0L));
             }
         }

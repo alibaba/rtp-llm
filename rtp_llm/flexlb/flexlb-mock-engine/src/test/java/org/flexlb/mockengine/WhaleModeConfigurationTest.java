@@ -18,6 +18,7 @@ class WhaleModeConfigurationTest {
     void decodeSuccessQpsCountsOnlySuccessfulDecodeTerminals() {
         var reports = new ArrayList<Double>();
         var dashboardReports = new ArrayList<Double>();
+        var dashboardTags = new ArrayList<java.util.Map<String, String>>();
         var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
                 getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
                 (proxy, method, args) -> {
@@ -25,13 +26,16 @@ class WhaleModeConfigurationTest {
                             && args[0].equals("mock_decode_success_qps"))
                         reports.add(((Number) args[2]).doubleValue());
                     if (method.getName().equals("report") && args.length == 3
-                            && args[0].equals("py_rtp_success_qps_metric"))
+                            && args[0].equals("py_rtp_success_qps_metric")) {
                         dashboardReports.add(((Number) args[2]).doubleValue());
+                        dashboardTags.add(((org.flexlb.metric.FlexMetricTags) args[1]).getTags());
+                    }
                     return null;
                 });
         var monitor = new WhaleMockMonitor(sink);
         long now = System.nanoTime();
-        var decode = java.util.Map.of("role", "ROLE_TYPE_DECODE", "engine", "decode-1");
+        var decode = java.util.Map.of("role", "ROLE_TYPE_DECODE", "engine", "decode-1",
+                "hippo_role", "mock.decode_part0", "hippo_app", "mock-app");
         var prefill = java.util.Map.of("role", "ROLE_TYPE_PREFILL", "engine", "prefill-1");
         monitor.sample(java.util.Map.of("mock_completed_requests_total", 0), decode, now, true);
         monitor.sample(java.util.Map.of("mock_completed_requests_total", 8), decode, now + 2_000_000_000L, true);
@@ -39,8 +43,34 @@ class WhaleModeConfigurationTest {
         monitor.sample(java.util.Map.of("mock_completed_requests_total", 20), prefill, now + 3_000_000_000L);
         assertEquals(List.of(0.0, 4.0, 0.0), reports);
         assertEquals(List.of(0.0, 8.0, 0.0), dashboardReports);
+        assertEquals(java.util.Map.of("hippo_role", "mock.decode_part0", "hippo_app", "mock-app"),
+                dashboardTags.get(1));
         monitor.sample(java.util.Map.of("mock_completed_requests_total", 9), decode, now + 4_000_000_000L);
         assertEquals(3, dashboardReports.size());
+    }
+
+    @Test
+    void prefillFirstTokenLatencyUsesDashboardMillisecondsAndRoleOnly() {
+        var values = new ArrayList<Double>();
+        var labels = new ArrayList<java.util.Map<String, String>>();
+        var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("report") && args[0].equals("py_rtp_response_first_token_rt")) {
+                        values.add(((Number) args[2]).doubleValue());
+                        labels.add(((org.flexlb.metric.FlexMetricTags) args[1]).getTags());
+                    }
+                    return null;
+                });
+        var monitor = new WhaleMockMonitor(sink);
+        var prefill = java.util.Map.of("role", "ROLE_TYPE_PREFILL", "engine", "p-1",
+                "hippo_role", "mock.prefill_part0", "hippo_app", "mock-app");
+        monitor.reportEvent(java.util.Map.of("rtp_llm_first_token_latency_us", 415_000), prefill);
+        monitor.reportEvent(java.util.Map.of("rtp_llm_first_token_latency_us", 42_000),
+                java.util.Map.of("role", "ROLE_TYPE_DECODE", "hippo_role", "mock.decode_part0"));
+        assertEquals(List.of(415.0), values);
+        assertEquals(List.of(java.util.Map.of("hippo_role", "mock.prefill_part0", "hippo_app", "mock-app")),
+                labels);
     }
 
     @Test
