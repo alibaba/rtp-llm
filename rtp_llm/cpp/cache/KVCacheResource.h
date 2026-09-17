@@ -97,8 +97,8 @@ public:
     // Opaque model-extension payload: the restored checkpoint (interpreted only
     // by model-side code) and the reuse boundary derived from it.
     void setDsv41RestoredCheckpoint(std::shared_ptr<const void> checkpoint, int64_t materialized_end) {
-        dsv41_restored_checkpoint_     = std::move(checkpoint);
         dsv41_restored_checkpoint_end_ = checkpoint ? materialized_end : 0;
+        dsv41_restored_checkpoint_     = std::move(checkpoint);
     }
     const std::shared_ptr<const void>& dsv41RestoredCheckpoint() const {
         return dsv41_restored_checkpoint_;
