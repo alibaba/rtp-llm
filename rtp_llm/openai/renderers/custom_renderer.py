@@ -1282,6 +1282,18 @@ class CustomChatRenderer:
             or request.prompt_has_think_anchor() is True
         )
 
+    def installs_request_grammar(self, request: ChatCompletionRequest) -> bool:
+        """Whether this request will get a renderer-supplied grammar constraint.
+
+        ``apply_chat_completion_constraints`` runs after the endpoint resolved the
+        thinking mode, and the engine accepts a single grammar field per request,
+        so a renderer must declare here that it will install one. The endpoint's
+        best-effort no-think envelope then steps aside instead of colliding with
+        it (DeepSeek-V4 forced tool calls; the renderer's grammar is strictly
+        narrower, so nothing is lost).
+        """
+        return False
+
     async def render_response_stream(
         self,
         output_generator: AsyncGenerator[GenerateOutputs, None],

@@ -1,10 +1,15 @@
 import copy
+import functools
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES, GrammarConstraint
+from rtp_llm.config.grammar_constraint import (
+    GRAMMAR_FIELD_NAMES,
+    GrammarConstraint,
+    has_bounded_region,
+)
 from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
 
 if TYPE_CHECKING:
@@ -141,14 +146,26 @@ class ResponseFormatPlan:
                 # answer is gone once the budget is spent -- so keep the
                 # boundary tags out of the grammar instead. This is the no-think
                 # branch ADAPTIVE already compiles, on its own.
+                #
+                # The hardening is best-effort: it must never turn a servable
+                # request into a failure, so every shape the envelope cannot wrap
+                # keeps the caller's own grammar (or none) and is logged once.
                 if config.has_num_beams() or config.num_return_sequences > 1:
-                    # Grammar-constrained decoding rejects multiple sequences at
-                    # the engine boundary; the hardening is best-effort, so keep
-                    # the request servable instead of failing it.
-                    logging.warning(
+                    _warn_skipped_no_think(
+                        "multiple_sequences",
                         "skipping the no-think constraint: grammar-constrained "
                         "decoding does not support beam search or "
-                        "num_return_sequences > 1"
+                        "num_return_sequences > 1",
+                    )
+                elif _has_bounded_final_format(final_constraint):
+                    # A structural_tag carrying any_text/any_tokens max_tokens
+                    # cannot be nested in the envelope; the caller's budgeted
+                    # grammar stays in charge, exactly as before the hardening.
+                    _warn_skipped_no_think(
+                        "bounded_final_format",
+                        "skipping the no-think constraint: the caller's "
+                        "structural_tag already bounds an any_text/any_tokens "
+                        "region, which the no-think envelope cannot wrap",
                     )
                 else:
                     final_format = (
@@ -284,6 +301,33 @@ def _no_think_only_envelope(
         "type": "structural_tag",
         "format": _add_no_think_excludes(final_format, reasoning_format),
     }
+
+
+def _has_bounded_final_format(
+    final_constraint: Optional[GrammarConstraint],
+) -> bool:
+    """Whether the caller's grammar bounds a region the envelope cannot wrap.
+
+    ``GrammarConstraint.final_format_node`` refuses such a structural_tag (the
+    reasoning envelopes cannot nest a bounded any_text/any_tokens), so the
+    no-think hardening must yield before that call instead of failing the request.
+    """
+
+    if final_constraint is None or final_constraint.name != "structural_tag":
+        return False
+    return has_bounded_region(final_constraint.value)
+
+
+@functools.lru_cache(maxsize=None)
+def _warn_skipped_no_think(reason: str, message: str) -> None:
+    """Log one skipped hardening per reason per process.
+
+    The conditions are request- or deployment-shaped, so a caller that always
+    sends them would otherwise log a line per request. Tests clear the cache to
+    observe the record regardless of execution order.
+    """
+
+    logging.warning(message)
 
 
 def _adaptive_reasoning_envelope(

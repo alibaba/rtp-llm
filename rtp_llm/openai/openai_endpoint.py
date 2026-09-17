@@ -290,6 +290,58 @@ class OpenaiEndpoint(object):
                 variants.append(ids)
         return sorted(variants, key=len, reverse=True)
 
+    def _think_end_id_variants(self, config: GenerateConfig) -> List[List[int]]:
+        """Token forms of the think end tag, longest first.
+
+        Derived from the same ``THINK_END_TAG`` the no-think excludes ban, so
+        "what the grammar forbids" and "what counts as an already-closed block"
+        cannot drift apart. ``end_think_token_ids`` is deliberately not used:
+        on DISABLED requests it is empty, and a deployment may point it at a
+        generic terminator token.
+        """
+        think_end_tag = normalize_think_tag(self.generate_env_config.think_end_tag)
+        variants: List[List[int]] = []
+        for text in (think_end_tag, think_end_tag.rstrip("\n")):
+            if not text:
+                continue
+            ids = self.tokenizer.encode(text, add_special_tokens=False)
+            if ids and ids not in variants:
+                variants.append(ids)
+        return sorted(variants, key=len, reverse=True)
+
+    def _prompt_inside_think_block(
+        self, config: GenerateConfig, input_ids: Optional[List[int]]
+    ) -> bool:
+        """Whether the prompt's last think boundary is an opener.
+
+        ``_request_prompt_has_think_anchor`` only looks at the tail, so a prompt
+        that already opened a block and continued it (a caller prefill behind the
+        template's anchor) reads as unanchored there. Masking the end tag in that
+        state would leave the block unclosable and the answer unreachable, so an
+        unterminated block is its own exemption. Scanning backwards to the last
+        boundary keeps the cost proportional to the distance to it.
+        """
+        if input_ids is None:
+            return False
+        start_variants = self._think_anchor_id_variants(config)
+        end_variants = self._think_end_id_variants(config)
+        start_first = {variant[0] for variant in start_variants}
+        end_first = {variant[0] for variant in end_variants}
+
+        def matches(position: int, variants: List[List[int]]) -> bool:
+            return any(
+                input_ids[position : position + len(variant)] == variant
+                for variant in variants
+            )
+
+        for position in range(len(input_ids) - 1, -1, -1):
+            token_id = input_ids[position]
+            if token_id in end_first and matches(position, end_variants):
+                return False
+            if token_id in start_first and matches(position, start_variants):
+                return True
+        return False
+
     def _reasoning_format_for_prompt(
         self,
         config: GenerateConfig,
@@ -362,15 +414,33 @@ class OpenaiEndpoint(object):
         only re-route text that already exists. Keep the boundary tags out of
         the grammar instead.
 
-        The one exemption is an OPEN anchor at the end of the prompt: there the
-        template itself told the model to start thinking, so masking ``</think>``
-        would leave the block unclosable and the reply stuck in reasoning.
+        The exemptions are the shapes where the model already is (or was) asked
+        to think, and masking ``</think>`` there would leave the block unclosable
+        and the reply stuck in reasoning:
+
+        - an OPEN anchor at the end of the prompt (the template just injected
+          it), and
+        - a prompt inside an unterminated think block (a caller prefill behind
+          that anchor).
+
+        Two request shapes keep the previous behavior as well: a renderer that
+        installs its own grammar for this request (the engine accepts one grammar
+        field per request), and a caller structural_tag that already bounds an
+        any_text/any_tokens region (the envelope cannot wrap it).
+
+        This runs on the OpenAI endpoint path only; raw ``prompt`` callers and
+        the C++ api_server never reach it. Correct exclusion also depends on
+        ``THINK_START_TAG``/``THINK_END_TAG`` matching this deployment's template.
         """
         if not self.generate_env_config.enforce_no_think_on_disabled:
             return None
         if not renderer.emits_reasoning_stream:
             return None
+        if renderer.installs_request_grammar(request):
+            return None
         if self._request_prompt_has_think_anchor(config, input_ids, request):
+            return None
+        if self._prompt_inside_think_block(config, input_ids):
             return None
         base_format = renderer.get_reasoning_format()
         # Exclude the bare tags, not the template's newline-suffixed forms:

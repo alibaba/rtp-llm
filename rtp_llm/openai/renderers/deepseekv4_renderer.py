@@ -322,6 +322,12 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             stop_after_first=self._tool_choice_name(request) is not None,
         )
 
+    @override
+    def installs_request_grammar(self, request: ChatCompletionRequest) -> bool:
+        # A forced tool call replaces whatever grammar the request carries; the
+        # endpoint's no-think envelope must yield before the conflict check below.
+        return self._tool_choice_forces_tool(request)
+
     def apply_chat_completion_constraints(
         self,
         request: ChatCompletionRequest,
