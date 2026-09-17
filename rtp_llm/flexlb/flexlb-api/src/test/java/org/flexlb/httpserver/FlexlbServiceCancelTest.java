@@ -9,7 +9,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
-import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -49,7 +48,6 @@ class FlexlbServiceCancelTest {
                 routeService,
                 consistencyService,
                 mock(EngineHealthReporter.class),
-                mock(ActiveRequestCounter.class),
                 forwarder,
                 mock(ConfigService.class),
                 mock(BatchSchedulerReporter.class),

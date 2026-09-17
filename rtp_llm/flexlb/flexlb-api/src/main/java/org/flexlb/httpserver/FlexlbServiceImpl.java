@@ -23,7 +23,6 @@ import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RouteService;
-import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -48,7 +47,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final RouteService routeService;
     private final MasterElectService masterElectService;
     private final EngineHealthReporter engineHealthReporter;
-    private final ActiveRequestCounter activeRequestCounter;
     private final FlexlbGrpcForwarder grpcForwarder;
     private final ConfigService configService;
     private final BatchSchedulerReporter batchSchedulerReporter;
@@ -59,14 +57,13 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     public FlexlbServiceImpl(RouteService routeService,
                              LBStatusConsistencyService lbStatusConsistencyService,
                              EngineHealthReporter engineHealthReporter,
-                             ActiveRequestCounter activeRequestCounter,
                              FlexlbGrpcForwarder grpcForwarder,
                              ConfigService configService,
                              BatchSchedulerReporter batchSchedulerReporter,
                              ServerScheduleLatencyRecorder serverLatencyRecorder,
                              RequestSchedulerReporter requestSchedulerReporter) {
         this(routeService, (MasterElectService) lbStatusConsistencyService,
-                engineHealthReporter, activeRequestCounter, grpcForwarder,
+                engineHealthReporter, grpcForwarder,
                 configService, batchSchedulerReporter, serverLatencyRecorder,
                 requestSchedulerReporter);
     }
@@ -74,7 +71,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     FlexlbServiceImpl(RouteService routeService,
                       MasterElectService masterElectService,
                       EngineHealthReporter engineHealthReporter,
-                      ActiveRequestCounter activeRequestCounter,
                       FlexlbGrpcForwarder grpcForwarder,
                       ConfigService configService,
                       BatchSchedulerReporter batchSchedulerReporter,
@@ -83,7 +79,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         this.routeService = routeService;
         this.masterElectService = masterElectService;
         this.engineHealthReporter = engineHealthReporter;
-        this.activeRequestCounter = activeRequestCounter;
         this.grpcForwarder = grpcForwarder;
         this.configService = configService;
         this.batchSchedulerReporter = batchSchedulerReporter;
@@ -97,7 +92,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         Long interceptedEntryNanos = GrpcServerTimingInterceptor.getNanos();
         serverLatencyRecorder.recordArrival(
                 interceptedEntryNanos != null ? interceptedEntryNanos : System.nanoTime());
-        ActiveRequestCounter.RequestToken token = activeRequestCounter.acquire();
         AtomicBoolean completionClaimed = new AtomicBoolean(false);
         BalanceContext context = null;
         ScheduleOrigin errorOrigin = ScheduleOrigin.ENTRY_ERROR;
@@ -118,7 +112,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                                 request,
                                 requestContext,
                                 responseObserver,
-                                token,
                                 completionClaimed,
                                 forwardResult,
                                 forwardError));
@@ -129,13 +122,13 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     ? ScheduleOrigin.LOCAL_MASTER
                     : ScheduleOrigin.LOCAL_STANDALONE;
             errorOrigin = routeOrigin;
-            routeAndComplete(request, requestContext, responseObserver, token,
+            routeAndComplete(request, requestContext, responseObserver,
                     completionClaimed, routeOrigin);
 
         } catch (Exception e) {
             Logger.error("FlexlbService.schedule error, request_id={}", request.getRequestId(), e);
             completeOnce(request.getRequestId(), context, buildErrorResponse(e),
-                    responseObserver, errorOrigin, token, completionClaimed);
+                    responseObserver, errorOrigin, completionClaimed);
         }
     }
 
@@ -143,7 +136,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
             BalanceContext context,
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
-            ActiveRequestCounter.RequestToken token,
             AtomicBoolean completionClaimed,
             FlexlbGrpcForwarder.MasterForwardResult forwardResult,
             Throwable forwardError) {
@@ -158,7 +150,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                                 failureName(forwardError), ""),
                         responseObserver,
                         ScheduleOrigin.FORWARD_FAILED,
-                        token,
                         completionClaimed);
                 return;
             }
@@ -172,14 +163,13 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                         response,
                         responseObserver,
                         ScheduleOrigin.FORWARDED_TO_MASTER,
-                        token,
                         completionClaimed);
                 return;
             }
 
             if (forwardResult != null && !forwardResult.masterFound()) {
                 // No Master address was selected and no RPC was attempted.
-                routeAndComplete(request, context, responseObserver, token,
+                routeAndComplete(request, context, responseObserver,
                         completionClaimed, ScheduleOrigin.LOCAL_FALLBACK);
                 return;
             }
@@ -201,7 +191,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                                     : forwardResult.masterHost()),
                     responseObserver,
                     ScheduleOrigin.FORWARD_FAILED,
-                    token,
                     completionClaimed);
         } catch (Exception error) {
             Logger.warn("FlexlbService.schedule master forward completion error, request_id={}",
@@ -212,7 +201,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     buildMasterForwardFailureResponse(failureName(error), ""),
                     responseObserver,
                     ScheduleOrigin.FORWARD_FAILED,
-                    token,
                     completionClaimed);
         }
     }
@@ -257,7 +245,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
             BalanceContext context,
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
-            ActiveRequestCounter.RequestToken token,
             AtomicBoolean completionClaimed,
             ScheduleOrigin origin) {
         CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeFuture;
@@ -275,7 +262,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     buildErrorResponse(error),
                     responseObserver,
                     origin,
-                    token,
                     completionClaimed);
             return;
         }
@@ -284,11 +270,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             if (!completionClaimed.compareAndSet(false, true)) {
                 return;
             }
-            try {
-                cancelUndeliveredRoute(request.getRequestId());
-            } finally {
-                closeRequestToken(request.getRequestId(), token);
-            }
+            cancelUndeliveredRoute(request.getRequestId());
         };
         inboundContext.addListener(cancellationListener, Runnable::run);
         Runnable removeCancellationListener =
@@ -304,7 +286,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     routeError == null ? response : buildErrorResponse(routeError),
                     responseObserver,
                     origin,
-                    token,
                     completionClaimed,
                     removeCancellationListener);
         });
@@ -316,10 +297,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
             ScheduleOrigin origin,
-            ActiveRequestCounter.RequestToken token,
             AtomicBoolean completionClaimed) {
         completeOnce(requestId, context, response, responseObserver, origin,
-                token, completionClaimed, () -> { });
+                completionClaimed, () -> { });
     }
 
     private void completeOnce(
@@ -328,7 +308,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
             ScheduleOrigin origin,
-            ActiveRequestCounter.RequestToken token,
             AtomicBoolean completionClaimed,
             Runnable completionCleanup) {
         if (!completionClaimed.compareAndSet(false, true)) {
@@ -342,17 +321,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     requestId, error);
         } finally {
             completionCleanup.run();
-            closeRequestToken(requestId, token);
-        }
-    }
-
-    private void closeRequestToken(
-            long requestId, ActiveRequestCounter.RequestToken token) {
-        try {
-            token.close();
-        } catch (Exception error) {
-            Logger.warn("FlexlbService.schedule request token close failed, request_id={}",
-                    requestId, error);
         }
     }
 

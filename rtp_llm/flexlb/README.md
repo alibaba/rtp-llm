@@ -212,18 +212,23 @@ command-line properties, such as `--server.port` and
 `--flexlb.engine-grpc.enqueue-timeout-ms`.
 HA currently retains `HIPPO_ROLE` as its existing election group identifier.
 
-The gRPC server executor is configured in `FLEXLB_CONFIG`:
+The gRPC server executor and shutdown quiet period are configured in `FLEXLB_CONFIG`:
 
 ```json
 "grpcServer": {
   "executorCoreSize": 1000,
   "executorMaxSize": 1000,
-  "executorQueueSize": 1000
+  "executorQueueSize": 1000,
+  "shutdownQuietPeriodMs": 5000
 }
 ```
 
-All three default to 1000. Core size may be 0; maximum size and queue size
+All three executor settings default to 1000. Core size may be 0; maximum size and queue size
 must be positive, and maximum size must be at least core size.
+`shutdownQuietPeriodMs` (静默时间) defaults to 5000 ms and must be positive.
+The quiet period starts when shutting down; each Schedule arrival restarts it.
+After it elapses, gRPC waits for accepted RPCs to finish before serving resources
+are destroyed. Normal idle serving does not start an exit timer.
 
 ### Scheduler, ordering, decision, and dispatcher
 

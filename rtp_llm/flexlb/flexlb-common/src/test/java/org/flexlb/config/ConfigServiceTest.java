@@ -16,6 +16,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
     @Test
+    void shutdownQuietPeriodUsesConfigDefaultsOverridesAndValidation() {
+        assertEquals(5000L, ConfigTestFixtures.parse("{}").getGrpcServer().getShutdownQuietPeriodMs());
+        assertEquals(7000L, ConfigTestFixtures.parse("""
+                {"grpcServer":{"shutdownQuietPeriodMs":7000}}
+                """).getGrpcServer().getShutdownQuietPeriodMs());
+        for (String value : new String[]{"0", "-1", "null", "1.5", "\"7000\""}) {
+            ConfigValidationException error = assertThrows(ConfigValidationException.class,
+                    () -> ConfigTestFixtures.parse("{\"grpcServer\":{\"shutdownQuietPeriodMs\":" + value + "}}"));
+            assertTrue(error.getMessage().contains("shutdownQuietPeriodMs"), error.getMessage());
+        }
+    }
+
+    @Test
     void grpcExecutorDefaultsAndOverridesAreValidated() {
         FlexlbConfig.GrpcServerConfig defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
         assertEquals(1000, defaults.getExecutorCoreSize());

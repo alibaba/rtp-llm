@@ -18,7 +18,6 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
-import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -54,12 +53,10 @@ class FlexlbServiceImplTest {
     private RouteService routeService;
     private LBStatusConsistencyService lbStatusConsistencyService;
     private EngineHealthReporter engineHealthReporter;
-    private ActiveRequestCounter activeRequestCounter;
     private FlexlbGrpcForwarder grpcForwarder;
     private ConfigService configService;
     private BatchSchedulerReporter batchSchedulerReporter;
     private ServerScheduleLatencyRecorder serverLatencyRecorder;
-    private ActiveRequestCounter.RequestToken requestToken;
     private FlexlbServiceImpl service;
     private ch.qos.logback.classic.Logger pvLogger;
     private ListAppender<ILoggingEvent> pvAppender;
@@ -69,7 +66,6 @@ class FlexlbServiceImplTest {
         routeService = mock(RouteService.class);
         lbStatusConsistencyService = mock(LBStatusConsistencyService.class);
         engineHealthReporter = mock(EngineHealthReporter.class);
-        activeRequestCounter = mock(ActiveRequestCounter.class);
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
         batchSchedulerReporter = mock(BatchSchedulerReporter.class);
         serverLatencyRecorder = mock(ServerScheduleLatencyRecorder.class);
@@ -78,14 +74,11 @@ class FlexlbServiceImplTest {
         FlexlbConfig flexlbConfig = org.flexlb.mock.TestFlexlbConfigs.create();
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
 
-        requestToken = mock(ActiveRequestCounter.RequestToken.class);
-        when(activeRequestCounter.acquire()).thenReturn(requestToken);
 
         service = new FlexlbServiceImpl(
                 routeService,
                 lbStatusConsistencyService,
                 engineHealthReporter,
-                activeRequestCounter,
                 grpcForwarder,
                 configService,
                 batchSchedulerReporter,
@@ -169,7 +162,6 @@ class FlexlbServiceImplTest {
         verify(routeService).cancelRequest(
                 12_356L, 0L, CancelReason.CLIENT_CANCELLED);
         verifyNoInteractions(observer);
-        verify(requestToken).close();
 
         Response lateRoute = new Response();
         lateRoute.setSuccess(true);
@@ -177,7 +169,6 @@ class FlexlbServiceImplTest {
         pendingRoute.complete(lateRoute);
 
         verifyNoInteractions(observer);
-        verify(requestToken, times(1)).close();
     }
 
     @Test
@@ -200,7 +191,6 @@ class FlexlbServiceImplTest {
         inOrder.verify(routeService).cancelRequest(
                 12_357L, 0L, CancelReason.CLIENT_CANCELLED);
         verifyNoInteractions(observer);
-        verify(requestToken).close();
     }
 
     @Test
@@ -318,7 +308,6 @@ class FlexlbServiceImplTest {
                 () -> service.schedule(request, observer));
 
         verifyNoInteractions(observer);
-        verify(requestToken, never()).close();
         verify(routeService, never()).route(any());
 
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB response =
@@ -335,7 +324,6 @@ class FlexlbServiceImplTest {
 
         verify(observer, times(1)).onNext(response);
         verify(observer, times(1)).onCompleted();
-        verify(requestToken, times(1)).close();
         verify(routeService, never()).route(any());
     }
 
@@ -370,7 +358,6 @@ class FlexlbServiceImplTest {
 
         verify(observer, times(1)).onNext(response);
         verify(observer, times(1)).onCompleted();
-        verify(requestToken, times(1)).close();
         verify(routeService, never()).route(any());
     }
 
@@ -397,7 +384,6 @@ class FlexlbServiceImplTest {
         assertFalse(response.getValue().getSuccess());
         assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
                 response.getValue().getCode());
-        verify(requestToken, times(1)).close();
         verify(routeService, never()).route(any());
     }
 
@@ -427,7 +413,6 @@ class FlexlbServiceImplTest {
         verify(routeService, never()).route(any());
         verify(observer, times(1)).onNext(any());
         verify(observer, never()).onCompleted();
-        verify(requestToken, times(1)).close();
     }
 
     @Test

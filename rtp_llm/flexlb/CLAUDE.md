@@ -346,7 +346,11 @@ Spring command-line properties. Spring does not bind environment variables.
 Monitoring enhancements:
 - `BatchSchedulerReporter`: Reports canonical worker-queue size and wait-time metrics
 - `RequestSchedulerReporter`: Reports admission and lifecycle metrics
-- `ActiveRequestCounter`: Tracks concurrent active requests
+
+Graceful shutdown starts a quiet period only when explicitly stopping the service.
+`FLEXLB_CONFIG.grpcServer.shutdownQuietPeriodMs` defaults to 5000; each Schedule arrival restarts
+that period. After it elapses, gRPC waits for accepted RPCs before Spring destroys
+serving resources. No application request counter or per-request token is used.
 
 ## Error Types
 
