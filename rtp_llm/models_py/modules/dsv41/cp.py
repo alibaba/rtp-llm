@@ -1243,7 +1243,7 @@ class V41CPL20Tail:
             start = max(start, previous.positions.start)
         else:
             start = max(start, context.start)
-        rank_positions = [[] for _ in range(self.cp.cp_size)]
+        rank_positions = [[] for _ in range(context.cp.cp_size)]
         old_indices = []
         if previous is not None:
             for rank, positions in enumerate(previous.rank_positions):
