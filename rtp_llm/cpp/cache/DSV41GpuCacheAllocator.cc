@@ -72,12 +72,14 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& info) {
         dsv41Identity(view.identity);
         const size_t unit = dsv41DataUnit();
         const bool   cp   = unit != config_.seq_size_per_block;
-        if (cp && (!info.cp_slot_mapper || !info.cp_slot_mapper->isSharded() || info.cp_slot_mapper->cpSize() != 8))
-            throw std::invalid_argument("V4.1 publication requires the CP8 canonical mapper");
+        if (cp && (!info.cp_slot_mapper || !info.cp_slot_mapper->isSharded()
+                   || (info.cp_slot_mapper->cpSize() != 4 && info.cp_slot_mapper->cpSize() != 8)))
+            throw std::invalid_argument("V4.1 publication requires the CP4/CP8 canonical mapper");
         CacheKeysType keys = resource.cacheKeys();
         if (cp && !resource.cacheKeysAreCpCanonical()) {
             keys.clear();
-            for (size_t index = 7; index < resource.cacheKeys().size(); index += 8)
+            const size_t canonical_stride = info.cp_slot_mapper->cpSize();
+            for (size_t index = canonical_stride - 1; index < resource.cacheKeys().size(); index += canonical_stride)
                 keys.push_back(resource.cacheKeys()[index]);
         }
         const size_t count =
@@ -140,8 +142,9 @@ int HybridPoolKVCacheAllocator::reuseCache(const CacheKeysType&                 
         throw std::logic_error("V4.1 block matching requires request identity");
     const auto view = resource.dsv41CacheState()->view();
     dsv41Identity(view.identity);
-    if (dsv41DataUnit() != config_.seq_size_per_block && (!mapper || !mapper->isSharded() || mapper->cpSize() != 8))
-        throw std::invalid_argument("V4.1 block matching requires the CP8 canonical mapper");
+    if (dsv41DataUnit() != config_.seq_size_per_block
+        && (!mapper || !mapper->isSharded() || (mapper->cpSize() != 4 && mapper->cpSize() != 8)))
+        throw std::invalid_argument("V4.1 block matching requires the CP4/CP8 canonical mapper");
     std::array<BlockIndicesType, 6>                blocks;
     std::shared_ptr<const DSV41CheckpointMetadata> tail;
     size_t                                         tail_blocks = 0;
