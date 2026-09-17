@@ -13,6 +13,15 @@ enum class DSV41ReplayMode {
     BOUNDED_CHECKPOINT_V1
 };
 
+// Model-side identity payload: the execution-policy strings the generic cache
+// config carries as an opaque model extension (see CacheConfig::dsv41_model_identity).
+struct DSV41ModelIdentity {
+    std::string model_revision;
+    std::string replay_mode{"full"};
+    uint32_t    tail_policy_version{1};
+    uint32_t    replay_window{128};
+};
+
 struct DSV41CacheIdentity {
     std::string     model_revision;
     std::string     layout_fingerprint;

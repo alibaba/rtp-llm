@@ -48,7 +48,6 @@ public:
 public:
     bool init();
 
-    std::string        dsv41LayoutFingerprint() const;
     size_t             dsv41ReuseUnit() const;
     size_t             dsv41DataUnit() const;
     // Stages the completed checkpoint prefix to the memory connector as a plain

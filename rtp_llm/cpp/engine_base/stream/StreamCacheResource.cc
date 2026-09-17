@@ -4,8 +4,8 @@
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/DSV41CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/DSV41CacheState.h"
-#include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
@@ -274,27 +274,9 @@ void StreamCacheResource::init(int batch_size) {
     if (resource_context_.cache_manager) {
         const auto& config = resource_context_.cache_manager->cacheConfig();
         if (config.dsv41_cache_layout_version != 0) {
-            const auto& revision = config.dsv41_model_revision;
-            RTP_LLM_CHECK_WITH_INFO(
-                revision.size() == 40
-                    && std::all_of(revision.begin(),
-                                   revision.end(),
-                                   [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }),
-                "V4.1 cache requires a fixed 40-hex model revision");
-            RTP_LLM_CHECK_WITH_INFO(config.dsv41_replay_mode == "full"
-                                        || config.dsv41_replay_mode == "bounded_checkpoint_v1",
-                                    "unsupported V4.1 replay mode");
-            auto swa = std::dynamic_pointer_cast<DSV41KVCacheSpec>(config.cache_specs.at(5));
-            RTP_LLM_CHECK_WITH_INFO(swa != nullptr, "V4.1 cache requires its physical SWA spec");
-            DSV41CacheIdentity identity{revision,
-                                        config.dsv41LayoutFingerprint(),
-                                        config.dsv41_replay_mode == "full" ? DSV41ReplayMode::FULL :
-                                                                             DSV41ReplayMode::BOUNDED_CHECKPOINT_V1,
-                                        config.dsv41_tail_policy_version,
-                                        128,
-                                        swa->entries_per_block};
+            const auto seed = dsv41CacheIdentity(config).cacheKeySeed();
             for (int batch = 0; batch < batch_size; ++batch)
-                batch_kv_cache_resource_->cacheResource(batch).setDsv41CacheKeySeed(identity.cacheKeySeed());
+                batch_kv_cache_resource_->cacheResource(batch).setDsv41CacheKeySeed(seed);
         }
     }
     resource_released_ = false;

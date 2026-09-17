@@ -10,6 +10,7 @@
 #include <thread>
 
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/DSV41CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
@@ -166,7 +167,7 @@ protected:
     DSV41CacheIdentity identity(DSV41ReplayMode mode = DSV41ReplayMode::FULL) const {
         const auto spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(config_.cache_specs.at(5));
         return DSV41CacheIdentity{
-            "gpu-component-revision", memory_->dsv41LayoutFingerprint(), mode, 1, 128, spec->entries_per_block};
+            "gpu-component-revision", dsv41LayoutFingerprint(config_), mode, 1, 128, spec->entries_per_block};
     }
 
     DSV41CheckpointMetadata metadata(const DSV41CacheIdentity& id, size_t count) const {

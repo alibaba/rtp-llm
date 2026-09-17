@@ -14,6 +14,7 @@
 #include <tuple>
 
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/DSV41CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
@@ -229,7 +230,7 @@ protected:
     DSV41CacheIdentity cacheIdentity(DSV41ReplayMode mode = DSV41ReplayMode::FULL) const {
         const auto spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(config_.cache_specs.at(5));
         return DSV41CacheIdentity{
-            identity().model_revision, connector_->dsv41LayoutFingerprint(), mode, 1, 128, spec->entries_per_block};
+            identity().model_revision, dsv41LayoutFingerprint(config_), mode, 1, 128, spec->entries_per_block};
     }
     CacheKeysType keys(size_t blocks, int32_t first, const DSV41CacheIdentity& id) const {
         CacheKeysType result;
@@ -830,7 +831,6 @@ protected:
 TEST_F(DSV41MemoryTargetOnlyGpuTest, FortyLayerLayoutStoresKvWithoutInventingDraftState) {
     ASSERT_EQ(config_.layer_all_num, 40);
     EXPECT_EQ(connector_->layerRegionSlots().size(), 51);
-    EXPECT_EQ(connector_->dsv41LayoutFingerprint(), config_.dsv41LayoutFingerprint());
     auto source = resource(1, 135000);
     fill(source, 73);
     ASSERT_TRUE(write(source));

@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/DSV41CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
@@ -25,21 +26,6 @@ inline CacheKeysType dsv41PrefillCacheKeysForLoad(const GenerateRequestPB& reque
     return {request.prefill_cache_keys().begin(), request.prefill_cache_keys().end()};
 }
 
-inline DSV41CacheIdentity dsv41CacheIdentity(const CacheConfig& config) {
-    const auto* swa = dynamic_cast<const DSV41KVCacheSpec*>(config.cache_specs.at(5).get());
-    if (config.dsv41_cache_layout_version != 1 || !swa || swa->region != KVCacheRegionName::SWA_KV
-        || (config.dsv41_replay_mode != "full" && config.dsv41_replay_mode != "bounded_checkpoint_v1"))
-        throw std::invalid_argument("V4.1 transfer requires an explicit supported cache layout and replay mode");
-    DSV41CacheIdentity identity{config.dsv41_model_revision,
-                                config.dsv41LayoutFingerprint(),
-                                config.dsv41_replay_mode == "full" ? DSV41ReplayMode::FULL :
-                                                                     DSV41ReplayMode::BOUNDED_CHECKPOINT_V1,
-                                config.dsv41_tail_policy_version,
-                                128,
-                                swa->entries_per_block};
-    return identity;
-}
-
 // Call before enqueue: the scheduler may finish P and remove its partial
 // cache key while the RPC thread is still preparing LOAD. Keep the existing
 // canonical token/image hashing and the producer's local layout identity.
@@ -55,9 +41,8 @@ inline CacheKeysType dsv41PrefillPromptCacheKeys(const CompleteTokenIdsPtr& toke
 
 inline V41TransferIdentityPB dsv41TransferIdentity(const CacheConfig& config, int cp_size) {
     const auto local = dsv41CacheIdentity(config);
-    if (config.layer_num != 40 || (config.layer_all_num != 40 && config.layer_all_num != 43)
-        || cp_size < 1)
-        throw std::invalid_argument("V4.1 transfer requires target40 and either zero or three draft layers");
+    if (cp_size < 1)
+        throw std::invalid_argument("V4.1 transfer requires a positive CP width");
     std::ostringstream layout;
     std::ostringstream sources;
     layout << "dsv41-pd-layout-v1:block=" << config.seq_size_per_block << ":kernel=" << config.kernel_seq_size_per_block
@@ -91,7 +76,7 @@ inline V41TransferIdentityPB dsv41TransferIdentity(const CacheConfig& config, in
     wire.set_model_revision(local.model_revision);
     wire.set_layout_fingerprint(layout.str());
     wire.set_source_fingerprint(sources.str());
-    wire.set_replay_mode(config.dsv41_replay_mode);
+    wire.set_replay_mode(local.replay_mode == DSV41ReplayMode::FULL ? "full" : "bounded_checkpoint_v1");
     wire.set_tail_policy_version(local.tail_policy_version);
     wire.set_replay_window(local.replay_window);
     wire.set_physical_swa_entries(local.physical_swa_entries);

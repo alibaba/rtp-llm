@@ -52,7 +52,7 @@ TEST(DSV41RpcStateTest, IdentityAcceptsPhysicalByteSlicesButRejectsExecutionCont
         const auto prefill = cacheConfig(RoleType::PREFILL, draft);
         const auto decode = cacheConfig(RoleType::DECODE, draft);
         const auto identity = dsv41TransferIdentity(prefill, 8);
-        EXPECT_NE(prefill.dsv41LayoutFingerprint(), decode.dsv41LayoutFingerprint());
+        EXPECT_NE(dsv41LayoutFingerprint(prefill), dsv41LayoutFingerprint(decode));
         EXPECT_NO_THROW(validateDSV41TransferIdentity(decode, identity, 8));
         auto changed = identity;
         changed.set_replay_mode("bounded_checkpoint_v1");

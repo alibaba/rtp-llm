@@ -49,13 +49,6 @@ bool KVCacheMemoryConnector::isDsv41TypedCacheLayout(const std::vector<LayerRegi
            && *swa.rbegin() == static_cast<int>(cache_config_.layer_all_num) - 1;
 }
 
-std::string KVCacheMemoryConnector::dsv41LayoutFingerprint() const {
-    const auto slots = layerRegionSlots();
-    if (!isDsv41TypedCacheLayout(slots))
-        throw std::logic_error("invalid V4.1 memory layout");
-    return cache_config_.dsv41LayoutFingerprint();
-}
-
 size_t KVCacheMemoryConnector::dsv41ReuseUnit() const {
     auto spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(cache_config_.cache_specs.at(5));
     if (!spec)
