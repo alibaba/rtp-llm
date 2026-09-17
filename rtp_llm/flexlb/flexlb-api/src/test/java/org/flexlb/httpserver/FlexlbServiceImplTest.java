@@ -1,5 +1,6 @@
 package org.flexlb.httpserver;
 
+import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import io.grpc.Context;
@@ -16,16 +17,21 @@ import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.MockedStatic;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
@@ -46,10 +52,12 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -146,6 +154,46 @@ class FlexlbServiceImplTest {
         assertPvContains("\"scheduleOrigin\":\"LOCAL_STANDALONE\"");
         verify(serverLatencyRecorder).recordArrival(anyLong());
         verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"INFO, true, true", "WARN, true, false", "WARN, false, true", "OFF, false, false"})
+    void testSchedule_serializesPvOnlyWhenItsLevelIsEnabled(
+            String level, boolean success, boolean expectPv) {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();
+        response.setSuccess(success);
+        response.setCode(success ? 200 : 500);
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(response));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+        Level previousLevel = pvLogger.getLevel();
+        pvLogger.setLevel(Level.toLevel(level));
+
+        try (MockedStatic<JsonUtils> json = mockStatic(JsonUtils.class, CALLS_REAL_METHODS)) {
+            service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                    .setRequestId(12346L)
+                    .build(), observer);
+
+            ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
+                    ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+            verify(observer).onNext(captor.capture());
+            verify(observer).onCompleted();
+            verify(observer, never()).onError(any());
+            assertEquals(success, captor.getValue().getSuccess());
+            assertEquals(response.getCode(), captor.getValue().getCode());
+            json.verify(() -> JsonUtils.toStringOrEmpty(any(PvLogData.class)),
+                    times(expectPv ? 1 : 0));
+            if (expectPv) {
+                assertPvContains("\"requestId\":12346");
+                assertEquals(success ? Level.INFO : Level.ERROR, pvAppender.list.get(0).getLevel());
+            } else {
+                assertTrue(pvAppender.list.isEmpty());
+            }
+        } finally {
+            pvLogger.setLevel(previousLevel);
+        }
     }
 
     @Test
