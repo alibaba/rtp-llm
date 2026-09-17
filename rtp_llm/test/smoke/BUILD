@@ -78,6 +78,7 @@ filegroup(
 # ============================================================================
 
 load("//rtp_llm/test/smoke:suites_h20_oss.bzl", "h20_oss_suites")
+load("//rtp_llm/test/smoke:suites_cuda13.bzl", "cuda13_suites")
 load("//rtp_llm/test/smoke:suites_sm8x.bzl", "sm8x_suites")
 load("//rtp_llm/test/smoke:suites_sm100.bzl", "sm100_suites")
 load("//rtp_llm/test/smoke:suites_sm120.bzl", "sm120_suites")
@@ -85,6 +86,7 @@ load("//rtp_llm/test/smoke:suites_rocm_oss.bzl", "rocm_oss_suites")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "remote_cache_suites")
 
 h20_oss_suites()
+cuda13_suites()
 sm8x_suites()
 sm100_suites()
 sm120_suites()

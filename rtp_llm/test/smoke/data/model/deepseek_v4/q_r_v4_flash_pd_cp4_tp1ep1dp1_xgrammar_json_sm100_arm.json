@@ -1,0 +1,1115 @@
+{
+    "model_type": "deepseek_v4",
+    "model_path": "/mnt/nas1/hf/DeepSeek-V4-Flash",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Return only a JSON object with key answer and value ok."
+                    }
+                ],
+                "max_tokens": 64,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "json_format": true
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "answer"
+                ],
+                "expected_json": {
+                    "answer": "ok"
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Return only a JSON object with key city and value Hangzhou."
+                    }
+                ],
+                "max_tokens": 64,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "response_format": {
+                    "type": "json_object"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "city"
+                ],
+                "expected_json": {
+                    "city": "Hangzhou"
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Return only a JSON object for a weather report in Hangzhou."
+                    }
+                ],
+                "max_tokens": 96,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "weather_report",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "city": {
+                                    "type": "string"
+                                },
+                                "condition": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "city",
+                                "condition"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "city",
+                    "condition"
+                ]
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "stream": true,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_object"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "stream": true,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "entity_extract_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "你好"
+                    }
+                ],
+                "max_tokens": 32,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "text"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你需要提取出name（名字，为string类型）、age（年龄，为string类型）与email（邮箱，为string类型），请输出JSON 字符串，不要输出其它无关内容。\n示例：\nQ：我叫张三，今年25岁，邮箱是zhangsan@example.com\nA：{\"name\":\"张三\",\"age\":\"25岁\",\"email\":\"zhangsan@example.com\"}\nQ：我叫李四，今年30岁，我的邮箱是lisi@example.com\nA：{\"name\":\"李四\",\"age\":\"30岁\",\"email\":\"lisi@example.com\"}\nQ：我叫王五，我的邮箱是wangwu@example.com，今年40岁\nA：{\"name\":\"王五\",\"age\":\"40岁\",\"email\":\"wangwu@example.com\"}"
+                    },
+                    {
+                        "role": "user",
+                        "content": "大家好，我叫刘五，今年34岁，邮箱是liuwu@example.com"
+                    }
+                ],
+                "max_tokens": 64,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "response_format": {
+                    "type": "json_object"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "name",
+                    "age",
+                    "email"
+                ],
+                "expected_json": {
+                    "name": "刘五",
+                    "age": "34岁",
+                    "email": "liuwu@example.com"
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "stream": true,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "math_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "enum": [
+                                            "我国",
+                                            "社会主义事业",
+                                            "两个文明建设"
+                                        ]
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ]
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "地点": [
+                        "我国"
+                    ],
+                    "人物": [],
+                    "组织": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_object"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "entity_extract_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "entity_extract_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": false
+                    }
+                },
+                "stream": true
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "entity_extract_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": false
+                    }
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "查询下北京的天气，json格式返回"
+                    }
+                ],
+                "max_tokens": 160,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "incremental_output": true,
+                "enable_search": true,
+                "response_format": {
+                    "type": "json_object"
+                },
+                "result_format": "message",
+                "search_options": {
+                    "citation_format": "[ref_<number>]",
+                    "enable_citation": true,
+                    "enable_search_extension": true,
+                    "enable_source": true,
+                    "forced_search": true,
+                    "search_strategy": "turbo"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "查询下北京的天气，查询结果以json格式返回"
+                    }
+                ],
+                "max_tokens": 160,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "incremental_output": true,
+                "enable_search": true,
+                "response_format": {
+                    "type": "json_object"
+                },
+                "result_format": "message",
+                "search_options": {
+                    "citation_format": "[ref_<number>]",
+                    "enable_citation": true,
+                    "enable_search_extension": true,
+                    "enable_source": true,
+                    "forced_search": true,
+                    "search_strategy": "max"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "expected_json": {
+                    "location": "北京",
+                    "weather": {
+                        "temperature": "15°C",
+                        "condition": "多云",
+                        "humidity": "45%",
+                        "wind": "北风 3级",
+                        "update_time": "2025-04-05 14:00"
+                    }
+                },
+                "required_json_keys": [
+                    "location",
+                    "weather"
+                ]
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "查询下北京的天气，查询结果以json格式返回"
+                    }
+                ],
+                "max_tokens": 160,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "incremental_output": true,
+                "enable_search": true,
+                "response_format": {
+                    "type": "json_object"
+                },
+                "result_format": "message",
+                "search_options": {
+                    "citation_format": "[ref_<number>]",
+                    "enable_citation": true,
+                    "enable_search_extension": true,
+                    "enable_source": true,
+                    "forced_search": true,
+                    "search_strategy": "max"
+                },
+                "thinking_budget": 10,
+                "stream": true
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "查询下北京的天气，json格式返回"
+                    }
+                ],
+                "max_tokens": 160,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "incremental_output": true,
+                "enable_search": true,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "get_weather",
+                        "schema": {
+                            "additionalProperties": false,
+                            "properties": {
+                                "advice": {
+                                    "description": "建议",
+                                    "type": "string"
+                                },
+                                "city": {
+                                    "description": "城市名称",
+                                    "type": "string"
+                                },
+                                "date": {
+                                    "description": "日期",
+                                    "type": "string"
+                                },
+                                "weather": {
+                                    "description": "天气",
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "city",
+                                "date",
+                                "advice",
+                                "weather"
+                            ],
+                            "type": "object"
+                        },
+                        "strict": true
+                    }
+                },
+                "result_format": "message",
+                "search_options": {
+                    "citation_format": "[ref_<number>]",
+                    "enable_citation": true,
+                    "enable_search_extension": true,
+                    "enable_source": true,
+                    "forced_search": true,
+                    "search_strategy": "turbo"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "advice",
+                    "city",
+                    "date",
+                    "weather"
+                ]
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "查询下北京的天气，查询结果以json格式返回"
+                    }
+                ],
+                "max_tokens": 160,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "incremental_output": true,
+                "enable_search": true,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "get_weather",
+                        "schema": {
+                            "additionalProperties": false,
+                            "properties": {
+                                "advice": {
+                                    "description": "建议",
+                                    "type": "string"
+                                },
+                                "city": {
+                                    "description": "城市名称",
+                                    "type": "string"
+                                },
+                                "date": {
+                                    "description": "日期",
+                                    "type": "string"
+                                },
+                                "weather": {
+                                    "description": "天气",
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "city",
+                                "date",
+                                "advice",
+                                "weather"
+                            ],
+                            "type": "object"
+                        },
+                        "strict": true
+                    }
+                },
+                "result_format": "message",
+                "search_options": {
+                    "citation_format": "[ref_<number>]",
+                    "enable_citation": true,
+                    "enable_search_extension": true,
+                    "enable_source": true,
+                    "forced_search": true,
+                    "search_strategy": "max"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "advice",
+                    "city",
+                    "date",
+                    "weather"
+                ]
+            }
+        }
+    ]
+}

@@ -15,6 +15,7 @@ __pycache__/
 /3rdparty/apex/
 
 bazel-*
+rtp_llm/test/smoke/flexlb_runtime/
 bazel.log
 bep.json*
 *.profile.gz
