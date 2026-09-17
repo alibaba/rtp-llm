@@ -258,8 +258,8 @@ cc_test(
         "//conditions:default": [],
     }),
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "H20"},
-        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "@//:using_cuda": {"gpu": "H20", "gpu_count": "2"},
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7", "gpu_count": "2"},
         "//conditions:default": {},
     }),
 )

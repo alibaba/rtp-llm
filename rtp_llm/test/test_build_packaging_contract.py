@@ -1370,6 +1370,12 @@ class BuildPackagingContractTest(TestCase):
         self.assertIn('"gpu_count": "2"', cache_store)
         self.assertIn('"gpu": "A10"', cache_store)
 
+        block_pool = target_block(
+            "rtp_llm/cpp/cache/test/BUILD", "block_pool_device_malloc_test"
+        )
+        self.assertIn('"GPU_COUNT": "2"', block_pool)
+        self.assertIn('"gpu_count": "2"', block_pool)
+
     def test_non_sm100_py_ut_profiles_ignore_dsv4(self):
         with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
             pyproject = tomllib.load(f)
