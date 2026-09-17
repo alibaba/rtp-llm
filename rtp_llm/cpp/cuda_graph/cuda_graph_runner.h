@@ -45,6 +45,7 @@ public:
                     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter    = nullptr):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(graph_params.enable_cuda_graph),
+        capture_pre_final_norm_(graph_params.capture_pre_final_norm),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
         role_(graph_params.role),
@@ -227,6 +228,7 @@ private:
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
     bool                    enable_cuda_graph_{false};
+    bool                    capture_pre_final_norm_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Union
 
 import torch
@@ -17,6 +18,13 @@ if TYPE_CHECKING:
 """
 用于多种多样的下游任务
 """
+
+
+class HiddenStateStage(str, Enum):
+    """Source of generate-path hidden states, independent of token selection."""
+
+    POST_FINAL_NORM = "post_final_norm"
+    PRE_FINAL_NORM = "pre_final_norm"
 
 
 class CustomModule(object):
@@ -83,6 +91,22 @@ class CustomHandler(object):
     # specify required args for extended_forward
     def extend_forward_args(self) -> List[str]:
         return ["input_lengths", "input_ids", "hidden_states"]
+
+    def select_token_position(
+        self, input_ids: torch.Tensor, text_tokens_mask=None
+    ) -> int:
+        """Select on expanded CPU prompt tokens; -1 opts out. Called once per request."""
+        raise NotImplementedError
+
+    def hidden_state_stage(self) -> HiddenStateStage:
+        """Match the stage used to train this head; embedding ignores this.
+
+        The default preserves the model's final normalized output. PRE_FINAL_NORM
+        means the input to the final model norm, not the norms inside each block.
+        Selected rows retain the model activation device and dtype in either stage.
+        Unsupported models/backends must reject it rather than substitute data.
+        """
+        return HiddenStateStage.POST_FINAL_NORM
 
     # extended_forward
     # input_lengths: [batch_size]

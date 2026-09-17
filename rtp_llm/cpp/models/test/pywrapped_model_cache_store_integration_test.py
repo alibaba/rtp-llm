@@ -449,5 +449,133 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertTrue(all("_tag_draft" in block["key"] for block in record["blocks"]))
 
 
+class Handler:
+    def __init__(self, stage):
+        self.stage = stage
+        self.calls = 0
+
+    def hidden_state_stage(self):
+        return self.stage
+
+    def extend_forward_args(self):
+        return ["selected_hidden_states"]
+
+    def extend_forward(self, selected_hidden_states):
+        self.calls += 1
+        return selected_hidden_states * 2
+
+
+def rms_norm(hidden):
+    fp32 = hidden.float()
+    return (fp32 * torch.rsqrt(fp32.square().mean(-1, keepdim=True) + 1e-5)).to(
+        hidden.dtype
+    )
+
+
+class ForwardModel(SuccessfulGenerationPrefillCaptureModel):
+    supports_pre_final_norm = True
+    capture = True
+
+    def hidden(self, inputs):
+        return (
+            inputs.input_ids.unsqueeze(1) * 4 + torch.arange(4, device="cuda") + 1
+        ).to(torch.bfloat16)
+
+    def forward_micro_batch(self, inputs):
+        return [PyModelOutputs(self.hidden(part)) for part in inputs]
+
+    def forward(self, inputs, fmha_impl=None):
+        hidden = self.hidden(inputs)
+        indexes = inputs.pre_final_norm_output_indexes
+        selected = hidden[indexes] if indexes is not None and self.capture else None
+        hidden.copy_(rms_norm(hidden))  # Capture must survive an in-place norm.
+        outputs = PyModelOutputs(hidden)
+        if selected is not None:
+            outputs.pre_final_norm_hidden_states = selected
+        return outputs
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
+class CustomOutputPostLayersTest(unittest.TestCase):
+    def run_case(self, handler, indexes=(1, 4), python_norm=True, model=None):
+        return _extension.run_post_layers(
+            model or ForwardModel(),
+            handler,
+            torch.tensor(indexes, dtype=torch.int64).pin_memory(),
+            python_norm,
+        )
+
+    def test_selected_rows_preserve_logits_across_eager_and_graph(self):
+        hidden = torch.arange(24, device="cuda", dtype=torch.bfloat16).reshape(6, 4) + 1
+        for python_norm in (False, True):
+            baseline = self.run_case(None, python_norm=python_norm)
+            self.assertIsNone(baseline["custom_output"])
+            for stage in ("pre_final_norm", "post_final_norm"):
+                for indexes in ((1, 4), (4,), ()):
+                    with self.subTest(
+                        python_norm=python_norm, stage=stage, indexes=indexes
+                    ):
+                        handler = Handler(stage)
+                        result = self.run_case(handler, indexes, python_norm)
+                        self.assertEqual(result["custom_output_error"], "")
+                        steps = (("", hidden, list(indexes)),)
+                        if python_norm:
+                            self.assertEqual(result["graph_status"], "replayed")
+                            self.assertIsNone(result["decode_custom_output"])
+                            steps += (
+                                ("next_", hidden.flip(0), [i - 1 for i in indexes]),
+                            )
+                        self.assertEqual(handler.calls, len(steps) if indexes else 0)
+                        for prefix, rows, selected in steps:
+                            torch.testing.assert_close(
+                                result[prefix + "logits"],
+                                baseline[prefix + "logits"],
+                                rtol=0,
+                                atol=0,
+                            )
+                            output = result[prefix + "custom_output"]
+                            if not selected:
+                                self.assertIsNone(output)
+                            else:
+                                values = (
+                                    rows
+                                    if stage == "pre_final_norm"
+                                    else rms_norm(rows)
+                                )
+                                torch.testing.assert_close(output, values[selected] * 2)
+
+    def test_invalid_contracts_fail_explicitly(self):
+        with self.assertRaisesRegex(RuntimeError, "unsupported.*hidden_state_stage"):
+            self.run_case(Handler("invalid"))
+        model = ForwardModel()
+        model.supports_pre_final_norm = False
+        with self.assertRaisesRegex(RuntimeError, "does not support pre_final_norm"):
+            self.run_case(Handler("pre_final_norm"), model=model)
+        model.supports_pre_final_norm, model.capture = True, False
+        with self.assertRaisesRegex(
+            RuntimeError, "graph did not capture selected hidden rows"
+        ):
+            self.run_case(Handler("pre_final_norm"), model=model)
+
+        def fail(rows):
+            raise ValueError("head failure")
+
+        for forward, message in (
+            (lambda rows: rows.double(), "output dtype"),
+            (lambda rows: rows.cpu(), "input CUDA device"),
+            (lambda rows: rows[:1], "one row per selected context sequence"),
+            (lambda rows: rows[:0], "nonempty"),
+            (fail, "head failure"),
+        ):
+            with self.subTest(message=message):
+                handler = Handler("post_final_norm")
+                handler.extend_forward = lambda selected_hidden_states: forward(
+                    selected_hidden_states
+                )
+                result = self.run_case(handler, python_norm=False)
+                self.assertIsNone(result["custom_output"])
+                self.assertIn(message, result["custom_output_error"])
+
+
 if __name__ == "__main__":
     unittest.main()

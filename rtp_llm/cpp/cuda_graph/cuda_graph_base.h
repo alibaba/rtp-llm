@@ -39,6 +39,7 @@ struct CudaGraphState {
 
 struct GraphParams {
     bool             enable_cuda_graph            = false;
+    bool             capture_pre_final_norm       = false;
     bool             enable_cuda_graph_debug_mode = false;
     bool             is_prefill_cuda_graph_mode   = false;
     bool             is_target_verify             = false;

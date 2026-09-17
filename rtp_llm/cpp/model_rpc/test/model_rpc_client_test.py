@@ -250,6 +250,34 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(request_info_pb.trace_id, "header-trace")
         self.assertEqual(request_info_pb.request_id, "header-request-id")
 
+    def test_custom_output_without_aux_info(self):
+        request = self._make_generate_input(GenerateConfig(aux_info=False))
+        values = torch.tensor([[[2147483647, -16777217]], [[0, 1]]], dtype=torch.int32)
+        response = GenerateOutputsPB()
+        flat = response.flatten_output
+        flat.finished.extend([True, True])
+        flat.custom_output.CopyFrom(
+            TensorPB(
+                data_type=TensorPB.INT32,
+                shape=list(values.shape),
+                int32_data=values.numpy().tobytes(),
+            )
+        )
+        for output, expected in zip(
+            trans_output(request, response, StreamState()).generate_outputs, values
+        ):
+            torch.testing.assert_close(output.custom_output, expected, rtol=0, atol=0)
+            self.assertIsNone(output.aux_info)
+        flat.ClearField("custom_output")
+        self.assertTrue(
+            all(
+                output.custom_output is None
+                for output in trans_output(
+                    request, response, StreamState()
+                ).generate_outputs
+            )
+        )
+
     @staticmethod
     def _make_generate_input(generate_config: GenerateConfig) -> GenerateInput:
         return GenerateInput(

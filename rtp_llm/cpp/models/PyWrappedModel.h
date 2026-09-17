@@ -106,7 +106,12 @@ private:
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
                                                           const GptModelInputs& inputs,
                                                           bool                  skip_final_layernorm,
-                                                          size_t                num_valid_tokens = -1);
+                                                          size_t                num_valid_tokens      = -1,
+                                                          torch::Tensor         pre_final_norm_hidden = {});
+    // Compact context rows prepared once by input gathering.
+    torch::Tensor                   customOutputIndexes(const GptModelInputs& inputs);
+    void                            initializeCustomOutput();
+    torch::Tensor                   runCustomOutput(const torch::Tensor& rows);
     torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel
@@ -119,7 +124,8 @@ private:
                                       size_t                token_num,
                                       const GptModelInputs& inputs,
                                       torch::Tensor         merged_eagle3_hidden,
-                                      bool                  skip_final_layernorm = false);
+                                      bool                  skip_final_layernorm  = false,
+                                      torch::Tensor         pre_final_norm_hidden = {});
     // CP gather-last-hidden exit: `hidden` is already the lm_output_indexes-selected,
     // post-final-layernorm rows produced by handleOutputsLastHidden, so this runs
     // lm_head directly (no index_select, no final layernorm — matching the existing
@@ -167,6 +173,8 @@ private:
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::shared_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
+    bool                                       custom_output_enabled_  = false;
+    bool                                       custom_output_pre_norm_ = false;
 
     // Accumulated H2D copies from tensorHoldHostAndToCuda(); flushed as one kernel per forward.
     FusedD2DCopyParams d2d_copies_;
@@ -353,6 +361,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
+    // The Python model owns its handler; internal warmup/propose executors do not invoke it.
+    if (params.enable_custom_output && py::hasattr(py_model_, "custom_output_handler")) {
+        initializeCustomOutput();
+    }
     const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
                                      dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                       "forward";
@@ -538,6 +550,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             } else {
                 GraphParams generation_prefill_cuda_graph_params                = graph_params;
                 generation_prefill_cuda_graph_params.role                       = CudaGraphRole::GENERATION_PREFILL;
+                generation_prefill_cuda_graph_params.capture_pre_final_norm     = custom_output_pre_norm_;
                 generation_prefill_cuda_graph_params.is_prefill_cuda_graph_mode = true;
                 generation_prefill_cuda_graph_params.is_target_verify           = false;
                 generation_prefill_cuda_graph_params.num_tokens_per_bs          = 1;
