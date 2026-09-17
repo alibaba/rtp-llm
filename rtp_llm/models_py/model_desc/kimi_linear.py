@@ -1506,6 +1506,9 @@ class KimiLinearModel(GptModelBase):
             hidden_states = shard_tokens(hidden_states, attn_meta.token_shard)
         del inputs_embeds
 
+        if self.pinned_mla_groups:
+            fmha_impl.pinned_mla_groups = self.pinned_mla_groups
+
         typed_aux_cache_store = create_write_cache_store_impl(
             attention_inputs, self.kv_cache
         )

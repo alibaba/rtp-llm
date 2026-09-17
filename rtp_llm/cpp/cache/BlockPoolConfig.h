@@ -16,6 +16,10 @@ struct BlockPoolConfig {
     size_t total_size_bytes = 0;
 
     std::vector<MemoryLayoutConfig> memory_layouts;
+
+    bool hasMlaHostCache() const {
+        return !memory_layouts.empty() && memory_layouts.front().hasMlaHostCache();
+    }
 };
 
 }  // namespace rtp_llm

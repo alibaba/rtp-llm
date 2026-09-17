@@ -229,11 +229,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         kv_cache.kernel_seq_size_per_block = params.kernel_tokens_per_block;
         const auto& layout                 = params.kv_cache_layer_layout.value();
         kv_cache.kv_cache_base_by_layer.reserve(layout.layers_to_kv_buffer_ptrs.size());
-        kv_cache.num_kv_heads  = params.description.attention_conf.kv_head_num;
-        kv_cache.head_dim      = params.description.attention_conf.size_per_head;
-        kv_cache.use_mla       = params.description.attention_conf.use_mla;
-        kv_cache.kv_lora_rank  = params.description.attention_conf.kv_lora_rank;
-        kv_cache.rope_head_dim = params.description.attention_conf.rope_head_dim;
+        kv_cache.mla_host_cache_by_layer = layout.mla_host_cache_by_layer;
+        kv_cache.num_kv_heads            = params.description.attention_conf.kv_head_num;
+        kv_cache.head_dim                = params.description.attention_conf.size_per_head;
+        kv_cache.use_mla                 = params.description.attention_conf.use_mla;
+        kv_cache.kv_lora_rank            = params.description.attention_conf.kv_lora_rank;
+        kv_cache.rope_head_dim           = params.description.attention_conf.rope_head_dim;
         for (const auto& t : layout.layers_to_kv_buffer_ptrs) {
             kv_cache.kv_cache_base_by_layer.push_back(t);
         }
@@ -249,12 +250,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         for (auto value : layout.group_seq_size_per_block) {
             kv_cache.group_seq_size_per_block.push_back(static_cast<int>(value));
         }
-        kv_cache.layer_region_to_group_id = layout.local_layer_region_to_group_id.empty() ?
-                                                layout.layer_region_to_group_id :
-                                                layout.local_layer_region_to_group_id;
+        kv_cache.layer_region_to_group_id          = layout.local_layer_region_to_group_id.empty() ?
+                                                         layout.layer_region_to_group_id :
+                                                         layout.local_layer_region_to_group_id;
         kv_cache.layer_region_to_physical_group_id = layout.layer_region_to_group_id;
-        kv_cache.kv_cache_base_by_layer_region = layout.layers_to_kv_buffer_ptrs_by_attn;
-        kv_cache.kv_scale_base_by_layer_region = layout.layers_to_scale_buffer_ptrs_by_attn;
+        kv_cache.kv_cache_base_by_layer_region     = layout.layers_to_kv_buffer_ptrs_by_attn;
+        kv_cache.kv_scale_base_by_layer_region     = layout.layers_to_scale_buffer_ptrs_by_attn;
 
         // Flatten by_attn into a 1D vector for pybind11 compatibility
         // Layout: [layer_0_type_0, ..., layer_0_type_7, layer_1_type_0, ...]

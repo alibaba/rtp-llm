@@ -35,6 +35,10 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
             return false;
         }
         if (!receiver->regMem(block_info, size)) {
+            if (backend == transfer::TransferBackend::kBarexRdma) {
+                RTP_LLM_LOG_ERROR("init failed: receiver regMem failed, addr: %p, size: %ld", block_info.addr, size);
+                return false;
+            }
             RTP_LLM_LOG_WARNING(
                 "receiver regMem failed, addr: %p, size: %ld (non-fatal for TCP mode)", block_info.addr, size);
         }

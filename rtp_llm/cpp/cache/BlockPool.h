@@ -39,6 +39,18 @@ public:
     MemoryType                 where() const;
     std::vector<torch::Tensor> allLayerCacheBase() const;
     std::vector<torch::Tensor> allLayerScaleCacheBase() const;
+    std::vector<torch::Tensor> allLayerHbmCacheBase() const;
+    const torch::Tensor&       blockGenerations() const {
+        return block_generations_;
+    }
+    // Call after enqueueing an external block replacement, before the next
+    // forward. The caller must preserve copy -> forward stream ordering.
+    void   markBlockWritten(BlockIdxType block_id);
+    size_t mlaHbmTokens() const {
+        return config_.hasMlaHostCache() ? static_cast<size_t>(config_.memory_layouts.front().mla_hbm_blocks)
+                                               * config_.memory_layouts.front().seq_size_per_block :
+                                           0;
+    }
 
     // these interfaces are all thread-safe
     std::vector<BlockIdxType> malloc(int num_blocks);
@@ -89,12 +101,13 @@ private:
     void                checkLayoutValidity(int layout_id) const;
 
     // Helper functions for init()
-    void validateConfig() const;
-    void initializeCacheBuffer();
-    void initializePinnedCpuBuffer(const char* log_context);
-    void initializeCudaMallocBuffer();
-    void initializeLayerMappings();
-    void initializeLayoutStrategies();
+    void          validateConfig() const;
+    void          initializeCacheBuffer();
+    void          initializePinnedCpuBuffer(const char* log_context);
+    void          initializeCudaMallocBuffer();
+    torch::Tensor allocateCudaBuffer(size_t size_bytes);
+    void          initializeLayerMappings();
+    void          initializeLayoutStrategies();
 
     // Helper functions for initializeLayoutStrategies()
     void          processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor, size_t& global_layer_begin);
@@ -142,6 +155,8 @@ private:
     BlockCachePtr block_cache_;
 
     torch::Tensor               cache_aligned_buffer_;
+    torch::Tensor               mla_hbm_buffer_;
+    torch::Tensor               block_generations_;
     void*                       cache_base_ptr_               = nullptr;
     bool                        cache_buffer_registered_host_ = false;
     bool                        kvcache_reg_mr_               = false;

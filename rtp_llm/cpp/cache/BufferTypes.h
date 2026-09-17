@@ -6,6 +6,7 @@
 
 #include <torch/extension.h>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/MlaHostCacheInfo.h"
 
 namespace rtp_llm {
 
@@ -20,14 +21,15 @@ struct CacheLayerLayout {
     // layer_region_to_group_id addresses the process-wide physical cache pools.
     // MTP models additionally use local group ids to index their compact
     // group_region_names/group_seq_size_per_block vectors.
-    std::vector<std::vector<int>> layer_region_to_group_id;
-    std::vector<std::vector<int>> local_layer_region_to_group_id;
-    std::vector<CacheGroupType>   group_types;
-    std::vector<KVCacheRegionName>  group_region_names;
-    std::vector<size_t>             group_seq_size_per_block;
-    std::vector<CacheGroupType>   layer_group_types;
+    std::vector<std::vector<int>>           layer_region_to_group_id;
+    std::vector<std::vector<int>>           local_layer_region_to_group_id;
+    std::vector<CacheGroupType>             group_types;
+    std::vector<KVCacheRegionName>          group_region_names;
+    std::vector<size_t>                     group_seq_size_per_block;
+    std::vector<CacheGroupType>             layer_group_types;
     std::vector<torch::Tensor>              layers_to_kv_buffer_ptrs;
     std::vector<torch::Tensor>              layers_to_scale_buffer_ptrs;
+    std::vector<MlaHostCacheInfo>           mla_host_cache_by_layer;
     std::vector<std::vector<torch::Tensor>> layers_to_kv_buffer_ptrs_by_attn;
     std::vector<std::vector<torch::Tensor>> layers_to_scale_buffer_ptrs_by_attn;
 

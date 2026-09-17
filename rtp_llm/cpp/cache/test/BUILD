@@ -3,6 +3,16 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "mla_host_cache_plan_test",
+    srcs = ["MlaHostCachePlanTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/cache:mla_host_cache_plan",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 test_copts = [
     "-fno-access-control",
 ] + copts()

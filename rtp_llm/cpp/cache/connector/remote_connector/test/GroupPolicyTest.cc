@@ -1,9 +1,11 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <tuple>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 
 using namespace rtp_llm;
 using namespace rtp_llm::remote_connector;
@@ -52,11 +54,19 @@ public:
         return {};
     }
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const override {
-        return {};
+        return convertIndexToBuffer(layer_id, KVCacheRegionName::DEFAULT, block_id);
+    }
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, KVCacheRegionName region, int block_id) const override {
+        auto it = buffers.find({layer_id, region, block_id});
+        return it == buffers.end() ? std::vector<BlockInfo>{} : it->second;
     }
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
-        return {};
+        return convertIndexToBuffer(layer_id, block_id);
+    }
+    std::map<std::tuple<int, KVCacheRegionName, int>, std::vector<BlockInfo>> buffers;
+    void                                                                      setLayout(CacheLayerLayout layout) {
+        fake_layout_ = std::move(layout);
     }
     CacheLayerLayout allLayerCacheBase() const override {
         return fake_layout_;
@@ -127,6 +137,98 @@ protected:
 private:
     CacheLayerLayout fake_layout_;
 };
+
+TEST(HostTierTransferTest, RemoteIovsPreservePerBlockMemoryType) {
+    auto allocator =
+        std::make_shared<FakeKVCacheAllocator>(CacheConfig{}, std::vector<int32_t>{0}, std::vector<int32_t>{}, 1);
+    uint8_t   host_bytes[16] = {}, device_address_placeholder[16] = {};
+    BlockInfo host, gpu;
+    host.addr                                              = host_bytes;
+    host.size_bytes                                        = sizeof(host_bytes);
+    host.is_cuda                                           = false;
+    gpu.addr                                               = device_address_placeholder;
+    gpu.size_bytes                                         = sizeof(device_address_placeholder);
+    gpu.is_cuda                                            = true;
+    allocator->buffers[{0, KVCacheRegionName::DEFAULT, 1}] = {gpu};
+    allocator->buffers[{0, KVCacheRegionName::DEFAULT, 2}] = {host};
+    DefaultLayerGroupPolicy policy(allocator, {0}, {});
+    ASSERT_TRUE(policy.init());
+    kv_cache_manager::BlockBuffers result;
+    ASSERT_TRUE(policy.genBlockBuffers({0, 0}, {1, 2}, result));
+    ASSERT_EQ(result.size(), 2);
+    ASSERT_EQ(result[0].iovs.size(), 1);
+    ASSERT_EQ(result[1].iovs.size(), 1);
+    EXPECT_EQ(result[0].iovs[0].type, kv_cache_manager::MemoryType::GPU);
+    EXPECT_EQ(result[1].iovs[0].type, kv_cache_manager::MemoryType::CPU);
+    EXPECT_EQ(result[0].iovs[0].base, gpu.addr);
+    EXPECT_EQ(result[1].iovs[0].base, host.addr);
+    EXPECT_EQ(result[1].iovs[0].size, host.size_bytes);
+}
+
+TEST(HostTierTransferTest, P2pRegistrationCoversBothTiersAndTypedRegions) {
+    auto allocator =
+        std::make_shared<FakeKVCacheAllocator>(CacheConfig{}, std::vector<int32_t>{0}, std::vector<int32_t>{1}, 1);
+    const auto cpu     = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true);
+    const auto gpu     = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    auto       host    = torch::empty({4, 256, 528}, cpu);
+    auto       hbm     = torch::empty({21, 128, 528}, gpu);  // 512 full tokens + 2176 resident tokens.
+    auto       kda     = torch::empty({4, 4096}, gpu);
+    auto       indexer = torch::empty({12, 32, 132}, gpu);  // Two kernel pages per physical block.
+    auto       block   = [](const torch::Tensor& tensor, size_t bytes, size_t offset = 0) {
+        BlockInfo info;
+        info.addr       = static_cast<uint8_t*>(tensor.data_ptr()) + offset;
+        info.size_bytes = bytes;
+        info.is_cuda    = tensor.is_cuda();
+        return info;
+    };
+    const size_t mla_stride                                   = 256 * 528;
+    allocator->buffers[{0, KVCacheRegionName::DEFAULT, 0}]    = {block(hbm, mla_stride)};
+    allocator->buffers[{1, KVCacheRegionName::DEFAULT, 0}]    = {block(kda, 4096)};
+    allocator->buffers[{0, KVCacheRegionName::INDEXER_KV, 0}] = {block(indexer, 64 * 132)};
+    CacheLayerLayout layout;
+    layout.layers_to_kv_buffer_ptrs = {host, kda};
+    layout.layers_to_kv_buffer_ptrs_by_attn.resize(2);
+    layout.layers_to_kv_buffer_ptrs_by_attn[0].resize(static_cast<size_t>(KVCacheRegionName::REGION_COUNT));
+    layout.layers_to_kv_buffer_ptrs_by_attn[0][0] = host;  // Alias must only register once.
+    layout.layers_to_kv_buffer_ptrs_by_attn[0][static_cast<size_t>(KVCacheRegionName::INDEXER_KV)] = indexer;
+    layout.mla_host_cache_by_layer.resize(2);
+    layout.mla_host_cache_by_layer[0].hbm_cache  = hbm;
+    layout.mla_host_cache_by_layer[0].hbm_tokens = 512;
+    allocator->setLayout(layout);
+    LayerBlockConverterImpl converter(allocator);
+    const auto              registrations = converter.getAllBuffers();
+    ASSERT_EQ(registrations.size(), 4);
+    for (const auto& [info, alignment] : registrations) {
+        EXPECT_EQ(info.size_bytes % alignment, 0);
+        if (info.addr == hbm.data_ptr()) {
+            EXPECT_TRUE(info.is_cuda);
+            EXPECT_EQ(info.size_bytes, 2 * mla_stride);  // Excludes private resident slots.
+            EXPECT_EQ(alignment, mla_stride);
+        }
+        if (info.addr == host.data_ptr()) {
+            EXPECT_FALSE(info.is_cuda);
+            EXPECT_EQ(info.size_bytes, 4 * mla_stride);
+            EXPECT_EQ(alignment, mla_stride);
+        }
+    }
+    // Every transferable physical block must lie wholly within exactly one
+    // registered range, including the boundary on either side of the tier.
+    for (int id = 0; id < 6; ++id) {
+        const auto info =
+            id < 2 ? block(hbm, mla_stride, id * mla_stride) : block(host, mla_stride, (id - 2) * mla_stride);
+        size_t matches = 0;
+        for (const auto& [registration, alignment] : registrations) {
+            const auto begin = reinterpret_cast<uintptr_t>(registration.addr);
+            const auto ptr   = reinterpret_cast<uintptr_t>(info.addr);
+            if (ptr >= begin && ptr + info.size_bytes <= begin + registration.size_bytes
+                && info.is_cuda == registration.is_cuda) {
+                ++matches;
+                EXPECT_EQ((ptr - begin) % alignment, 0);
+            }
+        }
+        EXPECT_EQ(matches, 1);
+    }
+}
 
 MATCHER_P(LocationsEqLocationsView, locations_view, "") {
     const kv_cache_manager::Locations& locations = arg;

@@ -57,7 +57,13 @@ KVCacheSpecPtr createFullAttentionSpec(const ModelConfig&       model_config,
                                        uint32_t                 layer_num) {
     KVCacheSpecPtr spec;
     if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
-        spec = std::make_shared<MLAKVCacheSpec>(model_config.attn_config, parallelism_config);
+        auto mla_spec = std::make_shared<MLAKVCacheSpec>(model_config.attn_config, parallelism_config);
+        // KPool has its own INDEXER_KV region. The legacy MLA scale region
+        // stores uncompressed indexer keys, not the inline FP8 MLA scales.
+        if (model_config.attn_config.indexer_compress_ratio > 1) {
+            mla_spec->is_sparse = false;
+        }
+        spec = std::move(mla_spec);
     } else {
         spec = std::make_shared<MHAKVCacheSpec>(model_config.attn_config, parallelism_config);
     }
@@ -312,21 +318,21 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     const auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
 
     CacheConfig config;
-    config.layer_num                       = static_cast<uint32_t>(model_config.num_layers);
-    config.layer_all_num                   = config.layer_num;
-    config.block_num                       = 0;
-    config.seq_size_per_block              = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    config.kernel_seq_size_per_block       = kv_cache_config.kernel_seq_size_per_block > 0 ?
-                                                 static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block) :
-                                                 config.seq_size_per_block;
-    config.use_mla                         = model_config.attn_config.use_mla;
-    config.dtype                           = dtype;
-    config.linear_step                     = std::max(1, kv_cache_config.linear_step);
-    config.linear_fixed_cap                = std::max(0, kv_cache_config.linear_fixed_cap);
+    config.layer_num                        = static_cast<uint32_t>(model_config.num_layers);
+    config.layer_all_num                    = config.layer_num;
+    config.block_num                        = 0;
+    config.seq_size_per_block               = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    config.kernel_seq_size_per_block        = kv_cache_config.kernel_seq_size_per_block > 0 ?
+                                                  static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block) :
+                                                  config.seq_size_per_block;
+    config.use_mla                          = model_config.attn_config.use_mla;
+    config.dtype                            = dtype;
+    config.linear_step                      = std::max(1, kv_cache_config.linear_step);
+    config.linear_fixed_cap                 = std::max(0, kv_cache_config.linear_fixed_cap);
     config.linear_request_cache_pool_blocks = kv_cache_config.linear_request_cache_pool_blocks;
-    config.linear_speculative_reserve_step = gen_num_per_cycle > 0 ? gen_num_per_cycle + 1 : 0;
-    config.role_type                       = parallelism_config.role_type;
-    const char* linear_request_cache_env   = std::getenv("ENABLE_LINEAR_ATTN_REQUEST_CACHE");
+    config.linear_speculative_reserve_step  = gen_num_per_cycle > 0 ? gen_num_per_cycle + 1 : 0;
+    config.role_type                        = parallelism_config.role_type;
+    const char* linear_request_cache_env    = std::getenv("ENABLE_LINEAR_ATTN_REQUEST_CACHE");
     config.enable_linear_attention_request_cache =
         linear_request_cache_env != nullptr && std::string(linear_request_cache_env) == "1";
     config.is_sparse = model_config.attn_config.is_sparse;

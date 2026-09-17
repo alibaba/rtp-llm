@@ -34,11 +34,7 @@ from rtp_llm.models_py.modules.factory.attention.common import (
 )
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import should_enable_glm5_cmp
 from rtp_llm.ops import MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import (
-    PyModelInitResources,
-    PyModelInputs,
-    PyModelOutputs,
-)
+from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 _MTP_INDEXER_ROLE_NORMAL = 0
@@ -190,6 +186,8 @@ class GenericMoeMTPModel(GptModelBase):
         clone.layer_num = self.layer_num
         clone.vocab_size = self.vocab_size
         clone.kv_cache = None
+        clone.pinned_mla_groups = self.pinned_mla_groups
+        clone._pinned_mla_cache_key = self._pinned_mla_cache_key
         clone.device_type = self.device_type
         clone.params_dict = {}
         clone.moe_config = self.moe_config
@@ -441,6 +439,8 @@ class GenericMoeMTPModel(GptModelBase):
         input_ids: torch.Tensor = inputs.input_ids
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
+        if self.pinned_mla_groups:
+            fmha_impl.pinned_mla_groups = self.pinned_mla_groups
         typed_aux_cache_store = create_write_cache_store_impl(
             inputs.attention_inputs, self.kv_cache
         )

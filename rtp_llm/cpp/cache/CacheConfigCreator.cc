@@ -2,6 +2,10 @@
 
 #include <numeric>
 #include <algorithm>
+#include <cstdlib>
+#include <limits>
+
+#include "rtp_llm/cpp/cache/MlaHostCachePlan.h"
 
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
@@ -100,6 +104,97 @@ void validateTypedKernelSeqSize(const ModelConfig& model_config,
                             ratio);
 }
 
+size_t mlaHostEnv(const char* name) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0')
+        return 0;
+    const std::string value(raw);
+    if (value.find_first_not_of("0123456789") != std::string::npos) {
+        throw std::invalid_argument(std::string(name) + " must be a nonnegative integer");
+    }
+    return std::stoull(value);
+}
+
+void configureMlaHostCache(CacheConfig&         config,
+                           const RuntimeConfig& runtime,
+                           const ModelConfig&   model,
+                           size_t               query_tokens) {
+    const size_t host_mb = mlaHostEnv("RTP_LLM_DSA_MLA_HOST_CACHE_MB");
+    if (!host_mb || config.role_type != RoleType::DECODE)
+        return;
+    RTP_LLM_CHECK_WITH_INFO(config.use_independent_block_pools && config.use_mla && config.is_sparse
+                                && model.attn_config.indexer_compress_ratio == 4,
+                            "host MLA cache requires GLM53 independent MLA/indexer pools on decode");
+    RTP_LLM_CHECK_WITH_INFO(host_mb <= std::numeric_limits<size_t>::max() / (1024 * 1024),
+                            "host MLA budget overflows size_t");
+    const size_t topk = static_cast<size_t>(model.attn_config.sparse_attention_topk);
+    RTP_LLM_CHECK_WITH_INFO(model.attn_config.sparse_attention_topk > 0 && runtime.max_generate_batch_size > 0
+                                && query_tokens > 0
+                                && query_tokens <= std::numeric_limits<size_t>::max()
+                                                       / static_cast<size_t>(runtime.max_generate_batch_size),
+                            "invalid host MLA decode/verify batch");
+    size_t budget = 0, mla_bytes = 0, auxiliary_bytes = 0, layers = 0, rounding_reserve = 0;
+    for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
+        const auto type         = config.group_types.at(gid);
+        const auto region       = config.group_region_names.at(gid);
+        const bool fixed_region = isDsv4FixedRegion(region);
+        const bool fixed =
+            (type == CacheGroupType::LINEAR && config.enable_linear_attention_request_cache)
+            || (fixed_region
+                && (config.dsv4_fixed_pool_blocks > 0
+                    || (region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0)));
+        if (fixed || (fixed_region && config.fixed_pool_uses_pinned_cpu))
+            continue;
+        const size_t bytes = config.group_block_size_bytes.at(gid);
+        budget += static_cast<size_t>(config.group_block_nums.at(gid)) * bytes;
+        if (type == CacheGroupType::FULL && region == KVCacheRegionName::DEFAULT
+            && std::dynamic_pointer_cast<MLAKVCacheSpec>(config.cache_specs[gid])) {
+            mla_bytes += bytes;
+            layers += config.global_layer_ids.at(gid).size();
+        } else {
+            const size_t step = (type == CacheGroupType::SWA || fixed_region) ?
+                                    static_cast<size_t>(std::max(1, config.linear_step)) :
+                                    1;
+            // finalizeBlockNums rounds these pools down, but keeps at least
+            // one block. Reserve that minimum separately and round bytes up.
+            auxiliary_bytes += bytes / step + (bytes % step != 0);
+            if (step > 1)
+                rounding_reserve += bytes;
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(budget > rounding_reserve, "insufficient host MLA paged HBM budget");
+    const auto plan  = planMlaHostCache({budget - rounding_reserve,
+                                         host_mb * 1024 * 1024,
+                                         mla_bytes,
+                                         auxiliary_bytes,
+                                         layers,
+                                         config.seq_size_per_block,
+                                         config.kernel_seq_size_per_block,
+                                         static_cast<size_t>(runtime.max_generate_batch_size) * query_tokens,
+                                         topk,
+                                         mlaHostEnv("RTP_LLM_DSA_MLA_RESIDENT_TOKENS")});
+    const auto apply = [&](CacheConfig& cfg) {
+        const size_t fixed_reserve  = cfg.fixed_pool_reserve_bytes;
+        cfg.dsa_mla_hbm_blocks      = plan.hbm_blocks;
+        cfg.dsa_mla_resident_tokens = plan.resident_tokens;
+        cfg.block_num               = plan.hbm_blocks + plan.host_blocks;
+        cfg.finalizeBlockNums(cfg.block_num, runtime);
+        cfg.fixed_pool_reserve_bytes = fixed_reserve;
+    };
+    apply(config);
+    for (auto& sub : config.mtp_sub_configs)
+        apply(*sub);
+    RTP_LLM_LOG_INFO("GLM53 host MLA cache: hbm_blocks=%u host_blocks=%u resident_tokens=%zu "
+                     "logical_tokens=%zu host_bytes=%zu paged_hbm_bytes=%zu budget=%zu; KDA remains on GPU",
+                     plan.hbm_blocks,
+                     plan.host_blocks,
+                     plan.resident_tokens,
+                     static_cast<size_t>(config.block_num) * config.seq_size_per_block,
+                     static_cast<size_t>(plan.host_blocks) * mla_bytes,
+                     plan.hbm_bytes + rounding_reserve,
+                     budget);
+}
+
 }  // namespace
 
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
@@ -196,6 +291,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                             kv_cache_seq_len,
                             model_config.max_seq_len);
     }
+    configureMlaHostCache(config, runtime_config, model_config, 1);
     return config;
 }
 
@@ -344,23 +440,21 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
             config.global_layer_ids.emplace_back();
             config.layer_ids.emplace_back();
             config.group_types.push_back(propose_config.group_types[g]);
-            config.group_region_names.push_back(
-                g < propose_config.group_region_names.size() ? propose_config.group_region_names[g]
-                                                             : KVCacheRegionName::DEFAULT);
-            config.group_seq_size_per_block.push_back(
-                g < propose_config.group_seq_size_per_block.size() ? propose_config.group_seq_size_per_block[g]
-                                                                   : propose_config.seq_size_per_block);
-            config.group_kv_block_stride_bytes.push_back(
-                g < propose_config.group_kv_block_stride_bytes.size()
-                    ? propose_config.group_kv_block_stride_bytes[g]
-                    : propose_config.kv_block_stride_bytes);
-            config.group_kv_scale_stride_bytes.push_back(
-                g < propose_config.group_kv_scale_stride_bytes.size()
-                    ? propose_config.group_kv_scale_stride_bytes[g]
-                    : propose_config.kv_scale_stride_bytes);
-            config.group_block_size_bytes.push_back(
-                g < propose_config.group_block_size_bytes.size() ? propose_config.group_block_size_bytes[g]
-                                                                 : propose_config.block_size_bytes);
+            config.group_region_names.push_back(g < propose_config.group_region_names.size() ?
+                                                    propose_config.group_region_names[g] :
+                                                    KVCacheRegionName::DEFAULT);
+            config.group_seq_size_per_block.push_back(g < propose_config.group_seq_size_per_block.size() ?
+                                                          propose_config.group_seq_size_per_block[g] :
+                                                          propose_config.seq_size_per_block);
+            config.group_kv_block_stride_bytes.push_back(g < propose_config.group_kv_block_stride_bytes.size() ?
+                                                             propose_config.group_kv_block_stride_bytes[g] :
+                                                             propose_config.kv_block_stride_bytes);
+            config.group_kv_scale_stride_bytes.push_back(g < propose_config.group_kv_scale_stride_bytes.size() ?
+                                                             propose_config.group_kv_scale_stride_bytes[g] :
+                                                             propose_config.kv_scale_stride_bytes);
+            config.group_block_size_bytes.push_back(g < propose_config.group_block_size_bytes.size() ?
+                                                        propose_config.group_block_size_bytes[g] :
+                                                        propose_config.block_size_bytes);
             config.group_block_nums.push_back(0);
             if (propose_config.group_types[g] == CacheGroupType::FULL) {
                 ++config.full_group_num;
@@ -438,15 +532,14 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 // Keep the propose model's group placement. DSV4 MTP is
                 // SWA-only and lives in the SWA typed pool, not the first FULL
                 // pool. Non-typed hybrid configs fall back to the full group.
-                const int target_gid = independent_eagle_pool
-                                           ? static_cast<int>(propose_group_offset + g)
-                                           : ((g < config.global_layer_ids.size()) ? static_cast<int>(g)
-                                                                                  : static_cast<int>(full_gid));
-                RTP_LLM_CHECK_WITH_INFO(
-                    static_cast<size_t>(local_lid) < propose_config.layer_to_group_id.size(),
-                    "propose layer_to_group_id missing local layer %d (size=%zu)",
-                    local_lid,
-                    propose_config.layer_to_group_id.size());
+                const int target_gid =
+                    independent_eagle_pool ?
+                        static_cast<int>(propose_group_offset + g) :
+                        ((g < config.global_layer_ids.size()) ? static_cast<int>(g) : static_cast<int>(full_gid));
+                RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(local_lid) < propose_config.layer_to_group_id.size(),
+                                        "propose layer_to_group_id missing local layer %d (size=%zu)",
+                                        local_lid,
+                                        propose_config.layer_to_group_id.size());
                 const bool is_primary_group =
                     propose_config.layer_to_group_id[static_cast<size_t>(local_lid)] == static_cast<int>(g);
                 if (is_primary_group) {
@@ -525,6 +618,10 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         RTP_LLM_LOG_INFO("CacheConfig debugString(sub_propose_model[%zu]):\n%s", i, sub->debugString().c_str());
     }
 
+    configureMlaHostCache(config,
+                          runtime_config,
+                          score_model_config,
+                          static_cast<size_t>(std::max<int64_t>(0, sp_config.gen_num_per_cycle)) + 1);
     return config;
 }
 

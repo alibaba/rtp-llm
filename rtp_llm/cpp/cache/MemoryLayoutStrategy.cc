@@ -9,7 +9,8 @@ namespace rtp_llm {
 bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
                                 torch::Tensor&            kv_cache_tensor,
                                 torch::Tensor&            kv_scale_tensor,
-                                void*                     cache_base_ptr) {
+                                void*                     cache_base_ptr,
+                                const torch::Tensor&      hbm_cache_tensor) {
     config_         = config;
     cache_base_ptr_ = cache_base_ptr;
     data_type_      = config_.dtype;
@@ -17,6 +18,45 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
     RTP_LLM_CHECK_WITH_INFO(data_type_ != rtp_llm::TYPE_INVALID, "dtype must be set");
     RTP_LLM_CHECK_WITH_INFO(kv_cache_tensor.numel() > 0, "kv cache tensor is empty, cannot split by layers");
 
+    layer_hbm_tensors_.clear();
+    if (config_.hasMlaHostCache()) {
+        RTP_LLM_CHECK_WITH_INFO(config_.use_mla && config_.is_mla && !config_.is_linear_attention
+                                    && !config_.enable_hybrid_attention,
+                                "host tier requires an independent MLA layout");
+        RTP_LLM_CHECK_WITH_INFO(config_.mla_hbm_blocks < config_.block_num,
+                                "host tier must contain at least one allocator block");
+        RTP_LLM_CHECK_WITH_INFO(config_.seq_size_per_block > 0 && config_.kernel_blocks_per_kv_block > 0
+                                    && config_.seq_size_per_block % config_.kernel_blocks_per_kv_block == 0,
+                                "MLA allocator block must contain whole kernel pages");
+        const size_t page_size = config_.seq_size_per_block / config_.kernel_blocks_per_kv_block;
+        RTP_LLM_CHECK_WITH_INFO(config_.mla_resident_tokens % page_size == 0,
+                                "MLA working set must contain whole kernel pages");
+        const size_t type_size = rtp_llm::getTypeSize(data_type_);
+        RTP_LLM_CHECK_WITH_INFO(config_.kv_block_stride_bytes % (config_.seq_size_per_block * type_size) == 0,
+                                "MLA rows must contain whole dtype elements");
+        RTP_LLM_CHECK_WITH_INFO(hbm_cache_tensor.defined() && hbm_cache_tensor.is_contiguous()
+                                    && static_cast<size_t>(hbm_cache_tensor.nbytes()) == config_.mlaHbmSizeBytes(),
+                                "MLA HBM buffer size mismatch");
+        const size_t tokens =
+            static_cast<size_t>(config_.mla_hbm_blocks) * config_.seq_size_per_block + config_.mla_resident_tokens;
+        const size_t allocated_tokens = config_.mlaHbmSizeBytes() / config_.layer_num
+                                        / (config_.kv_block_stride_bytes / config_.seq_size_per_block);
+        // Keep ownership through a view of the allocation, including in tests
+        // and Python metadata that may outlive the layout strategy.
+        auto typed = hbm_cache_tensor.view(dataTypeToTorchType(data_type_))
+                         .reshape({static_cast<int64_t>(config_.layer_num),
+                                   static_cast<int64_t>(allocated_tokens / page_size),
+                                   static_cast<int64_t>(page_size),
+                                   static_cast<int64_t>(config_.kv_block_stride_bytes / config_.seq_size_per_block
+                                                        / type_size)});
+        typed.zero_();
+        for (uint32_t layer = 0; layer < config_.layer_num; ++layer) {
+            layer_hbm_tensors_.push_back(typed[layer].narrow(0, 0, static_cast<int64_t>(tokens / page_size)));
+        }
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(config_.mla_hbm_blocks == 0 && !hbm_cache_tensor.defined(),
+                                "MLA tier metadata supplied without a working set");
+    }
     processKVTensor(kv_cache_tensor);
     processScaleTensor(kv_scale_tensor);
 
@@ -61,11 +101,12 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
                                 "kv_block_stride_elems=%zu must be divisible by seq_size_per_block=%zu for MLA",
                                 kv_block_stride_elems,
                                 config_.seq_size_per_block);
-        const size_t  stride_elems    = kv_block_stride_elems / config_.seq_size_per_block;
-        torch::Tensor reshaped_tensor = kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
-                                                                static_cast<int64_t>(config_.block_num),
-                                                                static_cast<int64_t>(config_.seq_size_per_block),
-                                                                static_cast<int64_t>(stride_elems)});
+        const size_t  stride_elems = kv_block_stride_elems / config_.seq_size_per_block;
+        torch::Tensor reshaped_tensor =
+            kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
+                                    static_cast<int64_t>(config_.block_num - config_.mla_hbm_blocks),
+                                    static_cast<int64_t>(config_.seq_size_per_block),
+                                    static_cast<int64_t>(stride_elems)});
         clearKVTensor(reshaped_tensor);
         for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
             layer_kv_tensors_.push_back(reshaped_tensor[layer_id]);
@@ -230,17 +271,20 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createBasicBlockInfo(int layer_id, 
     // performance of beam search where massive kv cache info is required
 
     checkLayerIdValidity(layer_id);
-    auto& layer_tensor = layer_kv_tensors_[layer_id];
-    void* kv_addr      = nullptr;
-    if (config_.kernel_blocks_per_kv_block > 1) {
+    const bool in_hbm =
+        config_.hasMlaHostCache() && block_id >= 0 && static_cast<uint32_t>(block_id) < config_.mla_hbm_blocks;
+    const auto& layer_tensor  = in_hbm ? layer_hbm_tensors_[layer_id] : layer_kv_tensors_[layer_id];
+    const int   storage_block = in_hbm ? block_id : block_id - static_cast<int>(config_.mla_hbm_blocks);
+    void*       kv_addr       = nullptr;
+    if (config_.kernel_blocks_per_kv_block > 1 || config_.hasMlaHostCache()) {
         RTP_LLM_CHECK_WITH_INFO(block_id >= 0 && static_cast<size_t>(block_id) < config_.block_num,
                                 "Physical block ID %d out of range (max: %zu)",
                                 block_id,
                                 config_.block_num);
-        kv_addr =
-            static_cast<char*>(layer_tensor.data_ptr()) + static_cast<size_t>(block_id) * config_.kv_block_stride_bytes;
+        kv_addr = static_cast<char*>(layer_tensor.data_ptr())
+                  + static_cast<size_t>(storage_block) * config_.kv_block_stride_bytes;
     } else {
-        kv_addr = getBlockPtr(layer_tensor, block_id);
+        kv_addr = getBlockPtr(layer_tensor, storage_block);
     }
     auto kv_info = makeBlockInfo(layer_tensor, kv_addr, static_cast<size_t>(config_.kv_block_stride_bytes));
 

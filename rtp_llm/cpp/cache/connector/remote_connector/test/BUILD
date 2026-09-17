@@ -40,6 +40,7 @@ cc_test(
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
     deps = test_deps + [
+        "//rtp_llm/cpp/cache/connector/p2p:layer_block_converter",
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
 )

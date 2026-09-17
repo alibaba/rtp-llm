@@ -361,6 +361,26 @@ void BlockPool::validateConfig() const {
     RTP_LLM_CHECK_WITH_INFO(!config_.memory_layouts.empty(), "BlockPoolConfig.memory_layouts must not be empty");
     RTP_LLM_CHECK_WITH_INFO(config_.block_num > 0, "BlockPoolConfig.block_num must be > 0");
 
+    if (config_.hasMlaHostCache()) {
+        // GLM53 stores the indexer in a separate typed pool. Never move KDA
+        // state or indexer pages into this token-addressed host arena.
+        const auto& layout = config_.memory_layouts.front();
+        RTP_LLM_CHECK_WITH_INFO(config_.memory_layouts.size() == 1 && layout.use_mla && layout.is_mla
+                                    && !layout.is_linear_attention && !layout.enable_hybrid_attention
+                                    && !layout.hasScale(),
+                                "host MLA requires an independent MLA pool with a separate indexer pool");
+        RTP_LLM_CHECK_WITH_INFO(allocation_type_ == AllocationType::DEVICE && !use_pinned_cpu_backing_,
+                                "host MLA tier requires a DEVICE pool");
+        RTP_LLM_CHECK_WITH_INFO(layout.mla_hbm_blocks < layout.block_num && layout.seq_size_per_block > 0,
+                                "invalid host MLA block boundary");
+        RTP_LLM_CHECK_WITH_INFO(
+            config_.total_size_bytes == layout.kv_block_pool_size_bytes && layout.kv_cache_offset_bytes == 0
+                && layout.kv_block_pool_size_bytes
+                       == static_cast<size_t>(layout.layer_num) * (layout.block_num - layout.mla_hbm_blocks)
+                              * layout.kv_block_stride_bytes,
+            "host MLA backing size must match overflow blocks");
+    }
+
     for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
         const auto& layout_cfg = config_.memory_layouts[layout_idx];
 
@@ -379,7 +399,21 @@ void BlockPool::validateConfig() const {
 
 void BlockPool::initializeCacheBuffer() {
     cache_buffer_registered_host_ = false;
-    if (allocation_type_ == AllocationType::HOST) {
+    if (config_.hasMlaHostCache()) {
+        // GPU fetch kernels directly read this address. A pageable fallback
+        // would be invalid, so registration failures must propagate.
+        cache_aligned_buffer_ = allocateRegisteredCpuTensor(
+            config_.total_size_bytes, shouldInterleaveRegisteredHostBlockPool(), hostBlockPoolPrefaultThreads());
+        cache_buffer_registered_host_ = true;
+        markHostBlockPoolDontDump(cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
+        const size_t hbm_bytes = config_.memory_layouts.front().mlaHbmSizeBytes();
+        mla_hbm_buffer_        = use_cuda_malloc_backing_ ?
+                                     allocateCudaBuffer(hbm_bytes) :
+                                     torch::empty({static_cast<int64_t>(hbm_bytes)},
+                                           torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        block_generations_     = torch::zeros(
+            {config_.block_num}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU).pinned_memory(true));
+    } else if (allocation_type_ == AllocationType::HOST) {
         if (shouldPinHostBlockPool()) {
             // Parse the mode outside the allocation fallback. Invalid configuration
             // must fail fast instead of silently changing pinned memory to pageable.
@@ -461,10 +495,14 @@ void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
 }
 
 void BlockPool::initializeCudaMallocBuffer() {
+    cache_aligned_buffer_ = allocateCudaBuffer(config_.total_size_bytes);
+}
+
+torch::Tensor BlockPool::allocateCudaBuffer(size_t size_bytes) {
 #if USING_CUDA
     RTP_LLM_CHECK_WITH_INFO(allocation_type_ == AllocationType::DEVICE,
                             "cudaMalloc block pool backing requires DEVICE allocation");
-    RTP_LLM_CHECK_WITH_INFO(config_.total_size_bytes > 0, "cudaMalloc block pool total_size_bytes must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(size_bytes > 0, "cudaMalloc block pool total_size_bytes must be > 0");
 
     int  device_id  = -1;
     auto device_err = cudaGetDevice(&device_id);
@@ -473,11 +511,11 @@ void BlockPool::initializeCudaMallocBuffer() {
                             cudaGetErrorString(device_err));
 
     void*      ptr = nullptr;
-    const auto err = cudaMalloc(&ptr, config_.total_size_bytes);
+    const auto err = cudaMalloc(&ptr, size_bytes);
     RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess,
                             "cudaMalloc block pool failed, pool_name=%s, total_size=%zu bytes, error=%s",
                             config_.pool_name.c_str(),
-                            config_.total_size_bytes,
+                            size_bytes,
                             cudaGetErrorString(err));
 
     auto deleter = [device_id](void* p) {
@@ -493,9 +531,9 @@ void BlockPool::initializeCudaMallocBuffer() {
         }
         (void)cudaFree(p);
     };
-    cache_aligned_buffer_ =
+    auto buffer =
         torch::from_blob(ptr,
-                         {static_cast<int64_t>(config_.total_size_bytes)},
+                         {static_cast<int64_t>(size_bytes)},
                          std::move(deleter),
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
     // REBASE CONFLICT CONTEXT(2413e8e03): source branch added cudaMalloc backing for
@@ -503,10 +541,11 @@ void BlockPool::initializeCudaMallocBuffer() {
     RTP_LLM_LOG_INFO("cudaMalloc block pool backing allocated, pool_name=%s, ptr=%p, total_size=%zu bytes, device=%d",
                      config_.pool_name.c_str(),
                      ptr,
-                     config_.total_size_bytes,
+                     size_bytes,
                      device_id);
+    return buffer;
 #else
-    RTP_LLM_FAIL("cudaMalloc block pool backing requested but this binary was not built with CUDA");
+    throw std::runtime_error("cudaMalloc block pool backing requested but this binary was not built with CUDA");
 #endif
 }
 
@@ -594,10 +633,10 @@ void BlockPool::initializeLayoutStrategy(size_t                    layout_idx,
                             "Failed to create memory layout strategy for layout[%zu]",
                             layout_idx);
 
-    RTP_LLM_CHECK_WITH_INFO(
-        layout_strategies_[layout_idx]->init(layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr),
-        "Failed to initialize memory layout strategy for layout[%zu]",
-        layout_idx);
+    RTP_LLM_CHECK_WITH_INFO(layout_strategies_[layout_idx]->init(
+                                layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr, mla_hbm_buffer_),
+                            "Failed to initialize memory layout strategy for layout[%zu]",
+                            layout_idx);
 }
 
 void BlockPool::processLayerTensors(size_t                    layout_idx,
@@ -673,6 +712,11 @@ std::vector<torch::Tensor> BlockPool::allLayerScaleCacheBase() const {
     return global_layer_kv_scale_tensors_;
 }
 
+std::vector<torch::Tensor> BlockPool::allLayerHbmCacheBase() const {
+    return config_.hasMlaHostCache() ? layout_strategies_.front()->getLayerHbmCacheTensors() :
+                                       std::vector<torch::Tensor>();
+}
+
 BlockIndicesType BlockPool::malloc(int num_blocks) {
     RTP_LLM_PROFILE_FUNCTION();
     if (num_blocks <= 0) {
@@ -692,6 +736,12 @@ BlockIndicesType BlockPool::malloc(int num_blocks) {
         auto last  = std::next(first, num_blocks);
         block_ids.assign(first, last);
         free_block_ids_.erase(first, last);
+        if (block_generations_.defined()) {
+            auto* generations = block_generations_.data_ptr<int64_t>();
+            for (const auto id : block_ids) {
+                ++generations[id];
+            }
+        }
         request_ref_counter_.incrementRefCounter(block_ids);
         req_con_ref_counter_.incrementRefCounter(block_ids);
         req_cache_ref_counter_.incrementRefCounter(block_ids);
@@ -819,6 +869,15 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
                                     "kv");
 
             // Register scale buffer if present
+            if (config_.hasMlaHostCache()) {
+                registerUserMrForBuffer(memory_util,
+                                        layout_idx,
+                                        0,
+                                        layout_cfg.mlaHbmSizeBytes(),
+                                        layout_cfg.kv_block_stride_bytes,
+                                        true,
+                                        "hbm_kv");
+            }
             if (layout_cfg.hasScale()) {
                 registerUserMrForBuffer(memory_util,
                                         layout_idx,
@@ -847,6 +906,9 @@ void BlockPool::deregUserMr() {
             deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, gpu, "kv");
 
             // Deregister scale buffer if present
+            if (config_.hasMlaHostCache()) {
+                deregisterUserMrForBuffer(memory_util, layout_idx, 0, true, "hbm_kv");
+            }
             if (layout_cfg.hasScale()) {
                 deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_scale_offset_bytes, gpu, "scale");
             }
@@ -865,7 +927,10 @@ void BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> mem
                                         bool                                 gpu,
                                         const std::string&                   buffer_type) {
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
-    auto  start_us = currentTimeUs();
+    if (buffer_type == "hbm_kv") {
+        base_ptr = mla_hbm_buffer_.data_ptr();
+    }
+    auto start_us = currentTimeUs();
 
     if (!memory_util->regUserMr(base_ptr, bytes, gpu, stride_bytes)) {
         RTP_LLM_FAIL("register user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
@@ -889,6 +954,9 @@ void BlockPool::deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> m
                                           bool                                 gpu,
                                           const std::string&                   buffer_type) {
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
+    if (buffer_type == "hbm_kv") {
+        base_ptr = mla_hbm_buffer_.data_ptr();
+    }
 
     if (!memory_util->deregUserMr(base_ptr, gpu)) {
         RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
@@ -974,6 +1042,17 @@ MemoryType BlockPool::where() const {
         return MemoryType::MEMORY_CPU_PINNED;
     }
     return cache_aligned_buffer_.is_pinned() ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_CPU;
+}
+
+void BlockPool::markBlockWritten(BlockIdxType block_id) {
+    if (!block_generations_.defined()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(ref_mu_);
+    RTP_LLM_CHECK_WITH_INFO(block_id >= 0 && static_cast<size_t>(block_id) < config_.block_num,
+                            "MLA written block id is out of range: %d",
+                            block_id);
+    ++block_generations_.data_ptr<int64_t>()[block_id];
 }
 
 void BlockPool::checkLayoutValidity(int layout_id) const {

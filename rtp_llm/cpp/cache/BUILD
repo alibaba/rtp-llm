@@ -2,6 +2,19 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "mla_host_cache_plan",
+    hdrs = ["MlaHostCachePlan.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "mla_host_cache_info",
+    hdrs = ["MlaHostCacheInfo.h"],
+    deps = torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cp_slot_mapper",
     srcs = ["CPSlotMapper.cc"],
     hdrs = ["CPSlotMapper.h"],
@@ -49,6 +62,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":block_info",
+        ":mla_host_cache_info",
         ":batch_kv_cache_resource",
         ":cache_group_type",
         ":cp_slot_mapper",
@@ -217,6 +231,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":mla_host_cache_plan",
         ":batch_kv_cache_resource",
         ":cache_types",
         ":kv_cache_allocator",

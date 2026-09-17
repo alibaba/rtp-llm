@@ -46,6 +46,8 @@ class GptModelBase(nn.Module):
         self.vocab_size: int = config.vocab_size
 
         self.kv_cache: Optional[KVCache] = None
+        self.pinned_mla_groups = {}
+        self._pinned_mla_cache_key = None
         self.device_type: DeviceType = get_device_type()
 
         ## (batch_size -> fmha_params)
@@ -53,6 +55,36 @@ class GptModelBase(nn.Module):
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
+        metadata = getattr(self.kv_cache, "mla_host_cache_by_layer", ())
+        cache_key = tuple(
+            (
+                layer,
+                self.kv_cache.kv_cache_base_by_layer[layer].data_ptr(),
+                info.hbm_cache.data_ptr(),
+                tuple(info.hbm_cache.shape),
+                info.block_generations.data_ptr(),
+                info.hbm_tokens,
+            )
+            for layer, info in enumerate(metadata)
+            if info.hbm_cache is not None
+        )
+        if cache_key:
+            if self.micro_batch_size != 1:
+                raise ValueError(
+                    "Host MLA working sets require enable_layer_micro_batch=0"
+                )
+            # initialize is called again for graph capture; retain the token
+            # maps and buffers when the native allocation has not changed.
+            if cache_key != self._pinned_mla_cache_key:
+                from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.pinned_mla_cache import (
+                    build_working_sets,
+                )
+
+                self.pinned_mla_groups = build_working_sets(self.kv_cache)
+                self._pinned_mla_cache_key = cache_key
+        else:
+            self.pinned_mla_groups = {}
+            self._pinned_mla_cache_key = None
         if self.kv_cache is not None:
             num_layers = len(self.kv_cache.kv_cache_base_by_layer)
             layer0_shape = (

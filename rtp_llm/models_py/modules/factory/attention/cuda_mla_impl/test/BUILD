@@ -184,3 +184,11 @@ py_test(
     tags = ["manual"],
     exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
 )
+
+py_test(
+    name = "glm53_pinned_mla_cache_test",
+    srcs = ["glm53_pinned_mla_cache_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
+)

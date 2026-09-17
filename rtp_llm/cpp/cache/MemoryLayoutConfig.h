@@ -36,14 +36,14 @@ struct MemoryLayoutConfig {
     // Linear-cache blocks use [SSM heads][history][Q | K | V heads].
     // Asymmetric-TP PD transfer therefore needs one SSM segment plus three
     // segments per convolution-history entry.
-    bool   is_linear_attention        = false;
+    bool   is_linear_attention           = false;
     bool   enable_linear_cache_partition = false;
-    size_t linear_num_k_heads         = 0;
-    size_t linear_num_v_heads         = 0;
-    size_t linear_conv_history        = 0;
-    size_t linear_q_bytes_per_history = 0;
-    size_t linear_k_bytes_per_history = 0;
-    size_t linear_v_bytes_per_history = 0;
+    size_t linear_num_k_heads            = 0;
+    size_t linear_num_v_heads            = 0;
+    size_t linear_conv_history           = 0;
+    size_t linear_q_bytes_per_history    = 0;
+    size_t linear_k_bytes_per_history    = 0;
+    size_t linear_v_bytes_per_history    = 0;
     // TODO(xinfei.sxf) rm head info
     size_t local_head_num_kv  = 0;
     size_t seq_size_per_block = 0;
@@ -54,6 +54,26 @@ struct MemoryLayoutConfig {
     // KV tensor as (layer, block_num × bpk, kv_block_stride_bytes / bpk) so the
     // kernel view sees per-kernel-block strides.
     size_t kernel_blocks_per_kv_block = 1;
+
+    // Tiered MLA only: logical block IDs below this boundary live in HBM;
+    // remaining IDs address a registered host arena starting at storage block 0.
+    // The HBM allocation ends with a token working set, aligned to kernel pages
+    // (not necessarily to the larger allocator blocks).
+    uint32_t mla_hbm_blocks      = 0;
+    size_t   mla_resident_tokens = 0;
+
+    bool hasMlaHostCache() const {
+        return mla_resident_tokens > 0;
+    }
+
+    size_t mlaHbmSizeBytes() const {
+        // RDMA chunks must not split allocator blocks, including across layers.
+        // Padding is allocation-only; kernels see the requested token capacity.
+        const size_t resident_blocks =
+            mla_resident_tokens / seq_size_per_block + (mla_resident_tokens % seq_size_per_block != 0);
+        return static_cast<size_t>(layer_num) * (static_cast<size_t>(mla_hbm_blocks) + resident_blocks)
+               * kv_block_stride_bytes;
+    }
 
     bool enable_kv_scale         = false;
     bool enable_hybrid_attention = false;

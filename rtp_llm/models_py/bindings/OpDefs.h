@@ -6,6 +6,7 @@
 #include <torch/extension.h>
 #include <cstdint>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/MlaHostCacheInfo.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -24,8 +25,9 @@ namespace torch_ext {
 //   MHA: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
 //   MLA: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
 struct LayerKVCache {
-    torch::Tensor kv_cache_base;
-    torch::Tensor kv_scale_base;
+    torch::Tensor             kv_cache_base;
+    torch::Tensor             kv_scale_base;
+    rtp_llm::MlaHostCacheInfo mla_host_cache;
     // Contiguous source segments matching destination linear head slices.
     // Empty selects the existing opaque/MHA cache-store path.
     std::vector<size_t> cache_store_segment_sizes;
@@ -43,15 +45,16 @@ struct LayerKVCache {
 // Call getLayerCache(global_layer_id) to obtain a per-layer LayerKVCache.
 struct KVCache {
     // Per-layer views
-    std::vector<torch::Tensor> kv_cache_base_by_layer;
-    std::vector<torch::Tensor> kv_scale_base_by_layer;
-    int                        seq_size_per_block        = 0;
-    int                        kernel_seq_size_per_block = 0;
-    int                        num_kv_heads              = 0;
-    int                        head_dim                  = 0;
-    bool                       use_mla                   = false;
-    int                        kv_lora_rank              = 0;
-    int                        rope_head_dim             = 0;
+    std::vector<torch::Tensor>             kv_cache_base_by_layer;
+    std::vector<torch::Tensor>             kv_scale_base_by_layer;
+    std::vector<rtp_llm::MlaHostCacheInfo> mla_host_cache_by_layer;
+    int                                    seq_size_per_block        = 0;
+    int                                    kernel_seq_size_per_block = 0;
+    int                                    num_kv_heads              = 0;
+    int                                    head_dim                  = 0;
+    bool                                   use_mla                   = false;
+    int                                    kv_lora_rank              = 0;
+    int                                    rope_head_dim             = 0;
 
     // Per-layer attention type (CacheGroupType::FULL or LINEAR).
     std::vector<rtp_llm::CacheGroupType>    layer_group_types;
@@ -85,6 +88,9 @@ struct KVCache {
         // Determine whether this layer is a full-attention layer.
         if (idx < 0 || static_cast<size_t>(idx) >= layer_group_types.size())
             throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
+        if (static_cast<size_t>(idx) < mla_host_cache_by_layer.size()) {
+            layer_cache.mla_host_cache = mla_host_cache_by_layer[idx];
+        }
         auto          base = kv_cache_base_by_layer[idx];
         torch::Tensor scale;
         if (!kv_scale_base_by_layer.empty()) {
@@ -111,17 +117,17 @@ struct KVCache {
                 const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
                 if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
                     // MLA layout: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
-                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
-                                                              (int64_t)kernel_seq_size_per_block,
-                                                              (int64_t)(kv_lora_rank + rope_head_dim)});
+                    layer_cache.kv_cache_base                           = base.reshape({kernel_block_num,
+                                                                                        (int64_t)kernel_seq_size_per_block,
+                                                                                        (int64_t)(kv_lora_rank + rope_head_dim)});
                     layer_cache.cache_store_tensor_is_kernel_block_view = kernel_blocks_per_kv_block > 1;
                 } else if (num_kv_heads > 0 && head_dim > 0) {
                     // MHA layout: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
-                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
-                                                              2,
-                                                              (int64_t)num_kv_heads,
-                                                              (int64_t)kernel_seq_size_per_block,
-                                                              (int64_t)head_dim});
+                    layer_cache.kv_cache_base                           = base.reshape({kernel_block_num,
+                                                                                        2,
+                                                                                        (int64_t)num_kv_heads,
+                                                                                        (int64_t)kernel_seq_size_per_block,
+                                                                                        (int64_t)head_dim});
                     layer_cache.cache_store_tensor_is_kernel_block_view = kernel_blocks_per_kv_block > 1;
                 } else {
                     layer_cache.kv_cache_base = base;
@@ -212,8 +218,7 @@ struct KVCache {
         // granularity. CacheStore keys remain physical-block based, so the
         // writer must merge all kernel pages owned by one physical block.
         layer_cache.cache_store_tensor_is_kernel_block_view =
-            is_full_region && kernel_seq_size_per_block > 0
-            && seq_size_per_block > kernel_seq_size_per_block;
+            is_full_region && kernel_seq_size_per_block > 0 && seq_size_per_block > kernel_seq_size_per_block;
         if (!kv_scale_base_by_layer_region.empty() && layer < kv_scale_base_by_layer_region.size()
             && attn < kv_scale_base_by_layer_region[layer].size()) {
             layer_cache.kv_scale_base = kv_scale_base_by_layer_region[layer][attn];

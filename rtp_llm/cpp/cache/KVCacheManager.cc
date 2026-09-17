@@ -350,6 +350,9 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     layout.layer_to_group_ids.resize(config_.layer_num);
     layout.layer_region_to_group_id.resize(config_.layer_num);
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_num);
+    if (!all_layout.mla_host_cache_by_layer.empty()) {
+        layout.mla_host_cache_by_layer.resize(config_.layer_num);
+    }
     if (!all_scale_tensors.empty()) {
         layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
     }
@@ -372,6 +375,9 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
         if (static_cast<size_t>(layer_id) < all_layer_tensors.size()) {
             layout.layer_to_groups[layer_id]          = all_layout.layer_to_groups[layer_id];
             layout.layers_to_kv_buffer_ptrs[layer_id] = all_layer_tensors[layer_id];
+            if (!layout.mla_host_cache_by_layer.empty()) {
+                layout.mla_host_cache_by_layer[layer_id] = all_layout.mla_host_cache_by_layer.at(layer_id);
+            }
         } else {
             RTP_LLM_CHECK(false);
         }
@@ -428,6 +434,9 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
 
     layout.layer_to_groups.resize(mtp_layer_num);
     layout.layers_to_kv_buffer_ptrs.resize(mtp_layer_num);
+    if (!all_layout.mla_host_cache_by_layer.empty()) {
+        layout.mla_host_cache_by_layer.resize(mtp_layer_num);
+    }
     if (!all_scale_tensors.empty()) {
         layout.layers_to_scale_buffer_ptrs.resize(mtp_layer_num);
     }
@@ -438,9 +447,9 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     // without these, ``build_metadata_eager`` finds an empty
     // ``group_region_names`` and emits zero ``paged_block_tables``,
     // which trips Attention.forward_decode's "no paged metadata" gate.
-    layout.group_region_names       = mtp_sub_config->group_region_names;
-    layout.group_types              = mtp_sub_config->group_types;
-    layout.group_seq_size_per_block = mtp_sub_config->group_seq_size_per_block;
+    layout.group_region_names             = mtp_sub_config->group_region_names;
+    layout.group_types                    = mtp_sub_config->group_types;
+    layout.group_seq_size_per_block       = mtp_sub_config->group_seq_size_per_block;
     layout.local_layer_region_to_group_id = mtp_sub_config->layer_region_to_group_id;
     RTP_LLM_CHECK_WITH_INFO(layout.local_layer_region_to_group_id.size() == mtp_layer_num,
                             "mtp_sub_configs[%d] local region-to-group mapping size %zu != layer_num %u",
@@ -466,6 +475,10 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
             if (global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < all_layer_tensors.size()) {
                 layout.layer_to_groups[local_layer_id]          = all_layout.layer_to_groups[global_layer_id];
                 layout.layers_to_kv_buffer_ptrs[local_layer_id] = all_layer_tensors[global_layer_id];
+                if (!layout.mla_host_cache_by_layer.empty()) {
+                    layout.mla_host_cache_by_layer[local_layer_id] =
+                        all_layout.mla_host_cache_by_layer.at(global_layer_id);
+                }
             } else {
                 RTP_LLM_CHECK(false);
             }
@@ -590,7 +603,7 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
         auto                      shared_cache = allocator_->sharedBlockCache();
         if (shared_cache) {
             device_cache_keys = shared_cache->allCacheKeys();
-            info.version = shared_cache->version();
+            info.version      = shared_cache->version();
         }
         // memory cache keys
         RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr,

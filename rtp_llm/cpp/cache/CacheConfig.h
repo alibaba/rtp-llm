@@ -40,6 +40,9 @@ struct CacheConfig {
     bool                           use_typed_cache_regions                  = false;
     bool                           use_opaque_kv_cache_store                = false;
     bool                           disable_decode_first_malloc_device_reuse = false;
+    // Applies only to independent DEFAULT MLA pools, never LINEAR/indexer pools.
+    uint32_t dsa_mla_hbm_blocks      = 0;
+    size_t   dsa_mla_resident_tokens = 0;
 
     // Model configuration
     rtp_llm::DataType dtype;
@@ -142,11 +145,11 @@ struct CacheConfig {
                 // Prefill keeps room for one previous batch of whole-state
                 // cache entries while the next batch owns its two live states.
                 const uint32_t cached_request_blocks = role_type == RoleType::DECODE ? 0u : 1u;
-                const uint32_t live_blocks = concurrency * (kResidentBlocksPerRequest + speculative_blocks);
-                const uint32_t auto_blocks = live_blocks + concurrency * cached_request_blocks;
-                rule_blocks = linear_request_cache_pool_blocks == 0 ?
-                                  auto_blocks :
-                                  std::max(linear_request_cache_pool_blocks, live_blocks);
+                const uint32_t live_blocks           = concurrency * (kResidentBlocksPerRequest + speculative_blocks);
+                const uint32_t auto_blocks           = live_blocks + concurrency * cached_request_blocks;
+                rule_blocks                          = linear_request_cache_pool_blocks == 0 ?
+                                                           auto_blocks :
+                                                           std::max(linear_request_cache_pool_blocks, live_blocks);
             } else if (use_explicit_hca_blocks) {
                 rule_blocks = dsv4_hca_state_pool_blocks;
             } else if (use_explicit_fixed_blocks) {
@@ -197,6 +200,8 @@ struct CacheConfig {
         OUTPUT_FIELD(block_num);
         OUTPUT_FIELD(seq_size_per_block);
         OUTPUT_FIELD(kernel_seq_size_per_block);
+        OUTPUT_FIELD(dsa_mla_hbm_blocks);
+        OUTPUT_FIELD(dsa_mla_resident_tokens);
         os << "\n";
 
         // Block sizing information section

@@ -6,6 +6,7 @@
 
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
@@ -92,6 +93,93 @@ KVCacheConfig makeKvConfig() {
 
 }  // namespace
 
+TEST(GLM53CacheConfigTest, DecodeHostTierPreservesKdaAndIndexerLayout) {
+    ScopedEnvVar      request_cache("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
+    ParallelismConfig pc;
+    pc.role_type = RoleType::DECODE;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size = 2;
+    auto kv                         = makeKvConfig();
+    kv.test_block_num               = 2048;
+    kv.seq_size_per_block           = 256;
+    const auto  model               = makeGlm53Config();
+    CacheConfig baseline;
+    {
+        ScopedEnvVar host("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "0");
+        baseline = CacheConfigCreator::createConfig(model, pc, runtime, kv);
+    }
+    ScopedEnvVar host("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "128");
+    ScopedEnvVar resident("RTP_LLM_DSA_MLA_RESIDENT_TOKENS", "0");
+    const auto   config = CacheConfigCreator::createConfig(model, pc, runtime, kv);
+    EXPECT_GE(config.dsa_mla_resident_tokens, 2 * 2051);
+    EXPECT_EQ(config.dsa_mla_resident_tokens % 128, 0);
+    EXPECT_GT(config.block_num, baseline.block_num);
+    EXPECT_EQ(config.fixed_pool_reserve_bytes, baseline.fixed_pool_reserve_bytes);
+    for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
+        const auto pool     = BlockPoolConfigHelper::createConfigForGroup(config, gid);
+        const auto old_pool = BlockPoolConfigHelper::createConfigForGroup(baseline, gid);
+        if (config.group_types[gid] == CacheGroupType::LINEAR) {
+            EXPECT_FALSE(pool.hasMlaHostCache());
+            EXPECT_EQ(pool.block_num, old_pool.block_num);
+            EXPECT_EQ(pool.total_size_bytes, old_pool.total_size_bytes);
+            EXPECT_EQ(pool.memory_layouts[0].kv_block_stride_bytes, old_pool.memory_layouts[0].kv_block_stride_bytes);
+        } else if (config.group_region_names[gid] == KVCacheRegionName::DEFAULT) {
+            EXPECT_TRUE(pool.hasMlaHostCache());
+            EXPECT_EQ(pool.memory_layouts[0].mla_hbm_blocks, config.dsa_mla_hbm_blocks);
+        } else {
+            EXPECT_FALSE(pool.hasMlaHostCache());
+            EXPECT_EQ(pool.memory_layouts[0].kv_block_stride_bytes, old_pool.memory_layouts[0].kv_block_stride_bytes);
+        }
+    }
+}
+
+TEST(GLM53CacheConfigTest, PrefillIgnoresDecodeHostTier) {
+    ScopedEnvVar      host("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "128");
+    ParallelismConfig pc;
+    pc.role_type      = RoleType::PREFILL;
+    auto kv           = makeKvConfig();
+    kv.test_block_num = 2048;
+    const auto config = CacheConfigCreator::createConfig(makeGlm53Config(), pc, RuntimeConfig{}, kv);
+    EXPECT_EQ(config.dsa_mla_resident_tokens, 0);
+    EXPECT_EQ(config.block_num, 2048);
+    for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
+        EXPECT_FALSE(BlockPoolConfigHelper::createConfigForGroup(config, gid).hasMlaHostCache());
+    }
+}
+
+TEST(GLM53CacheConfigTest, DecodeHostTierBudgetsMtpVerifyAndPreservesLayerMapping) {
+    ScopedEnvVar      request_cache("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
+    ScopedEnvVar      host("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "128");
+    ScopedEnvVar      resident("RTP_LLM_DSA_MLA_RESIDENT_TOKENS", "0");
+    ParallelismConfig pc;
+    pc.role_type = RoleType::DECODE;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size                      = 2;
+    auto kv                                              = makeKvConfig();
+    kv.test_block_num                                    = 2048;
+    auto main                                            = makeGlm53Config();
+    auto draft                                           = makeGlm53Config();
+    draft.num_layers                                     = 1;
+    draft.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_MTP;
+    sp.gen_num_per_cycle = 3;
+    const auto config = CacheConfigCreator::createSpConfig(main, draft, pc, runtime, kv, sp, std::nullopt, true, false);
+    EXPECT_GE(config.dsa_mla_resident_tokens, 2u * 4u * 2051u);
+    ASSERT_FALSE(config.mtp_sub_configs.empty());
+    for (const auto& sub : config.mtp_sub_configs) {
+        EXPECT_EQ(sub->dsa_mla_hbm_blocks, config.dsa_mla_hbm_blocks);
+        EXPECT_EQ(sub->dsa_mla_resident_tokens, config.dsa_mla_resident_tokens);
+        EXPECT_EQ(sub->block_num, config.block_num);
+        ASSERT_EQ(sub->local_to_global_layer_ids.size(), 1u);
+        EXPECT_GE(sub->local_to_global_layer_ids[0], main.num_layers);
+        for (size_t gid = 0; gid < sub->cache_specs.size(); ++gid) {
+            const auto pool = BlockPoolConfigHelper::createConfigForGroup(*sub, gid);
+            EXPECT_EQ(pool.hasMlaHostCache(), sub->group_region_names[gid] == KVCacheRegionName::DEFAULT);
+        }
+    }
+}
+
 TEST(GLM53CacheConfigTest, AppendsKPoolRegionsOnlyToMlaLayers) {
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, makeKvConfig(), false, 0);
@@ -102,6 +190,7 @@ TEST(GLM53CacheConfigTest, AppendsKPoolRegionsOnlyToMlaLayers) {
     EXPECT_EQ(config.group_region_names[2], KVCacheRegionName::INDEXER_KV);
     EXPECT_EQ(config.group_region_names[3], KVCacheRegionName::INDEXER_STATE);
     EXPECT_NE(dynamic_cast<MLAKVCacheSpec*>(config.cache_specs[0].get()), nullptr);
+    EXPECT_EQ(config.cache_specs[0]->scale_block_size_bytes(), 0u);
     auto* linear = dynamic_cast<LinearKVCacheSpec*>(config.cache_specs[1].get());
     ASSERT_NE(linear, nullptr);
     EXPECT_EQ(linear->ssm_state_dtype, DataType::TYPE_FP32);
@@ -446,7 +535,7 @@ TEST(GLM53CacheConfigTest, LinearRequestPoolBlockOverrideIsAppliedWithLiveReques
     RuntimeConfig runtime;
     runtime.max_generate_batch_size = 64;
 
-    auto kv_config = makeKvConfig();
+    auto kv_config                             = makeKvConfig();
     kv_config.linear_request_cache_pool_blocks = 384;
     auto config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 3);
     config.finalizeBlockNums(10000, runtime);
@@ -483,8 +572,10 @@ TEST(GLM53CacheConfigTest, OfficialShapeCacheBytesMatchOneMillionTokenAccounting
     auto* mla_spec = dynamic_cast<MLAKVCacheSpec*>(prefill_config.cache_specs[0].get());
     ASSERT_NE(mla_spec, nullptr);
     EXPECT_EQ(11u * mla_spec->block_size_bytes(), 743424u);
-    EXPECT_EQ(11u * mla_spec->scale_block_size_bytes(), 185856u);
-    EXPECT_EQ(prefill_config.group_block_size_bytes[0], 929280u);
+    // KPool owns the indexer bytes separately. FP8 MLA's four scales are
+    // already included in its 528-byte row, with no legacy scale region.
+    EXPECT_EQ(mla_spec->scale_block_size_bytes(), 0u);
+    EXPECT_EQ(prefill_config.group_block_size_bytes[0], 743424u);
     EXPECT_EQ(prefill_config.group_block_size_bytes[1], 18452480u);
     EXPECT_EQ(prefill_config.group_block_size_bytes[2], 46464u);
 

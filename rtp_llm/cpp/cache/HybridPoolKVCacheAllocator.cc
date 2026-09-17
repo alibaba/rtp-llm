@@ -279,9 +279,22 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     }
 
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        const auto layer_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerCacheBase();
-        const auto scale_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerScaleCacheBase();
-        const auto region_name   = static_cast<size_t>(gid < static_cast<int>(config_.group_region_names.size()) ?
+        const auto  layer_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerCacheBase();
+        const auto  scale_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerScaleCacheBase();
+        const auto& pool          = group_block_pools_[static_cast<size_t>(gid)];
+        const auto  hbm_tensors   = pool->allLayerHbmCacheBase();
+        if (!hbm_tensors.empty()) {
+            const auto& global_ids = config_.global_layer_ids[static_cast<size_t>(gid)];
+            RTP_LLM_CHECK_WITH_INFO(hbm_tensors.size() == global_ids.size(), "MLA HBM layer count mismatch");
+            layout.mla_host_cache_by_layer.resize(config_.layer_all_num);
+            for (size_t local = 0; local < global_ids.size(); ++local) {
+                auto& info             = layout.mla_host_cache_by_layer.at(global_ids[local]);
+                info.hbm_cache         = hbm_tensors[local];
+                info.block_generations = pool->blockGenerations();
+                info.hbm_tokens        = pool->mlaHbmTokens();
+            }
+        }
+        const auto region_name = static_cast<size_t>(gid < static_cast<int>(config_.group_region_names.size()) ?
                                                          config_.group_region_names[static_cast<size_t>(gid)] :
                                                          KVCacheRegionName::DEFAULT);
         RTP_LLM_CHECK_WITH_INFO(
@@ -386,6 +399,18 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
                                                group_block_pools_[static_cast<size_t>(gid)]->where());
 
             for (int layer_id : config_.global_layer_ids[static_cast<size_t>(gid)]) {
+                if (group_block_pools_[static_cast<size_t>(gid)]->blockGenerations().defined()) {
+                    const auto src =
+                        kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, src_block_index);
+                    const auto dst =
+                        kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, dest_block_index);
+                    RTP_LLM_CHECK_WITH_INFO(src.size() == 1 && dst.size() == 1, "MLA tier copy needs one KV buffer");
+                    const auto tier_copy_type = BatchCopyParams::get_copy_type(
+                        dst[0].is_cuda ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU_PINNED,
+                        src[0].is_cuda ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU_PINNED);
+                    copy_params.add(dst[0].addr, src[0].addr, src[0].size_bytes, tier_copy_type);
+                    continue;
+                }
                 auto src_addr_info =
                     kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, src_block_index);
                 auto dst_addr_info =
@@ -411,6 +436,13 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
     }
 
     execBatchCopy(copy_params);
+    for (const auto& pool : group_block_pools_) {
+        if (pool->blockGenerations().defined()) {
+            for (auto it = begin_ptr; it != end_ptr; ++it) {
+                pool->markBlockWritten(it->dst);
+            }
+        }
+    }
 }
 
 size_t HybridPoolKVCacheAllocator::freeBlocksNum() const {

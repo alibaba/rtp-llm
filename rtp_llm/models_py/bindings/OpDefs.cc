@@ -20,10 +20,17 @@ void registerPyOpDefs(pybind11::module& m) {
         .value("SWA_KV", rtp_llm::KVCacheRegionName::SWA_KV)
         .export_values();
 
+    pybind11::class_<rtp_llm::MlaHostCacheInfo>(m, "MlaHostCacheInfo")
+        .def(pybind11::init<>())
+        .def_readwrite("hbm_cache", &rtp_llm::MlaHostCacheInfo::hbm_cache)
+        .def_readwrite("block_generations", &rtp_llm::MlaHostCacheInfo::block_generations)
+        .def_readwrite("hbm_tokens", &rtp_llm::MlaHostCacheInfo::hbm_tokens);
+
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
         .def(pybind11::init<>())
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
+        .def_readwrite("mla_host_cache", &LayerKVCache::mla_host_cache)
         .def_readwrite("cache_store_segment_sizes",
                        &LayerKVCache::cache_store_segment_sizes,
                        "Contiguous source segments for asymmetric-TP linear cache transfer")
@@ -37,6 +44,7 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
+        .def_readwrite("mla_host_cache_by_layer", &KVCache::mla_host_cache_by_layer)
         .def_readwrite("kv_cache_base_by_layer", &KVCache::kv_cache_base_by_layer, "Per-layer KV cache tensors")
         .def_readwrite("kv_scale_base_by_layer", &KVCache::kv_scale_base_by_layer, "Per-layer KV scale tensors")
         .def_readwrite("seq_size_per_block", &KVCache::seq_size_per_block, "Physical (logical) block size in tokens")

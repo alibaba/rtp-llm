@@ -88,6 +88,69 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
 }  // namespace
 
 // Initialization Test
+// Physical blocks are 256 tokens; the working set only needs 128-token
+// alignment. Exercise both the tier boundary and layer stride with raw FP8 rows.
+TEST_F(BlockPoolTest, Glm53MlaHostTierAddressesAndGeneration) {
+    MemoryLayoutConfig layout;
+    layout.layer_num                  = 2;
+    layout.block_num                  = 6;
+    layout.dtype                      = TYPE_UINT8;
+    layout.is_mla                     = true;
+    layout.use_mla                    = true;
+    layout.seq_size_per_block         = 256;
+    layout.kernel_blocks_per_kv_block = 2;
+    layout.mla_hbm_blocks             = 2;
+    layout.mla_resident_tokens        = 2176;
+    layout.kv_block_stride_bytes      = 256 * 528;
+    layout.kv_block_pool_size_bytes   = 2 * 4 * layout.kv_block_stride_bytes;
+    layout.total_size_bytes           = layout.kv_block_pool_size_bytes;
+    BlockPoolConfig config;
+    config.block_num        = layout.block_num;
+    config.total_size_bytes = layout.total_size_bytes;
+    config.memory_layouts   = {layout};
+    block_pool_             = std::make_shared<BlockPool>(config);
+    ASSERT_TRUE(block_pool_->init());
+    auto host = block_pool_->allLayerCacheBase();
+    auto hbm  = block_pool_->allLayerHbmCacheBase();
+    ASSERT_EQ(host.size(), 2);
+    ASSERT_EQ(hbm.size(), 2);
+    EXPECT_EQ(block_pool_->where(), MemoryType::MEMORY_CPU_PINNED);
+    EXPECT_EQ(block_pool_->mlaHbmTokens(), 512);
+    for (int layer = 0; layer < 2; ++layer) {
+        EXPECT_TRUE(host[layer].is_pinned());
+        EXPECT_FALSE(host[layer].is_cuda());
+        EXPECT_TRUE(hbm[layer].is_cuda());
+        EXPECT_EQ(host[layer].size(0), 4);
+        EXPECT_EQ(hbm[layer].size(0), (512 + 2176) / 128);
+        for (int block = 0; block < 6; ++block) {
+            const auto info = block_pool_->convertIndexToBuffer(layer, block);
+            ASSERT_EQ(info.size(), 1);
+            EXPECT_EQ(info[0].is_cuda, block < 2);
+            const auto& backing = block < 2 ? hbm[layer] : host[layer];
+            const auto  offset  = (block < 2 ? block : block - 2) * layout.kv_block_stride_bytes;
+            EXPECT_EQ(info[0].addr, static_cast<char*>(backing.data_ptr()) + offset);
+            EXPECT_EQ(info[0].size_bytes, layout.kv_block_stride_bytes);
+            const auto partitioned = block_pool_->convertIndexToBuffer(layer, block, 2, 1);
+            ASSERT_EQ(partitioned.size(), 1);
+            EXPECT_EQ(partitioned[0].addr, info[0].addr);
+        }
+    }
+    const auto ids = block_pool_->malloc(5);
+    ASSERT_EQ(ids.size(), 5);
+    auto* generations = block_pool_->blockGenerations().data_ptr<int64_t>();
+    for (const auto id : ids)
+        EXPECT_EQ(generations[id], 1);
+    block_pool_->requestFree(ids);
+    const auto reused = block_pool_->malloc(5);
+    EXPECT_EQ(reused, ids);
+    for (const auto id : reused)
+        EXPECT_EQ(generations[id], 2);
+    block_pool_->markBlockWritten(reused.front());
+    EXPECT_EQ(generations[reused.front()], 3);
+    block_pool_->requestFree(reused);
+    EXPECT_ANY_THROW(block_pool_->convertIndexToBuffer(0, 6));
+}
+
 TEST_F(BlockPoolTest, ConstructorAndInit) {
     auto config = createTestConfig();
     block_pool_ = std::make_shared<BlockPool>(config);

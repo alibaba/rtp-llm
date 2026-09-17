@@ -6,6 +6,16 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [":cuda13_torch_nvshmem"],
+    "//conditions:default": [],
+})
+
 cc_library(
     name = "test_rpc_server",
     srcs = [
@@ -103,7 +113,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
-    ] + device_impl_target(),
+    ] + device_impl_target() + cuda13_torch_link_deps,
     copts = test_copts,
     exec_properties = {'gpu':'A10'},
 )
