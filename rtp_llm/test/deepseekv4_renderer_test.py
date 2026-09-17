@@ -264,6 +264,42 @@ class DeepseekV4ToolChoiceConstraintTest(TestCase):
                 ):
                     self.renderer.apply_chat_completion_constraints(request, config)
 
+    def test_forced_tool_choice_declares_its_request_grammar(self):
+        """强制工具调用会自装语法，端点必须据此让出 no-think envelope，否则引擎
+        每请求只接受一个语法字段的约束会把请求打成 400。"""
+        tools = _rtp_two_tools()
+        forced = [
+            {"type": "function", "function": {"name": "search"}},
+            "required",
+        ]
+        for tool_choice in forced:
+            with self.subTest(tool_choice=tool_choice):
+                request = ChatCompletionRequest(
+                    messages=[{"role": "user", "content": "Search docs"}],
+                    tools=tools,
+                    tool_choice=tool_choice,
+                )
+                self.assertTrue(self.renderer.installs_request_grammar(request))
+
+        inactive = [
+            ChatCompletionRequest(
+                messages=[{"role": "user", "content": "hi"}], tools=tools
+            ),
+            ChatCompletionRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=tools,
+                tool_choice="auto",
+            ),
+            ChatCompletionRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=tools,
+                tool_choice="none",
+            ),
+        ]
+        for request in inactive:
+            with self.subTest(request=request.tool_choice):
+                self.assertFalse(self.renderer.installs_request_grammar(request))
+
 
 @skipUnless(
     DSV4_ENCODING_PATH.exists(),
