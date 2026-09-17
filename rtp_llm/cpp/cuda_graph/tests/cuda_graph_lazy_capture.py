@@ -114,13 +114,14 @@ class TestCudaGraphLazyCapture(unittest.TestCase):
         runner = CudaGraphRunner()
         runner.init_generation_prefill(
             model or _Model(),
-            self.hidden_size,
-            4,
-            self.max_seq_len,
-            self.tokens_per_block,
-            self.tokens_per_block,
-            [4, 8],
-            mori_max_tokens,
+            max_requests=4,
+            max_seq_len=self.max_seq_len,
+            tokens_per_block=self.tokens_per_block,
+            kernel_tokens_per_block=self.tokens_per_block,
+            prefill_capture_seq_lens=[4, 8],
+            hidden_size=self.hidden_size,
+            lazy_capture=True,
+            mori_max_tokens=mori_max_tokens,
         )
         self.addCleanup(self._close_runner, runner)
         return runner

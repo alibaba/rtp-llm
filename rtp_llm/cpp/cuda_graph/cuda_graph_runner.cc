@@ -1291,11 +1291,14 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
     if (graph_it != graph_instances_.end()
         && graph_it->second.mem_hold_.py_model_inputs_.input_ids.defined()) {
         captured_inputs_ptr = &graph_it->second.mem_hold_.py_model_inputs_;
-    } else if (lazy_capture_ && mode == CudaGraphCheckMode::FORWARD
+    } else if (graph_it != graph_instances_.end() && lazy_capture_ && mode == CudaGraphCheckMode::FORWARD
                && capture_mem_hold_.py_model_inputs_.input_ids.defined()) {
         // Before a lazy bucket is captured, forward planning validates against
         // shared storage. Preparation waits until buildBucketInstance() creates
         // the bucket-specific destinations after the triggering eager forward.
+        // Buckets disabled at init (e.g. above Mori capacity) have no instance
+        // and must fall through to the fallback path: borrowing shared storage
+        // would later dereference the missing bucket instance.
         captured_inputs_ptr = &capture_mem_hold_.py_model_inputs_;
     } else {
         if (observe_fallback) {
