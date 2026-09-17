@@ -307,6 +307,7 @@ class PyModelInitResources:
     def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
+    pre_final_norm_output_indexes: typing.Optional[torch.Tensor]
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload
@@ -378,6 +379,7 @@ class PyModelInputs:
     def multimodal_inputs(self, arg0: PyMultimodalInputs) -> None: ...
 
 class PyModelOutputs:
+    pre_final_norm_hidden_states: typing.Optional[torch.Tensor]
     @typing.overload
     def __init__(self) -> None:
         """

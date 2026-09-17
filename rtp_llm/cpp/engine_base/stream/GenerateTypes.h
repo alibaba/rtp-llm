@@ -70,6 +70,9 @@ public:
         auto prefix_tensor =
             torch::from_blob(const_cast<int*>(prefix_prompt.data()), {(int64_t)prefix_prompt.size()}, torch::kInt32);
         input_ids = torch::cat({prefix_tensor, input_ids}, 0);
+        if (custom_output_token_position >= 0) {
+            custom_output_token_position += prefix_length;
+        }
     }
 
 public:
@@ -94,6 +97,9 @@ public:
     // Auto-TPM QoS priority (task40): 30/40/50/60/70; 0 = not set. TPS metrics
     // tagging only — never used for engine-side scheduling decisions.
     int32_t priority = 0;
+
+    // Selected position in input_ids; -1 means no custom output.
+    int custom_output_token_position = -1;
 
     // Batch grouping params
     int     group_size = 1;
@@ -159,6 +165,8 @@ public:
     std::optional<torch::Tensor>      logits;
     std::optional<torch::Tensor>      loss;
     std::optional<PromptLogitsOutput> prompt_logits;
+    // Output of the deployment-registered post-layers CustomHandler.
+    std::optional<torch::Tensor> custom_output;
 };
 
 class GenerateOutputs {

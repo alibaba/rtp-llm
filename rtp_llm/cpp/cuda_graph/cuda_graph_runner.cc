@@ -288,6 +288,15 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
                             token_num,
                             py_model_inputs.input_ids.numel());
     optimizedCopyAsync(inputs.input_ids, py_model_inputs.input_ids, token_num * sizeof(int));
+    if (py_model_inputs.pre_final_norm_output_indexes.defined()) {
+        auto& indexes = py_model_inputs.pre_final_norm_output_indexes;
+        indexes.zero_();
+        if (inputs.pre_final_norm_output_indexes.defined()) {
+            const auto count = inputs.pre_final_norm_output_indexes.numel();
+            TORCH_CHECK(count <= indexes.numel(), "selected hidden rows exceed graph request capacity");
+            indexes.narrow(0, 0, count).copy_(inputs.pre_final_norm_output_indexes, true);
+        }
+    }
     if (isGenerationPrefillCudaGraph() && token_num < state.graph_token_capacity) {
         py_model_inputs.input_ids.slice(0, token_num, state.graph_token_capacity)
             .fill_(generation_prefill_cuda_graph_pad_token_id_);
@@ -1108,6 +1117,11 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         }
         auto& mem_hold        = graph_instances_[state.current_real_graph_seq_len].mem_hold_;
         outputs.hidden_states = mem_hold.decoder_layer_hidden_states_.slice(0, 0, state.current_seq_len);
+        if (inputs.pre_final_norm_output_indexes.defined()) {
+            TORCH_CHECK(mem_hold.pre_final_norm_hidden_states_.defined(), "graph did not capture selected hidden rows");
+            outputs.pre_final_norm_hidden_states = mem_hold.pre_final_norm_hidden_states_.narrow(
+                0, 0, inputs.pre_final_norm_output_indexes.numel());
+        }
         if (mem_hold.mtp_target_hidden_states_.defined()) {
             outputs.mtp_target_hidden_states = mem_hold.mtp_target_hidden_states_.slice(0, 0, state.current_seq_len);
         }
@@ -1778,6 +1792,10 @@ void CudaGraphRunner::initCapture() {
         // owns only attention metadata and must not replace this tensor because
         // the captured graph retains its address.
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
+        if (capture_pre_final_norm_) {
+            inputs.pre_final_norm_output_indexes =
+                torch::zeros({static_cast<int64_t>(max_bs_)}, options_cuda_int32_.dtype(torch::kInt64));
+        }
         // input_hidden_size_ is the width of one input_hiddens row. PyWrappedModel sets it
         // to hidden_size * hc_mult for regular (MTP) graphs and to
         // len(target_layer_ids) * hidden_size for a DSpARK draft graph, so it must be used
@@ -1974,6 +1992,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 throw;
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+            // Retain the graph-owned selected tensor; no full-token feature buffer or extra copy.
+            graph_instances_[key].mem_hold_.pre_final_norm_hidden_states_ = outputs.pre_final_norm_hidden_states;
             auto& mtp_target_hidden_states = graph_instances_[key].mem_hold_.mtp_target_hidden_states_;
             RTP_LLM_CHECK_WITH_INFO(mtp_target_hidden_states.defined() == outputs.mtp_target_hidden_states.defined(),
                                     "MTP target hidden output presence changed during CUDA graph capture");
@@ -2105,6 +2125,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common direct assignments (no slice needed)
     inputs.attention_inputs.dtype       = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
     inputs.bert_embedding_inputs        = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
+    inputs.pre_final_norm_output_indexes = capture_mem_hold_.py_model_inputs_.pre_final_norm_output_indexes;
     inputs.attention_inputs.is_s_padded = true;
     refreshTaggedAttentionInputs(inputs);
 }

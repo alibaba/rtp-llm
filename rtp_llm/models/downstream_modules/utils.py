@@ -11,20 +11,27 @@ def create_custom_module(
     tokenizer: Optional[BaseTokenizer],
 ):
     task_type = config.task_type
-    if task_type == TaskType.LANGUAGE_MODEL:
-        return None
-
     # try import internal module
     try:
         from internal_source.rtp_llm.models.downstream_modules.utils import (
-            create_custom_module,
+            create_custom_module as create_internal_module,
         )
-
-        internal_module = create_custom_module(config, tokenizer)
-        if internal_module is not None:
-            return internal_module
     except ImportError:
-        logging.exception("internal module not found, using external module")
+        logging.debug("internal module not found, using external module")
+    else:
+        try:
+            internal_module = create_internal_module(config, tokenizer)
+            if internal_module is not None:
+                return internal_module
+        except ImportError:
+            # A configured generation head must not disappear silently. Other
+            # tasks retain their existing fallback to the external module.
+            if task_type == TaskType.LANGUAGE_MODEL:
+                raise
+            logging.debug("internal module not found, using external module")
+
+    if task_type == TaskType.LANGUAGE_MODEL:
+        return None
 
     model_type = config.model_type
     assert tokenizer is not None, "tokenizer should not be None"

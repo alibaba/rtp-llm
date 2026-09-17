@@ -231,6 +231,10 @@ def _record_for_request(result: dict, request_id: int) -> dict:
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    @unittest.skipUnless(torch.version.cuda, "MockEngine fixture requires CUDA")
+    def test_custom_output_selection_uses_prepared_prompt_and_reports_invalid_position(self):
+        _extension.run_custom_output_selection()
+
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:
@@ -447,6 +451,225 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             all("model_id_7_" in block["key"] for block in record["blocks"])
         )
         self.assertTrue(all("_tag_draft" in block["key"] for block in record["blocks"]))
+
+
+class Handler:
+    def __init__(self, stage):
+        self.stage = stage
+        self.calls = 0
+
+    def hidden_state_stage(self):
+        return self.stage
+
+    def extend_forward_args(self):
+        return ["selected_hidden_states"]
+
+    def extend_forward(self, selected_hidden_states):
+        self.calls += 1
+        return selected_hidden_states * 2
+
+
+def rms_norm(hidden):
+    fp32 = hidden.float()
+    return (fp32 * torch.rsqrt(fp32.square().mean(-1, keepdim=True) + 1e-5)).to(
+        hidden.dtype
+    )
+
+
+class ForwardModel:
+    supports_pre_final_norm = True
+    capture = True
+
+    def __init__(self, dtype=torch.bfloat16):
+        self.dtype = dtype
+
+    def initialize(self, resources):
+        return True
+
+    def prepare_fmha_impl(
+        self, inputs, is_cuda_graph=False, cuda_graph_selection_mode=None
+    ):
+        return None
+
+    def hidden(self, inputs):
+        return (
+            inputs.input_ids.unsqueeze(1) * 4 + torch.arange(4, device="cuda") + 1
+        ).to(self.dtype)
+
+    def forward_micro_batch(self, inputs):
+        return [_extension.PyModelOutputs(self.hidden(part)) for part in inputs]
+
+    def forward(self, inputs, fmha_impl=None):
+        hidden = self.hidden(inputs)
+        indexes = inputs.pre_final_norm_output_indexes
+        selected = (
+            hidden.index_select(0, indexes)
+            if indexes is not None and self.capture
+            else None
+        )
+        hidden.copy_(rms_norm(hidden))  # Capture must survive an in-place norm.
+        outputs = _extension.PyModelOutputs(hidden)
+        if selected is not None:
+            outputs.pre_final_norm_hidden_states = selected
+        return outputs
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
+class CustomOutputPostLayersTest(unittest.TestCase):
+    def run_case(self, handler, model=None, python_norm=True, graph=False, **overrides):
+        model = model or ForwardModel()
+        args = dict(
+            model=model,
+            handler=handler,
+            hidden=torch.arange(24, device="cuda", dtype=model.dtype).reshape(6, 4) + 1,
+            lm_indexes=torch.tensor(
+                [2, 5] if python_norm else [0, 2, 5], dtype=torch.int32
+            ),
+            custom_indexes=torch.tensor([1, 4], dtype=torch.int32),
+            decode_batch=0 if python_norm else 1,
+            python_norm=python_norm,
+            all_logits=not python_norm,
+            enable_graph=graph,
+        )
+        args.update(overrides)
+        return _extension.run_post_layers(**args)
+
+    def test_scoring_preserves_logits_and_graph_behavior(self):
+        # Representative paths, not a Cartesian product of every option.
+        for python_norm, graph, dtype in (
+            (True, True, torch.bfloat16),
+            (False, False, torch.float16),
+            (False, False, torch.float32),
+        ):
+            baseline = None
+            for stage in (None, "pre_final_norm", "post_final_norm"):
+                with self.subTest(
+                    python_norm=python_norm, graph=graph, dtype=dtype, stage=stage
+                ):
+                    handler = Handler(stage) if stage else None
+                    result = self.run_case(
+                        handler,
+                        ForwardModel(dtype),
+                        python_norm,
+                        graph,
+                    )
+                    self.assertEqual(result["custom_output_error"], "")
+                    if stage is None:
+                        self.assertIsNone(result["custom_output"])
+                        baseline = result["logits"]
+                        next_baseline = result.get("next_logits")
+                        continue
+                    # Only real context forwards invoke the head, never startup or decode.
+                    self.assertEqual(handler.calls, 2 if graph else 1)
+                    hidden = (
+                        torch.arange(24, device="cuda", dtype=dtype).reshape(6, 4) + 1
+                    )
+                    expected = (
+                        hidden if stage == "pre_final_norm" else rms_norm(hidden)
+                    )[[1, 4]] * 2
+                    torch.testing.assert_close(result["custom_output"], expected)
+                    torch.testing.assert_close(
+                        result["logits"], baseline, rtol=0, atol=0
+                    )
+                    if graph:
+                        self.assertEqual(result["graph_status"], "replayed")
+                        self.assertIsNone(result["decode_custom_output"])
+                        next_hidden = hidden.flip(0)
+                        next_expected = (
+                            next_hidden
+                            if stage == "pre_final_norm"
+                            else rms_norm(next_hidden)
+                        )[[0, 3]] * 2
+                        torch.testing.assert_close(
+                            result["next_custom_output"], next_expected
+                        )
+                        torch.testing.assert_close(
+                            result["next_logits"], next_baseline, rtol=0, atol=0
+                        )
+
+    def test_cached_tokens_are_omitted_from_scoring(self):
+        for python_norm, graph in ((True, True), (False, False)):
+            baseline = self.run_case(None, python_norm=python_norm, graph=graph)
+            for stage in ("pre_final_norm", "post_final_norm"):
+                for indexes in ([-1, 4], [1, -1], [-1, -1]):
+                    with self.subTest(stage=stage, indexes=indexes, graph=graph):
+                        handler = Handler(stage)
+                        result = self.run_case(
+                            handler,
+                            python_norm=python_norm,
+                            graph=graph,
+                            custom_indexes=torch.tensor([index for index in indexes if index >= 0], dtype=torch.int64),
+                        )
+                        self.assertEqual(result["custom_output_error"], "")
+                        torch.testing.assert_close(
+                            result["logits"], baseline["logits"], rtol=0, atol=0
+                        )
+                        valid = [index for index in indexes if index >= 0]
+                        if not valid:
+                            self.assertIsNone(result["custom_output"])
+                            self.assertEqual(handler.calls, 0)
+                            continue
+                        self.assertEqual(handler.calls, 2 if graph else 1)
+                        hidden = (
+                            torch.arange(24, device="cuda", dtype=torch.bfloat16)
+                            .reshape(6, 4) + 1
+                        )
+                        expected = (
+                            hidden if stage == "pre_final_norm" else rms_norm(hidden)
+                        )[valid] * 2
+                        torch.testing.assert_close(result["custom_output"], expected)
+                        if graph:
+                            torch.testing.assert_close(
+                                result["next_logits"], baseline["next_logits"], rtol=0, atol=0
+                            )
+                            next_hidden = hidden.flip(0)
+                            expected = (
+                                next_hidden if stage == "pre_final_norm" else rms_norm(next_hidden)
+                            )[[index - 1 for index in valid]] * 2
+                            torch.testing.assert_close(result["next_custom_output"], expected)
+                            self.assertIsNone(result["decode_custom_output"])
+
+    def test_no_capture_is_an_error_and_unselected_requests_do_not_score(self):
+        model = ForwardModel()
+        model.capture = False
+        result = self.run_case(Handler("pre_final_norm"), model)
+        self.assertIsNone(result["custom_output"])
+        self.assertIn("pre_final_norm", result["custom_output_error"])
+        result = self.run_case(Handler("pre_final_norm"), custom_indexes=None)
+        self.assertIsNone(result["custom_output"])
+        model.custom_output_handler = Handler("invalid_must_not_be_read")
+        self.assertIsNone(self.run_case(None, model)["custom_output"])
+
+    def test_invalid_contract_fails_startup_and_bad_output_fails_request(self):
+        with self.assertRaisesRegex(RuntimeError, "unsupported.*hidden_state_stage"):
+            self.run_case(Handler("invalid"))
+        handler = Handler("post_final_norm")
+
+        def fail(selected_hidden_states):
+            raise ValueError("head failure")
+
+        for forward, message in (
+            (
+                lambda selected_hidden_states: selected_hidden_states.double(),
+                "output dtype",
+            ),
+            (
+                lambda selected_hidden_states: selected_hidden_states.cpu(),
+                "input CUDA device",
+            ),
+            (lambda selected_hidden_states: selected_hidden_states[:1], "one row"),
+            (lambda selected_hidden_states: selected_hidden_states[:0], "nonempty"),
+            (fail, "head failure"),
+        ):
+            with self.subTest(message=message):
+                handler.extend_forward = forward
+                result = self.run_case(handler)
+                self.assertIsNone(result["custom_output"])
+                self.assertIn(message, result["custom_output_error"])
+        model = ForwardModel()
+        model.supports_pre_final_norm = False
+        with self.assertRaisesRegex(RuntimeError, "does not support pre_final_norm"):
+            self.run_case(Handler("pre_final_norm"), model)
 
 
 if __name__ == "__main__":

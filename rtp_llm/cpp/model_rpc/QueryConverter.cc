@@ -470,6 +470,12 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
         pb->set_end_pos(pl.end_pos);
     }
 
+    if (std::any_of(
+            source_outputs.begin(), source_outputs.end(), [](const auto& r) { return r.custom_output.has_value(); })) {
+        stackBuffersToTensorPB(
+            flatten_output->mutable_custom_output(), source_outputs, [](const auto& r) { return r.custom_output; });
+    }
+
     RTP_LLM_LOG_DEBUG("transResponse done");
 }
 

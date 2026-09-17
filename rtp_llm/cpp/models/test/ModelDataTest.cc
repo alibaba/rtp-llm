@@ -122,6 +122,14 @@ TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
               (std::array<int64_t, 2>{1048576, 12288}));
 }
 
+TEST_F(ModelDataTest, testCustomOutputIndexesStayRankLocal) {
+    GptModelInputs inputs;
+    inputs.combo_tokens          = torch::tensor({10, 20, 30, 40}, torch::kInt32);
+    const auto hints             = getModelInputShapeHints(inputs);
+    inputs.custom_output_indexes = torch::tensor({1, 3}, torch::kInt32);
+    EXPECT_EQ(getModelInputShapeHints(inputs), hints);
+}
+
 TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) {
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(-1, 1), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(1, 0), RTPException);

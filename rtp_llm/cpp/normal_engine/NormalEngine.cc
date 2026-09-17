@@ -153,6 +153,12 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    if (params.py_model && !params.py_model.is_none()) {
+        py::gil_scoped_acquire gil;
+        if (py::hasattr(params.py_model, "custom_output_handler")) {
+            custom_output_selector_ = params.py_model.attr("custom_output_handler").attr("select_token_position");
+        }
+    }
     // Reject an explicitly requested generation-prefill/speculative combination
     // on PDFUSION before warmup or runner creation. The shared request predicate
     // excludes roles that ignore this feature. Do not gate on full runner
@@ -314,6 +320,10 @@ void NormalEngine::initScheduler() {
 NormalEngine::~NormalEngine() {
     RTP_LLM_LOG_INFO("destory normal engine");
     (void)stop();
+    if (custom_output_selector_) {
+        py::gil_scoped_acquire gil;
+        custom_output_selector_ = py::object();
+    }
 }
 
 size_t NormalEngine::warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block) {
@@ -729,6 +739,18 @@ absl::Status NormalEngine::trySaveStepError() const {
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
+    std::string selection_error;
+    if (custom_output_selector_) {
+        py::gil_scoped_acquire gil;
+        try {
+            // All entrypoints arrive after multimodal expansion, before system-prefix insertion.
+            const int position = custom_output_selector_(input->input_ids, input->text_tokens_mask).cast<int>();
+            TORCH_CHECK(position >= -1 && position < input->inputLength(), "custom output position outside prompt");
+            input->custom_output_token_position = position;
+        } catch (const std::exception& error) {
+            selection_error = error.what();
+        }
+    }
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
     // DecodeRpcServer calls makeStream() before enqueue() so it can allocate the
@@ -736,6 +758,9 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
     // invariants here as well; otherwise that first allocation is planned without
     // the speculative-round headroom.
     stream->setReserveStep(reserve_step_);
+    if (!selection_error.empty()) {
+        stream->reportError(ErrorCode::INVALID_PARAMS, selection_error);
+    }
     return stream;
 }
 
@@ -745,9 +770,7 @@ void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
-        input, model_config_, runtime_config, resource_context_, metrics_reporter_);
-    stream->setReserveStep(reserve_step_);
+    auto stream = makeStream(input);
     (void)scheduler_->enqueue(stream);
     return stream;
 }
@@ -757,10 +780,7 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     std::vector<GenerateStreamPtr> streams;
     streams.reserve(inputs.size());
     for (auto& inp : inputs) {
-        auto stream = std::make_shared<NormalGenerateStream>(
-            inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
-        stream->setReserveStep(reserve_step_);
-        streams.push_back(stream);
+        streams.push_back(makeStream(inp));
     }
     return scheduler_->enqueueGroup(streams);
 }
