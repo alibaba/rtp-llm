@@ -1,5 +1,6 @@
 """Validate K3 cache binding and the supported PageRR execution layout."""
 
+import math
 from typing import Any, Sequence
 
 import torch
@@ -129,5 +130,8 @@ def validate_kimi_k3_page_rr_target(
     budget = whole_model_query_budget_tokens
     if budget > 0 and (budget < checkpoint_tokens or budget % upstream_shards):
         raise ValueError("Kimi K3 query budget cannot advance an aligned checkpoint")
-    if int(attention.mla_prefill_expanded_kv_budget_bytes) < 0:
-        raise ValueError("Kimi K3 expanded-KV byte budget must be non-negative")
+    expanded_kv_budget_gib = float(attention.mla_prefill_expanded_kv_budget_gib)
+    if not math.isfinite(expanded_kv_budget_gib) or expanded_kv_budget_gib < 0:
+        raise ValueError(
+            "Kimi K3 expanded-KV GiB budget must be non-negative and finite"
+        )

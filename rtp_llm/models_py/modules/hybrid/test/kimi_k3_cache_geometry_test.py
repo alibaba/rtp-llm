@@ -153,7 +153,7 @@ class KimiK3PageRRTargetTest(unittest.TestCase):
                 attn_config=SimpleNamespace(
                     kv_cache_dtype=cache_dtype,
                     mla_fp8_compute=mla_fp8_compute,
-                    mla_prefill_expanded_kv_budget_bytes=0,
+                    mla_prefill_expanded_kv_budget_gib=0.0,
                     kv_lora_rank=512,
                     rope_head_dim=64,
                     nope_head_dim=128,

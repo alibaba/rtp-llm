@@ -6,16 +6,23 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_forward_
     plan_flashmla_forward,
 )
 
-PAGE_SIZE = 4
+PREFIX_CHUNK_ALIGNMENT_TOKENS = 4
 BYTES_PER_TOKEN = 16
+GIB = 1024**3
 
 
-def make_plan(q_lens, prefix_lens, *, capacity_tokens, page_size=PAGE_SIZE):
+def make_plan(
+    q_lens,
+    prefix_lens,
+    *,
+    capacity_tokens,
+    prefix_chunk_alignment_tokens=PREFIX_CHUNK_ALIGNMENT_TOKENS,
+):
     return plan_flashmla_forward(
         q_lens,
         prefix_lens,
-        page_size=page_size,
-        expanded_kv_budget_bytes=capacity_tokens * BYTES_PER_TOKEN,
+        prefix_chunk_alignment_tokens=prefix_chunk_alignment_tokens,
+        expanded_kv_budget_gib=capacity_tokens * BYTES_PER_TOKEN / GIB,
         expanded_kv_bytes_per_token=BYTES_PER_TOKEN,
     )
 
@@ -30,7 +37,14 @@ def launch_slices(plan):
     ]
 
 
-def assert_prefix_invariants(test_case, plan, q_lens, prefix_lens, *, page_size):
+def assert_prefix_invariants(
+    test_case,
+    plan,
+    q_lens,
+    prefix_lens,
+    *,
+    prefix_chunk_alignment_tokens,
+):
     if plan.route is FlashMLAForwardRoute.FULL:
         test_case.assertEqual(plan.prefix_launches, ())
         test_case.assertEqual(plan.max_expanded_kv_tokens, 0)
@@ -59,13 +73,19 @@ def assert_prefix_invariants(test_case, plan, q_lens, prefix_lens, *, page_size)
 
         for slice_index, item in enumerate(launch.slices):
             test_case.assertEqual(item.prefix_start, cursors[item.request_idx])
-            test_case.assertEqual(item.prefix_start % page_size, 0)
+            test_case.assertEqual(
+                item.prefix_start % prefix_chunk_alignment_tokens,
+                0,
+            )
             test_case.assertGreater(item.prefix_len, 0)
             cursor_after = item.prefix_start + item.prefix_len
             test_case.assertLessEqual(cursor_after, prefix_lens[item.request_idx])
             if cursor_after < prefix_lens[item.request_idx]:
                 test_case.assertEqual(slice_index, len(launch.slices) - 1)
-                test_case.assertEqual(item.prefix_len % page_size, 0)
+                test_case.assertEqual(
+                    item.prefix_len % prefix_chunk_alignment_tokens,
+                    0,
+                )
             cursors[item.request_idx] = cursor_after
             owner_launch_counts[item.request_idx] += 1
             if cursor_after == prefix_lens[item.request_idx]:
@@ -74,7 +94,7 @@ def assert_prefix_invariants(test_case, plan, q_lens, prefix_lens, *, page_size)
         if active:
             test_case.assertLess(
                 plan.capacity_tokens - launch.expanded_kv_tokens,
-                page_size,
+                prefix_chunk_alignment_tokens,
             )
 
     test_case.assertEqual(cursors, list(prefix_lens))
@@ -97,9 +117,23 @@ def assert_prefix_invariants(test_case, plan, q_lens, prefix_lens, *, page_size)
 
 
 class FlashMLAForwardPlanTest(unittest.TestCase):
+    def test_prefix_chunk_alignment_must_be_positive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "alignment must be positive"):
+            plan_flashmla_forward(
+                (1,),
+                (1,),
+                prefix_chunk_alignment_tokens=0,
+                expanded_kv_budget_gib=0,
+                expanded_kv_bytes_per_token=BYTES_PER_TOKEN,
+            )
+
     def test_prefix_budget_must_fit_one_page(self) -> None:
-        with self.assertRaisesRegex(ValueError, "at least one prefix page"):
-            make_plan((1,), (8,), capacity_tokens=PAGE_SIZE - 1)
+        with self.assertRaisesRegex(ValueError, "at least one physical prefix chunk"):
+            make_plan(
+                (1,),
+                (8,),
+                capacity_tokens=PREFIX_CHUNK_ALIGNMENT_TOKENS - 1,
+            )
 
     def test_route_selection_and_budget_boundaries(self) -> None:
         cases = (
@@ -116,13 +150,13 @@ class FlashMLAForwardPlanTest(unittest.TestCase):
             ("q_over_budget", (9,), (1,), 128, FlashMLAForwardRoute.HYBRID, 8),
             ("no_prefix", (7, 1), (0, 0), 128, FlashMLAForwardRoute.FULL, 8),
         )
-        for name, q_lens, prefix_lens, budget, route, capacity in cases:
+        for name, q_lens, prefix_lens, budget_bytes, route, capacity in cases:
             with self.subTest(name=name):
                 plan = plan_flashmla_forward(
                     q_lens,
                     prefix_lens,
-                    page_size=PAGE_SIZE,
-                    expanded_kv_budget_bytes=budget,
+                    prefix_chunk_alignment_tokens=PREFIX_CHUNK_ALIGNMENT_TOKENS,
+                    expanded_kv_budget_gib=budget_bytes / GIB,
                     expanded_kv_bytes_per_token=BYTES_PER_TOKEN,
                 )
                 self.assertIs(plan.route, route)
@@ -132,7 +166,7 @@ class FlashMLAForwardPlanTest(unittest.TestCase):
                     plan,
                     q_lens,
                     prefix_lens,
-                    page_size=PAGE_SIZE,
+                    prefix_chunk_alignment_tokens=PREFIX_CHUNK_ALIGNMENT_TOKENS,
                 )
 
     def test_request_major_packing_splits_only_the_boundary_request(self) -> None:
@@ -177,7 +211,7 @@ class FlashMLAForwardPlanTest(unittest.TestCase):
                     q_lens,
                     prefix_lens,
                     capacity_tokens=capacity,
-                    page_size=128,
+                    prefix_chunk_alignment_tokens=128,
                 )
                 self.assertEqual(launch_slices(plan), expected)
                 assert_prefix_invariants(
@@ -185,7 +219,7 @@ class FlashMLAForwardPlanTest(unittest.TestCase):
                     plan,
                     q_lens,
                     prefix_lens,
-                    page_size=128,
+                    prefix_chunk_alignment_tokens=128,
                 )
 
     def test_large_batches_preserve_coverage_without_special_cases(self) -> None:
@@ -193,13 +227,14 @@ class FlashMLAForwardPlanTest(unittest.TestCase):
             with self.subTest(batch_size=batch_size):
                 q_lens = (1,) * batch_size
                 prefix_lens = tuple(
-                    PAGE_SIZE * (1 + index % 5) + index % PAGE_SIZE
+                    PREFIX_CHUNK_ALIGNMENT_TOKENS * (1 + index % 5)
+                    + index % PREFIX_CHUNK_ALIGNMENT_TOKENS
                     for index in range(batch_size)
                 )
                 plan = make_plan(
                     q_lens,
                     prefix_lens,
-                    capacity_tokens=PAGE_SIZE * batch_size,
+                    capacity_tokens=PREFIX_CHUNK_ALIGNMENT_TOKENS * batch_size,
                 )
                 self.assertIs(plan.route, FlashMLAForwardRoute.HYBRID)
                 self.assertLessEqual(
@@ -211,13 +246,57 @@ class FlashMLAForwardPlanTest(unittest.TestCase):
                     plan,
                     q_lens,
                     prefix_lens,
-                    page_size=PAGE_SIZE,
+                    prefix_chunk_alignment_tokens=PREFIX_CHUNK_ALIGNMENT_TOKENS,
+                )
+
+    def test_production_shape_uses_physical_page_alignment(self) -> None:
+        physical_page_tokens = 1024
+        q_lens = (2048,) * 32
+        prefix_lens = (1_032_192,) * 32
+        plan = plan_flashmla_forward(
+            q_lens,
+            prefix_lens,
+            prefix_chunk_alignment_tokens=physical_page_tokens,
+            expanded_kv_budget_gib=4.0,
+            expanded_kv_bytes_per_token=3840,
+        )
+
+        self.assertIs(plan.route, FlashMLAForwardRoute.HYBRID)
+        self.assertEqual(plan.capacity_tokens, 1_118_208)
+        self.assertEqual(len(plan.prefix_launches), 30)
+        assert_prefix_invariants(
+            self,
+            plan,
+            q_lens,
+            prefix_lens,
+            prefix_chunk_alignment_tokens=physical_page_tokens,
+        )
+
+    def test_capacity_and_splits_follow_configured_physical_page(self) -> None:
+        for physical_page_tokens in (1024, 8192):
+            with self.subTest(physical_page_tokens=physical_page_tokens):
+                plan = make_plan(
+                    (1, 1),
+                    (physical_page_tokens * 5 + 1, physical_page_tokens * 3),
+                    capacity_tokens=physical_page_tokens * 2,
+                    prefix_chunk_alignment_tokens=physical_page_tokens,
+                )
+                self.assertEqual(
+                    plan.capacity_tokens,
+                    physical_page_tokens * 2,
+                )
+                assert_prefix_invariants(
+                    self,
+                    plan,
+                    (1, 1),
+                    (physical_page_tokens * 5 + 1, physical_page_tokens * 3),
+                    prefix_chunk_alignment_tokens=physical_page_tokens,
                 )
 
     def test_equivalent_shapes_reuse_cached_plan(self) -> None:
         kwargs = {
-            "page_size": 128,
-            "expanded_kv_budget_bytes": 5 * 1024**3,
+            "prefix_chunk_alignment_tokens": 128,
+            "expanded_kv_budget_gib": 5.0,
             "expanded_kv_bytes_per_token": 7680,
         }
         first = plan_flashmla_forward([1, 64], [1 << 20, 128], **kwargs)
@@ -230,12 +309,16 @@ class FlashMLAForwardPlanTest(unittest.TestCase):
         checked = 0
         for _ in range(120):
             batch_size = rng.randint(1, 96)
-            page_size = rng.choice((4, 8, 16))
+            prefix_chunk_alignment_tokens = rng.choice((4, 8, 16))
             q_lens = tuple(rng.randint(1, 3) for _ in range(batch_size))
             prefix_lens = tuple(
-                rng.randint(0, page_size * 6 + page_size - 1) for _ in range(batch_size)
+                rng.randint(
+                    0,
+                    prefix_chunk_alignment_tokens * 7 - 1,
+                )
+                for _ in range(batch_size)
             )
-            capacity_tokens = page_size * rng.randint(2, 12)
+            capacity_tokens = prefix_chunk_alignment_tokens * rng.randint(2, 12)
             if (
                 sum(q_lens) > capacity_tokens
                 or sum(q_lens) + sum(prefix_lens) <= capacity_tokens
@@ -245,13 +328,13 @@ class FlashMLAForwardPlanTest(unittest.TestCase):
                 q_lens,
                 prefix_lens,
                 capacity_tokens=capacity_tokens,
-                page_size=page_size,
+                prefix_chunk_alignment_tokens=prefix_chunk_alignment_tokens,
             )
             second = make_plan(
                 q_lens,
                 prefix_lens,
                 capacity_tokens=capacity_tokens,
-                page_size=page_size,
+                prefix_chunk_alignment_tokens=prefix_chunk_alignment_tokens,
             )
             self.assertEqual(first, second)
             assert_prefix_invariants(
@@ -259,7 +342,7 @@ class FlashMLAForwardPlanTest(unittest.TestCase):
                 first,
                 q_lens,
                 prefix_lens,
-                page_size=page_size,
+                prefix_chunk_alignment_tokens=prefix_chunk_alignment_tokens,
             )
             checked += 1
         self.assertGreater(checked, 0)

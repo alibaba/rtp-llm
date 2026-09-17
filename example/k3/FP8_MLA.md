@@ -74,7 +74,7 @@ export LOAD_METHOD=fastsafetensors
 export RTP_LLM_SKIP_BUILD=1
 export SMOKE_SUITE=all
 # Default K3 prefix-expansion budget: 6 GiB per rank.
-export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES=6442450944
+export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB=6
 python3 example/k3/kimi_k3_full_model_two_host_pd_smoke_driver.py
 ```
 
@@ -118,8 +118,8 @@ Ordinary smoke does not arm a profiler or perform timed warmups. Its
 `planned_prefix_blocks` describes coverage computed from cache metadata; actual
 FP8 kernel launches and output/LSE merges require the separate timeline audit.
 
-The rebased implementation uses the upstream expanded-KV byte budget and forward
-planner. FP8 historical chunks restore the cache into bounded BF16 latent/RoPE
-buffers before projection and FP8 attention; BF16 retains the upstream fused
-gather and FlashMLA path. Historical performance results from the previous
-branch do not validate this rebased implementation.
+The implementation uses the expanded-KV GiB budget and forward planner. For FP8
+MLA, each historical chunk is charged for both the BF16 KV-up staging tensor and
+the overlapping FP8 K/V attention copy. BF16 retains the fused gather and
+FlashMLA path. Historical performance results from the previous branch do not
+validate this implementation.

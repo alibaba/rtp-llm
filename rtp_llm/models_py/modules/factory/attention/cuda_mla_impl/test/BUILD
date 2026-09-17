@@ -38,7 +38,10 @@ py_test(
 
 py_test(
     name = "mla_page_rr_nccl_test",
-    srcs = ["mla_page_rr_nccl_test.py"],
+    srcs = [
+        "flashmla_forward_test_utils.py",
+        "mla_page_rr_nccl_test.py",
+    ],
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:testlib",

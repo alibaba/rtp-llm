@@ -10,6 +10,49 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_page_rr_cache
 )
 
 
+class MlaPageRRChunkDescriptorTest(unittest.TestCase):
+    def test_descriptor_tracks_nonzero_starts_and_original_requests(self) -> None:
+        for page_tokens, shard_size in ((128, 2), (1024, 8), (8192, 16)):
+            with self.subTest(page_tokens=page_tokens, shard_size=shard_size):
+                adapter = MlaPageRRCacheAdapter(page_tokens, shard_size, 0)
+                descriptor = adapter.build_prefix_chunk_descriptor(
+                    request_indices=(7, 2),
+                    prefix_starts=(page_tokens, page_tokens * (shard_size + 1)),
+                    prefix_lens=(page_tokens * shard_size + 1, page_tokens - 1),
+                    feature_width=576,
+                )
+
+                self.assertEqual(descriptor.request_indices, (7, 2))
+                self.assertEqual(
+                    descriptor.global_page_starts,
+                    (1, shard_size + 1),
+                )
+                self.assertEqual(descriptor.local_page_offsets, (0, 2, 3))
+                self.assertEqual(
+                    descriptor.output_token_offsets,
+                    (0, page_tokens * shard_size + 1, page_tokens * (shard_size + 1)),
+                )
+                self.assertEqual(descriptor.total_local_pages, 3)
+
+    def test_descriptor_rejects_invalid_chunk_vectors(self) -> None:
+        adapter = MlaPageRRCacheAdapter(1024, 8, 0, kernel_page_tokens=128)
+        invalid = (
+            ("same length", (0, 1), (0,), (1,)),
+            ("physical-page aligned", (0,), (128,), (1,)),
+            ("positive", (0,), (0,), (0,)),
+        )
+        for message, request_indices, starts, lengths in invalid:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                (TypeError, ValueError), message
+            ):
+                adapter.build_prefix_chunk_descriptor(
+                    request_indices=request_indices,
+                    prefix_starts=starts,
+                    prefix_lens=lengths,
+                    feature_width=576,
+                )
+
+
 class MlaPageRRSlotMappingTest(unittest.TestCase):
     PAGE_TOKENS = 128
     SHARD_SIZE = 8

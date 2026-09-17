@@ -125,12 +125,12 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
         )
         for weight in ("0", "1"):
             for mla in ("0", "1"):
-                for budget in ("0", "268435456"):
+                for budget in ("0", "0.25"):
                     settings = {
                         "FP8_GEMM": weight,
                         "FP8_KV_CACHE": mla,
                         "FP8_MLA": mla,
-                        "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES": budget,
+                        "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB": budget,
                         "LOAD_METHOD": "fastsafetensors",
                     }
                     with self.subTest(

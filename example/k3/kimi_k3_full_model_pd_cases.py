@@ -7,6 +7,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import math
 import pathlib
 import re
 import threading
@@ -166,7 +167,7 @@ def parse_args() -> argparse.Namespace:
         "--long-prefix-target-tokens", type=int, default=DEFAULT_TARGET_TOKENS
     )
     parser.add_argument("--long-prefix-kernel-page-size", type=int, default=128)
-    parser.add_argument("--expanded-kv-budget-bytes", type=int, default=6442450944)
+    parser.add_argument("--expanded-kv-budget-gib", type=float, default=6.0)
     parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args()
     if args.batch_size < 4:
@@ -188,7 +189,10 @@ def parse_args() -> argparse.Namespace:
     ):
         if getattr(args, key) <= 0:
             parser.error(f"--{key.replace('_', '-')} must be positive")
-    if args.suite == "all" and args.expanded_kv_budget_bytes <= 0:
+    if args.suite == "all" and (
+        not math.isfinite(args.expanded_kv_budget_gib)
+        or args.expanded_kv_budget_gib <= 0
+    ):
         parser.error(
             "all suite needs a positive expansion budget for the long prefix case"
         )
@@ -1483,7 +1487,7 @@ class Runner:
             self.args.output.parent / "long-prefix",
             self.args.namespace,
             timeout=self.args.timeout,
-            budget=self.args.expanded_kv_budget_bytes,
+            budget=int(self.args.expanded_kv_budget_gib * 1024**3),
             page_size=self.args.block_size,
             kernel_page_size=self.args.long_prefix_kernel_page_size,
             bytes_per_token=expanded_bytes_per_token(

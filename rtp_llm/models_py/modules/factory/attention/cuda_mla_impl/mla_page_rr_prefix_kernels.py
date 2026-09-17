@@ -24,17 +24,18 @@ def _metadata(descriptor, device):
     metadata = descriptor._cuda_metadata
     if metadata is None or metadata.device.device != device:
         features = descriptor.feature_width
-        token_offsets, tile_offsets = [0], [0]
+        tile_offsets = [0]
         for length in descriptor.prefix_lens:
-            token_offsets.append(token_offsets[-1] + length)
             tile_offsets.append(
                 tile_offsets[-1] + triton.cdiv(length * features, _BLOCK_ELEMENTS)
             )
         host = torch.tensor(
             (
+                descriptor.request_indices + (0,),
+                descriptor.global_page_starts + (0,),
                 descriptor.prefix_lens + (0,),
                 descriptor.local_page_offsets,
-                tuple(token_offsets),
+                descriptor.output_token_offsets,
                 tuple(tile_offsets),
             ),
             dtype=torch.int64,
@@ -92,23 +93,38 @@ def _pack_prefix_kernel(
     BLOCK: tl.constexpr,
 ):
     packed_page = tl.program_id(0).to(tl.int64)
-    offsets = Metadata + REQUESTS + 1
+    row_width: tl.constexpr = REQUESTS + 1
+    request_indices = Metadata
+    global_page_starts = Metadata + row_width
+    prefix_lens = Metadata + 2 * row_width
+    offsets = Metadata + 3 * row_width
     request = _request_for_index(offsets, packed_page, REQUESTS).to(tl.int64)
-    local_page = packed_page - tl.load(offsets + request)
-    prefix_len = tl.load(Metadata + request)
-    global_start = (local_page * SHARDS + RANK) * PAGE_TOKENS
+    packed_slot = packed_page - tl.load(offsets + request)
+    prefix_len = tl.load(prefix_lens + request)
+    global_page_start = tl.load(global_page_starts + request)
+    first_relative_page = (RANK - global_page_start % SHARDS + SHARDS) % SHARDS
+    relative_page = first_relative_page + packed_slot * SHARDS
+    physical_pages = (prefix_len + PAGE_TOKENS - 1) // PAGE_TOKENS
+    global_page = global_page_start + relative_page
+    request_idx = tl.load(request_indices + request)
     # Ownership/payloads use physical pages; the live cache and table expose
     # kernel subpages. Mask the partial terminal page before reading its IDs.
     elements = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
     token = elements // FEATURES
     feature = elements % FEATURES
-    owned = (token < PAGE_TOKENS) & (global_start + token < prefix_len)
+    owned = (
+        (relative_page < physical_pages)
+        & (token < PAGE_TOKENS)
+        & (relative_page * PAGE_TOKENS + token < prefix_len)
+    )
+    owner_local_page = global_page // SHARDS
     kernel_page = (
-        local_page * (PAGE_TOKENS // KERNEL_PAGE_TOKENS) + token // KERNEL_PAGE_TOKENS
+        owner_local_page * (PAGE_TOKENS // KERNEL_PAGE_TOKENS)
+        + token // KERNEL_PAGE_TOKENS
     )
     in_table = kernel_page < TABLE_WIDTH
     block_id = tl.load(
-        Table + request * TABLE_REQUEST_STRIDE + kernel_page * TABLE_PAGE_STRIDE,
+        Table + request_idx * TABLE_REQUEST_STRIDE + kernel_page * TABLE_PAGE_STRIDE,
         mask=owned & in_table,
         other=0,
     ).to(tl.int64)
@@ -147,21 +163,29 @@ def _restore_prefix_kernel(
     BLOCK: tl.constexpr,
 ):
     tile = tl.program_id(0).to(tl.int64)
-    tile_offsets = Metadata + 3 * (REQUESTS + 1)
+    row_width: tl.constexpr = REQUESTS + 1
+    global_page_starts = Metadata + row_width
+    prefix_lens = Metadata + 2 * row_width
+    local_page_offsets = Metadata + 3 * row_width
+    output_token_offsets = Metadata + 4 * row_width
+    tile_offsets = Metadata + 5 * row_width
     request = _request_for_index(tile_offsets, tile, REQUESTS)
     elements = (tile - tl.load(tile_offsets + request)) * BLOCK + tl.arange(0, BLOCK)
     position = elements // FEATURES
     feature = elements % FEATURES
-    global_page = position // PAGE_TOKENS
+    relative_page = position // PAGE_TOKENS
+    global_page_start = tl.load(global_page_starts + request)
+    global_page = global_page_start + relative_page
     owner = global_page % SHARDS
-    local_page = global_page // SHARDS
-    packed_page = tl.load(Metadata + REQUESTS + 1 + request) + local_page
+    first_relative_page = (owner - global_page_start % SHARDS + SHARDS) % SHARDS
+    packed_slot = (relative_page - first_relative_page) // SHARDS
+    packed_page = tl.load(local_page_offsets + request) + packed_slot
     source = (
         (owner * LOCAL_PAGES + packed_page) * PAGE_TOKENS + position % PAGE_TOKENS
     ) * FEATURES + feature
-    live = position < tl.load(Metadata + request)
+    live = position < tl.load(prefix_lens + request)
     values = tl.load(Gathered + source, mask=live, other=0.0)
-    output_start = tl.load(Metadata + 2 * (REQUESTS + 1) + request) * FEATURES
+    output_start = tl.load(output_token_offsets + request) * FEATURES
     tl.store(Output + output_start + elements, values, mask=live)
 
 

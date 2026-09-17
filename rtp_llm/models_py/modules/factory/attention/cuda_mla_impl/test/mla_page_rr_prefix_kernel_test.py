@@ -59,6 +59,64 @@ def expected_payload(canonical, lengths, page_tokens, shards, rank):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
 class MlaPageRRPrefixKernelTest(unittest.TestCase):
+    def test_nonzero_chunk_starts_restore_request_major_slices(self):
+        for page_tokens, shards, starts in (
+            (1024, 2, (1024, 0)),
+            (128, 8, (9 * 128, 128)),
+            (128, 16, (17 * 128, 128)),
+        ):
+            with self.subTest(page_tokens=page_tokens, shards=shards):
+                full_lens = (
+                    starts[0] + 2 * page_tokens + 7,
+                    starts[1] + page_tokens + 3,
+                )
+                chunk_lens = (2 * page_tokens + 7, page_tokens + 3)
+                payloads = []
+                for rank in range(shards):
+                    cache, table, canonical = prefix_fixture(
+                        full_lens,
+                        page_tokens,
+                        shards,
+                        rank,
+                        features=6,
+                    )
+                    adapter = MlaPageRRCacheAdapter(page_tokens, shards, rank)
+                    descriptor = adapter.build_prefix_chunk_descriptor(
+                        request_indices=(0, 1),
+                        prefix_starts=starts,
+                        prefix_lens=chunk_lens,
+                        feature_width=6,
+                    )
+                    payloads.append(
+                        adapter._pack_prefix_chunk(
+                            cache.cuda(),
+                            table.cuda(),
+                            descriptor,
+                        )
+                    )
+                restored = _restore_mla_page_rr_prefix(
+                    torch.stack(payloads),
+                    descriptor,
+                )
+                request_rows = canonical.split(full_lens)
+                expected = torch.cat(
+                    [
+                        rows.narrow(0, start, length)
+                        for rows, start, length in zip(
+                            request_rows,
+                            starts,
+                            chunk_lens,
+                            strict=True,
+                        )
+                    ]
+                )
+                torch.testing.assert_close(
+                    restored.cpu(),
+                    expected,
+                    rtol=0,
+                    atol=0,
+                )
+
     def test_split_pages_preserve_padded_kernel_block_and_feature_strides(self):
         lengths = (3079, 382)
         for dtype in (torch.bfloat16, torch.float8_e4m3fn):

@@ -7,7 +7,12 @@ import torch
 from rtp_llm.models_py.modules.kimi_k3.cache_geometry import (
     validate_kimi_k3_page_rr_target,
 )
-from rtp_llm.ops import CPRotateMethod, KVCacheConfig, KvCacheDataType, ParallelismConfig
+from rtp_llm.ops import (
+    CPRotateMethod,
+    KVCacheConfig,
+    KvCacheDataType,
+    ParallelismConfig,
+)
 
 
 class KimiK3CacheConfigTest(unittest.TestCase):
@@ -33,7 +38,7 @@ class KimiK3PageRRTargetTest(unittest.TestCase):
                 compute_dtype=torch.bfloat16,
                 attn_config=SimpleNamespace(
                     kv_cache_dtype=KvCacheDataType.BASE,
-                    mla_prefill_expanded_kv_budget_bytes=5 * 1024**3,
+                    mla_prefill_expanded_kv_budget_gib=5.0,
                     kv_lora_rank=512,
                     rope_head_dim=64,
                     nope_head_dim=128,
@@ -41,7 +46,7 @@ class KimiK3PageRRTargetTest(unittest.TestCase):
                 ),
             ),
             kv_cache=SimpleNamespace(
-                kernel_seq_size_per_block=page if kernel_page is None else kernel_page,
+                kernel_seq_size_per_block=128 if kernel_page is None else kernel_page,
                 linear_step=1,
             ),
             page_tokens=page,
@@ -53,7 +58,7 @@ class KimiK3PageRRTargetTest(unittest.TestCase):
         )
 
     def test_supported_prefill_and_decode_layouts(self):
-        for page in (128, 256):
+        for page in (128, 256, 1024):
             for shards in (2, 4, 8):
                 for decode in (False, True):
                     with self.subTest(page=page, shards=shards, decode=decode):
@@ -82,7 +87,7 @@ class KimiK3PageRRTargetTest(unittest.TestCase):
             ("whole_model_query_budget_tokens", 512, "checkpoint"),
             ("whole_model_query_budget_tokens", 65535, "checkpoint"),
             (
-                "model_config.attn_config.mla_prefill_expanded_kv_budget_bytes",
+                "model_config.attn_config.mla_prefill_expanded_kv_budget_gib",
                 -1,
                 "non-negative",
             ),
@@ -99,21 +104,21 @@ class KimiK3PageRRTargetTest(unittest.TestCase):
                     validate_kimi_k3_page_rr_target(**vars(target))
 
     def test_rejects_undeclared_page_and_shard_bounds(self):
-        for options in (
-            {"shards": 3},
-            {"page": 1024},
-            {"page": 256, "kernel_page": 128},
+        for options, message in (
+            ({"shards": 3}, "page/shard"),
+            ({"page": 384}, "power of two"),
+            ({"page": 256, "kernel_page": 256}, "kernel_seq_size_per_block"),
         ):
             with self.subTest(options=options), self.assertRaisesRegex(
-                ValueError, "page/shard"
+                ValueError, message
             ):
                 validate_kimi_k3_page_rr_target(**vars(self._valid(**options)))
 
     def test_leaves_expanded_kv_capacity_and_alignment_to_planner(self):
-        for budget in (0, 120 * 1024**2, 5 * 1024**3 + 1):
+        for budget in (0.0, 0.125, 5.5):
             with self.subTest(budget=budget):
                 target = self._valid()
-                target.model_config.attn_config.mla_prefill_expanded_kv_budget_bytes = (
+                target.model_config.attn_config.mla_prefill_expanded_kv_budget_gib = (
                     budget
                 )
                 validate_kimi_k3_page_rr_target(**vars(target))

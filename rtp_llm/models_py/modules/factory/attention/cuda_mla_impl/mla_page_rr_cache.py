@@ -129,9 +129,10 @@ def build_mla_page_rr_slot_mapping(
             "valid_token_count must be within the slot-mapping extent: "
             f"valid={valid_token_count}, tokens={token_count}"
         )
-    valid_rows = torch.arange(
-        token_count, device=positions.device, dtype=torch.int64
-    ) < valid_token_count
+    valid_rows = (
+        torch.arange(token_count, device=positions.device, dtype=torch.int64)
+        < valid_token_count
+    )
 
     torch._assert_async(
         torch.all((~valid_rows) | (positions_i64 >= 0)),
@@ -141,7 +142,9 @@ def build_mla_page_rr_slot_mapping(
     request_count = int(local_block_table.shape[0])
     if request_count == 0:
         if valid_token_count:
-            raise RuntimeError("batch index out of range for an empty local block table")
+            raise RuntimeError(
+                "batch index out of range for an empty local block table"
+            )
         return skipped
     batch_in_range = (batch_indices_i64 >= 0) & (batch_indices_i64 < request_count)
     torch._assert_async(
@@ -186,11 +189,14 @@ def build_mla_page_rr_slot_mapping(
 
 
 @dataclass(frozen=True)
-class MlaPageRRBatchDescriptor:
-    """Rank-independent layout of one invocation's raw prefix pages."""
+class MlaPageRRChunkDescriptor:
+    """Rank-independent layout for one launch's request-major prefix slices."""
 
+    request_indices: tuple[int, ...]
+    prefix_starts: tuple[int, ...]
     prefix_lens: tuple[int, ...]
     local_page_offsets: tuple[int, ...]
+    output_token_offsets: tuple[int, ...]
     page_tokens: int
     shard_size: int
     feature_width: int
@@ -206,6 +212,18 @@ class MlaPageRRBatchDescriptor:
     def total_local_pages(self) -> int:
         return self.local_page_offsets[-1]
 
+    @property
+    def total_tokens(self) -> int:
+        return self.output_token_offsets[-1]
+
+    @property
+    def global_page_starts(self) -> tuple[int, ...]:
+        return tuple(start // self.page_tokens for start in self.prefix_starts)
+
+
+# Keep the old private type name usable by tests and compatibility helpers.
+MlaPageRRBatchDescriptor = MlaPageRRChunkDescriptor
+
 
 def _host_int_values(name: str, values: Sequence[int]) -> tuple[int, ...]:
     result = []
@@ -216,28 +234,69 @@ def _host_int_values(name: str, values: Sequence[int]) -> tuple[int, ...]:
     return tuple(result)
 
 
+def _chunk_descriptor(
+    request_indices: tuple[int, ...],
+    prefix_starts: tuple[int, ...],
+    prefix_lens: tuple[int, ...],
+    *,
+    page_tokens: int,
+    shard_size: int,
+    feature_width: int,
+    allow_empty: bool = False,
+) -> MlaPageRRChunkDescriptor:
+    if not prefix_lens:
+        raise ValueError("prefix_lens must be non-empty")
+    if not (len(request_indices) == len(prefix_starts) == len(prefix_lens)):
+        raise ValueError(
+            "request_indices, prefix_starts, and prefix_lens must have the same length"
+        )
+    if any(request_idx < 0 for request_idx in request_indices):
+        raise ValueError("request_indices must be non-negative")
+    if any(prefix_start < 0 for prefix_start in prefix_starts):
+        raise ValueError("prefix_starts must be non-negative")
+    if any(prefix_start % page_tokens for prefix_start in prefix_starts):
+        raise ValueError("prefix_starts must be physical-page aligned")
+    minimum = 0 if allow_empty else 1
+    if any(prefix_len < minimum for prefix_len in prefix_lens):
+        qualifier = "non-negative" if allow_empty else "positive"
+        raise ValueError(f"prefix_lens must be {qualifier}, got {prefix_lens}")
+    if feature_width <= 0:
+        raise ValueError("feature_width must be positive")
+
+    local_page_offsets = [0]
+    output_token_offsets = [0]
+    for prefix_len in prefix_lens:
+        physical_pages = (prefix_len + page_tokens - 1) // page_tokens
+        padded_pages_per_rank = (physical_pages + shard_size - 1) // shard_size
+        local_page_offsets.append(local_page_offsets[-1] + padded_pages_per_rank)
+        output_token_offsets.append(output_token_offsets[-1] + prefix_len)
+    return MlaPageRRChunkDescriptor(
+        request_indices=request_indices,
+        prefix_starts=prefix_starts,
+        prefix_lens=prefix_lens,
+        local_page_offsets=tuple(local_page_offsets),
+        output_token_offsets=tuple(output_token_offsets),
+        page_tokens=page_tokens,
+        shard_size=shard_size,
+        feature_width=feature_width,
+    )
+
+
 def _prefix_descriptor(
     prefix_lens: tuple[int, ...],
     *,
     page_tokens: int,
     shard_size: int,
     feature_width: int,
-) -> MlaPageRRBatchDescriptor:
-    if not prefix_lens:
-        raise ValueError("prefix_lens must be non-empty")
-    if any(prefix_len < 0 for prefix_len in prefix_lens):
-        raise ValueError(f"prefix_lens must be non-negative, got {prefix_lens}")
-    stripe_tokens = page_tokens * shard_size
-    local_page_offsets = [0]
-    for prefix_len in prefix_lens:
-        count = (prefix_len + stripe_tokens - 1) // stripe_tokens
-        local_page_offsets.append(local_page_offsets[-1] + count)
-    return MlaPageRRBatchDescriptor(
-        prefix_lens=prefix_lens,
-        local_page_offsets=tuple(local_page_offsets),
+) -> MlaPageRRChunkDescriptor:
+    return _chunk_descriptor(
+        tuple(range(len(prefix_lens))),
+        (0,) * len(prefix_lens),
+        prefix_lens,
         page_tokens=page_tokens,
         shard_size=shard_size,
         feature_width=feature_width,
+        allow_empty=True,
     )
 
 
@@ -259,7 +318,7 @@ def _validate_raw_cache(raw_cache: torch.Tensor, page_tokens: int) -> None:
 def _pack_mla_page_rr_prefix(
     raw_cache: torch.Tensor,
     local_block_table: torch.Tensor,
-    descriptor: MlaPageRRBatchDescriptor,
+    descriptor: MlaPageRRChunkDescriptor,
     shard_rank: int,
 ) -> torch.Tensor:
     page_tokens = descriptor.page_tokens
@@ -278,10 +337,11 @@ def _pack_mla_page_rr_prefix(
     if local_block_table.device != raw_cache.device:
         raise ValueError("raw cache and local block table must be on the same device")
 
-    if int(local_block_table.shape[0]) != descriptor.batch_size:
+    required_requests = max(descriptor.request_indices, default=-1) + 1
+    if int(local_block_table.shape[0]) < required_requests:
         raise ValueError(
-            "local block table batch does not match prefix_lens: "
-            f"table={local_block_table.shape[0]} prefix={descriptor.batch_size}"
+            "local block table does not contain every descriptor request: "
+            f"table={local_block_table.shape[0]} required={required_requests}"
         )
 
     output_shape = (
@@ -301,11 +361,11 @@ def _pack_mla_page_rr_prefix(
 
 def _restore_mla_page_rr_prefix(
     gathered_payload: torch.Tensor,
-    descriptor: MlaPageRRBatchDescriptor,
+    descriptor: MlaPageRRChunkDescriptor,
 ) -> torch.Tensor:
     """Remove rank/stripe padding into newly allocated request-major rows."""
     output = gathered_payload.new_empty(
-        (sum(descriptor.prefix_lens), descriptor.feature_width)
+        (descriptor.total_tokens, descriptor.feature_width)
     )
     if output.shape[0]:
         from .mla_page_rr_prefix_kernels import restore_prefix_cuda
@@ -322,7 +382,7 @@ class MlaPageRRCacheAdapter:
     shard_size: int
     shard_rank: int
     kernel_page_tokens: Optional[int] = None
-    _prefix_descriptor: Optional[MlaPageRRBatchDescriptor] = field(
+    _prefix_descriptor: Optional[MlaPageRRChunkDescriptor] = field(
         default=None, init=False, repr=False, compare=False
     )
 
@@ -402,6 +462,63 @@ class MlaPageRRCacheAdapter:
             collective_torch.all_gather_into(payload, gathered.flatten(0, 1), Group.TP)
         return _restore_mla_page_rr_prefix(gathered, descriptor)
 
+    def build_prefix_chunk_descriptor(
+        self,
+        request_indices: Sequence[int],
+        prefix_starts: Sequence[int],
+        prefix_lens: Sequence[int],
+        *,
+        feature_width: int,
+    ) -> MlaPageRRChunkDescriptor:
+        """Describe the exact request slices consumed by one KV-up launch."""
+
+        return _chunk_descriptor(
+            _host_int_values("request_indices", request_indices),
+            _host_int_values("prefix_starts", prefix_starts),
+            _host_int_values("prefix_lens", prefix_lens),
+            page_tokens=self.page_tokens,
+            shard_size=self.shard_size,
+            feature_width=int(feature_width),
+        )
+
+    def read_prefix_chunk(
+        self,
+        raw_cache: torch.Tensor,
+        local_block_table: torch.Tensor,
+        descriptor: MlaPageRRChunkDescriptor,
+    ) -> torch.Tensor:
+        """Pack, AllGather, and restore one launch-local canonical chunk."""
+
+        payload = self._pack_prefix_chunk(
+            raw_cache,
+            local_block_table,
+            descriptor,
+        )
+        gathered = payload.new_empty((self.shard_size, *payload.shape))
+        if descriptor.total_local_pages:
+            collective_torch.all_gather_into(payload, gathered.flatten(0, 1), Group.TP)
+        return _restore_mla_page_rr_prefix(gathered, descriptor)
+
+    def _pack_prefix_chunk(
+        self,
+        raw_cache: torch.Tensor,
+        local_block_table: torch.Tensor,
+        descriptor: MlaPageRRChunkDescriptor,
+    ) -> torch.Tensor:
+        _validate_raw_cache(raw_cache, self.kernel_page_tokens)
+        if (
+            descriptor.page_tokens != self.page_tokens
+            or descriptor.shard_size != self.shard_size
+            or descriptor.feature_width != raw_cache.shape[2]
+        ):
+            raise ValueError("prefix chunk descriptor does not match cache geometry")
+        return _pack_mla_page_rr_prefix(
+            raw_cache,
+            local_block_table,
+            descriptor,
+            self.shard_rank,
+        )
+
     def _pack_prefix(
         self,
         raw_cache: torch.Tensor,
@@ -430,4 +547,8 @@ class MlaPageRRCacheAdapter:
         )
 
 
-__all__ = ["MlaPageRRCacheAdapter", "build_mla_page_rr_slot_mapping"]
+__all__ = [
+    "MlaPageRRCacheAdapter",
+    "MlaPageRRChunkDescriptor",
+    "build_mla_page_rr_slot_mapping",
+]

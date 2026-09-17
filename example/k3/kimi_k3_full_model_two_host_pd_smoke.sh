@@ -168,10 +168,11 @@ Important optional variables:
   FP8_KV_CACHE             1 (default) stores target MLA cache in FP8
   FP8_MLA                  1 (default) uses FP8 MLA attention
                             Currently FP8_KV_CACHE and FP8_MLA must match.
-  KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES
-                            defaults to 6442450944 (6 GiB) per rank;
+  KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB
+                            defaults to 6 GiB per rank;
                             0 disables historical KV expansion limits.
-                            Current-chunk KV and FP8 temporaries are not capped.
+                            FP8 mode charges overlapping BF16 and FP8 historical
+                            K/V; current-chunk KV remains outside this limit.
   SMOKE_KEEP_SERVICES        1 retains model services after success or failure
   SMOKE_KEEP_CLUSTER_ON_SUCCESS
                             1 keeps both role runners, services and GPU locks
@@ -826,7 +827,7 @@ else:
     ])
 
 for key in ("FP8_GEMM", "FP8_KV_CACHE", "FP8_MLA",
-            "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES",
+            "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB",
             "KIMI_K3_MLA_FP8_DIAGNOSTICS", "RTP_LLM_MTP_ACCEPTANCE_DIAGNOSTICS"):
     if key in os.environ:
         expected[key] = os.environ[key]
@@ -867,7 +868,7 @@ apply_validated_common_profile() {
         echo "K3 currently requires matching FP8_KV_CACHE and FP8_MLA" >&2
         return 1
     fi
-    export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES="${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES:-6442450944}"
+    export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB="${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB:-6}"
     export SEQ_SIZE_PER_BLOCK="${smoke_block_size}"
     export KERNEL_SEQ_SIZE_PER_BLOCK="${smoke_kernel_block_size}"
     export MAX_CONTEXT_BATCH_SIZE=1
@@ -1151,7 +1152,7 @@ python3 -u "${case_runner}" \
     --long-prefix-tp-size "${smoke_long_prefix_tp_size}" \
     --long-prefix-target-tokens "${smoke_long_prefix_target_tokens}" \
     --long-prefix-kernel-page-size "${KERNEL_SEQ_SIZE_PER_BLOCK}" \
-    --expanded-kv-budget-bytes "${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES}" \
+    --expanded-kv-budget-gib "${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB}" \
     --timeout "${request_timeout}"
 
 # Runtime FP8 markers are produced only after the first model forward. Keep

@@ -38,6 +38,7 @@ if _TEST_TMPDIR:
     os.environ.setdefault("DG_JIT_CACHE_DIR", os.path.join(_TEST_TMPDIR, "deep_gemm"))
 
 CUDA_AVAILABLE = torch.cuda.is_available()
+GIB = 1024**3
 
 
 class FlashMlaWorkspaceLifetimeTest(TestCase):
@@ -66,16 +67,14 @@ class FlashMlaWorkspaceLifetimeTest(TestCase):
         torch.testing.assert_close(consumed_output, torch.arange(16))
 
 
-class FlashMlaCanonicalPrefixQuantizedActivationTest(TestCase):
+class FlashMlaPageRRPrefixCopyTest(TestCase):
     def setUp(self) -> None:
         self.op = object.__new__(MlaFlashMLAPrefillOp)
         self.op.kv_lora_rank = 512
         self.op.qk_rope_head_dim = 64
         self.op.q_lens = [1, 2]
         self.op.batch_reuse_info_host = ((0, 2, 0, 0), (0, 1, 0, 0))
-        self.op.external_prefix_cache = True
         self.op.has_reuse_cache = True
-        self.op._canonical_prefix_offsets = (0, 2, 3)
         self.op._forward_plan = SimpleNamespace(route=FlashMLAForwardRoute.FULL)
         self.latent = torch.tensor([3, 5, 6], dtype=torch.bfloat16)[:, None].repeat(
             1, 512
@@ -97,32 +96,25 @@ class FlashMlaCanonicalPrefixQuantizedActivationTest(TestCase):
         torch.testing.assert_close(latent, expected.repeat(1, 512), rtol=0, atol=0)
         torch.testing.assert_close(rope, expected.repeat(1, 64) * 10, rtol=0, atol=0)
 
-    def test_external_prefix_validation_preserves_quantized_projection_input(
+    def test_page_rr_chunk_copies_latent_and_rope_without_aggregate_offsets(
         self,
     ) -> None:
-        q = torch.empty((3, 1, 192), dtype=torch.bfloat16)
-        with (
-            patch.object(self.op, "_create_kv_b_proj", return_value=None),
-            patch.object(self.op, "_packed_kv_projection", return_value=None),
-            patch.object(
-                self.op,
-                "_forward_full",
-                side_effect=lambda q, compressed_kv, *args, **kwargs: compressed_kv,
-            ),
-        ):
-            actual = self.op.forward(q, self.quantized, self.k_pe, None, 0, self.prefix)
-        self.assertIs(actual, self.quantized)
+        self.op.num_heads = 2
+        self.op.qk_nope_head_dim = 128
+        self.op.v_head_dim = 128
+        compressed = torch.empty((3, 512), dtype=torch.bfloat16)
+        packed = torch.full((3, 2 * 320), -1, dtype=torch.bfloat16)
 
-    def test_external_prefix_still_rejects_non_bf16_cache_rows(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "canonical prefix mismatch"):
-            self.op.forward(
-                torch.empty((3, 1, 192), dtype=torch.bfloat16),
-                self.quantized,
-                self.k_pe,
-                None,
-                0,
-                self.prefix.float(),
-            )
+        self.op._copy_page_rr_prefix_chunk(self.prefix, compressed, packed)
+
+        torch.testing.assert_close(compressed, self.prefix[:, :512], rtol=0, atol=0)
+        rope = packed.view(3, 2, 320)[:, :, 128:192]
+        torch.testing.assert_close(
+            rope,
+            self.prefix[:, 512:].unsqueeze(1).expand_as(rope),
+            rtol=0,
+            atol=0,
+        )
 
 
 class FlashMlaDensePrefillConfigForwardingTest(TestCase):
@@ -271,9 +263,17 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
                                     )
                                 )
                             self.assertEqual(slots.tolist(), expected)
+                            if sliding_window == 0:
+                                self.assertIs(
+                                    backend_args["page_rr_cache_adapter"],
+                                    impl.page_rr_cache_adapter,
+                                )
+                            else:
+                                self.assertIsNone(backend_args["page_rr_cache_adapter"])
+                            self.assertEqual(backend_args["kernel_page_tokens"], 128)
                             self.assertEqual(
-                                backend_args["external_prefix_cache"],
-                                sliding_window == 0,
+                                backend_args["prefix_chunk_alignment_tokens"],
+                                128,
                             )
                             self.assertEqual(backend_args["fp8_compute"], fp8_compute)
                             self.assertEqual(backend_args["q_scale"], 0.5)
@@ -291,15 +291,18 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
         configs.rope_head_dim = 64
         configs.nope_head_dim = 128
         configs.v_head_dim = 128
+        configs.tokens_per_block = 8192
         configs.kernel_tokens_per_block = 4096
         configs.softmax_extra_scale = 1.0
         configs.use_mla = True
-        configs.mla_prefill_expanded_kv_budget_bytes = 5 * 1024**3
+        configs.mla_prefill_expanded_kv_budget_gib = 5.0
         captured: dict[str, object] = {}
 
         def make_op(*args: object, **kwargs: object) -> object:
-            captured["expanded_kv_budget_bytes"] = int(
-                kwargs["expanded_kv_budget_bytes"]
+            captured["expanded_kv_budget_gib"] = float(kwargs["expanded_kv_budget_gib"])
+            captured["kernel_page_tokens"] = int(kwargs["kernel_page_tokens"])
+            captured["prefix_chunk_alignment_tokens"] = int(
+                kwargs["prefix_chunk_alignment_tokens"]
             )
             return object()
 
@@ -332,7 +335,9 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
                 torch.empty(0),
             )
 
-        self.assertEqual(captured["expanded_kv_budget_bytes"], 5 * 1024**3)
+        self.assertEqual(captured["expanded_kv_budget_gib"], 5.0)
+        self.assertEqual(captured["kernel_page_tokens"], 4096)
+        self.assertEqual(captured["prefix_chunk_alignment_tokens"], 8192)
 
     def test_wrapper_does_not_expand_prefill_cp_config(self) -> None:
         configs = AttentionConfigs()
@@ -341,10 +346,11 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
         configs.rope_head_dim = 64
         configs.nope_head_dim = 128
         configs.v_head_dim = 128
+        configs.tokens_per_block = 1024
         configs.kernel_tokens_per_block = 128
         configs.softmax_extra_scale = 1.0
         configs.use_mla = True
-        configs.mla_prefill_expanded_kv_budget_bytes = 5 * 1024**3
+        configs.mla_prefill_expanded_kv_budget_gib = 5.0
         parallelism = SimpleNamespace(
             tp_size=8,
             tp_rank=5,
@@ -382,7 +388,9 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
                 parallelism_config=parallelism,
             )
 
-        self.assertFalse(captured["external_prefix_cache"])
+        self.assertIsNone(captured["page_rr_cache_adapter"])
+        self.assertEqual(captured["kernel_page_tokens"], 128)
+        self.assertEqual(captured["prefix_chunk_alignment_tokens"], 1024)
         self.assertIsNone(impl.page_rr_cache_adapter)
 
     def test_factory_skips_mla_impl_without_page_rr_prefill_capability(self) -> None:
@@ -505,38 +513,30 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         )
         adapter = SimpleNamespace(
             page_tokens=self.page_size,
-            read_prefix=Mock(return_value=canonical),
+            read_prefix_chunk=Mock(return_value=canonical),
         )
-        forward = Mock(return_value=torch.empty(0, device="cuda"))
-        impl = object.__new__(MlaFlashMLAPrefillImpl)
-        impl.fmha_impl = SimpleNamespace(forward=forward)
-        impl.fmha_params = SimpleNamespace(prefix_lens_host=(2,))
-        impl.page_rr_cache_adapter = adapter
-        impl.attn_inputs = SimpleNamespace(
+        op = object.__new__(MlaFlashMLAPrefillOp)
+        op.page_rr_cache_adapter = adapter
+        op._direct_attn_inputs = SimpleNamespace(
             kv_cache_kernel_block_id_device=torch.ones(
                 (1, 1), dtype=torch.int32, device="cuda"
             )
         )
-        impl.attn_configs = SimpleNamespace(
-            kv_lora_rank=512,
-            rope_head_dim=64,
-            mla_fp8_compute=mla_fp8_compute,
-            mla_fp8_kv_scale=kv_scale,
-        )
+        op.kv_lora_rank = 512
+        op.qk_rope_head_dim = 64
+        op.fp8_compute = mla_fp8_compute
+        op.kv_scale = kv_scale
         kv_cache = SimpleNamespace(
             kv_cache_base=torch.empty(
                 (1, self.page_size, 576), dtype=raw_dtype, device="cuda"
             )
         )
-        impl.compute_prefill_context(
-            torch.empty((1, 1, 192), dtype=torch.bfloat16, device="cuda"),
-            torch.empty((1, 512), dtype=torch.bfloat16, device="cuda"),
-            torch.empty((1, 1, 64), dtype=torch.bfloat16, device="cuda"),
+        actual = op._read_page_rr_prefix(
             kv_cache,
-            0,
+            SimpleNamespace(),
         )
-        adapter.read_prefix.assert_called_once()
-        return canonical, forward.call_args.kwargs["canonical_prefix_kv"]
+        adapter.read_prefix_chunk.assert_called_once()
+        return canonical, actual
 
     def test_page_rr_fp8_prefix_is_dequantized_with_fixed_kv_scale(self) -> None:
         raw, actual = self._read_page_rr_prefix(
@@ -552,6 +552,59 @@ class FlashMlaDensePrefillParamsTest(TestCase):
             rtol=0,
             atol=0,
         )
+
+    def test_page_rr_fp8_conversion_is_scoped_to_each_chunk(self) -> None:
+        raw_chunks = (
+            torch.full(
+                (3, 576),
+                2,
+                dtype=torch.float8_e4m3fn,
+                device="cuda",
+            ),
+            torch.full(
+                (1, 576),
+                6,
+                dtype=torch.float8_e4m3fn,
+                device="cuda",
+            ),
+        )
+        adapter = SimpleNamespace(
+            read_prefix_chunk=Mock(side_effect=raw_chunks),
+        )
+        op = object.__new__(MlaFlashMLAPrefillOp)
+        op.page_rr_cache_adapter = adapter
+        op._direct_attn_inputs = SimpleNamespace(
+            kv_cache_kernel_block_id_device=torch.ones(
+                (1, 1), dtype=torch.int32, device="cuda"
+            )
+        )
+        op.kv_lora_rank = 512
+        op.qk_rope_head_dim = 64
+        op.fp8_compute = True
+        op.kv_scale = 0.25
+        kv_cache = SimpleNamespace(
+            kv_cache_base=torch.empty(
+                (1, self.page_size, 576),
+                dtype=torch.float8_e4m3fn,
+                device="cuda",
+            )
+        )
+
+        actual = tuple(
+            op._read_page_rr_prefix(kv_cache, descriptor)
+            for descriptor in (SimpleNamespace(), SimpleNamespace())
+        )
+
+        self.assertEqual(adapter.read_prefix_chunk.call_count, 2)
+        self.assertEqual([chunk.shape[0] for chunk in actual], [3, 1])
+        for restored, raw in zip(actual, raw_chunks, strict=True):
+            self.assertEqual(restored.dtype, torch.bfloat16)
+            torch.testing.assert_close(
+                restored,
+                raw.to(torch.bfloat16) * 0.25,
+                rtol=0,
+                atol=0,
+            )
 
     def test_page_rr_bf16_prefix_is_forwarded_without_copy(self) -> None:
         raw, actual = self._read_page_rr_prefix(
@@ -577,7 +630,7 @@ class FlashMlaDensePrefillParamsTest(TestCase):
     def _make_unplanned_op(
         self,
         *,
-        expanded_kv_budget_bytes: int = 5 * 1024**3,
+        expanded_kv_budget_gib: float = 5.0,
     ) -> MlaFlashMLAPrefillOp:
         op = object.__new__(MlaFlashMLAPrefillOp)
         op.num_heads = 12
@@ -585,9 +638,10 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         op.qk_rope_head_dim = 64
         op.qk_nope_head_dim = 128
         op.v_head_dim = 128
-        op.page_size = self.page_size
-        op.expanded_kv_budget_bytes = expanded_kv_budget_bytes
-        op.external_prefix_cache = False
+        op.kernel_page_tokens = self.page_size
+        op.prefix_chunk_alignment_tokens = self.page_size
+        op.expanded_kv_budget_gib = expanded_kv_budget_gib
+        op.page_rr_cache_adapter = None
         op.flash_mla_cuda = SimpleNamespace(dense_prefill_fwd=lambda *args: None)
         op.fp8_compute = False
         op._prefix_producer = None
@@ -595,6 +649,18 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         op._prefix_runtime_launches = ()
         op._forward_workspace = None
         return op
+
+    def test_expanded_kv_cost_includes_fp8_attention_copy(self) -> None:
+        op = self._make_unplanned_op()
+        bf16_bytes = 12 * (128 + 64 + 128) * torch.bfloat16.itemsize
+        self.assertEqual(op._expanded_kv_bytes_per_token(), bf16_bytes)
+
+        op.fp8_compute = True
+        fp8_bytes = 12 * (128 + 64 + 128) * torch.float8_e4m3fn.itemsize
+        self.assertEqual(
+            op._expanded_kv_bytes_per_token(),
+            bf16_bytes + fp8_bytes,
+        )
 
     def _make_plan_params(
         self,
@@ -618,7 +684,7 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         )
 
     def test_plan_builds_full_route_once_without_prefix_metadata(self) -> None:
-        op = self._make_unplanned_op(expanded_kv_budget_bytes=0)
+        op = self._make_unplanned_op(expanded_kv_budget_gib=0)
         params = self._make_plan_params(q_lens=(128,), reuse_lens=(1024,))
         with patch.object(
             flashmla_dense_prefill,
@@ -634,7 +700,7 @@ class FlashMlaDensePrefillParamsTest(TestCase):
 
     def test_plan_materializes_contiguous_prefix_launch_in_one_storage(self) -> None:
         op = self._make_unplanned_op(
-            expanded_kv_budget_bytes=256 * 12 * (128 + 64 + 128) * 2
+            expanded_kv_budget_gib=256 * 12 * (128 + 64 + 128) * 2 / GIB
         )
         params = self._make_plan_params(q_lens=(2, 3), reuse_lens=(128, 128))
         with patch.object(
@@ -657,9 +723,108 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         self.assertEqual(launch.destination_starts.cpu().tolist(), [0, 2])
         self.assertEqual(launch.q_range, (0, 5))
 
+    def test_physical_chunk_alignment_keeps_kernel_page_table_offsets(self) -> None:
+        expanded_bytes_per_token = 12 * (128 + 64 + 128) * 2
+        op = self._make_unplanned_op(
+            expanded_kv_budget_gib=2048 * expanded_bytes_per_token / GIB
+        )
+        op.kernel_page_tokens = 128
+        op.prefix_chunk_alignment_tokens = 1024
+        params = self._make_plan_params(q_lens=(1,), reuse_lens=(3072,))
+
+        op.plan(params)
+
+        self.assertEqual(len(op._prefix_runtime_launches), 2)
+        first, second = op._prefix_runtime_launches
+        self.assertEqual(first.spec.slices[0].prefix_len, 2048)
+        self.assertEqual(second.spec.slices[0].prefix_start, 2048)
+        self.assertEqual(first.batch_reuse_info.cpu().tolist(), [[0, 2048, 0, 16]])
+        self.assertEqual(second.batch_reuse_info.cpu().tolist(), [[0, 1024, 16, 8]])
+
+    def test_page_rr_descriptors_reuse_the_common_prefix_launches(self) -> None:
+        expanded_bytes_per_token = 12 * (128 + 64 + 128) * 2
+        op = self._make_unplanned_op(
+            expanded_kv_budget_gib=256 * expanded_bytes_per_token / GIB
+        )
+        op.page_rr_cache_adapter = MlaPageRRCacheAdapter(128, 8, 0)
+        params = self._make_plan_params(q_lens=(1,), reuse_lens=(512,))
+
+        op.plan(params)
+
+        self.assertEqual(len(op._prefix_runtime_launches), 2)
+        descriptors = [
+            launch.page_rr_descriptor for launch in op._prefix_runtime_launches
+        ]
+        self.assertEqual(
+            [descriptor.prefix_starts for descriptor in descriptors],
+            [(0,), (256,)],
+        )
+        self.assertEqual(
+            [descriptor.prefix_lens for descriptor in descriptors],
+            [(256,), (256,)],
+        )
+
+    def test_production_shape_has_no_aggregate_page_rr_descriptor(self) -> None:
+        op = self._make_unplanned_op(expanded_kv_budget_gib=4.0)
+        op.num_heads = 6
+        op.kernel_page_tokens = 128
+        op.prefix_chunk_alignment_tokens = 1024
+        op.page_rr_cache_adapter = MlaPageRRCacheAdapter(
+            page_tokens=1024,
+            kernel_page_tokens=128,
+            shard_size=16,
+            shard_rank=0,
+        )
+        prefix_len = 1_032_192
+        params = self._make_plan_params(
+            q_lens=(2048,) * 32,
+            reuse_lens=(prefix_len,) * 32,
+        )
+
+        op.plan(params)
+
+        descriptors = [
+            launch.page_rr_descriptor for launch in op._prefix_runtime_launches
+        ]
+        descriptor_tokens = [descriptor.total_tokens for descriptor in descriptors]
+        self.assertEqual(op._forward_plan.capacity_tokens, 1_118_208)
+        self.assertEqual(len(descriptors), 30)
+        self.assertIsNone(op._page_rr_full_descriptor)
+        self.assertEqual(sum(descriptor_tokens), 32 * prefix_len)
+        self.assertEqual(max(descriptor_tokens), 1_118_208)
+        self.assertNotIn(32 * prefix_len, descriptor_tokens)
+
+    def test_fp8_production_shapes_budget_bf16_and_fp8_kv_together(self) -> None:
+        prefix_len = 1_032_192
+        params = self._make_plan_params(
+            q_lens=(2048,) * 32,
+            reuse_lens=(prefix_len,) * 32,
+        )
+        cases = (
+            (6, 4.0, 5760, 745_472),
+            (6, 6.0, 5760, 1_118_208),
+            (12, 6.0, 11520, 559_104),
+        )
+        for num_heads, budget_gib, bytes_per_token, capacity_tokens in cases:
+            with self.subTest(num_heads=num_heads, budget_gib=budget_gib):
+                op = self._make_unplanned_op(expanded_kv_budget_gib=budget_gib)
+                op.num_heads = num_heads
+                op.fp8_compute = True
+                op.kernel_page_tokens = 128
+                op.prefix_chunk_alignment_tokens = 1024
+
+                op.plan(params)
+
+                self.assertEqual(op._expanded_kv_bytes_per_token(), bytes_per_token)
+                self.assertEqual(op._forward_plan.capacity_tokens, capacity_tokens)
+                self.assertLessEqual(
+                    op._forward_plan.max_expanded_kv_tokens,
+                    capacity_tokens,
+                )
+
     def test_plan_materializes_b1_then_noncontiguous_launches_once(self) -> None:
         op = self._make_unplanned_op(
-            expanded_kv_budget_bytes=256 * 12 * (128 + 64 + 128) * 2
+            expanded_kv_budget_gib=256 * 12 * (128 + 64 + 128) * 2 / GIB
         )
         params = self._make_plan_params(q_lens=(2, 3, 1), reuse_lens=(384, 0, 128))
         with patch.object(
@@ -880,7 +1045,7 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         )
         params = build_flashmla_device_params(attn_inputs, self.page_size)
 
-        op = self._make_unplanned_op(expanded_kv_budget_bytes=0)
+        op = self._make_unplanned_op(expanded_kv_budget_gib=0)
         op.plan(params)
 
         # Model-layer dispatch switches this alias after the per-forward plan.

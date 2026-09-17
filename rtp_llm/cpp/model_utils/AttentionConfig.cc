@@ -33,7 +33,7 @@ std::string AttentionConfigs::DebugAttentionConfigStr() const {
     oss << "  nope_head_dim: " << nope_head_dim << std::endl;
     oss << "  rope_head_dim: " << rope_head_dim << std::endl;
     oss << "  v_head_dim: " << v_head_dim << std::endl;
-    oss << "  mla_prefill_expanded_kv_budget_bytes: " << mla_prefill_expanded_kv_budget_bytes << std::endl;
+    oss << "  mla_prefill_expanded_kv_budget_gib: " << mla_prefill_expanded_kv_budget_gib << std::endl;
     oss << "  mla_fp8_compute: " << mla_fp8_compute << std::endl;
     oss << "  mla_fp8_q_scale: " << mla_fp8_q_scale << std::endl;
     oss << "  mla_fp8_kv_scale: " << mla_fp8_kv_scale << std::endl;

@@ -3,9 +3,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from rtp_llm.models_py.distributed.sequence_parallel import (
-    mask_physical_padding_slots_,
-)
+from rtp_llm.models_py.distributed.sequence_parallel import mask_physical_padding_slots_
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
@@ -191,12 +189,8 @@ class MlaFlashInferImplBase(MlaImplBase):
 
         return mask_physical_padding_slots_(
             slot_mapping,
-            logical_tokens=int(
-                getattr(self.attn_inputs, "logical_token_count", 0)
-            ),
-            physical_tokens=int(
-                getattr(self.attn_inputs, "physical_token_count", 0)
-            ),
+            logical_tokens=int(getattr(self.attn_inputs, "logical_token_count", 0)),
+            physical_tokens=int(getattr(self.attn_inputs, "physical_token_count", 0)),
         )
 
     def _device_slot_mapping(self) -> Optional[torch.Tensor]:
@@ -231,12 +225,8 @@ class MlaFlashInferImplBase(MlaImplBase):
             )
 
         if page_rr_adapter is not None:
-            logical_tokens = int(
-                getattr(self.attn_inputs, "logical_token_count", 0)
-            )
-            physical_tokens = int(
-                getattr(self.attn_inputs, "physical_token_count", 0)
-            )
+            logical_tokens = int(getattr(self.attn_inputs, "logical_token_count", 0))
+            physical_tokens = int(getattr(self.attn_inputs, "physical_token_count", 0))
             valid_token_count = (
                 logical_tokens if physical_tokens > logical_tokens else None
             )
@@ -522,24 +512,25 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
         MlaFlashInferImplBase.__init__(
             self,
             MlaFlashMLAPrefillOp(
-                attn_configs.head_num,
-                attn_configs.kv_lora_rank,
-                attn_configs.rope_head_dim,
-                attn_configs.nope_head_dim,
-                attn_configs.v_head_dim,
-                attn_configs.kernel_tokens_per_block,
-                attn_configs.softmax_extra_scale,
-                attn_configs.use_mla,
-                weights,
-                quant_config,
+                num_heads=attn_configs.head_num,
+                kv_lora_rank=attn_configs.kv_lora_rank,
+                qk_rope_head_dim=attn_configs.rope_head_dim,
+                qk_nope_head_dim=attn_configs.nope_head_dim,
+                v_head_dim=attn_configs.v_head_dim,
+                kernel_page_tokens=attn_configs.kernel_tokens_per_block,
+                prefix_chunk_alignment_tokens=attn_configs.tokens_per_block,
+                softmax_extra_scale=attn_configs.softmax_extra_scale,
+                use_mla=attn_configs.use_mla,
+                weights=weights,
+                quant_config=quant_config,
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
-                expanded_kv_budget_bytes=(
-                    attn_configs.mla_prefill_expanded_kv_budget_bytes
+                expanded_kv_budget_gib=(
+                    attn_configs.mla_prefill_expanded_kv_budget_gib
                 ),
                 fp8_compute=attn_configs.mla_fp8_compute,
                 q_scale=attn_configs.mla_fp8_q_scale,
                 kv_scale=attn_configs.mla_fp8_kv_scale,
-                external_prefix_cache=self.page_rr_cache_adapter is not None,
+                page_rr_cache_adapter=self.page_rr_cache_adapter,
                 prepared_kv_b_projections=prepared_kv_b_projections,
             ),
             NewMlaRotaryEmbeddingOp(
@@ -633,60 +624,15 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
         kv_cache: Optional[LayerKVCache],
         layer_id: int,
     ) -> torch.Tensor:
-        """Read page-RR cache into canonical rows before backend computation."""
+        """Run Prefill; the backend materializes each planned prefix chunk."""
 
         assert self.fmha_impl is not None
-        assert self.fmha_params is not None
-        canonical_prefix_kv = None
-        adapter = self.page_rr_cache_adapter
-        prefix_lens = tuple(int(value) for value in self.fmha_params.prefix_lens_host)
-        if adapter is not None and any(prefix_lens):
-            if kv_cache is None:
-                raise RuntimeError("MLA page-RR prefix reuse requires an MLA KV cache")
-            block_table = getattr(
-                self.attn_inputs,
-                "kv_cache_kernel_block_id_device",
-                None,
-            )
-            if block_table is None:
-                raise RuntimeError("MLA page-RR prefix reuse requires a block table")
-            raw_cache = kv_cache.kv_cache_base
-            expected_width = (
-                self.attn_configs.kv_lora_rank + self.attn_configs.rope_head_dim
-            )
-            expected_cache_dtype = (
-                torch.float8_e4m3fn
-                if self.attn_configs.mla_fp8_compute
-                else torch.bfloat16
-            )
-            if (
-                raw_cache.dtype != expected_cache_dtype
-                or not raw_cache.is_cuda
-                or raw_cache.shape[-1] != expected_width
-            ):
-                raise RuntimeError(
-                    "MLA page-RR Prefill raw cache does not match the configured "
-                    f"precision; expected dtype={expected_cache_dtype} "
-                    f"[kernel_blocks,kernel_page_tokens,{expected_width}], got "
-                    f"shape={tuple(raw_cache.shape)} dtype={raw_cache.dtype} "
-                    f"device={raw_cache.device}"
-                )
-            canonical_prefix_kv = adapter.read_prefix(
-                raw_cache,
-                block_table,
-                prefix_lens,
-            )
-            if self.attn_configs.mla_fp8_compute:
-                canonical_prefix_kv = canonical_prefix_kv.to(torch.bfloat16)
-                canonical_prefix_kv.mul_(self.attn_configs.mla_fp8_kv_scale)
-
         return self.fmha_impl.forward(
             q,
             compressed_kv,
             k_pe,
             kv_cache,
             layer_id,
-            canonical_prefix_kv=canonical_prefix_kv,
         )
 
     @classmethod

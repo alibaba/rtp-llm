@@ -6,6 +6,7 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_dense_prefill import (
     MlaFlashMLAPrefillOp,
+    build_flashmla_device_params,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_forward_plan import (
     FlashMLAForwardRoute,
@@ -144,8 +145,130 @@ def make_case_inputs(q_lens: Sequence[int], prefix_lens: Sequence[int]) -> CaseI
     return CaseInputs(params, q, compressed_kv, k_pe, kv_cache)
 
 
+def make_direct_case_inputs(
+    q_lens: Sequence[int],
+    prefix_lens: Sequence[int],
+    *,
+    strided_k_pe: bool = False,
+) -> CaseInputs:
+    """Build the direct-attention metadata used by the production planner."""
+
+    inputs = make_case_inputs(q_lens, prefix_lens)
+    q_lens = tuple(q_lens)
+    prefix_lens = tuple(prefix_lens)
+    max_blocks = max(
+        (q_len + prefix_len + PAGE_SIZE - 1) // PAGE_SIZE
+        for q_len, prefix_len in zip(q_lens, prefix_lens, strict=True)
+    )
+    block_table = torch.zeros(
+        (len(q_lens), max_blocks), dtype=torch.int32, device="cuda"
+    )
+    page_cursor = 0
+    for owner, prefix_len in enumerate(prefix_lens):
+        page_count = (prefix_len + PAGE_SIZE - 1) // PAGE_SIZE
+        block_table[owner, :page_count] = torch.arange(
+            page_cursor,
+            page_cursor + page_count,
+            dtype=torch.int32,
+            device="cuda",
+        )
+        page_cursor += page_count
+
+    max_q_len = max(q_lens)
+    padding_offset = [
+        owner * max_q_len - sum(q_lens[:owner])
+        for owner, q_len in enumerate(q_lens)
+        for _ in range(q_len)
+    ]
+    attn_inputs = SimpleNamespace(
+        is_prefill=True,
+        total_tokens=sum(q_lens),
+        input_lengths_host=torch.tensor(q_lens, dtype=torch.int32),
+        prefix_lengths_host=torch.tensor(prefix_lens, dtype=torch.int32),
+        input_lengths=torch.tensor(q_lens, dtype=torch.int32, device="cuda"),
+        prefix_lengths=torch.tensor(prefix_lens, dtype=torch.int32, device="cuda"),
+        cu_seqlens=inputs.params.qo_indptr_d,
+        cu_kv_seqlens=inputs.params.prefill_ragged_kv_len_indptr_d,
+        padding_offset=torch.tensor(padding_offset, dtype=torch.int32, device="cuda"),
+        kv_cache_kernel_block_id_device_by_group=[block_table],
+        kv_cache_kernel_block_id_device=block_table,
+    )
+    params = build_flashmla_device_params(attn_inputs, PAGE_SIZE)
+    k_pe = inputs.k_pe
+    if strided_k_pe:
+        k_pe_storage = torch.empty(
+            (sum(q_lens), k_pe.shape[1] + 17),
+            dtype=k_pe.dtype,
+            device=k_pe.device,
+        )
+        strided_k_pe_view = k_pe_storage.narrow(1, 11, k_pe.shape[1])
+        strided_k_pe_view.copy_(k_pe)
+        k_pe = strided_k_pe_view
+    return CaseInputs(
+        params,
+        inputs.q,
+        inputs.compressed_kv,
+        k_pe,
+        inputs.kv_cache,
+    )
+
+
+def make_page_rr_rank_inputs(
+    inputs: CaseInputs,
+    *,
+    shard_size: int,
+    shard_rank: int,
+) -> CaseInputs:
+    """Shard a replicated physical-page cache for one Page-RR TP rank."""
+
+    if inputs.kv_cache is None:
+        raise ValueError("Page-RR test inputs require a prefix cache")
+    prefix_lens = tuple(inputs.params.prefix_lens_host)
+    source = inputs.kv_cache.kv_cache_base
+    canonical_table = inputs.params.attn_inputs.kv_cache_kernel_block_id_device
+    width = max(
+        1,
+        max(
+            (length + PAGE_SIZE * shard_size - 1) // (PAGE_SIZE * shard_size)
+            for length in prefix_lens
+        ),
+    )
+    local_cache_storage = source.new_full(
+        (len(prefix_lens) * width + 1, PAGE_SIZE, source.shape[-1]), -91
+    )
+    local_table = canonical_table.new_full((len(prefix_lens), width), -1)
+    for request, length in enumerate(prefix_lens):
+        for local_page, global_page in enumerate(
+            range(
+                shard_rank,
+                (length + PAGE_SIZE - 1) // PAGE_SIZE,
+                shard_size,
+            )
+        ):
+            block = local_cache_storage.shape[0] - 1 - request * width - local_page
+            local_table[request, local_page] = block
+            local_cache_storage[block].copy_(
+                source[canonical_table[request, global_page]]
+            )
+
+    local_attn_inputs = SimpleNamespace(**vars(inputs.params.attn_inputs))
+    local_attn_inputs.kv_cache_kernel_block_id_device = local_table
+    local_attn_inputs.kv_cache_kernel_block_id_device_by_group = [local_table]
+    local_cache = LayerKVCache()
+    local_cache.kv_cache_base = local_cache_storage
+    return CaseInputs(
+        build_flashmla_device_params(local_attn_inputs, PAGE_SIZE),
+        inputs.q,
+        inputs.compressed_kv,
+        inputs.k_pe,
+        local_cache,
+    )
+
+
 def make_op(
-    *, expanded_kv_capacity_tokens: int, external_prefix_cache: bool = False
+    *,
+    expanded_kv_capacity_tokens: int,
+    page_rr_cache_adapter=None,
 ) -> MlaFlashMLAPrefillOp:
     return MlaFlashMLAPrefillOp(
         num_heads=NUM_HEADS,
@@ -153,13 +276,14 @@ def make_op(
         qk_rope_head_dim=QK_ROPE_HEAD_DIM,
         qk_nope_head_dim=QK_NOPE_HEAD_DIM,
         v_head_dim=V_HEAD_DIM,
-        page_size=PAGE_SIZE,
+        kernel_page_tokens=PAGE_SIZE,
+        prefix_chunk_alignment_tokens=PAGE_SIZE,
         softmax_extra_scale=1.0,
         use_mla=True,
         weights=[{}],
-        external_prefix_cache=external_prefix_cache,
-        expanded_kv_budget_bytes=(
-            expanded_kv_capacity_tokens * EXPANDED_KV_BYTES_PER_TOKEN
+        page_rr_cache_adapter=page_rr_cache_adapter,
+        expanded_kv_budget_gib=(
+            expanded_kv_capacity_tokens * EXPANDED_KV_BYTES_PER_TOKEN / 1024**3
         ),
     )
 
@@ -167,7 +291,6 @@ def make_op(
 def call_op(
     op: MlaFlashMLAPrefillOp,
     inputs: Any,
-    canonical_prefix_kv: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return op.forward(
         inputs.q,
@@ -175,17 +298,15 @@ def call_op(
         inputs.k_pe,
         inputs.kv_cache,
         0,
-        canonical_prefix_kv=canonical_prefix_kv,
     )
 
 
 def output_and_lse(
     op: MlaFlashMLAPrefillOp,
     inputs: Any,
-    canonical_prefix_kv: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if op._forward_plan.route is FlashMLAForwardRoute.HYBRID:
-        output = call_op(op, inputs, canonical_prefix_kv)
+        output = call_op(op, inputs)
         torch.cuda.synchronize()
         return output.clone(), op._forward_workspace.canonical_lse.clone()
 
@@ -199,7 +320,7 @@ def output_and_lse(
 
     op._run_dense_attention = capture
     try:
-        output = call_op(op, inputs, canonical_prefix_kv)
+        output = call_op(op, inputs)
         torch.cuda.synchronize()
     finally:
         op._run_dense_attention = original

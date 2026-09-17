@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Optional, Set
@@ -10,35 +11,35 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Eagle3Weight, KimiK3MtpWeight, KimiK3Weight
+from rtp_llm.models.kimi_k3.kimi_k3_weight import (
+    KimiK3Eagle3Weight,
+    KimiK3MtpWeight,
+    KimiK3Weight,
+)
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
     load_kimi_k3_media_config,
 )
 from rtp_llm.ops import HybridAttentionType, KvCacheDataType, QuantAlgo
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
-_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV = (
-    "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES"
-)
+_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB_ENV = "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB"
 
 
-def _mla_prefill_expanded_kv_budget_bytes() -> int:
+def _mla_prefill_expanded_kv_budget_gib() -> float:
     """Resolve K3's dense-MLA expanded-KV workspace budget."""
 
-    raw = os.environ.get(
-        _MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV, str(6 * 1024**3)
-    ).strip()
+    raw = os.environ.get(_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB_ENV, "6").strip()
     try:
-        value = int(raw)
+        value = float(raw)
     except ValueError as error:
         raise ValueError(
-            f"{_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV} must be a non-negative "
-            f"integer, got {raw!r}"
+            f"{_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB_ENV} must be a non-negative "
+            f"finite GiB value, got {raw!r}"
         ) from error
-    if value < 0:
+    if not math.isfinite(value) or value < 0:
         raise ValueError(
-            f"{_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV} must be non-negative, "
-            f"got {value}"
+            f"{_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB_ENV} must be a non-negative "
+            f"finite GiB value, got {raw!r}"
         )
     return value
 
@@ -118,9 +119,7 @@ class KimiK3ModelConfig(ModelConfig):
         self.attn_config.mla_fp8_q_scale = 1.0
         self.attn_config.mla_fp8_kv_scale = 1.0
         if is_target:
-            if mla_fp8 and (
-                not self.attn_config.use_mla or self.attn_config.is_sparse
-            ):
+            if mla_fp8 and (not self.attn_config.use_mla or self.attn_config.is_sparse):
                 raise ValueError("K3 FP8 MLA requires dense MLA")
             if mla_fp8 and self.attn_config.kv_cache_dtype == KvCacheDataType.INT8:
                 raise ValueError("K3 FP8 MLA is incompatible with INT8 cache")
@@ -143,9 +142,11 @@ class KimiK3ModelConfig(ModelConfig):
         logging.info(
             "K3 precision: model=%s compute=%s attention_quantization=%s "
             "mla_fp8_compute=%s kv_cache_dtype=%s",
-            self.model_type, self.compute_dtype,
+            self.model_type,
+            self.compute_dtype,
             "fp8_per_block" if enabled else "none",
-            self.attn_config.mla_fp8_compute, self.attn_config.kv_cache_dtype,
+            self.attn_config.mla_fp8_compute,
+            self.attn_config.kv_cache_dtype,
         )
         if is_mtp:
             logging.info(
@@ -245,7 +246,7 @@ class KimiK3(BaseModel):
         logging.info(
             "Kimi K3 text config loaded: layers=%d hidden=%d heads=%d "
             "kda_layers=%d mla_layers=%d experts=%d topk=%d attn_res_block=%d "
-            "mla_prefill_expanded_kv_budget_bytes=%d",
+            "mla_prefill_expanded_kv_budget_gib=%g",
             config.num_layers,
             config.hidden_size,
             config.attn_config.head_num,
@@ -260,7 +261,7 @@ class KimiK3(BaseModel):
             config.expert_num,
             config.moe_k,
             config.k3_runtime_config.attn_res_block_size,
-            config.attn_config.mla_prefill_expanded_kv_budget_bytes,
+            config.attn_config.mla_prefill_expanded_kv_budget_gib,
         )
         return config
 
@@ -339,8 +340,8 @@ class KimiK3(BaseModel):
         # it as no-RoPE even though existing MLA APIs retain the historical name.
         config.attn_config.rope_head_dim = qk_rope_head_dim
         config.attn_config.v_head_dim = int(cls._required(text_config, "v_head_dim"))
-        config.attn_config.mla_prefill_expanded_kv_budget_bytes = (
-            _mla_prefill_expanded_kv_budget_bytes()
+        config.attn_config.mla_prefill_expanded_kv_budget_gib = (
+            _mla_prefill_expanded_kv_budget_gib()
         )
         config.attn_config.use_mla = True
         config.attn_config.is_causal = True
@@ -670,9 +671,9 @@ class KimiK3Mtp(KimiK3):
         schedule = text.get("linear_attn_config", {})
         # Checkpoint attention schedules use one-based layer numbers.
         schedule_layer = source_layer + 1
-        if schedule_layer not in schedule.get("full_attn_layers", []) or schedule_layer in schedule.get(
-            "kda_layers", []
-        ):
+        if schedule_layer not in schedule.get(
+            "full_attn_layers", []
+        ) or schedule_layer in schedule.get("kda_layers", []):
             raise ValueError(f"K3 MTP checkpoint layer {source_layer} must be full MLA")
         config = KimiK3ModelConfig()
         config.ckpt_path = ckpt_path
@@ -684,9 +685,9 @@ class KimiK3Mtp(KimiK3):
         cls._parse_kimi_runtime_config(text, config)
         if source_layer not in config.moe_layer_index:
             # The target schedule excludes MTP; evaluate its source layer explicitly.
-            if source_layer < int(text.get("first_k_dense_replace", 0)) or source_layer % int(
-                text.get("moe_layer_freq", 1)
-            ):
+            if source_layer < int(
+                text.get("first_k_dense_replace", 0)
+            ) or source_layer % int(text.get("moe_layer_freq", 1)):
                 raise ValueError("K3 MTP source layer must be MoE")
         config.num_layers = 1
         config.moe_layer_index = [0]
@@ -696,7 +697,9 @@ class KimiK3Mtp(KimiK3):
             HybridAttentionType.NONE
         ]
         config.k3_runtime_config = replace(
-            config.k3_runtime_config, attn_res_block_size=0, mtp_source_layer=source_layer
+            config.k3_runtime_config,
+            attn_res_block_size=0,
+            mtp_source_layer=source_layer,
         )
         config.mm_model_config.is_multimodal = False
         if "media_placeholder_token_id" in config_json:

@@ -21,7 +21,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.test.flashmla_for
     PAGE_SIZE,
     CaseInputs,
     DeterministicPackedProjection,
-    make_case_inputs,
+    make_direct_case_inputs,
     make_op,
     output_and_lse,
 )
@@ -42,65 +42,10 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
         *,
         strided_k_pe: bool = False,
     ) -> CaseInputs:
-        inputs = make_case_inputs(q_lens, prefix_lens)
-        q_lens = tuple(q_lens)
-        prefix_lens = tuple(prefix_lens)
-        max_blocks = max(
-            (q_len + prefix_len + PAGE_SIZE - 1) // PAGE_SIZE
-            for q_len, prefix_len in zip(q_lens, prefix_lens, strict=True)
-        )
-        block_table = torch.zeros(
-            (len(q_lens), max_blocks), dtype=torch.int32, device="cuda"
-        )
-        page_cursor = 0
-        for owner, prefix_len in enumerate(prefix_lens):
-            page_count = (prefix_len + PAGE_SIZE - 1) // PAGE_SIZE
-            block_table[owner, :page_count] = torch.arange(
-                page_cursor,
-                page_cursor + page_count,
-                dtype=torch.int32,
-                device="cuda",
-            )
-            page_cursor += page_count
-
-        max_q_len = max(q_lens)
-        padding_offset = [
-            owner * max_q_len - sum(q_lens[:owner])
-            for owner, q_len in enumerate(q_lens)
-            for _ in range(q_len)
-        ]
-        attn_inputs = SimpleNamespace(
-            is_prefill=True,
-            total_tokens=sum(q_lens),
-            input_lengths_host=torch.tensor(q_lens, dtype=torch.int32),
-            prefix_lengths_host=torch.tensor(prefix_lens, dtype=torch.int32),
-            input_lengths=torch.tensor(q_lens, dtype=torch.int32, device="cuda"),
-            prefix_lengths=torch.tensor(prefix_lens, dtype=torch.int32, device="cuda"),
-            cu_seqlens=inputs.params.qo_indptr_d,
-            cu_kv_seqlens=inputs.params.prefill_ragged_kv_len_indptr_d,
-            padding_offset=torch.tensor(
-                padding_offset, dtype=torch.int32, device="cuda"
-            ),
-            kv_cache_kernel_block_id_device_by_group=[block_table],
-            kv_cache_kernel_block_id_device=block_table,
-        )
-        params = build_flashmla_device_params(attn_inputs, PAGE_SIZE)
-        k_pe = inputs.k_pe
-        if strided_k_pe:
-            k_pe_storage = torch.empty(
-                (sum(q_lens), k_pe.shape[1] + 17),
-                dtype=k_pe.dtype,
-                device=k_pe.device,
-            )
-            strided_k_pe_view = k_pe_storage.narrow(1, 11, k_pe.shape[1])
-            strided_k_pe_view.copy_(k_pe)
-            k_pe = strided_k_pe_view
-        return CaseInputs(
-            params,
-            inputs.q,
-            inputs.compressed_kv,
-            k_pe,
-            inputs.kv_cache,
+        return make_direct_case_inputs(
+            q_lens,
+            prefix_lens,
+            strided_k_pe=strided_k_pe,
         )
 
     @staticmethod
@@ -220,7 +165,7 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
             (length + PAGE_SIZE * shard_size - 1) // (PAGE_SIZE * shard_size)
             for length in prefix_lens
         )
-        batches, caches, tables = [], [], []
+        caches, tables = [], []
         for rank in range(shard_size):
             cache = source.new_full((len(prefix_lens) * width + 1, PAGE_SIZE, 576), -91)
             table = canonical_table.new_full((len(prefix_lens), width), -1)
@@ -231,8 +176,6 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
                     block = cache.shape[0] - 1 - request * width - local_page
                     table[request, local_page] = block
                     cache[block].copy_(source[canonical_table[request, global_page]])
-            adapter = MlaPageRRCacheAdapter(PAGE_SIZE, shard_size, rank)
-            batches.append(adapter._pack_prefix(cache, table, prefix_lens))
             caches.append(cache)
             tables.append(table)
 
@@ -248,9 +191,10 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
             inputs.k_pe,
             local_cache,
         )
+        page_rr_adapter = MlaPageRRCacheAdapter(PAGE_SIZE, shard_size, 0)
         op = make_op(
             expanded_kv_capacity_tokens=expanded_kv_capacity_tokens,
-            external_prefix_cache=True,
+            page_rr_cache_adapter=page_rr_adapter,
         )
         op.plan(local_inputs.params)
         if expected_prefix_launches is not None:
@@ -261,28 +205,78 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
         with mock.patch.object(reference, "_create_kv_b_proj", return_value=projection):
             expected_out, expected_lse = output_and_lse(reference, inputs)
 
-        gathered = torch.stack(batches)
+        descriptors = (
+            [launch.page_rr_descriptor for launch in op._prefix_runtime_launches]
+            if op._forward_plan.route is FlashMLAForwardRoute.HYBRID
+            else [op._page_rr_full_descriptor]
+        )
+        descriptors = [
+            descriptor for descriptor in descriptors if descriptor is not None
+        ]
+        gathered_chunks = []
+        for descriptor in descriptors:
+            gathered_chunks.append(
+                torch.stack(
+                    [
+                        MlaPageRRCacheAdapter(
+                            PAGE_SIZE, shard_size, rank
+                        )._pack_prefix_chunk(
+                            caches[rank],
+                            tables[rank],
+                            descriptor,
+                        )
+                        for rank in range(shard_size)
+                    ]
+                )
+            )
+        gather_index = 0
+        restored_shapes = []
 
         def gather(local_payload, output, group):
-            torch.testing.assert_close(local_payload, batches[0], rtol=0, atol=0)
-            output.copy_(gathered.view_as(output))
+            nonlocal gather_index
+            expected_gathered = gathered_chunks[gather_index]
+            torch.testing.assert_close(
+                local_payload,
+                expected_gathered[0],
+                rtol=0,
+                atol=0,
+            )
+            output.copy_(expected_gathered.view_as(output))
+            gather_index += 1
+
+        original_restore = mla_page_rr_cache_module._restore_mla_page_rr_prefix
+
+        def restore(gathered_payload, descriptor):
+            restored = original_restore(gathered_payload, descriptor)
+            restored_shapes.append(restored.shape[0])
+            return restored
 
         with mock.patch.object(
             mla_page_rr_cache_module.collective_torch,
             "all_gather_into",
             side_effect=gather,
         ) as collective, mock.patch.object(
+            mla_page_rr_cache_module,
+            "_restore_mla_page_rr_prefix",
+            side_effect=restore,
+        ) as restore_mock, mock.patch.object(
             op, "_create_kv_b_proj", return_value=projection
         ), mock.patch.object(
             op,
             "_live_reuse_cache_page_indices",
             side_effect=AssertionError("canonical prefix must bypass rank-local pages"),
         ):
-            canonical = MlaPageRRCacheAdapter(PAGE_SIZE, shard_size, 0).read_prefix(
-                caches[0], tables[0], prefix_lens
+            actual_out, actual_lse = output_and_lse(op, local_inputs)
+        self.assertEqual(collective.call_count, len(descriptors))
+        self.assertEqual(restore_mock.call_count, len(descriptors))
+        self.assertEqual(gather_index, len(descriptors))
+        expected_shapes = [descriptor.total_tokens for descriptor in descriptors]
+        self.assertEqual(restored_shapes, expected_shapes)
+        if op._forward_plan.route is FlashMLAForwardRoute.HYBRID:
+            self.assertLessEqual(
+                max(restored_shapes, default=0),
+                op._forward_plan.max_expanded_kv_tokens,
             )
-            actual_out, actual_lse = output_and_lse(op, local_inputs, canonical)
-        self.assertEqual(collective.call_count, 1)
         torch.testing.assert_close(actual_out, expected_out, rtol=2e-2, atol=0.03125)
         torch.testing.assert_close(actual_lse, expected_lse, rtol=1e-4, atol=1e-4)
 

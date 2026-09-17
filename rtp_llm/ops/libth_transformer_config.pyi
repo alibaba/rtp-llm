@@ -94,7 +94,7 @@ class AttentionConfigs:
     kv_head_num: int
     kv_lora_rank: int
     max_seq_len: int
-    mla_prefill_expanded_kv_budget_bytes: int
+    mla_prefill_expanded_kv_budget_gib: float
     mla_fp8_compute: bool
     mla_fp8_q_scale: float
     mla_fp8_kv_scale: float

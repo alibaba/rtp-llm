@@ -1570,7 +1570,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("nope_head_dim", &AttentionConfigs::nope_head_dim)
         .def_readwrite("rope_head_dim", &AttentionConfigs::rope_head_dim)
         .def_readwrite("v_head_dim", &AttentionConfigs::v_head_dim)
-        .def_readwrite("mla_prefill_expanded_kv_budget_bytes", &AttentionConfigs::mla_prefill_expanded_kv_budget_bytes)
+        .def_readwrite("mla_prefill_expanded_kv_budget_gib", &AttentionConfigs::mla_prefill_expanded_kv_budget_gib)
         .def_readwrite("mla_fp8_compute", &AttentionConfigs::mla_fp8_compute)
         .def_readwrite("mla_fp8_q_scale", &AttentionConfigs::mla_fp8_q_scale)
         .def_readwrite("mla_fp8_kv_scale", &AttentionConfigs::mla_fp8_kv_scale)

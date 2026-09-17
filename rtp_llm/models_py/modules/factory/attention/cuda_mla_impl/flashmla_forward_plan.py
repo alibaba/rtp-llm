@@ -1,7 +1,10 @@
+import math
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
 from typing import Sequence
+
+_GIB = 1024**3
 
 
 class FlashMLAForwardRoute(Enum):
@@ -46,17 +49,21 @@ def _full_plan(capacity_tokens: int) -> FlashMLAForwardPlan:
     )
 
 
-def _take_prefix_tokens(tokens: int, free: int, page_size: int) -> int:
+def _take_prefix_tokens(
+    tokens: int,
+    free: int,
+    prefix_chunk_alignment_tokens: int,
+) -> int:
     if tokens <= free:
         return tokens
-    return free // page_size * page_size
+    return free // prefix_chunk_alignment_tokens * prefix_chunk_alignment_tokens
 
 
 def _build_prefix_launch(
     remaining: Sequence[int],
     *,
     capacity_tokens: int,
-    page_size: int,
+    prefix_chunk_alignment_tokens: int,
 ) -> dict[int, int]:
     """Pack whole requests in order and split only the boundary request."""
     takes = {}
@@ -64,7 +71,11 @@ def _build_prefix_launch(
     for owner, tokens in enumerate(remaining):
         if not tokens:
             continue
-        take = _take_prefix_tokens(tokens, free, page_size)
+        take = _take_prefix_tokens(
+            tokens,
+            free,
+            prefix_chunk_alignment_tokens,
+        )
         if take:
             takes[owner] = take
             free -= take
@@ -77,7 +88,7 @@ def _build_prefix_launches(
     q_lens: tuple[int, ...],
     prefix_lens: tuple[int, ...],
     *,
-    page_size: int,
+    prefix_chunk_alignment_tokens: int,
     capacity_tokens: int,
 ) -> tuple[FlashMLAPrefixLaunch, ...]:
     remaining = list(prefix_lens)
@@ -88,7 +99,7 @@ def _build_prefix_launches(
         takes = _build_prefix_launch(
             remaining,
             capacity_tokens=capacity_tokens,
-            page_size=page_size,
+            prefix_chunk_alignment_tokens=prefix_chunk_alignment_tokens,
         )
         selected = sorted(takes)
         launches.append(
@@ -115,8 +126,8 @@ def plan_flashmla_forward(
     q_lens: Sequence[int],
     prefix_lens: Sequence[int],
     *,
-    page_size: int,
-    expanded_kv_budget_bytes: int,
+    prefix_chunk_alignment_tokens: int,
+    expanded_kv_budget_gib: float,
     expanded_kv_bytes_per_token: int,
 ) -> FlashMLAForwardPlan:
     """Plan one causal current-Q call and page-aligned historical-prefix calls.
@@ -130,8 +141,8 @@ def plan_flashmla_forward(
     return _plan_flashmla_forward_cached(
         q_lens,
         prefix_lens,
-        page_size,
-        expanded_kv_budget_bytes,
+        prefix_chunk_alignment_tokens,
+        expanded_kv_budget_gib,
         expanded_kv_bytes_per_token,
     )
 
@@ -140,33 +151,45 @@ def plan_flashmla_forward(
 def _plan_flashmla_forward_cached(
     q_lens: tuple[int, ...],
     prefix_lens: tuple[int, ...],
-    page_size: int,
-    expanded_kv_budget_bytes: int,
+    prefix_chunk_alignment_tokens: int,
+    expanded_kv_budget_gib: float,
     expanded_kv_bytes_per_token: int,
 ) -> FlashMLAForwardPlan:
     # Identical request shapes recur in every MLA layer of one model invocation.
 
+    if prefix_chunk_alignment_tokens <= 0:
+        raise ValueError("prefix chunk alignment must be positive")
+
     q_tokens = sum(q_lens)
     total_tokens = q_tokens + sum(prefix_lens)
-    if expanded_kv_budget_bytes == 0:
+    if not math.isfinite(expanded_kv_budget_gib) or expanded_kv_budget_gib < 0:
+        raise ValueError(
+            "FlashMLA expanded KV GiB budget must be non-negative and finite"
+        )
+    if expanded_kv_budget_gib == 0:
         return _full_plan(0)
 
-    raw_capacity_tokens = expanded_kv_budget_bytes // expanded_kv_bytes_per_token
-    if total_tokens * expanded_kv_bytes_per_token <= expanded_kv_budget_bytes:
+    budget_bytes = int(expanded_kv_budget_gib * _GIB)
+    raw_capacity_tokens = budget_bytes // expanded_kv_bytes_per_token
+    if total_tokens * expanded_kv_bytes_per_token <= budget_bytes:
         return _full_plan(raw_capacity_tokens)
     if not any(prefix_lens):
         return _full_plan(raw_capacity_tokens)
 
-    capacity_tokens = raw_capacity_tokens // page_size * page_size
+    capacity_tokens = (
+        raw_capacity_tokens
+        // prefix_chunk_alignment_tokens
+        * prefix_chunk_alignment_tokens
+    )
     if capacity_tokens == 0:
         raise ValueError(
-            "FlashMLA expanded KV budget must fit at least one prefix page "
-            f"({page_size * expanded_kv_bytes_per_token} bytes)"
+            "FlashMLA expanded KV budget must fit at least one physical prefix chunk "
+            f"({prefix_chunk_alignment_tokens * expanded_kv_bytes_per_token} bytes)"
         )
     prefix_launches = _build_prefix_launches(
         q_lens,
         prefix_lens,
-        page_size=page_size,
+        prefix_chunk_alignment_tokens=prefix_chunk_alignment_tokens,
         capacity_tokens=capacity_tokens,
     )
     owner_launch_counts = [0] * len(q_lens)

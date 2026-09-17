@@ -1,5 +1,6 @@
 """K3 ordinary FP8 MLA: cache, ragged Prefill, Decode and Verify contracts."""
 
+import os
 import unittest
 
 import torch
@@ -14,6 +15,10 @@ class MlaFp8Test(unittest.TestCase):
     def setUp(self):
         self.assertTrue(torch.cuda.is_available(), "requires CUDA; no passing by skip")
         self.assertEqual(torch.cuda.get_device_capability()[0], 10)
+        os.environ["DG_JIT_CACHE_DIR"] = os.path.join(
+            os.environ.get("TEST_TMPDIR", "/tmp"),
+            "mla_fp8_deep_gemm",
+        )
         torch.manual_seed(101)
 
     def test_quantizer_saturation_noncontiguous_and_graph(self):
@@ -110,7 +115,8 @@ class MlaFp8Test(unittest.TestCase):
                     qk_rope_head_dim=64,
                     qk_nope_head_dim=128,
                     v_head_dim=128,
-                    page_size=128,
+                    kernel_page_tokens=128,
+                    prefix_chunk_alignment_tokens=128,
                     softmax_extra_scale=1.0,
                     use_mla=True,
                     weights=[{}],
@@ -118,7 +124,9 @@ class MlaFp8Test(unittest.TestCase):
                     fp8_compute=True,
                     q_scale=0.5,
                     kv_scale=0.5,
-                    expanded_kv_budget_bytes=capacity * EXPANDED_KV_BYTES_PER_TOKEN,
+                    expanded_kv_budget_gib=(
+                        capacity * EXPANDED_KV_BYTES_PER_TOKEN * 3 / 2 / 1024**3
+                    ),
                 )
                 op.plan(inputs.params)
                 with mock.patch.object(
@@ -197,7 +205,8 @@ class MlaFp8Test(unittest.TestCase):
                             qk_rope_head_dim=64,
                             qk_nope_head_dim=128,
                             v_head_dim=128,
-                            page_size=128,
+                            kernel_page_tokens=128,
+                            prefix_chunk_alignment_tokens=128,
                             softmax_extra_scale=1.0,
                             use_mla=True,
                             weights=[{}],
@@ -210,8 +219,12 @@ class MlaFp8Test(unittest.TestCase):
                             fp8_compute=fp8_cache,
                             q_scale=0.5,
                             kv_scale=0.5,
-                            expanded_kv_budget_bytes=capacity
-                            * EXPANDED_KV_BYTES_PER_TOKEN,
+                            expanded_kv_budget_gib=(
+                                capacity
+                                * EXPANDED_KV_BYTES_PER_TOKEN
+                                * (3 / 2 if fp8_cache else 1)
+                                / 1024**3
+                            ),
                         )
                         op.plan(inputs.params)
                         with mock.patch.object(
@@ -237,6 +250,195 @@ class MlaFp8Test(unittest.TestCase):
                         torch.testing.assert_close(
                             results[0][1], results[1][1], atol=0, rtol=0
                         )
+
+    def test_page_rr_full_forward_fp8_gemm_and_mla_cache_combinations(self):
+        from dataclasses import replace
+        from unittest import mock
+
+        from rtp_llm.config.quant_config import init_quant_config
+        from rtp_llm.models_py.distributed import collective_torch
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_dense_prefill import (
+            MlaFlashMLAPrefillOp,
+        )
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_page_rr_cache import (
+            MlaPageRRCacheAdapter,
+        )
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.test.flashmla_forward_test_utils import (
+            EXPANDED_KV_BYTES_PER_TOKEN,
+            PAGE_SIZE,
+            make_direct_case_inputs,
+            make_page_rr_rank_inputs,
+            output_and_lse,
+        )
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
+            CudaF16Linear,
+        )
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+            CudaFp8DeepGEMMLinear,
+        )
+        from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_producers import rmsnorm_fp8
+        from rtp_llm.ops import KvCacheDataType
+
+        config = init_quant_config("FP8_PER_BLOCK")
+        fp8_projection = CudaFp8DeepGEMMLinear(
+            weight=(torch.randn(3072, 512, device="cuda") * 0.03).to(
+                torch.float8_e4m3fn
+            ),
+            weight_scales=torch.full(
+                (1, 3072), 0x7F7F7F7F, device="cuda", dtype=torch.int32
+            ).T,
+            input_scales=None,
+            bias=None,
+            quant_config=config,
+        )
+        bf16_projection = CudaF16Linear(
+            torch.randn(512, 3072, device="cuda", dtype=torch.bfloat16).mul_(0.015625)
+        )
+
+        def make_combo_op(*, fp8_gemm: bool, fp8_mla: bool, adapter=None):
+            return MlaFlashMLAPrefillOp(
+                num_heads=12,
+                kv_lora_rank=512,
+                qk_rope_head_dim=64,
+                qk_nope_head_dim=128,
+                v_head_dim=128,
+                kernel_page_tokens=PAGE_SIZE,
+                prefix_chunk_alignment_tokens=PAGE_SIZE,
+                softmax_extra_scale=1.0,
+                use_mla=True,
+                weights=[{}],
+                quant_config=config if fp8_gemm else None,
+                kv_cache_dtype=(
+                    KvCacheDataType.FP8 if fp8_mla else KvCacheDataType.BASE
+                ),
+                fp8_compute=fp8_mla,
+                q_scale=0.5,
+                kv_scale=0.5,
+                page_rr_cache_adapter=adapter,
+                expanded_kv_budget_gib=(
+                    256
+                    * EXPANDED_KV_BYTES_PER_TOKEN
+                    * (3 / 2 if fp8_mla else 1)
+                    / 1024**3
+                ),
+            )
+
+        for fp8_gemm in (False, True):
+            for fp8_mla in (False, True):
+                with self.subTest(fp8_gemm=fp8_gemm, fp8_mla=fp8_mla):
+                    replicated = make_direct_case_inputs((2, 3), (384, 256))
+                    payload = rmsnorm_fp8(
+                        replicated.compressed_kv,
+                        torch.ones(512, device="cuda", dtype=torch.bfloat16),
+                        1.0e-6,
+                        retain_bf16=True,
+                    )
+                    if fp8_mla:
+                        replicated.kv_cache.kv_cache_base = quantize_fp8(
+                            replicated.kv_cache.kv_cache_base,
+                            0.5,
+                        )
+                    replicated = replace(
+                        replicated,
+                        compressed_kv=payload if fp8_gemm else payload.bf16,
+                    )
+                    rank_inputs = tuple(
+                        make_page_rr_rank_inputs(
+                            replicated,
+                            shard_size=2,
+                            shard_rank=rank,
+                        )
+                        for rank in range(2)
+                    )
+                    projection = fp8_projection if fp8_gemm else bf16_projection
+
+                    reference = make_combo_op(
+                        fp8_gemm=fp8_gemm,
+                        fp8_mla=fp8_mla,
+                    )
+                    reference.plan(replicated.params)
+                    with mock.patch.object(
+                        reference,
+                        "_create_kv_b_proj",
+                        return_value=projection,
+                    ):
+                        expected_output, expected_lse = output_and_lse(
+                            reference,
+                            replicated,
+                        )
+
+                    adapters = tuple(
+                        MlaPageRRCacheAdapter(PAGE_SIZE, 2, rank) for rank in range(2)
+                    )
+                    actual = make_combo_op(
+                        fp8_gemm=fp8_gemm,
+                        fp8_mla=fp8_mla,
+                        adapter=adapters[0],
+                    )
+                    actual.plan(rank_inputs[0].params)
+                    descriptors = tuple(
+                        launch.page_rr_descriptor
+                        for launch in actual._prefix_runtime_launches
+                    )
+                    self.assertEqual(len(descriptors), 3)
+                    self.assertTrue(
+                        all(descriptor is not None for descriptor in descriptors)
+                    )
+                    gather_index = 0
+
+                    def emulate_all_gather(local_payload, gathered, _group):
+                        nonlocal gather_index
+                        descriptor = descriptors[gather_index]
+                        gather_index += 1
+                        payloads = []
+                        for rank in range(2):
+                            rank_input = rank_inputs[rank]
+                            attn_inputs = rank_input.params.attn_inputs
+                            rank_block_table = (
+                                attn_inputs.kv_cache_kernel_block_id_device
+                            )
+                            payloads.append(
+                                adapters[rank]._pack_prefix_chunk(
+                                    rank_input.kv_cache.kv_cache_base,
+                                    rank_block_table,
+                                    descriptor,
+                                )
+                            )
+                        torch.testing.assert_close(
+                            local_payload,
+                            payloads[0],
+                            rtol=0,
+                            atol=0,
+                        )
+                        gathered.copy_(torch.stack(payloads).flatten(0, 1))
+
+                    with mock.patch.object(
+                        actual,
+                        "_create_kv_b_proj",
+                        return_value=projection,
+                    ), mock.patch.object(
+                        collective_torch,
+                        "all_gather_into",
+                        side_effect=emulate_all_gather,
+                    ):
+                        actual_output, actual_lse = output_and_lse(
+                            actual,
+                            rank_inputs[0],
+                        )
+
+                    self.assertEqual(gather_index, len(descriptors))
+                    torch.testing.assert_close(
+                        actual_output.float(),
+                        expected_output.float(),
+                        atol=2e-3,
+                        rtol=3e-2,
+                    )
+                    torch.testing.assert_close(
+                        actual_lse,
+                        expected_lse,
+                        atol=2e-3,
+                        rtol=2e-3,
+                    )
 
     def test_cache_writer_scale_page_boundary_and_skipped_slot(self):
         from types import SimpleNamespace
@@ -274,6 +476,7 @@ class MlaFp8Test(unittest.TestCase):
             12,
             512,
             64,
+            128,
             128,
             128,
             128,
