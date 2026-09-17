@@ -218,6 +218,8 @@ final class FlexlbConfigValidator {
             range(affinity.getMinPrefixHitPercent(), 0,
                     RoutingConfig.PERCENTAGE_SCALE,
                     "router.roles.prefill.cacheAffinity.minPrefixHitPercent");
+            range(affinity.getRemoteDiscount(), 0, 1,
+                    "router.roles.prefill.cacheAffinity.remoteDiscount");
         }
 
         require(routing.getRoles().getDecode() != null,

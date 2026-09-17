@@ -46,8 +46,8 @@ public class KvcmGrpcClient {
     private static final String INITIAL_HEALTH_REASON = "initial";
 
     private final boolean enabled;
+    private final CacheMatchConfiguration configuration;
     private final KvcmConfig topologyConfig;
-    private final KvcmCacheMatchingConfig config;
     private final KvcmMetaServiceClient metaServiceClient;
     private final KvcmLeaderResolver leaderResolver;
     private final KvcmWorkerMetadataResolver workerMetadataResolver;
@@ -55,10 +55,6 @@ public class KvcmGrpcClient {
     private final GrpcReporter grpcReporter;
     private final KvcmMetricsReporter metricsReporter;
     private final ScheduledExecutorService refreshExecutor;
-    private final int heartbeatFailureThreshold;
-    private final int queryFailureThreshold;
-    private final int maxQueryRetryCount;
-    private final int recoverySuccessThreshold;
     private final AtomicBoolean immediateRefreshQueued = new AtomicBoolean();
     private final AtomicReference<KvcmHealthState> healthState =
             new AtomicReference<>(KvcmHealthState.HEALTHY);
@@ -91,6 +87,7 @@ public class KvcmGrpcClient {
             ApplicationWarmupState applicationWarmupState,
             GrpcReporter grpcReporter,
             KvcmMetricsReporter metricsReporter) {
+        this.configuration = configuration;
         this.metaServiceClient = metaServiceClient;
         this.leaderResolver = leaderResolver;
         this.workerMetadataResolver = workerMetadataResolver;
@@ -98,25 +95,14 @@ public class KvcmGrpcClient {
         this.grpcReporter = grpcReporter;
         this.metricsReporter = metricsReporter;
         this.topologyConfig = configuration.getKvcmConfig();
-        this.config = configuration.getKvcmRuntimeConfig();
         this.enabled = configuration.isKvcmEnabled();
 
         if (!enabled) {
-            this.heartbeatFailureThreshold =
-                    KvcmCacheMatchingConfig.DEFAULT_HEARTBEAT_FAILURE_THRESHOLD;
-            this.queryFailureThreshold =
-                    KvcmCacheMatchingConfig.DEFAULT_QUERY_FAILURE_THRESHOLD;
-            this.maxQueryRetryCount = 0;
-            this.recoverySuccessThreshold =
-                    KvcmCacheMatchingConfig.DEFAULT_RECOVERY_SUCCESS_THRESHOLD;
             this.refreshExecutor = null;
             return;
         }
 
-        this.heartbeatFailureThreshold = config.getHeartbeatFailureThreshold();
-        this.queryFailureThreshold = config.getQueryFailureThreshold();
-        this.maxQueryRetryCount = Math.max(0, config.getMaxQueryRetryCount());
-        this.recoverySuccessThreshold = config.getRecoverySuccessThreshold();
+        KvcmCacheMatchingConfig startupConfig = configuration.getKvcmRuntimeConfig();
         this.refreshExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "kvcm-service-state-refresher");
             thread.setDaemon(true);
@@ -125,13 +111,13 @@ public class KvcmGrpcClient {
         this.refreshExecutor.scheduleWithFixedDelay(
                 this::refreshKvcmServiceStateSafely,
                 0,
-                config.getLeaderRefreshIntervalMs(),
+                startupConfig.getLeaderRefreshIntervalMs(),
                 TimeUnit.MILLISECONDS);
         log.info("Started KVCM client, address={}, bootstrapPort={}, "
                         + "leaderRefreshIntervalMs={}, maxQueryRetryCount={}, namespaceSource={}",
                 topologyConfig.getAddress(), topologyConfig.getPort(),
-                config.getLeaderRefreshIntervalMs(),
-                maxQueryRetryCount,
+                startupConfig.getLeaderRefreshIntervalMs(),
+                startupConfig.getMaxQueryRetryCount(),
                 workerMetadataResolver.usesConfiguredNamespace()
                         ? "configuration"
                         : "worker-status");
@@ -167,10 +153,13 @@ public class KvcmGrpcClient {
             QueryType queryType,
             RoleType roleType,
             String group) {
+        // One snapshot per query keeps the wire parameters of every attempt consistent.
+        KvcmCacheMatchingConfig config = configuration.getKvcmRuntimeConfig();
+        int maxQueryRetryCount = Math.max(0, config.getMaxQueryRetryCount());
         for (int attemptIndex = 0; attemptIndex <= maxQueryRetryCount; attemptIndex++) {
             try {
                 Map<String, org.flexlb.dao.cache.HostCacheMatch> result = queryOnce(
-                        requestId, blockCacheKeys, namespace, queryType,
+                        config, requestId, blockCacheKeys, namespace, queryType,
                         roleType, group, attemptIndex > 0);
                 recordQuerySuccess();
                 return result;
@@ -190,6 +179,7 @@ public class KvcmGrpcClient {
     }
 
     private Map<String, org.flexlb.dao.cache.HostCacheMatch> queryOnce(
+            KvcmCacheMatchingConfig config,
             String requestId,
             List<Long> blockCacheKeys,
             String namespace,
@@ -208,7 +198,9 @@ public class KvcmGrpcClient {
                 .setInstanceId(namespace)
                 .setQueryType(queryType)
                 .addAllBlockCacheKeys(blockCacheKeys)
-                .setP2PHostCount(Math.max(0, config.getP2pHostCount()))
+                .addAllMedium(config.getMedium())
+                .setGlobalKvsHostCount(Math.max(0, config.getGlobalKvsHostCount()))
+                .setEnableP2P(config.isEnableP2p())
                 .build();
 
         try {
@@ -287,7 +279,7 @@ public class KvcmGrpcClient {
         lastHeartbeatSuccessTimeMs.set(currentTimeMs);
         consecutiveHeartbeatFailures.set(0);
         int successes = consecutiveHeartbeatSuccesses.incrementAndGet();
-        if (successes >= recoverySuccessThreshold
+        if (successes >= configuration.getKvcmRuntimeConfig().getRecoverySuccessThreshold()
                 && healthState.compareAndSet(KvcmHealthState.UNHEALTHY, KvcmHealthState.HEALTHY)) {
             consecutiveQueryFailures.set(0);
             recordHealthTransition("heartbeat recovery threshold reached");
@@ -298,7 +290,7 @@ public class KvcmGrpcClient {
         lastHeartbeatFailureTimeMs.set(currentTimeMs);
         consecutiveHeartbeatSuccesses.set(0);
         int failures = consecutiveHeartbeatFailures.incrementAndGet();
-        if (failures >= heartbeatFailureThreshold
+        if (failures >= configuration.getKvcmRuntimeConfig().getHeartbeatFailureThreshold()
                 && healthState.compareAndSet(KvcmHealthState.HEALTHY, KvcmHealthState.UNHEALTHY)) {
             recordHealthTransition("heartbeat failure threshold reached");
         }
@@ -313,7 +305,7 @@ public class KvcmGrpcClient {
             return;
         }
         int failures = consecutiveQueryFailures.incrementAndGet();
-        if (failures >= queryFailureThreshold
+        if (failures >= configuration.getKvcmRuntimeConfig().getQueryFailureThreshold()
                 && healthState.compareAndSet(KvcmHealthState.HEALTHY, KvcmHealthState.UNHEALTHY)) {
             consecutiveHeartbeatSuccesses.set(0);
             recordHealthTransition("cache query failure threshold reached");
@@ -356,8 +348,7 @@ public class KvcmGrpcClient {
                     match.getHostIpPort(),
                     new org.flexlb.dao.cache.HostCacheMatch(
                             match.getLocal(),
-                            match.getP2P1Fetch(),
-                            match.getP2P1TotalMatch()));
+                            match.getGlobal()));
         }
         return result;
     }

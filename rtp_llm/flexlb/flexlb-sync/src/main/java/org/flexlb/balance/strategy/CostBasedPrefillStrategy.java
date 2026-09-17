@@ -155,6 +155,17 @@ public class CostBasedPrefillStrategy {
         cacheAwareService.trackRoutingPrediction(
                 String.valueOf(requestId), roleType, group, best.getStatus(),
                 seqLen, bestCacheHit, cacheMatchResult);
+        HostCacheMatch selectedMatch = cacheMatchResult.hostMatch(best.getStatus());
+        if (cacheMatchResult.source() == CacheMatchSource.KVCM) {
+            engineHealthReporter.reportKvcmSelectedMatch(
+                    roleType,
+                    best.getStatus().getMetricIpPort(),
+                    selectedMatch == null ? 0 : CacheMatchResult.matchedTokens(
+                            selectedMatch.localMatchBlocks(), cacheMatchResult.blockSize(), seqLen),
+                    selectedMatch == null ? 0 : CacheMatchResult.matchedTokens(
+                            selectedMatch.globalMatchBlocks(), cacheMatchResult.blockSize(), seqLen),
+                    true);
+        }
         balanceContext.recordCacheSelection(roleType, best.getIp(), bestCacheHit);
         recordDecision(balanceContext, roleType, group, discovery.registeredCount(), survivors,
                 selectedIndex, balanceContext.selectionReason(roleType), rejections);
@@ -593,15 +604,15 @@ public class CostBasedPrefillStrategy {
             return CacheTokenMatch.NONE;
         }
         long localMatchBlocks = Math.max(0L, match.localMatchBlocks());
-        long p2pAddedMatchBlocks = Math.max(
-                0L, match.p2pTotalMatchBlocks() - localMatchBlocks);
+        long remoteMatchBlocks = Math.max(
+                0L, match.globalMatchBlocks() - localMatchBlocks);
         RoutingConfig.CacheAffinityConfig affinity = config.getRouter()
                 .getRoles().getPrefill().getCacheAffinity();
-        double p2pHitDiscount = affinity == null
+        double remoteDiscount = affinity == null
                 ? 0.2
-                : Math.max(0.0, affinity.getP2pHitDiscount());
+                : Math.max(0.0, affinity.getRemoteDiscount());
         double effectiveMatchBlocks = localMatchBlocks
-                + p2pAddedMatchBlocks * p2pHitDiscount;
+                + remoteMatchBlocks * remoteDiscount;
         if (effectiveMatchBlocks <= 0.0) {
             return CacheTokenMatch.NONE;
         }

@@ -89,7 +89,5 @@ public class TaskInfo {
     @JsonIgnore
     private long kvcmLocalMatchTokens;
     @JsonIgnore
-    private long kvcmP2pFetchTokens;
-    @JsonIgnore
-    private long kvcmP2pTotalMatchTokens;
+    private long kvcmGlobalMatchTokens;
 }
