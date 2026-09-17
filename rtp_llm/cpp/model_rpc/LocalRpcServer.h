@@ -128,7 +128,12 @@ protected:
                                   std::shared_ptr<GenerateStream>& stream);
 
     // Shared helpers for single and batch paths
-    ErrorInfo    prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);
+    ErrorInfo prepareInput(const GenerateInputPB&                                              input_pb,
+                           std::shared_ptr<GenerateInput>&                                     output,
+                           const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span = {});
+    ErrorInfo
+                 updateMultimodalFeaturesWithTrace(std::shared_ptr<GenerateInput>&                                     input,
+                                                   const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span);
     ErrorInfo    collectStreamOutput(grpc::ServerContext*                  context,
                                      std::shared_ptr<GenerateStream>&      stream,
                                      const std::shared_ptr<GenerateInput>& input,

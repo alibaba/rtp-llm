@@ -15,10 +15,11 @@ namespace rtp_llm {
 
 class TestDecodeRpcService final: public RpcService::Service {
 public:
-    explicit TestDecodeRpcService(bool fail_first_allocate):
-        first_allocate_failure_(fail_first_allocate ? std::optional<grpc::Status>(
-                                    grpc::Status(grpc::StatusCode::INTERNAL, "allocate failed once")) :
-                                                      std::nullopt) {}
+    explicit TestDecodeRpcService(bool fail_first_allocate, bool supports_completion = false):
+        first_allocate_failure_(fail_first_allocate ? std::optional<grpc::Status>(grpc::Status(
+                                                          grpc::StatusCode::INTERNAL, "allocate failed once")) :
+                                                      std::nullopt),
+        supports_completion_(supports_completion) {}
 
     explicit TestDecodeRpcService(grpc::Status first_allocate_failure):
         first_allocate_failure_(std::move(first_allocate_failure)) {}
@@ -35,6 +36,7 @@ public:
         }
 
         GenerateOutputsPB response;
+        response.set_supports_prefill_completion(supports_completion_);
         if (!stream->Write(response)) {
             return grpc::Status(grpc::StatusCode::INTERNAL, "write allocate response failed");
         }
@@ -49,11 +51,13 @@ public:
 private:
     std::optional<grpc::Status> first_allocate_failure_;
     std::atomic<int>            allocate_count_{0};
+    bool                        supports_completion_ = false;
 };
 
 class TestDecodeRpcServer {
 public:
-    explicit TestDecodeRpcServer(bool fail_first_allocate): service_(fail_first_allocate) {}
+    explicit TestDecodeRpcServer(bool fail_first_allocate, bool supports_completion = false):
+        service_(fail_first_allocate, supports_completion) {}
     explicit TestDecodeRpcServer(grpc::Status first_allocate_failure): service_(std::move(first_allocate_failure)) {}
     ~TestDecodeRpcServer() {
         if (server_) {
@@ -230,6 +234,98 @@ protected:
     grpc::ServerContext          server_context_;
     kmonitor::MetricsReporterPtr metrics_reporter_;
 };
+
+TEST_F(PrefillRpcServerTest, PrefillCompletionRequiresCapabilityAndSuccessfulLocalFinish) {
+    class CompletionClient final: public PrefillGenerateContext::ClientStream {
+    public:
+        bool Read(GenerateOutputsPB*) override {
+            return true;
+        }
+        bool NextMessageSize(uint32_t*) override {
+            return false;
+        }
+        bool Write(const GenerateRequestPB& request, grpc::WriteOptions) override {
+            writes.push_back(request);
+            return write_ok;
+        }
+        void WaitForInitialMetadata() override {}
+        bool WritesDone() override {
+            return true;
+        }
+        grpc::Status Finish() override {
+            return grpc::Status::OK;
+        }
+        bool                           write_ok = true;
+        std::vector<GenerateRequestPB> writes;
+    };
+
+    for (const std::string mode : {"complete", "legacy", "continue", "unfinished", "error", "write_failure"}) {
+        SCOPED_TRACE(mode);
+        GenerateInputPB request;
+        request.set_request_id(42);
+        auto context                             = makeContext(&request);
+        context->meta                            = std::make_shared<RpcServerRuntimeMeta>();
+        context->generate_input                  = std::make_shared<GenerateInput>();
+        context->generate_input->generate_config = std::make_shared<GenerateConfig>();
+        auto stream                              = makeWaitingStream();
+        context->setStream(stream);
+        if (mode != "unfinished") {
+            stream->reportEvent(StreamEvents::GenerateDone);
+        }
+        if (mode == "continue") {
+            stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+        }
+        if (mode == "error") {
+            stream->reportError(ErrorCode::CANCELLED, "cancelled before completion");
+        }
+        context->supports_prefill_completion = mode != "legacy";
+        auto client                          = std::make_shared<CompletionClient>();
+        client->write_ok                     = mode != "write_failure";
+        context->client_stream               = client;
+        TestPrefillRpcServer server;
+        server.setProcessIdForTest("prefill");
+        server.remoteLoadCacheEnd(*context);
+        if (mode == "complete" || mode == "write_failure") {
+            ASSERT_EQ(client->writes.size(), 1u);
+            EXPECT_EQ(client->writes[0].stage(), RemoteStage::PREFILL_COMPLETE);
+            EXPECT_EQ(client->writes[0].request_id(), 42);
+            EXPECT_EQ(client->writes[0].client_id(), "prefill");
+        } else {
+            EXPECT_TRUE(client->writes.empty());
+        }
+        if (mode == "write_failure") {
+            EXPECT_TRUE(context->hasError());
+        } else if (mode == "complete" || mode == "legacy") {
+            EXPECT_TRUE(context->finished);
+            EXPECT_FALSE(context->hasError());
+        } else if (mode == "continue") {
+            EXPECT_FALSE(context->finished);
+        }
+        context->stream_.reset();
+    }
+}
+
+TEST_F(PrefillRpcServerTest, AllocateNegotiatesPrefillCompletionPerAttempt) {
+    for (const bool supported : {true, false}) {
+        SCOPED_TRACE(supported);
+        TestDecodeRpcServer decode_server(false, supported);
+        ASSERT_TRUE(decode_server.start());
+        GenerateInputPB request;
+        request.set_request_id(42);
+        request.add_token_ids(1);
+        auto context            = makeContext(&request);
+        context->generate_input = makeMultimodalInput();
+        context->generate_input->generate_config->role_addrs.emplace_back(
+            RoleType::DECODE, "127.0.0.1", 0, decode_server.listenPort());
+        context->supports_prefill_completion = !supported;
+        TestPrefillRpcServer server;
+        server.mm_processor_ = std::make_shared<TestMultimodalProcessor>(ErrorCode::NONE_ERROR);
+        server.prepareAllocateResource(*context);
+        ASSERT_TRUE(context->ok());
+        EXPECT_EQ(context->supports_prefill_completion, supported);
+        EXPECT_TRUE(context->closeGrpcStream().ok());
+    }
+}
 
 TEST_F(PrefillRpcServerTest, waitStreamBeforeRunUsesEachServerTimeout) {
     TestPrefillRpcServer first_server;
