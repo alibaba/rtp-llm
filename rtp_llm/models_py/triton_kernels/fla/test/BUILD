@@ -160,3 +160,27 @@ py_test(
     tags = ["manual"],
     exec_properties = {"gpu": "SM100_ARM"},
 )
+
+py_test(
+    name = "test_exact_qk_norm",
+    srcs = ["test_exact_qk_norm.py"],
+    deps = ["//rtp_llm:rtp_llm_lib"],
+    tags = ["manual", "cuda13", "sm10x"],
+    exec_properties = {"gpu": "SM100_ARM"},
+)
+
+py_test(
+    name = "test_gdn_prefill_exact",
+    srcs = ["test_gdn_prefill_exact.py"],
+    deps = ["//rtp_llm:rtp_llm_lib"],
+    tags = ["manual", "cuda13", "sm10x"],
+    exec_properties = {"gpu": "SM100_ARM"},
+)
+
+py_test(
+    name = "test_gdn_prefill_optimization",
+    srcs = ["test_gdn_prefill_optimization.py"],
+    deps = ["//rtp_llm:rtp_llm_lib"],
+    tags = ["manual", "cuda13", "sm10x"],
+    exec_properties = {"gpu": "SM100_ARM"},
+)

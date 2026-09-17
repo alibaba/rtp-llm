@@ -23,6 +23,10 @@ from rtp_llm.models_py.triton_kernels.fla.chunk_scaled_dot_kkt import (
     chunk_scaled_dot_kkt_fwd,
 )
 from rtp_llm.models_py.triton_kernels.fla.cumsum import chunk_local_cumsum
+from rtp_llm.models_py.triton_kernels.fla.exact_qk_norm import (
+    fused_l2norm_qk_exact,
+    supports_exact_qk_norm,
+)
 from rtp_llm.models_py.triton_kernels.fla.l2norm import fused_l2norm_qk, l2norm_fwd
 from rtp_llm.models_py.triton_kernels.fla.solve_tril import solve_tril
 from rtp_llm.models_py.triton_kernels.fla.utils import (
@@ -412,6 +416,10 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         if use_qk_l2norm_in_kernel:
             if is_amd:
                 q, k = fused_l2norm_qk(q, k)
+            elif os.environ.get(
+                "RTP_QWEN35_FUSED_PREFILL_QK_NORM", "0"
+            ) == "1" and supports_exact_qk_norm(q, k):
+                q, k = fused_l2norm_qk_exact(q, k)
             else:
                 # NOTE: fused_l2norm_qk is only validated on AMD/ROCm backend.
                 # On CUDA, fall back to l2norm_fwd until the fused kernel is verified.
@@ -547,6 +555,7 @@ def chunk_gated_delta_rule(
         # a proper V-first contiguous tensor has stride(-2) == K and stride(-1) == 1.
         if V == K and initial_state.stride(-2) == 1 and initial_state.stride(-1) == V:
             import warnings
+
             warnings.warn(
                 f"initial_state appears to be a transposed K-first view "
                 f"(stride(-2)=1, stride(-1)={V}) rather than a true V-first layout. "

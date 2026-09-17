@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 from functools import lru_cache
 from typing import Any, Dict, Optional
@@ -49,6 +50,10 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.triton_kernels.fla.gdn_gating_prefill import (
+    gdn_gating_prefill,
+    supports_gdn_gating_prefill,
+)
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -259,7 +264,12 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
     ) -> torch.Tensor:
-        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
+        gating = fused_gdn_gating
+        if os.getenv(
+            "RTP_QWEN35_TILED_PREFILL_GATING", "0"
+        ) == "1" and supports_gdn_gating_prefill(self.alog, a, b, self.dt_bias):
+            gating = gdn_gating_prefill
+        g, beta = gating(self.alog, a, b, self.dt_bias)
         ssm_states = (
             self._get_ssm_states(kv_cache_tensor)
             if kv_cache_tensor is not None
