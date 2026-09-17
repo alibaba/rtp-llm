@@ -1291,6 +1291,12 @@ class CustomChatRenderer:
         best-effort no-think envelope then steps aside instead of colliding with
         it (DeepSeek-V4 forced tool calls; the renderer's grammar is strictly
         narrower, so nothing is lost).
+
+        Contract: any renderer whose ``apply_chat_completion_constraints`` can
+        install a grammar field MUST override this to return True for exactly
+        those requests. Leaving it at the default False makes a DISABLED request
+        carry both grammars, and the engine's one-field check rejects it (400) for
+        a request that would otherwise have been servable.
         """
         return False
 

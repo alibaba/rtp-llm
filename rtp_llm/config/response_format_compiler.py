@@ -168,15 +168,30 @@ class ResponseFormatPlan:
                         "region, which the no-think envelope cannot wrap",
                     )
                 else:
-                    final_format = (
-                        final_constraint.final_format_node()
-                        if final_constraint is not None
-                        else {"type": "any_text"}
-                    )
-                    engine_constraint = GrammarConstraint(
-                        "structural_tag",
-                        _no_think_only_envelope(reasoning_format, final_format),
-                    ).normalized()
+                    # Any other shape the envelope cannot wrap -- a legacy
+                    # structural_tag ({"structures","triggers"}, no "format" node)
+                    # is one -- must keep the caller's grammar too. Calling
+                    # final_format_node() on it raises, and the hardening is
+                    # best-effort, so it yields rather than turning a request that
+                    # was servable before this branch existed into a failure.
+                    try:
+                        final_format = (
+                            final_constraint.final_format_node()
+                            if final_constraint is not None
+                            else {"type": "any_text"}
+                        )
+                        engine_constraint = GrammarConstraint(
+                            "structural_tag",
+                            _no_think_only_envelope(reasoning_format, final_format),
+                        ).normalized()
+                    except FtRuntimeException:
+                        engine_constraint = final_constraint
+                        _warn_skipped_no_think(
+                            "unwrappable_final_format",
+                            "skipping the no-think constraint: the caller's grammar "
+                            "is in a shape the no-think envelope cannot wrap, so it "
+                            "stays in charge",
+                        )
 
         return cls(final_constraint, engine_constraint)
 

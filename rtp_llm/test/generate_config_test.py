@@ -1449,6 +1449,41 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertIn("cannot wrap", "\n".join(logs.output))
         self.assertNotIn("<think>", str(config.structural_tag))
 
+    def test_disabled_no_think_keeps_legacy_structural_tag_servable(self):
+        """调用方自带 legacy 形态 structural_tag（{"structures","triggers"}，无 "format"）时，
+        envelope 无法包裹：final_format_node() 会抛错，加固必须让位并告警，保留调用方语法，
+        而不是把这个在加固前就可服务的请求打成 400（回归 finding 16573）。"""
+        env = GenerateEnvConfig()
+        env.think_end_tag = "</think>"
+        caller_tag = {
+            "structures": [{"type": "any_text"}],
+            "triggers": ["<foo>"],
+        }
+        normalized_tag = {"type": "structural_tag", **caller_tag}
+        config = GenerateConfig(
+            thinking_mode=ThinkingMode.DISABLED,
+            structural_tag=caller_tag,
+        )
+
+        with self.assertLogs(level="WARNING") as logs:
+            _warn_skipped_no_think.cache_clear()
+            constraint = config.add_thinking_params(
+                self.tokenizer,
+                env,
+                enable_thinking=False,
+                reasoning_format=ReasoningFormat(
+                    tag_begin="<think>",
+                    tag_end="</think>",
+                    enforce_no_think=True,
+                ),
+            )
+
+        self.assertEqual(constraint.value, normalized_tag)
+        validate_engine_ready(config)
+        self.assertEqual(config.structural_tag, normalized_tag)
+        self.assertIn("skipping the no-think constraint", "\n".join(logs.output))
+        self.assertNotIn("<think>", str(config.structural_tag))
+
     def test_disabled_no_think_envelope_passes_engine_boundary(self):
         """约束不带 think 预算，RPC 边界只需校验、不会触发预算重编译。"""
         env = GenerateEnvConfig()

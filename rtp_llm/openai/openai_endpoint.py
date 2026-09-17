@@ -290,14 +290,15 @@ class OpenaiEndpoint(object):
                 variants.append(ids)
         return sorted(variants, key=len, reverse=True)
 
-    def _think_end_id_variants(self, config: GenerateConfig) -> List[List[int]]:
+    def _think_end_id_variants(self) -> List[List[int]]:
         """Token forms of the think end tag, longest first.
 
         Derived from the same ``THINK_END_TAG`` the no-think excludes ban, so
         "what the grammar forbids" and "what counts as an already-closed block"
-        cannot drift apart. ``end_think_token_ids`` is deliberately not used:
-        on DISABLED requests it is empty, and a deployment may point it at a
-        generic terminator token.
+        cannot drift apart. Unlike ``_think_anchor_id_variants`` this takes no
+        ``config``: the end tag is a deployment constant, and ``end_think_token_ids``
+        is deliberately not used -- on DISABLED requests it is empty, and a
+        deployment may point it at a generic terminator token.
         """
         think_end_tag = normalize_think_tag(self.generate_env_config.think_end_tag)
         variants: List[List[int]] = []
@@ -318,15 +319,20 @@ class OpenaiEndpoint(object):
         that already opened a block and continued it (a caller prefill behind the
         template's anchor) reads as unanchored there. Masking the end tag in that
         state would leave the block unclosable and the answer unreachable, so an
-        unterminated block is its own exemption. Scanning backwards to the last
-        boundary keeps the cost proportional to the distance to it.
+        unterminated block is its own exemption. The scan walks backwards and
+        stops at the last boundary, so a prompt that does end near one is cheap.
+        A prompt with no think markup at all -- the main DISABLED shape -- has no
+        boundary to stop at and scans the whole prompt, but each token is a single
+        set-membership test against the boundary first-tokens, not a substring
+        match, so the pass stays linear and allocation-free.
         """
         if input_ids is None:
             return False
         start_variants = self._think_anchor_id_variants(config)
-        end_variants = self._think_end_id_variants(config)
+        end_variants = self._think_end_id_variants()
         start_first = {variant[0] for variant in start_variants}
         end_first = {variant[0] for variant in end_variants}
+        boundary_first = start_first | end_first
 
         def matches(position: int, variants: List[List[int]]) -> bool:
             return any(
@@ -336,6 +342,8 @@ class OpenaiEndpoint(object):
 
         for position in range(len(input_ids) - 1, -1, -1):
             token_id = input_ids[position]
+            if token_id not in boundary_first:
+                continue
             if token_id in end_first and matches(position, end_variants):
                 return False
             if token_id in start_first and matches(position, start_variants):
@@ -436,7 +444,12 @@ class OpenaiEndpoint(object):
             return None
         if not renderer.emits_reasoning_stream:
             return None
-        if renderer.installs_request_grammar(request):
+        # ``request`` is Optional on this helper's signature (the tail-anchor and
+        # think-block probes accept a bare prompt); the renderer hook is declared
+        # for a concrete request, so only ask it when there is one. A None request
+        # carries no tool_choice/response_format, so the renderer cannot be about
+        # to install a grammar and the envelope is safe to apply.
+        if request is not None and renderer.installs_request_grammar(request):
             return None
         if self._request_prompt_has_think_anchor(config, input_ids, request):
             return None
