@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
@@ -402,6 +403,154 @@ class PrefillScoreChunkTest(unittest.TestCase):
             )
         )
         self.assertTrue(torch.all(persistent_kv[1, 0, :, 0] == 7))
+
+    def test_cp_paged_prefill_uses_current_request_shape(self) -> None:
+        from rtp_llm.models_py.modules.hybrid.msa_attention import MSAAttention
+
+        attn = MSAAttention.__new__(MSAAttention)
+        torch.nn.Module.__init__(attn)
+        attn.cp_enabled = True
+        attn.page_size = 128
+        attn._scratch_batch_size = 0
+        attn._scratch_seq_len = 0
+        attn._scratch_slots = 0
+
+        # Seed the legacy grow-only high watermarks, then prove paged prefill
+        # sizing replaces them instead of cross-multiplying batch and sequence.
+        attn._ensure_scratch_addressing_capacity(bsz=8, max_kv=80_000)
+        attn._ensure_scratch_addressing_capacity(
+            bsz=1, max_kv=320_000, exact_cp_shape=True
+        )
+
+        self.assertEqual(attn._scratch_batch_size, 1)
+        self.assertEqual(attn._scratch_seq_len, 320_000)
+        self.assertEqual(attn._scratch_slots, 320_000)
+
+    def test_cp_paged_prefill_builds_bf16_working_pages(self) -> None:
+        from rtp_llm.models_py.modules.hybrid import msa_attention
+
+        attn = msa_attention.MSAAttention.__new__(msa_attention.MSAAttention)
+        torch.nn.Module.__init__(attn)
+        attn.page_size = 2
+        attn.kv_head_num = 1
+        attn.head_dim = 1
+        attn.idx_head_dim = 1
+        attn._scratch_slots = 4
+        attn._scratch_seq_len = 4
+        attn._idx_k_paged_view = lambda _cache: torch.empty(
+            2, 2, 1, dtype=torch.bfloat16
+        )
+        packed = torch.zeros(1, 3, dtype=torch.bfloat16)
+        one = torch.zeros(1, dtype=torch.int64)
+
+        for persistent_dtype in (torch.bfloat16, torch.float8_e4m3fn):
+            with self.subTest(persistent_dtype=persistent_dtype):
+                attn._paged_kv_base_view = lambda _cache, dtype=persistent_dtype: (
+                    torch.empty(2, 2, 1, 2, 1, dtype=dtype)
+                )
+                idx_scratch = torch.zeros(4, 1, 1, dtype=torch.bfloat16)
+                with mock.patch.object(
+                    msa_attention._IDX_K_SCRATCH,
+                    "acquire",
+                    return_value=idx_scratch,
+                ), mock.patch.object(msa_attention, "_fused_cp_paged_write") as write:
+                    k_paged, v_paged = attn._write_cp_suffix_to_bf16_working_pages(
+                        SimpleNamespace(),
+                        packed,
+                        one,
+                        one,
+                        one,
+                        one.to(torch.int32),
+                        1,
+                        1,
+                        1,
+                    )
+
+                self.assertEqual(k_paged.dtype, torch.bfloat16)
+                self.assertEqual(v_paged.dtype, torch.bfloat16)
+                self.assertEqual(tuple(k_paged.shape), (2, 1, 2, 1))
+                self.assertIsNone(attn._scratch_k)
+                self.assertIsNone(attn._scratch_v)
+                self.assertIs(attn._scratch_idx_k, idx_scratch)
+                self.assertTrue(write.call_args.kwargs["scratch_is_paged"])
+
+    def test_cp_prefix_scatter_accepts_bf16_and_e4m3_persistent_pages(self) -> None:
+        from rtp_llm.models_py.modules.hybrid.msa_attention import (
+            _scatter_cp_prefix_pages,
+        )
+
+        device = torch.device("cuda")
+        dst_pages = torch.tensor([1, 0], dtype=torch.int64, device=device)
+        idx_pages = torch.tensor(
+            [[[1], [2]], [[3], [4]]], dtype=torch.bfloat16, device=device
+        )
+        source = torch.arange(1, 17, dtype=torch.bfloat16, device=device).reshape(
+            2, 2, 1, 2, 2
+        )
+
+        for persistent_dtype in (torch.bfloat16, torch.float8_e4m3fn):
+            with self.subTest(persistent_dtype=persistent_dtype):
+                main_pages = source.to(persistent_dtype)
+                k_paged = torch.zeros(2, 1, 2, 2, dtype=torch.bfloat16, device=device)
+                v_paged = torch.zeros_like(k_paged)
+                idx_scratch = torch.zeros(2, 2, 1, dtype=torch.bfloat16, device=device)
+
+                _scatter_cp_prefix_pages(
+                    main_pages,
+                    idx_pages,
+                    dst_pages,
+                    k_paged,
+                    v_paged,
+                    idx_scratch,
+                )
+                torch.cuda.synchronize()
+
+                expected = main_pages.to(torch.bfloat16)
+                self.assertTrue(torch.equal(k_paged[1], expected[0, 0]))
+                self.assertTrue(torch.equal(v_paged[1], expected[0, 1]))
+                self.assertTrue(torch.equal(k_paged[0], expected[1, 0]))
+                self.assertTrue(torch.equal(v_paged[0], expected[1, 1]))
+                self.assertTrue(torch.equal(idx_scratch[1], idx_pages[0]))
+                self.assertTrue(torch.equal(idx_scratch[0], idx_pages[1]))
+
+    def test_cp_prefix_restore_reads_replicated_paged_cache(self) -> None:
+        from rtp_llm.models_py.modules.hybrid.msa_attention import MSAAttention
+
+        device = torch.device("cuda")
+        attn = MSAAttention.__new__(MSAAttention)
+        torch.nn.Module.__init__(attn)
+        attn._kv_sharded = False
+        attn.page_size = 2
+        attn._scratch_idx_k = torch.zeros(4, 1, 1, dtype=torch.bfloat16, device=device)
+        main_pool = torch.arange(1, 25, dtype=torch.bfloat16, device=device).reshape(
+            3, 2, 1, 2, 2
+        )
+        idx_pool = torch.arange(1, 7, dtype=torch.bfloat16, device=device).reshape(
+            3, 2, 1
+        )
+        block_table = torch.tensor([[2, 0]], dtype=torch.int32, device=device)
+        attn._paged_kv_base_view = lambda _cache: main_pool
+        attn._idx_k_paged_view = lambda _cache: idx_pool
+        attn._physical_block_table = lambda _inputs: block_table
+        k_paged = torch.zeros(2, 1, 2, 2, dtype=torch.bfloat16, device=device)
+        v_paged = torch.zeros_like(k_paged)
+
+        attn._restore_cp_prefix_working_pages(
+            mock.Mock(),
+            [4],
+            torch.tensor([[0, 1, 2, 3]], dtype=torch.int32, device=device),
+            mock.Mock(),
+            k_paged,
+            v_paged,
+        )
+        torch.cuda.synchronize()
+
+        self.assertTrue(torch.equal(k_paged[0], main_pool[2, 0]))
+        self.assertTrue(torch.equal(v_paged[0], main_pool[2, 1]))
+        self.assertTrue(torch.equal(k_paged[1], main_pool[0, 0]))
+        self.assertTrue(torch.equal(v_paged[1], main_pool[0, 1]))
+        self.assertTrue(torch.equal(attn._scratch_idx_k[:2, 0], idx_pool[2]))
+        self.assertTrue(torch.equal(attn._scratch_idx_k[2:, 0], idx_pool[0]))
 
     def test_triton_fused_chunk_matches_full(self) -> None:
         from rtp_llm.models_py.triton_kernels.sparse_msa.prefill import score_chunk
