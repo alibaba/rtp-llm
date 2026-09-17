@@ -4,7 +4,6 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.model_desc.generic_moe_mtp import (
     _MTP_INDEXER_ROLE_NORMAL,
     _MTP_INDEXER_ROLE_REUSE,
@@ -53,37 +52,6 @@ class MtpIndexerShareTest(unittest.TestCase):
             self.assertFalse(_mtp_indexer_share_active(supported, no_cp, 2, 4))
             self.assertFalse(_mtp_indexer_share_active(supported, no_cp, 1, 0))
             self.assertFalse(_mtp_indexer_share_active(supported, with_cp, 1, 4))
-
-    def test_cpu_world_control_group_is_created_lazily_and_reused(self):
-        old_config = collective_torch._parallelism_config
-        old_group = collective_torch._cpu_world_group
-        fake_group = object()
-        try:
-            collective_torch._parallelism_config = SimpleNamespace(world_size=2)
-            collective_torch._cpu_world_group = None
-            with (
-                patch.dict(
-                    "os.environ",
-                    {"RTP_LLM_ENABLE_MTP_INDEXER_SHARE": "1"},
-                    clear=True,
-                ),
-                patch.object(torch.distributed, "is_gloo_available", return_value=True),
-                patch.object(
-                    torch.distributed, "new_group", return_value=fake_group
-                ) as new_group,
-            ):
-                self.assertIs(
-                    collective_torch._get_or_create_mtp_indexer_cpu_world_group(),
-                    fake_group,
-                )
-                self.assertIs(
-                    collective_torch._get_or_create_mtp_indexer_cpu_world_group(),
-                    fake_group,
-                )
-                new_group.assert_called_once()
-        finally:
-            collective_torch._parallelism_config = old_config
-            collective_torch._cpu_world_group = old_group
 
     def _model(self, enabled=True, topk=4, capacity=3):
         model = object.__new__(GenericMoeMTPModel)

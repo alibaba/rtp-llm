@@ -132,3 +132,9 @@ py_test(
     ],
     tags = ["open_skip"],
 )
+
+py_test(
+    name = "mtp_mega_buf_share_test",
+    srcs = ["mtp_mega_buf_share_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+)
