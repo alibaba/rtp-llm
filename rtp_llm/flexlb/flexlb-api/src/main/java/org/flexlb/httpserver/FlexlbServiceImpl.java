@@ -739,6 +739,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             return;
         }
         try {
+            if (ctx.isSuccess() ? !pvLogger.isInfoEnabled() : !pvLogger.isErrorEnabled()) {
+                return;
+            }
             FlexlbScheduleProtocol.RequestLifecyclePB lifecycle = response.hasLifecycle()
                     ? response.getLifecycle()
                     : FlexlbScheduleProtocol.RequestLifecyclePB.getDefaultInstance();
