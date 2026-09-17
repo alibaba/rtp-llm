@@ -143,6 +143,52 @@ class WorkerBatcherSchedulingTest {
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void concurrentReadersShareOneVersionWithoutHoldingQueueLock() throws Exception {
+        FlexlbConfig config = singleConfig();
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        ProjectionCacheBlock delivery = new ProjectionCacheBlock();
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        ScheduledRequest head = spy(item(config, endpoint, 13L, 50, System.currentTimeMillis()));
+        CountDownLatch materializing = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            if (Thread.currentThread().getName().startsWith("projection-reader")) {
+                materializing.countDown();
+                await(finish);
+            }
+            return invocation.callRealMethod();
+        }).when(head).seqLen();
+        try (var readers = java.util.concurrent.Executors.newFixedThreadPool(
+                16, Thread.ofPlatform().name("projection-reader-", 0).factory())) {
+            assertTrue(runtime.offer(head));
+            await(delivery.firstPrepareEntered);
+            var first = readers.submit(runtime::captureRouteProjectionInputs);
+            await(materializing);
+            var started = new CountDownLatch(15);
+            var followers = new java.util.ArrayList<java.util.concurrent.Future<RouteProjection.Inputs>>();
+            for (int i = 0; i < 15; i++) {
+                followers.add(readers.submit(() -> {
+                    started.countDown();
+                    return runtime.captureRouteProjectionInputs();
+                }));
+            }
+            await(started);
+            // A normal queue reader must progress while materialization is blocked.
+            CompletableFuture.supplyAsync(runtime::captureQueueSnapshot).get(2, TimeUnit.SECONDS);
+            finish.countDown();
+            var shared = first.get(2, TimeUnit.SECONDS);
+            for (var follower : followers) {
+                org.junit.jupiter.api.Assertions.assertSame(shared, follower.get(2, TimeUnit.SECONDS));
+            }
+        } finally {
+            finish.countDown();
+            delivery.allowFirstPrepare.countDown();
+            delivery.allowSecondPrepare.countDown();
+        }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
     void capacityBlockInvalidatesAnUnfinishedProjectionCapture() throws Exception {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
