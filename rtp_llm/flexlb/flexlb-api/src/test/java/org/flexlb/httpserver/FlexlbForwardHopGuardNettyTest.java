@@ -16,7 +16,6 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
-import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
@@ -163,9 +162,6 @@ class FlexlbForwardHopGuardNettyTest {
             when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
             routeService = mock(RouteService.class);
             EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
-            ActiveRequestCounter activeRequestCounter = mock(ActiveRequestCounter.class);
-            when(activeRequestCounter.acquire()).thenReturn(
-                    mock(ActiveRequestCounter.RequestToken.class));
 
             channelEventLoop = new NioEventLoopGroup(1);
             channelExecutor = Executors.newFixedThreadPool(2);
@@ -176,7 +172,6 @@ class FlexlbForwardHopGuardNettyTest {
                     routeService,
                     consistency,
                     healthReporter,
-                    activeRequestCounter,
                     forwarder,
                     configService,
                     mock(BatchSchedulerReporter.class),

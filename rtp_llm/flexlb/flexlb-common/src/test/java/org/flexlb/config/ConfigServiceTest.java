@@ -18,6 +18,20 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
+    @Test
+    void shutdownQuietPeriodUsesConfigDefaultsOverridesAndValidation() {
+        assertEquals(5000L, ConfigService.parse("{}").getGrpcServer().getShutdownQuietPeriodMs());
+        assertEquals(7000L, ConfigService.parse("""
+                {"grpcServer":{"shutdownQuietPeriodMs":7000}}
+                """).getGrpcServer().getShutdownQuietPeriodMs());
+        for (String value : new String[]{"0", "-1", "null", "1.5", "\"7000\""}) {
+            ConfigValidationException error = assertThrows(ConfigValidationException.class,
+                    () -> ConfigService.parse("{\"grpcServer\":{\"shutdownQuietPeriodMs\":" + value + "}}"));
+            assertTrue(error.getMessage().contains("shutdownQuietPeriodMs"), error.getMessage());
+        }
+    }
+
+
     private static void assertInvalid(String document, String field) {
         var error = assertThrows(ConfigValidationException.class, () -> ConfigService.parse(document));
         assertTrue(error.getMessage().contains(field), error.getMessage());

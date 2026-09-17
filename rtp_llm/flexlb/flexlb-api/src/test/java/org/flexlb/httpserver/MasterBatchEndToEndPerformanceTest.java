@@ -39,7 +39,6 @@ import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
-import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
@@ -122,7 +121,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private ManagedChannel masterChannel;
     private FlexlbServiceGrpc.FlexlbServiceStub masterStub;
     private ServerScheduleLatencyRecorder latencyRecorder;
-    private ActiveRequestCounter activeRequestCounter;
     private static ch.qos.logback.classic.Logger flexlbLogger;
     private static ch.qos.logback.classic.Logger mockRpcLogger;
     private static ch.qos.logback.classic.Logger nettyLogger;
@@ -238,13 +236,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         LBStatusConsistencyService consistencyService =
                 mock(LBStatusConsistencyService.class, withSettings().stubOnly());
         when(consistencyService.isNeedConsistency()).thenReturn(false);
-        activeRequestCounter = new ActiveRequestCounter();
         latencyRecorder = new ServerScheduleLatencyRecorder();
         FlexlbServiceImpl service = new FlexlbServiceImpl(
                 routeService,
                 consistencyService,
                 mock(EngineHealthReporter.class, withSettings().stubOnly()),
-                activeRequestCounter,
                 mock(FlexlbGrpcForwarder.class, withSettings().stubOnly()),
                 configService,
                 reporter,
@@ -340,8 +336,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 "at least one EnqueueBatch call must contain multiple tasks");
         assertTrue(batches.distinctInputLengths() >= 32,
                 "engine traffic must retain the log-derived input-length distribution");
-        assertEquals(0L, activeRequestCounter.getCount(),
-                "all Master gRPC requests must release their active-request token");
 
         int processors = Runtime.getRuntime().availableProcessors();
         long defaultMinimumQps = Math.min(5_000L, Math.max(500L, processors * 250L));
@@ -460,7 +454,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             assertEquals(batches.batchCount(),
                     batchFullCount + windowTimeoutCount + predictThresholdCount,
                     "every engine batch must have one recorded dispatch reason");
-            assertEquals(0L, activeRequestCounter.getCount());
             assertTrue(result.qps() >= targetQps * minimumQpsRatio,
                     () -> String.format(
                             "client throughput %.1f QPS missed %.0f%% of target %d QPS",

@@ -14,7 +14,6 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RouteService;
-import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
@@ -107,10 +106,6 @@ class FollowerAsyncForwardingNettyTest {
              Follower follower = Follower.start(master.httpAddress(), REQUEST_COUNT);
              Client client = Client.connect(follower.grpcPort())) {
             client.warmUp(WARMUP_REQUEST_ID);
-            awaitCondition(
-                    () -> follower.activeRequests.getCount() == 0,
-                    Duration.ofSeconds(2),
-                    "warm-up request token was not released");
 
             long trafficStartNanos = System.nanoTime();
             for (int index = 0; index < REQUEST_COUNT; index++) {
@@ -139,8 +134,6 @@ class FollowerAsyncForwardingNettyTest {
 
                 assertEquals(0, follower.rejections.get(),
                         "async forwarding must not reject follower request tasks");
-                assertEquals(REQUEST_COUNT, follower.activeRequests.getCount(),
-                        "pending RPCs must retain, but not prematurely release, request tokens");
                 master.assertExactlyOnceAndOneHop();
                 verify(follower.routeService, never()).route(any());
             } finally {
@@ -152,10 +145,6 @@ class FollowerAsyncForwardingNettyTest {
             assertTrue(client.errors.isEmpty(),
                     () -> "unexpected client errors: " + client.errors);
             client.assertExactlyOnce();
-            awaitCondition(
-                    () -> follower.activeRequests.getCount() == 0,
-                    Duration.ofSeconds(2),
-                    "active request tokens were not released after Master responses");
             follower.awaitRequestExecutorIdle(Duration.ofSeconds(2));
             assertTrue(follower.waitForCallbackExecutorIdle(Duration.ofSeconds(2)),
                     "forward callback executor did not drain");
@@ -175,10 +164,6 @@ class FollowerAsyncForwardingNettyTest {
              BenchmarkClient client = BenchmarkClient.connect(
                      follower.grpcPort(), REQUEST_COUNT)) {
             client.warmUp(WARMUP_REQUEST_ID);
-            awaitCondition(
-                    () -> follower.activeRequests.getCount() == 0,
-                    Duration.ofSeconds(2),
-                    "benchmark warm-up request token was not released");
 
             GcSnapshot gcBefore = GcSnapshot.capture();
             long trafficStartNanos = System.nanoTime();
@@ -201,9 +186,6 @@ class FollowerAsyncForwardingNettyTest {
                 sampler.close();
             }
 
-            boolean tokensDrained = waitUntil(
-                    () -> follower.activeRequests.getCount() == 0,
-                    Duration.ofSeconds(5));
             boolean executorDrained = follower.waitForRequestExecutorIdle(
                     Duration.ofSeconds(5));
             boolean callbackExecutorDrained = follower.waitForCallbackExecutorIdle(
@@ -222,7 +204,6 @@ class FollowerAsyncForwardingNettyTest {
                     rssBeforeBytes,
                     threadsBefore,
                     allTerminated,
-                    tokensDrained,
                     executorDrained,
                     callbackExecutorDrained);
             result.printJson();
@@ -240,7 +221,6 @@ class FollowerAsyncForwardingNettyTest {
                     "client must receive exactly one terminal callback per unary RPC");
             assertEquals(0, follower.channelRejections.get(),
                     "forward callback executor must not reject completions");
-            assertTrue(tokensDrained, "benchmark leaked active request tokens");
             assertTrue(executorDrained, "follower request executor did not drain");
             assertTrue(callbackExecutorDrained,
                     "forward callback executor did not drain");
@@ -255,7 +235,7 @@ class FollowerAsyncForwardingNettyTest {
         System.out.printf(
                 "Follower forwarding capacity: core=%d max=%d queue_capacity=%d qps=%d "
                         + "requests=%d master_received=%d pool_size=%d active=%d queued=%d "
-                        + "rejections=%d active_tokens=%d all_forwarded=%s executor_idle=%s%n",
+                        + "rejections=%d all_forwarded=%s executor_idle=%s%n",
                 EXECUTOR_CORE_SIZE,
                 EXECUTOR_MAX_SIZE,
                 follower.requestQueueCapacity,
@@ -266,7 +246,6 @@ class FollowerAsyncForwardingNettyTest {
                 follower.requestExecutor.getActiveCount(),
                 follower.requestExecutor.getQueue().size(),
                 follower.rejections.get(),
-                follower.activeRequests.getCount(),
                 allRequestsForwarded,
                 requestExecutorIdle);
     }
@@ -507,7 +486,6 @@ class FollowerAsyncForwardingNettyTest {
         private final AtomicInteger rejections = new AtomicInteger();
         private final AtomicInteger channelRejections = new AtomicInteger();
         private final RouteService routeService = mock(RouteService.class);
-        private final ActiveRequestCounter activeRequests = new ActiveRequestCounter();
         private final int requestQueueCapacity;
         private final ThreadPoolExecutor requestExecutor;
         private final ThreadPoolExecutor channelExecutor;
@@ -553,7 +531,6 @@ class FollowerAsyncForwardingNettyTest {
                     routeService,
                     consistency,
                     healthReporter,
-                    activeRequests,
                     forwarder,
                     configService,
                     mock(BatchSchedulerReporter.class),
@@ -954,9 +931,7 @@ class FollowerAsyncForwardingNettyTest {
             long maxRssBytes,
             long gcCollections,
             long gcTimeMs,
-            long finalActiveTokens,
             boolean allTerminated,
-            boolean tokensDrained,
             boolean executorDrained,
             boolean callbackExecutorDrained) {
 
@@ -973,7 +948,6 @@ class FollowerAsyncForwardingNettyTest {
                 long rssBeforeBytes,
                 int threadsBefore,
                 boolean allTerminated,
-                boolean tokensDrained,
                 boolean executorDrained,
                 boolean callbackExecutorDrained) {
             long[] successLatencies = client.successfulLatencies();
@@ -1009,9 +983,7 @@ class FollowerAsyncForwardingNettyTest {
                     sampler.maxRssBytes.get(),
                     Math.max(0, gcAfter.collections() - gcBefore.collections()),
                     Math.max(0, gcAfter.collectionTimeMs() - gcBefore.collectionTimeMs()),
-                    follower.activeRequests.getCount(),
                     allTerminated,
-                    tokensDrained,
                     executorDrained,
                     callbackExecutorDrained);
         }
@@ -1059,8 +1031,7 @@ class FollowerAsyncForwardingNettyTest {
                             + "\"thread_delta\":%d,\"rss_before_bytes\":%d,"
                             + "\"max_rss_bytes\":%d,\"rss_delta_bytes\":%d,"
                             + "\"gc_collections\":%d,\"gc_time_ms\":%d,"
-                            + "\"final_active_tokens\":%d,\"all_terminated\":%s,"
-                            + "\"tokens_drained\":%s,\"executor_drained\":%s,"
+                            + "\"all_terminated\":%s,\"executor_drained\":%s,"
                             + "\"callback_executor_drained\":%s}%n",
                     EXECUTOR_CORE_SIZE,
                     EXECUTOR_MAX_SIZE,
@@ -1101,9 +1072,7 @@ class FollowerAsyncForwardingNettyTest {
                     rssDeltaBytes,
                     gcCollections,
                     gcTimeMs,
-                    finalActiveTokens,
                     allTerminated,
-                    tokensDrained,
                     executorDrained,
                     callbackExecutorDrained);
         }

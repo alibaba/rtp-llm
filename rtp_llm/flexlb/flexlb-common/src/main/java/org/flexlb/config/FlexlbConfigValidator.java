@@ -48,6 +48,8 @@ final class FlexlbConfigValidator {
         validateRouting(config.getRouter());
         validateWorkerRegistry(config.getWorkerRegistry());
         validateObservability(config.getObservability());
+        require(config.getGrpcServer() != null, "grpcServer", "is required");
+        positive(config.getGrpcServer().getShutdownQuietPeriodMs(), "grpcServer.shutdownQuietPeriodMs");
     }
 
     private static void validateQueue(FlexlbConfig config, QueueSchedulerConfig queue) {

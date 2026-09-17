@@ -334,7 +334,10 @@ OpenTelemetry integration for distributed tracing (configured via `OTEL_EXPORTER
 Monitoring enhancements:
 - `BatchSchedulerReporter`: Reports canonical worker-queue size and wait-time metrics
 - `PrioritySchedulerReporter`: Reports priority admission and lifecycle metrics
-- `ActiveRequestCounter`: Tracks concurrent active requests
+Graceful shutdown starts a quiet period only when stopping the service.
+`FLEXLB_CONFIG.grpcServer.shutdownQuietPeriodMs` defaults to 5000; each Schedule
+arrival restarts it. gRPC then waits for accepted RPCs before Spring destroys
+serving resources. No application request counter or per-request token is used.
 
 ## Error Types
 

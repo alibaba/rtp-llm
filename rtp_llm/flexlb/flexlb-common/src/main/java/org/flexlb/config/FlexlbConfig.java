@@ -26,6 +26,7 @@ public final class FlexlbConfig {
     private DispatcherConfig dispatcher = new BatchDispatcherConfig();
     private RoutingConfig router = new RoutingConfig();
     private WorkerRegistryConfig workerRegistry = new WorkerRegistryConfig();
+    private GrpcServerConfig grpcServer = new GrpcServerConfig();
     private ObservabilityConfig observability = new ObservabilityConfig();
 
     @JsonIgnore
@@ -143,5 +144,11 @@ public final class FlexlbConfig {
                 (RoutingConfig.RatioCandidatePoolConfig) pool;
         return Math.max(1, Math.max(ratio.getMinimumWorkers(),
                 (int) Math.floor(workerCount * ratio.getRatio())));
+    }
+    @Getter
+    @Setter
+    public static final class GrpcServerConfig {
+        /** Quiet time after shutdown starts; each Schedule arrival restarts it. */
+        private long shutdownQuietPeriodMs = 5_000L;
     }
 }

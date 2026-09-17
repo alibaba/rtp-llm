@@ -421,3 +421,21 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 ## License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
+### Graceful shutdown
+
+Configure the Schedule quiet period through `FLEXLB_CONFIG`:
+
+```json
+"grpcServer": {"shutdownQuietPeriodMs": 5000}
+```
+
+The value must be a positive integer (default 5000 ms). The quiet period starts
+when shutting down; each Schedule arrival restarts it. After it elapses, gRPC
+waits for accepted RPCs to finish before Spring destroys scheduler and forwarding
+resources. Normal idle serving never starts an exit timer. The entry supervisor
+waits for Java to exit before stopping auxiliary services; the platform owns
+the forced-kill deadline. Engine generation already handed off by a successful
+Schedule can continue independently after FlexLB exits.
+
+See [TERM verification](APP-META/docker-config/tests/README.md) for test commands.
