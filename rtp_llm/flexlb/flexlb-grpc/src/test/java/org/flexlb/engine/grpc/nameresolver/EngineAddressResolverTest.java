@@ -13,14 +13,18 @@ import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class EngineAddressResolverTest {
 
     @Test
+    @SuppressWarnings("unchecked")
     void notifiesEveryRegisteredListener() {
         Endpoint endpoint = new Endpoint();
         endpoint.setAddress("worker-service");
@@ -53,20 +57,33 @@ class EngineAddressResolverTest {
         resolver.subscribe(cacheListener);
         resolver.subscribe(grpcListener);
 
-        List<String> initialHosts = List.of("10.0.0.1:8080");
-        verify(grpcListener).onAddressUpdate(initialHosts);
-        verify(cacheListener).onAddressUpdate(initialHosts);
+        ArgumentCaptor<List<WorkerHost>> grpcHosts = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<List<WorkerHost>> cacheHosts = ArgumentCaptor.forClass(List.class);
+        verify(grpcListener).onAddressUpdate(grpcHosts.capture());
+        verify(cacheListener).onAddressUpdate(cacheHosts.capture());
+
+        assertWorkerHost(grpcHosts.getValue().get(0), "10.0.0.1", 8081, 18002);
+        assertWorkerHost(cacheHosts.getValue().get(0), "10.0.0.1", 8081, 18002);
 
         discoveryListener.getValue().onHostsChanged(
                 List.of(workerHost("10.0.0.2", 8080)));
 
-        List<String> updatedHosts = List.of("10.0.0.2:8080");
-        verify(grpcListener).onAddressUpdate(updatedHosts);
-        verify(cacheListener).onAddressUpdate(updatedHosts);
+        verify(grpcListener, times(2)).onAddressUpdate(grpcHosts.capture());
+        verify(cacheListener, times(2)).onAddressUpdate(cacheHosts.capture());
+
+        assertWorkerHost(grpcHosts.getValue().get(0), "10.0.0.2", 8081, 18002);
+        assertWorkerHost(cacheHosts.getValue().get(0), "10.0.0.2", 8081, 18002);
+    }
+
+    private void assertWorkerHost(WorkerHost host, String ip, int grpcPort, int workerStatusPort) {
+        assertInstanceOf(WorkerHost.class, host);
+        assertEquals(ip, host.getIp());
+        assertEquals(grpcPort, host.getGrpcPort());
+        assertEquals(workerStatusPort, host.getWorkerStatusPort());
     }
 
     private WorkerHost workerHost(String ip, int httpPort) {
         return new WorkerHost(ip, httpPort, httpPort + 1, httpPort + 5,
-                httpPort + 1, "", "", "");
+                18002, "", "", "");
     }
 }

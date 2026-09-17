@@ -27,10 +27,10 @@ import java.util.concurrent.CopyOnWriteArrayList;
 @Component
 public class EngineAddressResolver {
 
-    private final Map<Endpoint, List<String/*ip:port*/>> domainHostsMap = new ConcurrentHashMap<>();
+    private final Map<Endpoint, List<WorkerHost>> domainHostsMap = new ConcurrentHashMap<>();
     private final ServiceDiscovery serviceDiscovery;
     private final CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<>();
-    private volatile List<String/*ip:port*/> allIpPortList = List.of();
+    private volatile List<WorkerHost> allHosts = List.of();
     private final List<Endpoint> serviceEndpoints;
 
     public EngineAddressResolver(ServiceDiscovery serviceDiscovery, ModelMetaConfig modelMetaConfig) {
@@ -83,7 +83,7 @@ public class EngineAddressResolver {
         if (listener == null || !listeners.addIfAbsent(listener)) {
             return;
         }
-        notifyListener(listener, allIpPortList);
+        notifyListener(listener, allHosts);
     }
 
     /**
@@ -96,29 +96,25 @@ public class EngineAddressResolver {
         if (hostList == null || hostList.isEmpty()) {
             domainHostsMap.remove(endpoint);
         } else {
-            List<String/*ip:port*/> ipPortList = new ArrayList<>(hostList.size());
-            for (WorkerHost host : hostList) {
-                ipPortList.add(host.getIpPort());
-            }
-            domainHostsMap.put(endpoint, ipPortList);
+            domainHostsMap.put(endpoint, List.copyOf(hostList));
         }
         // Aggregate host lists from all addresses
-        List<String/*ip:port*/> aggregatedHosts = new ArrayList<>();
-        for (List<String/*ip:port*/> hosts : domainHostsMap.values()) {
+        List<WorkerHost> aggregatedHosts = new ArrayList<>();
+        for (List<WorkerHost> hosts : domainHostsMap.values()) {
             aggregatedHosts.addAll(hosts);
         }
         Logger.info("Address {} hosts updated, total aggregated hosts: {}",
                 endpoint.getAddress(), aggregatedHosts.size());
         // Update global host list and notify listener
-        this.allIpPortList = List.copyOf(aggregatedHosts);
+        this.allHosts = List.copyOf(aggregatedHosts);
         for (Listener listener : listeners) {
-            notifyListener(listener, allIpPortList);
+            notifyListener(listener, allHosts);
         }
     }
 
-    private void notifyListener(Listener listener, List<String> ipPortList) {
+    private void notifyListener(Listener listener, List<WorkerHost> hosts) {
         try {
-            listener.onAddressUpdate(ipPortList);
+            listener.onAddressUpdate(hosts);
         } catch (Exception e) {
             Logger.error("Failed to notify engine address listener", e);
         }
@@ -126,6 +122,6 @@ public class EngineAddressResolver {
 
     public interface Listener {
 
-        void onAddressUpdate(List<String/*ip:port*/> ipPortList);
+        void onAddressUpdate(List<WorkerHost> hosts);
     }
 }

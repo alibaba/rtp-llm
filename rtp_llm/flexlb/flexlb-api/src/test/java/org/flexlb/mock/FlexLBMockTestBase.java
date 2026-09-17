@@ -13,6 +13,7 @@ import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
 import org.flexlb.balance.scheduler.RouteAdmission;
+import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.InternalRuntimeSettings;
@@ -23,10 +24,11 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -154,11 +156,13 @@ public abstract class FlexLBMockTestBase {
                 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(runtime.getGrpcClientExecutorQueueCapacity()));
 
-        CustomNameResolver nameResolver = (listener) -> { /* no-op */ };
         GrpcReporter grpcReporter = new GrpcReporter(new NoOpFlexMonitor());
         grpcClient = new EngineGrpcClient(
-                nameResolver, grpcExecutor, eventLoopGroup,
-                grpcReporter, 1_000, enqueueTimeoutMillis());
+                mock(EngineAddressResolver.class),
+                new GrpcChannelFactory(grpcExecutor, eventLoopGroup),
+                grpcReporter,
+                mock(CacheMatchConfiguration.class),
+                enqueueTimeoutMillis());
 
         // 4. Create real dispatcher
         dispatcher = createDispatcher();
@@ -236,7 +240,7 @@ public abstract class FlexLBMockTestBase {
             mockDecodeWorker.stop();
         }
         if (grpcClient != null) {
-            grpcClient.shutdownChannelPool();
+            grpcClient.shutdown();
         }
         if (grpcExecutor != null) {
             grpcExecutor.shutdownNow();
