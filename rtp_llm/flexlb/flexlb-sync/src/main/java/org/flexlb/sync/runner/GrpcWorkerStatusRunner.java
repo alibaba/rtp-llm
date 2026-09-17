@@ -23,6 +23,8 @@ import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 public class GrpcWorkerStatusRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+    private static final long VIT_SYNC_REQUEST_TIMEOUT_MS = Long.parseLong(
+            System.getenv().getOrDefault("VIT_SYNC_REQUEST_TIMEOUT_MS", "1000"));
 
     private final String ipPort;
     private final String modelName;
@@ -43,6 +45,16 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
                                   long syncRequestTimeoutMs) {
+        this(modelName, ipPort, site, roleType, group, workerStatus, engineHealthReporter,
+                engineGrpcService, syncRequestTimeoutMs, VIT_SYNC_REQUEST_TIMEOUT_MS);
+    }
+
+    GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
+                           WorkerStatus workerStatus,
+                           EngineHealthReporter engineHealthReporter,
+                           EngineGrpcService engineGrpcService,
+                           long syncRequestTimeoutMs,
+                           long vitSyncRequestTimeoutMs) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
@@ -54,7 +66,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.group = group;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
-        this.syncRequestTimeoutMs = syncRequestTimeoutMs;
+        this.syncRequestTimeoutMs = roleType == RoleType.VIT
+                ? Math.max(syncRequestTimeoutMs, vitSyncRequestTimeoutMs)
+                : syncRequestTimeoutMs;
     }
 
     @Override

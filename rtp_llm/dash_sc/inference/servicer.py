@@ -141,6 +141,7 @@ def _build_mm_inputs(
                 part.max_frames,
                 [],  # crop_positions (no upstream control today)
                 -1,  # use VitConfig.mm_timeout_ms
+                part.max_long_side_pixel,
             ),
         )
         for part, tensor in zip(mm_parts, tensors)

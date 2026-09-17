@@ -855,6 +855,25 @@ class DashScGrpcRequestTest(TestCase):
         op = parse_other_params(req)
         self.assertFalse(op.return_input_ids)
 
+    def test_dashscope_uid_from_header_attributes(self):
+        for key in ("X-DashScope-Uid", "x-dashscope-uid"):
+            with self.subTest(key=key):
+                req = predict_v2_pb2.ModelInferRequest()
+                req.parameters["ds_header_attributes"].string_param = json.dumps(
+                    {
+                        key: "  uid-dash  ",
+                        "X-DashScope-Service": " service-dash ",
+                        "authorization": "not-forwarded",
+                    }
+                )
+                self.assertEqual(
+                    parse_other_params(req).request_headers,
+                    {
+                        "x-dashscope-uid": "uid-dash",
+                        "x-dashscope-service": "service-dash",
+                    },
+                )
+
     def test_parse_other_params_thinking_controls(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["ds_header_attributes"].string_param = json.dumps(
@@ -1125,6 +1144,7 @@ class DashScGrpcRequestTest(TestCase):
                                     "image": "http://ocr.jpg",
                                     "min_pixels": 3136,
                                     "max_pixels": 6422528,
+                                    "max_long_side_pixel": 1008,
                                     "enable_rotate": False,
                                 },
                                 {"text": "describe"},
@@ -1143,6 +1163,7 @@ class DashScGrpcRequestTest(TestCase):
                     mm_type=MMUrlType.IMAGE,
                     min_pixels=3136,
                     max_pixels=6422528,
+                    max_long_side_pixel=1008,
                 )
             ],
         )
@@ -1165,7 +1186,8 @@ class DashScGrpcRequestTest(TestCase):
                                         "http://f2.jpg",
                                         "http://f3.jpg",
                                     ],
-                                    "fps": 2,
+                                    "fps": 0.2,
+                                    "max_long_side_pixel": 896,
                                     "max_frames": 32,
                                 },
                             ],
@@ -1181,19 +1203,22 @@ class DashScGrpcRequestTest(TestCase):
                 MultimodalPart(
                     url="http://f1.jpg",
                     mm_type=MMUrlType.VIDEO,
-                    fps=2,
+                    max_long_side_pixel=896,
+                    fps=0.2,
                     max_frames=32,
                 ),
                 MultimodalPart(
                     url="http://f2.jpg",
                     mm_type=MMUrlType.VIDEO,
-                    fps=2,
+                    max_long_side_pixel=896,
+                    fps=0.2,
                     max_frames=32,
                 ),
                 MultimodalPart(
                     url="http://f3.jpg",
                     mm_type=MMUrlType.VIDEO,
-                    fps=2,
+                    max_long_side_pixel=896,
+                    fps=0.2,
                     max_frames=32,
                 ),
             ],

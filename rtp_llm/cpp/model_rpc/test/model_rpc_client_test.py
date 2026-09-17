@@ -31,6 +31,7 @@ from rtp_llm.config.log_config import setup_logging
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
     StreamState,
+    _make_multimodal_inputs_pb,
     trans_input,
     trans_output,
 )
@@ -123,6 +124,78 @@ class ModelRpcClientTest(TestCase):
             responses.extend(res.generate_outputs)
         return responses
 
+    def test_generate_stream_forwards_only_greennet_metadata(self):
+        from unittest.mock import AsyncMock, patch
+
+        async def run():
+            client = ModelRpcClient(["127.0.0.1:1"], {})
+            client._channel_pool.get = AsyncMock(return_value=MagicMock())
+            captured = []
+
+            class Stream:
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    raise StopAsyncIteration
+
+                def cancel(self):
+                    pass
+
+            class Stub:
+                def GenerateStreamCall(self, request, **kwargs):
+                    captured.append(kwargs)
+                    return Stream()
+
+            try:
+                with patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                    return_value=Stub(),
+                ):
+                    for headers in (
+                        {
+                            "X-DashScope-Uid": "uid-backend",
+                            "X-DashScope-Service": "service-backend",
+                            "authorization": "secret",
+                        },
+                        {},
+                    ):
+                        request = GenerateInput(
+                            123,
+                            torch.tensor([1]),
+                            [],
+                            GenerateConfig(),
+                            headers=headers,
+                        )
+                        await self._run(client, request)
+                self.assertEqual(
+                    captured,
+                    [
+                        {
+                            "metadata": (
+                                ("x-dashscope-uid", "uid-backend"),
+                                ("x-dashscope-service", "service-backend"),
+                            )
+                        },
+                        {},
+                    ],
+                )
+            finally:
+                await client.close()
+
+        asyncio.run(run())
+
+    def test_multimodal_rpc_request_keeps_request_id(self):
+        input_pb = GenerateInputPB(request_id=987654321)
+        input_pb.multimodal_inputs.add().multimodal_url = "image://test"
+
+        mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
+
+        self.assertEqual(mm_inputs_pb.request_id, 987654321)
+        self.assertEqual(
+            mm_inputs_pb.multimodal_inputs[0].multimodal_url, "image://test"
+        )
+
     @unittest.skip("need fix")
     def test_generate_stream(self):
         client = FakeModelRpcClient()
@@ -210,6 +283,50 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(input_pb.request_info.trace_id, "trace-from-info")
         self.assertEqual(input_pb.request_info.request_id, "source-request-id")
         self.assertEqual(input_pb.request_info.source_role, "frontend")
+
+    def test_trans_input_keeps_fractional_fps_and_max_long_side(self):
+        preprocess_config = SimpleNamespace(
+            width=-1,
+            height=-1,
+            min_pixels=-1,
+            max_pixels=-1,
+            fps=0.2,
+            min_frames=-1,
+            max_frames=-1,
+            crop_positions=[],
+            mm_timeout_ms=-1,
+            max_long_side_pixel=1008,
+        )
+        mm_input = SimpleNamespace(
+            url="https://example.com/video.mp4",
+            mm_type=2,
+            tensor=torch.empty(0),
+            mm_preprocess_config=preprocess_config,
+        )
+
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1]),
+                generate_config=GenerateConfig(),
+                request_id=1,
+                mm_inputs=[mm_input],
+            )
+        )
+        config_pb = input_pb.multimodal_inputs[0].mm_preprocess_config
+        self.assertAlmostEqual(config_pb.fps, 0.2)
+        self.assertEqual(config_pb.max_long_side_pixel, 1008)
+
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1]),
+                generate_config=GenerateConfig(fps=1, max_long_side_pixel=784),
+                request_id=2,
+                mm_inputs=[mm_input],
+            )
+        )
+        config_pb = input_pb.multimodal_inputs[0].mm_preprocess_config
+        self.assertAlmostEqual(config_pb.fps, 1.0)
+        self.assertEqual(config_pb.max_long_side_pixel, 784)
 
     def test_trans_output_preserves_all_probs(self):
         input_py = GenerateInput(
