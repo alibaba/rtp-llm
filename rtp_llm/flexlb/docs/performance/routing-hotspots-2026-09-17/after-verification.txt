@@ -1,0 +1,2 @@
+17:38:01.419 [main] INFO org.flexlb.config.ConfigService - FlexLB config loaded: schemaVersion=3, scheduler=QUEUE, ordering=FIFO, decision=FIXED_WINDOW, dispatcher=BATCH, prefillSelection=BEST_ONLY, decodeCostExpression=kvcache_used_ratio, groupRules=0
+VERIFY selections=2000 plans=2000 candidates=4000 states={BLOCKED=40, MODELED=3704, UNAVAILABLE=256} sha256=f8ee1a60677270f92efb9d51785512d54eec8ecf3a0be1dec889c62cce2d1062
