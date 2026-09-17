@@ -46,7 +46,7 @@ struct DSV41KVCacheSpec: public KVCacheSpec {
         entries_per_block(entries),
         cp_size(context_parallel_size),
         prefill_byte_slice(byte_slice) {
-        RTP_LLM_CHECK_WITH_INFO(entries > 0 && (cp_size == 1 || cp_size == 8), "invalid V4.1 page geometry");
+        RTP_LLM_CHECK_WITH_INFO(entries > 0 && cp_size >= 1, "invalid V4.1 page geometry");
         layer_num          = layers;
         local_head_num_kv  = 1;
         seq_size_per_block = token_block_size;
