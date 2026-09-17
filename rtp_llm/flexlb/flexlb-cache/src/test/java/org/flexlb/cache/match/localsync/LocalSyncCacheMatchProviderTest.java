@@ -2,25 +2,64 @@ package org.flexlb.cache.match.localsync;
 
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Set;
 
+import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
+import static org.flexlb.cache.CacheMatchTestConfigurations.localSync;
 import static org.flexlb.cache.WorkerStatusTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 class LocalSyncCacheMatchProviderTest {
+
+    @Test
+    void subscribesToAddressCleanupOnlyInLocalSyncMode() {
+        EngineAddressResolver addressResolver = mock(EngineAddressResolver.class);
+        KvCacheManager kvCacheManager = mock(KvCacheManager.class);
+        LocalSyncCacheMatchProvider provider = new LocalSyncCacheMatchProvider(
+                kvCacheManager,
+                mock(CacheMetricsReporter.class),
+                addressResolver,
+                localSync(modelMetaConfig(false)));
+        verify(addressResolver).subscribe(provider);
+
+        provider.onAddressUpdate(List.of(new WorkerHost("10.0.0.1", 8080)));
+
+        verify(kvCacheManager).removeStaleEngineCaches(List.of("10.0.0.1:8080"));
+    }
+
+    @Test
+    void doesNotSubscribeToAddressCleanupInKvcmMode() {
+        EngineAddressResolver addressResolver = mock(EngineAddressResolver.class);
+
+        new LocalSyncCacheMatchProvider(
+                mock(KvCacheManager.class),
+                mock(CacheMetricsReporter.class),
+                addressResolver,
+                kvcm(modelMetaConfig(true)));
+
+        verify(addressResolver, never()).subscribe(any());
+    }
 
     @Test
     void localProviderUpdatesLocalCache() {
@@ -129,5 +168,17 @@ class LocalSyncCacheMatchProviderTest {
     private WorkerStatus workerStatusWithCachedKeys(Set<Long> cachedKeys) {
         return workerStatus("127.0.0.1", 8080, RoleType.PREFILL, false,
                 CacheStatus.builder().cachedKeys(cachedKeys).build());
+    }
+
+    private ModelMetaConfig modelMetaConfig(boolean kvcmEnabled) {
+        ServiceRoute serviceRoute = new ServiceRoute();
+        serviceRoute.setServiceId("test-service");
+        if (kvcmEnabled) {
+            serviceRoute.setKvcm(new KvcmConfig());
+        }
+
+        ModelMetaConfig modelMetaConfig = new ModelMetaConfig();
+        modelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
+        return modelMetaConfig;
     }
 }

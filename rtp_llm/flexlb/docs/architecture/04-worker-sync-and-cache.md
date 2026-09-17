@@ -28,10 +28,12 @@ KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
 未配置时使用发现归一化后的 gRPC port。N>1 必须显式配置 status base，配置加载时同时校验 count、base 和
 `base + N - 1 <= 65535`。
 
-状态同步客户端按 `ip:实际RPC端口:serviceType` 复用 channel。发现刷新时先去重物理
-frontend 地址，再维护默认 gRPC channel；同一在线 IP 上按需创建的独立状态端口 channel
-会保留，只有 IP 完全退出发现集合后才关闭。该规则不区分 DashScope 与 VipServer。
-当前 endpoint 配置不热更新；同一 IP 上废弃的端口连接会随 IP 下线或进程退出清理。
+`EngineAddressResolver` 向唯一的 pooled `EngineGrpcClient` 发布结构化 `WorkerHost`，保留业务
+gRPC 端口和 worker status 端口。客户端按 `ip:实际RPC端口:serviceType` 复用 channel：
+`GetWorkerStatus` / `GetCacheStatus` 使用 `worker_status_port + i`，`EnqueueBatch` / `Cancel`
+使用共享 frontend gRPC 端口。多引擎的业务 channel 去重，状态 channel 按 engine 端口独立创建。
+KVCM 开启时不创建 `GetCacheStatus` channel。该规则对所有 discovery provider 一致；worker IP
+完全退出发现集合后关闭其 channel。endpoint 配置不热更新，端口变更依赖进程重启。
 
 worker 地址表示由不可变 `WorkerIdentity` 一次性预计算并保存，调用方不再解析或临时拼接：
 
@@ -107,6 +109,8 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   `calculateDiff` 在专用 ForkJoinPool 上并行算 added/removed，diff 大小回馈动态间隔服务。
 - `KvCacheManager`：门面——`findMatchingEngines`（候选来自 `WorkerStatusProvider`）、
   `updateEngineCache`（diff 后双表应用）、`removeStaleEngineCaches`、`clear`。
+- `LocalSyncCacheMatchProvider` 仅在 LOCAL_SYNC 模式订阅 `EngineAddressResolver`，按最新
+  `WorkerHost` 集合清理已下线 frontend 的本地 cache；KVCM 模式不注册该 listener。
 
 上述 LOCAL_SYNC key、KVCM `host_ip_port`、LOCAL_STANDBY 映射与 cache-hit comparison 均使用
 逻辑 `ip:httpPort@index`。KVCM 对 N=1 worker 兼容旧 physical `ip:httpPort` key：logical key

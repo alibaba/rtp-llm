@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.config.ConfigService;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 
 /** Test-source bridge to the package-visible dispatcher sizing injection. */
 public final class DefaultBatchDispatcherTestFactory {

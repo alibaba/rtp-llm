@@ -12,6 +12,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
@@ -100,6 +101,14 @@ public class GrpcChannelPool<K> {
         }
     }
 
+    public void shutdown(long timeout, TimeUnit unit) {
+        for (Map.Entry<K, PooledChannel> entry : channels.entrySet()) {
+            if (channels.remove(entry.getKey(), entry.getValue())) {
+                entry.getValue().shutdown(timeout, unit);
+            }
+        }
+    }
+
     private PooledChannel create(K key) {
         ManagedChannel channel = Objects.requireNonNull(
                 channelFactory.apply(key), "channelFactory returned null");
@@ -153,6 +162,24 @@ public class GrpcChannelPool<K> {
                 channel.shutdown();
             } catch (Exception e) {
                 log.warn("Failed to shut down gRPC channel: {}", description, e);
+            }
+        }
+
+        public void shutdown(long timeout, TimeUnit unit) {
+            if (!shutdown.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                channel.shutdown();
+                if (!channel.awaitTermination(timeout, unit)) {
+                    channel.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                channel.shutdownNow();
+            } catch (Exception e) {
+                log.warn("Failed to shut down gRPC channel: {}", description, e);
+                channel.shutdownNow();
             }
         }
     }

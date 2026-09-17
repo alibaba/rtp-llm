@@ -4,8 +4,8 @@ import io.grpc.Context;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.preemption.CancelTarget;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;

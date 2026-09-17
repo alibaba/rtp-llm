@@ -34,7 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       but the next call will fail because:</li>
  *   <li>The server sends a GOAWAY frame during graceful shutdown, and/or</li>
  *   <li>The TCP connection attempt fails with "Connection refused" (20ms timeout)</li>
- *   <li>{@link org.flexlb.engine.grpc.EngineGrpcClient} completes the asynchronous
+ *   <li>{@link org.flexlb.engine.grpc.client.EngineGrpcClient} completes the asynchronous
  *       EnqueueBatch call exceptionally and deliberately does not replay an
  *       invocation whose acceptance is ambiguous.</li>
  *   <li>The asynchronous invocation is ambiguous after it starts, so the scheduler
