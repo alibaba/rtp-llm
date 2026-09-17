@@ -491,12 +491,16 @@ public final class PrefillState {
 
     /** Queue and committed work captured at one ownership linearization point. */
     public record Snapshot(long capturedAtMs,
-                           List<ScheduledRequest> activeItems,
+                           PrefillActiveIndex.Capture active,
                            WorkCapture work) {
         public Snapshot {
-            activeItems = List.copyOf(activeItems);
+            Objects.requireNonNull(active, "missing active queue snapshot");
             Objects.requireNonNull(
                     work, "missing committed work snapshot");
+        }
+
+        public List<ScheduledRequest> activeItems() {
+            return active.items();
         }
     }
 
@@ -1839,11 +1843,9 @@ public final class PrefillState {
     public Snapshot snapshotUnderLock() {
         requireLock();
         long nowMs = clock.getAsLong();
-        List<ScheduledRequest> active = new ArrayList<>(activeIndex.size());
-        activeIndex.forEach(active::add);
         return new Snapshot(
                 nowMs,
-                active,
+                activeIndex.capture(),
                 captureWorkUnderLock(nowMs));
     }
 
