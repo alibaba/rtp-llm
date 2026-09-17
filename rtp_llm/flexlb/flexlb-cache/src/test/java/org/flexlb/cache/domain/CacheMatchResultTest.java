@@ -58,20 +58,19 @@ class CacheMatchResultTest {
     }
 
     @Test
-    void shouldPreserveRawKvcmP2pMatchFields() {
+    void shouldPreserveRawKvcmGlobalMatchFields() {
         CacheMatchResult result = new CacheMatchResult(
-                Map.of("10.0.0.1:8080", new HostCacheMatch(2, 8, 10)),
+                Map.of("10.0.0.1:8080", new HostCacheMatch(2, 10)),
                 CacheMatchSource.KVCM,
                 0,
                 1000);
 
         assertEquals(2, result.exactHostMatch("10.0.0.1:8080").localMatchBlocks());
-        assertEquals(8, result.exactHostMatch("10.0.0.1:8080").p2pFetchBlocks());
-        assertEquals(10, result.exactHostMatch("10.0.0.1:8080").p2pTotalMatchBlocks());
+        assertEquals(10, result.exactHostMatch("10.0.0.1:8080").globalMatchBlocks());
     }
 
     @Test
-    void shouldUseLocalMatchWhenKVCMDoesNotReturnP2pDetails() {
+    void shouldUseLocalMatchForLocalOnlyHosts() {
         CacheMatchResult result = new CacheMatchResult(
                 Map.of("10.0.0.1:8080", HostCacheMatch.local(2)), CacheMatchSource.KVCM, 0, 1000);
 

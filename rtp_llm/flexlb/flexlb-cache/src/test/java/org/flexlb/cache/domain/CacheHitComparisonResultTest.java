@@ -34,17 +34,17 @@ class CacheHitComparisonResultTest {
         assertTrue(json.contains(
                 "\"kvcm\":{\"hit\":100,\"delta\":20,"
                         + "\"local\":{\"hit\":60,\"delta\":60},"
-                        + "\"p2pTotal\":{\"hit\":110,\"delta\":10}}"));
+                        + "\"global\":{\"hit\":110,\"delta\":10}}"));
         assertTrue(json.contains("\"localStandby\":{\"hit\":70,\"delta\":50}"));
         assertEquals(100, comparison.kvcm().hit());
         assertEquals(20, comparison.kvcm().delta());
         assertSame(comparison.kvcmDetails().local(), comparison.kvcm().local());
-        assertSame(comparison.kvcmDetails().p2pTotal(), comparison.kvcm().p2pTotal());
+        assertSame(comparison.kvcmDetails().global(), comparison.kvcm().global());
         assertFalse(json.contains("\"routing\""));
         assertFalse(json.contains("\"kvcmDetails\""));
         assertTrue(json.indexOf("\"actual\"") < json.indexOf("\"kvcm\""));
         assertTrue(json.indexOf("\"kvcm\"") < json.indexOf("\"localStandby\""));
-        assertFalse(json.contains("\"p2pFetch\""));
+        assertFalse(json.contains("p2p"));
         assertFalse(json.contains("\"workerPort\""));
         assertFalse(json.contains("\"ipIndex\""));
     }

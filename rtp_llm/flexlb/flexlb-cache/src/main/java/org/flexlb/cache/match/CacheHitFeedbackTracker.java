@@ -47,8 +47,7 @@ final class CacheHitFeedbackTracker {
         CacheHitFeedback seed = new CacheHitFeedback("cache_hit_comparison", requestId, result.source().name(),
                 role.name(), group, worker.getWorkerIdentity(), null, inputTokens, blockSize, predictedHitTokens,
                 kvcm, match == null ? 0 : CacheMatchResult.matchedTokens(match.localMatchBlocks(), blockSize, inputTokens),
-                match == null ? 0 : CacheMatchResult.matchedTokens(match.p2pFetchBlocks(), blockSize, inputTokens),
-                match == null ? 0 : CacheMatchResult.matchedTokens(match.p2pTotalMatchBlocks(), blockSize, inputTokens), 0, 0);
+                match == null ? 0 : CacheMatchResult.matchedTokens(match.globalMatchBlocks(), blockSize, inputTokens), 0, 0);
         predictions.put(new Key(worker.getGenerationId(), role, requestId), new Prediction(seed,
                 comparisonService.captureComparison(requestId, role), blockSize > 0));
     }
@@ -82,7 +81,7 @@ final class CacheHitFeedbackTracker {
                 CacheHitFeedback feedback = new CacheHitFeedback(seed.eventType(), seed.requestId(),
                         seed.cacheMatchSource(), seed.role(), seed.group(), seed.workerIdentity(), state,
                         seed.inputTokens(), seed.blockSize(), seed.predictedHitTokens(), seed.kvcmMatchAvailable(),
-                        seed.kvcmLocalMatchTokens(), seed.kvcmP2pFetchTokens(), seed.kvcmP2pTotalMatchTokens(),
+                        seed.kvcmLocalMatchTokens(), seed.kvcmGlobalMatchTokens(),
                         task.prefixLength(), task.prefixLength() - seed.predictedHitTokens());
                 results.add(comparison.apply(feedback));
             }

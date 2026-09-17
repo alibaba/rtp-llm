@@ -3,7 +3,6 @@ package org.flexlb.engine.grpc.client;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.config.CacheMatchConfiguration;
-import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.KvcmConfig;
@@ -30,16 +29,16 @@ import java.util.concurrent.atomic.AtomicReference;
 public class KvcmLeaderResolver {
 
     private final boolean enabled;
+    private final CacheMatchConfiguration configuration;
     private final KvcmConfig topologyConfig;
-    private final KvcmCacheMatchingConfig runtimeConfig;
     private final Endpoint kvcmEndpoint;
     private final RoutingServiceDiscovery serviceDiscovery;
     private final KvcmMetaServiceClient metaServiceClient;
     private final AtomicReference<GrpcTarget> leader = new AtomicReference<>();
 
     public KvcmLeaderResolver(CacheMatchConfiguration configuration, RoutingServiceDiscovery serviceDiscovery, KvcmMetaServiceClient metaServiceClient) {
+        this.configuration = configuration;
         this.topologyConfig = configuration.getKvcmConfig();
-        this.runtimeConfig = configuration.getKvcmRuntimeConfig();
         this.enabled = configuration.isKvcmEnabled();
         this.kvcmEndpoint = enabled ? topologyConfig.toEndpoint() : null;
         this.serviceDiscovery = serviceDiscovery;
@@ -69,7 +68,7 @@ public class KvcmLeaderResolver {
                         GetClusterInfoRequest.newBuilder()
                                 .setTraceId(IdUtils.fastUuid())
                                 .build(),
-                        runtimeConfig.getRequestTimeoutMs());
+                        configuration.getKvcmRuntimeConfig().getRequestTimeoutMs());
                 ErrorCode code = response.getHeader().getStatus().getCode();
                 if (code != ErrorCode.OK || !response.hasLeaderEndpoint()) {
                     log.warn("KVCM bootstrap target {} did not return a leader, code={}",

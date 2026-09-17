@@ -130,8 +130,8 @@ public class LocalStandbyComparisonService {
                                 feedback.kvcmLocalMatchTokens(),
                                 feedback.actualHitTokens() - feedback.kvcmLocalMatchTokens()),
                         new CacheHitComparisonResult.HitComparison(
-                                feedback.kvcmP2pTotalMatchTokens(),
-                                feedback.actualHitTokens() - feedback.kvcmP2pTotalMatchTokens()))
+                                feedback.kvcmGlobalMatchTokens(),
+                                feedback.actualHitTokens() - feedback.kvcmGlobalMatchTokens()))
                 : null;
         return new CacheHitComparisonResult(
                 feedback.eventType(),

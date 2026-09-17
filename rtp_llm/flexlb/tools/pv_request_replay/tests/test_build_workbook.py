@@ -228,7 +228,7 @@ class CacheComparisonReplayTest(unittest.TestCase):
                          "routing": {"hit": 400 if kvcm else 300}, "actual": {"hit": actual},
                          "kvcm": {"hit": 400, "delta": 100,
                                   "local": {"hit": 200, "delta": 300},
-                                  "p2pTotal": {"hit": 600, "delta": -100}} if kvcm else None,
+                                  "global": {"hit": 600, "delta": -100}} if kvcm else None,
                          "localStandby": {"hit": 300, "delta": actual - 300}}
                 status = status_record("feedback", "10.0.0.1", epoch_ms(1, 45))
                 log = Path(directory) / "pv.log"
@@ -243,7 +243,7 @@ class CacheComparisonReplayTest(unittest.TestCase):
                            sheet.iter_rows(min_row=2, values_only=True)) if item.get("request_id") == "feedback")
                 self.assertEqual(row["actual_hit_tokens"], actual)
                 self.assertEqual(row["local_standby_delta_tokens"], actual - 300)
-                self.assertEqual(row["kvcm_p2p_total_delta_tokens"], -100 if kvcm else None)
+                self.assertEqual(row["kvcm_global_delta_tokens"], -100 if kvcm else None)
                 self.assertEqual(row["kvcm_minus_standby_tokens"], 100 if kvcm else None)
                 workbook.close()
                 output = Path(directory) / "replay.html"
@@ -254,7 +254,7 @@ class CacheComparisonReplayTest(unittest.TestCase):
                 comparison = request["cacheComparison"]
                 self.assertEqual(comparison["source"], source)
                 self.assertEqual(comparison["kvcm_local"]["hit"], 200 if kvcm else None)
-                self.assertEqual(comparison["kvcm_p2p_total"]["hit"], 600 if kvcm else None)
+                self.assertEqual(comparison["kvcm_global"]["hit"], 600 if kvcm else None)
                 self.assertEqual(comparison["local_standby"], {"hit": 300, "delta": actual - 300})
                 self.assertIn("renderCacheComparison", output.read_text())
 
@@ -275,7 +275,7 @@ class CacheComparisonReplayTest(unittest.TestCase):
     def test_absent_feedback_keeps_predictions_and_actual_unknown(self):
         request = html_module.compact_request({"request_id": "unknown", "route_log_time (decision)": "2026-08-11 01:45:00.000"})
         self.assertIsNone(request["actualHit"])
-        for key in ("kvcm", "kvcm_local", "kvcm_p2p_total", "local_standby"):
+        for key in ("kvcm", "kvcm_local", "kvcm_global", "local_standby"):
             self.assertEqual(request["cacheComparison"][key], {"hit": None, "delta": None})
 
 

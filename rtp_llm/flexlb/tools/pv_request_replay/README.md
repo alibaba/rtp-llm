@@ -86,7 +86,7 @@ Every command returns a non-zero exit status when collection or request joins ar
 ## Cache comparison
 
 `cache_hit_comparison` contains the selected routing source, actual Engine hit tokens, routing prediction,
-KVCM local and local-plus-P2P predictions, and the Local Standby prediction. All `delta` values are
+KVCM local and local-plus-remote (`global`) predictions, and the Local Standby prediction. All `delta` values are
 actual minus predicted tokens. A negative value means overprediction; a positive value means underprediction.
 `routing` describes the active source's prediction. `kvcm` is present for KVCM-sourced decisions;
 `localStandby` requires an available Standby prediction. Missing predictions are unknown, while zero
