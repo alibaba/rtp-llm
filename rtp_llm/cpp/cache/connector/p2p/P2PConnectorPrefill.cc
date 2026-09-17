@@ -457,8 +457,8 @@ grpc::Status P2PConnectorPrefill::waitForResourceEntry(
         return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "resource phase expired or terminal");
     }
     // The transfer wait window ended before the resource arrived. This
-    // StartLoad attempt is terminal; retain that state until the original
-    // request deadline so duplicate or delayed calls cannot wait again.
+    // StartLoad attempt is terminal; retain that state for one hour so
+    // duplicate or delayed calls cannot wait again.
     stream_store_->markCancelled(unique_key, request_deadline_ms);
     return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "resource wait transfer deadline exceeded");
 }

@@ -297,6 +297,8 @@ TEST_F(P2PConnectorTest, StartLoadRegistrationWaitExpiresWithoutCreatingRequestD
     EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
     EXPECT_NE(response.error_message().find("registration"), std::string::npos);
     EXPECT_EQ(connector_->streamStore()->waitForRequestDeadline(request.unique_key(), currentTimeMs()), 0);
+    EXPECT_TRUE(connector_->streamStore()->isMarkedCancelled(request.unique_key()));
+    EXPECT_EQ(connector_->streamStore()->requestDeadline(request.unique_key(), 5000), 0);
     for (const auto& server : tp_broadcast_servers_) {
         EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
     }
@@ -323,6 +325,8 @@ TEST_F(P2PConnectorTest, StartLoadRegistrationWaitObservesRpcCancellation) {
     ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
     EXPECT_EQ(result.get().error_code(), transErrorCodeToRPC(ErrorCode::CANCELLED));
     EXPECT_EQ(connector_->streamStore()->waitForRequestDeadline(request.unique_key(), currentTimeMs()), 0);
+    EXPECT_TRUE(connector_->streamStore()->isMarkedCancelled(request.unique_key()));
+    EXPECT_EQ(connector_->streamStore()->requestDeadline(request.unique_key(), 5000), 0);
 }
 
 TEST_F(P2PConnectorTest, StartLoadDoesNotRestartLoadBudgetAfterRegistrationWait) {
@@ -377,7 +381,9 @@ TEST_F(P2PConnectorTest, StartLoadUsesRegisteredRequestDeadlineWithoutRenewingIt
     });
     ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
     EXPECT_EQ(result.get().error_code(), transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
-    EXPECT_EQ(connector_->streamStore()->requestDeadline(request.unique_key(), 5000), deadline);
+    EXPECT_EQ(connector_->streamStore()->requestDeadline(request.unique_key(), 5000), 0);
+    EXPECT_TRUE(connector_->streamStore()->isMarkedCancelled(request.unique_key()));
+    EXPECT_EQ(connector_->streamStore()->request_states_.at(request.unique_key()).request_deadline_ms, deadline);
 }
 
 TEST_F(P2PConnectorTest, HandleReadRejectsNonPositiveTransferTimeout) {

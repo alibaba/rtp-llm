@@ -195,29 +195,11 @@ std::optional<int64_t> ComputedLayerCacheBufferStore::requestHorizon(int64_t req
                std::nullopt : std::make_optional(it->second.horizon_ms);
 }
 
-void ComputedLayerCacheBufferStore::removeBuffer(int64_t request_id, int64_t request_deadline_ms) {
+void ComputedLayerCacheBufferStore::removeBuffer(int64_t request_id, int64_t /*request_deadline_ms*/) {
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
-    std::optional<int64_t>      finite_request_deadline;
-    if (hasFiniteDeadline(request_deadline_ms)) {
-        finite_request_deadline = request_deadline_ms;
-    }
-    auto horizon_it = request_horizons_.find(request_id);
-    if (horizon_it != request_horizons_.end()) {
-        if (hasFiniteDeadline(horizon_it->second.request_deadline_ms)) {
-            finite_request_deadline = finite_request_deadline.has_value() ?
-                                          std::max(*finite_request_deadline,
-                                                   horizon_it->second.request_deadline_ms) :
-                                          horizon_it->second.request_deadline_ms;
-        }
-        request_horizons_.erase(horizon_it);
-    }
-    auto buffer_it = computed_buffers_.find(request_id);
-    if (buffer_it != computed_buffers_.end()) {
-        computed_buffers_.erase(buffer_it);
-    }
-    if (finite_request_deadline) {
-        markRemovedLocked(request_id, *finite_request_deadline);
-    }
+    request_horizons_.erase(request_id);
+    computed_buffers_.erase(request_id);
+    markRemovedLocked(request_id, currentTimeMs());
     notification_->notify();
 }
 
@@ -239,11 +221,12 @@ int64_t ComputedLayerCacheBufferStore::getBuffersCount() const {
 }
 
 void ComputedLayerCacheBufferStore::checkTimeout() {
+    checkTimeout(currentTimeMs());
+}
+
+void ComputedLayerCacheBufferStore::checkTimeout(int64_t current_time_ms) {
     std::unique_lock<std::mutex> lock(computed_buffers_mutex_);
-    int64_t                      current_time_ms = currentTimeMs();
-    // Clean tombstones created by earlier checks first. Entries created below
-    // remain visible for at least one checker cycle even when their horizon is
-    // exactly the current time.
+    // Reclaim terminal IDs independently of the active layer/transfer deadlines.
     while (!removed_request_expiry_queue_.empty()) {
         const auto& expiry = removed_request_expiry_queue_.top();
         if (expiry.expire_at_ms > current_time_ms) {
@@ -257,7 +240,7 @@ void ComputedLayerCacheBufferStore::checkTimeout() {
     }
     for (auto it = request_horizons_.begin(); it != request_horizons_.end();) {
         if (current_time_ms >= it->second.horizon_ms) {
-            markRemovedLocked(it->first, it->second.request_deadline_ms);
+            markRemovedLocked(it->first, current_time_ms);
             computed_buffers_.erase(it->first);
             it = request_horizons_.erase(it);
         } else {
@@ -266,12 +249,12 @@ void ComputedLayerCacheBufferStore::checkTimeout() {
     }
 }
 
-void ComputedLayerCacheBufferStore::markRemovedLocked(int64_t request_id, int64_t expire_at_ms) {
-    auto [it, inserted] = removed_request_ids_.emplace(request_id, expire_at_ms);
-    if (!inserted && expire_at_ms > it->second) {
-        it->second = expire_at_ms;
+void ComputedLayerCacheBufferStore::markRemovedLocked(int64_t request_id, int64_t now_ms) {
+    auto [it, inserted] = removed_request_ids_.emplace(request_id, now_ms + kTombstoneRetentionMs);
+    if (inserted) {
+        // Duplicate cleanup must not renew retention or accumulate timer entries.
+        removed_request_expiry_queue_.push(RemovedRequestExpiry{it->second, request_id});
     }
-    removed_request_expiry_queue_.push(RemovedRequestExpiry{it->second, request_id});
 }
 
 }  // namespace rtp_llm

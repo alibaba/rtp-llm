@@ -557,7 +557,7 @@ TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_TombstoneRetainedAfterReject
 
     stream_store_->markCancelled(unique_key, deadline_ms);
 
-    // Every add for the same terminal request is rejected until its deadline.
+    // Every add for the same terminal request is rejected during tombstone retention.
     EXPECT_FALSE(stream_store_->addResource(meta, resource));
     EXPECT_FALSE(stream_store_->addResource(meta, resource));
     EXPECT_TRUE(stream_store_->isMarkedCancelled(unique_key));
@@ -628,7 +628,7 @@ TEST(P2PRequestTimeoutTest, FirstArrivalWinsAndTerminalCannotRenew) {
     EXPECT_LE(deadline, currentTimeMs() + 5000);
     EXPECT_EQ(store.requestDeadline("relative-timeout", 60000), deadline);
     store.markTerminal("relative-timeout", deadline);
-    EXPECT_EQ(store.requestDeadline("relative-timeout", 60000), deadline);
+    EXPECT_EQ(store.requestDeadline("relative-timeout", 60000), 0);
     EXPECT_TRUE(store.isMarkedCancelled("relative-timeout"));
 }
 
@@ -701,7 +701,7 @@ protected:
     }
 };
 
-TEST_F(P2PResourceStoreDeadlineIndexTest, TerminalStateExpiresAtOriginalRequestDeadline) {
+TEST_F(P2PResourceStoreDeadlineIndexTest, TerminalStateRetainedForOneHourWithoutHoldingPayload) {
     auto& store = *stream_store_;
     const std::string key = "terminal";
     const auto deadline = store.requestDeadline(key, 60000);
@@ -709,29 +709,41 @@ TEST_F(P2PResourceStoreDeadlineIndexTest, TerminalStateExpiresAtOriginalRequestD
     const auto load_deadline = currentTimeMs() + 10000;
     ASSERT_NE(store.waitAndStealResource(key, load_deadline, deadline), nullptr);
     EXPECT_EQ(store.nextDeadlineMsLocked(), load_deadline);
+    const auto before_terminal = currentTimeMs();
     store.markTerminal(key, deadline);
-    EXPECT_EQ(store.nextDeadlineMsLocked(), deadline);
+    const auto expires_at = store.request_states_.at(key).terminal_expire_at_ms;
+    EXPECT_GE(expires_at, before_terminal + 3600000);
+    EXPECT_LE(expires_at, currentTimeMs() + 3600000);
+    EXPECT_EQ(store.nextDeadlineMsLocked(), expires_at);
     store.checkTimeout(load_deadline);
     EXPECT_EQ(store.request_states_.size(), 1u);
 
     store.checkTimeout(deadline - 1);
     EXPECT_TRUE(store.isMarkedCancelled(key));
-    EXPECT_EQ(store.requestDeadline(key, 120000), deadline);
+    EXPECT_EQ(store.requestDeadline(key, 120000), 0);
     EXPECT_FALSE(store.addResource(createMockMeta(key, 6101, deadline), createMockKVCacheResource()));
     P2PConnectorResourceEntry::SideChannelData data;
     store.publishPrefillPayload(key, deadline, std::move(data));
     EXPECT_FALSE(store.takePrefillPayload(key, data));
     ASSERT_EQ(store.deadline_index_.size(), 1u);
-    EXPECT_EQ(store.nextDeadlineMsLocked(), deadline);
+    EXPECT_EQ(store.nextDeadlineMsLocked(), expires_at);
 
-    // No extra hour of retention after the original request deadline.
+    // The request deadline does not remove the terminal record or retain payload.
     store.checkTimeout(deadline);
+    EXPECT_TRUE(store.isMarkedCancelled(key));
+    EXPECT_FALSE(store.request_states_.at(key).side_channel_data.has_value());
+    EXPECT_TRUE(store.resource_map_.empty());
+    store.markTerminal(key, deadline + 7200000);
+    EXPECT_EQ(store.nextDeadlineMsLocked(), expires_at);
+    store.checkTimeout(expires_at - 1);
+    EXPECT_TRUE(store.isMarkedCancelled(key));
+    store.checkTimeout(expires_at);
     EXPECT_TRUE(store.request_states_.empty());
     EXPECT_TRUE(store.deadline_index_.empty());
     EXPECT_FALSE(store.nextDeadlineMsLocked().has_value());
 }
 
-TEST_F(P2PResourceStoreDeadlineIndexTest, LoadExpiryReleasesResourcesAndKeepsTerminalUntilRequestExpiry) {
+TEST_F(P2PResourceStoreDeadlineIndexTest, LoadExpiryReleasesResourcesAndKeepsTerminalForOneHour) {
     auto& store = *stream_store_;
     // Insert in the opposite order to expiry, including an unrelated live request.
     const auto later_deadline = store.requestDeadline("later", 120000);
@@ -769,16 +781,24 @@ TEST_F(P2PResourceStoreDeadlineIndexTest, LoadExpiryReleasesResourcesAndKeepsTer
     EXPECT_FALSE(store.takePrefillPayload("loading", data));
     EXPECT_FALSE(store.addResource(createMockMeta("loading", 6102, request_deadline), createMockKVCacheResource()));
     EXPECT_EQ(released, 2);  // A rejected late add also releases its computed layers.
-    EXPECT_EQ(store.nextDeadlineMsLocked(), request_deadline);
+    EXPECT_EQ(store.request_states_.at("loading").terminal_expire_at_ms, load_deadline + 3600000);
+    EXPECT_EQ(store.nextDeadlineMsLocked(), later_deadline);
     EXPECT_EQ(store.deadline_index_.size(), 2u);
 
     store.checkTimeout(request_deadline - 1);
     store.checkTimeout(request_deadline);
     EXPECT_EQ(released, 2);
-    EXPECT_EQ(store.request_states_.count("loading"), 0u);
+    EXPECT_EQ(store.request_states_.count("loading"), 1u);
     EXPECT_EQ(store.request_states_.count("later"), 1u);
     EXPECT_EQ(store.nextDeadlineMsLocked(), later_deadline);
     store.checkTimeout(later_deadline);
+    EXPECT_EQ(store.request_states_.at("later").terminal_expire_at_ms, later_deadline + 3600000);
+    store.checkTimeout(load_deadline + 3600000 - 1);
+    EXPECT_EQ(store.request_states_.count("loading"), 1u);
+    store.checkTimeout(load_deadline + 3600000);
+    EXPECT_EQ(store.request_states_.count("loading"), 0u);
+    EXPECT_EQ(store.request_states_.count("later"), 1u);
+    store.checkTimeout(later_deadline + 3600000);
     EXPECT_TRUE(store.request_states_.empty());
     EXPECT_TRUE(store.deadline_index_.empty());
 }
@@ -798,15 +818,18 @@ TEST_F(P2PResourceStoreDeadlineIndexTest, PublicationsShareDeadlineWithoutAccumu
     EXPECT_EQ(store.request_states_.size(), 2u);
     const auto generation = store.deadline_generation_;
     EXPECT_EQ(store.requestDeadline("first", 120000), deadline);
-    // Completing a request with this same expiry needs no timer wakeup.
+    // Terminal retention replaces the active deadline without adding another timer.
     store.markTerminal("first", deadline);
-    EXPECT_EQ(store.deadline_generation_, generation);
+    EXPECT_EQ(store.deadline_generation_, generation);  // The second request is still due first.
     EXPECT_EQ(store.deadline_index_.size(), 2u);
     P2PConnectorResourceEntry::SideChannelData consumed;
     ASSERT_TRUE(store.takePrefillPayload("second", consumed));
     EXPECT_EQ(consumed.first_token_id, 15);
 
     store.checkTimeout(deadline);
+    EXPECT_EQ(store.request_states_.size(), 2u);
+    EXPECT_TRUE(store.resource_map_.empty());
+    store.checkTimeout(deadline + 3600000);
     EXPECT_TRUE(store.request_states_.empty());
     EXPECT_TRUE(store.deadline_index_.empty());
 }
@@ -817,11 +840,37 @@ TEST_F(P2PResourceStoreDeadlineIndexTest, ExpiredCallbacksDoNotRecreateCollected
     EXPECT_FALSE(store.addResource(createMockMeta("expired", 6103, expired_deadline), createMockKVCacheResource()));
     P2PConnectorResourceEntry::SideChannelData data;
     store.publishPrefillPayload("expired", expired_deadline, std::move(data));
-    store.markTerminal("expired", expired_deadline);
     EXPECT_EQ(store.waitAndStealResource("expired", expired_deadline, expired_deadline), nullptr);
     EXPECT_TRUE(store.request_states_.empty());
     EXPECT_TRUE(store.resource_map_.empty());
     EXPECT_TRUE(store.deadline_index_.empty());
+}
+
+TEST_F(P2PResourceStoreDeadlineIndexTest, TerminalBeforeRegistrationRejectsBothLateProducersForOneHour) {
+    auto& store = *stream_store_;
+    for (const auto original_deadline : {int64_t{0}, currentTimeMs() - 1, currentTimeMs() + 7200000}) {
+        const auto key = std::to_string(original_deadline);
+        const auto before_terminal = currentTimeMs();
+        store.markTerminal(key, original_deadline);
+        const auto expires_at = store.request_states_.at(key).terminal_expire_at_ms;
+        EXPECT_GE(expires_at, before_terminal + 3600000);
+        EXPECT_LE(expires_at, currentTimeMs() + 3600000);
+        EXPECT_EQ(store.requestDeadline(key, 5000), 0);
+        EXPECT_EQ(store.waitForRequestDeadline(key, currentTimeMs() + 5000), 0);
+
+        const auto late_deadline = currentTimeMs() + 5000;
+        EXPECT_FALSE(store.addResource(createMockMeta(key, 6104, late_deadline), createMockKVCacheResource()));
+        P2PConnectorResourceEntry::SideChannelData data;
+        data.has_first_token = true;
+        store.publishPrefillPayload(key, late_deadline, std::move(data));
+        EXPECT_FALSE(store.takePrefillPayload(key, data));
+        store.markTerminal(key, late_deadline);
+        EXPECT_EQ(store.request_states_.at(key).terminal_expire_at_ms, expires_at);
+        store.checkTimeout(expires_at - 1);
+        EXPECT_TRUE(store.isMarkedCancelled(key));
+        store.checkTimeout(expires_at);
+        EXPECT_EQ(store.request_states_.count(key), 0u);
+    }
 }
 
 }  // namespace rtp_llm

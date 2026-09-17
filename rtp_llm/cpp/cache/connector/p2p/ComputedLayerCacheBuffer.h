@@ -81,6 +81,8 @@ public:
     }
 
 private:
+    static constexpr int64_t kTombstoneRetentionMs = 60LL * 60 * 1000;
+
     struct RemovedRequestExpiry {
         int64_t expire_at_ms;
         int64_t request_id;
@@ -92,7 +94,8 @@ private:
         }
     };
 
-    void markRemovedLocked(int64_t request_id, int64_t expire_at_ms);
+    void markRemovedLocked(int64_t request_id, int64_t now_ms);
+    void checkTimeout(int64_t now_ms);
     const std::shared_ptr<P2PNotification> notification_{std::make_shared<P2PNotification>()};
 
     struct RequestHorizon {
@@ -105,7 +108,7 @@ private:
     std::unordered_map<int64_t, std::shared_ptr<ComputedLayerCacheBuffer>> computed_buffers_;
     std::unordered_map<int64_t, RequestHorizon>                           request_horizons_;
 
-    // request_ids that have been explicitly removed; late addBuffer calls are rejected
+    // Keep removed request IDs for one hour; late layer and StartLoad calls are rejected.
     std::unordered_map<int64_t, int64_t> removed_request_ids_;  // request_id -> expire_at_ms
     std::priority_queue<RemovedRequestExpiry,
                         std::vector<RemovedRequestExpiry>,

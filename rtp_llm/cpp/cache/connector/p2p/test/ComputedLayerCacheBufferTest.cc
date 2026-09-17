@@ -319,4 +319,59 @@ TEST_F(ComputedLayerCacheBufferTest, SameLayerDifferentTagsDoNotCollide) {
     EXPECT_EQ(buffers[1], swa_buffer);
 }
 
+TEST_F(ComputedLayerCacheBufferTest, RemoveBeforeEitherSideArrivesRetainsTombstoneForOneHour) {
+    // Missing, already-expired and long request deadlines all use the same retention.
+    int64_t request_id = 5000;
+    for (const auto deadline : {int64_t{0}, currentTimeMs() - 1, currentTimeMs() + 7200000}) {
+        ++request_id;
+        const auto before_remove = currentTimeMs();
+        store_->removeBuffer(request_id, deadline);
+        const auto expires_at = store_->removed_request_ids_.at(request_id);
+        EXPECT_GE(expires_at, before_remove + 3600000);
+        EXPECT_LE(expires_at, currentTimeMs() + 3600000);
+        const auto late_deadline = currentTimeMs() + 5000;
+        EXPECT_FALSE(store_->registerRequestHorizon(request_id, late_deadline, late_deadline));
+        EXPECT_FALSE(store_->activateRequestHorizon(request_id, late_deadline, late_deadline));
+        EXPECT_EQ(store_->addBuffer(request_id, createLayerCacheBuffer(0), late_deadline), nullptr);
+        store_->removeBuffer(request_id, late_deadline);
+        EXPECT_EQ(store_->removed_request_ids_.at(request_id), expires_at);
+        EXPECT_EQ(store_->removed_request_expiry_queue_.size(), 1u);
+        store_->checkTimeout(expires_at - 1);
+        EXPECT_EQ(store_->removed_request_ids_.count(request_id), 1u);
+        store_->checkTimeout(expires_at);
+        EXPECT_TRUE(store_->removed_request_ids_.empty());
+        EXPECT_TRUE(store_->removed_request_expiry_queue_.empty());
+    }
+}
+
+TEST_F(ComputedLayerCacheBufferTest, LayerAndLoadTimeoutsReleaseBuffersBeforeTombstoneExpiry) {
+    const auto request_deadline = currentTimeMs() + 60000;
+    const auto load_deadline = currentTimeMs() + 10000;
+    ASSERT_TRUE(store_->registerRequestHorizon(5101, request_deadline, request_deadline));
+    auto buffer = store_->addBuffer(5101, createLayerCacheBuffer(0), request_deadline);
+    std::weak_ptr<ComputedLayerCacheBuffer> weak_buffer = buffer;
+    buffer.reset();
+    ASSERT_TRUE(store_->activateRequestHorizon(5101, load_deadline, request_deadline));
+    // Another request has only P-side layers; its original timeout must also be preserved.
+    ASSERT_TRUE(store_->registerRequestHorizon(5102, request_deadline, request_deadline));
+    ASSERT_NE(store_->addBuffer(5102, createLayerCacheBuffer(0), request_deadline), nullptr);
+
+    store_->checkTimeout(load_deadline - 1);
+    EXPECT_FALSE(weak_buffer.expired());
+    store_->checkTimeout(load_deadline);
+    EXPECT_TRUE(weak_buffer.expired());
+    EXPECT_EQ(store_->removed_request_ids_.at(5101), load_deadline + 3600000);
+    EXPECT_NE(store_->getBuffer(5102), nullptr);
+    store_->checkTimeout(request_deadline);
+    EXPECT_EQ(store_->getBuffer(5102), nullptr);
+    EXPECT_EQ(store_->removed_request_ids_.at(5102), request_deadline + 3600000);
+    EXPECT_EQ(store_->removed_request_ids_.count(5101), 1u);
+
+    store_->checkTimeout(load_deadline + 3600000);
+    EXPECT_EQ(store_->removed_request_ids_.count(5101), 0u);
+    EXPECT_EQ(store_->removed_request_ids_.count(5102), 1u);
+    store_->checkTimeout(request_deadline + 3600000);
+    EXPECT_TRUE(store_->removed_request_ids_.empty());
+}
+
 }  // namespace rtp_llm

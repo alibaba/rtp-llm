@@ -125,9 +125,11 @@ TEST_F(StoreWaitContextTest, HorizonChangesNotifyAndRescheduleNearestTimeout) {
     EXPECT_NE(signal->generation(), generation);
     EXPECT_EQ(computed_buffers_->nextTimeoutMs(), transfer_deadline);
     generation = signal->generation();
+    const auto before_remove = currentTimeMs();
     computed_buffers_->removeBuffer(4001, deadline);
     EXPECT_NE(signal->generation(), generation);
-    EXPECT_EQ(computed_buffers_->nextTimeoutMs(), deadline);  // Tombstone expiry.
+    EXPECT_GE(computed_buffers_->nextTimeoutMs(), before_remove + 3600000);
+    EXPECT_LE(computed_buffers_->nextTimeoutMs(), currentTimeMs() + 3600000);
 }
 
 TEST_F(StoreWaitContextTest, EmptyStoreHasNoPeriodicWakeupDeadline) {

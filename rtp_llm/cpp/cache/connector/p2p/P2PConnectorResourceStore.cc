@@ -77,6 +77,9 @@ int64_t P2PConnectorResourceStore::requestDeadline(const std::string& unique_key
     }
     std::lock_guard<std::mutex> lock(resource_map_mutex_);
     auto [it, inserted] = request_states_.try_emplace(unique_key, RequestState{now + timeout_ms});
+    if (it->second.terminal) {
+        return 0;
+    }
     it->second.request_registered = true;
     scheduleDeadlineCheckLocked(unique_key, it->second);
     resource_cv_.notify_all();
@@ -169,12 +172,13 @@ void P2PConnectorResourceStore::markTerminal(const std::string& unique_key, int6
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         auto it = request_states_.find(unique_key);
         if (it == request_states_.end()) {
-            if (!validDeadline(request_deadline_ms) || currentTimeMs() >= request_deadline_ms) {
-                return;
-            }
+            // StartLoad may end before GenerateStream registers its deadline.
             it = request_states_.emplace(unique_key, RequestState{request_deadline_ms}).first;
         }
-        it->second.terminal = true;
+        if (!it->second.terminal) {
+            it->second.terminal = true;
+            it->second.terminal_expire_at_ms = currentTimeMs() + kTombstoneRetentionMs;
+        }
         retired.swap(it->second.side_channel_data);
         request_deadline_ms = it->second.request_deadline_ms;
         auto resource = resource_map_.find(unique_key);
@@ -248,6 +252,7 @@ void P2PConnectorResourceStore::checkTimeout(int64_t now_ms) {
             state.scheduled_deadline_ms = 0;
             if (!state.terminal) {
                 state.terminal = true;
+                state.terminal_expire_at_ms = now_ms + kTombstoneRetentionMs;
                 if (state.side_channel_data) {
                     retired.push_back(std::move(*state.side_channel_data));
                     state.side_channel_data.reset();
@@ -259,11 +264,11 @@ void P2PConnectorResourceStore::checkTimeout(int64_t now_ms) {
                     resource_map_.erase(resource);
                 }
             }
-            if (now_ms >= state.request_deadline_ms) {
+            if (now_ms >= state.terminal_expire_at_ms) {
                 request_states_.erase(it);
             } else {
-                // A load timeout seals the request, but its terminal record is
-                // still needed until the original request deadline rejects late callbacks.
+                // Resources still expire at the original phase deadline. Only
+                // the lightweight terminal record receives the extra hour.
                 scheduleDeadlineCheckLocked(it->first, state);
             }
         }
@@ -283,7 +288,7 @@ void P2PConnectorResourceStore::checkTimeout(int64_t now_ms) {
 }
 
 void P2PConnectorResourceStore::scheduleDeadlineCheckLocked(const std::string& unique_key, RequestState& state) {
-    const int64_t deadline_ms = state.terminal ? state.request_deadline_ms : state.deadlineMs();
+    const int64_t deadline_ms = state.terminal ? state.terminal_expire_at_ms : state.deadlineMs();
     if (state.scheduled_deadline_ms == deadline_ms) {
         return;
     }

@@ -27,7 +27,7 @@ struct P2PConnectorResourceEntry {
     std::string        unique_key;         // 路由唯一标识（从 Meta::P2PRoutingContext 填充）
     KVCacheResourcePtr kv_cache_resource;  // KV cache 资源引用，用于保持引用计数
     int64_t            deadline_ms;        // Prefill 资源持有截止时间
-    int64_t            request_deadline_ms;  // 原始请求截止时间，用于终态 tombstone
+    int64_t            request_deadline_ms;  // 原始请求截止时间
     int64_t            add_time_us;        // 添加时间
 
     // Published CPU tensors are owned by this payload and must remain read-only.
@@ -48,7 +48,7 @@ struct P2PConnectorResourceEntry {
 };
 
 // Prefill rank 0 holds request KV resources until StartLoad takes ownership.
-// Lightweight request state remains until the original request deadline.
+// Lightweight terminal state remains for one hour after completion/cancellation/timeout.
 class P2PConnectorResourceStore {
 public:
     P2PConnectorResourceStore(const kmonitor::MetricsReporterPtr& metrics_reporter,
@@ -108,6 +108,8 @@ public:
     void clearPrefillPayload(const std::string& unique_key);
 
 private:
+    static constexpr int64_t kTombstoneRetentionMs = 60LL * 60 * 1000;
+
     void checkTimeout(int64_t now_ms);
     void runDeadlineLoop();
     std::optional<int64_t> nextDeadlineMsLocked() const;
@@ -117,6 +119,7 @@ private:
         int64_t request_deadline_ms;
         int64_t load_deadline_ms = 0;
         int64_t scheduled_deadline_ms = 0;
+        int64_t terminal_expire_at_ms = 0;
         bool request_registered = false;
         bool consumed = false;
         bool terminal = false;
