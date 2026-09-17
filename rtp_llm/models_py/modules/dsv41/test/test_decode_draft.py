@@ -14,6 +14,7 @@ from rtp_llm.models_py.model_desc.deepseek_v41_dspark_model import (
     DeepSeekV41DSparkModel,
     V41DraftFmhaImpl,
     _draft_query_width,
+    _native_cp_width,
 )
 from rtp_llm.models_py.modules.dsv41.cache_layout import CacheLayout, CacheRegion
 from rtp_llm.models_py.modules.dsv41.compact_reader import CompactPages
@@ -29,6 +30,28 @@ from rtp_llm.utils.model_weight import W
 
 
 class DraftDescriptorTest(unittest.TestCase):
+    def test_native_cp_width_mirrors_cache_config_helper(self):
+        cases = (
+            # (kv_cache_sharded, role, tp_size, prefill_cp_size, expected)
+            (False, "PREFILL", 4, 4, 1),
+            (False, "DECODE", 1, 4, 1),
+            (True, "PREFILL", 4, 4, 4),
+            (True, "PREFILL", 8, 8, 8),
+            (True, "PREFILL", 16, 16, 16),
+            (True, "DECODE", 1, 4, 4),
+            (True, "DECODE", 1, 8, 8),
+            (True, "DECODE", 1, 16, 16),
+        )
+        for sharded, role, tp_size, cp_size, expected in cases:
+            parallelism = SimpleNamespace(
+                role_type=role,
+                tp_size=tp_size,
+                prefill_cp_config=SimpleNamespace(
+                    kv_cache_sharded=sharded, prefill_cp_size=cp_size
+                ),
+            )
+            self.assertEqual(_native_cp_width(parallelism), expected)
+
     def test_prefill_initialization_does_not_bind_cp_shards_as_decode_pages(self):
         model = DeepSeekV41DSparkModel.__new__(DeepSeekV41DSparkModel)
         nn.Module.__init__(model)

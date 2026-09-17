@@ -21,6 +21,18 @@ def _prefill_role(parallelism):
     return str(parallelism.role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
 
 
+def _native_cp_width(parallelism):
+    # Mirror DSV41CacheConfigHelper::contextParallelSize: the native cache
+    # groups are sized block*cp, with cp taken from the TP group on PREFILL
+    # and from the explicit prefill CP width on DECODE.
+    cp = parallelism.prefill_cp_config
+    if not cp.kv_cache_sharded:
+        return 1
+    if _prefill_role(parallelism):
+        return int(parallelism.tp_size)
+    return int(cp.prefill_cp_size)
+
+
 def _draft_query_width(inputs):
     lengths = inputs.attention_inputs.input_lengths
     if (
@@ -377,8 +389,12 @@ class DeepSeekV41DSparkModel(GptModelBase):
             raise ValueError("V4.1 DSpark requires three stages and gamma5")
         self._prefill_only = _prefill_role(parallelism_config)
         self.layout = CacheLayout(
-            token_block_size=kv_cache_config.seq_size_per_block,
-            cp_size=8,
+            token_block_size=(
+                kv_cache_config.seq_size_per_block
+                if kv_cache_config.seq_size_per_block > 0
+                else 128
+            ),
+            cp_size=_native_cp_width(parallelism_config),
             speculative_tokens=5,
             draft_enabled=True,
         )
