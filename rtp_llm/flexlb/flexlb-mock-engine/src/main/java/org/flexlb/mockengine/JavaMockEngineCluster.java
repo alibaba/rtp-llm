@@ -4761,6 +4761,8 @@ public final class JavaMockEngineCluster {
         /** Master-facing used tokens (occupied + pressure, clamped to total) —
          * the pool-derived caliber behind "active" everywhere. */
         long getActiveKvTokens() { return usedKvTokens(); }
+        /** Blocks currently pinned by in-flight leases (held + referenced). */
+        long getOccupiedKvTokens() { return occupiedKvTokens(); }
         /** Pool availability (free + pure-LRU) clamped to total, minus pressure. */
         long getAvailableKvTokens() { return availableKvTokens(); }
         /** Total pool blocks (ceil(totalKvTokens/spb) or explicit override). */

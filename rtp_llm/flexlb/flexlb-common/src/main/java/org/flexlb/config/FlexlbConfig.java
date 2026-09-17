@@ -101,6 +101,8 @@ public final class FlexlbConfig {
         private int executorCoreSize = 1000;
         private int executorMaxSize = 1000;
         private int executorQueueSize = 1000;
+        /** 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。 */
+        private long shutdownQuietPeriodMs = 5_000L;
     }
 
 }

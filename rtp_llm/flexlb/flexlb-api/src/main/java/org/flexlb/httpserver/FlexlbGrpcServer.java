@@ -41,6 +41,7 @@ public class FlexlbGrpcServer {
      */
     static final int FLEXLB_GRPC_PORT_OFFSET = 2;
     private static final int DEFAULT_HTTP_PORT = 7001;
+    private final long quietPeriodNanos;
 
     /**
      * Metric prefix — matches {@code MicrometerFlexMonitor.METRIC_PREFIX} so that
@@ -72,6 +73,8 @@ public class FlexlbGrpcServer {
         this.flexlbServiceImpl = flexlbServiceImpl;
         this.configService = configService;
         this.environment = environment;
+        this.quietPeriodNanos = TimeUnit.MILLISECONDS.toNanos(
+                configService.loadBalanceConfig().getGrpcServer().getShutdownQuietPeriodMs());
         this.grpcServerEventLoopGroup = grpcServerEventLoopGroup;
         this.meterRegistry = meterRegistry;
         this.grpcServerTimingInterceptor = grpcServerTimingInterceptor;
@@ -180,17 +183,49 @@ public class FlexlbGrpcServer {
         Logger.info("FlexLB gRPC server executor metrics registered with MeterRegistry");
     }
 
-    @PreDestroy
-    public void shutdown() {
-        if (server != null) {
-            server.shutdown();
-            try {
-                server.awaitTermination(5, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                server.shutdownNow();
+    /** Called before Spring destroys any serving resources. */
+    public synchronized void drain() {
+        if (server == null || server.isTerminated()) {
+            return;
+        }
+        boolean interrupted = false;
+        long startedAt = System.nanoTime();
+        Logger.info("keep serving until no new requests for {} ms",
+                TimeUnit.NANOSECONDS.toMillis(quietPeriodNanos));
+        try {
+            while (!server.isShutdown()) {
+                long lastArrival = Math.max(startedAt, grpcServerTimingInterceptor.getLastScheduleArrivalNanos());
+                long remaining = quietPeriodNanos - (System.nanoTime() - lastArrival);
+                if (remaining <= 0) {
+                    Logger.info("Schedule quiet period elapsed; shutting down gRPC and waiting for accepted RPCs");
+                    server.shutdown();
+                    break;
+                }
+                try {
+                    TimeUnit.NANOSECONDS.sleep(remaining);
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+            while (!server.isTerminated()) {
+                try {
+                    server.awaitTermination();
+                } catch (InterruptedException e) {
+                    // An interrupt must not turn graceful drain into resource destruction.
+                    interrupted = true;
+                }
+            }
+            Logger.info("All accepted gRPC requests completed");
+        } finally {
+            if (interrupted) {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        drain();
         if (bossGroup != null) {
             bossGroup.shutdownGracefully();
         }

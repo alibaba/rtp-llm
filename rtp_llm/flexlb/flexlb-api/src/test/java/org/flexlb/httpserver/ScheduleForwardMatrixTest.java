@@ -12,7 +12,6 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
-import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -91,8 +90,6 @@ class ScheduleForwardMatrixTest {
     private RouteService routeService;
     private LBStatusConsistencyService consistency;
     private EngineHealthReporter engineHealthReporter;
-    private ActiveRequestCounter activeRequestCounter;
-    private ActiveRequestCounter.RequestToken requestToken;
     private FlexlbGrpcForwarder grpcForwarder;
     private FlexlbServiceImpl service;
     private ch.qos.logback.classic.Logger pvLogger;
@@ -112,15 +109,11 @@ class ScheduleForwardMatrixTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
 
-        activeRequestCounter = mock(ActiveRequestCounter.class);
-        requestToken = mock(ActiveRequestCounter.RequestToken.class);
-        when(activeRequestCounter.acquire()).thenReturn(requestToken);
 
         service = new FlexlbServiceImpl(
                 routeService,
                 consistency,
                 engineHealthReporter,
-                activeRequestCounter,
                 grpcForwarder,
                 configService,
                 mock(BatchSchedulerReporter.class),
@@ -203,7 +196,6 @@ class ScheduleForwardMatrixTest {
 
         // The failed forward is terminal: no local routing attempt at all.
         verify(routeService, never()).route(any());
-        verify(requestToken, times(1)).close();
         assertSinglePvContains("\"code\":8511");
         assertSinglePvContains("\"scheduleOrigin\":\"FORWARD_FAILED\"");
     }
@@ -263,7 +255,6 @@ class ScheduleForwardMatrixTest {
         verify(routeService, never()).route(any());
         verify(grpcForwarder, never())
                 .forwardCompensatingCancelToMaster(any(), any(), any(io.opentelemetry.context.Context.class));
-        verify(requestToken, times(1)).close();
 
         // The forwarding node writes no PV record: no local scheduling trace.
         assertTrue(pvAppender.list.isEmpty(),
