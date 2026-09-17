@@ -195,13 +195,13 @@ public final class RouteAdmission implements AutoCloseable {
         requireProvisional();
         if (decodeEndpoint() == null || decodeBinding.reservation() != null) { return true; }
         DecodeEndpoint.ReservationHandle reservation = switch (decodeBinding.mode()) {
-            case IMMEDIATE, WAIT_AT_DISPATCH -> decodeEndpoint().reserve(
+            case IMMEDIATE -> decodeEndpoint().reserve(
                     decodePin(),
                     requestId,
                     decodeBinding.hardKvTokens(),
                     decodeBinding.expectedKvTokens(),
                     decodeBinding.priority());
-            case PREEMPT_AT_PLACEMENT -> decodeEndpoint().reserve(
+            case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> decodeEndpoint().reserve(
                     decodePin(),
                     requestId,
                     decodeBinding.hardKvTokens(),

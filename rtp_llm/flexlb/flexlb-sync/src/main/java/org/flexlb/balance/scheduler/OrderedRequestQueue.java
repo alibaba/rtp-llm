@@ -61,6 +61,18 @@ final class OrderedRequestQueue {
         return size;
     }
 
+    /** Rare route withdrawal: restore the original position without issuing a new sequence. */
+    void restore(GlobalQueueEntry entry) {
+        if (!entry.removed || entry.linked || entry.sequence <= 0L) {
+            throw new IllegalStateException("only a previously removed entry can be restored");
+        }
+        Bucket bucket = priorityOrdering ? priorityBuckets[entry.priority] : fifo;
+        bucket.restore(entry);
+        entry.removed = false;
+        size++;
+        rewindScanTo(entry);
+    }
+
     /** Continue an ordered scan, counting every examined entry against the budget. */
     List<GlobalQueueEntry> scanForPlanningCandidates(
             int candidateLimit, int scanBudget, Predicate<GlobalQueueEntry> eligible) {
@@ -257,6 +269,21 @@ final class OrderedRequestQueue {
             entry.previous = null;
             entry.next = null;
             entry.linked = false;
+        }
+
+        void restore(GlobalQueueEntry entry) {
+            GlobalQueueEntry before = head;
+            while (before != null && before.sequence < entry.sequence) { before = before.next; }
+            if (before == null) {
+                add(entry);
+                return;
+            }
+            entry.next = before;
+            entry.previous = before.previous;
+            if (before.previous == null) { head = entry; }
+            else { before.previous.next = entry; }
+            before.previous = entry;
+            entry.linked = true;
         }
 
         boolean isEmpty() {

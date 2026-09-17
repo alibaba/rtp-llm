@@ -69,7 +69,7 @@ For DIRECT use `"scheduler":{"type":"DIRECT"}` and
 | `router.roles.prefill.cacheAffinity.minPrefixHitPercent` | `5` | Percentage in `[0,100]`; only when cacheAffinity exists |
 | `router.roles.decode.costEstimator.expression` | `kvcache_used_ratio` | Valid, non-empty Decode cost formula; lowest cost wins within each availability tier |
 | `router.roles.decode.availability.maxKvUsagePercent` | `90` | Percentage in `[0,100]`; `0` means zero usage is allowed, not disabled admission |
-| `router.roles.decode.availability.maxEngineRequests` | Omitted | Positive Decode request cap; required when the cost expression uses `max_running_size`, otherwise optional. Dispatch counts Engine ownership and permits, while preemptive placement also counts queued reservations |
+| `router.roles.decode.availability.maxEngineRequests` | Omitted | Positive Decode request cap; required when the cost expression uses `max_running_size`, otherwise optional. Dispatch counts Engine ownership and permits, while every QUEUE placement also counts queued reservations |
 | `router.groupSelector` | Omitted | First matching rule wins; no match uses `defaultTargets` |
 | `workerRegistry.health.statusPollIntervalMs` | `20` ms | Positive |
 | `workerRegistry.health.statusRpcTimeoutMs` | `5000` ms | Positive |
@@ -115,7 +115,7 @@ policy before selecting workers. These modes are derived behavior, not JSON fiel
 | Mode | Derived from | Selection and capacity scope |
 |---|---|---|
 | `IMMEDIATE` | DIRECT | Select only workers with available Engine-facing dispatch capacity |
-| `WAIT_AT_DISPATCH` | QUEUE without Decode reclamation | Prefer currently dispatchable workers; when all are busy, retain a physically feasible route and wait for its Decode permit at delivery |
+| `WAIT_AT_PLACEMENT` | QUEUE without Decode reclamation | Reserve request/KV capacity including queued reservations before Prefill publication; wait in the global queue when capacity is unavailable |
 | `PREEMPT_AT_PLACEMENT` | PRIORITY QUEUE with Decode reclamation | Evaluate placement inventory, including queued reservations; an exact capacity miss can reclaim allowed lower-priority Decode owners |
 
 `ScheduledRequest.DecodeBinding` carries the frozen request identity, normalized priority,
@@ -139,12 +139,27 @@ the best reusable prefix when its additional TTFT stays within `maxExtraTtftMs`
 and its predictor-effective reusable prefix meets `minPrefixHitPercent`. The final
 cache block remains compute work; equal cache hits preserve the best-TTFT candidate.
 Decode prefers workers with current KV/request capacity. If all are busy, QUEUE
-can still select a physically feasible worker: without preemption it registers
-the route on the selected Prefill and waits for an exact Decode permit at delivery;
-with Decode preemption it checks capacity or reclaims victims before Prefill
-publication. DIRECT requires current capacity and atomically checks and registers
+can still select a physically feasible worker to attempt admission, but it cannot
+publish to Prefill until it reserves Decode request/KV capacity. Without reclamation,
+it waits in the global queue for a capacity event and then selects P/D again. With
+Decode reclamation enabled, it may reclaim allowed lower-priority owners before
+Prefill publication. DIRECT requires current capacity and atomically checks and registers
 Prefill ownership under the endpoint lock. Concurrent ownership changes alone do
 not reject a DIRECT request. There are no mean-relative outlier filters.
+
+For local queued-reservation reclamation, the scheduler pins each victim's exact
+route against dispatch and atomically transfers Decode capacity to the incoming
+higher-priority request. A victim with a dispatch permit cannot be reclaimed this
+way. Each displaced request leaves its old Prefill queue and returns to the global
+queue with the same Future, priority, FIFO identity and absolute deadlines. It
+selects P/D again; this is not a terminal response or an Engine cancellation.
+Cancellation/expiry during withdrawal is settled before requeue. Existing victim-stage
+policy still controls whether reclamation is allowed; Engine-owned preemption is
+unchanged. Prefill ordering, prefix batching and prediction formulas are unchanged.
+
+Hard reservations can hold Decode capacity while requests wait for Prefill. They
+prevent local queued overbooking, but a later Engine observation can still reduce
+available capacity, so delivery must retain its exact permit check.
 
 `router.roles.decode.costEstimator.expression` defaults to `kvcache_used_ratio`.
 The expression supports arithmetic `+`, `-`, `*`, `/`, `^`,
@@ -160,7 +175,7 @@ Decode expressions do not support `sum`.
 | `kvcache_used_ratio` | `kvcache_used / kvcache_capacity`; unknown capacity of zero yields zero, and reservations above capacity can produce ratios above one |
 
 Request and KV measurements include queued reservations and ownership retained during
-preemption. Workers with current dispatch capacity remain preferred over workers that
+preemption. Workers with capacity for the derived admission mode remain preferred over workers that
 must wait; lower formula cost wins within that tier, and equal costs rotate. A non-finite
 formula result excludes that worker; if the preferred tier has no finite results, routing
 fails with a formula error. The formula does not change KV/request admission limits.
