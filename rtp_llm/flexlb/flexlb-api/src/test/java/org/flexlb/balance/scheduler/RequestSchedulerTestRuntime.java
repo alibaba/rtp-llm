@@ -84,12 +84,14 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 deliveryStrategy,
                 placementAvailability);
         this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService, lifecycle);
+        var cancelChannel = org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
+        var preemption = new org.flexlb.balance.eviction.DecodePreemptionCoordinator(cancelChannel, lifecycle);
         this.scheduler = new RequestScheduler(
                 configService,
                 router,
                 registry,
                 batchReporter,
-                org.mockito.Mockito.mock(EvictionManager.class),
+                new EvictionManager(requestReporter, cancelChannel, preemption, lifecycle, batchReporter),
                 lifecycle,
                 placementAvailability);
         this.runtime = new SchedulerRuntime(

@@ -370,7 +370,7 @@ class DecodeSelectorTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void engineRequestGateTakesPriorityOverLowerRunningCost(boolean direct) {
+    void availabilityUsesDispatchForDirectAndAllReservationsForQueue(boolean direct) {
         configureCost("running_size / max_running_size");
         if (direct) {
             configService.loadBalanceConfig().setScheduler(SchedulerConfig.direct());
@@ -387,8 +387,8 @@ class DecodeSelectorTest {
         ServerStatus selected = selectStatus(availableStrategy(registry), context(100L, 1_001L),
                 RoleType.DECODE, null);
 
-        Assertions.assertEquals("127.0.0.2", selected.getServerIp(),
-                "a READY worker outranks a cheaper worker at its Engine request cap");
+        Assertions.assertEquals(direct ? "127.0.0.2" : "127.0.0.1", selected.getServerIp(),
+                "DIRECT can use dispatch capacity; QUEUE sees both workers full and selects a blocked placement candidate");
     }
 
     @ParameterizedTest

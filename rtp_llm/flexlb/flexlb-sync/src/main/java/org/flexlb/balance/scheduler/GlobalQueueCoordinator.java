@@ -16,6 +16,7 @@ import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -63,6 +64,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final Condition changed = lock.newCondition();
     private final OrderedRequestQueue orderedQueue;
     private final PlacementWaitQueue waitingRequests;
+    /** Retained until response completion so withdrawal reuses the original FIFO identity. */
+    private final Map<CompletableFuture<Response>, GlobalQueueEntry> registered = new IdentityHashMap<>();
     // Protected by lock. A slot stays occupied until its result has been handled,
     // including when the request is cancelled while planning.
     private final Set<GlobalQueueEntry> inFlight =
@@ -114,6 +117,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             close();
         });
         availability.addListener(availabilityListener);
+        lifecycle.attachGlobalQueue(this);
         decisionThread.start();
     }
 
@@ -132,9 +136,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 return false;
             }
             orderedQueue.add(entry);
+            registered.put(future, entry);
             // Completion removes this exact request from the ordering and wait
             // indexes without scanning the backlog.
-            future.whenComplete((ignored, failure) -> removeRequest(entry));
+            future.whenComplete((ignored, failure) -> completeRequest(entry));
             changed.signal();
             return true;
         } finally {
@@ -146,6 +151,35 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         lock.lock();
         try {
             return orderedQueue.size();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** A withdrawal is not a new request: keep its sequence, context, Future and absolute deadline. */
+    boolean requeue(ScheduledRequest previous) {
+        lock.lock();
+        try {
+            if (previous.future().isDone()) { return true; }
+            GlobalQueueEntry entry = registered.get(previous.future());
+            if (closed.get() || entry == null) { return false; }
+            if (!entry.removed) { throw new IllegalStateException("withdrawn route still has a global queue entry"); }
+            entry.context.setPlanType("");
+            entry.context.setPlanCost(0L);
+            entry.context.setVictimCount(0);
+            orderedQueue.restore(entry);
+            changed.signal();
+            return true;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void completeRequest(GlobalQueueEntry entry) {
+        lock.lock();
+        try {
+            registered.remove(entry.future, entry);
+            removeRequestUnderLock(entry);
         } finally {
             lock.unlock();
         }
@@ -508,6 +542,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         try {
             abandoned = orderedQueue.drain();
             waitingRequests.clear();
+            registered.clear();
             completed = List.copyOf(completedPlans);
             completedPlans.clear();
             inFlight.clear();

@@ -81,8 +81,12 @@ public final class ScheduledRequest implements Prioritized {
         this.prefill = prefill;
         this.prefillEp = prefillEp;
         this.decodeBinding = frozenDecode.bind(decode, decodeEp, decodeReservation);
-        this.enqueuedAtMs = enqueuedAtMs;
-        this.enqueueSequence = ENQUEUE_SEQUENCE.incrementAndGet();
+        if (ctx.getWorkerEnqueueSequence() == 0L) {
+            ctx.setFirstWorkerEnqueueTime(enqueuedAtMs);
+            ctx.setWorkerEnqueueSequence(ENQUEUE_SEQUENCE.incrementAndGet());
+        }
+        this.enqueuedAtMs = ctx.getFirstWorkerEnqueueTime();
+        this.enqueueSequence = ctx.getWorkerEnqueueSequence();
         this.expiresAtMs = ctx.getRequestExpiresAtMs();
         this.hitCache = hitCacheOf(prefill);
         FlexlbConfig schedulingConfig = Objects.requireNonNull(
@@ -196,13 +200,13 @@ public final class ScheduledRequest implements Prioritized {
 
     public enum DecodeMode {
         IMMEDIATE,
-        WAIT_AT_DISPATCH,
+        WAIT_AT_PLACEMENT,
         PREEMPT_AT_PLACEMENT;
 
         public static DecodeMode from(FlexlbConfig config) {
             if (config.isDirect()) { return IMMEDIATE; }
             return config.queueScheduler().getOrdering().preemptionPolicy().isPresent()
-                    ? PREEMPT_AT_PLACEMENT : WAIT_AT_DISPATCH;
+                    ? PREEMPT_AT_PLACEMENT : WAIT_AT_PLACEMENT;
         }
     }
 
