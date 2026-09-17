@@ -52,6 +52,13 @@ def build(output, internal, spec_path, master_config_path):
           </dependency></dependencies></profile>""", 1)
         pom.write_text(text)
         tests = project / "flexlb-common/src/test/java/org/flexlb/config"
+        dispatcher_type = json.loads(master_config_path.read_text())["dispatcher"]["type"]
+        dispatcher_class = {
+            "BATCH": "BatchDispatcherConfig",
+            "NON_BATCH": "NonBatchDispatcherConfig",
+        }.get(dispatcher_type)
+        if dispatcher_class is None:
+            raise ValueError("unsupported legacy dispatcher type: " + dispatcher_type)
         (tests / "WhaleLegacyConfigTest.java").write_text("""package org.flexlb.config;
 import org.junit.jupiter.api.Test;
 import java.nio.file.Files;
@@ -61,10 +68,10 @@ class WhaleLegacyConfigTest {
  @Test void productionDocumentParsesWithoutTranslation() throws Exception {
   var config = ConfigService.parse(Files.readString(Path.of("inner-master.json")));
   assertEquals(1, config.getSchemaVersion());
-  assertEquals(NonBatchDispatcherConfig.class, config.getDispatcher().getClass());
+  assertEquals(DISPATCHER_CLASS.class, config.getDispatcher().getClass());
  }
 }
-""")
+""".replace("DISPATCHER_CLASS", dispatcher_class))
         shutil.copyfile(master_config_path, project / "flexlb-common/inner-master.json")
         run(["mvn", "-B", "-Popensource,!internal", "-pl", "flexlb-common", "-am", "install",
              "-Dtest=WhaleLegacyConfigTest,WhaleFileDiscoveryTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
