@@ -10,7 +10,7 @@ import java.util.Map;
  * Cache matches and the block size used to produce them.
  *
  * <p>Each map key normally is a logical worker identity in {@code ip:port@engineIndex} format
- * and has one {@link HostCacheMatch} containing the raw local/P2P block counts. KVCM responses
+ * and has one {@link HostCacheMatch} containing the raw local/global block counts. KVCM responses
  * from legacy single-engine deployments can use the physical {@code ip:port} identity.
  */
 public record CacheMatchResult(

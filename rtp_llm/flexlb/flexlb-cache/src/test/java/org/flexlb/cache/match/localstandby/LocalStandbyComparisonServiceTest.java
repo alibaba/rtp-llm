@@ -55,7 +55,7 @@ class LocalStandbyComparisonServiceTest {
         CacheHitFeedback feedback = new CacheHitFeedback(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "default",
                 "10.0.0.1", 8080, "running", 8000, 2192, 4384,
-                true, 4000, 8000, 10000,
+                true, 4000, 10000,
                 6000, 1616);
         CacheHitComparisonResult result =
                 comparisonService.captureComparison(feedback.requestId(), RoleType.valueOf(feedback.role())).apply(feedback).get(1, TimeUnit.SECONDS);
@@ -65,8 +65,8 @@ class LocalStandbyComparisonServiceTest {
         assertEquals(1616, result.routing().delta());
         assertEquals(4000, result.kvcmDetails().local().hit());
         assertEquals(2000, result.kvcmDetails().local().delta());
-        assertEquals(10000, result.kvcmDetails().p2pTotal().hit());
-        assertEquals(-4000, result.kvcmDetails().p2pTotal().delta());
+        assertEquals(10000, result.kvcmDetails().global().hit());
+        assertEquals(-4000, result.kvcmDetails().global().delta());
         assertNotNull(result.localStandby());
         assertEquals(4096, result.localStandby().hit());
         assertEquals(1904, result.localStandby().delta());
@@ -95,7 +95,7 @@ class LocalStandbyComparisonServiceTest {
         CacheHitFeedback feedback = new CacheHitFeedback(
                 "cache_hit_comparison", "request-1", "LOCAL_STANDBY", "PREFILL", "default",
                 "10.0.0.1", 8080, "running", 8000, 4096, 4096,
-                false, 0, 0, 0,
+                false, 0, 0,
                 6000, 1904);
         CacheHitComparisonResult result =
                 comparisonService.captureComparison(feedback.requestId(), RoleType.valueOf(feedback.role())).apply(feedback).get(1, TimeUnit.SECONDS);
@@ -130,7 +130,7 @@ class LocalStandbyComparisonServiceTest {
         CacheHitFeedback feedback = new CacheHitFeedback(
                 "cache_hit_comparison", "request-index-1", "LOCAL_STANDBY", "PREFILL", "default",
                 "10.0.0.1", 8080, 1, "running", 12000, 4096, 4096,
-                false, 0, 0, 0,
+                false, 0, 0,
                 9000, 4904);
 
         CacheHitComparisonResult result =
@@ -163,7 +163,7 @@ class LocalStandbyComparisonServiceTest {
         CacheHitFeedback feedback = new CacheHitFeedback(
                 "cache_hit_comparison", "request-miss-1", "LOCAL_STANDBY", "PREFILL", "default",
                 "10.0.0.1", 8080, 1, "running", 12000, 4096, 4096,
-                false, 0, 0, 0,
+                false, 0, 0,
                 9000, 4904);
 
         CacheHitComparisonResult result =

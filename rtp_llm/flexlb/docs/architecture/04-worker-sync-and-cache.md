@@ -124,13 +124,20 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   `localStandbyEnabled = kvcmEnabled`**。
 - `KvcmGrpcClient`（flexlb-grpc）：向 KVCM **leader** 发 `GetHostCacheState`
   （namespace = `deploymentName_blockSize`，QueryType 按 worker `kvCacheGroupMode` 映射
-  QT_PREFIX_MATCH / QT_PREFIX_MATCH_WITH_MAMBA），响应 `HostCacheMatch{host_ip_port,
-  prefix_match_blocks}`；`p2pHostCount` 默认 0，只对 local 命中最长的前 N 个 host 计算
-  P2P，配置为 0 时跳过 P2P；查询失败重试至 `maxQueryRetryCount`。
+  QT_PREFIX_MATCH / QT_PREFIX_MATCH_WITH_MAMBA），响应 `HostCacheMatch{host_ip_port, local,
+  global}`；`global` 是 local、P2P 与远端 pool 来源联合后的前缀命中块数，已包含 `local`。
+  请求侧 `medium` 默认空列表（空表示匹配全部介质，取值原样透传给 KVCM）；
+  `globalKvsHostCount` 默认 3，按 local 降序取前 N 个逻辑引擎计算远端命中，0 表示只算本地；
+  `enableP2p` 默认 `false`，与 `globalKvsHostCount` 相互独立；查询失败重试至 `maxQueryRetryCount`。
 - 健康管理：daemon 线程每 `leaderRefreshIntervalMs(10s)` 刷 leader（`GetClusterInfo`）与
   worker 元数据；心跳/查询失败计数对 `heartbeatFailureThreshold(3)` /
   `queryFailureThreshold(10)` 判不健康，连续 `recoverySuccessThreshold(3)` 次心跳成功恢复；
   预热期（warmup）失败忽略。健康变化通知监听者。
+- 参数热更新：`CacheMatchConfiguration` 注册 `ConfigService` 更新监听器，用 volatile 字段发布
+  最新的 `KvcmCacheMatchingConfig`；`KvcmGrpcClient` 与 `KvcmLeaderResolver` 不再缓存构造期快照，
+  因此 `requestTimeoutMs`、`maxQueryRetryCount`、健康阈值与三个查询参数在更新后即时生效。
+  单次查询开始时读取一次快照，同一查询的所有重试复用该快照。`leaderRefreshIntervalMs`、
+  `localStandby.*` 与 `cacheMatching.type` 仍在启动时固定，修改需重启。
 
 ### LOCAL_STANDBY（兜底索引）
 

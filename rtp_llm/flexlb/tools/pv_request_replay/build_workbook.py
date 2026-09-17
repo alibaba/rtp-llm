@@ -591,7 +591,7 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
         standby_comparison = cache_payload.get("localStandby") or {}
         routing_comparison = cache_payload.get("routing") or {}
         local_comparison = kvcm_comparison.get("local") or {}
-        p2p_comparison = kvcm_comparison.get("p2pTotal") or {}
+        global_comparison = kvcm_comparison.get("global") or {}
         route_predicted_hit_tokens = as_number(cache_selection.get("hitCacheTokens"))
         predicted_hit_tokens = as_number(routing_comparison.get("hit"))
         if predicted_hit_tokens is None:
@@ -728,8 +728,8 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
             "kvcm_delta_tokens": as_number(kvcm_comparison.get("delta")),
             "kvcm_local_hit_tokens": as_number(local_comparison.get("hit")),
             "kvcm_local_delta_tokens": as_number(local_comparison.get("delta")),
-            "kvcm_p2p_total_hit_tokens": as_number(p2p_comparison.get("hit")),
-            "kvcm_p2p_total_delta_tokens": as_number(p2p_comparison.get("delta")),
+            "kvcm_global_hit_tokens": as_number(global_comparison.get("hit")),
+            "kvcm_global_delta_tokens": as_number(global_comparison.get("delta")),
             "local_standby_hit_tokens": as_number(standby_comparison.get("hit")),
             "local_standby_delta_tokens": as_number(standby_comparison.get("delta")),
             "local_standby_hit_rate_pct": pct(standby_comparison.get("hit"), input_tokens),
@@ -874,8 +874,8 @@ REFERENCE_AND_EVIDENCE_COLUMNS = [
     Column("kvcm_delta_tokens", "kvcm_delta_tokens", 30, "integer"),
     Column("kvcm_local_hit_tokens", "kvcm_local_hit_tokens", 30, "integer"),
     Column("kvcm_local_delta_tokens", "kvcm_local_delta_tokens", 30, "integer"),
-    Column("kvcm_p2p_total_hit_tokens", "kvcm_p2p_total_hit_tokens", 30, "integer"),
-    Column("kvcm_p2p_total_delta_tokens", "kvcm_p2p_total_delta_tokens", 30, "integer"),
+    Column("kvcm_global_hit_tokens", "kvcm_global_hit_tokens", 30, "integer"),
+    Column("kvcm_global_delta_tokens", "kvcm_global_delta_tokens", 30, "integer"),
     Column("local_standby_hit_tokens", "local_standby_hit_tokens", 30, "integer"),
     Column("local_standby_delta_tokens", "local_standby_delta_tokens", 30, "integer"),
     Column("local_standby_hit_rate_pct", "local_standby_hit_rate_pct", 28, "pct"),
@@ -1133,7 +1133,7 @@ def write_routing_decisions_sheet(workbook: xlsxwriter.Workbook, rows: list[dict
               "usedKvTokens", "availableKvTokens", "logWeight", "ownershipVersion"]
     policy_fields = ["requestInputTokens", "candidateChoice", "minimumTtftMs", "relativeTolerance",
                      "minimumToleranceMs", "shortestTtftPoolSize", "cacheAffinityMaxExtraTtftMs",
-                     "cacheAffinityMinPrefixHitPercent", "p2pHitDiscount", "maxOutstandingUncachedTokens",
+                     "cacheAffinityMinPrefixHitPercent", "remoteDiscount", "maxOutstandingUncachedTokens",
                      "minimumEffectiveHitTokens", "maximumEffectiveHitTokens",
                      "maxPendingVsAverageMultiplier", "maxDrainVsAverageMultiplier"]
     group_fields = ["id", "policy", "dispatcher", "worker", "committedSize", "reason", "committedAtMs", "requestWaitMs"]

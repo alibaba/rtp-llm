@@ -49,7 +49,7 @@ public record CacheHitComparisonResult(
                 routing.hit(),
                 routing.delta(),
                 kvcmDetails == null ? null : kvcmDetails.local(),
-                kvcmDetails == null ? null : kvcmDetails.p2pTotal());
+                kvcmDetails == null ? null : kvcmDetails.global());
     }
 
     public record Actual(long hit) {
@@ -60,16 +60,16 @@ public record CacheHitComparisonResult(
 
     /**
      * KVCM prediction drill-down. {@code hit}/{@code delta} are the blended prediction used for
-     * routing; {@code local} and {@code p2pTotal} compare the actual hit against the local-only
-     * match and the full local+P2P match respectively. {@code p2pTotal.hit} includes
+     * routing; {@code local} and {@code global} compare the actual hit against the local-only
+     * match and the full local+remote match respectively. {@code global.hit} includes
      * {@code local.hit}.
      */
     public record KvcmComparison(long hit,
                                  long delta,
                                  HitComparison local,
-                                 HitComparison p2pTotal) {
+                                 HitComparison global) {
     }
 
-    public record KvcmDetails(HitComparison local, HitComparison p2pTotal) {
+    public record KvcmDetails(HitComparison local, HitComparison global) {
     }
 }

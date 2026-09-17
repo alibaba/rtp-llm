@@ -468,7 +468,7 @@
     function renderCacheComparison(request) {
       const comparison = request.cacheComparison || {};
       const rows = [['KVCM 路由预测', comparison.kvcm], ['KVCM 本地匹配', comparison.kvcm_local],
-        ['KVCM 本地 + P2P 总匹配', comparison.kvcm_p2p_total], ['Local Standby', comparison.local_standby]];
+        ['KVCM 本地 + 远端总匹配', comparison.kvcm_global], ['Local Standby', comparison.local_standby]];
       return `<div class="muted">缓存对照 · 来源 ${escaped(comparison.source)} · 实际命中 ${tokenWork(request.actualHit)} · 差值 = 实际 − 预测</div>
         <div class="kv-grid">${rows.map(([label, value]) => `<div class="kv"><div class="key">${label}</div><div class="val">${tokenWork(value?.hit)} · 差值 ${tokenWork(value?.delta)}</div></div>`).join('')}</div>
         <div class="muted">KVCM 预测 − Local Standby 预测：${tokenWork(comparison.kvcmMinusStandby)}</div>`;

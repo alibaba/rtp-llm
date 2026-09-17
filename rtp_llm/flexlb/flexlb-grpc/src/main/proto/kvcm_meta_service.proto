@@ -71,9 +71,13 @@ message GetHostCacheStateRequest {
   QueryType query_type = 3;
   repeated int64 block_cache_keys = 4;  // Ordered prompt block cache keys.
   repeated string medium = 5;           // Empty means all storage media.
-  // Number of hosts with the longest local match to continue evaluating P2P for.
-  // Zero skips P2P evaluation.
+  // Deprecated: superseded by global_kvs_host_count and enable_p2p. The number is
+  // kept so that vendored field numbering stays aligned with the upstream protocol.
   int32 p2p_host_count = 6;
+  // Number of logical engines with the longest local match to compute remote hits for.
+  // Zero computes local matches only.
+  int32 global_kvs_host_count = 7;
+  bool enable_p2p = 8;
 }
 
 message HostCacheMatch {
@@ -81,8 +85,13 @@ message HostCacheMatch {
   // A legacy physical ip:port key is accepted only for an unambiguous N=1 worker.
   string host_ip_port = 1;
   int64 local = 2;                    // Local continuous prefix matches.
+  // Deprecated: superseded by global. The numbers are kept so that vendored field
+  // numbering stays aligned with the upstream protocol.
   int64 p2p_1_fetch = 3;              // Local-miss blocks fetched from one remote peer.
   int64 p2p_1_total_match = 4;        // Continuous prefix matches after that P2P fetch.
+  // Continuous prefix matches from local, P2P and remote pool sources combined,
+  // including local.
+  int64 global = 5;
 }
 
 message GetHostCacheStateResponse {

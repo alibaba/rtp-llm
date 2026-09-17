@@ -18,8 +18,7 @@ public record CacheHitFeedback(
         long predictedHitTokens,
         boolean kvcmMatchAvailable,
         long kvcmLocalMatchTokens,
-        long kvcmP2pFetchTokens,
-        long kvcmP2pTotalMatchTokens,
+        long kvcmGlobalMatchTokens,
         long actualHitTokens,
         long deltaHitTokens) {
 
@@ -38,8 +37,7 @@ public record CacheHitFeedback(
             long predictedHitTokens,
             boolean kvcmMatchAvailable,
             long kvcmLocalMatchTokens,
-            long kvcmP2pFetchTokens,
-            long kvcmP2pTotalMatchTokens,
+            long kvcmGlobalMatchTokens,
             long actualHitTokens,
             long deltaHitTokens) {
         this(
@@ -55,8 +53,7 @@ public record CacheHitFeedback(
                 predictedHitTokens,
                 kvcmMatchAvailable,
                 kvcmLocalMatchTokens,
-                kvcmP2pFetchTokens,
-                kvcmP2pTotalMatchTokens,
+                kvcmGlobalMatchTokens,
                 actualHitTokens,
                 deltaHitTokens);
     }
@@ -75,8 +72,7 @@ public record CacheHitFeedback(
             long predictedHitTokens,
             boolean kvcmMatchAvailable,
             long kvcmLocalMatchTokens,
-            long kvcmP2pFetchTokens,
-            long kvcmP2pTotalMatchTokens,
+            long kvcmGlobalMatchTokens,
             long actualHitTokens,
             long deltaHitTokens) {
         this(
@@ -94,8 +90,7 @@ public record CacheHitFeedback(
                 predictedHitTokens,
                 kvcmMatchAvailable,
                 kvcmLocalMatchTokens,
-                kvcmP2pFetchTokens,
-                kvcmP2pTotalMatchTokens,
+                kvcmGlobalMatchTokens,
                 actualHitTokens,
                 deltaHitTokens);
     }
@@ -128,7 +123,6 @@ public record CacheHitFeedback(
                 blockSize,
                 predictedHitTokens,
                 false,
-                0,
                 0,
                 0,
                 actualHitTokens,

@@ -161,8 +161,8 @@ UniConfig / Nacos 的 v1 部分更新示例：
 - `observability.cacheHit`：recent-key window、指标和理论命中日志。
 - `observability.logging`：FlexLB logger group 级别与 root/PV stdout 开关。
 - `serviceDiscovery`：connect/read timeout、poll interval 与连接池运行参数。
-- `cacheMatching`：`LOCAL_SYNC` / `KVCM` tagged union；KVCM 分支拥有查询、健康、P2P
-  和 Local Standby 参数。
+- `cacheMatching`：`LOCAL_SYNC` / `KVCM` tagged union；KVCM 分支拥有查询、健康、远端命中
+  （`medium` / `globalKvsHostCount` / `enableP2p`）和 Local Standby 参数。
 - `optimizer`：启用开关和服务发现轮询间隔。
 - `consistency`：`NONE` / `ZOOKEEPER` tagged union；ZooKeeper 分支拥有连接和 master
   刷新参数。
@@ -246,7 +246,7 @@ Prefill 包含选中、最短 TTFT、最高有效缓存命中候选。`projected
 Engine 的 `prefixLengthValid`
 表示实际命中值有效；有效的 0 表示零命中，无效值不参与差异计算。每个关联记录最多生成一次
 `cache_hit_comparison` 和一次 `prefill_worker_status`。比较事件包含实际命中、路由预测、
-KVCM 本地匹配、KVCM 本地加 P2P 总匹配，以及 Local Standby 预测；差值统一为实际值减预测值。
+KVCM 本地匹配、KVCM 本地加远端的 global 总匹配，以及 Local Standby 预测；差值统一为实际值减预测值。
 预测关联最多保留 100,000 条，保存期限为一小时。Local Standby 对照异步完成，反馈等待上限
 为一秒；不可用时省略 Standby 对照，其余比较正常输出。观测回调在 Worker 状态锁外执行。
 

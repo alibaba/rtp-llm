@@ -20,8 +20,8 @@ public class CacheMatchConfiguration {
     private final List<ServiceRoute> serviceRoutes;
     private final ServiceRoute kvcmServiceRoute;
     private final KvcmConfig kvcmConfig;
-    private final KvcmCacheMatchingConfig kvcmRuntimeConfig;
     private final LocalStandbyConfig localStandbyConfig;
+    private volatile KvcmCacheMatchingConfig kvcmRuntimeConfig;
     private final boolean kvcmEnabled;
     private final boolean localSyncEnabled;
     private final boolean localStandbyEnabled;
@@ -33,6 +33,9 @@ public class CacheMatchConfiguration {
             ModelMetaConfig modelMetaConfig,
             ConfigService configService) {
         this(modelMetaConfig, configService.loadBalanceConfig());
+        if (kvcmEnabled) {
+            configService.addUpdateListener(this::applyRuntimeConfigUpdate);
+        }
     }
 
     public CacheMatchConfiguration(
@@ -60,6 +63,30 @@ public class CacheMatchConfiguration {
         logInitialization();
     }
 
+    /**
+     * Publishes the KVCM runtime parameters of a configuration update. The volatile write makes
+     * the freshly deserialized instance safely visible to routing threads.
+     */
+    private void applyRuntimeConfigUpdate(FlexlbConfig config) {
+        if (!config.isKvcmCacheMatching()) {
+            log.warn("Ignored runtime cacheMatching.type change; activating another cache match "
+                    + "mode requires a restart");
+            return;
+        }
+        kvcmRuntimeConfig = config.kvcmCacheMatching();
+        log.info("Applied KVCM cache matching configuration update: requestTimeoutMs={}, "
+                        + "heartbeatFailureThreshold={}, queryFailureThreshold={}, maxQueryRetryCount={}, "
+                        + "recoverySuccessThreshold={}, globalKvsHostCount={}, enableP2p={}, medium={}",
+                kvcmRuntimeConfig.getRequestTimeoutMs(),
+                kvcmRuntimeConfig.getHeartbeatFailureThreshold(),
+                kvcmRuntimeConfig.getQueryFailureThreshold(),
+                kvcmRuntimeConfig.getMaxQueryRetryCount(),
+                kvcmRuntimeConfig.getRecoverySuccessThreshold(),
+                kvcmRuntimeConfig.getGlobalKvsHostCount(),
+                kvcmRuntimeConfig.isEnableP2p(),
+                kvcmRuntimeConfig.getMedium());
+    }
+
     private ServiceRoute resolveKvcmServiceRoute(List<ServiceRoute> routes) {
         for (ServiceRoute route : routes) {
             if (route != null && route.getKvcm() != null) {
@@ -81,7 +108,7 @@ public class CacheMatchConfiguration {
             log.info("KVCM cache matching configuration: serviceId={}, address={}, namespace={}, "
                             + "requestTimeoutMs={}, leaderRefreshIntervalMs={}, "
                             + "heartbeatFailureThreshold={}, queryFailureThreshold={}, maxQueryRetryCount={}, "
-                            + "recoverySuccessThreshold={}, p2pHostCount={}",
+                            + "recoverySuccessThreshold={}, globalKvsHostCount={}, enableP2p={}, medium={}",
                     kvcmServiceRoute.getServiceId(),
                     kvcmConfig.getAddress(),
                     kvcmConfig.getNamespace(),
@@ -91,7 +118,9 @@ public class CacheMatchConfiguration {
                     kvcmRuntimeConfig.getQueryFailureThreshold(),
                     kvcmRuntimeConfig.getMaxQueryRetryCount(),
                     kvcmRuntimeConfig.getRecoverySuccessThreshold(),
-                    kvcmRuntimeConfig.getP2pHostCount());
+                    kvcmRuntimeConfig.getGlobalKvsHostCount(),
+                    kvcmRuntimeConfig.isEnableP2p(),
+                    kvcmRuntimeConfig.getMedium());
         }
         if (localStandbyEnabled) {
             log.info("Local standby cache configuration: autoSwitch={}, blockSize={}, "
