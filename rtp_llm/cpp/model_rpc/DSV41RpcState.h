@@ -57,7 +57,7 @@ inline CacheKeysType dsv41PrefillPromptCacheKeys(const CompleteTokenIdsPtr& toke
 inline V41TransferIdentityPB dsv41TransferIdentity(const CacheConfig& config, int cp_size) {
     const auto local = dsv41CacheIdentity(config);
     if (config.layer_num != 40 || (config.layer_all_num != 40 && config.layer_all_num != 43)
-        || (cp_size != 1 && cp_size != 8))
+        || (cp_size != 1 && cp_size != 4 && cp_size != 8))
         throw std::invalid_argument("V4.1 transfer requires target40 and either zero or three draft layers");
     std::ostringstream layout;
     std::ostringstream sources;
