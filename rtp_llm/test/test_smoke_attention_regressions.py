@@ -301,13 +301,15 @@ def test_qwen35_sm100_cuda_graph_cases_match_validated_loader_environment():
 
     empty_think = "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
     reasoning = "\n\n<think>\nOkay, the user asked me to introduce myself. Let me start by recalling my identity"
+    # Mainline 699c21547c preserves this checkpoint's FP32 SSM state and
+    # records one exact completion per configuration for both batch sizes.
     assert dp2[0]["result"]["response"] == empty_think
     assert {item["response"] for item in dp2[1]["result"]["response_batch"]} == {
-        reasoning
-    }
-    assert tp2[0]["result"]["response"] == empty_think
-    assert {item["response"] for item in tp2[1]["result"]["response_batch"]} == {
         empty_think
+    }
+    assert tp2[0]["result"]["response"] == reasoning
+    assert {item["response"] for item in tp2[1]["result"]["response_batch"]} == {
+        reasoning
     }
 
 
