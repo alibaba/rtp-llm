@@ -246,36 +246,6 @@ struct DSV41ExecutionProgress {
     int64_t decoder_checkpoint_end{0};
 };
 
-// The scheduling rank supplies these callbacks for a real in-flight prefill.
-// Storage and copy completion remain owned by the existing memory connector.
-struct DSV41ExecutionContext {
-    int64_t request_id{-1};
-    int64_t protected_prefix_end{0};
-    int64_t final_handoff_end{0};
-    std::vector<std::vector<int32_t>> block_ids_by_group;
-    std::function<void(const DSV41ExecutionProgress&)> report_progress;
-    std::function<bool()> is_active;
-    using WorkerBlockIds = std::vector<std::vector<std::vector<int32_t>>>;
-    std::function<bool(const DSV41ExecutionState&, const std::vector<std::vector<int32_t>>&, const WorkerBlockIds&)>
-        protect_checkpoint;
-
-    void reportProgress(const DSV41ExecutionProgress& progress) const {
-        if (progress.request_id != request_id || !report_progress)
-            throw std::invalid_argument("V4.1 progress callback belongs to another request");
-        report_progress(progress);
-    }
-    bool isActive() const {
-        return is_active && is_active();
-    }
-    bool protectCheckpoint(const DSV41ExecutionState& publication,
-                           const std::vector<std::vector<int32_t>>& actual_block_ids,
-                           const WorkerBlockIds& worker_block_ids = {}) const {
-        if (publication.request_id != request_id || !protect_checkpoint)
-            throw std::invalid_argument("V4.1 checkpoint callback belongs to another request");
-        return protect_checkpoint(publication, actual_block_ids, worker_block_ids);
-    }
-};
-
 // The connector owns the immutable CPU snapshot. Keeping this handle protects
 // N's complete state while the live GPU rings advance towards T.
 class DSV41CheckpointSnapshot {
@@ -313,18 +283,6 @@ public:
     View view() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return state_;
-    }
-    void requireProtectedPrefix(int64_t prefix_end, int64_t handoff_end) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        active();
-        if (prefix_end < 0 || (prefix_end > 0 && prefix_end < state_.encoder_materialized_end) || prefix_end > handoff_end
-            || handoff_end <= 0 || handoff_end > 1048576
-            || (state_.final_handoff_end > 0
-                && (state_.protected_prefix_end != prefix_end || state_.final_handoff_end != handoff_end))) {
-            throw std::invalid_argument("V4.1 protected prefix must be selected before advancing past N");
-        }
-        state_.protected_prefix_end = prefix_end;
-        state_.final_handoff_end    = handoff_end;
     }
     void advanceEncoder(int64_t end) {
         std::lock_guard<std::mutex> lock(mutex_);

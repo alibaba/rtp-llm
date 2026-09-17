@@ -10,22 +10,6 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
-namespace {
-
-class DSV41ProtectedSnapshot final: public DSV41CheckpointSnapshot {
-public:
-    DSV41ProtectedSnapshot(const DSV41CheckpointMetadata&          metadata,
-                           std::shared_ptr<KVCacheMemoryConnector> owner,
-                           std::shared_ptr<void>                   copy_plan):
-        DSV41CheckpointSnapshot(metadata), owner_(std::move(owner)), copy_plan_(std::move(copy_plan)) {}
-
-private:
-    // CopyPlan releases pins through its owner, so destroy the plan first.
-    std::shared_ptr<KVCacheMemoryConnector> owner_;
-    std::shared_ptr<void>                   copy_plan_;
-};
-
-}  // namespace
 
 bool KVCacheMemoryConnector::isDsv41TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const {
     if (cache_config_.dsv41_cache_layout_version != 1
@@ -85,42 +69,11 @@ size_t KVCacheMemoryConnector::dsv41DataUnit() const {
     return cache_config_.seq_size_per_block * (spec->prefill_byte_slice ? spec->cp_size : 1);
 }
 
-DSV41CacheIdentity KVCacheMemoryConnector::dsv41CacheIdentity(const std::string& model_revision,
-                                                              DSV41ReplayMode    replay_mode) const {
-    auto               spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(cache_config_.cache_specs.at(5));
-    DSV41CacheIdentity identity{model_revision, dsv41LayoutFingerprint(), replay_mode, 1, 128, spec->entries_per_block};
-    identity.validate();
-    return identity;
-}
-
 bool KVCacheMemoryConnector::dsv41ResourceCompatible(const KVCacheResource& resource) const {
     const auto spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(cache_config_.cache_specs.at(5));
     if (!spec || (spec->cp_size > 1 && spec->prefill_byte_slice && !resource.cacheKeysAreCpCanonical()))
         return false;
-    if (resource.dsv41CacheState()) {
-        const auto view = resource.dsv41CacheState()->view();
-        return view.identity == dsv41CacheIdentity(view.identity.model_revision, view.identity.replay_mode);
-    }
-    return resource.blockIdsAreKeyAligned();
-}
-
-bool KVCacheMemoryConnector::validDsv41Recovery(const KVCacheResource&                                resource,
-                                                size_t                                                block_index,
-                                                const std::shared_ptr<const DSV41CheckpointMetadata>& metadata) const {
-    if (!metadata || (!resource.dsv41CacheState() && !resource.blockIdsAreKeyAligned())
-        || block_index >= resource.blockDependencies().size())
-        return false;
-    try {
-        metadata->validate(dsv41ReuseUnit());
-        const auto& dependency = resource.blockDependencies()[block_index];
-        return metadata->identity
-                   == dsv41CacheIdentity(metadata->identity.model_revision, metadata->identity.replay_mode)
-               && (!resource.dsv41CacheState() || metadata->identity == resource.dsv41CacheState()->view().identity)
-               && metadata->materialized_end
-                      == static_cast<int64_t>((uint64_t{dependency.ordinal} + 1) * dsv41DataUnit());
-    } catch (const std::exception&) {
-        return false;
-    }
+    return resource.dsv41CacheState() || resource.blockIdsAreKeyAligned();
 }
 
 std::optional<size_t> KVCacheMemoryConnector::dsv41SlotIndex(const KVCacheResource& resource,
@@ -145,8 +98,7 @@ bool KVCacheMemoryConnector::bindDsv41ReadPlan(CopyPlan&                        
         if (found == resource.cacheKeys().end())
             return false;
         const size_t index  = found - resource.cacheKeys().begin();
-        bool         usable = info.kind != CacheBlockKind::STATE_SWA_KV
-                      || (resource.dsv41CacheState() && validDsv41Recovery(resource, index, info.recovery_metadata));
+        bool         usable = info.kind != CacheBlockKind::STATE_SWA_KV || info.recovery_metadata;
         info.gpu_blocks.assign(slots.size(), NULL_BLOCK_IDX);
         for (size_t s = 0; s < slots.size(); ++s) {
             if (kindForSlot(slots[s]) != info.kind)
@@ -208,9 +160,6 @@ bool KVCacheMemoryConnector::stageDsv41Checkpoint(const std::shared_ptr<KVCacheR
                                                   const std::shared_ptr<Meta>&            meta) {
     if (!resource || !resource->dsv41CacheState() || !wait_for_producer || !meta || stop_.load())
         return false;
-    auto owner = weak_from_this().lock();
-    if (!owner)
-        return false;
     const auto state = resource->dsv41CacheState();
     const auto view  = state->view();
     if (!view.completed || view.finished || view.cancelled || !dsv41ResourceCompatible(*resource)
@@ -251,21 +200,9 @@ bool KVCacheMemoryConnector::stageDsv41Checkpoint(const std::shared_ptr<KVCacheR
             if (!write->success())
                 return false;
         }
-        const auto slots = layerRegionSlots();
-        auto       plan  = buildPrefixCopyPlanForRead(source->cacheKeys(),
-                                               source->blockDependencies(),
-                                               resourceLayerRegionBlocks(*source, slots),
-                                               slots,
-                                               0,
-                                               count,
-                                               source.get());
-        if (!plan || plan->copy_infos.empty() || !plan->copy_infos.back().recovery_metadata
-            || !(*plan->copy_infos.back().recovery_metadata == *view.completed))
-            return false;
-        state->protect(std::make_shared<DSV41ProtectedSnapshot>(*view.completed, std::move(owner), plan));
         return true;
     } catch (const std::exception& error) {
-        RTP_LLM_LOG_WARNING("V4.1 checkpoint protection failed: %s", error.what());
+        RTP_LLM_LOG_WARNING("V4.1 checkpoint staging failed: %s", error.what());
         return false;
     }
 }

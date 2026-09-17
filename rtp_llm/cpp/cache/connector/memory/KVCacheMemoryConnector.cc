@@ -1023,7 +1023,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
             if (dsv41) {
                 for (const auto& copy_info : copy_plan->copy_infos) {
                     if (copy_info.kind != CacheBlockKind::STATE_SWA_KV || !resource->dsv41CacheState()
-                        || !validDsv41Recovery(*resource, tail_index, copy_info.recovery_metadata))
+                        || !copy_info.recovery_metadata)
                         continue;
                     try {
                         resource->dsv41CacheState()->restore(*copy_info.recovery_metadata, dsv41ReuseUnit());
@@ -1193,8 +1193,7 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForRead(const CacheKeysType&         
                 }
             };
             if (dsv41 && kind == CacheBlockKind::STATE_SWA_KV
-                && (!resource || !resource->dsv41CacheState()
-                    || !validDsv41Recovery(*resource, static_cast<size_t>(i), match_result.recovery_metadata))) {
+                && (!resource || !match_result.recovery_metadata)) {
                 release_match();
                 continue;
             }
@@ -1508,7 +1507,7 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForWrite(const CacheKeysType&        
             std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata;
             if (dsv41 && kind == CacheBlockKind::STATE_SWA_KV) {
                 recovery_metadata = resource ? resource->dsv41RecoveryMetadata(static_cast<size_t>(i)) : nullptr;
-                if (!resource || !validDsv41Recovery(*resource, static_cast<size_t>(i), recovery_metadata))
+                if (!resource || !recovery_metadata)
                     continue;
             }
             const auto slot_valid_mask =

@@ -52,10 +52,8 @@ public:
     std::string        dsv41LayoutFingerprint() const;
     size_t             dsv41ReuseUnit() const;
     size_t             dsv41DataUnit() const;
-    DSV41CacheIdentity dsv41CacheIdentity(const std::string& model_revision, DSV41ReplayMode replay_mode) const;
-    // Called at the real N boundary, before any writer can overwrite its ring.
-    // The producer barrier must cover target/draft and all source ready events.
-    // The caller keeps the live ring stable until this synchronous protection returns.
+    // Stages the completed checkpoint prefix to the memory connector as a plain
+    // byte copy; completion is reported through the returned status only.
     bool stageDsv41Checkpoint(const std::shared_ptr<KVCacheResource>& resource,
                               const std::function<void()>&            wait_for_producer,
                               const std::shared_ptr<Meta>&            meta);
@@ -116,9 +114,6 @@ private:
     };
 
     bool dsv41ResourceCompatible(const KVCacheResource& resource) const;
-    bool validDsv41Recovery(const KVCacheResource&                                resource,
-                            size_t                                                block_index,
-                            const std::shared_ptr<const DSV41CheckpointMetadata>& metadata) const;
     bool bindDsv41ReadPlan(CopyPlan& plan, const KVCacheResource& resource, const std::vector<LayerRegionSlot>& slots);
     bool bindDsv41WorkerBlocks(CopyPlan& plan, const KVCacheResource& resource,
                                const std::vector<LayerRegionSlot>& slots) const;

@@ -114,10 +114,6 @@ public:
     std::shared_ptr<AsyncContext>
     asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
 
-    bool stageDsv41Checkpoint(const KVCacheResource& resource,
-                              const std::function<void()>& wait_for_producer,
-                              const std::shared_ptr<Meta>& meta);
-
     // for every single rank
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 

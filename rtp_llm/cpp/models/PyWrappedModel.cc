@@ -781,7 +781,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_inputs.v41_is_fake          = inputs.v41_is_fake;
             py_model_inputs.v41_execution_context = inputs.v41_execution_context;
             py_model_inputs.v41_swa_ranges        = inputs.v41_swa_ranges;
-            py_model_inputs.v41_execution_contexts = inputs.v41_execution_contexts;
         }
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;

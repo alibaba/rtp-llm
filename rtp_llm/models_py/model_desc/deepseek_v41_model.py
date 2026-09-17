@@ -721,122 +721,9 @@ class DeepSeekV41Model(GptModelBase):
             first = last
         return requests
 
-    def _cp_native_call(self, context, action):
-        from rtp_llm.models_py.distributed import collective_torch
-        from rtp_llm.models_py.distributed.collective_torch import Group
-
-        torch.cuda.current_stream().synchronize()
-        collective_torch.barrier(Group.TP)
-        error = None
-        status = torch.ones(1, dtype=torch.int32, device=context.query_device)
-        if self._cp_rank == 0:
-            try:
-                if action() is False:
-                    raise RuntimeError("V4.1 native checkpoint copy did not complete")
-            except Exception as exc:
-                error = exc
-                status.zero_()
-        collective_torch.broadcast(status, 0, Group.TP)
-        if int(status.item()) != 1:
-            raise RuntimeError(
-                "V4.1 native state update failed on the scheduling rank"
-            ) from error
-
-    def _cp_protect(
-        self, native, context, history, *, publication_end=None, swa_ranges=None
-    ):
-        from rtp_llm.models_py.distributed import collective_torch
-        from rtp_llm.models_py.distributed.collective_torch import Group
-
-        group_count = len(self.kv_cache.group_region_names)
-        sizes = torch.zeros(group_count, dtype=torch.int64, device=context.query_device)
-        if self._cp_rank == 0:
-            sizes.copy_(
-                torch.tensor(
-                    [len(ids) for ids in native.block_ids_by_group],
-                    dtype=torch.int64,
-                    device=context.query_device,
-                )
-            )
-        collective_torch.broadcast(sizes, 0, Group.TP)
-        groups = {}
-        for slot, table in context.tables.items():
-            groups[self._groups[(slot.owner_layer, int(_REGIONS[slot.region]))]] = (
-                table[0]
-            )
-        for layer, table in context.pair_tables.items():
-            groups[self._groups[(layer, int(KVCacheRegionName.DSV41_PAIR_STATE))]] = (
-                table[0]
-            )
-        counts = sizes.cpu().tolist()
-        if set(groups) != set(range(group_count)) or any(
-            count > groups[gid].numel() for gid, count in enumerate(counts)
-        ):
-            raise ValueError(
-                "V4.1 native checkpoint groups differ from actual CP page tables"
-            )
-        flat = torch.cat([groups[gid][:count] for gid, count in enumerate(counts)])
-        gathered = (
-            collective_torch.all_gather(flat, Group.TP)
-            .reshape(self.layout.cp_size, -1)
-            .cpu()
-            .tolist()
-        )
-        per_rank = []
-        for values in gathered:
-            grouped, first = [], 0
-            for count in counts:
-                grouped.append(values[first : first + count])
-                first += count
-            per_rank.append(grouped)
-        publication = self._context_state(
-            context,
-            history.token_ids,
-            history.image_mask,
-            publication_end=publication_end,
-            swa_ranges=swa_ranges,
-        )
-        self._cp_native_call(
-            context,
-            lambda: native.protect_checkpoint(publication, per_rank[0], per_rank),
-        )
-        return True
-
-    def _protect_restored_cp(self, native, context, rows, swa_ranges):
-        from rtp_llm.models_py.modules.dsv41.prefill import V41CPHistory
-
-        packed = torch.cat(
-            (rows.history_ids, (~rows.history_valid).to(torch.int32)), dim=1
-        )
-        values = (
-            context.gather_rows(packed, context.start, context.start + 1)[0]
-            .cpu()
-            .tolist()
-        )
-        for index, position in enumerate(range(context.start - 3, context.start)):
-            if position < 0:
-                values[index], values[index + 3] = -1, 0
-        history = V41CPHistory(
-            tuple(values[:3]), tuple(bool(value) for value in values[3:])
-        )
-        self._cp_protect(
-            native,
-            context,
-            history,
-            publication_end=context.start,
-            swa_ranges=swa_ranges,
-        )
-
     def _forward_cp(self, inputs, rows, requests):
-        from rtp_llm.models_py.distributed import collective_torch
-        from rtp_llm.models_py.distributed.collective_torch import Group
         from rtp_llm.models_py.modules.dsv41.prefill import V41CPPrefillExecutor
 
-        handles = {
-            item.request_id: item
-            for item in getattr(inputs, "v41_execution_contexts", ())
-            if item is not None
-        }
         images = self._images(inputs, rows)
         hidden = self.target.embedding.new_zeros(
             (rows.token_ids.numel(), self.config.hidden_size)
@@ -844,24 +731,6 @@ class DeepSeekV41Model(GptModelBase):
         self._prefill_observations = []
         for request in requests:
             context = request.context
-            native = handles.get(int(context.cache.request_id))
-            bounds = torch.tensor(
-                [0, context.end, 0], dtype=torch.int64, device=context.query_device
-            )
-            if native is not None:
-                bounds.copy_(
-                    torch.tensor(
-                        [native.protected_prefix_end, native.final_handoff_end, 1],
-                        dtype=torch.int64,
-                        device=context.query_device,
-                    )
-                )
-            collective_torch.broadcast(bounds, 0, Group.TP)
-            checkpoint, final, has_native = bounds.cpu().tolist()
-            if final != context.end:
-                raise ValueError(
-                    "V4.1 engine must supply the complete prefill before sampling"
-                )
             current = V41ModelRows(
                 *(
                     getattr(rows, field.name)[request.first : request.last].contiguous()
@@ -878,13 +747,6 @@ class DeepSeekV41Model(GptModelBase):
                     images.token_types[keep],
                     images.values[keep],
                 )
-            restored_protected = (
-                has_native and checkpoint == context.start and checkpoint > 0
-            )
-            if restored_protected:
-                self._protect_restored_cp(
-                    native, context, current, inputs.v41_swa_ranges[request.batch]
-                )
             executor = V41CPPrefillExecutor(
                 self.target,
                 request_id=context.cache.request_id,
@@ -892,37 +754,14 @@ class DeepSeekV41Model(GptModelBase):
                 layout=self.layout,
                 initial_encoder_end=context.start,
                 initial_decoder_end=context.start,
-                initial_protected_end=checkpoint if restored_protected else 0,
                 draft_commit=self.prefill_draft,
                 max_tokens_per_rank=self.max_tokens_per_rank,
             )
-
-            def report(progress):
-                from rtp_llm.ops.compute_ops import V41ExecutionProgress
-
-                if progress.encoder_materialized_end == progress.decoder_checkpoint_end:
-                    return
-                value = V41ExecutionProgress()
-                value.request_id = int(context.cache.request_id)
-                value.encoder_materialized_end = progress.encoder_materialized_end
-                value.decoder_checkpoint_end = progress.decoder_checkpoint_end
-                self._cp_native_call(context, lambda: native.report_progress(value))
-
             output = executor.run_extend(
                 current,
                 context,
-                protected_checkpoint_end=checkpoint,
-                final_handoff_end=final,
-                protect_checkpoint=(
-                    (
-                        lambda completed, history: self._cp_protect(
-                            native, completed, history
-                        )
-                    )
-                    if has_native
-                    else None
-                ),
-                report_progress=report if has_native else None,
+                protected_checkpoint_end=0,
+                final_handoff_end=context.end,
                 image_features=current_images,
             )
             hidden[request.first : request.last].copy_(output.hidden_states)
@@ -934,78 +773,6 @@ class DeepSeekV41Model(GptModelBase):
             )
         result = PyModelOutputs(hidden)
         return result
-
-    @staticmethod
-    def _context_state(
-        context,
-        history_token_ids,
-        history_image_mask,
-        *,
-        publication_end=None,
-        swa_ranges=None,
-    ):
-        from rtp_llm.ops.compute_ops import V41ExecutionState
-
-        if context is None:
-            raise RuntimeError("V4.1 final prefill has no completed decoder context")
-        cache = context.cache
-        end = context.end if publication_end is None else publication_end
-        layers = 43 if cache.layout.draft_enabled else 40
-        if any(cache.swa_ends.get(layer) != end for layer in range(layers)):
-            raise RuntimeError(
-                "V4.1 publication requires all target/draft SWA at the actual boundary"
-            )
-        state = V41ExecutionState()
-        state.request_id = int(cache.request_id)
-        state.materialized_end = end
-        state.encoder_materialized_end = end
-        state.decoder_checkpoint_end = end
-        state.draft_layers = layers - 40
-        state.global_entries = [
-            cache.owners[layer].materialized_end // layer_sources(layer).ratio
-            for layer in GLOBAL_OWNERS
-        ]
-        state.index_entries = list(state.global_entries)
-        if swa_ranges is None:
-            state.swa_valid_start = [
-                int(cache.swa[layer].valid_starts[0]) for layer in range(layers)
-            ]
-            state.swa_valid_end = [
-                int(cache.swa[layer].valid_ends[0]) for layer in range(layers)
-            ]
-            state.swa_replay_floor = [
-                0 if layer <= 20 else context.replay_floor for layer in range(layers)
-            ]
-        else:
-            if swa_ranges.dtype != torch.int64 or swa_ranges.shape != (layers, 3):
-                raise ValueError("V4.1 restored state requires every native SWA range")
-            ranges = swa_ranges.cpu().tolist()
-            if any(last != end for _, last, _ in ranges):
-                raise ValueError(
-                    "V4.1 restored SWA does not match its checkpoint boundary"
-                )
-            state.swa_valid_start = [first for first, _, _ in ranges]
-            state.swa_valid_end = [last for _, last, _ in ranges]
-            state.swa_replay_floor = [floor for _, _, floor in ranges]
-        state.pair_positions = [
-            (
-                cache.owners[layer].pair.next_position - 1
-                if cache.owners[layer].pair.next_position % 2
-                else -1
-            )
-            for layer in PAIR_OWNERS
-        ]
-        state.pair_valid = [
-            cache.owners[layer].pair.next_position % 2 for layer in PAIR_OWNERS
-        ]
-        state.history_token_ids = list(history_token_ids)
-        state.history_image_mask = [int(value) for value in history_image_mask]
-        state.history_ready = True
-        state.draft_committed = cache.layout.draft_enabled
-        if state.draft_committed:
-            state.aux_valid_start = max(0, end - 128)
-            state.aux_valid_end = end
-        return state
 
     @staticmethod
     def _images(inputs, rows):

@@ -1092,7 +1092,6 @@ class V41CPPrefillExecutor:
         protected_checkpoint_end,
         final_handoff_end,
         protect_checkpoint=None,
-        report_progress=None,
         image_features=None,
         lookup_outputs=None,
     ):
@@ -1178,8 +1177,6 @@ class V41CPPrefillExecutor:
                 history = V41CPHistory.at_boundary(encoder, current_rows)
                 if bounded:
                     self.tail = V41CPL20Tail.append(self.tail, l20, encoder)
-                if report_progress is not None:
-                    report_progress(progress)
                 decoder, draft_rows = None, None
                 if extend.decoder_rows is not None:
                     if bounded:
@@ -1224,8 +1221,6 @@ class V41CPPrefillExecutor:
                         extend, LateCompletion(extend.decoder_rows, True, True)
                     )
                     decoder.scatter_rows(output.hidden_states, output=hidden)
-                    if report_progress is not None:
-                        report_progress(progress)
                     if extend.checkpoint_end is not None:
                         if protect_checkpoint(decoder, history) is not True:
                             raise RuntimeError(

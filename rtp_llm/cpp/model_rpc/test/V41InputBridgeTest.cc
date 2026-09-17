@@ -73,30 +73,6 @@ TEST_F(V41InputBridgeTest, ReusableCheckpointLeavesPromptWorkAndDoesNotSplitImag
     EXPECT_EQ(input.alignedCheckpointEnd(16385, 1024), 16384);
 }
 
-TEST_F(V41InputBridgeTest, ProtectedCheckpointSuppressesIntermediateCheckpointAtOrBelow16K) {
-    V41RequestInputs input;
-    input.token_types = torch::full({1048576}, -1, torch::kInt32);
-    for (const auto [length, expected] :
-         std::vector<std::pair<int64_t, int64_t>>{{0, 0}, {1, 0}, {1023, 0}, {1024, 0}, {1025, 0},
-                                                  {15360, 0}, {16384, 0}, {16385, 16384}, {17408, 16384},
-                                                  {1048320, 1047552}, {1048576, 1047552}}) {
-        EXPECT_EQ(input.protectedCheckpointEnd(length, 1024), expected);
-    }
-    V41ImageInput image;
-    image.start = 15100;
-    image.types = torch::zeros({300}, torch::kInt32);
-    input.images.push_back(image);
-    EXPECT_EQ(input.protectedCheckpointEnd(16384, 1024), 0);
-    EXPECT_EQ(input.protectedCheckpointEnd(16385, 1024), 16384);
-    V41RequestInputs elevated;
-    elevated.token_types = torch::full({1048576}, -1, torch::kInt32);
-    V41ImageInput high;
-    high.start = 16100;
-    high.types = torch::zeros({300}, torch::kInt32);
-    elevated.images.push_back(high);
-    EXPECT_EQ(elevated.protectedCheckpointEnd(16500, 1024), 15360);
-}
-
 TEST_F(V41InputBridgeTest, RpcOwnsExactCanonicalPayloadAfterProtoLifetime) {
     auto wire  = imageRequest();
     auto input = QueryConverter::transQuery(&wire);

@@ -359,7 +359,6 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
     model_input.sequence_lengths      = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
     model_input.prefix_lengths        = torch::empty({(int64_t)total_context_batch_size}, cuda_i32);
-    model_input.v41_execution_contexts.clear();
     model_input.request_id            = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
 
@@ -554,9 +553,6 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             RTP_LLM_LOG_TRACE("context kv_cache: %s", kv_cache.debugString().c_str());
             RTP_LLM_LOG_TRACE("context stream: %s", stream->debugString().c_str());
         }
-
-        if (auto context = stream->streamCacheResource().createDsv41ExecutionContext())
-            model_input.v41_execution_contexts.push_back(std::move(context));
 
         for (auto i = 0; i < current_batch_size; ++i) {
             const auto prefill_batch_idx = ctx.batch_idx - ctx.total_decode_batch_size;

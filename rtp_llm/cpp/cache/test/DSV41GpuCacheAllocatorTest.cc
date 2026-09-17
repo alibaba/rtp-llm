@@ -344,7 +344,6 @@ TEST_F(DSV41GpuCacheAllocatorTest, ValidKvBlocksDoNotRequireCompleteTailAndStale
     auto stale = resource(2);
     fill(stale, 29);
     auto state = stale->cacheResource().dsv41CacheState();
-    state->requireProtectedPrefix(256, 385);
     state->advanceEncoder(256);
     auto meta = metadata(identity(), 2);
     state->completeDecoder(meta, 128);

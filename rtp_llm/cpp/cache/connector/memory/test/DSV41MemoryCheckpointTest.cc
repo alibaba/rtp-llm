@@ -793,7 +793,6 @@ TEST_F(DSV41MemoryCheckpointGpuTest, ProtectedNUsesOriginalAsyncCopyAndSurvivesL
     fill(source, 59);
     const auto expected = bytes(source, 1, true);
     auto       state    = source->dsv41CacheState();
-    state->requireProtectedPrefix(128, 300);
     state->advanceEncoder(128);
     state->completeDecoder(checkpoint(cacheIdentity(), 128), 128);
     ASSERT_TRUE(connector_->stageDsv41Checkpoint(source, [] { cudaCheck(cudaDeviceSynchronize()); }, meta_));
@@ -806,26 +805,6 @@ TEST_F(DSV41MemoryCheckpointGpuTest, ProtectedNUsesOriginalAsyncCopyAndSurvivesL
     ASSERT_TRUE(restore(destination, 1));
     EXPECT_EQ(bytes(destination, 1, false), expected);
     EXPECT_EQ(destination->dsv41CacheState()->view().decoder_checkpoint_end, 128);
-}
-
-TEST_F(DSV41MemoryCheckpointGpuTest, ProtectedSnapshotKeepsCopyOwnerUntilItsPinsAreReleased) {
-    auto source = resource(1, 110500);
-    fill(source, 59);
-    auto state = source->dsv41CacheState();
-    state->advanceEncoder(128);
-    state->completeDecoder(checkpoint(cacheIdentity(), 128), 128);
-    ASSERT_TRUE(connector_->stageDsv41Checkpoint(source, [] { cudaCheck(cudaDeviceSynchronize()); }, meta_));
-    auto                                  snapshot = state->view().snapshots.at(0);
-    std::weak_ptr<KVCacheMemoryConnector> owner    = connector_;
-    state->cancel();
-    state.reset();
-    source.reset();
-    service_.connector = nullptr;
-    connector_.reset();
-    EXPECT_FALSE(owner.expired());
-    EXPECT_EQ(snapshot->metadata().materialized_end, 128);
-    snapshot.reset();
-    EXPECT_TRUE(owner.expired());
 }
 
 TEST_F(DSV41MemoryCheckpointGpuTest, StaleNIsRejectedBeforeCopyAndCancellationKeepsValidatedBlocks) {
