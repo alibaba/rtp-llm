@@ -69,6 +69,26 @@ class PrefillStateSnapshotTest {
     }
 
     @Test
+    void committedWorkChangesReuseActiveMembershipButCaptureBothAtOnePoint() {
+        var queued = item(1);
+        enqueue(queued);
+        var before = capture();
+        var reservation = state.reserveUnqueuedRoute(item(2), 20, Long.MAX_VALUE).reservation();
+        var after = capture();
+        assertSame(before.active(), after.active());
+        assertTrue(before.work().materialize().requests().isEmpty());
+        assertEquals(1, after.work().materialize().requests().size());
+        enqueue(item(3));
+        var added = capture();
+        assertNotSame(after.active(), added.active());
+        assertSame(after.work(), added.work());
+        assertEquals(List.of(queued), before.activeItems());
+        reservation.close();
+        assertSame(added.active(), capture().active());
+        assertTrue(capture().work().materialize().requests().isEmpty());
+    }
+
+    @Test
     void clockRollbackRecapturesWorkWithoutMutatingEarlierSnapshots() {
         state.reserveUnqueuedRoute(item(1), 10, Long.MAX_VALUE);
         var original = capture();
