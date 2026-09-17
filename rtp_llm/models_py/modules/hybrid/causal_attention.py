@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,8 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplB
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
+
+QuantizedInput = Tuple[torch.Tensor, torch.Tensor]
 
 device_type = get_device_type()
 if device_type == DeviceType.ROCm:
@@ -78,16 +80,30 @@ class CausalAttention(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
         gate: Optional[torch.Tensor] = None,
+        quantized_input: Optional[QuantizedInput] = None,
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
-        qkv = self.qkv_proj(hidden_states)
+        if quantized_input is not None and hasattr(self.qkv_proj, "forward_quantized"):
+            qkv = self.qkv_proj.forward_quantized(*quantized_input)
+        else:
+            qkv = self.qkv_proj(hidden_states)
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
         attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
-            attn_output = attn_output * torch.sigmoid(gate)
-        output = self.o_proj(attn_output)
+            from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.sigmoid_mul_fp8_quant import (
+                maybe_sigmoid_mul_fp8_quant,
+            )
+
+            fused = maybe_sigmoid_mul_fp8_quant(attn_output, gate)
+            if fused is not None and hasattr(self.o_proj, "forward_quantized"):
+                output = self.o_proj.forward_quantized(*fused)
+            else:
+                attn_output = attn_output * torch.sigmoid(gate)
+                output = self.o_proj(attn_output)
+        else:
+            output = self.o_proj(attn_output)
         if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output
