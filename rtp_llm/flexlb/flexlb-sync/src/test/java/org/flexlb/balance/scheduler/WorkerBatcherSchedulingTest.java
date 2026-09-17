@@ -163,7 +163,7 @@ class WorkerBatcherSchedulingTest {
                 () -> 0L, mock(RequestRegistry.class), mock(DeliveryMetrics.class))
                 .projectionPolicy();
         RouteProjection.Candidate candidate = RouteProjection.project(
-                inputs, 22L, 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L,
+                inputs, new RouteProjection.Probe(22L, 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
                 endpoint.getPredictor().evaluator(), projection, now);
         assertTrue(candidate.selectable(),
                 "a delivery-only wait must leave incoming backlog selectable");

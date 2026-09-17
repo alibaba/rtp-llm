@@ -3,6 +3,7 @@ package org.flexlb.sync.runner;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
@@ -63,6 +64,9 @@ class EngineSyncRunnerTest {
     @Mock
     private CacheAwareService localKvCacheAwareManager;
 
+    @Mock
+    private DynamicCacheIntervalService cacheIntervalService;
+
     private final long syncRequestTimeoutMs = 5000L;
 
     @Mock
@@ -85,6 +89,7 @@ class EngineSyncRunnerTest {
                 engineGrpcService,
                 roleType,
                 localKvCacheAwareManager,
+                cacheIntervalService,
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
@@ -113,6 +118,7 @@ class EngineSyncRunnerTest {
                 engineGrpcService,
                 roleType,
                 localKvCacheAwareManager,
+                cacheIntervalService,
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
@@ -136,6 +142,7 @@ class EngineSyncRunnerTest {
                 modelName, workerDirectory, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.VIT,
                 localKvCacheAwareManager,
+                cacheIntervalService,
                 syncRequestTimeoutMs, syncCount,
                 syncEngineStatusInterval, false, STATUS_STALE_AFTER_US);
 
@@ -157,7 +164,7 @@ class EngineSyncRunnerTest {
                 modelName, workerDirectory, workerAddressService,
                 statusCheckExecutor, engineHealthReporter, engineGrpcService,
                 RoleType.PREFILL, localKvCacheAwareManager,
-                syncRequestTimeoutMs, syncCount,
+                cacheIntervalService, syncRequestTimeoutMs, syncCount,
                 syncEngineStatusInterval, false, STATUS_STALE_AFTER_US);
 
         runner.run();
@@ -195,6 +202,7 @@ class EngineSyncRunnerTest {
                 modelName, directory, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.PREFILL,
                 localKvCacheAwareManager,
+                cacheIntervalService,
                 syncRequestTimeoutMs, syncCount,
                 syncEngineStatusInterval, false,
                 1_000_000L);
@@ -226,6 +234,7 @@ class EngineSyncRunnerTest {
                 engineGrpcService,
                 RoleType.PREFILL,
                 localKvCacheAwareManager,
+                cacheIntervalService,
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
@@ -326,6 +335,7 @@ class EngineSyncRunnerTest {
                 modelName, directory, workerAddressService,
                 statusCheckExecutor, engineHealthReporter, engineGrpcService,
                 RoleType.PREFILL, localKvCacheAwareManager,
+                cacheIntervalService,
                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                 false, STATUS_STALE_AFTER_US);
     }
@@ -365,6 +375,7 @@ class EngineSyncRunnerTest {
                 engineGrpcService,
                 RoleType.PREFILL,
                 localKvCacheAwareManager,
+                cacheIntervalService,
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
