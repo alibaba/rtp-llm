@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
@@ -615,7 +616,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               bert_embedding_inputs});
     }
 
-    const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
+    const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
     CacheStoreWriteCycleGuard cache_store_write_cycle(
         cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
 
@@ -886,7 +887,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 }
             }
         }
-        const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
+        const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
         CacheStoreWriteCycleGuard cache_store_write_cycle(
             cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
 
@@ -1308,10 +1309,11 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
     size_t                      prefill_batch_idx      = 0;
     // TODO(async): micro-batch token slicing still computes CPU scalar sums.
     // Convert explicitly and keep all sliced GptModelInputs device-resident.
-    const auto  input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
-                                         inputs.input_lengths.cpu().pin_memory() :
-                                         inputs.input_lengths;
-    const auto* input_lengths_ptr  = input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
+    const auto input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
+                                        inputs.input_lengths.cpu().pin_memory() :
+                                        inputs.input_lengths;
+    const auto* input_lengths_ptr =
+        input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");

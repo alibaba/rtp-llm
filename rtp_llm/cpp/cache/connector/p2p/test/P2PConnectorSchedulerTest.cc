@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/test/TestRpcServer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
@@ -438,6 +439,64 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ThrowException_BroadcastTimeout) {
     EXPECT_THROW(waitAsyncContextDone(async_context, 500, /*check_done=*/true), RTPException);
 }
 
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_BackgroundCheckerConvergesBroadcastTimeout) {
+    // Give both local RPCs time to enter their handlers. The broadcast then
+    // exceeds its shorter deadline while the prefill call remains pending, so
+    // the real checker must catch the fatal result and cancel its peer.
+    tp_broadcast_servers_[0]->service()->setSleepMillis(1500);
+    prefill_server_->service()->setSleepMillis(1500);
+
+    auto resource            = createValidKVCacheResource(2, 2);
+    auto layer_cache_buffers = LayerCacheBufferUtil::convert(*resource, 0, 0, -1);
+    ASSERT_FALSE(layer_cache_buffers.empty());
+
+    auto broadcast_client = std::make_shared<P2PBroadcastClient>(tp_broadcast_addrs_);
+    ASSERT_TRUE(broadcast_client->init());
+    auto tp_result = broadcast_client->broadcast(2009,
+                                                 layer_cache_buffers,
+                                                 {},
+                                                 "test_background_checker_broadcast_timeout",
+                                                 currentTimeMs() + 500,
+                                                 P2PConnectorBroadcastType::READ,
+                                                 1);
+    ASSERT_NE(tp_result, nullptr);
+
+    PrefillLoadCaller prefill_caller({"127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort())});
+    auto              server_result = prefill_caller.load(2009,
+                                             "127.0.0.1",
+                                             static_cast<uint32_t>(prefill_server_->listenPort()),
+                                             "test_background_checker_broadcast_timeout",
+                                             currentTimeMs() + 5000,
+                                             nullptr);
+    ASSERT_NE(server_result, nullptr);
+
+    auto collector     = std::make_shared<DecodeSchedulerMetricsCollector>(nullptr);
+    auto async_context = std::make_shared<P2PConnectorAsyncReadContext>(
+        resource, tp_result, server_result, collector, /*transfer_not_done_hold_ms=*/0);
+    P2PConnectorAsyncReadContextChecker checker;
+    ASSERT_TRUE(checker.init(nullptr, broadcast_client));
+    checker.addContext(async_context);
+
+    const auto done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!async_context->done() && std::chrono::steady_clock::now() < done_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(async_context->done());
+    EXPECT_FALSE(async_context->success());
+    const auto error = async_context->errorInfo();
+    EXPECT_EQ(error.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_NE(error.ToString().find("broadcast rpc timeout"), std::string::npos) << error.ToString();
+
+    const auto cleanup_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while ((checker.inflightContextCount() != 0 || prefill_server_->service()->getStartLoadCancelledCallCount() == 0)
+           && std::chrono::steady_clock::now() < cleanup_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_EQ(checker.inflightContextCount(), 0);
+    EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
+    EXPECT_EQ(prefill_server_->service()->getStartLoadCancelledCallCount(), 1);
+}
+
 // 测试: asyncread prefill 失败, 取消broadcast
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelBroadcast_WhenPrefillFailed) {
     // 设置 prefill server 立即返回失败
@@ -513,7 +572,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelPrefill_WhenBroadcastFailed) {
 // Prefill：worker 极慢导致 gRPC DEADLINE_EXCEEDED 时抛 RTPException（与 BroadcastManager 行为一致）
 TEST_F(P2PConnectorSchedulerTest, SendKVCache_ThrowException_WhenBroadcastExceedsDeadline) {
     for (auto& server : tp_broadcast_servers_) {
-        server->service()->setSleepMillis(120000);
+        server->service()->setSleepMillis(500);
         server->service()->setP2PResponseSuccess(true);
     }
 

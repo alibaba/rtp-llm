@@ -1,0 +1,99 @@
+{
+    "model_type": "deepseek_v4",
+    "model_path": "/mnt/nas1/hf/DeepSeek-V4-Flash",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache"
+                    }
+                ],
+                "max_tokens": 8,
+                "temperature": 0,
+                "top_p": 0,
+                "top_k": 1,
+                "aux_info": true
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "required_aux_info": {
+                    "pd_sep": true
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache"
+                    }
+                ],
+                "max_tokens": 8,
+                "temperature": 0,
+                "top_p": 0,
+                "top_k": 1,
+                "aux_info": true
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "required_aux_info": {
+                    "pd_sep": true
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache cache"
+                    }
+                ],
+                "max_tokens": 8,
+                "temperature": 0,
+                "top_p": 0,
+                "top_k": 1,
+                "aux_info": true
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "required_aux_info": {
+                    "pd_sep": true
+                }
+            }
+        }
+    ]
+}

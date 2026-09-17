@@ -65,9 +65,9 @@ void P2PConnectorAsyncReadContext::checkDone() {
     if (tryFinishExpiredTransferNotDoneHold()) {
         return;
     }
-    if (!tp_sync_result_->done()) {
-        tp_sync_result_->checkDone();
-    }
+    // BroadcastManager now completes RPCs on its own CQ thread. Always consume
+    // the terminal result so a deadline error cannot race done() and disappear.
+    tp_sync_result_->checkDone();
     if (!server_call_result_->done()) {
         server_call_result_->checkDone();
     }
@@ -100,9 +100,7 @@ bool P2PConnectorAsyncReadContext::tryFinishExpiredTransferNotDoneHold() {
     transfer_not_done_hold_pending_.store(false, std::memory_order_release);
     transfer_not_done_hold_until_ms_.store(0, std::memory_order_relaxed);
 
-    if (!tp_sync_result_->done()) {
-        tp_sync_result_->checkDone();
-    }
+    tp_sync_result_->checkDone();
     if (!server_call_result_->done()) {
         server_call_result_->checkDone();
     }
@@ -216,6 +214,43 @@ void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClie
     }
 }
 
+void P2PConnectorAsyncReadContext::failFromChecker(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client,
+                                                   const std::string&                         error_message) noexcept {
+    // Cancellation itself may consume another failed RPC result and throw.
+    // Keep that secondary failure inside the checker boundary; the exception
+    // that entered this method remains the observable context error.
+    try {
+        cancel(tp_broadcast_client);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING(
+            "P2P async read peer cancellation failed, unique_key: %s, error: %s", uniqueKey().c_str(), e.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("P2P async read peer cancellation failed, unique_key: %s, unknown error",
+                            uniqueKey().c_str());
+    }
+
+    transfer_not_done_hold_pending_.store(false, std::memory_order_release);
+    transfer_not_done_hold_until_ms_.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (done_) {
+            return;
+        }
+        done_          = true;
+        success_       = false;
+        error_code_    = ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED;
+        error_message_ = error_message;
+    }
+    done_cv_.notify_all();
+
+    if (collector_) {
+        collector_->success                  = false;
+        collector_->total_cost_time_us       = currentTimeUs() - collector_->start_time_us;
+        collector_->tp_sync_cost_time_us     = tp_sync_result_->totalCostTimeUs();
+        collector_->server_call_cost_time_us = server_call_result_->totalCostTimeUs();
+    }
+}
+
 /*----------------------------------------------- P2PConnectorAsyncWriteByLayerContext
  * -------------------------------------------------*/
 void P2PConnectorAsyncWriteByLayerContext::waitDone() {
@@ -277,12 +312,27 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
 
     std::lock_guard<std::mutex> lock(async_contexts_mutex_);
     for (auto& async_context : async_contexts_) {
-        async_context->checkDone();
-        // 检查是否需要取消另一个未完成的请求
-        if (async_context->needCancel()) {
-            RTP_LLM_LOG_DEBUG("P2PConnectorAsyncReadContextChecker checkOnce: needCancel, unique_key: %s",
-                              async_context->uniqueKey().c_str());
-            async_context->cancel(tp_broadcast_client_);
+        try {
+            async_context->checkDone();
+            // 检查是否需要取消另一个未完成的请求
+            if (async_context->needCancel()) {
+                RTP_LLM_LOG_DEBUG("P2PConnectorAsyncReadContextChecker checkOnce: needCancel, unique_key: %s",
+                                  async_context->uniqueKey().c_str());
+                async_context->cancel(tp_broadcast_client_);
+            }
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("P2PConnectorAsyncReadContextChecker caught async read exception, unique_key: %s, "
+                                "error: %s",
+                                async_context->uniqueKey().c_str(),
+                                e.what());
+            async_context->failFromChecker(tp_broadcast_client_, e.what());
+        } catch (...) {
+            constexpr const char* error_message = "unknown async read checker exception";
+            RTP_LLM_LOG_WARNING("P2PConnectorAsyncReadContextChecker caught async read exception, unique_key: %s, "
+                                "error: %s",
+                                async_context->uniqueKey().c_str(),
+                                error_message);
+            async_context->failFromChecker(tp_broadcast_client_, error_message);
         }
     }
     for (auto& async_context : async_contexts_) {

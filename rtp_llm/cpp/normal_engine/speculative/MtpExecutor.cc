@@ -1856,14 +1856,14 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
         // path below.
         model_input_copy.combo_tokens =
             torch::empty({static_cast<int64_t>(batch_size * (propose_step_ + 1))}, cuda_i32);
-        // Multi-step MTP carries adjacent positions here: sequence_lengths is
-        // the draft decode position, while prefix_lengths is the number of
-        // initialized target-KV rows. Target verification starts at the latter.
+        // Shifted draft KV and target verification resume at the same cache
+        // position. Prefer the explicit target prefix; callers without one
+        // supply that position in sequence_lengths.
         torch::Tensor target_prefix_lengths_for_prepare = model_input.prefix_lengths;
         if ((!target_prefix_lengths_for_prepare.defined()
              || target_prefix_lengths_for_prepare.numel() < static_cast<int64_t>(batch_size))
             && model_input.sequence_lengths.defined()) {
-            target_prefix_lengths_for_prepare = model_input.sequence_lengths - 1;
+            target_prefix_lengths_for_prepare = model_input.sequence_lengths;
         }
 #if USING_CUDA
         const bool can_fuse_target_prepare =
@@ -2464,12 +2464,11 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         tensor_d      = tensor_d.reshape({static_cast<int64_t>(batch_size)});
         return tensor_d.is_contiguous() ? tensor_d : tensor_d.contiguous();
     };
-    spec_prefix_lengths =
-        model_input.prefix_lengths.defined() && model_input.prefix_lengths.numel() > 0 ?
-            toCudaInt32WithHostHold(model_input.prefix_lengths, buffer_holder_) :
-            (model_input.sequence_lengths.defined() ?
-                 (toCudaInt32WithHostHold(model_input.sequence_lengths, buffer_holder_) - 1).to(torch::kInt32) :
-                 torch::Tensor());
+    spec_prefix_lengths = model_input.prefix_lengths.defined() && model_input.prefix_lengths.numel() > 0 ?
+                              toCudaInt32WithHostHold(model_input.prefix_lengths, buffer_holder_) :
+                              (model_input.sequence_lengths.defined() ?
+                                   toCudaInt32WithHostHold(model_input.sequence_lengths, buffer_holder_) :
+                                   torch::Tensor());
     // prefix_lengths belongs to the eventual target verify input. Draft decode
     // attention metadata must be driven only by sequence_lengths.
     model_input.prefix_lengths = torch::empty({0}, cuda_i32);

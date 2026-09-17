@@ -5,6 +5,7 @@
 #include <limits>
 #include "torch/all.h"
 #include "gtest/gtest.h"
+#include "autil/EnvUtil.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -778,9 +779,9 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
             EXPECT_EQ(torch::kInt32, input.sequence_lengths.scalar_type());
             EXPECT_EQ(expected_prefix, toVec<int>(input.prefix_lengths));
             EXPECT_EQ(expected_sequence, toVec<int>(input.sequence_lengths));
-            EXPECT_EQ(expected_sequence, toVec<int>(input.prefix_lengths + 1));
+            EXPECT_EQ(expected_sequence, toVec<int>(input.prefix_lengths));
         };
-    expect_positions(model_input, {1, 2}, {2, 3});
+    expect_positions(model_input, {1, 2}, {1, 2});
 
     // Legacy GPU propose-token path receives the normal decode position.
     stream1->getSPOutputBuffer()->propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
@@ -788,10 +789,10 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     model_input.sequence_lengths                     = torch::tensor({4, 5}, torch::kInt32);
     processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
 
-    expect_positions(model_input, {4, 5}, {5, 6});
+    expect_positions(model_input, {4, 5}, {4, 5});
 
-    // Device state publishes the committed length, which is already the draft
-    // decode position and one greater than the target prefix.
+    // Device state includes the carried target token. Draft KV and target
+    // verification both start one slot before that committed length.
     GenerateStream::MtpAsyncDeviceState state1;
     state1.propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
     state1.next_seq_len_gpu   = torch::tensor({7}, torch::kInt32).to(torch::kCUDA);
@@ -805,7 +806,125 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     model_input.sequence_lengths = torch::tensor({99, 99}, torch::kInt32);
     processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
 
-    expect_positions(model_input, {6, 3}, {7, 4});
+    expect_positions(model_input, {6, 3}, {6, 3});
+}
+
+TEST_F(MtpBatchStreamProcessorTest, DraftCacheWritesRemainContiguousAcrossPreparationPaths) {
+    // This test exercises the legacy compact post-rejection path; device-state
+    // preparation below is selected by explicitly supplied stream state.
+    autil::EnvGuard             stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    autil::EnvGuard             device_state("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "0");
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig logging_config;
+    SpeculativeExecutionConfig  sp_config;
+    model_config.max_seq_len                           = 4096;
+    model_config.vocab_size                            = 16;
+    model_config.num_layers                            = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    sp_config.gen_num_per_cycle                        = 4;
+    auto                    cache_config               = test::makeSimpleMhaCacheConfig(1, 4, 2048, rtp_llm::TYPE_FP16);
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
+
+    for (int prompt_len : {465, 2048, 2051}) {
+        SCOPED_TRACE(prompt_len);
+        ResourceContext resource_context;
+        auto            stream =
+            createContextStream(model_config, runtime_config, resource_context, vector<int>(prompt_len, 1), 1);
+        stream->getSPOutputBuffer()->tokens = torch::tensor({{2, 3}}, torch::kInt32);
+        StreamGroups   groups({stream});
+        TensorHolder   holder;
+        GptModelInputs prefill;
+        prefill.combo_tokens   = torch::ones({prompt_len}, torch::kInt32);
+        prefill.input_lengths  = torch::tensor({prompt_len}, torch::kInt32);
+        prefill.prefix_lengths = torch::tensor({0}, torch::kInt32);
+        GptModelOutputs prefill_output;
+        prefill_output.all_hidden_states = torch::zeros({prompt_len, 2});
+        SamplerOutput sampled;
+        sampled.token_ids = torch::tensor({{2}}, torch::kInt32);
+        processor.updatePrefillPostDraftModelInput(groups, prefill, prefill_output, sampled, holder);
+        ASSERT_EQ((vector<int>{prompt_len}), toVec<int>(prefill.input_lengths));
+        ASSERT_EQ((vector<int>{0}), toVec<int>(prefill.prefix_lengths));
+        EXPECT_EQ(2, toVec<int>(prefill.combo_tokens).back());
+        const int first_unwritten_slot = toVec<int>(prefill.prefix_lengths)[0] + toVec<int>(prefill.input_lengths)[0];
+
+        // Supply the same logical position through CPU, legacy GPU, incomplete
+        // GPU state, and complete committed-length state. Physical block IDs
+        // and explicit positional coordinates must not be rewritten.
+        for (int path = 0; path < 4; ++path) {
+            SCOPED_TRACE(path);
+            stream->setMtpAsyncDeviceState({});
+            stream->getSPOutputBuffer()->propose_tokens_gpu = torch::Tensor();
+            GptModelInputs input;
+            input.input_lengths            = torch::tensor({prompt_len}, torch::kInt32);
+            input.sequence_lengths         = torch::tensor({first_unwritten_slot}, torch::kInt32);
+            input.combo_position_ids       = torch::tensor({prompt_len, prompt_len + 1, prompt_len + 2}, torch::kInt32);
+            input.kv_cache_block_id        = torch::tensor({{{17, 23}}}, torch::kInt32);
+            input.kv_cache_kernel_block_id = input.kv_cache_block_id.clone();
+            const auto positions           = input.combo_position_ids.clone();
+            const auto block_ids           = input.kv_cache_block_id.clone();
+            if (path == 1) {
+                stream->getSPOutputBuffer()->propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
+            } else if (path >= 2) {
+                GenerateStream::MtpAsyncDeviceState state;
+                state.propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
+                if (path == 3) {
+                    state.next_seq_len_gpu = torch::tensor({first_unwritten_slot + 1}, torch::kInt32).to(torch::kCUDA);
+                    input.sequence_lengths = torch::tensor({99}, torch::kInt32);
+                }
+                stream->setMtpAsyncDeviceState(std::move(state));
+            }
+            processor.prepareDecodeDraftModelInput(groups, input, holder);
+            EXPECT_EQ((vector<int>{first_unwritten_slot}), toVec<int>(input.sequence_lengths));
+            EXPECT_EQ((vector<int>{first_unwritten_slot}), toVec<int>(input.prefix_lengths));
+            EXPECT_EQ((vector<int>{3}), toVec<int>(input.combo_tokens));
+            EXPECT_TRUE(torch::equal(positions, input.combo_position_ids));
+            EXPECT_TRUE(torch::equal(block_ids, input.kv_cache_block_id));
+            EXPECT_TRUE(torch::equal(block_ids, input.kv_cache_kernel_block_id));
+            GptModelOutputs draft_output;
+            draft_output.all_hidden_states = torch::zeros({1, 2});
+            processor.updateDecodeDraftModelInput(input, draft_output, torch::tensor({{4}}, torch::kInt32), holder);
+            EXPECT_EQ((vector<int>{first_unwritten_slot + 1}), toVec<int>(input.sequence_lengths));
+            EXPECT_EQ((vector<int>{first_unwritten_slot}), toVec<int>(input.prefix_lengths));
+            EXPECT_EQ(toVec<int>(positions + 1), toVec<int>(input.combo_position_ids));
+        }
+
+        stream->setMtpAsyncDeviceState({});
+        stream->getSPOutputBuffer()->propose_tokens_gpu = torch::Tensor();
+        for (int accepted : {1, 4, 5}) {
+            SCOPED_TRACE(accepted);
+            GptModelInputs post;
+            post.prefix_lengths = torch::tensor({first_unwritten_slot}, torch::kInt32);
+            post.input_lengths  = torch::tensor({5}, torch::kInt32);
+            speculative::SpeculativeSamplerOutput rejection;
+            rejection.accept_len_cpu    = torch::tensor({accepted}, torch::kInt32);
+            rejection.accept_tokens_cpu = torch::tensor({{2, 3, 4, 5, 6}}, torch::kInt32);
+            GptModelOutputs verified;
+            verified.all_hidden_states = torch::zeros({5, 2});
+            torch::Tensor selected_hidden;
+            processor.updateDecodePostDraftModelInput(post, verified, rejection, 1, selected_hidden, holder);
+            ASSERT_EQ((vector<int>{accepted}), toVec<int>(post.input_lengths));
+            ASSERT_EQ((vector<int>{first_unwritten_slot}), toVec<int>(post.prefix_lengths));
+            const int      next_slot = toVec<int>(post.prefix_lengths)[0] + toVec<int>(post.input_lengths)[0];
+            GptModelInputs next;
+            next.input_lengths    = torch::tensor({prompt_len}, torch::kInt32);
+            next.sequence_lengths = torch::tensor({next_slot}, torch::kInt32);
+            processor.prepareDecodeDraftModelInput(groups, next, holder);
+            EXPECT_EQ((vector<int>{next_slot}), toVec<int>(next.sequence_lengths));
+            EXPECT_EQ((vector<int>{next_slot}), toVec<int>(next.prefix_lengths));
+            GenerateStream::MtpAsyncDeviceState state;
+            state.propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
+            state.next_seq_len_gpu   = torch::tensor({next_slot + 1}, torch::kInt32).to(torch::kCUDA);
+            stream->setMtpAsyncDeviceState(std::move(state));
+            next.sequence_lengths = torch::tensor({99}, torch::kInt32);
+            processor.prepareDecodeDraftModelInput(groups, next, holder);
+            EXPECT_EQ((vector<int>{next_slot}), toVec<int>(next.sequence_lengths));
+            EXPECT_EQ((vector<int>{next_slot}), toVec<int>(next.prefix_lengths));
+            stream->setMtpAsyncDeviceState({});
+        }
+    }
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShapes) {

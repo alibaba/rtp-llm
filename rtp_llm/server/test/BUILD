@@ -64,7 +64,6 @@ py_test(
     ],
     tags = ["manual"],
 )
-
 py_test(
     name = "master_client_trace_test",
     srcs = ["master_client_trace_test.py"],

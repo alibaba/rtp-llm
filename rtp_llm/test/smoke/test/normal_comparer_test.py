@@ -1,6 +1,7 @@
 import json
 import unittest
 
+from smoke.base_comparer import _asserts_cold_cache
 from smoke.common_def import QueryStatus, SmokeException, Tracer
 from smoke.normal_comparer import NormalComparer, QueryInfo
 
@@ -117,6 +118,109 @@ class NormalComparerGraphStatusTest(unittest.TestCase):
                     self.comparer.compare_result(
                         self._parse(expected), self._parse(self._response(status))
                     )
+
+
+class NormalComparerDiskReuseTest(unittest.TestCase):
+    DISK_FIELDS = (
+        "disk_reuse_len",
+        "prefill_disk_reuse_len",
+        "decode_disk_reuse_len",
+    )
+
+    def setUp(self):
+        self.comparer = NormalComparer(None, "", {}, Tracer(), False)
+
+    def _response(self, aux):
+        return self.comparer.format_result({"response": "same output", "aux_info": aux})
+
+    def test_explicit_disk_expectations_survive_parsing_and_reject_mismatch(self):
+        for field in self.DISK_FIELDS:
+            for expected_value, actual_value in ((512, 0), (0, 512), (512, None)):
+                with self.subTest(
+                    field=field, expected=expected_value, actual=actual_value
+                ):
+                    expected = self._response({field: expected_value})
+                    self.assertEqual(getattr(expected.aux_info, field), expected_value)
+                    with self.assertRaises(SmokeException) as raised:
+                        self.comparer.compare_result(
+                            expected, self._response({field: actual_value})
+                        )
+                    self.assertEqual(
+                        raised.exception.error_status, QueryStatus.COMPARE_FAILED
+                    )
+                    self.assertIn(field, raised.exception.message)
+
+    def test_matching_disk_expectations_pass(self):
+        for field in self.DISK_FIELDS:
+            for value in (0, 512):
+                with self.subTest(field=field, value=value):
+                    self.comparer.compare_result(
+                        self._response({field: value}), self._response({field: value})
+                    )
+
+    def test_undeclared_or_null_disk_expectation_does_not_add_constraint(self):
+        for field in self.DISK_FIELDS:
+            for expected in ({}, {field: None}):
+                with self.subTest(field=field, expected=expected):
+                    self.comparer.compare_result(
+                        self._response(expected), self._response({field: 512})
+                    )
+
+    def test_disk_only_cold_expectation_controls_retry_classification(self):
+        for field in self.DISK_FIELDS:
+            for reuse_enabled in (False, True):
+                for value in (0, 512):
+                    with self.subTest(field=field, reuse=reuse_enabled, value=value):
+                        self.assertEqual(
+                            _asserts_cold_cache(
+                                {
+                                    "_reuse_cache_enabled": reuse_enabled,
+                                    "result": {"aux_info": {field: value}},
+                                }
+                            ),
+                            reuse_enabled and value == 0,
+                        )
+
+    def test_mixed_tier_expectations_are_cold_only_when_all_fields_are_zero(self):
+        for disk_field in self.DISK_FIELDS:
+            prefix = disk_field.removesuffix("disk_reuse_len")
+            for tier in ("local", "memory", "remote"):
+                other_field = f"{prefix}{tier}_reuse_len"
+                for disk_value, other_value in ((0, 0), (0, 512), (512, 0), (512, 512)):
+                    for reuse_enabled in (False, True):
+                        with self.subTest(
+                            disk_field=disk_field,
+                            other_field=other_field,
+                            disk_value=disk_value,
+                            other_value=other_value,
+                            reuse_enabled=reuse_enabled,
+                        ):
+                            self.assertEqual(
+                                _asserts_cold_cache(
+                                    {
+                                        "_reuse_cache_enabled": reuse_enabled,
+                                        "result": {
+                                            "aux_info": {
+                                                disk_field: disk_value,
+                                                other_field: other_value,
+                                            }
+                                        },
+                                    }
+                                ),
+                                reuse_enabled and disk_value == 0 and other_value == 0,
+                            )
+
+    def test_warm_disk_expectation_is_not_misclassified_by_other_zero_fields(self):
+        for field in self.DISK_FIELDS:
+            with self.subTest(field=field):
+                self.assertFalse(
+                    _asserts_cold_cache(
+                        {
+                            "_reuse_cache_enabled": True,
+                            "result": {"aux_info": {"reuse_len": 0, field: 512}},
+                        }
+                    )
+                )
 
 
 if __name__ == "__main__":

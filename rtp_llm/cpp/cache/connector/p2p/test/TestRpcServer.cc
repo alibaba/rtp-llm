@@ -55,6 +55,7 @@ namespace rtp_llm {
     }
 
     if (context->IsCancelled()) {
+        start_load_cancelled_call_count_++;
         return ::grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
     }
 
@@ -145,16 +146,21 @@ int TestRpcService::getStartLoadCallCount() const {
     return start_load_call_count_.load();
 }
 
+int TestRpcService::getStartLoadCancelledCallCount() const {
+    return start_load_cancelled_call_count_.load();
+}
+
 int TestRpcService::getGenerateStreamCallCount() const {
     return generate_stream_call_count_.load();
 }
 
 void TestRpcService::resetCallCounts() {
-    broadcast_tp_call_count_        = 0;
-    broadcast_tp_cancel_call_count_ = 0;
-    start_load_call_count_          = 0;
-    generate_stream_call_count_     = 0;
-    start_load_app_error_pb_        = ErrorCodePB::NONE_ERROR;
+    broadcast_tp_call_count_         = 0;
+    broadcast_tp_cancel_call_count_  = 0;
+    start_load_call_count_           = 0;
+    start_load_cancelled_call_count_ = 0;
+    generate_stream_call_count_      = 0;
+    start_load_app_error_pb_         = ErrorCodePB::NONE_ERROR;
     start_load_app_error_message_.clear();
 }
 

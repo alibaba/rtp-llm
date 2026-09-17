@@ -1,0 +1,59 @@
+#pragma once
+
+#include <chrono>
+#include <cstdint>
+#include <vector>
+
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
+
+namespace rtp_llm {
+
+struct EvictionTimingSnapshot {
+    EvictionTimingSnapshot() = default;
+    explicit EvictionTimingSnapshot(const CandidateMeta& candidate_meta):
+        tier_enter_time_us(candidate_meta.tier_enter_time_us),
+        insert_time_us(candidate_meta.insert_time_us),
+        last_access_time_us(candidate_meta.last_access_time_us),
+        selected_time_us(currentTimeUs()) {}
+
+    int64_t tier_enter_time_us{0};
+    int64_t insert_time_us{0};
+    int64_t last_access_time_us{0};
+    int64_t selected_time_us{0};
+};
+
+struct EvictionTransferTask {
+    explicit EvictionTransferTask(TransferTask task): transfer_task(std::move(task)) {}
+    EvictionTransferTask(TransferTask task, std::vector<EvictionTimingSnapshot> timing_snapshots):
+        transfer_task(std::move(task)), timings(std::move(timing_snapshots)) {}
+
+    const std::vector<TransferDescriptor>& descriptors() const {
+        return transfer_task.descriptors();
+    }
+
+    std::vector<TransferDescriptor>& mutableDescriptorsForPreparation() {
+        return transfer_task.mutableDescriptorsForPreparation();
+    }
+
+    TransferTask                        transfer_task;
+    std::vector<EvictionTimingSnapshot> timings;
+};
+
+struct EvictionDropTask {
+    TransferDescriptor                  primary_desc;
+    EvictionTimingSnapshot              primary_timing;
+    std::vector<TransferDescriptor>     cascade_descs;
+    std::vector<EvictionTimingSnapshot> cascade_timings;
+    // FULL prune closure only. Every dependent descriptor targets NONE,
+    // and nodes stay valid because task activation is synchronous.
+    std::vector<TransferDescriptor>     dependent_prune_descs;
+    std::vector<EvictionTimingSnapshot> dependent_prune_timings;
+    std::vector<TreeNode*>              full_prune_nodes_bottom_up;
+
+    bool hasFullPrune() const {
+        return !full_prune_nodes_bottom_up.empty();
+    }
+};
+
+}  // namespace rtp_llm

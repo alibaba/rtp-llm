@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -54,8 +55,7 @@ void releaseHostMemoryCache() {
 #endif
 }
 
-bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config,
-                                         const CacheStoreConfig& cache_store_config) {
+bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const CacheStoreConfig& cache_store_config) {
     // Only PD cache-store RDMA registers KV cache as user MR.  Keep the
     // raw device allocation backing out of direct KVCacheManager users and non-RDMA
     // paths so PyTorch allocator behavior is unchanged elsewhere.
@@ -359,6 +359,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::build_system_prompt) {
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
+        THROW_IF_STATUS_ERROR(stream->streamCacheResource().waitForAllocatorLoad());
     };
     std::list<GenerateStreamPtr> streams{stream};
     THROW_IF_STATUS_ERROR(executor_->process(streams));
@@ -525,14 +526,25 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     // value when the user passed --seq_size_per_block < 256.
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-    auto cache_config =
-        CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, cache_gen_num_per_cycle);
+    // Independent cache pools derive their physical and kernel block geometry
+    // from KVCacheConfig. Rebuilding them through createBasicConfig drops an
+    // explicit kernel block override (for example physical=1024, kernel=128),
+    // which makes CUDA-graph warmup feed the physical size to attention kernels.
+    const bool  use_independent_pools = model_config_.hybrid_attention_config.enable_independent_kv_cache_pools;
+    CacheConfig cache_config;
+    if (use_independent_pools) {
+        cache_config = HybridPoolConfigCreator::createConfig(
+            model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
+    } else {
+        cache_config =
+            CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, cache_gen_num_per_cycle);
+    }
     cache_config.block_num = 5;
     // createBasicConfig's SingleConfigCreator / HybridConfigCreator paths can
     // leave kernel_seq_size_per_block at 0 (only the real createConfig path
     // runs setupKernelSeqSize). PyWrappedModel asserts kernel_tokens_per_block
     // > 0, so apply the same default here: kernel block == physical block.
-    if (cache_config.kernel_seq_size_per_block == 0) {
+    if (!use_independent_pools && cache_config.kernel_seq_size_per_block == 0) {
         cache_config.kernel_seq_size_per_block = cache_config.seq_size_per_block;
     }
     ParallelismConfig temp_parallelism_config;
@@ -590,9 +602,20 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     return stream;
 }
 
+void NormalEngine::normalizeSystemPromptCacheConfig() {
+    if (kv_cache_config.multi_task_prompt_tokens.empty()) {
+        return;
+    }
+    if (!kv_cache_config.reuse_cache || !kv_cache_config.enable_device_cache) {
+        RTP_LLM_LOG_INFO("system prompt enabled; forcing reuse_cache and enable_device_cache on");
+    }
+    kv_cache_config.reuse_cache         = true;
+    kv_cache_config.enable_device_cache = true;
+}
+
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
-    const bool use_device_malloc_block_pool =
-        shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
+    normalizeSystemPromptCacheConfig();
+    const bool use_device_malloc_block_pool = shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
                                                          propose_params_->getEngineInitParams().model_config_,
@@ -649,10 +672,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
-    resource_context_.initCacheConfig(kv_cache_config, runtime_config.fifo_scheduler_config, model_config_.max_seq_len);
+    resource_context_.initCacheConfig(kv_cache_config);
 
     if (!kv_cache_config.multi_task_prompt_tokens.empty()) {
-        resource_context_.reuse_cache = true;
         CHECK_AND_RETURN_REF(
             system_prompt_param,
             SystemPromptConstructor::construct(
@@ -684,6 +706,7 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    resource_context_.cache_manager->stopMetricsReporter();
     return absl::OkStatus();
 }
 
