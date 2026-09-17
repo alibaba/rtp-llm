@@ -385,6 +385,7 @@ class GenerateEnvConfig:
         self.stop_words_str: Optional[str] = None
         self.think_start_tag: str = "<think>\n"
         self.think_terminate_token_id: int = 1
+        self.enforce_no_think_on_disabled: bool = True
         self.generation_config_path: Optional[str] = None
 
     def to_string(self):
@@ -397,6 +398,7 @@ class GenerateEnvConfig:
             f"stop_words_str: {self.stop_words_str}\n"
             f"think_start_tag: {self.think_start_tag}\n"
             f"think_terminate_token_id: {self.think_terminate_token_id}\n"
+            f"enforce_no_think_on_disabled: {self.enforce_no_think_on_disabled}\n"
             f"generation_config_path: {self.generation_config_path}"
         )
 

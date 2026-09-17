@@ -1,4 +1,5 @@
 import copy
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
@@ -18,6 +19,10 @@ class ReasoningFormat:
     tag_end: Union[str, List[str], Dict[str, Any]]
     suffix: str = ""
     no_think_excludes: Tuple[str, ...] = ()
+    # DISABLED hardening: the prompt is not inside an open think block, so the
+    # reply must not open one. Compiles the no-think branch only (see
+    # ResponseFormatPlan.compile).
+    enforce_no_think: bool = False
 
     @classmethod
     def from_generate_env_config(cls, generate_env_config: Any) -> "ReasoningFormat":
@@ -124,6 +129,37 @@ class ResponseFormatPlan:
                     "num_return_sequences > 1",
                 )
             engine_constraint = final_constraint
+            if (
+                thinking_mode == ThinkingMode.DISABLED
+                and reasoning_format is not None
+                and reasoning_format.enforce_no_think
+            ):
+                # Thinking is off and the prompt did not put the model inside a
+                # think block, yet a hybrid reasoning checkpoint may still open
+                # <think> by itself and spend the caller's whole max_new_tokens
+                # inside it. The renderer can only re-route that text -- the
+                # answer is gone once the budget is spent -- so keep the
+                # boundary tags out of the grammar instead. This is the no-think
+                # branch ADAPTIVE already compiles, on its own.
+                if config.has_num_beams() or config.num_return_sequences > 1:
+                    # Grammar-constrained decoding rejects multiple sequences at
+                    # the engine boundary; the hardening is best-effort, so keep
+                    # the request servable instead of failing it.
+                    logging.warning(
+                        "skipping the no-think constraint: grammar-constrained "
+                        "decoding does not support beam search or "
+                        "num_return_sequences > 1"
+                    )
+                else:
+                    final_format = (
+                        final_constraint.final_format_node()
+                        if final_constraint is not None
+                        else {"type": "any_text"}
+                    )
+                    engine_constraint = GrammarConstraint(
+                        "structural_tag",
+                        _no_think_only_envelope(reasoning_format, final_format),
+                    ).normalized()
 
         return cls(final_constraint, engine_constraint)
 
@@ -233,6 +269,21 @@ def _add_no_think_excludes(
     if excludes:
         result["excludes"] = excludes
     return result
+
+
+def _no_think_only_envelope(
+    reasoning_format: ReasoningFormat,
+    final_format: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Answer-only grammar: free text, minus the think boundary tags.
+
+    Unlike the ADAPTIVE envelope this has no think branch and no budget, so the
+    model cannot re-open a think block at all -- EOS stays samplable throughout.
+    """
+    return {
+        "type": "structural_tag",
+        "format": _add_no_think_excludes(final_format, reasoning_format),
+    }
 
 
 def _adaptive_reasoning_envelope(

@@ -689,8 +689,14 @@ class GenerateConfig(BaseModel):
             reasoning_format = ReasoningFormat.from_generate_env_config(
                 generate_env_config
             )
+        # DISABLED requests normally carry no reasoning format. The exception is
+        # the answer-mode no-think constraint, which exists precisely because
+        # thinking stays off (see ResponseFormatPlan.compile).
+        keeps_reasoning_format = self.in_think_mode or bool(
+            reasoning_format is not None and reasoning_format.enforce_no_think
+        )
         return self.finalize_response_format(
-            reasoning_format=reasoning_format if self.in_think_mode else None
+            reasoning_format=reasoning_format if keeps_reasoning_format else None
         )
 
     def add_stop_ids_from_str(self, tokenizer):

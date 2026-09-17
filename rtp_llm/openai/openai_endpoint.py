@@ -301,7 +301,7 @@ class OpenaiEndpoint(object):
             ThinkingMode.ENABLED,
             ThinkingMode.ADAPTIVE,
         ):
-            return None
+            return self._disabled_no_think_format(config, renderer, input_ids, request)
 
         base_format = renderer.get_reasoning_format()
         think_start_tag = normalize_think_tag(self.generate_env_config.think_start_tag)
@@ -343,6 +343,48 @@ class OpenaiEndpoint(object):
             tag_end=base_format.tag_end,
             suffix=base_format.suffix,
             no_think_excludes=base_format.no_think_excludes,
+        )
+
+    def _disabled_no_think_format(
+        self,
+        config: GenerateConfig,
+        renderer: CustomChatRenderer,
+        input_ids: Optional[List[int]],
+        request: Optional[ChatCompletionRequest],
+    ) -> Optional[ReasoningFormat]:
+        """Enforce no-think on a DISABLED request whose prompt is not mid-think.
+
+        ``thinking_mode=disabled`` is the deployer's statement that the request
+        must not reason. A hybrid reasoning checkpoint can still emit a think
+        block on its own -- after the template's closed empty block, or with no
+        think markup in the prompt at all -- and that text spends the caller's
+        whole ``max_new_tokens`` before the answer starts; the response path can
+        only re-route text that already exists. Keep the boundary tags out of
+        the grammar instead.
+
+        The one exemption is an OPEN anchor at the end of the prompt: there the
+        template itself told the model to start thinking, so masking ``</think>``
+        would leave the block unclosable and the reply stuck in reasoning.
+        """
+        if not self.generate_env_config.enforce_no_think_on_disabled:
+            return None
+        if not renderer.emits_reasoning_stream:
+            return None
+        if self._request_prompt_has_think_anchor(config, input_ids, request):
+            return None
+        base_format = renderer.get_reasoning_format()
+        # Exclude the bare tags, not the template's newline-suffixed forms:
+        # banning "<think>\n" alone would still admit a bare "<think>".
+        return ReasoningFormat(
+            tag_begin=normalize_think_tag(
+                self.generate_env_config.think_start_tag
+            ).rstrip("\n"),
+            tag_end=normalize_think_tag(self.generate_env_config.think_end_tag).rstrip(
+                "\n"
+            ),
+            suffix=base_format.suffix,
+            no_think_excludes=base_format.no_think_excludes,
+            enforce_no_think=True,
         )
 
     def _tokenize_request_stop_words(self, stop_words: List[str]) -> List[List[int]]:
