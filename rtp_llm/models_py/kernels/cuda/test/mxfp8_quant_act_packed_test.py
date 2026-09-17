@@ -30,6 +30,14 @@ class Mxfp8QuantActPackedTest(TestCase):
         except Exception as e:
             raise SkipTest(f"flashinfer/deep_gemm unavailable: {e}")
 
+    def _skip_unless_sm100(self) -> None:
+        # DeepGEMM 2.1 only packs FP32 1x32 UE8M0 on SM100. On SM90 the
+        # transform asserts "Unknown SF transformation", and FlashInfer's
+        # mxfp8_quantize dequant error is also out of contract there.
+        major, _ = torch.cuda.get_device_capability()
+        if major < 10:
+            raise SkipTest("MXFP8 packed FlashInfer/DeepGEMM 1x32 layout is SM100-only")
+
     def _run_shape(self, M: int, K: int, dtype: torch.dtype) -> None:
         from rtp_llm.models_py.kernels.cuda.mxfp8_ops import mxfp8_quant_act_packed
 
@@ -54,6 +62,7 @@ class Mxfp8QuantActPackedTest(TestCase):
         self.assertLess(rel_err.mean().item(), 0.08)
 
     def test_decode_and_prefill_shapes(self) -> None:
+        self._skip_unless_sm100()
         cases = [
             (1, 128, torch.bfloat16),
             (8, 3072, torch.bfloat16),
@@ -73,6 +82,7 @@ class Mxfp8QuantActPackedTest(TestCase):
         dequant check normalized with .contiguous(), so it could not catch a
         physical-layout divergence — this test compares the raw tensors.
         """
+        self._skip_unless_sm100()
         from rtp_llm.models_py.kernels.cuda.mxfp8_ops import pack_mxfp8_scale
         from rtp_llm.models_py.triton_kernels.moe.mxfp8_kernels import (
             pack_flashinfer_mxfp8_scale_triton,
@@ -134,6 +144,7 @@ class Mxfp8QuantActPackedTest(TestCase):
         random-data benchmark never hit) to see whether the tiled kernel's
         quantization diverges from the production unfused path.
         """
+        self._skip_unless_sm100()
         from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
             mxfp8_quant_act_packed,
             pack_mxfp8_scale,
