@@ -38,26 +38,37 @@ public class WhaleConstraintTreePublisher implements ConstraintTreePublisher {
     private final GeneralHttpNettyService httpService;
     private final ExecutorService publishExecutor;
     private final Duration publishTimeout;
+    private final ConstraintTreeBootstrapRegistry bootstrapRegistry;
     private final Map<String, ConstraintTreeSidMapping> mappingCache = new ConcurrentHashMap<>();
 
     @Autowired
     public WhaleConstraintTreePublisher(WorkerAddressService workerAddressService,
-                                        GeneralHttpNettyService httpService) {
+                                        GeneralHttpNettyService httpService,
+                                        ConstraintTreeBootstrapRegistry bootstrapRegistry) {
         this(workerAddressService,
                 httpService,
                 configuredConcurrency(),
-                Duration.ofSeconds(configuredTimeoutSeconds()));
+                Duration.ofSeconds(configuredTimeoutSeconds()), bootstrapRegistry);
     }
 
     WhaleConstraintTreePublisher(WorkerAddressService workerAddressService,
                                  GeneralHttpNettyService httpService,
                                  int concurrency,
                                  Duration publishTimeout) {
+        this(workerAddressService, httpService, concurrency, publishTimeout, new ConstraintTreeBootstrapRegistry());
+    }
+
+    WhaleConstraintTreePublisher(WorkerAddressService workerAddressService,
+                                 GeneralHttpNettyService httpService,
+                                 int concurrency,
+                                 Duration publishTimeout,
+                                 ConstraintTreeBootstrapRegistry bootstrapRegistry) {
         this.workerAddressService = workerAddressService;
         this.httpService = httpService;
         this.publishExecutor = Executors.newFixedThreadPool(
                 Math.max(1, concurrency), new NamedThreadFactory("constraint-tree-publisher"));
         this.publishTimeout = publishTimeout;
+        this.bootstrapRegistry = bootstrapRegistry;
     }
 
     @Override
@@ -71,8 +82,18 @@ public class WhaleConstraintTreePublisher implements ConstraintTreePublisher {
         // Every build probes cheap metadata on all current targets. No full
         // vocabulary is fetched while the cached fingerprint remains unchanged.
         for (URI uri : targets.values()) {
-            ConstraintTreeSidMapping status = httpService.get(uri, "/constraint_tree_mapping_status", ConstraintTreeSidMapping.class)
-                    .timeout(publishTimeout).block();
+            ConstraintTreeSidMapping status;
+            try {
+                status = httpService.get(uri, "/constraint_tree_mapping_status", ConstraintTreeSidMapping.class)
+                        .timeout(bootstrapRegistry.isPending(request.model(), uri)
+                                ? Duration.ofSeconds(5) : publishTimeout).block();
+            } catch (RuntimeException e) {
+                // A terminated bootstrap process must not poison builds for existing Workers.
+                // A reachable but incompatible mapping still fails closed below.
+                if (!bootstrapRegistry.isPending(request.model(), uri)) { throw e; }
+                log.warn("bootstrap mapping probe unavailable worker={}: {}", uri, rootMessage(e));
+                continue;
+            }
             if (status == null || status.fingerprint() == null || !status.fingerprint().matches("[0-9a-f]{64}")) {
                 throw new IllegalStateException("Worker SID mapping metadata is unavailable");
             }
@@ -81,6 +102,9 @@ public class WhaleConstraintTreePublisher implements ConstraintTreePublisher {
             }
             fingerprint = status.fingerprint();
             source = uri;
+        }
+        if (source == null) {
+            throw new IllegalStateException("no Whale inference worker has available SID mapping metadata");
         }
         ConstraintTreeSidMapping mapping = mappingCache.get(request.model());
         if (mapping == null || !mapping.fingerprint().equals(fingerprint)) {
@@ -133,7 +157,7 @@ public class WhaleConstraintTreePublisher implements ConstraintTreePublisher {
         Map<String, URI> targets = new LinkedHashMap<>();
         addTargets(targets, workerAddressService.getAllEngineWorkerList(model, RoleType.DECODE));
         addTargets(targets, workerAddressService.getAllEngineWorkerList(model, RoleType.PDFUSION));
-        return targets;
+        return bootstrapRegistry.merge(model, targets);
     }
 
     private void addTargets(Map<String, URI> targets, List<WorkerHost> hosts) {

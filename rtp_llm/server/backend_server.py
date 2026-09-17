@@ -18,7 +18,7 @@ from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.distribute.gang_server import GangServer
-from rtp_llm.distribute.worker_info import g_parallel_info
+from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
@@ -27,6 +27,7 @@ from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.constraint_tree_bootstrap import ConstraintTreeBootstrap
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.worker_status import TaskInfo, WorkStatus
 from rtp_llm.structure.request_extractor import request_id_field_name
@@ -73,6 +74,7 @@ class BackendServer(object):
         self.dp_size = g_parallel_info.dp_size
         self.tp_size = g_parallel_info.tp_size
         self._weight_manager = None
+        self._constraint_tree_bootstrap = None
 
     def start(self, py_env_configs: PyEnvConfigs):
         self._gang_server.start()
@@ -96,8 +98,19 @@ class BackendServer(object):
                 )
                 self._lora_manager = LoraManager(self.engine)
                 self._weight_manager = WeightManager(self.engine)
+                # The native control endpoints are up, but readiness/VIP may
+                # still be gated on the first CSR. Start before the gang wait.
+                self._constraint_tree_bootstrap = ConstraintTreeBootstrap.from_env(
+                    self.backend_rpc_server_visitor.host_service,
+                    g_worker_info.http_port,
+                    self.engine.config.role_type,
+                )
+                if self._constraint_tree_bootstrap is not None:
+                    self._constraint_tree_bootstrap.start()
 
     def stop(self) -> None:
+        if self._constraint_tree_bootstrap is not None:
+            self._constraint_tree_bootstrap.stop()
         if isinstance(self.engine, BaseEngine):
             _nfs_manager.unmount_all()
             logging.info("all nfs paths unmounted")

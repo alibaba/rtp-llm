@@ -102,6 +102,8 @@ public class IgraphConstraintTreePoller {
 
     public Status getStatus() { return status; }
 
+    public String getModel() { return model; }
+
     /** The HTTP handler only enqueues work; it never waits for the source or CSR build. */
     public boolean trigger() {
         if (!eligible() || !running.compareAndSet(false, true)) { return false; }

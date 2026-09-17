@@ -159,4 +159,26 @@ class WhaleConstraintTreePublisherTest {
         assertThrows(IllegalStateException.class, () -> publisher.prepare(ConstraintTreeSidMappingTest.request(1, "C1")));
         verify(http, never()).get(any(URI.class), eq("/constraint_tree_mapping"), eq(ConstraintTreeSidMapping.class));
     }
+
+    @Test
+    void unreachableBootstrapDoesNotPoisonExistingWorkersButMappingMismatchStillFails() {
+        var registry = new ConstraintTreeBootstrapRegistry();
+        URI pending = URI.create("http://10.0.0.2:9005");
+        registry.register("gul_item", pending);
+        var bootstrapPublisher = new WhaleConstraintTreePublisher(addresses, http, 2, Duration.ofSeconds(2), registry);
+        URI active = URI.create("http://10.0.0.1:8005");
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(
+                new WorkerHost("10.0.0.1", 8000, 8001, 8005, "hz", "default")));
+        var mapping = ConstraintTreeSidMappingTest.mapping(java.util.Map.of("C1", 17));
+        when(http.get(active, "/constraint_tree_mapping_status", ConstraintTreeSidMapping.class)).thenReturn(Mono.just(mapping));
+        when(http.get(active, "/constraint_tree_mapping", ConstraintTreeSidMapping.class)).thenReturn(Mono.just(mapping));
+        when(http.get(pending, "/constraint_tree_mapping_status", ConstraintTreeSidMapping.class))
+                .thenReturn(Mono.error(new IllegalStateException("connection refused")),
+                        Mono.just(ConstraintTreeSidMappingTest.mapping(java.util.Map.of("C1", 19))));
+        try {
+            assertEquals(17, bootstrapPublisher.prepare(ConstraintTreeSidMappingTest.request(1, "C1C1")).request().rqTokenIds().get(0)[0]);
+            assertThrows(IllegalStateException.class,
+                    () -> bootstrapPublisher.prepare(ConstraintTreeSidMappingTest.request(2, "C1C1")));
+        } finally { bootstrapPublisher.destroy(); }
+    }
 }

@@ -38,6 +38,134 @@ class ConstraintTreeMappedE2ETest {
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
     @Test
+    @SuppressWarnings("unchecked")
+    void pythonBootstrapBreaksReadinessDiscoveryCycleAndRestoresRestartedWorker() throws Exception {
+        String binary = System.getenv("CONSTRAINT_TREE_CPP_WORKER_BINARY");
+        assumeTrue(binary != null && Files.isExecutable(Path.of(binary)), "requires compiled C++ test Worker");
+        Path clientPath = Path.of("../../server/constraint_tree_bootstrap.py").toAbsolutePath().normalize();
+        assertTrue(Files.exists(clientPath), clientPath.toString());
+        var mapping = ConstraintTreeSidMappingTest.mapping(Map.of("C1", 17, "C2", 19)).validated();
+        Path manifest = Files.createTempFile("csr-bootstrap-e2e-", ".json");
+        Files.writeString(manifest, JSON.writeValueAsString(mapping));
+        int port = freePort();
+        Process nativeWorker = null;
+        Process bootstrapClient = null;
+        try {
+            nativeWorker = worker(binary, port, manifest);
+            // The second round discards all Master state while retaining the Worker.
+            for (int masterGeneration = 0; masterGeneration < 2; masterGeneration++) {
+                var registry = new ConstraintTreeBootstrapRegistry();
+                var visible = new java.util.concurrent.atomic.AtomicBoolean();
+                var addresses = mock(WorkerAddressService.class);
+                var host = new WorkerHost("127.0.0.1", port - 5, port - 4, port, "local", "default");
+                when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of());
+                // Simulate Carbon: no VIP record at all until health has passed.
+                when(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION))
+                        .thenAnswer(ignored -> visible.get() ? List.of(host) : List.of());
+                var transport = new GeneralHttpNettyService(new HttpNettyConfig().createNettyClientHandler());
+                var publisher = new WhaleConstraintTreePublisher(addresses, transport, 2, Duration.ofSeconds(5), registry);
+                var builds = new ConstraintTreeBuildService(new ConstraintTreeBuilder(), Executors.newSingleThreadExecutor(), publisher);
+                var reads = new java.util.concurrent.atomic.AtomicInteger();
+                org.flexlb.constraint.source.SidBucketClient source = (key, limit, timeout) -> {
+                    reads.incrementAndGet();
+                    return java.util.concurrent.CompletableFuture.completedFuture(key.equals("123")
+                            ? List.of(new org.flexlb.constraint.source.SidBucketClient.Row(key, "123", "C1C2")) : List.of());
+                };
+                var poller = new IgraphConstraintTreePoller(new BucketSidReader(source, BucketSidReaderTest.skipEmptySettings(4000, 2000)),
+                        builds, () -> true, "gul_item", true, true, 600, java.time.Clock.systemUTC());
+                var provider = (org.springframework.beans.factory.ObjectProvider<IgraphConstraintTreePoller>)
+                        mock(org.springframework.beans.factory.ObjectProvider.class);
+                when(provider.getIfAvailable()).thenReturn(poller);
+                var leader = mock(LBStatusConsistencyService.class);
+                when(leader.isMaster()).thenReturn(true);
+                var coordinator = new ConstraintTreeBootstrapService(registry, builds, provider, leader);
+                var models = mock(org.flexlb.config.ModelMetaConfig.class);
+                var route = mock(org.flexlb.dao.route.ServiceRoute.class);
+                when(route.getRoleEndpoints(RoleType.PDFUSION)).thenReturn(List.of(new org.flexlb.dao.route.Endpoint()));
+                String service = org.flexlb.util.IdUtils.getServiceIdByModelName("gul_item");
+                when(models.getServiceRoute(service)).thenReturn(route);
+                var handler = RouterFunctions.toHttpHandler(new org.flexlb.httpserver.ConstraintTreeBootstrapServer(
+                        registry, models, leader).constraintTreeBootstrapRoutes());
+                var server = HttpServer.create().host("127.0.0.1").port(0).handle(new ReactorHttpHandlerAdapter(handler)).bindNow();
+                try {
+                    if (masterGeneration == 0) { assertEquals(503, healthCode(port)); }
+                    assertTrue(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION).isEmpty());
+                    assertTrue(builds.getCurrentArtifact().isEmpty());
+                    bootstrapClient = bootstrapPython(clientPath, server.port(), port, service);
+                    awaitBootstrap(coordinator, builds, registry, port);
+                    assertEquals(4000, reads.get(), "one source read, not one per repeated registration");
+                    assertTrue(bootstrapClient.isAlive(), "must renew until VIP handoff, even after tree is ready");
+                    var artifact = builds.getCurrentArtifact().orElseThrow();
+                    visible.set(true);
+                    builds.reconcileCurrent();
+                    assertTrue(bootstrapClient.waitFor(5, TimeUnit.SECONDS));
+                    assertEquals(0, bootstrapClient.exitValue());
+                    assertTrue(registry.pendingModels().isEmpty());
+
+                    // A replacement process has no tree; current artifact must be repushed, not rebuilt.
+                    stop(nativeWorker);
+                    nativeWorker = worker(binary, port, manifest);
+                    visible.set(false);
+                    builds.reconcileCurrent();
+                    assertEquals(503, healthCode(port));
+                    bootstrapClient = bootstrapPython(clientPath, server.port(), port, service);
+                    awaitBootstrap(coordinator, builds, registry, port);
+                    assertSame(artifact, builds.getCurrentArtifact().orElseThrow());
+                    assertEquals(4000, reads.get());
+                    visible.set(true);
+                    builds.reconcileCurrent();
+                    assertTrue(bootstrapClient.waitFor(5, TimeUnit.SECONDS));
+                    assertEquals(0, bootstrapClient.exitValue());
+                } finally {
+                    if (bootstrapClient != null && bootstrapClient.isAlive()) {
+                        bootstrapClient.destroy();
+                        bootstrapClient.waitFor(5, TimeUnit.SECONDS);
+                    }
+                    coordinator.close();
+                    poller.close();
+                    builds.destroy();
+                    publisher.destroy();
+                    server.disposeNow();
+                }
+            }
+        } finally {
+            stop(nativeWorker);
+            Files.deleteIfExists(manifest);
+        }
+    }
+
+    private Process bootstrapPython(Path path, int masterPort, int workerPort, String service) throws Exception {
+        String script = "import importlib.util,sys; "
+                + "s=importlib.util.spec_from_file_location('bootstrap',sys.argv[1]); "
+                + "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                + "b=m.ConstraintTreeBootstrap(lambda:sys.argv[2],sys.argv[3],int(sys.argv[4]),'PDFUSION',0.05); "
+                + "b.start(); b._thread.join(40); sys.exit(1 if b._thread.is_alive() else 0)";
+        return new ProcessBuilder("python3", "-c", script, path.toString(), "127.0.0.1:" + masterPort,
+                service, Integer.toString(workerPort)).redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.INHERIT).start();
+    }
+
+    private int healthCode(int port) throws Exception {
+        return http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/health"))
+                .timeout(Duration.ofSeconds(2)).GET().build(), HttpResponse.BodyHandlers.discarding()).statusCode();
+    }
+
+    private void awaitBootstrap(ConstraintTreeBootstrapService coordinator, ConstraintTreeBuildService builds,
+                                ConstraintTreeBootstrapRegistry registry, int port) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        while (System.nanoTime() < deadline) {
+            // Accelerate the two production timers; never submit a tree from the test.
+            coordinator.tick();
+            if (builds.getCurrentArtifact().isPresent() && healthCode(port) == 200
+                    && get(port, "/constraint_tree_status").path("version").asLong()
+                        == builds.getCurrentArtifact().orElseThrow().version()
+                    && !registry.pendingModels().isEmpty()) { return; }
+            Thread.sleep(50);
+        }
+        fail("bootstrap failed: " + builds.getStatus());
+    }
+
+    @Test
     void bucketInputBuildsCsrAndPublishesToNativeWorkerWhileReadFailureKeepsOldTree() throws Exception {
         bucketInputRoundTrip(false);
     }

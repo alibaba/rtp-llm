@@ -24,6 +24,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Service
@@ -35,6 +36,7 @@ public class ConstraintTreeBuildService {
     private final ConstraintTreePublisher publisher;
     private final ScheduledExecutorService reconcileExecutor;
     private final AtomicLong latestAcceptedVersion = new AtomicLong();
+    private final AtomicBoolean reconciling = new AtomicBoolean();
     private volatile String latestContentSha256 = "";
     private volatile String latestModel = "";
     private BuildRequest retryRequest;
@@ -304,6 +306,7 @@ public class ConstraintTreeBuildService {
     }
 
     void reconcileCurrent() {
+        if (!reconciling.compareAndSet(false, true)) { return; }
         try {
             BuildStatus before = status.get();
             if (before.state() == BuildState.BUILDING
@@ -352,6 +355,8 @@ public class ConstraintTreeBuildService {
                     publicationMessage));
         } catch (Exception e) {
             log.warn("constraint tree reconciliation failed", e);
+        } finally {
+            reconciling.set(false);
         }
     }
 

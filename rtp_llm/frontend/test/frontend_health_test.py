@@ -14,6 +14,7 @@ import uvicorn
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.frontend.frontend_app import FrontendApp
 from rtp_llm.server.backend_app import BackendApp
+from rtp_llm.server.backend_server import BackendServer
 from rtp_llm.start_server import check_server_health
 
 
@@ -22,6 +23,58 @@ class FrontendHealthTest(unittest.IsolatedAsyncioTestCase):
         env = patch.dict(os.environ, {"CONSTRAINT_TREE_REQUIRED": "false"})
         env.start()
         self.addCleanup(env.stop)
+
+    def test_backend_starts_bootstrap_after_native_engine_before_returning(self):
+        from rtp_llm.config.task_type import TaskType
+        from rtp_llm.ops import RoleType
+        from rtp_llm.server.constraint_tree_bootstrap import ConstraintTreeBootstrap
+
+        backend = object.__new__(BackendServer)
+        backend._gang_server = Mock()
+        engine = Mock(task_type=TaskType.LANGUAGE_MODEL)
+        engine.config.role_type = RoleType.PDFUSION
+        config = SimpleNamespace(
+            profiling_debug_config=SimpleNamespace(debug_start_fake_process=0)
+        )
+        events = []
+
+        def create_engine(*args):
+            events.append("native_started")
+            return engine
+
+        registration = Mock()
+        registration.start.side_effect = lambda: events.append("bootstrap_started")
+        with patch(
+            "rtp_llm.server.backend_server.ModelFactory.create_from_env",
+            side_effect=create_engine,
+        ), patch("rtp_llm.server.backend_server.BackendRPCServerVisitor"), patch(
+            "rtp_llm.server.backend_server.LoraManager"
+        ), patch(
+            "rtp_llm.server.backend_server.WeightManager"
+        ), patch.object(
+            ConstraintTreeBootstrap, "from_env", return_value=registration
+        ) as factory:
+            backend.start(config)
+            events.append("backend_start_returned")
+            self.assertEqual(
+                ["native_started", "bootstrap_started", "backend_start_returned"],
+                events,
+            )
+            self.assertEqual(RoleType.PDFUSION, factory.call_args.args[2])
+            backend.stop()
+            registration.stop.assert_called_once()
+
+        with patch.dict(
+            os.environ,
+            {
+                "CONSTRAINT_TREE_REQUIRED": "on",
+                "MODEL_SERVICE_CONFIG": '{"service_id":"aigc.text-generation.generation.engine_service", "master_endpoint":{"address":"master.vip"}}',
+            },
+        ):
+            bootstrap = ConstraintTreeBootstrap.from_env(
+                Mock(), 23495, RoleType.PDFUSION
+            )
+            self.assertEqual("PDFUSION", bootstrap.body["role"])
 
     @staticmethod
     def frontend_app(required=False):
