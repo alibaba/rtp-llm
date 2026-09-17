@@ -1363,6 +1363,12 @@ public:
     float   used_ratio          = 0;
 };
 
+class RtpLLMMemoryCacheCopyErrorMetricsCollector final {
+public:
+    std::string error_type;
+    bool        from_gpu = false;
+};
+
 class RtpLLMMemoryCacheMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
@@ -1372,6 +1378,7 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyTaskMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheStatusMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyErrorMetricsCollector* collector);
 
 public:
     kmonitor::MutableMetric* kv_cache_memory_cache_match_qps_metric         = nullptr;
@@ -1395,6 +1402,7 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_write_input_token_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_write_token_metric       = nullptr;
 
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_error_qps_metric  = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_qps_metric        = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_latency_metric    = nullptr;

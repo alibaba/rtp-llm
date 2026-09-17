@@ -215,6 +215,33 @@ TEST(LocalRpcServerAdmissionTest, ExecuteFunctionRejectedWhenNotRunning) {
     EXPECT_EQ(controller->activeAdmissionCount(), 0);  // rejected -> no lease held
 }
 
+TEST(LocalRpcServerAdmissionTest, MemoryCopyRejectedBeforeAccessingCache) {
+    for (bool draining : {false, true}) {
+        auto       controller = std::make_shared<SleepLifecycleController>(true);
+        SleepHooks hooks;
+        hooks.drain = [draining](const SleepOptions&) { return !draining; };
+        controller->setHooks(hooks);
+        controller->sleep(SleepOptions{});
+        ASSERT_EQ(controller->state(), draining ? SleepState::DRAINING : SleepState::SLEEPING);
+        LocalRpcServer server;
+        server.admission_gate_ = std::make_shared<AdmissionGate>(controller.get(), "test_instance");
+        // No engine is installed: admitted execution would fail before copying.
+        for (auto direction : {MemoryOperationRequestPB::H2D, MemoryOperationRequestPB::D2H}) {
+            SCOPED_TRACE(::testing::Message() << "draining=" << draining << " direction=" << direction);
+            grpc::ServerContext context;
+            FunctionRequestPB   request;
+            FunctionResponsePB  response;
+            auto*               copy = request.mutable_mem_request();
+            copy->set_copy_direction(direction);
+            copy->add_copy_items()->set_mem_block(0);
+            const auto status = server.ExecuteFunction(&context, &request, &response);
+            EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+            EXPECT_FALSE(response.has_mem_response());
+            EXPECT_EQ(controller->activeAdmissionCount(), 0);
+        }
+    }
+}
+
 TEST(LocalRpcServerAdmissionTest, ExecuteFunctionAdmittedWhenRunning) {
     SleepLifecycleController controller(true);
     ASSERT_EQ(controller.state(), SleepState::RUNNING);

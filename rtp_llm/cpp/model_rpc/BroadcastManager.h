@@ -130,6 +130,11 @@ public:
         return responses;
     }
 
+    bool rpcSucceeded(size_t rank) const {
+        std::unique_lock<std::mutex> lock(wait_done_mutex_);
+        return worker_contexts_.at(rank)->status.ok();
+    }
+
 private:
     std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts_;
     std::vector<bool>                              finished_;

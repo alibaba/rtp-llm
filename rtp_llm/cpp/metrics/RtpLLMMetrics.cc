@@ -838,6 +838,8 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*              t
 }
 
 bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_copy_error_qps_metric,
+                                "rtp_llm_kv_cache_memory_cache_copy_error_qps");
     // Match 相关指标
     REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_match_qps_metric, "rtp_llm_kv_cache_memory_cache_match_qps");
     REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_match_none_qps_metric,
@@ -960,6 +962,14 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*            ta
     if (collector->write_token == 0) {
         REPORT_MUTABLE_QPS(kv_cache_memory_cache_write_none_qps_metric);
     }
+}
+
+void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*                tags,
+                                      RtpLLMMemoryCacheCopyErrorMetricsCollector* collector) {
+    kmonitor::MetricsTags copy_tags = tags ? *tags : kmonitor::MetricsTags{};
+    copy_tags.AddTag("copy_direction", collector->from_gpu ? "FROM_GPU" : "TO_GPU");
+    copy_tags.AddTag("error_type", collector->error_type);
+    kv_cache_memory_cache_copy_error_qps_metric->Report(&copy_tags, 1);
 }
 
 void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*           tags,

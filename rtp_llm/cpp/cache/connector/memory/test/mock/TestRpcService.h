@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <thread>
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
@@ -21,7 +22,11 @@ public:
         if (context->IsCancelled()) {
             return ::grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
         }
+        if (memory_handler_) {
+            memory_handler_(request->mem_request(), *response->mutable_mem_response());
+        } else {
         response->mutable_mem_response()->set_success(mem_response_success_);
+        }
         return rpc_response_status_;
     }
     void setSleepMillis(int ms) {
@@ -33,11 +38,15 @@ public:
     void setRpcResponseStatus(const ::grpc::Status& status) {
         rpc_response_status_ = status;
     }
+    void setMemoryHandler(std::function<void(const MemoryOperationRequestPB&, MemoryOperationResponsePB&)> handler) {
+        memory_handler_ = std::move(handler);
+    }
 
 private:
     int            sleep_millis_{0};
     bool           mem_response_success_{true};
     ::grpc::Status rpc_response_status_{::grpc::Status::OK};
+    std::function<void(const MemoryOperationRequestPB&, MemoryOperationResponsePB&)> memory_handler_;
 };
 
 class TestRpcServer {

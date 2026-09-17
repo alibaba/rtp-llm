@@ -12,6 +12,7 @@ enum class ErrorCode {
     INVALID_PARAMS               = 605,
     EXECUTION_EXCEPTION          = 606,
     EXCEEDS_KV_CACHE_MAX_LEN     = 607,
+    KV_CACHE_REUSE_ERROR         = 608,
 
     // multimodal error
     MM_LONG_PROMPT_ERROR   = 901,
@@ -122,6 +123,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "FINISHED";
         case ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN:
             return "EXCEEDS_KV_CACHE_MAX_LEN";
+        case ErrorCode::KV_CACHE_REUSE_ERROR:
+            return "KV_CACHE_REUSE_ERROR";
         case ErrorCode::GET_HOST_FAILED:
             return "GET_HOST_FAILED";
         case ErrorCode::GET_CONNECTION_FAILED:

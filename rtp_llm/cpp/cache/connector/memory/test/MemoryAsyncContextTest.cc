@@ -110,9 +110,9 @@ TEST_F(MemoryAsyncContextTest, success_ReturnTrue_WhenAllResponsesSuccess) {
 TEST_F(MemoryAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultNullAndCallbackCalledOnce) {
     int  callback_cnt = 0;
     bool last_ok      = true;
-    auto cb           = [&](bool ok) {
+    auto cb           = [&](MemoryOperationResponsePB::ErrorCode error) {
         callback_cnt++;
-        last_ok = ok;
+        last_ok = error == MemoryOperationResponsePB::NONE;
     };
 
     auto ctx = std::make_shared<rtp_llm::MemoryAsyncContext>(/*done_callback=*/cb);
@@ -135,9 +135,9 @@ TEST_F(MemoryAsyncContextTest, waitDone_BlocksUntilBroadcastResultSet_ThenCallba
     std::atomic<int>  callback_cnt{0};
     std::atomic<bool> last_ok{true};
     std::atomic<bool> wait_returned{false};
-    auto              cb = [&](bool ok) {
+    auto              cb = [&](MemoryOperationResponsePB::ErrorCode error) {
         callback_cnt.fetch_add(1);
-        last_ok.store(ok);
+        last_ok.store(error == MemoryOperationResponsePB::NONE);
     };
 
     auto ctx = std::make_shared<rtp_llm::MemoryAsyncContext>(cb);
@@ -169,9 +169,9 @@ TEST_F(MemoryAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultNonNullAnd
 
     int  callback_cnt = 0;
     bool last_ok      = false;
-    auto cb           = [&](bool ok) {
+    auto cb           = [&](MemoryOperationResponsePB::ErrorCode error) {
         callback_cnt++;
-        last_ok = ok;
+        last_ok = error == MemoryOperationResponsePB::NONE;
     };
 
     auto ctx = std::make_shared<rtp_llm::MemoryAsyncContext>(cb);
@@ -207,9 +207,9 @@ TEST_F(MemoryAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultNonNullAnd
 TEST_F(MemoryAsyncContextTest, waitDone_IsIdempotent_CallbackOnlyOnce) {
     int  callback_cnt = 0;
     bool last_ok      = false;
-    auto cb           = [&](bool ok) {
+    auto cb           = [&](MemoryOperationResponsePB::ErrorCode error) {
         callback_cnt++;
-        last_ok = ok;
+        last_ok = error == MemoryOperationResponsePB::NONE;
     };
 
     // Use empty worker contexts: BroadcastResult::waitDone() completes immediately and marks success.
@@ -229,9 +229,9 @@ TEST_F(MemoryAsyncContextTest, waitDone_IsIdempotent_CallbackOnlyOnce) {
 TEST_F(MemoryAsyncContextTest, waitDone_ConcurrentCallersFinalizeOnce) {
     std::atomic<int>  callback_cnt{0};
     std::atomic<bool> last_ok{false};
-    auto              cb = [&](bool ok) {
+    auto              cb = [&](MemoryOperationResponsePB::ErrorCode error) {
         callback_cnt.fetch_add(1);
-        last_ok.store(ok);
+        last_ok.store(error == MemoryOperationResponsePB::NONE);
     };
 
     auto result = std::make_shared<MemoryBroadcastResultT>(std::vector<std::shared_ptr<MemoryWorkerCtxT>>{});

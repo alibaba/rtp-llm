@@ -2,6 +2,29 @@ load("//:def.bzl", "copts", "rocm_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "crc_block_copy_hdr",
+    hdrs = ["CrcBlockCopy.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "crc_block_copy_unavailable",
+    srcs = ["CrcBlockCopyUnavailable.cc"],
+    deps = [":crc_block_copy_hdr"],
+    copts = copts(),
+)
+
+alias(
+    name = "crc_block_copy",
+    actual = select({
+        "@//:using_cuda13_x86": "//rtp_llm/models_py/bindings/cuda:crc_block_copy",
+        "@//:using_cuda13_arm": "//rtp_llm/models_py/bindings/cuda:crc_block_copy",
+        "//conditions:default": ":crc_block_copy_unavailable",
+    }),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "op_defs",
     hdrs = [
         "OpDefs.h",
