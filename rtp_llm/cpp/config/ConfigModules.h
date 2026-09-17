@@ -387,7 +387,7 @@ struct FIFOSchedulerConfig {
 
 struct GrammarConfig {
     std::string grammar_backend                         = "xgrammar";
-    bool        constrained_json_disable_any_whitespace = false;
+    bool        constrained_json_disable_any_whitespace = true;
     // Threads one compile fans out over, and the main lever on compile latency: a compile spends nearly
     // all of its time in a phase that parallelises almost perfectly. <=0 is resolved on the Python side
     // from the CPU this rank owns, so a value reaching the engine should already be concrete.
