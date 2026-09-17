@@ -2,6 +2,7 @@ package org.flexlb.sync.synchronizer;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
@@ -41,6 +42,7 @@ public final class MasterEngineSynchronizer {
     private final FlexlbConfig flexlbConfig;
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService cacheAwareService;
+    private final DynamicCacheIntervalService cacheIntervalService;
     private final long syncRequestTimeoutMs;
     private final LongAdder syncCount = new LongAdder();
     private final Long syncEngineStatusInterval;
@@ -55,6 +57,7 @@ public final class MasterEngineSynchronizer {
                                     EngineGrpcService engineGrpcService,
                                     ModelMetaConfig modelMetaConfig,
                                     CacheAwareService cacheAwareService,
+                                    DynamicCacheIntervalService cacheIntervalService,
                                     ConfigService configService) {
 
         this.workerAddressService = workerAddressService;
@@ -63,6 +66,7 @@ public final class MasterEngineSynchronizer {
         this.flexlbConfig = configService.loadBalanceConfig();
         this.engineGrpcService = engineGrpcService;
         this.cacheAwareService = cacheAwareService;
+        this.cacheIntervalService = cacheIntervalService;
         this.modelName = modelMetaConfig.modelName();
         this.requiredRoles = modelMetaConfig.requiredRoles();
 
@@ -120,6 +124,7 @@ public final class MasterEngineSynchronizer {
                         modelName, workerDirectory,
                         workerAddressService, statusCheckExecutor, engineHealthReporter,
                         engineGrpcService, roleType, cacheAwareService,
+                        cacheIntervalService,
                         syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                         flexlbConfig.getWorkerRegistry().getCacheStatus()
                                 .isFullSnapshotDebugMode(),

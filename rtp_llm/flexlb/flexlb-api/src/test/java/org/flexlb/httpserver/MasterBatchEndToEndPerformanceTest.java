@@ -47,7 +47,6 @@ import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
-import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -211,7 +210,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private NioEventLoopGroup masterServerEventLoopGroup;
     private List<ManagedChannel> masterChannels = List.of();
     private CompletionCoverageRecorder latencyRecorder;
-    private ActiveRequestCounter activeRequestCounter;
     private static ch.qos.logback.classic.Logger flexlbLogger;
     private static ch.qos.logback.classic.Logger syncLogger;
     private static ch.qos.logback.classic.Logger mockWorkerLogger;
@@ -360,14 +358,12 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 scheduler,
                 new RecentCacheKeyTraceReporter());
 
-        activeRequestCounter = new ActiveRequestCounter();
         latencyRecorder = new CompletionCoverageRecorder();
         EngineHealthReporter engineHealthReporter = createNoOpEngineHealthReporter();
         FlexlbServiceImpl service = new FlexlbServiceImpl(
                 routeService,
                 STANDALONE_MASTER_ELECT_SERVICE,
                 engineHealthReporter,
-                activeRequestCounter,
                 mock(FlexlbGrpcForwarder.class, withSettings().stubOnly()),
                 configService,
                 reporter,
@@ -526,7 +522,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
         assertTrue(batches.distinctInputLengths() >= 32,
                 "engine traffic must retain the log-derived input-length distribution");
-        awaitNoActiveRequests();
 
         int processors = Runtime.getRuntime().availableProcessors();
         long defaultMinimumQps = Math.min(5_000L, Math.max(500L, processors * 250L));
@@ -685,7 +680,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 "every prefill engine must appear in measured routing decisions");
         assertEquals(decodeEngineCount, activeDecodeRoutes,
                 "every decode engine must appear in measured routing decisions");
-        awaitNoActiveRequests();
         assertTrue(result.qps() >= targetQps * minimumQpsRatio,
                 () -> String.format(
                         "client throughput %.1f QPS missed %.0f%% of target %d QPS",
@@ -913,10 +907,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             System.out.printf(
                     "FlexLB Master traffic failure: requests=%d completed=%d successful=%d "
                             + "exceptional=%d scheduler_inflight=%d queued=%d "
-                            + "active_grpc=%d engine_received=%d%n",
+                            + "engine_received=%d%n",
                     requestCount, completed, successful, completed - successful,
                     scheduler.getInflightSize(), scheduler.getQueuedRequestCount(),
-                    activeRequestCounter.getCount(), receivedEngineRequestCount());
+                    receivedEngineRequestCount());
             for (int index = 0; index < futures.size(); index++) {
                 CompletableFuture<TimedResponse> future = futures.get(index);
                 if (!future.isCompletedExceptionally() && !future.isCancelled()) {
@@ -1347,16 +1341,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             TimeUnit.MILLISECONDS.sleep(5);
         } while (System.nanoTime() < deadlineNanos);
         return latencyRecorder.snapshot();
-    }
-
-    private void awaitNoActiveRequests() throws InterruptedException {
-        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (activeRequestCounter.getCount() != 0L
-                && System.nanoTime() < deadlineNanos) {
-            TimeUnit.MILLISECONDS.sleep(1);
-        }
-        assertEquals(0L, activeRequestCounter.getCount(),
-                "all Master gRPC requests must release their active-request token");
     }
 
     private void awaitDeliveryWaitCount(long expectedCount) throws InterruptedException {
