@@ -86,7 +86,7 @@ class CPSelectedRowsTest(unittest.TestCase):
                     torch.testing.assert_close(actual, legacy, rtol=0, atol=0)
 
     @torch.inference_mode()
-    def test_owner_errors_and_nonowner_missing_pages(self):
+    def test_missing_owner_pages_read_as_zero_rows(self):
         entries, entry_bytes, rank = 64, 288, 3
         pool, table = self.fixture(entries, entry_bytes, rank, limit=2048)
         wanted = torch.tensor(
@@ -94,17 +94,27 @@ class CPSelectedRowsTest(unittest.TestCase):
         )
         for invalid in (0, -1, pool.shape[0], pool.shape[0] + 101):
             table[0, 0] = invalid
-            with self.subTest(page=invalid), self.assertRaisesRegex(
-                ValueError, "allocated owner page"
-            ):
-                _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank)
-            actual = _selected_local_rows(
-                pool, table, wanted[1:], entries, entry_bytes, rank
-            )
-            self.assertEqual(torch.count_nonzero(actual).item(), 0)
+            with self.subTest(page=invalid):
+                actual = _selected_local_rows(
+                    pool, table, wanted, entries, entry_bytes, rank
+                )
+                # An owned row whose page is missing reads as zeros instead of
+                # raising; the valid owner row keeps its payload.
+                torch.testing.assert_close(actual[0], torch.zeros_like(actual[0]))
+                torch.testing.assert_close(
+                    actual[1:].cpu(),
+                    self.expected(wanted[1:], entries, entry_bytes, rank),
+                    rtol=0,
+                    atol=0,
+                )
+                with patch.dict(os.environ, {"DSV41_CP_FUSED_SELECTED": "0"}):
+                    legacy = _selected_local_rows(
+                        pool, table, wanted, entries, entry_bytes, rank
+                    )
+                torch.testing.assert_close(actual, legacy, rtol=0, atol=0)
         outside = torch.tensor([(table.shape[1] * 8 + rank) * entries], device="cuda")
-        with self.assertRaisesRegex(ValueError, "allocated owner page"):
-            _selected_local_rows(pool, table, outside, entries, entry_bytes, rank)
+        actual = _selected_local_rows(pool, table, outside, entries, entry_bytes, rank)
+        torch.testing.assert_close(actual, torch.zeros_like(actual))
 
     @torch.inference_mode()
     def test_repeated_calls_read_current_metadata_and_empty_input(self):

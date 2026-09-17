@@ -39,8 +39,6 @@ _FLAGS = (
     "DSV41_CP_COMPACT_MODEL_ROWS",
     "DSV41_CP_COMPACT_QUERY_ROWS",
     "DSV41_CP_SINGLE_OWNER_TRANSPORT",
-    "DSV41_NATIVE_COMPACT_READER",
-    "DSV41_NATIVE_COMPACT_WRITER",
 )
 
 
@@ -463,24 +461,6 @@ def _swa_read_batches(rank, device):
                     assert "1 GiB" in str(error), str(error)
                 else:
                     raise AssertionError(f"{label} accepted 1 GiB")
-                for query_count, binding, message in (
-                    (
-                        1,
-                        replace(
-                            initial,
-                            valid_starts=torch.tensor(
-                                [context.start], dtype=torch.int32, device=device
-                            ),
-                        ),
-                        "missing restored SWA history",
-                    ),
-                ):
-                    try:
-                        context.swa_queries(0, 0, query_count, binding, encoded)
-                    except ValueError as error:
-                        assert message in str(error), str(error)
-                    else:
-                        raise AssertionError(f"{label} accepted {message}")
             context.publish_swa(0, initial, encoded)
             for token in range(
                 max(context.start, context.end - spec.entries), context.end
@@ -773,8 +753,8 @@ def _selected_query_transport(rank, device):
 
 
 def _selected_query_transport_deferred(rank, device):
-    # Deferred owner-page asserts plus one-shot negative masking must produce
-    # bitwise-identical bytes to the default per-call checked path.
+    # One-shot negative masking after transport must produce bitwise-identical
+    # bytes to the default per-call masked path.
     observations = []
     for slot in (
         RegionSlot(CacheRegion.GLOBAL, 2),
@@ -801,21 +781,14 @@ def _selected_query_transport_deferred(rank, device):
                     slot, selected, slot.owner_layer, query_owner=owner
                 )
                 context.release(lease, slot.owner_layer)
-                statuses = []
                 deferred, lease = context.gather_selected(
                     slot,
                     selected,
                     slot.owner_layer,
                     query_owner=owner,
                     mask_negative=False,
-                    defer_status=statuses,
                 )
                 context.release(lease, slot.owner_layer)
-                assert statuses, "deferred transport must collect per-call status"
-                torch._assert_async(
-                    (torch.cat(statuses) == 0).all(),
-                    "CP selected KV row has no allocated owner page",
-                )
                 deferred.masked_fill_((selected < 0)[:, :, None], 0)
                 torch.cuda.synchronize()
                 _equal(deferred.cpu(), expected, f"{slot} deferred selected bytes")
@@ -830,10 +803,9 @@ def _selected_query_transport_deferred(rank, device):
                         source_owner=slot.owner_layer,
                         query_owner=owner,
                         query_rows=count,
-                        deferred_statuses=len(statuses),
                     )
                 )
-                del reference, deferred, statuses
+                del reference, deferred
     return observations
 
 

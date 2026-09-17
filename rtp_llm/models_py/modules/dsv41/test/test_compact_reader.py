@@ -7,7 +7,6 @@ No CPU fallback or GPU skip is permitted in this target.
 
 import json
 import math
-import os
 import unittest
 from dataclasses import replace
 
@@ -259,10 +258,6 @@ class CompactReaderGpuTest(unittest.TestCase):
         if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
             raise RuntimeError(
                 "this required GPU target needs an actual Blackwell device"
-            )
-        if os.environ.get("DSV41_NATIVE_COMPACT_READER") != "1":
-            raise RuntimeError(
-                "set DSV41_NATIVE_COMPACT_READER=1 for this explicit candidate probe"
             )
 
     def test_attention_output_aliases_rejected_and_disjoint_graph_buffers_reused(self):

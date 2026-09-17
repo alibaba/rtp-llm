@@ -95,9 +95,6 @@ def draft_flashmla_attention(query, query_kv, context, stage, sinks):
         & (page > 0)
         & (page < swa.pages.data.shape[0])
     )
-    torch._assert_async(
-        (~active | metadata_ok).all(), "DSpark needs complete committed SWA"
-    )
     usable = active & metadata_ok
     offsets = buffers.history_offsets
     positions = begin[:, None] + offsets[None, :]

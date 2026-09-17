@@ -1,7 +1,6 @@
 """Native compact V4.1 encoding and scatter into full local cache pages.
 
-The byte ABI is the compact reader's row-interleaved 528/288/68 format. This is
-an explicit kernel candidate behind DSV41_NATIVE_COMPACT_WRITER=1. CP SWA byte
+The byte ABI is the compact reader's row-interleaved 528/288/68 format. CP SWA byte
 sharding and PD protocol integration are caller responsibilities.
 """
 

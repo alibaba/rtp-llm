@@ -164,11 +164,6 @@ def pack_v41_moe_weights(config, weights: Mapping, *, ep_size, ep_rank, draft=Fa
             torch.float8_e8m0fnu,
             device,
         )
-    for name, value in raw.items():
-        if name.endswith(".scale"):
-            torch._assert_async(
-                (value.view(torch.uint8) != 255).all(), "nonfinite V4.1 expert scale"
-            )
     packed = {}
     # float8 concatenation is not implemented by every supported Torch build.
     for name in shapes:

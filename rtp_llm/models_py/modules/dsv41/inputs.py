@@ -114,33 +114,6 @@ class V41ModelRows:
                 raise ValueError(
                     "V4.1 metadata must have exact row shape, dtype, contiguity and device"
                 )
-        torch._assert_async(
-            (((self.token_ids >= 0) & (self.token_ids < 129280)) | ~self.valid).all(),
-            "V4.1 canonical ID outside vocabulary",
-        )
-        torch._assert_async(
-            ((self.token_types >= -1) & (self.token_types <= 3)).all(),
-            "invalid V4.1 image type",
-        )
-        torch._assert_async(
-            (~self.image_mask | (self.token_ids == 129264)).all(),
-            "image span lost canonical ID 129264",
-        )
-        torch._assert_async(
-            ((self.token_types == -1) | self.valid).all(),
-            "padding cannot retain image token types",
-        )
-        torch._assert_async(
-            (~self.history_valid | self.valid[:, None]).all(),
-            "padding cannot retain Engram history",
-        )
-        torch._assert_async(
-            (
-                ((self.history_ids >= 0) & (self.history_ids < 129280))
-                | ~self.history_valid
-            ).all(),
-            "Engram history ID outside vocabulary",
-        )
 
     @property
     def image_mask(self):

@@ -279,10 +279,9 @@ class DeepSeekV41Model(GptModelBase):
         warmup_block32_linears(self.target, max_rows=max_tokens_per_rank)
         if self.prefill_draft is not None:
             warmup_block32_linears(self.prefill_draft, max_rows=128)
-        if os.environ.get("DSV41_SPARSE_INDEXER") == "1":
-            from rtp_llm.models_py.modules.dsv41.indexer import warmup_sparse_indexer
+        from rtp_llm.models_py.modules.dsv41.indexer import warmup_sparse_indexer
 
-            warmup_sparse_indexer(self.target.embedding.device)
+        warmup_sparse_indexer(self.target.embedding.device)
 
     def initialize(self, init_resource):
         if bool(init_resource.is_speculative) != self.layout.draft_enabled:

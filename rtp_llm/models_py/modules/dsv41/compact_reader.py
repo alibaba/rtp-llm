@@ -1,6 +1,6 @@
 """Experimental native V4.1 compact KV reader.
 
-Set DSV41_NATIVE_COMPACT_READER=1 explicitly. The attention kernel reads at most
+The attention kernel reads at most
 128 SWA rows and 512 selected global rows per query, in 16-row tiles. There is no
 history-sized score or decoded-KV allocation. It is a correctness candidate,
 with no performance-selection or release-acceptance claim.

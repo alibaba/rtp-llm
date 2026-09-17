@@ -119,13 +119,6 @@ class CompactWriterGpuTest(unittest.TestCase):
             raise RuntimeError(
                 "this required quantizer test needs an actual Blackwell GPU"
             )
-        if (
-            os.environ.get("DSV41_NATIVE_COMPACT_WRITER") != "1"
-            or os.environ.get("DSV41_NATIVE_COMPACT_READER") != "1"
-        ):
-            raise RuntimeError(
-                "enable both native compact writer and reader for the ABI test"
-            )
         cls.official = _load_official_kernel()
 
     def test_planar_destination_is_rejected_before_any_byte_is_written(self):

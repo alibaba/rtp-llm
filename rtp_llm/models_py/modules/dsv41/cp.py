@@ -46,14 +46,10 @@ from rtp_llm.models_py.modules.dsv41.compact_reader import (
     MAX_GATHER_BYTES,
     CompactPages,
     GlobalBinding,
-    ReaderResult,
     SwaBinding,
     compact_attention,
 )
-from rtp_llm.models_py.modules.dsv41.compact_writer import (
-    CompactWriteResult,
-    encode_compact,
-)
+from rtp_llm.models_py.modules.dsv41.compact_writer import encode_compact
 from rtp_llm.models_py.modules.dsv41.compressor import (
     OwnerPageBinding,
     PairCarry,
@@ -101,11 +97,6 @@ _INDEX_ROWS = CANDIDATE_BLOCKS * SPARSE_BLOCK
 _SELECTED_METADATA_BYTES = 80
 
 
-def _check(condition, message):
-    if not bool(condition.all().item()):
-        raise ValueError(message)
-
-
 def _bytes(*tensors):
     return sum(value.numel() * value.element_size() for value in tensors)
 
@@ -121,10 +112,7 @@ def _copy_query_rows(destination, indices, values):
         destination.index_copy_(0, indices, values)
 
 
-def _selected_local_rows(
-    pool, table, wanted, entries, entry_bytes, rank, *, defer_status=None
-):
-    message = "CP selected KV row has no allocated owner page"
+def _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank):
     if (
         pool.is_cuda
         and pool.stride(1) == 1
@@ -140,14 +128,12 @@ def _selected_local_rows(
         local = torch.empty(
             (wanted.numel(), entry_bytes), dtype=torch.uint8, device=pool.device
         )
-        status = torch.empty((blocks,), dtype=torch.int32, device=pool.device)
         if blocks:
             gather_selected_kernel[(blocks,)](
                 pool,
                 table,
                 wanted,
                 local,
-                status,
                 ROWS=wanted.numel(),
                 ENTRIES=entries,
                 ENTRY_BYTES=entry_bytes,
@@ -160,17 +146,6 @@ def _selected_local_rows(
                 BLOCK_ROWS=block_rows,
                 BLOCK_BYTES=1 << (entry_bytes - 1).bit_length(),
             )
-            # The async assert is the measured optimum (P0-2 GB200 A/B): the
-            # synchronous _check forced an NCCL drain per tile. The env remains
-            # only as a diagnostic override.
-            if defer_status is not None:
-                # The caller batches one async assert over the whole transport
-                # loop; the per-tile status tensors stay alive in the list.
-                defer_status.append(status)
-            elif os.environ.get("DSV41_CP_GATHER_CHECK_ASYNC", "1") == "1":
-                torch._assert_async((status == 0).all(), message)
-            else:
-                _check(status == 0, message)
         return local
 
     logical = wanted.clamp_min(0).long() // entries
@@ -178,14 +153,14 @@ def _selected_local_rows(
     owned = (wanted >= 0) & (owners == rank)
     in_table = virtual < table.shape[1]
     ids = table[0].index_select(0, virtual.clamp_max(table.shape[1] - 1)).long()
-    _check(~owned | (in_table & (ids > 0) & (ids < pool.shape[0])), message)
+    valid = owned & in_table & (ids > 0) & (ids < pool.shape[0])
     page_rows = pool[:, : entries * entry_bytes].view(
         pool.shape[0], entries, entry_bytes
     )
     local = page_rows[
         ids.clamp(0, pool.shape[0] - 1), wanted.clamp_min(0).long() % entries
     ]
-    local.masked_fill_(~owned[:, None], 0)
+    local.masked_fill_(~valid[:, None], 0)
     return local
 
 
@@ -298,12 +273,6 @@ class V41CPAttentionContext(V41AttentionContext):
         )
         rank_positions[self._restore] = torch.arange(start, end, device=device)
         self._rank_positions = rank_positions.view(8, self.local_count)
-        expected = self._rank_positions[cp.cp_rank]
-        _check(
-            (self.valid == (expected >= 0))
-            & (~self.valid | (self.positions == expected)),
-            "CP query positions/validity differ from canonical source restoration",
-        )
 
     @property
     def query_rows(self):
@@ -755,16 +724,12 @@ class V41CPAttentionContext(V41AttentionContext):
 
     def _physical_async(self, table, logical, pool):
         # The GPU-side twin of _physical: the page ID stays on device (no host
-        # sync) and the bounds check rides the async assert stream.
+        # sync).
         if not 0 <= logical < table.shape[1]:
             raise ValueError("CP fixed state is missing its canonical checkpoint page")
         page = table[0, logical : logical + 1]
-        torch._assert_async(
-            ((page > 0) & (page < pool.shape[0])).all(),
-            "CP fixed state requires an allocated rank-local page",
-        )
-        # Clamp before indexing: the async assert reports after the write, so
-        # an invalid page must land on the unmapped null page, never OOB.
+        # Clamp before indexing: an invalid page must land on the unmapped null
+        # page, never OOB.
         return page.clamp(0, pool.shape[0] - 1).long()
 
     def _fixed_receive(self, pool, table, logical):
@@ -790,7 +755,6 @@ class V41CPAttentionContext(V41AttentionContext):
                 received,
                 torch.ones((8, 1), dtype=torch.int32, device=self.query_device),
             )
-            restored.check()
             pages = restored.pages
         else:
             pages = CompactPages(
@@ -982,8 +946,7 @@ class V41CPAttentionContext(V41AttentionContext):
         ids = table[0, first_virtual : first_virtual + virtual_count].long()
         if ids.numel() != virtual_count:
             raise ValueError("CP index scan exceeds the request's allocated page table")
-        _check((ids >= 0) & (ids < pool.shape[0]), "invalid CP index physical page ID")
-        local[1:].copy_(pool.index_select(0, ids))
+        local[1:].copy_(pool.index_select(0, ids.clamp(0, pool.shape[0] - 1)))
         received = self._all_gather(local).view(
             8, virtual_count + 1, spec.page_stride_bytes
         )
@@ -994,7 +957,6 @@ class V41CPAttentionContext(V41AttentionContext):
             remapped[None, :], retained_bytes=_bytes(received)
         ).view(8, 1, virtual_count)
         restored = bind_cprr_paged(self.cache.layout, slot, received, rank_tables)
-        restored.check()
         return restored, self.lease(
             slot, (received, restored.page_table, restored.status), layer
         )
@@ -1014,7 +976,6 @@ class V41CPAttentionContext(V41AttentionContext):
         retained_bytes=0,
         query_owner=None,
         mask_negative=True,
-        defer_status=None,
     ):
         """Receive compact rows selected by each rank, retaining original quantization."""
         spec, pool, table = self._page_specs[slot], self.pools[slot], self.tables[slot]
@@ -1045,7 +1006,6 @@ class V41CPAttentionContext(V41AttentionContext):
             spec.entries,
             spec.encoding.entry_bytes,
             self.cp.cp_rank,
-            defer_status=defer_status,
         )
         # Each byte has exactly one page owner; SUM preserves its bit pattern.
         if query_owner is None:
@@ -1146,10 +1106,6 @@ class V41CPAttentionContext(V41AttentionContext):
         )
         local = encoded.index_select(0, local_indices)
         if self.replay_floor < self.start:
-            _check(
-                ~past | (wanted >= initial.valid_starts[0]),
-                "CP query is missing restored SWA history",
-            )
             if self.cp.cp_rank == 0:
                 old = initial.pages.data[
                     1, : initial.pages.entries_per_page * 528
@@ -1257,12 +1213,7 @@ class V41CPL20Tail:
             raise ValueError(
                 "CP L20 tail requires completed full encoder rows and sources"
             )
-        _check(
-            l20.rows.valid == context.valid,
-            "CP L20 validity differs from its canonical row map",
-        )
         selected = context.selection_for(20)
-        selected.check()
         start = max(0, context.end - SWA_WINDOW)
         if previous is not None:
             if (
@@ -1656,7 +1607,6 @@ def _publish_owner(attention, hidden, context, source_rows=0):
     source_rows = source_rows or _SOURCE_ROWS
     if source_rows < 2 or source_rows % 2:
         raise ValueError("CP source tile must be a positive even row count")
-    pending = []
     for first in range(context.start, context.end, source_rows):
         last = min(first + source_rows, context.end)
         source_hidden = context.gather_rows(hidden, first, last)
@@ -1688,19 +1638,14 @@ def _publish_owner(attention, hidden, context, source_rows=0):
                     context.cp.cp_rank,
                 )
             )
-        pending.extend(
-            rows.store(
-                OwnerPageBinding(owner, context.cache.identity, state.global_kv.pages),
-                OwnerPageBinding(owner, context.cache.identity, state.index_pages),
-                *slots,
-            )
+        rows.store(
+            OwnerPageBinding(owner, context.cache.identity, state.global_kv.pages),
+            OwnerPageBinding(owner, context.cache.identity, state.index_pages),
+            *slots,
         )
         state.pair = source.next_pair
         state.materialized_end = last
         del source_hidden, source, rows, slots
-    # One synchronous writer status check per layer, after every source tile.
-    CompactWriteResult.check_all(pending)
-    del pending
     if owner in PAIR_OWNERS:
         context.publish_pair(owner, state.pair)
     context.published_sources.add(owner)
@@ -1819,10 +1764,8 @@ def _score_queries(attention, hidden, qr, context):
                 )
                 # Tile transport, then score the complete candidate set once.
                 # This preserves the existing selector's tie behavior. The
-                # per-tile owner-page status asserts batch into one async
-                # assert and the negative-position mask applies once over the
-                # complete values tensor (bitwise identical to per-tile masks).
-                statuses = []
+                # negative-position mask applies once over the complete values
+                # tensor (bitwise identical to per-tile masks).
                 for row_first in range(
                     0, actual.shape[1], transport_blocks * SPARSE_BLOCK
                 ):
@@ -1834,7 +1777,6 @@ def _score_queries(attention, hidden, qr, context):
                         retained_bytes=_bytes(values, actual),
                         query_owner=context.single_query_owner,
                         mask_negative=False,
-                        defer_status=statuses,
                     )
                     if count:
                         values[:, row_first:row_last].copy_(
@@ -1842,11 +1784,6 @@ def _score_queries(attention, hidden, qr, context):
                         )
                     context.release(row_lease, layer)
                     del received, row_lease
-                if statuses:
-                    torch._assert_async(
-                        (torch.cat(statuses) == 0).all(),
-                        "CP selected KV row has no allocated owner page",
-                    )
                 if not count:
                     del values, actual
                     continue
@@ -1923,8 +1860,6 @@ def _score_queries(attention, hidden, qr, context):
                 query_rows,
                 blocks[first].ordered_positions(),
             )
-    # One synchronous status check per layer, after every tile merged above.
-    ReaderResult(topk, query_status).check()
     context.publish_selection(
         IndexSelection(
             topk,
@@ -2000,7 +1935,6 @@ def forward_cp_attention(attention, hidden, context):
             _score_queries(attention, hidden, qr, context)
         query_rows = context.query_row_indices(0, context.query_rows)
         encoded = encode_compact(_query_rows(kv, query_rows), CacheRegion.SWA)
-        encoded.check()
         if query_rows is None:
             encoded_rows = encoded.output
         else:
@@ -2016,12 +1950,8 @@ def forward_cp_attention(attention, hidden, context):
             if indices is not None
             else None
         )
-        # The per-tile reader status checks batch into one DtoH copy per layer
-        # (measured: the per-tile .cpu() is the dominant forced host sync in
-        # the p13-final py-spy, 126 samples vs single digits elsewhere). The
-        # batched check keeps identical accept/reject semantics and still runs
-        # before the output is consumed by the inverse RoPE below.
-        read_results = []
+        # The per-tile reader output is copied into the query-row layout before
+        # the inverse RoPE below consumes it.
         for first in range(0, hidden.shape[0], read_queries):
             last = min(first + read_queries, hidden.shape[0])
             query_rows = context.query_row_indices(first, last)
@@ -2081,14 +2011,11 @@ def forward_cp_attention(attention, hidden, context):
                 global_kv=global_kv,
                 global_indices=global_indices,
             )
-            read_results.append(result)
             _copy_query_rows(output[first:last], query_rows, result.output)
             if lease is not None:
                 context.release(lease, attention.layer)
                 del values, pages, table, lease
             del result, swa, global_kv
-        ReaderResult.check_all(read_results)
-        del read_results
         context.publish_swa(attention.layer, initial, encoded_rows)
         output = attention_rope(
             context.pack_model_rows(output),

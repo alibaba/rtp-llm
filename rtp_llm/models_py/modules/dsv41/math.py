@@ -5,7 +5,6 @@ functions do not replace real checkpoint or GPU acceptance measurements.
 """
 
 import importlib
-import os
 
 import torch
 import torch.nn.functional as F
@@ -17,8 +16,7 @@ _HC_PRENORM_READY = {}
 
 def _hc_prenorm_supported(hidden, weight):
     return (
-        os.environ.get("DSV41_MHC_PRENORM", "1") == "1"
-        and not torch.is_grad_enabled()
+        not torch.is_grad_enabled()
         and not torch.is_autocast_enabled()
         and hidden.is_cuda
         and hidden.dtype == torch.bfloat16
@@ -73,8 +71,7 @@ def _hc_prenorm(hidden, weight, norm_eps):
 
 def _hc_pointwise_supported(hidden, *mixes):
     return (
-        os.environ.get("DSV41_MHC_POINTWISE", "1") == "1"
-        and not torch.is_grad_enabled()
+        not torch.is_grad_enabled()
         and hidden.is_cuda
         and hidden.dtype == torch.bfloat16
         and hidden.ndim >= 3
@@ -202,11 +199,9 @@ def moe_gate(
 
 def _rms_norm_native_supported(hidden, weight):
     # Code-default on (R4-3): <=1 BF16 ulp vs the reference path measured on
-    # B300 SM103 (W10-032) and GB200 SM100 (W10-070); the env stays only as a
-    # diagnostic override.
+    # B300 SM103 (W10-032) and GB200 SM100 (W10-070).
     return (
-        os.environ.get("DSV41_RMSNORM_NATIVE", "1") == "1"
-        and not torch.is_grad_enabled()
+        not torch.is_grad_enabled()
         and not torch.is_autocast_enabled()
         and hidden.is_cuda
         and hidden.dtype == torch.bfloat16
@@ -315,8 +310,7 @@ def hc_mixes(
             flat.square().mean(-1, keepdim=True) + norm_eps
         )
     if (
-        os.environ.get("DSV41_HC_SPLIT_SINKHORN", "0") == "1"
-        and hc == 4
+        hc == 4
         and iterations >= 1
         and not torch.is_grad_enabled()
         and mixes.is_cuda
@@ -357,8 +351,7 @@ def engram_inject(
             "Engram token_mask must contain one boolean per canonical token"
         )
     if (
-        os.environ.get("DSV41_ENGRAM_FUSED_INJECT", "1") == "1"
-        and not torch.is_grad_enabled()
+        not torch.is_grad_enabled()
         and hidden.is_cuda
         and hidden.numel() > 0
         and (hc, dim) == (4, 5120)

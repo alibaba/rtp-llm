@@ -10,7 +10,6 @@ def gather_selected_kernel(
     table,
     wanted,
     output,
-    status,
     ROWS: tl.constexpr,
     ENTRIES: tl.constexpr,
     ENTRY_BYTES: tl.constexpr,
@@ -47,4 +46,3 @@ def gather_selected_kernel(
         values,
         (rows[:, None] < ROWS) & (columns[None, :] < ENTRY_BYTES),
     )
-    tl.store(status + tl.program_id(0), tl.sum((owned & ~valid).to(tl.int32), 0))

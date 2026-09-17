@@ -121,13 +121,6 @@ class EngramHash(nn.Module):
         all_ids = torch.cat((history_ids, input_ids), dim=1)
         all_valid = torch.cat((history_valid, token_mask), dim=1)
         safe_ids = all_ids.masked_fill(~all_valid, self.pad_token_id)
-        torch._assert_async(
-            (safe_ids >= 0).all(), "Engram received a negative canonical token ID"
-        )
-        torch._assert_async(
-            (safe_ids < self.token_map.numel()).all(),
-            "Engram received an out-of-vocabulary canonical token ID",
-        )
         compressed = self.token_map[safe_ids]
         blocked = torch.zeros_like(input_ids, dtype=torch.bool)
         tokens = []

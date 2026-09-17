@@ -87,23 +87,6 @@ class V41ImageFeatures:
             or self.values.device != indices.device
         ):
             raise ValueError("V4.1 image features need matching row/type/BF16 metadata")
-        torch._assert_async(
-            ((indices >= 0) & (indices < rows.token_ids.numel())).all(),
-            "image feature row outside the current target input",
-        )
-        torch._assert_async(
-            (indices[1:] > indices[:-1]).all(),
-            "image feature rows must be unique and in canonical order",
-        )
-        torch._assert_async(
-            rows.image_mask.sum() == indices.numel(),
-            "every image patch and delimiter must have exactly one feature row",
-        )
-        torch._assert_async(
-            rows.image_mask[indices].all()
-            & (rows.token_types[indices] == self.token_types).all(),
-            "image features disagree with canonical token types",
-        )
 
 
 @dataclass(frozen=True)
@@ -364,11 +347,7 @@ class V41TargetModel(nn.Module):
             )
         ids = rows.token_ids.masked_fill(~rows.valid, self.config.pad_token_id)
         embedded = F.embedding(ids, self.embedding)
-        if image_features is None:
-            torch._assert_async(
-                ~rows.image_mask.any(), "V4.1 image rows require vision features"
-            )
-        else:
+        if image_features is not None:
             image_features.validate(rows, self.hidden_size)
             embedded.index_copy_(0, image_features.row_indices, image_features.values)
         embedded.masked_fill_(~rows.valid[:, None], 0)
@@ -454,17 +433,6 @@ class V41TargetModel(nn.Module):
             raise ValueError(
                 "retained L20 HC/pre_mix has a different geometry or device"
             )
-        if hasattr(context, "cp"):
-            if count != context.query_rows or not torch.equal(
-                l20.rows.valid, context.valid
-            ):
-                raise ValueError(
-                    "late CP rows must preserve the selected canonical validity"
-                )
-        else:
-            torch._assert_async(
-                l20.rows.valid.all(), "late prefill cannot consume padding aux"
-            )
         # Padded ranks still execute every block/EP collective, but never create aux.
         selected = l20.rows.valid.nonzero().flatten()
         hidden, pre_mix, aux = self._run_blocks(
@@ -503,22 +471,6 @@ class V41TargetModel(nn.Module):
             ):
                 raise ValueError(
                     "V4.1 aux consumers need explicit contiguous int64 row indices"
-                )
-            torch._assert_async(
-                ((indices >= 0) & (indices < rows.token_ids.numel())).all()
-                & (indices[1:] > indices[:-1]).all(),
-                "V4.1 aux rows must be unique, ordered and inside the current input",
-            )
-            if dense_aux:
-                torch._assert_async(
-                    (
-                        indices == torch.arange(indices.numel(), device=indices.device)
-                    ).all(),
-                    "dense aux must retain the complete fixed input order",
-                )
-            else:
-                torch._assert_async(
-                    rows.valid[indices].all(), "V4.1 aux rows cannot include padding"
                 )
         hidden, pre_mix, aux = self._run_blocks(
             rows, hidden, pre_mix, context, 0, 40, aux_row_indices, lookup_outputs

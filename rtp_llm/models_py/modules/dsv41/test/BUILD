@@ -6,9 +6,6 @@ py_test(
         "//rtp_llm:rtp_llm_lib",
     ],
     data = ["//:rtp_compute_ops"],
-    env = {
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
@@ -19,10 +16,6 @@ py_test(
         "//rtp_llm:rtp_llm_lib",
     ],
     data = ["//:rtp_compute_ops"],
-    env = {
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
@@ -36,8 +29,6 @@ py_test(
     data = ["//:rtp_compute_ops"],
     env = {
         "DSV41_ATTENTION_BACKEND": "flashmla",
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
     },
 )
 
@@ -45,19 +36,12 @@ py_test(
     name = "test_decode_attention",
     srcs = ["test_decode_attention.py", "test_attention.py", "official_compressor.py", "test_compact_writer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
     name = "test_decode_compressor",
     srcs = ["test_decode_compressor.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
@@ -115,7 +99,6 @@ py_test(
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     env = {
         "DSV41_CPRR_READER_BACKEND": "native",
-        "DSV41_NATIVE_COMPACT_READER": "1",
     },
 )
 
@@ -126,7 +109,6 @@ py_test(
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     env = {
         "DSV41_CPRR_READER_BACKEND": "flashmla",
-        "DSV41_NATIVE_COMPACT_READER": "1",
     },
 )
 
@@ -137,10 +119,6 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:models",
     ],
-    env = {
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
@@ -150,10 +128,6 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:models",
     ],
-    env = {
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
@@ -163,10 +137,6 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:models",
     ],
-    env = {
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
@@ -176,20 +146,12 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:models",
     ],
-    env = {
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
     name = "test_compact_writer_alias",
     srcs = ["test_compact_writer_alias.py", "test_compact_writer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
@@ -205,10 +167,6 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:models",
     ],
-    env = {
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
@@ -233,29 +191,18 @@ py_test(
     name = "test_attention",
     srcs = ["test_attention.py", "official_compressor.py", "test_compact_writer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
     name = "test_indexer",
     srcs = ["test_indexer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
     name = "test_compressor",
     srcs = ["test_compressor.py", "official_compressor.py", "test_compact_writer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_library(
@@ -283,17 +230,12 @@ py_test(
     name = "test_compact_writer",
     srcs = ["test_compact_writer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
     name = "test_compact_reader",
     srcs = ["test_compact_reader.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {"DSV41_NATIVE_COMPACT_READER": "1"},
 )
 
 py_test(
@@ -366,9 +308,6 @@ py_test(
     name = "test_draft",
     srcs = ["test_draft.py", "fixture.py", "official_compressor.py", "test_compact_writer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(

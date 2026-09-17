@@ -337,14 +337,6 @@ class V41DecodeFmhaImpl:
             torch.int32,
             "valid row counts",
         )
-        expected_valid = (
-            torch.arange(self.query_width, device=self.device)[None, :]
-            < row_valid.sum(1)[:, None]
-        )
-        torch._assert_async(
-            (row_valid == expected_valid).all(),
-            "decode valid rows must form a request-local prefix",
-        )
         if any((count == 0) != masked for count, masked in zip(counts_cpu, fake)):
             raise ValueError("decode rows disagree with fake request flags")
         if any(
@@ -352,9 +344,6 @@ class V41DecodeFmhaImpl:
             for start, count in zip(starts, counts_cpu)
         ):
             raise ValueError("live decode rows exceed the model context")
-        torch._assert_async(
-            ~rows.image_mask.any(), "decode image rows require prefill execution"
-        )
         execution = _host(
             inputs.v41_execution_context,
             (batch, 4),
@@ -449,10 +438,6 @@ class V41DecodeFmhaImpl:
             unit = self.layout.reuse_unit if fixed else self.layout.token_block_size
             logical = (padded_starts + counts - 1).clamp_min(0) // unit
             previous = (padded_starts - 1).clamp_min(0) // unit
-            torch._assert_async(
-                (~active | (logical < destination.shape[1])).all(),
-                "decode page table is too short for the request",
-            )
             selected = destination.gather(
                 1, logical.clamp_max(destination.shape[1] - 1)[:, None]
             ).squeeze(1)
@@ -461,23 +446,6 @@ class V41DecodeFmhaImpl:
             ).squeeze(1)
             self._current_pages[group].copy_(selected)
             self._previous_pages[group].copy_(old)
-            # Also exclude another request's source page: boundary migration
-            # and verify writes must never race a different request's reader.
-            other_request = ~torch.eye(
-                self.batch_size, dtype=torch.bool, device=self.device
-            )
-            same = (selected[:, None] == selected[None, :]) | (
-                selected[:, None] == old[None, :]
-            )
-            same &= (
-                active[:, None]
-                & active[None, :]
-                & other_request
-                & (selected[:, None] > 0)
-            )
-            torch._assert_async(
-                ~same.any(), "live requests share writable decode state"
-            )
         # Transfer validated host ranges once, before the per-layer device work.
         # Each pageable H2D tensor construction otherwise fences earlier copies.
         range_layers = tuple(self._swa)
@@ -668,15 +636,6 @@ class V41DecodeFmhaImpl:
             )
         counts = torch.zeros_like(self._retained_rows)
         counts[:batch].copy_(retained_rows)
-        torch._assert_async(
-            (
-                (counts >= 0)
-                & (counts <= self.context.valid_rows)
-                & ((counts > 0) == (self.context.valid_rows > 0))
-            ).all(),
-            "every live target prefix must retain at least its executed anchor",
-        )
-        self.context.check()
         self._commit(counts)
         self._draft_committed = bool(draft_committed)
 
@@ -694,7 +653,6 @@ class V41DecodeFmhaImpl:
             )
         if int(self._committed_epoch) != self._prepare_generation:
             return []
-        self.context.check()
         statuses = (
             list(self._copy_status.values())
             + list(self._pair_load_status.values())

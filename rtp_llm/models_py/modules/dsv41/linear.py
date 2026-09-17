@@ -102,10 +102,6 @@ class V41Block32Linear(nn.Module):
                 "V4.1 dense scales must be the checkpoint UE8M0 32x32 grid"
             )
         scales = scale.float()
-        torch._assert_async(
-            (torch.isfinite(scales) & (scales > 0)).all(),
-            "V4.1 checkpoint contains invalid UE8M0 scales",
-        )
         self.register_buffer("weight", weight)
         self.register_buffer("weight_scale", scales)
         flashinfer_shape = (

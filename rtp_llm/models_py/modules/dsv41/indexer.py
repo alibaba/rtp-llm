@@ -91,9 +91,6 @@ def _retain(
         from rtp_llm.models_py.modules.dsv41.deepselect import topk
 
         selected = topk(scores, min(capacity, scores.shape[-1]))
-        torch._assert_async(
-            (selected.status == 0).all(), "invalid DeepSelect index selection"
-        )
         values, offsets = selected.values, selected.indices.clamp_min(0).long()
     else:
         values, offsets = scores.topk(min(capacity, scores.shape[-1]), dim=-1)
