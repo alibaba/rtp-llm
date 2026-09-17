@@ -337,7 +337,12 @@ cuda13_only_paths = [
     "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/mega_moe_routed_only_execution_test.py",
     "rtp_llm/models_py/triton_kernels/moe/test/test_mega_moe_gate_pack.py",
     "rtp_llm/test/dsv4",
-    "rtp_llm/models_py/modules/dsv4",
+    # The original decode/test suite still runs on SM100_ARM with CUDA 12.9.
+    # Only the newer kernel families require the CUDA 13 test environments.
+    "rtp_llm/models_py/modules/dsv4/test",
+    "rtp_llm/models_py/modules/dsv4/fp8",
+    "rtp_llm/models_py/modules/dsv4/hc",
+    "rtp_llm/models_py/modules/dsv4/prefill",
     "rtp_llm/models_py/modules/factory/fused_moe/tests/test_strategy_select.py",
     "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_chunked_moe.py",
     "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_shared_expert_executor.py",

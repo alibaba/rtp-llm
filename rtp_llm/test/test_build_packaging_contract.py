@@ -1380,6 +1380,12 @@ class BuildPackagingContractTest(TestCase):
         self.assertNotIn("ignore_paths", profiles["py_ut_sm100_arm"])
 
     def test_dsv4_decode_bazel_targets_are_routed_to_sm100_pytest(self):
+        from rtp_llm.test.ci_profile_plugin import _get_profile
+
+        # Check the effective profile, including exclusions added at runtime.
+        # Checking only the TOML entry misses broad CUDA 13 directory ignores.
+        profile = _get_profile(PROJECT_ROOT, "py_ut_sm100_arm")
+        ignored = [PROJECT_ROOT / path for path in profile.get("ignore_paths", [])]
         expected_cases = {
             "decode_attn_metadata_test.py": 14,
             "decode_metadata_in_place_test.py": 4,
@@ -1394,6 +1400,11 @@ class BuildPackagingContractTest(TestCase):
         build_targets = re.findall(r"py_test\(\n(.*?)\n\)", build_source, re.DOTALL)
 
         for filename, expected_count in expected_cases.items():
+            test_path = test_dir / filename
+            self.assertFalse(
+                any(test_path == path or path in test_path.parents for path in ignored),
+                f"Original SM100_ARM test excluded from its effective profile: {filename}",
+            )
             tree = ast.parse((test_dir / filename).read_text())
             gpu_markers = [
                 marker
