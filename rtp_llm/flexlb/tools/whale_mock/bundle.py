@@ -117,8 +117,8 @@ def run():
 
     try:
         env = os.environ.copy()
-        # The control API uses the real Pod address; engine RPCs use unique
-        # loopbacks inside this Pod to preserve master engineIp metric identity.
+        # FetchResponse originates in a different Pod, so its advertised engine
+        # address must be reachable from the frontend. Ports identify engines.
         pod_ip = os.environ.get("POD_IP") or socket.gethostbyname(socket.gethostname())
         if pod_ip.startswith("127.") or pod_ip == "0.0.0.0":
             raise ValueError("bundle requires an advertised Pod IP")
@@ -154,7 +154,7 @@ def run():
                 "--host",
                 pod_ip,
                 "--unique-engine-ips",
-                str(dispatcher != "NON_BATCH").lower(),
+                str(dispatcher != "NON_BATCH" and fetch_output_stream == "0").lower(),
                 "--auto-fetch",
                 str(fetch_output_stream == "0").lower(),
                 "--endpoint-file",

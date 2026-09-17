@@ -1,7 +1,7 @@
 # Whale 寄生 mock 模式
 
 显式设置 `RTP_LLM_MOCK_BUNDLE=1` 后启用。`FETCH_OUTPUT_STREAM=0`（默认）由 mock 引擎自动接续；设为 `1` 时引擎等待 frontend FetchResponse，供全链路输出和成功率指标验证。
-一个 CPU Pod 运行 master 与 mock 两个独立 JVM；mock 内每个逻辑引擎拥有独立端口、KV 池、队列和生命周期。
+一个 CPU Pod 运行 master 与 mock 两个独立 JVM；mock 内每个逻辑引擎拥有独立端口、KV 池、队列和生命周期。Fetch 模式将可跨 Pod 访问的 Pod IP 宣告给 frontend，各引擎由端口区分。
 默认的本地 case 模式和 Whale 单引擎 Pod 模式不变。
 
 `bundle.yaml` 定义 P/D 数量、每引擎容量、线程数、堆大小与观测参数。

@@ -36,10 +36,12 @@ class BundleConfigurationTest(unittest.TestCase):
         self.assertIsNone(performance)
         self.assertEqual(command[command.index("--block-size") + 1], "1024")
         self.assertEqual(command[command.index("--auto-fetch") + 1], "true")
+        self.assertEqual(command[command.index("--unique-engine-ips") + 1], "true")
 
     def test_frontend_fetch_controls_engine_continuation(self):
         command, _ = self.launch_to_process_boundary({"FETCH_OUTPUT_STREAM": "1"})
         self.assertEqual(command[command.index("--auto-fetch") + 1], "false")
+        self.assertEqual(command[command.index("--unique-engine-ips") + 1], "false")
 
     def test_invalid_fetch_mode_cannot_launch(self):
         with self.assertRaisesRegex(ValueError, "FETCH_OUTPUT_STREAM must be 0 or 1"):
