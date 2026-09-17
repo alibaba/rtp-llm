@@ -48,19 +48,26 @@ except ImportError:
         return False
 
 
-try:
-    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
-        CudaFp8GEMMLinear,
-    )
-except ImportError:
-    CudaFp8GEMMLinear = None
+from rtp_llm.device.device_type import DeviceType, get_device_type
 
-try:
-    from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
-        CudaMxfp8Linear,
-    )
-except ImportError:
-    CudaMxfp8Linear = None
+# Importing impl.cuda registers CUDA Linear strategies via package __init__.
+# Keep that off ROCm/PPU so RocmF16Linear* stays the only F16 match.
+CudaFp8GEMMLinear = None
+CudaMxfp8Linear = None
+if get_device_type() == DeviceType.Cuda:
+    try:
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+            CudaFp8GEMMLinear,
+        )
+    except ImportError:
+        CudaFp8GEMMLinear = None
+
+    try:
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
+            CudaMxfp8Linear,
+        )
+    except ImportError:
+        CudaMxfp8Linear = None
 
 try:
     from rtp_llm.models_py.triton_kernels.common.fused_add_rmsnorm_fp8_quant import (
