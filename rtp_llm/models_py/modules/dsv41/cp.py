@@ -80,6 +80,7 @@ from rtp_llm.models_py.modules.dsv41.indexer import (
 )
 from rtp_llm.models_py.modules.dsv41.math import grouped_wo_a
 from rtp_llm.models_py.modules.dsv41.source_indexer import (
+    MAX_SCORE_QUERY_TILE,
     SOURCE_QUERY_TILE,
     index_source_plan,
     prepare_index_source,
@@ -1707,10 +1708,15 @@ def _publish_owner(attention, hidden, context, source_rows=0):
     context.published_sources.add(owner)
 
 
-def _score_queries(attention, hidden, qr, context):
+def _score_queries(attention, hidden, qr, context, query_tile=0):
     layer, source = attention.layer, attention.source
     if source.index_k_owner not in context.published_sources:
         raise ValueError("CP index queries require their published source owner")
+    # The tile size is validated by the caller (forward_cp_attention); the
+    # default here only covers direct test callers of this helper.
+    query_tile = (query_tile or SOURCE_QUERY_TILE) if layer <= 20 else QUERY_TILE
+    if layer <= 20 and not 1 <= query_tile <= MAX_SCORE_QUERY_TILE:
+        raise ValueError("CP score query tile must be between 1 and 8192")
     query = context.unpack_model_rows(
         attention_rope(
             attention.index_wq_b(context.pack_model_rows(qr)).reshape(-1, 32, 128),
@@ -1728,7 +1734,6 @@ def _score_queries(attention, hidden, qr, context):
     slot = RegionSlot(CacheRegion.INDEX_K, source.index_k_owner)
     top, blocks, status = {}, {}, {}
     calls = max_logits = max_packed = 0
-    query_tile = SOURCE_QUERY_TILE if layer <= 20 else QUERY_TILE
     source_tiles = (
         (0,)
         if layer > 20
@@ -1987,6 +1992,15 @@ def forward_cp_attention(attention, hidden, context):
     source_rows = int(os.environ.get("DSV41_CP_SOURCE_ROWS", _SOURCE_ROWS))
     if source_rows < 2 or source_rows % 2:
         raise ValueError("CP source tile must be a positive even row count")
+    # The score query tile is validated here (before the poisoned-on-failure
+    # body) like read_queries/source_rows. The code default is
+    # SOURCE_QUERY_TILE; the env stays only as a diagnostic override. Larger
+    # tiles merge the same per-row selections in fewer scorer calls (the
+    # ordered top-k over one row's positions is tile-count invariant), bounded
+    # above by the pinned DeepSelect row capacity.
+    score_query_tile = int(os.environ.get("DSV41_CP_QUERY_TILE", SOURCE_QUERY_TILE))
+    if not 1 <= score_query_tile <= MAX_SCORE_QUERY_TILE:
+        raise ValueError("CP score query tile must be between 1 and 8192")
     try:
         model_positions = context.pack_model_rows(context.positions)
         qr, query, kv = (
@@ -1998,7 +2012,7 @@ def forward_cp_attention(attention, hidden, context):
         if attention.source.writes_global:
             _publish_owner(attention, hidden, context, source_rows)
         if attention.source.scores_queries:
-            _score_queries(attention, hidden, qr, context)
+            _score_queries(attention, hidden, qr, context, score_query_tile)
         query_rows = context.query_row_indices(0, context.query_rows)
         encoded = encode_compact(_query_rows(kv, query_rows), CacheRegion.SWA)
         encoded.check()

@@ -1083,6 +1083,91 @@ def _publish_status_check(rank, device):
 
 
 @torch.inference_mode()
+def _query_tile_scan(rank, device):
+    # The score query tile merges the same per-row selections in fewer scorer
+    # calls: the published ordered top-k must be tile-count invariant, and
+    # invalid tile env values must fail before the cache can be poisoned.
+    layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
+    identity = ReplayConfig(ReplayMode.FULL).cache_identity("query-tile-scan", layout)
+    frameworks = [_framework_pages(layout, rank, device) for _ in range(3)]
+    models = _models(layout, device)
+    cp = _metadata((1000, 1028), (0, 0), rank, device)
+
+    def run(tile, request_id, framework):
+        env = {} if tile is None else {"DSV41_CP_QUERY_TILE": str(tile)}
+        with patch.dict(os.environ, env):
+            context = begin_cp_request(
+                cp,
+                1,
+                request_id=request_id,
+                identity=identity,
+                layout=layout,
+                max_tokens=2048,
+                **framework,
+            )
+            local = _hidden(context.start, context.end, 1, device).index_select(
+                0, (context.positions - context.start).long()
+            ).contiguous()
+            local.masked_fill_(~context.valid[:, None], torch.nan)
+            selected = {}
+            for layer in _LAYERS:
+                models[layer](local, context)
+                if layer_sources(layer).scores_queries and layer <= 20:
+                    selection = context.selections[layer]
+                    selected[layer] = (
+                        selection.topk.clone(),
+                        None
+                        if selection.candidate_blocks is None
+                        else selection.candidate_blocks.clone(),
+                        selection.status.clone(),
+                        selection.scorer_calls,
+                    )
+            return selected, int(context.valid.sum())
+
+    default_selected, valid_rows = run(None, "query-tile-default", frameworks[0])
+    batched_selected, _ = run(2048, "query-tile-batched", frameworks[1])
+    scorer_calls = {}
+    for layer, (topk, blocks, status, calls) in default_selected.items():
+        other_topk, other_blocks, other_status, other_calls = batched_selected[layer]
+        _equal(other_topk, topk, f"query-tile top-k {layer}")
+        _equal(other_status, status, f"query-tile status {layer}")
+        if blocks is not None:
+            _equal(other_blocks, blocks, "query-tile L20 candidate blocks")
+        # One 2048-row tile covers this fixture's rows in a single scorer call.
+        assert other_calls == (1 if valid_rows else 0), (layer, other_calls)
+        assert 0 < other_calls <= calls, (layer, calls, other_calls)
+        scorer_calls[layer] = [calls, other_calls]
+    rejected = []
+    context = begin_cp_request(
+        cp,
+        1,
+        request_id="query-tile-reject",
+        identity=identity,
+        layout=layout,
+        max_tokens=2048,
+        **frameworks[2],
+    )
+    local = _hidden(context.start, context.end, 1, device).index_select(
+        0, (context.positions - context.start).long()
+    ).contiguous()
+    local.masked_fill_(~context.valid[:, None], torch.nan)
+    for value in ("0", "-1", "8193", "not-an-integer"):
+        with patch.dict(os.environ, {"DSV41_CP_QUERY_TILE": value}):
+            try:
+                models[2](local, context)
+            except ValueError:
+                rejected.append(value)
+            else:
+                raise AssertionError("invalid CP score query tile accepted: " + value)
+        assert not context.completed_layers and not context.cache.poisoned
+    return {
+        "tile_invariant_layers": sorted(default_selected),
+        "scorer_calls": scorer_calls,
+        "rejected_tiles": rejected,
+    }
+
+
+@torch.inference_mode()
 def _run_rank():
     rank, device = int(os.environ["RANK"]), torch.device(
         "cuda", int(os.environ["LOCAL_RANK"])
@@ -1110,6 +1195,7 @@ def _run_rank():
     pair_checkpoints = _pair_checkpoint_restore(rank, device)
     score_status = _score_status_check(rank, device)
     publish_status = _publish_status_check(rank, device)
+    query_tile = _query_tile_scan(rank, device)
     layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
     identity = ReplayConfig(ReplayMode.FULL).cache_identity(
         "cp8-attention-integration", layout
@@ -1320,6 +1406,7 @@ def _run_rank():
         deferred_reads=deferred_reads,
         score_status=score_status,
         publish_status=publish_status,
+        query_tile=query_tile,
         rejected_read_queries=rejected_batches,
     )
     destination = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")

@@ -16,8 +16,14 @@ from rtp_llm.models_py.modules.dsv41.indexer import (
     _integer,
 )
 
-# Includes merging the previous source tile's token/block selections.
-SOURCE_QUERY_TILE = 128
+# Measured optimum (2026-09-17 GB200 same-wheel two-arm A/B, 128 vs 2048 rows:
+# one 2048-row extend scores in a single scorer call; selection is tile-count
+# invariant and the suite reuse pins/known answers held). Includes merging the
+# previous source tile's token/block selections.
+SOURCE_QUERY_TILE = 2048
+# Upper bound for one score_index_source call: the pinned DeepSelect
+# TopkSelectConfig row capacity observed in the production dispatch.
+MAX_SCORE_QUERY_TILE = 8192
 _SOURCE_ROWS = CANDIDATE_BLOCKS * SPARSE_BLOCK
 
 
@@ -124,9 +130,9 @@ def score_index_source(
         or query.shape[1:] != (32, 128)
         or query.dtype != torch.bfloat16
         or not query.is_contiguous()
-        or not 0 < query.shape[0] <= SOURCE_QUERY_TILE
+        or not 0 < query.shape[0] <= MAX_SCORE_QUERY_TILE
     ):
-        raise ValueError("source Q must be contiguous BF16 [1..128,32,128]")
+        raise ValueError("source Q must be contiguous BF16 [1..8192,32,128]")
     count = query.shape[0]
     if (
         weights.shape != (count, 32)
