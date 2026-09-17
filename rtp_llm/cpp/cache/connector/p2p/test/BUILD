@@ -80,6 +80,7 @@ cc_test(
 cc_test(
     name = "p2p_connector_scheduler_test",
     srcs = [
+        "KVCacheManagerP2PReadTest.cc",
         "P2PConnectorSchedulerTest.cc",
         "main.cc",
     ],
@@ -89,6 +90,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache:kv_cache_allocator",
+        "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
