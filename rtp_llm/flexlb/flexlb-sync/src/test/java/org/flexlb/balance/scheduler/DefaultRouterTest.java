@@ -304,7 +304,7 @@ class DefaultRouterTest {
         var selectedDecode = selection(RoleType.DECODE, 701L, "10.0.0.2", 8080, "g1");
         var decode = (DecodeEndpoint) selectedDecode.endpoint();
         var reservation = new DecodeEndpoint.ReservationHandle(1L, 701L, 1L);
-        when(decode.reserve(any(), anyLong(), anyLong(), anyLong(), anyInt()))
+        when(decode.reserve(any(), anyLong(), anyLong(), anyLong(), anyInt(), eq(frozen.capacity())))
                 .thenReturn(reservation);
         when(decode.acquireDispatchPermit(reservation, frozen.capacity())).thenReturn(
                 new DecodeEndpoint.EngineDispatchPermitAcquisition(
@@ -333,7 +333,7 @@ class DefaultRouterTest {
             assertSame(reservation, item.decodeBinding().reservation());
             assertSame(decode, item.decodeBinding().endpoint());
             assertEquals(hardKv, item.seqLen());
-            assertEquals(DecodeMode.WAIT_AT_DISPATCH, frozen.mode());
+            assertEquals(DecodeMode.WAIT_AT_PLACEMENT, frozen.mode());
 
             var delivery = PrefillAdmissionResources.prepareMember(item);
             assertFalse(delivery.accepted());
@@ -341,8 +341,8 @@ class DefaultRouterTest {
             assertFalse(delivery.boundary().availability().isAvailable());
             verify(decode).shouldRetryDispatch(701L, frozen.capacity());
             verify(decode).acquireDispatchPermit(reservation, frozen.capacity());
-            verify(decode).reserve(any(), eq(701L), eq(hardKv), eq(expectedKv), eq(73));
-            verify(decode, never()).reserve(any(), anyLong(), anyLong(), anyLong(), anyInt(), any());
+            verify(decode).reserve(any(), eq(701L), eq(hardKv), eq(expectedKv), eq(73), eq(frozen.capacity()));
+            verify(decode, never()).reserve(any(), anyLong(), anyLong(), anyLong(), anyInt());
         }
         verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
     }

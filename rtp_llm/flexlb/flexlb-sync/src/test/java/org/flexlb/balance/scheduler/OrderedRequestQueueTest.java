@@ -20,6 +20,26 @@ import static org.mockito.Mockito.mock;
 class OrderedRequestQueueTest {
 
     @Test
+    void withdrawnRouteReturnsAheadOfNewerSamePriorityRequests() {
+        for (boolean priority : new boolean[]{false, true}) {
+            OrderedRequestQueue queue = new OrderedRequestQueue(priority);
+            GlobalQueueEntry first = entry(50);
+            GlobalQueueEntry second = entry(50);
+            GlobalQueueEntry third = entry(50);
+            queue.add(first);
+            queue.add(second);
+            queue.add(third);
+            long sequence = second.sequence;
+            queue.scanForPlanningCandidates(3, 3, candidate -> true);
+            queue.remove(second);
+            queue.restore(second);
+            assertEquals(sequence, second.sequence);
+            assertEquals(List.of(second, third), queue.scanForPlanningCandidates(3, 3, candidate -> true));
+            assertEquals(List.of(first, second, third), queue.drain());
+        }
+    }
+
+    @Test
     void fifoUnlinksCompletedSuffixWithoutScanningFromHead() {
         OrderedRequestQueue queue = new OrderedRequestQueue(false);
         GlobalQueueEntry first = entry(50);

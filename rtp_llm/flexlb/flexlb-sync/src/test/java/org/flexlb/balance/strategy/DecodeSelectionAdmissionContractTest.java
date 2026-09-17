@@ -84,7 +84,7 @@ class DecodeSelectionAdmissionContractTest {
 
     @ParameterizedTest(name = "{0}: {1}")
     @MethodSource("dispatchAdmissionCases")
-    void dispatchAdmissionKeepsQueuedEndpointsEligibleWithoutTakingCapacity(
+    void selectionDoesNotReserveAndUsesTheModesCapacityScope(
             Policy policy, CapacityDimension dimension) {
         try (Fixture fixture = new Fixture(policy, dimension)) {
             fixture.assertPlacementAndDispatchDisagree();
@@ -101,8 +101,8 @@ class DecodeSelectionAdmissionContractTest {
                 }
             }
 
-            assertEquals(Map.of(QUEUED_IP, 3, FREE_IP, 3), selectedCounts,
-                    "DIRECT and queues without preemption must evaluate dispatch ownership, excluding queued work");
+            assertEquals(policy == Policy.DIRECT ? Map.of(QUEUED_IP, 3, FREE_IP, 3) : Map.of(FREE_IP, 6), selectedCounts,
+                    "QUEUE includes queued reservations; DIRECT retains dispatch admission");
         }
     }
 

@@ -127,6 +127,8 @@ public final class RequestSlot {
 
     private boolean admissionOpen = true;
     private AdmissionHandle admissionHandle;
+    /** Pins a queued route while Decode capacity is transferred to a higher priority owner. */
+    private ScheduledRequest withdrawingRoute;
     private CancelReason pendingAdmissionCancelReason;
     private boolean pendingAdmissionInactivityExpired;
     private DeferredTerminal admissionPendingTerminal;
@@ -309,6 +311,9 @@ public final class RequestSlot {
     /** Verify the aggregate at every mutation boundary. */
     private void assertInvariantLocked() {
         requireSlotLock("request slot invariant");
+        if (withdrawingRoute != null && admissionHandle == null) {
+            throw new IllegalStateException("route withdrawal has no admission handle for " + requestId);
+        }
         if (admissionHandle != null && preemption != null) {
             throw new IllegalStateException(
                     "admission handle overlaps preemption for " + requestId);
@@ -360,6 +365,35 @@ public final class RequestSlot {
         admissionHandle = exact;
         assertInvariantLocked();
         return exact;
+    }
+
+    synchronized AdmissionHandle tryBeginRouteWithdrawal(
+            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+        if (item == null || item.decodeEp() != endpoint
+                || !Objects.equals(item.decodeReservation(), reservation)
+                || !ownsPreparedDeliveryLocked(item) || admissionHandle != null
+                || item.requestExpired(System.currentTimeMillis())) {
+            return null;
+        }
+        admissionHandle = new AdmissionHandle(this);
+        withdrawingRoute = item;
+        return admissionHandle;
+    }
+
+    /** Called only after the exact Decode reservation has been atomically replaced. */
+    void detachWithdrawnRoute(AdmissionHandle claim, ScheduledRequest exact) {
+        // Never acquire the Prefill queue lock under the request monitor.
+        if (!exact.prefillEp().removeQueued(exact, "DECODE_RESERVATION_YIELDED")) {
+            throw new IllegalStateException("withdrawn route is no longer queued: " + requestId);
+        }
+        synchronized (this) {
+            if (admissionHandle != claim || withdrawingRoute != exact || item != exact) {
+                throw new IllegalStateException("route withdrawal lost its owner: " + requestId);
+            }
+            item = null;
+            detail = "queued after Decode reservation withdrawal";
+            updatedAtMs = System.currentTimeMillis();
+        }
     }
 
     PlacementResult.Status commitRoute(ScheduledRequest exact, BooleanSupplier publication) {
@@ -425,6 +459,7 @@ public final class RequestSlot {
             synchronized (this) {
                 if (admissionHandle == exact) {
                     admissionHandle = null;
+                    withdrawingRoute = null;
                     effect = settleAdmissionLocked(failureResponse);
                 }
                 cleanupPending = cleanupProgress != null;
@@ -566,7 +601,7 @@ public final class RequestSlot {
     /** Queue publication makes an exact item claimable even while admission still pins its resources. */
     private boolean ownsPreparedDeliveryLocked(ScheduledRequest exact) {
         requireSlotLock("delivery eligibility");
-        return ownsActiveItem(exact) && isOpen() && preemption == null
+        return ownsActiveItem(exact) && isOpen() && preemption == null && withdrawingRoute == null
                 && state == RequestState.Phase.QUEUED && deliveryClaimKind == DeliveryClaimKind.NONE;
     }
 
