@@ -87,6 +87,12 @@ class MockRemoteDecodeEngineTest {
             assertEquals(1024, decode.getOccupiedKvTokens());
             assertEquals(0, decode.getActiveDecodeCount());
             var metrics = decode.whaleMetrics();
+            assertEquals(0, metrics.get("rtp_llm_running_stream_size").intValue());
+            assertEquals(0, metrics.get("rtp_llm_wait_stream_size").intValue(),
+                    "ALLOCATE has not enqueued a Decode scheduler stream");
+            assertEquals(0, metrics.get("rtp_llm_loading_cache_stream_size").intValue(),
+                    "the pre-GENERATE lease is not the scheduler cache-load queue");
+            assertEquals(1, metrics.get("mock_decode_reserved_requests").intValue());
             assertEquals(7, metrics.get("rtp_llm_kv_cache_available_blocks").intValue());
             assertEquals(12.5, metrics.get("rtp_llm_kv_cache_used_ratio").doubleValue());
             assertEquals(8, metrics.get("rtp_llm_kv_cache_pool_total_blocks").intValue());

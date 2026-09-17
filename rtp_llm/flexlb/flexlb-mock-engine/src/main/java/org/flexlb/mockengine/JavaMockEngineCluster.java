@@ -1837,8 +1837,7 @@ public final class JavaMockEngineCluster {
                     // BOTH roles: prefill queued requests (waitingPrefillRequests)
                     // and decode queued requests (decodePendingQueue size). Previously
                     // decode always reported 0. Reuses the existing proto field.
-                    .setWaitingQueryLen(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
-                            ? waitingPrefillRequests.get() : decodePendingQueueSize())
+                    .setWaitingQueryLen(schedulerWaitingStreamSize())
                     .setRunningQueryLen((int) runningCount)
                     .setAvailableKvCache(availableKvTokens())
                     .setTotalKvCache(totalKvTokens)
@@ -4937,6 +4936,12 @@ public final class JavaMockEngineCluster {
             }
         }
 
+        /** Scheduler WAITING streams only; a D ALLOCATE waiting for P/Fetch is not enqueued yet. */
+        private int schedulerWaitingStreamSize() {
+            return roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
+                    ? decodePendingQueueSize() : waitingPrefillRequests.get();
+        }
+
         /** Snapshot size of the prefill pending queue in BATCHES (cap accounting unit). */
         private int prefillPendingQueueSize() {
             synchronized (prefillQueueLock) {
@@ -5949,6 +5954,7 @@ public final class JavaMockEngineCluster {
                     Map.entry("mock_prefill_waiting_requests", waitingPrefillRequests.get()),
                     Map.entry("mock_prefill_running_requests", activePrefillRequests.get()),
                     Map.entry("mock_decode_waiting_requests", decodePendingQueueSize() + decodeWaitingForKv.size()),
+                    Map.entry("mock_decode_reserved_requests", decodeWaitingForKv.size()),
                     Map.entry("mock_decode_running_requests", activeDecodeRequests.get()),
                     Map.entry("mock_completed_requests_total", completedCount.get()),
                     Map.entry("mock_cancelled_requests_total", cancelledCount.get()),
@@ -5956,9 +5962,11 @@ public final class JavaMockEngineCluster {
                     Map.entry("mock_cache_key_hits_total", cacheKeyHits.sum()),
                     Map.entry("mock_cache_keys_requested_total", cacheKeysRequested.sum()),
                     Map.entry("rtp_llm_running_stream_size", activePrefillRequests.get() + activeDecodeRequests.get()),
-                    Map.entry("rtp_llm_wait_stream_size", waitingPrefillRequests.get() + decodePendingQueueSize()),
-                    Map.entry("rtp_llm_remote_running_stream_size", decodeWaitingForKv.size()),
-                    Map.entry("rtp_llm_loading_cache_stream_size", decodeWaitingForKv.size()),
+                    Map.entry("rtp_llm_wait_stream_size", schedulerWaitingStreamSize()),
+                    // Real scheduler metrics exclude the pre-GENERATE D lease. The
+                    // mock LOAD exchange is immediate, not a scheduler cache-load queue.
+                    Map.entry("rtp_llm_remote_running_stream_size", 0),
+                    Map.entry("rtp_llm_loading_cache_stream_size", 0),
                     Map.entry("rtp_llm_context_batch_size", activePrefillRequests.get()),
                     Map.entry("rtp_llm_generate_batch_size", activeDecodeRequests.get()),
                     Map.entry("rtp_llm_kv_cache_item_num", cache.lruKeyBlocks()),
@@ -6480,8 +6488,7 @@ public final class JavaMockEngineCluster {
             // For decode engines, report the decode pending queue depth (consistent
             // with getWorkerStatus waitingQueryLen) instead of waitingPrefillRequests
             // which is always 0 for decode engines.
-            snap.put("waiting", roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
-                    ? decodePendingQueueSize() : waitingPrefillRequests.get());
+            snap.put("waiting", schedulerWaitingStreamSize());
             // Queued prefill batches (same unit as prefill.max_waiting_batches, for
             // cap observation). Requests-vs-batches: "waiting" above counts requests.
             if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
