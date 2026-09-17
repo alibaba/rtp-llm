@@ -126,6 +126,13 @@ async def _wait_for_rpc_termination(
     return None
 
 
+async def _read_rpc_response(response_stream: Any) -> Any:
+    try:
+        return await response_stream.__anext__()
+    except StopAsyncIteration:
+        return None
+
+
 async def _settle_client_span_after_rpc(  # noqa: C901 - request-local lifecycle state machine
     response_iterator: Any,
     client_span: Any,
@@ -133,6 +140,7 @@ async def _settle_client_span_after_rpc(  # noqa: C901 - request-local lifecycle
     abandoned_event: "asyncio.Event",
     active_deadline: Optional[float] = None,
     include_all_sequences: bool = True,
+    terminal_read_task: Optional["asyncio.Task[Any]"] = None,
 ) -> Any:
     """Settle a CLIENT span without letting observation own an active call.
 
@@ -245,7 +253,8 @@ async def _settle_client_span_after_rpc(  # noqa: C901 - request-local lifecycle
         raise
     finally:
         pending_tasks = []
-        for task in (status_task, abandoned_task):
+        owned_read = terminal_read_task if abandoned_event.is_set() else None
+        for task in (status_task, abandoned_task, owned_read):
             if task is not None and not task.done():
                 task.cancel()
                 pending_tasks.append(task)
@@ -1036,6 +1045,7 @@ class ModelRpcClient(object):
         )
         stream_done = False
         terminal_seen = False
+        terminal_read_task = None
         client_settlement_task = None
         client_settlement_abandoned = None
         rpc_deadline = None
@@ -1056,8 +1066,9 @@ class ModelRpcClient(object):
         client_span, trace_metadata = start_client_span(
             client_span_name, target_address
         )
-        if client_span is not None:
+        if client_span is not None or use_fetch_response:
             client_settlement_abandoned = asyncio.Event()
+        if client_span is not None:
             # Bailian Unitrace index key (see rtp_llm/telemetry/attributes.py)
             client_span.set_attribute(trace_attrs.REQUEST_ID, str(input_py.request_id))
         last_output = None
@@ -1086,12 +1097,29 @@ class ModelRpcClient(object):
             else:
                 response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
-            async for response in response_iterator.__aiter__():
+            response_stream = response_iterator.__aiter__()
+            while True:
+                if terminal_read_task is None:
+                    response = await _read_rpc_response(response_stream)
+                else:
+                    response = await asyncio.shield(terminal_read_task)
+                    terminal_read_task = None
+                if response is None:
+                    break
                 output_py = trans_output(input_py, response, stream_state)
                 last_output = output_py
                 if use_fetch_response and _is_finished_response(response):
                     terminal_seen = True
-                if _engine_reported_finished(output_py) and client_span is not None:
+                if terminal_seen:
+                    # Own the EOF read before publishing the terminal frame. An
+                    # upstream close must not cancel grpc.aio while it reads trailers.
+                    terminal_read_task = asyncio.create_task(
+                        _read_rpc_response(response_stream)
+                    )
+                    terminal_read_task.add_done_callback(_consume_settlement_task)
+                if _engine_reported_finished(output_py) and (
+                    client_span is not None or terminal_seen
+                ):
                     # The finished application frame is not the gRPC EOF. If it
                     # escapes first, an upstream renderer can close this generator
                     # while the server is still settling the RPC. The application
@@ -1106,6 +1134,7 @@ class ModelRpcClient(object):
                                 client_settlement_abandoned,
                                 active_deadline=rpc_deadline,
                                 include_all_sequences=include_all_sequences,
+                                terminal_read_task=terminal_read_task,
                             )
                         )
                         client_settlement_task.add_done_callback(
@@ -1200,14 +1229,24 @@ class ModelRpcClient(object):
             )
             raise e
         finally:
+            if (
+                client_settlement_task is not None
+                and not stream_done
+                and client_settlement_abandoned is not None
+            ):
+                client_settlement_abandoned.set()
+                # Settlement may have observed trailers before the consumer
+                # left. In that case its finally block could not yet reclaim
+                # the detached read; the generator remains its last owner.
+                if (
+                    client_settlement_task.done()
+                    and terminal_read_task is not None
+                    and not terminal_read_task.done()
+                ):
+                    terminal_read_task.cancel()
+                    await asyncio.gather(terminal_read_task, return_exceptions=True)
             try:
                 if client_span is not None:
-                    if (
-                        client_settlement_task is not None
-                        and not stream_done
-                        and client_settlement_abandoned is not None
-                    ):
-                        client_settlement_abandoned.set()
                     # Normal completion has a detached settlement task. Do not
                     # await it here, otherwise aclose() would reintroduce the
                     # finished-frame blocking regression.

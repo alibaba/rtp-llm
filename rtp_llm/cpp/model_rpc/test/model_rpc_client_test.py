@@ -837,7 +837,150 @@ class _RealChannelPool:
         return self.channel
 
 
+class _ControlledFetchServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):
+    def __init__(self, finished, status):
+        self.finished = finished
+        self.status = status
+        self.release = asyncio.Event()
+
+    async def FetchResponse(self, request, context):
+        response = _MetadataCaptureServicer._response()
+        response.flatten_output.finished[0] = self.finished
+        yield response
+        await self.release.wait()
+        if self.status != StatusCode.OK:
+            await context.abort(self.status, "injected terminal RPC error")
+
+
 class ModelRpcClientGrpcMetadataTest(TestCase):
+    def _check_fetch_response_teardown(
+        self, status, *, finished=True, close_at_frame=False, trace_enabled=True
+    ):
+        async def run():
+            server = grpc.aio.server()
+            servicer = _ControlledFetchServicer(finished, status)
+            model_rpc_service_pb2_grpc.add_RpcServiceServicer_to_server(
+                servicer, server
+            )
+            port = server.add_insecure_port("127.0.0.1:0")
+            await server.start()
+            channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+            client = ModelRpcClient([], {}, max_rpc_timeout_ms=5000)
+            client._channel_pool = _RealChannelPool(channel)
+            spans = [_FakeClientSpan(), _FakeClientSpan()]
+            received = [asyncio.Event(), asyncio.Event()]
+            calls = []
+            real_stub = model_rpc_service_pb2_grpc.RpcServiceStub(channel)
+
+            def fetch(request, **kwargs):
+                call = real_stub.FetchResponse(request, **kwargs)
+                calls.append(call)
+                return call
+
+            async def consume(index):
+                gen = client.enqueue(
+                    GenerateInput(
+                        token_ids=torch.tensor([1, 2, 3]),
+                        generate_config=GenerateConfig(
+                            timeout_ms=5000,
+                            role_addrs=[_prefill_role_addr("127.0.0.1", port)],
+                        ),
+                        request_id=960 + index,
+                        mm_inputs=[],
+                        enqueued_by_master=True,
+                    )
+                )
+                try:
+                    response = await gen.__anext__()
+                    self.assertEqual(response.generate_outputs[0].finished, finished)
+                    received[index].set()
+                    if not close_at_frame:
+                        await gen.__anext__()
+                finally:
+                    await gen.aclose()
+
+            tasks = []
+            try:
+                with patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub"
+                ) as stub, patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+                    side_effect=[
+                        (span if trace_enabled else None, []) for span in spans
+                    ],
+                ):
+                    stub.return_value.FetchResponse.side_effect = fetch
+                    tasks = [asyncio.create_task(consume(i)) for i in range(2)]
+                    await asyncio.wait_for(
+                        asyncio.gather(*(event.wait() for event in received)), 5
+                    )
+                    # Both consumers are now reading EOF, or have closed at yield.
+                    await asyncio.sleep(0)
+                    if not close_at_frame:
+                        for task in tasks:
+                            task.cancel()
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for result in results:
+                        if close_at_frame:
+                            self.assertIsNone(result)
+                        else:
+                            self.assertIsInstance(result, asyncio.CancelledError)
+                    servicer.release.set()
+                    expected = status if finished else StatusCode.CANCELLED
+                    for call in calls:
+                        self.assertEqual(
+                            await asyncio.wait_for(call.code(), 5), expected
+                        )
+                    if trace_enabled:
+                        for index, span in enumerate(spans):
+                            await asyncio.wait_for(span.finished_event.wait(), 5)
+                            self.assertEqual(
+                                span.attributes["rpc.response.status_code"],
+                                expected.name,
+                            )
+                            self.assertEqual(
+                                span.status,
+                                "OK" if expected == StatusCode.OK else "ERROR",
+                            )
+                            self.assertEqual(
+                                span.attributes["request_id"], str(960 + index)
+                            )
+                            self.assertEqual(span.end_count, 1)
+            finally:
+                servicer.release.set()
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await channel.close()
+                await server.stop(None)
+
+        asyncio.run(run())
+
+    def test_fetch_response_terminal_read_survives_consumer_teardown(self):
+        for trace_enabled in (False, True):
+            for close_at_frame in (False, True):
+                with self.subTest(
+                    trace_enabled=trace_enabled, close_at_frame=close_at_frame
+                ):
+                    self._check_fetch_response_teardown(
+                        StatusCode.OK,
+                        trace_enabled=trace_enabled,
+                        close_at_frame=close_at_frame,
+                    )
+
+    def test_fetch_response_terminal_read_preserves_late_rpc_errors(self):
+        for status in (
+            StatusCode.CANCELLED,
+            StatusCode.DEADLINE_EXCEEDED,
+            StatusCode.INTERNAL,
+        ):
+            with self.subTest(status=status):
+                self._check_fetch_response_teardown(status)
+
+    def test_fetch_response_cancellation_before_finished_still_cancels_rpc(self):
+        self._check_fetch_response_teardown(StatusCode.OK, finished=False)
+
     def test_trans_input_carries_distinct_w3c_context_per_request(self):
         self.addCleanup(tracing.reset_telemetry_for_test)
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -1637,6 +1780,87 @@ class ClientSpanSettlementTest(TestCase):
             asyncio.run(run(client, span))
             client = self._build_client(None, total=1, terminal_never=True)
             asyncio.run(run(client, None))
+
+    def test_close_after_settlement_reclaims_terminal_read(self):
+        from rtp_llm.cpp.model_rpc.model_rpc_client import _read_rpc_response
+
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=1)
+
+        async def run():
+            reading = asyncio.Event()
+            closed = asyncio.Event()
+            calls = 0
+
+            async def controlled_read(stream):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return await _read_rpc_response(stream)
+                reading.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    closed.set()
+
+            inp = self._make_input()
+            inp.enqueued_by_master = True
+            inp.generate_config.role_addrs = [_prefill_role_addr("worker", 9000)]
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client._read_rpc_response",
+                controlled_read,
+            ):
+                gen = client.enqueue(inp)
+                await gen.__anext__()
+                await asyncio.wait_for(reading.wait(), 5)
+                await asyncio.wait_for(span.finished_event.wait(), 5)
+                # Let settlement finish its own finally block before closing.
+                await asyncio.sleep(0)
+                await gen.aclose()
+                self.assertTrue(closed.is_set())
+                self.assertFalse(client._test_stub.iterator.cancelled)
+                self.assertEqual(span.end_count, 1)
+                self.assertEqual(span.status, "OK")
+
+        asyncio.run(run())
+
+    def test_abandoned_settlement_reclaims_blocked_terminal_read(self):
+        async def run():
+            for resolve_first in (False, True):
+                with self.subTest(resolve_first=resolve_first):
+                    closed = asyncio.Event()
+                    started = asyncio.Event()
+
+                    async def read():
+                        started.set()
+                        try:
+                            await asyncio.Event().wait()
+                        finally:
+                            closed.set()
+
+                    reader = asyncio.create_task(read())
+                    await started.wait()
+                    stub = _SpanAwareStub(total=0, terminal_never=True)
+                    call = stub.GenerateStreamCall(None)
+                    abandoned = asyncio.Event()
+                    span = _FakeClientSpan()
+                    if resolve_first:
+                        call._terminal_status = StatusCode.OK
+                        call._terminal_ready.set()
+                    abandoned.set()
+                    with patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
+                        0.01,
+                    ):
+                        await _settle_client_span_after_rpc(
+                            call, span, None, abandoned, terminal_read_task=reader
+                        )
+                    self.assertTrue(reader.done())
+                    self.assertTrue(closed.is_set())
+                    self.assertEqual(span.end_count, 1)
+                    self.assertEqual(span.status, "OK" if resolve_first else "ERROR")
+
+        asyncio.run(run())
 
     def test_settlement_task_cancellation_respects_transport_ownership(self):
         async def run(abandoned):
