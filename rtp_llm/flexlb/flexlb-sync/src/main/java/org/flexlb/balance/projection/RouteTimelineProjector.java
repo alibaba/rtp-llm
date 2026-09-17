@@ -203,6 +203,7 @@ final class RouteTimelineProjector {
                         "PREFILL_KV_CAPACITY");
             }
 
+            int probePosition = ordered.probePosition();
             final GroupPlanner.Plan<GroupPlanner.Item> plan;
             final RouteProjection.GroupPlanning planning;
             try {
@@ -212,15 +213,8 @@ final class RouteTimelineProjector {
                         GroupPlanner.itemAccess(),
                         queue.constraints(),
                         decisionNowMs,
-                        items -> {
-                            int projectedProbeIndex =
-                                    identityIndexOf(items, probe);
-                            int requiredThroughIndex = projectedProbeIndex >= 0
-                                    ? projectedProbeIndex
-                                    : items.size() - 1;
-                            return planning.durationMs(
-                                    items, requiredThroughIndex);
-                        });
+                        items -> planning.durationMs(
+                                items, Math.min(probePosition, items.size() - 1)));
             } catch (PredictionFailure predictionFailure) {
                 return unavailable(
                         predictionFailure.detail("BATCH_PREDICTION_FAILED"));
@@ -244,14 +238,13 @@ final class RouteTimelineProjector {
             long readyInMs = elapsedFromNow(projectionAtMs, decisionNowMs);
             long startMs = Math.max(cursorMs, readyInMs);
 
-            int probeIndex = identityIndexOf(plan.items(), probe);
             try {
                 RouteProjection.GroupService service =
                         deliveryProjection.service(plan, predictions, planning);
-                if (probeIndex >= 0) {
+                if (probePosition < plan.items().size()) {
                     return candidate(
                             RouteProjection.Candidate.State.MODELED,
-                            saturatedAdd(startMs, service.completionOffsetMs(probeIndex)),
+                            saturatedAdd(startMs, service.completionOffsetMs(probePosition)),
                             incomingPrefillMs,
                             initialHeadDisposition,
                             "SERIAL_FROZEN_QUEUE");
@@ -321,17 +314,6 @@ final class RouteTimelineProjector {
             boolean initialHeadExpired) {
     }
 
-    private static int identityIndexOf(
-            List<GroupPlanner.Item> items,
-            GroupPlanner.Item target) {
-        for (int i = 0; i < items.size(); i++) {
-            if (items.get(i) == target) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
     /**
      * Ordered snapshot plus probe. Prefix consumption advances an index; expiry
      * clears individual slots. The heap visits each deadline once, including
@@ -344,6 +326,8 @@ final class RouteTimelineProjector {
         private final int probeIndex;
         private final int initialHeadIndex;
         private int headIndex;
+        // Number of live, unconsumed items before the probe; holes do not count.
+        private int itemsBeforeProbe;
 
         private ProjectedQueue(
                 GroupPlanner.Item[] itemsInQueueOrder,
@@ -357,6 +341,7 @@ final class RouteTimelineProjector {
                 expiryIndexes.add(index);
             }
             this.probeIndex = probeIndex;
+            this.itemsBeforeProbe = probeIndex;
             this.initialHeadIndex = initialHeadIndex;
         }
 
@@ -384,6 +369,10 @@ final class RouteTimelineProjector {
                 itemsInQueueOrder[index] = probe;
             }
             return new ProjectedQueue(itemsInQueueOrder, probeIndex, initialHeadIndex);
+        }
+
+        private int probePosition() {
+            return itemsBeforeProbe;
         }
 
         private boolean isEmpty() {
@@ -440,6 +429,9 @@ final class RouteTimelineProjector {
                     throw new IllegalStateException(
                             "planner selected beyond the projected queue prefix");
                 }
+                if (headIndex < probeIndex) {
+                    itemsBeforeProbe--;
+                }
                 // Keep consumed items readable while their indexes remain in the expiry heap.
                 headIndex++;
                 while (headIndex < itemsInQueueOrder.length && itemsInQueueOrder[headIndex] == null) {
@@ -460,6 +452,9 @@ final class RouteTimelineProjector {
                 expiryIndexes.remove();
                 if (expiredIndex < headIndex) {
                     continue;
+                }
+                if (expiredIndex < probeIndex) {
+                    itemsBeforeProbe--;
                 }
                 itemsInQueueOrder[expiredIndex] = null;
                 if (expiredIndex == probeIndex) {
