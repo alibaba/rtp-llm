@@ -518,7 +518,17 @@ class OpenaiEndpoint(object):
                         all_choices[i].logprobs = response.choices[i].logprobs
             usage = response.usage or usage
             aux_info = response.aux_info or aux_info
-            extra_outputs = response.extra_outputs or extra_outputs
+            if (
+                extra_outputs is not None
+                and response.extra_outputs is not None
+                and response.extra_outputs.custom_output is not None
+            ):
+                # Persistent scores must not erase prefill-only outputs.
+                extra_outputs = extra_outputs.model_copy(
+                    update=response.extra_outputs.model_dump(exclude_none=True)
+                )
+            else:
+                extra_outputs = response.extra_outputs or extra_outputs
 
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")

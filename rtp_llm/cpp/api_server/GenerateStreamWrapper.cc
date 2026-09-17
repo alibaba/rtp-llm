@@ -3,6 +3,24 @@
 #include "rtp_llm/cpp/api_server/Exception.h"
 
 namespace rtp_llm {
+namespace {
+
+template<typename T>
+Any customOutputToJson(const torch::Tensor& tensor) {
+    const auto* data = tensor.data_ptr<T>();
+    if (tensor.dim() == 1) {
+        return ToJson(std::vector<T>(data, data + tensor.numel()));
+    }
+    JsonArray rows;
+    rows.reserve(tensor.size(0));
+    const auto width = tensor.size(1);
+    for (int64_t row = 0; row < tensor.size(0); ++row) {
+        rows.push_back(ToJson(std::vector<T>(data + row * width, data + (row + 1) * width)));
+    }
+    return rows;
+}
+
+}  // namespace
 
 GenerateStreamWrapper::GenerateStreamWrapper(const std::shared_ptr<ApiServerMetricReporter>& metric_reporter,
                                              const std::shared_ptr<TokenProcessor>&          token_processor):
@@ -108,11 +126,25 @@ MultiSeqsResponse GenerateStreamWrapper::formatResponse(const std::vector<std::s
     if (generate_config->return_input_ids)
         res.input_ids.emplace();
 
-    for (const auto& generate_output : generate_outputs.generate_outputs) {
+    JsonArray custom_outputs;
+
+    for (size_t i = 0; i < generate_outputs.generate_outputs.size(); ++i) {
+        const auto& generate_output = generate_outputs.generate_outputs[i];
         auto logits        = generate_output.logits;
         auto loss          = generate_output.loss;
         auto hidden_states = generate_output.hidden_states;
         auto output_ids    = generate_output.output_ids;
+
+        if (generate_output.custom_output.has_value()) {
+            if (custom_outputs.empty()) {
+                custom_outputs.resize(generate_outputs.generate_outputs.size());
+            }
+            const auto& custom = generate_output.custom_output.value();
+            auto        tensor = custom.to(torch::kCPU).contiguous();
+            custom_outputs[i]  = tensor.scalar_type() == torch::kInt32 ?
+                                     customOutputToJson<int32_t>(tensor) :
+                                     customOutputToJson<float>(tensor.to(torch::kFloat32));
+        }
 
         if (generate_config->return_logits && logits.has_value()) {
             auto tensor = logits.value().to(torch::kFloat).contiguous();
@@ -142,6 +174,10 @@ MultiSeqsResponse GenerateStreamWrapper::formatResponse(const std::vector<std::s
         }
     }
 
+    if (!custom_outputs.empty()) {
+        // Match Python's explicit multi-sequence result shape, including num_return_sequences == 1.
+        res.custom_output = generate_config->num_return_sequences > 0 ? Any(custom_outputs) : custom_outputs.front();
+    }
     return res;
 }
 

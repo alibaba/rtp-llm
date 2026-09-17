@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Union
 
 import torch
 
@@ -8,6 +8,8 @@ from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.ops import MultimodalInput
 
 GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED = "not_requested"
+
+CustomOutput = Union[List[Union[float, int]], List[List[Union[float, int]]]]
 
 
 class EmbeddingOutput:
@@ -147,6 +149,8 @@ class GenerateOutput:
     logits: Optional[torch.Tensor] = None
     all_probs: Optional[torch.Tensor] = None
     prompt_logits: Optional[Dict[str, Any]] = None
+    # output of the deployment-registered post-layers CustomHandler
+    custom_output: Optional[torch.Tensor] = None
 
     class Config:
         arbitrary_types_allowed = True
