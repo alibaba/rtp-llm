@@ -1,13 +1,12 @@
 {
     "_comment": [
-        "Regenerated from the smoke_actual artifact of run 65789165, case",
-        "next_moe_nvfp4_cudagraph_tp2_sm100. Goldens were matched to files by case name, so",
-        "this file and its DP2 sibling (q_r_35b_nvfp4_py_dp2_ll_cg_sm100_arm.json) are not",
-        "interchanged even though their expected text differs.",
-        "Unlike the DP2 sibling, this configuration is batch-invariant: TP2 has no DeepEP",
-        "dispatch, so batch 1 and batch 3 take the same expert routing and all four slots",
-        "expect identical output. See the DP2 file's _comment for why that one legitimately",
-        "diverges across batch sizes."
+        "Regenerated from the smoke_actual artifacts of runs 71439644 and 71441736, case",
+        "next_moe_nvfp4_cudagraph_tp2_sm100. Both runs produced the same responses after",
+        "SSM_STATE_DTYPE defaulted to auto and preserved this checkpoint's",
+        "mamba_ssm_dtype=float32 instead of overriding it with BF16.",
+        "This TP2 configuration remains batch-invariant: batch 1 and batch 3 all produce",
+        "the same completion. The DP2 sibling uses DeepEP low-latency expert dispatch and",
+        "therefore retains a separate, configuration-specific golden."
     ],
     "model_type": "qwen35_moe",
     "model_path": "/mnt/nas1/smoke/Qwen3.5-35B-A3B-NVFP4-reshard",
@@ -23,7 +22,7 @@
                 }
             },
             "result": {
-                "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language",
+                "response": "\n\n<think>\nOkay, the user asked me to introduce myself. Let me start by recalling my identity",
                 "finished": true
             }
         },
@@ -42,13 +41,13 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
+                        "response": "\n\n<think>\nOkay, the user asked me to introduce myself. Let me start by recalling my identity"
                     },
                     {
-                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
+                        "response": "\n\n<think>\nOkay, the user asked me to introduce myself. Let me start by recalling my identity"
                     },
                     {
-                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
+                        "response": "\n\n<think>\nOkay, the user asked me to introduce myself. Let me start by recalling my identity"
                     }
                 ]
             }
