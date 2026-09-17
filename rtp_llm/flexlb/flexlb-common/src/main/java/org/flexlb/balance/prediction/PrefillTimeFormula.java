@@ -93,6 +93,11 @@ public final class PrefillTimeFormula {
                 formula, VAR_INDEX_MAP, BATCH_SCOPED_VARIABLES, true));
     }
 
+    /** Fresh accumulation state for one nonempty append-only batch; null if compilation falls back. */
+    public ArithmeticFormula.Aggregation newAggregation() {
+        return formula.newAggregation();
+    }
+
     /**
      * Evaluate the formula with aggregate-aware per-request bindings.
      * {@code sum(expr)} evaluates {@code expr} for each array in {@code itemVars}.

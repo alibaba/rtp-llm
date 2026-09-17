@@ -17,14 +17,17 @@ public final class ArithmeticFormula {
 
     // Bounded reuse also avoids one generated class per equal-model endpoint.
     private static final int MAX_COMPILED_FORMULAS = 128;
-    private static final Map<Node, Executable> COMPILED = new LinkedHashMap<>(MAX_COMPILED_FORMULAS, 0.75f, true);
+    private static final Map<Node, Compiled> COMPILED = new LinkedHashMap<>(MAX_COMPILED_FORMULAS, 0.75f, true);
 
-    private final Executable executable;
+    private final Compiled compiled;
+
+    private record Compiled(Executable full, ArithmeticFormulaCompiler.Incremental incremental) { }
     private final Set<String> referencedVariables;
 
     private ArithmeticFormula(Node root, Set<String> referencedVariables) {
         synchronized (COMPILED) {
-            this.executable = COMPILED.computeIfAbsent(root, ArithmeticFormulaCompiler::compile);
+            this.compiled = COMPILED.computeIfAbsent(root, node -> new Compiled(
+                    ArithmeticFormulaCompiler.compile(node), ArithmeticFormulaCompiler.compileIncremental(node)));
             if (COMPILED.size() > MAX_COMPILED_FORMULAS) {
                 COMPILED.remove(COMPILED.keySet().iterator().next());
             }
@@ -63,7 +66,33 @@ public final class ArithmeticFormula {
      * Inputs must remain stable during this call; aggregates may share one traversal.
      */
     public double evaluateAsDouble(double[] vars, List<double[]> itemVars) {
-        return executable.evaluate(vars, itemVars);
+        return compiled.full().evaluate(vars, itemVars);
+    }
+
+    /** A fresh, caller-owned accumulator for a nonempty append-only batch; null on compiler fallback. */
+    public Aggregation newAggregation() {
+        return compiled.incremental() == null ? null : new Aggregation(compiled.incremental());
+    }
+
+    public static final class Aggregation {
+        private final ArithmeticFormulaCompiler.Incremental program;
+        private final double[] sums;
+        private boolean nonempty;
+
+        private Aggregation(ArithmeticFormulaCompiler.Incremental program) {
+            this.program = program;
+            sums = new double[program.aggregateCount()];
+        }
+
+        public void append(double[] itemVars) {
+            program.append(itemVars, sums);
+            nonempty = true;
+        }
+
+        public double evaluate(double[] batchVars) {
+            if (!nonempty) throw new IllegalStateException("Append an item before evaluating a batch");
+            return program.evaluate(batchVars, sums);
+        }
     }
 
     interface Executable {
