@@ -13,7 +13,9 @@ import io.netty.channel.epoll.EpollSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.ThreadPoolExecutor;
@@ -27,17 +29,50 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class GrpcChannelFactory {
 
+    public static final String CONNECT_TIMEOUT_PROPERTY = "flexlb.engine-grpc.connect-timeout-ms";
+    public static final String VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY =
+            "flexlb.engine-grpc.vit-cache-max-inbound-message-bytes";
+    private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 20;
+    private static final int DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 8 * 1024 * 1024;
+    private static final int DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
+
     private final ThreadPoolExecutor executor;
     private final EventLoopGroup eventLoopGroup;
+    private final int connectTimeoutMillis;
 
+    @Value("${" + VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY + ":"
+            + DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES + "}")
+    private int vitCacheMaxInboundMessageBytes = DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES;
+
+    @Autowired
     public GrpcChannelFactory(
             @Qualifier("managedChannelThreadPoolExecutor") ThreadPoolExecutor executor,
-            @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup) {
+            @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
+            @Value("${" + CONNECT_TIMEOUT_PROPERTY + ":"
+                    + DEFAULT_CONNECT_TIMEOUT_MILLIS + "}") int connectTimeoutMillis) {
+        if (connectTimeoutMillis <= 0) {
+            throw new IllegalArgumentException("connectTimeoutMillis must be positive");
+        }
         this.executor = executor;
         this.eventLoopGroup = eventLoopGroup;
+        this.connectTimeoutMillis = connectTimeoutMillis;
+    }
+
+    public GrpcChannelFactory(
+            ThreadPoolExecutor executor,
+            EventLoopGroup eventLoopGroup) {
+        this(executor, eventLoopGroup, DEFAULT_CONNECT_TIMEOUT_MILLIS);
     }
 
     public ManagedChannel create(GrpcTarget target) {
+        return create(target, DEFAULT_MAX_INBOUND_MESSAGE_BYTES);
+    }
+
+    public ManagedChannel createVitCacheStatusChannel(GrpcTarget target) {
+        return create(target, vitCacheMaxInboundMessageBytes);
+    }
+
+    private ManagedChannel create(GrpcTarget target, int maxInboundMessageBytes) {
         log.info("Creating gRPC channel: {}", target);
         return NettyChannelBuilder.forAddress(target.host(), target.port())
                 .channelType(channelType(eventLoopGroup))
@@ -45,15 +80,14 @@ public class GrpcChannelFactory {
                 .withOption(ChannelOption.SO_KEEPALIVE, true)
                 .withOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
                 // Connection timeout in milliseconds
-                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, 20)
+                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeoutMillis)
                 // Write buffer water mark: prevents memory accumulation and pendingTasks buildup
                 .withOption(ChannelOption.WRITE_BUFFER_WATER_MARK,
                         new WriteBufferWaterMark(64 * 1024, 128 * 1024))
                 // Receive/send buffer size
                 .withOption(ChannelOption.SO_RCVBUF, 512 * 1024)
                 .withOption(ChannelOption.SO_SNDBUF, 512 * 1024)
-                // Maximum message size limit (8MB)
-                .maxInboundMessageSize(8 * 1024 * 1024)
+                .maxInboundMessageSize(maxInboundMessageBytes)
                 // HTTP/2 initial flow control window: prevents transmission issues due to flow control
                 .initialFlowControlWindow(2 * 1024 * 1024)
                 // Send an HTTP/2 PING after this interval without read activity
