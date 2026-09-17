@@ -13,7 +13,9 @@ import io.netty.channel.epoll.EpollSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.ThreadPoolExecutor;
@@ -27,14 +29,31 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class GrpcChannelFactory {
 
+    public static final String CONNECT_TIMEOUT_PROPERTY = "flexlb.engine-grpc.connect-timeout-ms";
+    private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 20;
+
     private final ThreadPoolExecutor executor;
     private final EventLoopGroup eventLoopGroup;
+    private final int connectTimeoutMillis;
 
+    @Autowired
     public GrpcChannelFactory(
             @Qualifier("managedChannelThreadPoolExecutor") ThreadPoolExecutor executor,
-            @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup) {
+            @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
+            @Value("${" + CONNECT_TIMEOUT_PROPERTY + ":"
+                    + DEFAULT_CONNECT_TIMEOUT_MILLIS + "}") int connectTimeoutMillis) {
+        if (connectTimeoutMillis <= 0) {
+            throw new IllegalArgumentException("connectTimeoutMillis must be positive");
+        }
         this.executor = executor;
         this.eventLoopGroup = eventLoopGroup;
+        this.connectTimeoutMillis = connectTimeoutMillis;
+    }
+
+    public GrpcChannelFactory(
+            ThreadPoolExecutor executor,
+            EventLoopGroup eventLoopGroup) {
+        this(executor, eventLoopGroup, DEFAULT_CONNECT_TIMEOUT_MILLIS);
     }
 
     public ManagedChannel create(GrpcTarget target) {
@@ -45,7 +64,7 @@ public class GrpcChannelFactory {
                 .withOption(ChannelOption.SO_KEEPALIVE, true)
                 .withOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
                 // Connection timeout in milliseconds
-                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, 20)
+                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeoutMillis)
                 // Write buffer water mark: prevents memory accumulation and pendingTasks buildup
                 .withOption(ChannelOption.WRITE_BUFFER_WATER_MARK,
                         new WriteBufferWaterMark(64 * 1024, 128 * 1024))

@@ -4,7 +4,7 @@ import io.netty.channel.EventLoopGroup;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;

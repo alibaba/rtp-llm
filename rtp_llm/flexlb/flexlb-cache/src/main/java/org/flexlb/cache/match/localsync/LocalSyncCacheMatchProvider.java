@@ -5,10 +5,14 @@ import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.match.CacheMatchProvider;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -20,14 +24,36 @@ import java.util.Set;
  */
 @Slf4j
 @Component
-public class LocalSyncCacheMatchProvider implements CacheMatchProvider {
+public class LocalSyncCacheMatchProvider implements CacheMatchProvider, EngineAddressResolver.Listener {
 
     private final KvCacheManager kvCacheManager;
     private final CacheMetricsReporter cacheMetricsReporter;
 
+    @Autowired
+    public LocalSyncCacheMatchProvider(
+            KvCacheManager kvCacheManager,
+            CacheMetricsReporter cacheMetricsReporter,
+            EngineAddressResolver addressResolver,
+            CacheMatchConfiguration configuration) {
+        this(kvCacheManager, cacheMetricsReporter);
+        if (configuration.isLocalSyncEnabled()) {
+            addressResolver.subscribe(this);
+        }
+    }
+
     public LocalSyncCacheMatchProvider(KvCacheManager kvCacheManager, CacheMetricsReporter cacheMetricsReporter) {
         this.kvCacheManager = kvCacheManager;
         this.cacheMetricsReporter = cacheMetricsReporter;
+    }
+
+    @Override
+    public void onAddressUpdate(List<WorkerHost> hosts) {
+        if (hosts == null) {
+            log.warn("Ignoring null engine address update for local cache cleanup");
+            return;
+        }
+        kvCacheManager.removeStaleEngineCaches(
+                hosts.stream().map(WorkerHost::getIpPort).toList());
     }
 
     @Override

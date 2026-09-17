@@ -5,6 +5,7 @@ import io.grpc.ManagedChannel;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 
@@ -141,4 +142,19 @@ class GrpcChannelPoolTest {
         assertSame(replacement, pool.getOrCreate("target"));
         verify(firstChannel).shutdown();
     }
+
+    @Test
+    void boundedShutdownForcesChannelThatDoesNotTerminate() throws InterruptedException {
+        ManagedChannel channel = mock(ManagedChannel.class);
+        when(channel.awaitTermination(1, TimeUnit.SECONDS)).thenReturn(false);
+        GrpcChannelPool<String> pool = new GrpcChannelPool<>(ignored -> channel);
+        pool.getOrCreate("target");
+
+        pool.shutdown(1, TimeUnit.SECONDS);
+
+        verify(channel).shutdown();
+        verify(channel).awaitTermination(1, TimeUnit.SECONDS);
+        verify(channel).shutdownNow();
+    }
+
 }
