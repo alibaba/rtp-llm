@@ -67,6 +67,14 @@ public:
     int  multi_token_decode_total_tokens_ = 0;
     int  prefill_tokens_per_batch_        = 0;
     void fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block, bool forbid_realloc = false);
+    // Initialize eager multi-token decode without reading CUDA lengths on CPU.
+    // total_tokens comes from the packed input shape, not a device reduction.
+    void fillMultiTokenDecodeParams(torch::Tensor input_lengths_d,
+                                    torch::Tensor prefix_lengths_d,
+                                    torch::Tensor block_table_d,
+                                    int           seq_size_per_block,
+                                    int           total_tokens);
+
     void fillMultiTokenDecodeCudaGraphParams(torch::Tensor input_lengths_d,
                                              torch::Tensor prefix_lengths_d,
                                              torch::Tensor kv_cache_block_id_device,

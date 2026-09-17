@@ -49,6 +49,7 @@ private:
                             int&          reuse_page_num,
                             int&          batch_reuse_info_size);
 
+protected:
     // Ensure tensors are allocated with sufficient size.
     // forbid_realloc: when true (replay path only), throw if realloc would be needed.
     void ensureTensorSize(int  batch_size,
@@ -59,7 +60,6 @@ private:
                           bool forbid_realloc    = false,
                           int  page_num_capacity = 0);
 
-protected:
     static std::tuple<torch::Tensor, std::vector<torch::Tensor>> allocateManyBuffer(
         const std::vector<std::vector<int64_t>>& shapes, bool is_device, torch::ScalarType dtype = torch::kInt32);
 

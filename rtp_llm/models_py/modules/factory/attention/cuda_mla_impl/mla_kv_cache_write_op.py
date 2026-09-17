@@ -22,7 +22,9 @@ class MlaKVCacheWriteOp:
     ) -> None:
         self.kv_cache_dtype = kv_cache_dtype
         # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode
-        self.scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+        # Construct on device: torch.tensor would synchronously copy a CPU scalar
+        # and drain pending decode work when the eager attention op is recreated.
+        self.scale = torch.ones((), dtype=torch.float32, device="cuda")
 
     def forward(
         self,

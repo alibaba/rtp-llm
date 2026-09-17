@@ -342,7 +342,7 @@ torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor, TensorHolder& host
 
 void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolder& host_holder) {
     // TODO(async): stream state is still gathered through CPU pointers above.
-    // Publish only device tensors at the model boundary.
+    // Publish core tensors on device and retain host metadata needed by eager MLA.
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.publish_core_tensors_to_cuda");
     model_input.combo_tokens     = publishInt32ToCuda(model_input.combo_tokens, host_holder);
     model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths, host_holder);
@@ -350,6 +350,7 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
     model_input.prefix_lengths   = publishInt32ToCuda(model_input.prefix_lengths, host_holder);
     // Migrate the 3-D KV kernel block id tensor with one H2D, replacing the
     // former per-group tensorHoldHostAndToCuda copies in PyWrappedModel.
+    model_input.kv_cache_kernel_block_id_host = model_input.kv_cache_kernel_block_id;
     model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
 }
 
@@ -695,9 +696,13 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 }
 
 absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
-                                                                                   TensorHolder& host_holder) const {
+                                                                                   TensorHolder&       host_holder,
+                                                                                   torch::Tensor* host_snapshot) const {
     const size_t total_batch_size = stream_groups.totalModelBatchSize();
     const size_t max_blocks_num   = stream_groups.curBlocksNum();
+    if (host_snapshot) {
+        *host_snapshot = torch::Tensor{};
+    }
     if (max_blocks_num == 0 || total_batch_size == 0) {
         return torch::Tensor{};
     }
@@ -734,6 +739,9 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
         fill_one_stream(stream, batch_idx);
     }
 
+    if (host_snapshot) {
+        *host_snapshot = host_tensor;
+    }
     return publishInt32ToCuda(host_tensor, host_holder);
 }
 

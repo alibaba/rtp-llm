@@ -462,7 +462,11 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     const bool skip_host_kv =
         forward_uses_cuda_graph && !inputs.warmup && description_.attention_conf.kv_cache_dtype == KvCacheDataType::FP8;
     if (description_.attention_conf.use_mla && !skip_host_kv) {
-        torch::Tensor all_groups = inputs.kv_cache_kernel_block_id;
+        torch::Tensor all_groups = inputs.kv_cache_kernel_block_id_host.defined() ?
+                                       inputs.kv_cache_kernel_block_id_host :
+                                       inputs.kv_cache_kernel_block_id;
+        RTP_LLM_CHECK_WITH_INFO(all_groups.sizes() == inputs.kv_cache_kernel_block_id.sizes(),
+                                "kernel block host snapshot shape mismatch");
         if (all_groups.device().is_cuda()) {
             all_groups = all_groups.cpu();
         }
@@ -881,54 +885,8 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
         // from the current `inputs` directly via prepareAttentionInputs().
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_kernel_block_id.dim() == 3,
-                            "kv_cache_kernel_block_id must be 3-D (group, batch, blocks)");
-    const size_t group = inputs.kv_cache_kernel_block_id.size(0);
-
-    // Re-alias _device_by_group / _device from the freshly-gathered tensor.
-    // Slices are zero-copy views, no new allocation. Same logic as
-    // setupKVCacheForAttentionInputs but applied in place to attention_inputs_.
-    attention_inputs_.kv_cache_kernel_block_id_device_by_group.clear();
-    attention_inputs_.kv_cache_kernel_block_id_device_by_group.reserve(group);
-    for (size_t g = 0; g < group; ++g) {
-        attention_inputs_.kv_cache_kernel_block_id_device_by_group.push_back(inputs.kv_cache_kernel_block_id[g]);
-    }
-    attention_inputs_.kv_cache_kernel_block_id_device = attention_inputs_.kv_cache_kernel_block_id_device_by_group[0];
-
-    if (inputs.kv_cache_block_id.defined()) {
-        torch::Tensor physical_group0;
-        if (inputs.kv_cache_block_id.dim() == 3) {
-            physical_group0 = inputs.kv_cache_block_id[0];
-        } else if (inputs.kv_cache_block_id.dim() == 2) {
-            physical_group0 = inputs.kv_cache_block_id;
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(false, "kv_cache_block_id shape should be 2 or 3");
-        }
-        if (physical_group0.dtype() != torch::kInt32) {
-            physical_group0 = physical_group0.to(torch::kInt32);
-        }
-        if (!physical_group0.is_contiguous()) {
-            physical_group0 = physical_group0.contiguous();
-        }
-        if (physical_group0.device().is_cuda()) {
-            attention_inputs_.kv_cache_block_id_device = physical_group0;
-            const bool skip_host_kv                    = enable_cuda_graph_ && !inputs.warmup
-                                      && description_.attention_conf.kv_cache_dtype == KvCacheDataType::FP8;
-            if (description_.attention_conf.use_mla && !skip_host_kv) {
-                auto physical_host = physical_group0.cpu().contiguous().pin_memory();
-                buffer_holder_.hold_host(physical_host);
-                attention_inputs_.kv_cache_block_id_host = physical_host;
-            }
-        } else {
-            if (!physical_group0.is_pinned()) {
-                physical_group0 = physical_group0.pin_memory();
-            }
-            buffer_holder_.hold_host(physical_group0);
-            attention_inputs_.kv_cache_block_id_host   = physical_group0;
-            auto cuda_i32                              = runtimeCudaI32Options();
-            attention_inputs_.kv_cache_block_id_device = physical_group0.to(cuda_i32, /*non_blocking=*/false);
-        }
-    }
+    // Refresh host and device views together, including every hybrid group.
+    setupKVCacheForAttentionInputs(attention_inputs_, inputs);
 
     // CUDA-graph case: refresh the captured held buffers + FlashInfer plan
     // via the focused graph_runner hook (no replay of unrelated D2D copies).
@@ -1474,6 +1432,8 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, sliced_batch_idx, total_batch_size);
                 micro_model_inputs.kv_cache_kernel_block_id =
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, total_batch_size);
+                micro_model_inputs.kv_cache_kernel_block_id_host = sliceKvCacheBlockIdByBatch(
+                    inputs.kv_cache_kernel_block_id_host, sliced_batch_idx, total_batch_size);
                 micro_model_inputs.prefix_lengths =
                     inputs.prefix_lengths.narrow(0, prefill_batch_idx, p_micro_batch_size);
                 micro_model_inputs.attention_mask =
@@ -1530,6 +1490,8 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, sliced_batch_idx, d_micro_batch_size);
                 micro_model_inputs.kv_cache_kernel_block_id =
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, d_micro_batch_size);
+                micro_model_inputs.kv_cache_kernel_block_id_host = sliceKvCacheBlockIdByBatch(
+                    inputs.kv_cache_kernel_block_id_host, sliced_batch_idx, d_micro_batch_size);
                 micro_model_inputs.prefix_lengths = torch::empty({0}, runtimeCudaI32Options());
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_batch_idx, d_micro_batch_size);
@@ -1554,6 +1516,8 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.kv_cache_kernel_block_id =
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, p_micro_batch_size);
+                micro_model_inputs.kv_cache_kernel_block_id_host = sliceKvCacheBlockIdByBatch(
+                    inputs.kv_cache_kernel_block_id_host, sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.prefix_lengths =
                     inputs.prefix_lengths.narrow(0, prefill_batch_idx, p_micro_batch_size);
                 micro_model_inputs.attention_mask =

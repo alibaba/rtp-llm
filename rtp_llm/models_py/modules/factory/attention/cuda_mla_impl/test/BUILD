@@ -172,3 +172,15 @@ py_test(
     tags = ["manual"],
     timeout = "long",
 )
+
+# ARM/CUDA 13 coverage of the same CPU-reference metadata contract.
+py_test(
+    name = "glm53_target_verify_kernel_test",
+    srcs = ["test_target_verify_kernel.py"],
+    main = "test_target_verify_kernel.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
+)

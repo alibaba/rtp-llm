@@ -532,6 +532,28 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
     }
 }
 
+void SparseMlaParams::fillMultiTokenDecodeParams(torch::Tensor input_lengths_d,
+                                                 torch::Tensor prefix_lengths_d,
+                                                 torch::Tensor block_table_d,
+                                                 int           seq_size_per_block,
+                                                 int           total_tokens) {
+    RTP_LLM_CHECK_WITH_INFO(input_lengths_d.dim() == 1 && prefix_lengths_d.dim() == 1 && block_table_d.dim() == 2
+                                && total_tokens > 0 && input_lengths_d.numel() > 0
+                                && prefix_lengths_d.numel() == input_lengths_d.numel()
+                                && block_table_d.size(0) == input_lengths_d.numel(),
+                            "multi-token decode metadata shapes are inconsistent");
+    const int batch_size    = static_cast<int>(input_lengths_d.numel());
+    const int page_capacity = static_cast<int>(block_table_d.numel());
+    FlashInferMlaAttnParams::ensureTensorSize(batch_size, total_tokens, page_capacity, 0, batch_size * 4);
+    ensureTensorSize(batch_size, total_tokens);
+    multi_token_decode_total_tokens_ = total_tokens;
+    // The replay kernel uses these shapes as its active capacities. Repeated
+    // eager calls may reuse allocations from a larger preceding batch.
+    kvlen_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
+    batch_indice_d.unsafeGetTensorImpl()->set_sizes_contiguous({total_tokens});
+    fillMultiTokenDecodeCudaGraphParams(input_lengths_d, prefix_lengths_d, block_table_d, seq_size_per_block);
+}
+
 void SparseMlaParams::fillMultiTokenDecodeCudaGraphParams(torch::Tensor input_lengths_d,
                                                           torch::Tensor prefix_lengths_d,
                                                           torch::Tensor kv_cache_block_id_device,
@@ -669,6 +691,13 @@ void registerPySparseMlaParams(pybind11::module& m) {
             pybind11::arg("attention_inputs"),
             pybind11::arg("seq_size_per_block"),
             pybind11::arg("forbid_realloc") = false)
+        .def("fill_multi_token_decode_params",
+             &SparseMlaParams::fillMultiTokenDecodeParams,
+             pybind11::arg("input_lengths"),
+             pybind11::arg("prefix_lengths"),
+             pybind11::arg("kv_cache_block_id_device"),
+             pybind11::arg("seq_size_per_block"),
+             pybind11::arg("total_tokens"))
         .def(
             "fill_multi_token_decode_cuda_graph_params",
             [](rtp_llm::SparseMlaParams& self,

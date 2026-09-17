@@ -109,6 +109,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         shape_hints_ptr[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
     }
 
+    shape_hints_ptr[GptModelInputIndex::hasKernelBlockHostSnapshot] = inputs.kv_cache_kernel_block_id_host.defined();
+
     // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
     // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
     // contract for cross-node TP.
@@ -303,6 +305,18 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
     }
 
+    // Send the original host table in the existing packed CPU broadcast. A
+    // device-to-host copy here would drain pending decode work on every rank.
+    if (shape_hints_ptr[GptModelInputIndex::hasKernelBlockHostSnapshot]) {
+        if (parallelism_config.tp_rank != 0) {
+            inputs.kv_cache_kernel_block_id_host =
+                torch::empty(inputs.kv_cache_kernel_block_id.sizes(),
+                             torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+        }
+    } else {
+        inputs.kv_cache_kernel_block_id_host = torch::Tensor{};
+    }
+
     // Collect all tensors that participate in broadcast.
     // The collect order must be deterministic and identical across all ranks.
     std::vector<torch::Tensor*> tensor_ptrs;
@@ -318,6 +332,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.prefix_lengths);
     if (max_kernel_blocks || max_blocks) {
         collect(inputs.kv_cache_kernel_block_id);
+        collect(inputs.kv_cache_kernel_block_id_host);
         collect(inputs.kv_cache_block_id);
         if (layer_to_group_len) {
             collect(inputs.kv_cache_layer_to_group);

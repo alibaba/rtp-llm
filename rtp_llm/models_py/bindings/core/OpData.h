@@ -54,6 +54,9 @@ struct GptModelInputs {
     // - hybrid cache: [group_nums, batch_size, block_nums]
     torch::Tensor kv_cache_block_id;
     torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
+    // Exact pinned host snapshot of the device table. Replace/slice together
+    // with kv_cache_kernel_block_id; legacy device-only producers may omit it.
+    torch::Tensor kv_cache_kernel_block_id_host;
 
     torch::Tensor kv_cache_layer_to_group;  // [layer_num], int32
     torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.

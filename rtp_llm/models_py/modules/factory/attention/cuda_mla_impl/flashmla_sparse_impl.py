@@ -904,9 +904,26 @@ class SparseMlaImpl(MlaImplBase):
         self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
     ) -> None:
         """Refresh per-forward params + plan. forbid_realloc=True under cuda graph replay."""
-        self.fmha_params.fill_params(
-            attn_inputs, self.seq_size_per_block, forbid_realloc
-        )
+        block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+        if (
+            type(self.fmha_impl) is SparseMlaOp
+            and _is_multi_token_decode(attn_inputs)
+            and not forbid_realloc
+            and attn_inputs.total_tokens > 0
+            and isinstance(block_table, torch.Tensor)
+            and block_table.is_cuda
+        ):
+            self.fmha_params.fill_multi_token_decode_params(
+                attn_inputs.input_lengths,
+                attn_inputs.prefix_lengths,
+                block_table,
+                self.seq_size_per_block,
+                attn_inputs.total_tokens,
+            )
+        else:
+            self.fmha_params.fill_params(
+                attn_inputs, self.seq_size_per_block, forbid_realloc
+            )
         self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc)
         block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
         if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
@@ -920,7 +937,7 @@ class SparseMlaImpl(MlaImplBase):
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         if (
             _is_multi_token_decode(attn_inputs)
-            and isinstance(self.fmha_impl, SparseMlaFp8Op)
+            and isinstance(self.fmha_impl, SparseMlaOp)
             and attn_inputs.kv_cache_kernel_block_id_device is not None
             and self.fmha_params.multi_token_decode_total_tokens > 0
         ):

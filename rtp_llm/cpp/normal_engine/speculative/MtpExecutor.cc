@@ -2705,11 +2705,20 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
 
         if (tp_rank_ == 0) {
             model_input.kv_cache_kernel_block_id =
-                batch_stream_processor_->gatherKvCacheKernelBlockId(stream_groups, buffer_holder_).value();
+                batch_stream_processor_
+                    ->gatherKvCacheKernelBlockId(
+                        stream_groups, buffer_holder_, &model_input.kv_cache_kernel_block_id_host)
+                    .value();
         }
 
         if (parallelism_config_.tp_size > 1) {
             execBroadcast({{model_input.kv_cache_kernel_block_id}, 0});
+            if (tp_rank_ != 0) {
+                model_input.kv_cache_kernel_block_id_host =
+                    torch::empty(model_input.kv_cache_kernel_block_id.sizes(),
+                                 torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+            }
+            execBroadcastCpu({{model_input.kv_cache_kernel_block_id_host}, 0});
         }
 
         // Focused refresh of device block tables and graph-held buffers,

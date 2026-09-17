@@ -33,9 +33,11 @@ public:
 
     // Build only the CUDA kv_cache_kernel_block_id tensor in 3-D layout.
     // Read-only over streams: no stream->step() and no other fields.
-    // Empty input returns an undefined tensor.
+    // Empty input returns an undefined tensor. host_snapshot optionally receives
+    // the same pinned table before its asynchronous H2D copy.
     virtual absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
-                                                                     TensorHolder&       host_holder) const;
+                                                                     TensorHolder&       host_holder,
+                                                                     torch::Tensor*      host_snapshot = nullptr) const;
 
 protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,

@@ -228,6 +228,34 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
+        ASSERT_TRUE(model_input.kv_cache_kernel_block_id_host.defined());
+        EXPECT_TRUE(model_input.kv_cache_kernel_block_id_host.is_pinned());
+        EXPECT_EQ(toVec<int>(model_input.kv_cache_kernel_block_id_host),
+                  toVec<int>(model_input.kv_cache_kernel_block_id));
+
+        // A subsequent KV refresh must not overwrite a previous input's host
+        // snapshot, even after the staging holder's release window expires.
+        auto previous = model_input.kv_cache_kernel_block_id_host.clone();
+        addr1.setBatchBlocks(0, 0, {21, 22, 23, 24});
+        stream1->setKVCache(addr1);
+        torch::Tensor refreshed_host;
+        auto          refreshed = processor.gatherKvCacheKernelBlockId(stream_groups, holder, &refreshed_host);
+        ASSERT_TRUE(refreshed.ok()) << refreshed.status();
+        ASSERT_TRUE(refreshed_host.defined());
+        EXPECT_TRUE(refreshed_host.is_pinned());
+        EXPECT_EQ(toVec<int>(refreshed_host), toVec<int>(refreshed.value()));
+        EXPECT_NE(toVec<int>(previous), toVec<int>(refreshed_host));
+        for (size_t i = 0; i <= TensorHolder::kReleasedHoldRounds; ++i) {
+            holder.release();
+        }
+        EXPECT_EQ(toVec<int>(previous), toVec<int>(model_input.kv_cache_kernel_block_id_host));
+
+        std::list<GenerateStreamPtr> empty_streams;
+        StreamGroups                 empty_groups(empty_streams);
+        auto empty = processor.gatherKvCacheKernelBlockId(empty_groups, holder, &refreshed_host);
+        ASSERT_TRUE(empty.ok());
+        EXPECT_FALSE(empty.value().defined());
+        EXPECT_FALSE(refreshed_host.defined());
     }
     {
         MMModelConfig mm_model_config;
@@ -418,6 +446,11 @@ TEST_F(NormalBatchStreamProcessorTest, testBatchedNormalGatherStableShrunkReorde
         ASSERT_TRUE(result.ok()) << result.status();
         EXPECT_EQ(toVec<int32_t>(result->combo_tokens), expected_tokens);
         EXPECT_EQ(toVec<int32_t>(result->sequence_lengths), expected_lengths);
+        ASSERT_TRUE(result->kv_cache_kernel_block_id_host.defined());
+        EXPECT_TRUE(result->kv_cache_kernel_block_id_host.is_pinned());
+        EXPECT_EQ(result->kv_cache_kernel_block_id_host.size(1), streams.size());
+        EXPECT_EQ(toVec<int32_t>(result->kv_cache_kernel_block_id_host),
+                  toVec<int32_t>(result->kv_cache_kernel_block_id));
         if (shared) {
             EXPECT_EQ(result->combo_tokens.data_ptr(), tokens.data_ptr());
         }

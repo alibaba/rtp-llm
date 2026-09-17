@@ -263,6 +263,46 @@ class TestSparseMlaTargetVerifyParams(TestCase):
             "page_count": int(ref_params.decode_page_indptr_d[self.batch_size].item()),
         }
 
+    def test_eager_multi_token_device_init_and_batch_resize(self):
+        params = rtp_llm_ops.SparseMlaParams()
+        for lengths in (
+            (4, 4, 4, 4),
+            (4,),
+            (2, 2, 2),
+            (4, 1, 3, 2),
+            (1,),
+            (2, 4, 1),
+            (4, 4, 4, 4),
+        ):
+            with self.subTest(lengths=lengths):
+                batch = len(lengths)
+                self.batch_size = batch
+                self.total_tokens = sum(lengths)
+                self.input_lengths = torch.tensor(
+                    lengths, dtype=torch.int32, device=self.device
+                )
+                self.prefix_lengths = (
+                    torch.arange(batch, dtype=torch.int32, device=self.device) * 127
+                    + 63
+                )
+                self.block_table = torch.randint(
+                    0,
+                    1000,
+                    (batch, self.max_blocks),
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                ref = self._build_reference()
+                params.fill_multi_token_decode_params(
+                    self.input_lengths,
+                    self.prefix_lengths,
+                    self.block_table,
+                    self.seq_size_per_block,
+                    self.total_tokens,
+                )
+                torch.cuda.synchronize()
+                self._assert_match(params, ref)
+
     def test_decode_fast_path_matches_cpu(self):
         """SparseMla decode fast path (used by MTP draft) outputs match
         CPU fillParams baseline."""
