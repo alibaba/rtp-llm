@@ -1,12 +1,13 @@
+from __future__ import annotations
+
 import logging
-from typing import Callable, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Union
 
 from rtp_llm.config.cuda_graph import (
     CudaGraphSelectionMode,
     GenerationPrefillCudaGraphUnsupportedBackend,
 )
 from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
     MlaImplBase,
@@ -23,6 +24,9 @@ from rtp_llm.utils.model_weight import W
 
 AttentionImpl = Union[FMHAImplBase, MlaImplBase]
 AttentionImplFactory = Callable[..., AttentionImpl]
+
+if TYPE_CHECKING:
+    from rtp_llm.model_loader.model_weight_info import ModelWeights
 
 
 def _normalize_cuda_graph_selection_mode(

@@ -35,6 +35,33 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
+# Keep the routing contract in regular CI without importing optional executor
+# implementations exercised by the full matrix's priority tests.
+py_test(
+    name = "test_cuda_strategy_routing",
+    srcs = ["test_cuda_strategies.py"],
+    main = "test_cuda_strategies.py",
+    args = [
+        "TestCudaNoQuantFallbackStrategies",
+        "TestCudaFp8PerBlockNoDPStrategy.test_can_handle_single_gpu",
+        "TestCudaFp8PerBlockNoDPStrategy.test_can_handle_tp_equal_ep",
+        "TestCudaFp8PerBlockNoDPStrategy.test_can_handle_false_cuda_graph",
+        "TestCudaFp8PerBlockNoDPStrategy.test_rejects_backend_missing_required_executor_symbols",
+        "TestCudaFp8PerTensorNoDPStrategy.test_can_handle_fp8_per_tensor_compressed",
+        "TestCudaFp8PerTensorNoDPStrategy.test_can_handle_fp8_dynamic_per_tensor",
+        "TestCudaW4a8Int4PerChannelNoDPStrategy.test_can_handle_w4a8_int4_per_channel",
+        "TestRocmEpStrategyQuantFiltering",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
+    tags = ["H20"],
+)
+
 py_test(
     name = "test_batched_data_router_ep",
     srcs = ["test_batched_data_router_ep.py"],
