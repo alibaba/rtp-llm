@@ -201,19 +201,19 @@ class DeepSeekV41Model(GptModelBase):
             device_resource_config,
         )
         cp = parallelism_config.prefill_cp_config
-        if parallelism_config.get_attn_tp_size() != 1 or cp.prefill_cp_size != 8:
+        if parallelism_config.get_attn_tp_size() != 1 or cp.prefill_cp_size < 1:
             raise ValueError(
-                "V4.1 target requires attention TP1 and explicit CP8 layout"
+                "V4.1 target requires attention TP1 and an explicit CP layout width"
             )
         self._cp_enabled = cp.is_enabled()
         self._cp_rank = parallelism_config.tp_rank
         self._forward_epoch = 0
         if self._cp_enabled and (
-            parallelism_config.tp_size != 8
-            or parallelism_config.ep_size != 8
+            parallelism_config.tp_size != cp.prefill_cp_size
+            or parallelism_config.ep_size != cp.prefill_cp_size
             or not cp.kv_cache_sharded
         ):
-            raise ValueError("V4.1 CP prefill requires sharded CP8/EP8 pages")
+            raise ValueError("V4.1 CP prefill requires sharded pages on the CP world")
         self._capture_aux = tuple(config.capture_aux_hidden_layer_ids or ())
         if self._capture_aux and self._capture_aux != (37, 38, 39):
             raise ValueError("V4.1 DSpark requires target aux layers 37/38/39")
@@ -234,7 +234,7 @@ class DeepSeekV41Model(GptModelBase):
                 if kv_cache_config.seq_size_per_block > 0
                 else 128
             ),
-            cp_size=8,
+            cp_size=max(int(cp.prefill_cp_size), 1),
             speculative_tokens=5 if self._capture_aux else 0,
             draft_enabled=bool(self._capture_aux),
         )
@@ -610,7 +610,7 @@ class DeepSeekV41Model(GptModelBase):
         from rtp_llm.models_py.modules.dsv41.cp import begin_cp_request
 
         if not self._cp_enabled or not inputs.attention_inputs.is_prefill:
-            raise ValueError("V4.1 CP row metadata requires its CP8 prefill role")
+            raise ValueError("V4.1 CP row metadata requires its CP prefill role")
         attn = inputs.attention_inputs
         cp_info = attn.context_parallel_info
         cp_context = build_cp_context_for_forward(
@@ -783,7 +783,10 @@ class DeepSeekV41Model(GptModelBase):
             )
         flat = torch.cat([groups[gid][:count] for gid, count in enumerate(counts)])
         gathered = (
-            collective_torch.all_gather(flat, Group.TP).reshape(8, -1).cpu().tolist()
+            collective_torch.all_gather(flat, Group.TP)
+            .reshape(self.layout.cp_size, -1)
+            .cpu()
+            .tolist()
         )
         per_rank = []
         for values in gathered:

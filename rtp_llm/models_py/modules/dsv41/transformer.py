@@ -127,12 +127,12 @@ class V41TargetModel(nn.Module):
         self.hc_mult = t["hc_mult"]
         if (
             type(head_tp_size) is not int
-            or head_tp_size not in (1, 8)
+            or head_tp_size < 1
             or type(head_tp_rank) is not int
             or not 0 <= head_tp_rank < head_tp_size
             or t["vocab_size"] % head_tp_size
         ):
-            raise ValueError("V4.1 head partition must be explicit TP1 or CP8 metadata")
+            raise ValueError("V4.1 head partition requires explicit sharding metadata")
         self.head_tp_size = head_tp_size
         self.head_tp_rank = head_tp_rank
         self.head_vocab_size = t["vocab_size"] // head_tp_size
@@ -208,18 +208,16 @@ class V41TargetModel(nn.Module):
 
         if (
             type(ep_size) is not int
-            or ep_size not in (8, 16)
+            or ep_size < 1
             or type(ep_rank) is not int
             or not 0 <= ep_rank < ep_size
             or not dist.is_initialized()
             or dist.get_world_size() != ep_size
             or dist.get_rank() != ep_rank
         ):
-            raise ValueError("V4.1 target binding requires the actual EP8/EP16 WORLD")
-        if layout.cp_size != 8:
-            raise ValueError("distributed V4.1 target requires the CP8 cache layout")
-        if head_tp_size == 8 and (ep_size != 8 or head_tp_rank != ep_rank):
-            raise ValueError("V4.1 P head must match its CP8/EP8 role rank")
+            raise ValueError("V4.1 target binding requires the actual EP WORLD")
+        if head_tp_size != 1 and (ep_size != head_tp_size or head_tp_rank != ep_rank):
+            raise ValueError("V4.1 P head must match its CP/EP role rank")
         return cls.from_model_weights(
             config,
             weights,
@@ -263,7 +261,7 @@ class V41TargetModel(nn.Module):
         provide the compatible quantized expert implementation explicitly;
         no legacy block128 or dequantized-expert implementation is selected.
         The caller owns the shared lookup's registration/Graph/close lifecycle.
-        CP8 callers pass their actual head partition. The engine retains its
+        CP callers pass their actual head partition. The engine retains its
         existing last-hidden gather and TP logits gather after this model.
         """
         from rtp_llm.utils.model_weight import W
@@ -495,7 +493,7 @@ class V41TargetModel(nn.Module):
     def logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.head_tp_size != 1:
             raise RuntimeError(
-                "CP8 local logits require the engine's TP vocabulary gather before sampling"
+                "CP local logits require the engine's TP vocabulary gather before sampling"
             )
         return self.local_logits(hidden_states)
 

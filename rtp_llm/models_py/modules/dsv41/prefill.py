@@ -1,4 +1,4 @@
-"""CED stage execution over local pages or framework-owned CP8 cache shards."""
+"""CED stage execution over local pages or framework-owned CP cache shards."""
 
 from dataclasses import dataclass, fields, replace
 
@@ -899,7 +899,7 @@ class V41CPPrefillExecutor:
     ):
         if (
             not request_id
-            or layout.cp_size != 8
+            or layout.cp_size <= 1
             or identity.layout_fingerprint != layout.fingerprint
             or identity.replay_fingerprint
             not in (

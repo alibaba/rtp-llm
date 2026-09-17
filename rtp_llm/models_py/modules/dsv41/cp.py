@@ -1,4 +1,4 @@
-"""CP8 target prefill over framework-owned V4.1 cache shards.
+"""CP target prefill over framework-owned V4.1 cache shards.
 
 Queries retain the framework's padded zigzag order. Row-local model and attention
 operations pack only real rows without changing their CP owners. Only compressor
@@ -110,7 +110,7 @@ def _copy_query_rows(destination, indices, values):
         destination.index_copy_(0, indices, values)
 
 
-def _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank):
+def _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank, cp_size):
     if (
         pool.is_cuda
         and pool.stride(1) == 1
@@ -140,13 +140,14 @@ def _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank):
                 TABLE_STRIDE=table.stride(1),
                 WANTED_STRIDE=wanted.stride(0),
                 RANK=rank,
+                CP_SIZE=cp_size,
                 BLOCK_ROWS=block_rows,
                 BLOCK_BYTES=1 << (entry_bytes - 1).bit_length(),
             )
         return local
 
     logical = wanted.clamp_min(0).long() // entries
-    owners, virtual = logical % 8, logical // 8
+    owners, virtual = logical % cp_size, logical // cp_size
     owned = (wanted >= 0) & (owners == rank)
     in_table = virtual < table.shape[1]
     ids = table[0].index_select(0, virtual.clamp_max(table.shape[1] - 1)).long()
@@ -232,7 +233,7 @@ class V41CPAttentionContext(V41AttentionContext):
         for flat in restore:
             rank, local = divmod(flat, cp.chunk_length)
             local -= self.local_first
-            if not 0 <= rank < 8 or not 0 <= local < self.local_count:
+            if not 0 <= rank < cp.cp_size or not 0 <= local < self.local_count:
                 raise ValueError("CP restore map crosses a request's local row range")
             mapping.append(rank * self.local_count + local)
         if len(set(mapping)) != end - start:
@@ -258,10 +259,10 @@ class V41CPAttentionContext(V41AttentionContext):
         )
         self._restore = torch.tensor(mapping, dtype=torch.int64, device=device)
         rank_positions = torch.full(
-            (8 * self.local_count,), -1, dtype=torch.int64, device=device
+            (cp.cp_size * self.local_count,), -1, dtype=torch.int64, device=device
         )
         rank_positions[self._restore] = torch.arange(start, end, device=device)
-        self._rank_positions = rank_positions.view(8, self.local_count)
+        self._rank_positions = rank_positions.view(cp.cp_size, self.local_count)
 
     @property
     def query_rows(self):
@@ -335,7 +336,7 @@ class V41CPAttentionContext(V41AttentionContext):
         if not self.start <= start < self.end:
             raise ValueError("CP tail rows must belong to the current encoder chunk")
         selected = self.selection_for(20)
-        rank_rows = [[] for _ in range(8)]
+        rank_rows = [[] for _ in range(self.cp.cp_size)]
         for position in range(start, self.end):
             rank, local = divmod(
                 self._restore_host[position - self.start], self.local_count
@@ -362,7 +363,7 @@ class V41CPAttentionContext(V41AttentionContext):
             != ReplayConfig(ReplayMode.BOUNDED).fingerprint
             or not 0 <= replay_floor <= start < self.end
             or self.end - start > SWA_WINDOW
-            or len(rank_rows) != 8
+            or len(rank_rows) != self.cp.cp_size
         ):
             raise ValueError(
                 "CP late execution requires an explicit bounded 128-row plan"
@@ -391,7 +392,7 @@ class V41CPAttentionContext(V41AttentionContext):
             )
         if any(owner.materialized_end != start for owner in self.cache.owners.values()):
             raise ValueError("CP encoder split must follow completed source writes")
-        rank_rows = [[] for _ in range(8)]
+        rank_rows = [[] for _ in range(self.cp.cp_size)]
         for position in range(start, end):
             rank, local = divmod(
                 self._restore_host[position - self.start], self.local_count
@@ -425,8 +426,11 @@ class V41CPAttentionContext(V41AttentionContext):
             )
         capacity = max(map(len, rank_rows))
         device = self.query_device
-        positions = torch.full((8, capacity), end - 1, dtype=torch.int64, device=device)
-        valid = torch.zeros((8, capacity), dtype=torch.bool, device=device)
+        cp_size = self.cp.cp_size
+        positions = torch.full(
+            (cp_size, capacity), end - 1, dtype=torch.int64, device=device
+        )
+        valid = torch.zeros((cp_size, capacity), dtype=torch.bool, device=device)
         restore = torch.empty(end - start, dtype=torch.int64, device=device)
         for rank, values in enumerate(rank_rows):
             absolute = torch.tensor(
@@ -441,7 +445,7 @@ class V41CPAttentionContext(V41AttentionContext):
         cp = replace(
             self.cp,
             chunk_length=capacity,
-            padded_seq_len=8 * capacity,
+            padded_seq_len=cp_size * capacity,
             seq_len_full=end - start,
             relative_positions=(local_positions - start).contiguous(),
             prefix_length=start,
@@ -642,7 +646,7 @@ class V41CPAttentionContext(V41AttentionContext):
         self.gather_count += 1
 
     def _all_gather(self, local, *, retained_bytes=0, restored_bytes=0):
-        receive_bytes = 8 * _bytes(local)
+        receive_bytes = self.cp.cp_size * _bytes(local)
         self._record_gather(
             receive_bytes,
             receive_bytes + _bytes(local) + restored_bytes + retained_bytes,
@@ -663,10 +667,11 @@ class V41CPAttentionContext(V41AttentionContext):
             )
         if first == last:
             return local_rows.new_empty((0, local_rows.shape[1]))
+        cp_size = self.cp.cp_size
         key = (first, last)
         if key not in self._gather_plans:
             source = self._restore_host[first - self.start : last - self.start]
-            per_rank = [[] for _ in range(8)]
+            per_rank = [[] for _ in range(cp_size)]
             for flat in source:
                 rank, local = divmod(flat, self.local_count)
                 per_rank[rank].append(local)
@@ -688,15 +693,15 @@ class V41CPAttentionContext(V41AttentionContext):
         capacity, indices, restore = self._gather_plans[key]
         row_bytes = local_rows.shape[1] * local_rows.element_size()
         self._record_gather(
-            8 * capacity * row_bytes,
-            (10 * capacity + last - first) * row_bytes,
+            cp_size * capacity * row_bytes,
+            ((cp_size + 2) * capacity + last - first) * row_bytes,
         )
         packed = local_rows.new_zeros((capacity, local_rows.shape[1]))
         packed[: indices.numel()].copy_(local_rows.index_select(0, indices))
         tile_cp = replace(
             self.cp,
             chunk_length=capacity,
-            padded_seq_len=8 * capacity,
+            padded_seq_len=cp_size * capacity,
             seq_len_full=last - first,
             unpad_restore=restore,
             unpad_restore_is_prefix=False,
@@ -725,9 +730,9 @@ class V41CPAttentionContext(V41AttentionContext):
         page = self._physical(table, logical, pool)
         local = torch.zeros((2, pool.shape[1]), dtype=torch.uint8, device=pool.device)
         local[1].copy_(pool[page])
-        return self._all_gather(local, restored_bytes=8 * pool.shape[1]).view(
-            8, 2, pool.shape[1]
-        )
+        return self._all_gather(
+            local, restored_bytes=self.cp.cp_size * pool.shape[1]
+        ).view(self.cp.cp_size, 2, pool.shape[1])
 
     def restore_swa(self, layer):
         slot = RegionSlot(CacheRegion.SWA, layer)
@@ -742,7 +747,9 @@ class V41CPAttentionContext(V41AttentionContext):
                 self.cache.layout,
                 layer,
                 received,
-                torch.ones((8, 1), dtype=torch.int32, device=self.query_device),
+                torch.ones(
+                    (self.cp.cp_size, 1), dtype=torch.int32, device=self.query_device
+                ),
             )
             pages = restored.pages
         else:
@@ -884,7 +891,7 @@ class V41CPAttentionContext(V41AttentionContext):
     def publish_pair(self, owner, pair):
         pool = self.pair_pools[owner]
         raw = torch.zeros(
-            pool.shape[1] * 8, dtype=torch.uint8, device=self.query_device
+            pool.shape[1] * self.cp.cp_size, dtype=torch.uint8, device=self.query_device
         )
         for snapshot, value in (
             (0, self._pair_initials[owner]),
@@ -921,12 +928,11 @@ class V41CPAttentionContext(V41AttentionContext):
     def gather_paged(self, slot, first_entry, last_entry, layer):
         """Bind a bounded index scan without assuming peer physical page IDs."""
         spec, pool, table = self._page_specs[slot], self.pools[slot], self.tables[slot]
-        if first_entry % (spec.entries * 8):
+        rr_cycle = spec.entries * self.cp.cp_size
+        if first_entry % rr_cycle:
             raise ValueError("CP scan windows must align to a complete RR page cycle")
-        first_virtual = first_entry // (spec.entries * 8)
-        virtual_count = (last_entry - first_entry + spec.entries * 8 - 1) // (
-            spec.entries * 8
-        )
+        first_virtual = first_entry // rr_cycle
+        virtual_count = (last_entry - first_entry + rr_cycle - 1) // rr_cycle
         local = torch.zeros(
             (virtual_count + 1, spec.page_stride_bytes),
             dtype=torch.uint8,
@@ -937,14 +943,14 @@ class V41CPAttentionContext(V41AttentionContext):
             raise ValueError("CP index scan exceeds the request's allocated page table")
         local[1:].copy_(pool.index_select(0, ids.clamp(0, pool.shape[0] - 1)))
         received = self._all_gather(local).view(
-            8, virtual_count + 1, spec.page_stride_bytes
+            self.cp.cp_size, virtual_count + 1, spec.page_stride_bytes
         )
         remapped = torch.where(
             ids > 0, torch.arange(1, virtual_count + 1, device=self.query_device), 0
         ).to(torch.int32)
         rank_tables = self._all_gather(
             remapped[None, :], retained_bytes=_bytes(received)
-        ).view(8, 1, virtual_count)
+        ).view(self.cp.cp_size, 1, virtual_count)
         restored = bind_cprr_paged(self.cache.layout, slot, received, rank_tables)
         return restored, self.lease(
             slot, (received, restored.page_table, restored.status), layer
@@ -985,7 +991,7 @@ class V41CPAttentionContext(V41AttentionContext):
             output_bytes,
             retained_bytes
             + _bytes(positions, wanted)
-            + (9 if query_owner is None else 1) * output_bytes
+            + (self.cp.cp_size + 1 if query_owner is None else 1) * output_bytes
             + wanted.numel() * _SELECTED_METADATA_BYTES,
         )
         local = _selected_local_rows(
@@ -995,6 +1001,7 @@ class V41CPAttentionContext(V41AttentionContext):
             spec.entries,
             spec.encoding.entry_bytes,
             self.cp.cp_rank,
+            self.cp.cp_size,
         )
         # Each byte has exactly one page owner; SUM preserves its bit pattern.
         if query_owner is None:
@@ -1210,7 +1217,7 @@ class V41CPL20Tail:
             start = max(start, previous.positions.start)
         else:
             start = max(start, context.start)
-        rank_positions = [[] for _ in range(8)]
+        rank_positions = [[] for _ in range(context.cp.cp_size)]
         old_indices = []
         if previous is not None:
             for rank, positions in enumerate(previous.rank_positions):
@@ -1374,10 +1381,9 @@ def begin_cp_request(
     Bounded orchestration supplies the independently materialized decoder end.
     """
     if (
-        cp_ctx.cp_size != 8
-        or not 0 <= cp_ctx.cp_rank < 8
+        cp_ctx.cp_size != layout.cp_size
+        or not 0 <= cp_ctx.cp_rank < cp_ctx.cp_size
         or not cp_ctx.kv_cache_sharded
-        or layout.cp_size != 8
         or (layout.speculative_tokens, layout.draft_enabled)
         not in ((0, False), (5, True))
         or identity.layout_fingerprint != layout.fingerprint
@@ -1390,18 +1396,19 @@ def begin_cp_request(
         or type(restored_state_ready) is not bool
     ):
         raise ValueError(
-            "CP prefill requires CP8 target-only or gamma5/three-draft layout and replay policy"
+            "CP prefill requires a target-only or gamma5/three-draft layout and replay policy"
         )
     if (
         not torch.distributed.is_initialized()
-        or torch.distributed.get_world_size(collective_torch._get_group(Group.TP)) != 8
+        or torch.distributed.get_world_size(collective_torch._get_group(Group.TP))
+        != cp_ctx.cp_size
     ):
         raise RuntimeError(
-            "CP8 attention requires the actual eight-rank TP process group"
+            "CP attention requires the TP process group to match the declared cp_size"
         )
     device = cp_ctx.global_positions.device
     if not is_supported(torch.empty((0, 5120), dtype=torch.bfloat16, device=device)):
-        raise RuntimeError("CP8 attention requires Blackwell CUDA")
+        raise RuntimeError("CP attention requires Blackwell CUDA")
     cache = V41AttentionCache(request_id, identity, layout, max_tokens, {}, {})
     context = V41CPAttentionContext(
         cache, cp_ctx, request_index, pools, tables, pair_pools, pair_tables, epoch
@@ -1441,7 +1448,8 @@ def begin_cp_request(
                 context.end + layout.token_block_size - 1
             ) // layout.token_block_size
             logicals = [
-                logical // 8 for logical in range(cp_ctx.cp_rank, block_count, 8)
+                logical // cp_ctx.cp_size
+                for logical in range(cp_ctx.cp_rank, block_count, cp_ctx.cp_size)
             ]
             # One batched read per table instead of a forced scalar sync per
             # logical page; the checks and their order match _physical.
@@ -1466,7 +1474,9 @@ def begin_cp_request(
         pair = None
         if owner in PAIR_OWNERS:
             pair_size = (
-                ((context._pair_snapshots[owner] * _PAIR_BYTES + 511) // 512) * 512 // 8
+                ((context._pair_snapshots[owner] * _PAIR_BYTES + 511) // 512)
+                * 512
+                // layout.cp_size
             )
             pool, table = pair_pools[owner], pair_tables[owner]
             if (
@@ -1615,7 +1625,7 @@ def _publish_owner(attention, hidden, context, source_rows=0):
                     context.cache.layout.token_block_size,
                     pages.entries_per_page,
                     attention.source.ratio,
-                    8,
+                    context.cp.cp_size,
                     context.cp.cp_rank,
                 )
             )
@@ -1729,7 +1739,7 @@ def _score_queries(attention, hidden, qr, context):
                 )
                 # Size the common transport schedule for the largest rank buffer.
                 padded_value_bytes = (last - first) * actual.shape[1] * 68
-                peers = 8 if context.single_query_owner is None else 1
+                peers = context.cp.cp_size if context.single_query_owner is None else 1
                 transport_blocks = min(
                     _REINDEX_BLOCKS,
                     (MAX_GATHER_BYTES - padded_value_bytes - _bytes(actual))
@@ -1737,7 +1747,7 @@ def _score_queries(attention, hidden, qr, context):
                         (last - first)
                         * SPARSE_BLOCK
                         * (
-                            (9 if peers == 8 else 1) * 68
+                            (peers + 1 if peers == context.cp.cp_size else 1) * 68
                             + peers * (4 + _SELECTED_METADATA_BYTES)
                             + 4
                         )
@@ -1883,7 +1893,7 @@ def forward_cp_attention(attention, hidden, context):
     # batch on top of the per-gather live-byte accounting.
     read_queries = _READ_QUERIES
     if context.single_query_owner is not None:
-        read_queries = min(64, 8 * read_queries)
+        read_queries = min(64, context.cp.cp_size * read_queries)
     # The 8192-row source tile is the measured optimum (GB200 p13 A/B
     # 2026-09-17: 512 vs 2048 vs 8192 same-wheel back-to-back arms; 8192 wins
     # the 16K composition counts and the 64K unprofiled latency, ties 16K); the
