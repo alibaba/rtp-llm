@@ -46,8 +46,9 @@ def run():
         ):
             raise ValueError(f"{role} must be a positive integer")
     cfg.update(overrides)
-    if os.environ.get("FETCH_OUTPUT_STREAM", "0") != "0":
-        raise ValueError("bundle mode requires FETCH_OUTPUT_STREAM=0")
+    fetch_output_stream = os.environ.get("FETCH_OUTPUT_STREAM", "0")
+    if fetch_output_stream not in {"0", "1"}:
+        raise ValueError("FETCH_OUTPUT_STREAM must be 0 or 1")
     http_port = int(os.environ.get("START_PORT", "7001"))
     mock_port = http_port + cfg["mock_port_offset"]
     runtime = Path(os.environ.get("MOCK_BUNDLE_RUN_DIR", "/home/admin/ai-whale/mock"))
@@ -121,7 +122,7 @@ def run():
         pod_ip = os.environ.get("POD_IP") or socket.gethostbyname(socket.gethostname())
         if pod_ip.startswith("127.") or pod_ip == "0.0.0.0":
             raise ValueError("bundle requires an advertised Pod IP")
-        # The JVM owns engine completion, never waits for frontend output fetching.
+        # With output fetching enabled the frontend owns continuation and completion.
         mock = start(
             "mock",
             [
@@ -155,7 +156,7 @@ def run():
                 "--unique-engine-ips",
                 str(dispatcher != "NON_BATCH").lower(),
                 "--auto-fetch",
-                "true",
+                str(fetch_output_stream == "0").lower(),
                 "--endpoint-file",
                 str(runtime / "endpoints.json"),
                 "--discovery-file",
@@ -237,8 +238,12 @@ def run():
         (runtime / "identity.json").write_text(
             json.dumps(
                 {
-                    "mode": "WHALE_BUNDLE_SCHEDULE_ONLY",
-                    "fetch_output_stream": False,
+                    "mode": (
+                        "WHALE_BUNDLE_FETCH"
+                        if fetch_output_stream == "1"
+                        else "WHALE_BUNDLE_SCHEDULE_ONLY"
+                    ),
+                    "fetch_output_stream": fetch_output_stream == "1",
                     "master_pid": master.pid,
                     "mock_pid": mock.pid,
                     "master_http_port": http_port,

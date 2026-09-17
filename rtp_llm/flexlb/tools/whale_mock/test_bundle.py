@@ -35,6 +35,15 @@ class BundleConfigurationTest(unittest.TestCase):
         command, performance = self.launch_to_process_boundary({})
         self.assertIsNone(performance)
         self.assertEqual(command[command.index("--block-size") + 1], "1024")
+        self.assertEqual(command[command.index("--auto-fetch") + 1], "true")
+
+    def test_frontend_fetch_controls_engine_continuation(self):
+        command, _ = self.launch_to_process_boundary({"FETCH_OUTPUT_STREAM": "1"})
+        self.assertEqual(command[command.index("--auto-fetch") + 1], "false")
+
+    def test_invalid_fetch_mode_cannot_launch(self):
+        with self.assertRaisesRegex(ValueError, "FETCH_OUTPUT_STREAM must be 0 or 1"):
+            self.launch_to_process_boundary({"FETCH_OUTPUT_STREAM": "invalid"})
 
     def test_glm_config_and_eos_are_written_without_losing_coefficients(self):
         profile = {
