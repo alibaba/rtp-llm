@@ -233,6 +233,8 @@ cc_test(
 
 cc_test(
     name = "block_pool_device_malloc_test",
+    # DestructionRestoresCurrentDevice exercises switching between two devices.
+    env = {"GPU_COUNT": "2"},
     srcs = [
         "BlockPoolDeviceMallocTest.cc",
     ],

@@ -8,6 +8,7 @@ This is particularly useful in testing environments where you want to use
 a specific version of flashinfer different from the system-installed one.
 """
 
+import hashlib
 import importlib.metadata
 import logging
 import os
@@ -32,6 +33,8 @@ def get_package_info(package_name):
         meta_package_name = package_name
         if package_name == "tvm_ffi":
             meta_package_name = "apache-tvm-ffi"
+        elif package_name == "flashinfer":
+            meta_package_name = "flashinfer-python"
 
         if runfiles_dir and os.path.exists(runfiles_dir):
             if runfiles_dir not in sys.path:
@@ -72,8 +75,8 @@ def _build_variant(source_path):
     every later job on that host imports, and it does so silently, because the
     staged directory is prepended to sys.path.
 
-    Returns None when the layout is unrecognised, in which case the caller keeps
-    the old version-only key rather than guessing.
+    Native venvs are keyed by their installation path. Their dependency-derived
+    venv names distinguish builds that publish the same Python version number.
     """
     for part in Path(source_path).parts:
         if part.startswith("pip_"):
@@ -81,10 +84,14 @@ def _build_variant(source_path):
     return None
 
 
+def _native_install_key(source_path):
+    return hashlib.sha256(str(Path(source_path).resolve()).encode()).hexdigest()[:16]
+
+
 def _cache_key(package_name, version, source_path):
     variant = _build_variant(source_path)
     if variant is None:
-        return "%s_python-%s" % (package_name, version)
+        variant = "native-" + _native_install_key(source_path)
     return "%s_python-%s__%s" % (package_name, version, variant)
 
 
@@ -144,7 +151,10 @@ def copy_package_with_lock(package_name, cache_dir):
         # Copy the package
         try:
             if Path(source_path).is_dir():
-                shutil.copytree(source_path, target_package_path, symlinks=True)
+                # Native wheels can contain links into their original venv.
+                # A persistent copy must remain usable after that venv is pruned.
+                preserve_links = _build_variant(source_path) is not None
+                shutil.copytree(source_path, target_package_path, symlinks=preserve_links)
             else:
                 shutil.copy2(source_path, target_package_path)
 
@@ -159,7 +169,10 @@ def copy_package_with_lock(package_name, cache_dir):
                         logging.info(
                             f"[Package Copy] Copying {libs_dir_name} directory..."
                         )
-                        shutil.copytree(libs_source, libs_target, symlinks=True)
+                        shutil.copytree(
+                            libs_source, libs_target,
+                            symlinks=_build_variant(source_path) is not None,
+                        )
 
             # Verify copy
             if not target_package_path.exists():
@@ -265,6 +278,15 @@ def bootstrap_remote_jit_dir():
 
 def setup_jit_cache():
     bootstrap_remote_jit_dir()
+
+    if not (os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")):
+        # FlashInfer's generated ninja files embed absolute package paths. Its
+        # default version/architecture cache can otherwise reference a deleted
+        # venv. Set this before get_package_info imports FlashInfer.
+        os.environ.setdefault(
+            "FLASHINFER_WORKSPACE_BASE",
+            str(Path.home() / ".cache" / "rtp-native-jit" / _native_install_key(sys.prefix)),
+        )
 
     cache_dir = Path.home().as_posix() + "/.cache"
     packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]

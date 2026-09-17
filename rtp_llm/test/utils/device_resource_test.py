@@ -33,6 +33,47 @@ device_resource = _load_device_resource_module()
 
 
 class DeviceResourceMainContractTest(TestCase):
+    def test_native_jit_cache_separates_installations_and_owns_linked_files(self):
+        jit_setup = _load_jit_sys_path_setup_module()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "venv-a" / "site-packages" / "flashinfer"
+            source.mkdir(parents=True)
+            header = root / "original.cuh"
+            header.write_text("current kernel source")
+            (source / "kernel.cuh").symlink_to(header)
+            other_source = root / "venv-b" / "site-packages" / "flashinfer"
+            self.assertNotEqual(
+                jit_setup._cache_key("flashinfer", "0.6.9", source),
+                jit_setup._cache_key("flashinfer", "0.6.9", other_source),
+            )
+            self.assertEqual(
+                jit_setup._cache_key("torch", "2.8", "/runfiles/pip_cuda_torch/site-packages/torch"),
+                "torch_python-2.8__pip_cuda_torch",
+            )
+            with patch.object(jit_setup, "get_package_info", return_value=("0.6.9", str(source))):
+                copied = jit_setup.copy_package_with_lock("flashinfer", root)
+            header.unlink()
+            cached_header = Path(copied) / "flashinfer" / "kernel.cuh"
+            self.assertFalse(cached_header.is_symlink())
+            self.assertEqual(cached_header.read_text(), "current kernel source")
+
+    def test_native_flashinfer_workspace_is_selected_before_package_import(self):
+        jit_setup = _load_jit_sys_path_setup_module()
+        observed = []
+
+        def copy_package(*args):
+            observed.append(os.environ.get("FLASHINFER_WORKSPACE_BASE"))
+            return None
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            jit_setup, "copy_package_with_lock", side_effect=copy_package
+        ):
+            jit_setup.setup_jit_cache()
+        self.assertEqual(len(observed), 4)
+        self.assertTrue(all(value and value == observed[0] for value in observed))
+        self.assertIn(jit_setup._native_install_key(sys.prefix), observed[0])
+
     def test_default_requires_one_gpu(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(device_resource._get_required_gpu_count(), 1)
