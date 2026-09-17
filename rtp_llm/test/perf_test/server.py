@@ -26,12 +26,17 @@ class EngineServer:
         engine_cli = self._build_engine_cli(max_seq_len, max_concurrency)
 
         env: Dict[str, str] = {
-            "FAKE_BALANCE_EXPERT": "1",
+            "FAKE_BALANCE_EXPERT": os.environ.get("FAKE_BALANCE_EXPERT", "1"),
             "BATCH_DECODE_SCHEDULER_WARMUP_TYPE": (
                 "0" if self._args.partial in (0, 1) else "1"
             ),
             "TORCH_CUDA_PROFILER_DIR": self._args.result_dir,
         }
+        if os.environ.get("DSV4_FWD_PROFILE", "0") == "1":
+            env["DSV4_FWD_TRACE_DIR"] = os.path.abspath(self._args.result_dir)
+            logging.warning(
+                "Native forward profiler enabled: reported timings are diagnostic"
+            )
         if use_batch_decode_scheduler is not None:
             env["USE_BATCH_DECODE_SCHEDULER"] = (
                 "1" if use_batch_decode_scheduler else "0"

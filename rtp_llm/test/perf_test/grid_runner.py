@@ -32,6 +32,7 @@ class GridRunner:
         tp_size: int = 1,
         generate_config: Optional[Dict[str, Any]] = None,
         num_measures: int = 3,
+        use_batch_decode_scheduler: bool = True,
     ):
         self._port = port
         self._dp_size = dp_size
@@ -44,6 +45,7 @@ class GridRunner:
         self._tp_size = tp_size
         self._generate_config = generate_config or {}
         self._num_measures = num_measures
+        self._use_batch_decode_scheduler = use_batch_decode_scheduler
         self._title = "Decode Result" if is_decode else "Prefill Result"
 
     def warmup(self) -> None:
@@ -66,6 +68,7 @@ class GridRunner:
             warmup_runs=0,
             measure_runs=warmup_runs,
             profile_runs=0,
+            use_batch_decode_scheduler=self._use_batch_decode_scheduler,
         ).run()
         require_complete_measurement(metric, context="grid warmup")
 
@@ -100,6 +103,7 @@ class GridRunner:
                         True,
                         self._generate_config,
                         trace_name,
+                        use_batch_decode_scheduler=self._use_batch_decode_scheduler,
                     ).run(num_measures=self._num_measures)
                     require_complete_measurement(
                         metric,
