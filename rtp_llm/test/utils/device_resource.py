@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import socket
@@ -204,14 +205,16 @@ def _detect_rocm():
             check=False,
         )
         if result.returncode == 0:
-            gpu_names = []
+            gpu_names = {}
             for line in result.stdout.strip().splitlines():
-                if "GPU[" in line and ":" in line:
+                gpu = re.match(r"\s*GPU\[(\d+)\]\s*:", line)
+                if gpu:
                     parts = line.split(":")
                     if len(parts) >= 3 and parts[-1].strip():
-                        gpu_names.append(parts[-1].strip())
+                        # --showproductname emits several properties per GPU.
+                        gpu_names.setdefault(gpu.group(1), parts[-1].strip())
             if gpu_names:
-                return gpu_names[0], len(gpu_names)
+                return next(iter(gpu_names.values())), len(gpu_names)
     except FileNotFoundError:
         pass
     try:

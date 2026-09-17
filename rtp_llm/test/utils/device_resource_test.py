@@ -33,6 +33,64 @@ device_resource = _load_device_resource_module()
 
 
 class DeviceResourceMainContractTest(TestCase):
+    def test_rocm_product_properties_count_each_device_once(self):
+        path = PROJECT_ROOT / "rtp_llm/test/utils/test_device_detection.py"
+        spec = importlib.util.spec_from_file_location("_device_detection_probe", path)
+        probe = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(probe)
+        output = "\n".join(
+            f"GPU[{gpu}] : {field} : {value}"
+            for gpu in (0, 1)
+            for field, value in (
+                ("Card series", "AMD Radeon Graphics"),
+                ("Card model", "0x74a1"),
+                ("Card vendor", "Advanced Micro Devices, Inc."),
+            )
+        )
+        output += "\nGPU[0] : Card series : AMD Radeon Graphics\n"
+        with patch.object(
+            device_resource.subprocess,
+            "run",
+            return_value=Mock(returncode=0, stdout=output),
+        ):
+            for detector in (
+                device_resource._detect_rocm,
+                probe.TestDeviceDetection()._detect_rocm,
+            ):
+                with self.subTest(detector=detector.__module__):
+                    self.assertEqual(detector(), ("AMD Radeon Graphics", 2))
+
+    def test_rocm_allocator_uses_devices_instead_of_product_property_rows(self):
+        output = "\n".join(
+            f"GPU[{gpu}] : property {field} : AMD Radeon Graphics"
+            for gpu in range(8)
+            for field in range(9)
+        )
+        with (
+            TemporaryDirectory() as directory,
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(device_resource, "GPU_STATUS_ROOT", directory),
+            patch.object(device_resource, "get_ip", return_value="worker"),
+            patch.object(device_resource, "_detect_nvidia", return_value=None),
+            patch.object(
+                device_resource.subprocess,
+                "run",
+                return_value=Mock(returncode=0, stdout=output),
+            ),
+            patch.object(
+                device_resource.DeviceResource,
+                "_get_topology_numa_groups",
+                return_value=[],
+            ),
+        ):
+            resource = device_resource.DeviceResource(2)
+            self.assertEqual(list(resource.total_gpus), list(range(8)))
+            self.assertEqual(
+                [list(group) for group in resource._candidate_gpu_groups()],
+                [[gpu, gpu + 1] for gpu in range(7)],
+            )
+
     def test_native_jit_cache_separates_installations_and_owns_linked_files(self):
         jit_setup = _load_jit_sys_path_setup_module()
         with TemporaryDirectory() as directory:

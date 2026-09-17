@@ -6,6 +6,7 @@ NOTE: Detection logic is intentionally duplicated from device_resource.py so
 this test stays fully self-contained using only stdlib + subprocess.
 """
 
+import re
 import subprocess
 import unittest
 
@@ -56,14 +57,16 @@ class TestDeviceDetection(unittest.TestCase):
                 check=False,
             )
             if r.returncode == 0:
-                names = []
+                names = {}
                 for line in r.stdout.strip().splitlines():
-                    if "GPU[" in line and ":" in line:
+                    gpu = re.match(r"\s*GPU\[(\d+)\]\s*:", line)
+                    if gpu:
                         parts = line.split(":")
                         if len(parts) >= 3 and parts[-1].strip():
-                            names.append(parts[-1].strip())
+                            # --showproductname emits several properties per GPU.
+                            names.setdefault(gpu.group(1), parts[-1].strip())
                 if names:
-                    return names[0], len(names)
+                    return next(iter(names.values())), len(names)
         except FileNotFoundError:
             pass
         try:

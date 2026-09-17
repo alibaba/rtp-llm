@@ -539,7 +539,8 @@ gpu_type = "A10"
 minimum_count = 1
 # Mainline sync expanded this inventory: runs 73135846 and 73119418 both
 # executed the same 2724 distinct case IDs, with no failures or skips.
-expected_count = 2724
+# Two additional regressions cover ROCm device enumeration and allocation.
+expected_count = 2726
 forbid_skips = true
 ignore_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4"]
 isolated_paths = [
@@ -551,7 +552,7 @@ markexpr = "not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke
 description = "Open-source-only Python UT on SM8x after internal_source is stripped"
 gpu_type = "A10"
 minimum_count = 1
-expected_count = 2724
+expected_count = 2726
 forbid_skips = true
 ignore_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4"]
 isolated_paths = [
