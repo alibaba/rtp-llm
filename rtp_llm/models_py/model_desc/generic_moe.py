@@ -646,6 +646,8 @@ class GenericMoeDecoderLayer(nn.Module):
             # quant config; the idx_q/idx_k branches stay bf16 and consume the
             # bf16_normed output from the fused kernel.
             return getattr(self.self_attn, "qkv_proj", None)
+        if isinstance(self.self_attn, CausalAttention):
+            return getattr(self.self_attn, "qkv_proj", None)
         return None
 
     def _forward_attention(
