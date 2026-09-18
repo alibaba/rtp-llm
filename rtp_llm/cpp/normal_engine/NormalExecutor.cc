@@ -141,7 +141,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          params.model_config_.hidden_size,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
-         params.model_config_.hc_mult});
+         params.model_config_.hc_mult,
+         params.model_config_.getMtpInputHiddenSize()});
     model_init_params.metrics_reporter = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,

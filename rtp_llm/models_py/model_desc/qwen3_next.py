@@ -1445,6 +1445,11 @@ class Qwen3NextDecoderLayer(nn.Module):
                 hw_kernel_config=hw_kernel_config,
             )
 
+        self._build_residual_modules(config, weights)
+
+    def _build_residual_modules(
+        self, config: ModelConfig, weights: Dict[str, torch.Tensor]
+    ) -> None:
         self.input_layernorm = RMSResNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
@@ -1479,6 +1484,8 @@ class Qwen3NextDecoderLayer(nn.Module):
 
 
 class Qwen3NextModel(GptModelBase):
+    _decoder_layer_cls = Qwen3NextDecoderLayer
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -1510,7 +1517,7 @@ class Qwen3NextModel(GptModelBase):
         )
         self.layers = nn.ModuleList(
             [
-                Qwen3NextDecoderLayer(
+                self._decoder_layer_cls(
                     model_config,
                     parallelism_config,
                     weights.weights[idx],
@@ -1523,6 +1530,11 @@ class Qwen3NextModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
+        self._build_output_head(model_config, weights)
+
+    def _build_output_head(
+        self, model_config: ModelConfig, weights: ModelWeights
+    ) -> None:
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
@@ -1657,15 +1669,12 @@ class Qwen3NextModel(GptModelBase):
         input_ids: torch.Tensor = inputs.input_ids
         return self.embed_tokens(input_ids)
 
-    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        if torch.version.hip is not None and isinstance(
-            fmha_impl, (_QwenGraphAttentionImpls, _QwenGdnGraphDelegate)
-        ):
-            fmha_impl.bind_graph_inputs(inputs)
-        hidden_states = self.word_embedding(inputs)
-        capture = self.capture_context(inputs.capture_hidden_states)
-
-        is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
+    def _build_attn_meta(
+        self,
+        inputs: PyModelInputs,
+        device: torch.device,
+        is_cuda_graph: bool = False,
+    ) -> Qwen3NextMetadata:
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         linear_layer_idx = next(
             (
@@ -1711,14 +1720,12 @@ class Qwen3NextModel(GptModelBase):
                     cp_restore_indices,
                     cp_local_extract_indices,
                     cp_local_valid_mask,
-                ) = self._build_cp_linear_attn_metadata(
-                    attention_inputs, hidden_states.device
-                )
+                ) = self._build_cp_linear_attn_metadata(attention_inputs, device)
             else:
                 cu_seqlen_without_padding = attention_inputs.cu_seqlens_device
                 prefill_conv1d_meta = prepare_causal_conv1d_metadata(
                     query_start_loc=cu_seqlen_without_padding,
-                    device=hidden_states.device,
+                    device=device,
                 )
 
         if (
@@ -1755,7 +1762,7 @@ class Qwen3NextModel(GptModelBase):
                         metadata,
                     )
 
-        attn_meta = Qwen3NextMetadata(
+        return Qwen3NextMetadata(
             prefill_conv1d_meta=prefill_conv1d_meta,
             is_target_verify=is_target_verify,
             full_prefill_conv1d_meta=full_prefill_conv1d_meta,
@@ -1767,27 +1774,38 @@ class Qwen3NextModel(GptModelBase):
             aiter_gdn_prefill_metadata=aiter_gdn_prefill_metadata,
         )
 
+    def _layer_fmha_impl(self, decoder_layer, fmha_impl, layer_idx: int):
+        if decoder_layer.layer_type == HybridAttentionType.LINEAR:
+            return None
+        return select_fmha_impl_for_layer(fmha_impl, self.kv_cache, layer_idx)
+
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        if torch.version.hip is not None and isinstance(
+            fmha_impl, (_QwenGraphAttentionImpls, _QwenGdnGraphDelegate)
+        ):
+            fmha_impl.bind_graph_inputs(inputs)
+        hidden_states = self.word_embedding(inputs)
+
+        is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
+        attn_meta = self._build_attn_meta(inputs, hidden_states.device, is_cuda_graph)
+        capture = self.capture_context(inputs.capture_hidden_states)
+
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
         residual = torch.zeros_like(hidden_states)
         capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
         if capture_aux_hidden:
-            self.begin_aux_hidden_capture(hidden_states, is_target_verify)
+            self.begin_aux_hidden_capture(hidden_states, attn_meta.is_target_verify)
 
         for i, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
                 inputs, self.kv_cache, i
             )
-            layer_fmha_impl = (
-                None
-                if decoder_layer.layer_type == HybridAttentionType.LINEAR
-                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
-            )
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
-                layer_fmha_impl,
+                self._layer_fmha_impl(decoder_layer, fmha_impl, i),
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,

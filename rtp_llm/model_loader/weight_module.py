@@ -19,6 +19,10 @@ from rtp_llm.utils.model_weight import CkptWeightInfo, W, WeightStyle, identity,
 class WeightModule(ABC):
     _registry = weakref.WeakValueDictionary()
     _cache = weakref.WeakKeyDictionary()
+    # The fastsafetensors iterator reads every tensor before Python-side key
+    # filtering. Descriptors that must select checkpoint keys *before* I/O (for
+    # example a rank-local table) opt out and make ModelLoader use scratch load.
+    supports_fastsafetensors_iteration = True
     lora_base_name = "base_model.model.{}.{}.weight"
     lora_A_suffix = "lora_A"
     lora_B_suffix = "lora_B"

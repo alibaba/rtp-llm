@@ -174,6 +174,70 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
 }
 
+bool PyWrappedModel::hasSpeculativeTargetCommitHooks() const {
+    return has_speculative_target_commit_hooks_;
+}
+
+std::string PyWrappedModel::prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) {
+    if (!has_speculative_target_commit_hooks_) {
+        return {};
+    }
+    try {
+        py::gil_scoped_acquire gil;
+        py_model_.attr("prepare_speculative_target_commit")(accept_len);
+        return {};
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python speculative target commit prepare failed: %s", e.what());
+        return e.what();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("Speculative target commit prepare failed: %s", e.what());
+        return e.what();
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Speculative target commit prepare failed with an unknown exception");
+        return "unknown speculative target commit prepare failure";
+    }
+}
+
+std::string PyWrappedModel::finishSpeculativeTargetCommit(bool commit) {
+    if (!has_speculative_target_commit_hooks_) {
+        return {};
+    }
+    try {
+        py::gil_scoped_acquire gil;
+        py_model_.attr("finish_speculative_target_commit")(commit);
+        return {};
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python speculative target commit finish failed (commit=%d): %s", commit, e.what());
+        return e.what();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("Speculative target commit finish failed (commit=%d): %s", commit, e.what());
+        return e.what();
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Speculative target commit finish failed with an unknown exception (commit=%d)", commit);
+        return "unknown speculative target commit finish failure";
+    }
+}
+
+std::string PyWrappedModel::finalizeSpeculativeTargetCommit() {
+    if (!has_speculative_target_commit_hooks_) {
+        return {};
+    }
+    try {
+        py::gil_scoped_acquire gil;
+        py_model_.attr("finalize_speculative_target_commit")();
+        return {};
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python speculative target commit finalize failed: %s", e.what());
+        return e.what();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("Speculative target commit finalize failed: %s", e.what());
+        return e.what();
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Speculative target commit finalize failed with an unknown exception");
+        return "unknown speculative target commit finalize failure";
+    }
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;

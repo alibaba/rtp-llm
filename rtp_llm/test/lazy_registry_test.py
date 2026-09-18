@@ -3,8 +3,21 @@ import unittest
 from pathlib import Path
 from typing import Iterable, Set
 
-from rtp_llm.model_factory_register import ModelDict, _model_type_to_module
-from rtp_llm.openai.renderer_factory_register import _renderer_type_to_module
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
+    _tokenizer_factory,
+    ensure_tokenizer_registered,
+)
+from rtp_llm.model_factory_register import (
+    ModelDict,
+    _model_factory,
+    _model_type_to_module,
+    ensure_model_registered,
+)
+from rtp_llm.openai.renderer_factory_register import (
+    _renderer_factory,
+    _renderer_type_to_module,
+    ensure_renderer_registered,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -63,6 +76,28 @@ class LazyRegistryTest(unittest.TestCase):
         }
 
         self.assertEqual(source_names, registered_names)
+
+    def test_qwen4_exp_lazy_renderer_registration(self):
+        self.assertTrue(ensure_renderer_registered("qwen4_exp"))
+        renderer_type = _renderer_factory["qwen4_exp"]
+        self.assertEqual(renderer_type.__name__, "Qwen35Renderer")
+        self.assertEqual(
+            renderer_type.__module__, "rtp_llm.openai.renderers.qwen35_renderer"
+        )
+
+    def test_qwen4_exp_mtp_lazy_registration(self):
+        self.assertEqual(
+            _model_type_to_module["qwen4_exp_mtp"],
+            "rtp_llm.models.qwen4_exp.qwen4_exp_mtp",
+        )
+        self.assertTrue(ensure_renderer_registered("qwen4_exp_mtp"))
+        self.assertEqual(_renderer_factory["qwen4_exp_mtp"].__name__, "Qwen35Renderer")
+        self.assertTrue(ensure_model_registered("qwen4_exp_mtp"))
+        self.assertEqual(_model_factory["qwen4_exp_mtp"].__name__, "Qwen4ExpMTP")
+        self.assertTrue(ensure_tokenizer_registered("qwen4_exp_mtp"))
+        self.assertEqual(
+            _tokenizer_factory["qwen4_exp_mtp"].__name__, "QWenV2Tokenizer"
+        )
 
     def test_dsv4_architecture_inference_is_available_without_model_import(self):
         self.assertEqual(

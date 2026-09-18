@@ -124,6 +124,16 @@ protected:
     void
     maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source, int64_t hidden_rows = 0);
 
+    bool                reduceSpeculativeTargetPrepareStatus(bool local_ok);
+    static bool         asyncPrepareAllowed(bool requested, bool target_commit_hooks);
+    static absl::Status validateSpeculativeTargetExecutionPolicy(bool target_commit_hooks, bool eplb_enabled);
+    bool                speculativeTargetTransactionsEnabled() const;
+    absl::Status        rendezvousSpeculativeTargetPhaseStatus(const absl::Status& local_status, const char* phase);
+    absl::Status        rendezvousSpeculativeTargetSamplingStatus(const absl::Status& local_status);
+    absl::Status        prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, size_t batch_size);
+    void                rollbackSpeculativeTargetStateOrFailStop(const char* phase);
+    void                rollbackSpeculativeTargetStateBestEffort(const char* phase) noexcept;
+
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
 
     absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams,
@@ -266,7 +276,7 @@ private:
 
     // for mtp
     DataType data_type_;
-    size_t   hidden_size_;
+    size_t   mtp_input_hidden_size_;
     size_t   propose_step_;
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
@@ -319,8 +329,13 @@ private:
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
 
-    torch::Stream dspark_cache_store_sync_stream_;
-    torch::Tensor dspark_cache_store_status_;
+    torch::Stream             dspark_cache_store_sync_stream_;
+    torch::Tensor             dspark_cache_store_status_;
     std::function<bool(bool)> dspark_cache_store_status_reducer_for_test_;
+
+    // Reused TP consensus scalar for validation, prepare, tentative commit,
+    // rollback, and finalize phases of a target side-state transaction.
+    torch::Tensor             speculative_target_prepare_status_;
+    std::function<bool(bool)> speculative_target_status_reducer_for_test_;
 };
 }  // namespace rtp_llm

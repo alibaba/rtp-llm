@@ -59,6 +59,27 @@ from rtp_llm.utils.version_info import VersionInfo
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 
 STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
+BACKEND_HEALTH_READY_TIMEOUT_S_ENV = "RTP_LLM_FRONTEND_BACKEND_HEALTH_TIMEOUT_S"
+DEFAULT_BACKEND_HEALTH_READY_TIMEOUT_S = 3600
+
+
+def _backend_health_ready_timeout_seconds() -> float:
+    raw = os.environ.get(BACKEND_HEALTH_READY_TIMEOUT_S_ENV, "").strip()
+    if not raw:
+        return DEFAULT_BACKEND_HEALTH_READY_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if value <= 0:
+        logging.warning(
+            "invalid %s=%r, keeping default %ss",
+            BACKEND_HEALTH_READY_TIMEOUT_S_ENV,
+            raw,
+            DEFAULT_BACKEND_HEALTH_READY_TIMEOUT_S,
+        )
+        return DEFAULT_BACKEND_HEALTH_READY_TIMEOUT_S
+    return value
 
 
 def _pre_stop_drain_seconds(
@@ -450,7 +471,7 @@ class FrontendApp(object):
         """Loop until backend gRPC health_check returns ok (used when PD 不分离)."""
         if self.frontend_server.is_embedding:
             return
-        timeout_s = 3600
+        timeout_s = _backend_health_ready_timeout_seconds()
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             try:

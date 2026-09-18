@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
+#include <limits>
 #include <sstream>
 #include <string>
 
@@ -161,6 +162,25 @@ bool ModelConfig::isGatedActivation() const {
     return rtp_llm::isGatedActivation(activation_type);
 }
 
+int64_t ModelConfig::getMtpInputHiddenSize() const {
+    if (mtp_input_hidden_size < 0) {
+        throw std::runtime_error("mtp_input_hidden_size must be non-negative, got "
+                                 + std::to_string(mtp_input_hidden_size));
+    }
+    if (mtp_input_hidden_size > 0) {
+        return mtp_input_hidden_size;
+    }
+    if (hidden_size <= 0 || hc_mult <= 0) {
+        throw std::runtime_error("cannot resolve mtp_input_hidden_size from hidden_size="
+                                 + std::to_string(hidden_size) + " and hc_mult=" + std::to_string(hc_mult));
+    }
+    if (hidden_size > std::numeric_limits<int64_t>::max() / hc_mult) {
+        throw std::runtime_error("mtp_input_hidden_size overflows int64_t for hidden_size="
+                                 + std::to_string(hidden_size) + " and hc_mult=" + std::to_string(hc_mult));
+    }
+    return hidden_size * hc_mult;
+}
+
 bool ModelConfig::isKvCacheQuant() const {
     return attn_config.kv_cache_dtype == KvCacheDataType::FP8;
 }
@@ -251,6 +271,7 @@ std::string ModelConfig::to_string() const {
         << "use_norm_input_residual: " << use_norm_input_residual << "\n"
         << "use_norm_attn_out_residual: " << use_norm_attn_out_residual << "\n"
         << "max_seq_len: " << max_seq_len << "\n"
+        << "mtp_input_hidden_size: " << mtp_input_hidden_size << "\n"
         << "vocab_size: " << vocab_size << "\n"
         << "output_vocab_size: " << output_vocab_ids.size() << "\n"
         << "output_vocab_padded_size: " << output_vocab_padded_size << "\n"

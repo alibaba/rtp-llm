@@ -81,8 +81,13 @@ class Qwen3NextBase(BaseModel):
         cls._parse_moe_config(config_json, config)
         cls._parse_hybrid_attention_config(config_json, config)
         cls._parse_linear_attention_config(config_json, config)
+        cls._parse_extra_text_config(config_json, config)
 
         return config
+
+    @classmethod
+    def _parse_extra_text_config(cls, config_json: dict, config: ModelConfig) -> None:
+        """Hook for fields that only some family members carry."""
 
     @classmethod
     def _preprocess_config_json(cls, config_json: dict) -> dict:
@@ -225,6 +230,7 @@ class Qwen35Moe(Qwen3NextBase):
         cls._parse_hybrid_attention_config(text_config_json, config)
         cls._parse_linear_attention_config(text_config_json, config)
         cls._parse_mm_config(config_json, config)
+        cls._parse_extra_text_config(text_config_json, config)
 
         return config
 
@@ -275,6 +281,11 @@ class Qwen35Moe(Qwen3NextBase):
 
         config.mm_related_params.config["ckpt_path"] = config.ckpt_path
 
+    def _py_model_class(self):
+        from rtp_llm.models_py.model_desc.qwen3_next import Qwen35Model
+
+        return Qwen35Model
+
     def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config
@@ -298,9 +309,8 @@ class Qwen35Moe(Qwen3NextBase):
                 "Qwen3Next has no python-model implementation for "
                 f"{get_device_type().name}"
             )
-        from rtp_llm.models_py.model_desc.qwen3_next import Qwen35Model
 
-        self.py_model = Qwen35Model(
+        self.py_model = self._py_model_class()(
             model_config,
             parallelism_config,
             self.weight,

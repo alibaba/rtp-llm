@@ -11,6 +11,7 @@ from rtp_llm.models.qwen2_vl import QWen2_VL
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import Qwen3NextMTP
 from rtp_llm.models.qwen3_vl import QWen3_VL
+from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
 from rtp_llm.models.qwen_v2 import QwenV2MTP
 from rtp_llm.ops import (
     CacheReusePolicyDesc,
@@ -228,6 +229,77 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertEqual(tags[11], "full")
         self.assertEqual(tags[12], "linear")
         self.assertEqual(tags[13], "linear")
+
+    def test_qwen4_exp_48_layers_from_layer_types(self):
+        config = ModelConfig()
+        config.num_layers = 48
+        layer_types = [
+            "full_attention" if (i + 1) % 4 == 0 else "linear_attention"
+            for i in range(48)
+        ]
+
+        Qwen4Exp._parse_hybrid_attention_config({"layer_types": layer_types}, config)
+        Qwen4Exp._post_build_model_config(config)
+
+        self.assertTrue(config.hybrid_attention_config.enable_hybrid_attention)
+        self.assertEqual(
+            list(config.hybrid_attention_config.hybrid_attention_types)[:4],
+            [
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.NONE,
+            ],
+        )
+        tags = [layer_descs[0].tag for layer_descs in config.kv_cache_spec_descs]
+        self.assertEqual(len(tags), 48)
+        self.assertEqual(tags.count("full"), 12)
+        self.assertEqual(tags.count("linear0"), 12)
+        self.assertEqual(tags.count("linear1"), 12)
+        self.assertEqual(tags.count("linear2"), 12)
+        self.assertEqual(tags[3], "full")
+        self.assertEqual(tags[4], "linear0")
+        for tag, layer_descs in zip(tags, config.kv_cache_spec_descs):
+            expected = KVCacheSpecType.MHA if tag == "full" else KVCacheSpecType.LINEAR
+            self.assertEqual(layer_descs[0].cache_type, expected)
+
+    def test_qwen4_exp_falls_back_to_full_attention_interval(self):
+        config = ModelConfig()
+        config.num_layers = 8
+
+        Qwen4Exp._parse_hybrid_attention_config({"full_attention_interval": 4}, config)
+
+        self.assertEqual(
+            list(config.hybrid_attention_config.hybrid_attention_types),
+            [
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.NONE,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.NONE,
+            ],
+        )
+
+    def test_qwen4_exp_rejects_layer_types_length_mismatch(self):
+        config = ModelConfig()
+        config.num_layers = 48
+
+        with self.assertRaisesRegex(ValueError, "4 entries but the model has 48"):
+            Qwen4Exp._parse_hybrid_attention_config(
+                {"layer_types": ["linear_attention"] * 3 + ["full_attention"]}, config
+            )
+
+    def test_qwen4_exp_rejects_unknown_layer_type(self):
+        config = ModelConfig()
+        config.num_layers = 2
+
+        with self.assertRaisesRegex(ValueError, "layer_types\\[1\\] is 'swa'"):
+            Qwen4Exp._parse_hybrid_attention_config(
+                {"layer_types": ["linear_attention", "swa"]}, config
+            )
 
     def test_qwen35_defaults_missing_mrope_interleaved_to_true(self):
         config = ModelConfig()
