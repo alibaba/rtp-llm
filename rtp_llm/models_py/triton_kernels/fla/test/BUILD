@@ -194,6 +194,14 @@ py_test(
 )
 
 py_test(
+    name = "test_flashinfer_decode_adapter",
+    srcs = ["test_flashinfer_decode_adapter.py"],
+    deps = ["//rtp_llm:rtp_llm_lib"],
+    tags = ["manual", "cuda13", "sm10x"],
+    exec_properties = {"gpu": "SM100_ARM"},
+)
+
+py_test(
     name = "test_gdn_prefill_dispatch",
     srcs = ["test_gdn_prefill_dispatch.py"],
     deps = ["//rtp_llm:rtp_llm_lib"],

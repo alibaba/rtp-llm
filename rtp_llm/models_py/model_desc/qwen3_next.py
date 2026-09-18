@@ -46,6 +46,10 @@ from rtp_llm.models_py.triton_kernels.fla.chunk import (
     is_flydsl_chunk_gdn_enabled,
     is_flydsl_chunk_gdn_shape_supported,
 )
+from rtp_llm.models_py.triton_kernels.fla.flashinfer_decode import (
+    flashinfer_gdn_decode,
+    gdn_decode_backend,
+)
 from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
@@ -558,13 +562,35 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             dim=2,
         )
 
+        ssm_states = self._get_ssm_states(kv_cache_tensor)
+        if (
+            gdn_decode_backend() == "flashinfer"
+            and not is_target_verify
+            and seq == 1
+        ):
+            core_attn_out = flashinfer_gdn_decode(
+                q=query,
+                k=key,
+                v=value,
+                a=a,
+                b=b,
+                A_log=self.alog,
+                dt_bias=self.dt_bias,
+                initial_state=ssm_states,
+                block_map=self._get_fla_block_map(attn_inputs),
+                sequence_lengths_plus_1=attn_inputs.sequence_lengths_plus_1_device,
+                seq_size_per_block=seq_size_per_block,
+            )
+            return core_attn_out.reshape(
+                [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
+            )
+
         if g is None or beta is None:
             g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
 
         # contiguous will be applyed when call fused_recurrent_gated_delta_rule
         g = g.view(batch, seq, self.local_num_v_heads)
         beta = beta.view(batch, seq, self.local_num_v_heads)
-        ssm_states = self._get_ssm_states(kv_cache_tensor)
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
             k=key,
@@ -603,7 +629,10 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         is_target_verify = attn_meta.is_target_verify
         g = None
         beta = None
-        if not is_target_verify:
+        use_flashinfer = (
+            gdn_decode_backend() == "flashinfer" and not is_target_verify
+        )
+        if not is_target_verify and not use_flashinfer:
             batch, seq = self._get_bs_from_attenion_input(
                 mixed_qkv, attn_inputs, is_target_verify
             )
