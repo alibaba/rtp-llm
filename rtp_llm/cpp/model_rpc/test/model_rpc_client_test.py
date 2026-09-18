@@ -2,7 +2,7 @@ import asyncio
 import json
 import struct
 import sys
-from enum import Enum
+from enum import IntEnum
 from unittest.mock import MagicMock, patch
 
 # Mock the ops module to avoid CUDA dependency in this unit test
@@ -13,7 +13,7 @@ mock_nccl_op = MagicMock()
 mock_compute_ops = MagicMock()
 
 
-class _FakeRoleType(Enum):
+class _FakeRoleType(IntEnum):
     PDFUSION = 0
     PREFILL = 1
     DECODE = 2
@@ -258,6 +258,31 @@ class ModelRpcClientTest(TestCase):
             mm_inputs=[],
             generate_config=generate_config,
         )
+
+    def test_trans_input_priority_matches_flexlb_resolution(self):
+        from rtp_llm.server.master_client import MasterClient
+
+        cases = [
+            ({"x-dashscope-inner-qos-level": "70"}, 77, 70),
+            ({"X-DashScope-Inner-QoS-Level": " 70 "}, 77, 70),
+            ({}, 77, 77),
+            ({"x-dashscope-inner-qos-level": "invalid"}, 77, 77),
+            ({"x-dashscope-inner-qos-level": "101"}, 77, 77),
+            ({"x-dashscope-inner-qos-level": "0"}, None, 50),
+            ({}, 101, 50),
+            ({}, None, 50),
+            ({"x-dashscope-inner-qos-level": "1"}, None, 1),
+            ({"x-dashscope-inner-qos-level": "100"}, None, 100),
+        ]
+        for headers, priority, expected in cases:
+            with self.subTest(headers=headers, config_priority=priority):
+                config = GenerateConfig()
+                if priority is not None:
+                    config.qos_priority = priority
+                request = self._make_generate_input(config)
+                request.headers = headers
+                self.assertEqual(trans_input(request).priority, expected)
+                self.assertEqual(MasterClient._extract_priority(request), expected)
 
     def test_thinking_mode_values_match_proto_contract(self):
         cases = (
