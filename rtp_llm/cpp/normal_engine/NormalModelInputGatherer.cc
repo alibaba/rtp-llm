@@ -5,6 +5,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -122,29 +123,30 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
     RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id.dim() == 3, "hybrid kv_cache_block_id must be 3-D");
 
     const size_t batch = model_input.kv_cache_kernel_block_id.size(1);
-    RTP_LLM_CHECK_WITH_INFO(kv_cache.groupNums() <= model_input.kv_cache_kernel_block_id.size(0) && model_batch_idx >= 0
-                                && static_cast<size_t>(model_batch_idx) < batch,
+    RTP_LLM_CHECK_WITH_INFO(kv_cache.groupNums() == model_input.kv_cache_kernel_block_id.size(0)
+                                && model_input.kv_cache_group_tags.size() == static_cast<size_t>(kv_cache.groupNums())
+                                && model_batch_idx >= 0 && static_cast<size_t>(model_batch_idx) < batch,
                             "kernel block table group or batch exceeds destination");
     int32_t* kernel_dst_base = model_input.kv_cache_kernel_block_id.data_ptr<int32_t>();
     int32_t* store_dst_base  = model_input.kv_cache_block_id.data_ptr<int32_t>();
 
-    for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
-        auto& kernel_blocks = kv_cache.kernelBlocks(stream_batch_idx, gid);
+    for (size_t row = 0; row < model_input.kv_cache_group_tags.size(); ++row) {
+        const auto& tag           = model_input.kv_cache_group_tags[row];
+        const auto& kernel_blocks = kv_cache.kernelBlocks(stream_batch_idx, tag);
         RTP_LLM_CHECK_WITH_INFO(kernel_blocks.size()
                                     <= static_cast<size_t>(model_input.kv_cache_kernel_block_id.size(2)),
-                                "kernel block ids exceed destination row for group=%d",
-                                gid);
-        int32_t* kernel_dst = kernel_dst_base
-                              + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx))
-                                    * max_blocks_num * kernel_blocks_per_kv_block;
+                                "kernel block ids exceed destination row for tag=%s",
+                                tag.c_str());
+        int32_t* kernel_dst =
+            kernel_dst_base
+            + (row * batch + static_cast<size_t>(model_batch_idx)) * max_blocks_num * kernel_blocks_per_kv_block;
         std::memcpy(kernel_dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
 
-        auto& physical_blocks = kv_cache.blocks(stream_batch_idx, gid);
+        const auto& physical_blocks = kv_cache.blocks(stream_batch_idx, tag);
         RTP_LLM_CHECK_WITH_INFO(physical_blocks.size() <= static_cast<size_t>(model_input.kv_cache_block_id.size(2)),
-                                "physical block ids exceed destination row for group=%d",
-                                gid);
-        int32_t* store_dst =
-            store_dst_base + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx)) * max_blocks_num;
+                                "physical block ids exceed destination row for tag=%s",
+                                tag.c_str());
+        int32_t* store_dst = store_dst_base + (row * batch + static_cast<size_t>(model_batch_idx)) * max_blocks_num;
         std::memcpy(store_dst, physical_blocks.data(), physical_blocks.size() * sizeof(int32_t));
     }
 }
@@ -231,8 +233,11 @@ void addCacheUpdateCopy(GatherModelInputContext&              ctx,
         const auto it = std::find(group_tags.begin(), group_tags.end(), mapping.tag);
         RTP_LLM_CHECK_WITH_INFO(
             it != group_tags.end(), "cache update mapping references unknown tag=%s", mapping.tag.c_str());
-        *ctx.kv_cache_update_mapping++ =
-            GroupBlockIdPair{static_cast<GroupIdType>(std::distance(group_tags.begin(), it)), mapping.src, mapping.dst};
+        const auto row = std::distance(group_tags.begin(), it);
+        RTP_LLM_CHECK_WITH_INFO(row <= std::numeric_limits<GroupIdType>::max(),
+                                "cache update mapping payload row exceeds int32 range");
+        // The first column identifies this payload's row, not a manager's group id.
+        *ctx.kv_cache_update_mapping++ = GroupBlockIdPair{static_cast<GroupIdType>(row), mapping.src, mapping.dst};
     }
 }
 
@@ -359,13 +364,17 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
                          pinned_i32);
         model_input.kv_cache_block_id = torch::zeros(
             {(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size, (int64_t)max_blocks_num}, pinned_i32);
-        model_input.kv_cache_group_types    = torch::empty({(int64_t)config_.kv_cache_group_nums}, pinned_i32);
-        model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 3}, pinned_i32);
         // CP-sharded group block tables can be narrower than the global cache-key
         // namespace. Keep cache_keys independently sized so PD writer and reader
         // derive identical keys from the complete token sequence.
         model_input.cache_keys =
             torch::zeros({(int64_t)total_context_batch_size, (int64_t)max_cache_keys_num}, pinned_i64);
+    }
+    if (config_.kv_cache_group_nums > 0) {
+        model_input.kv_cache_group_types = torch::empty({(int64_t)config_.kv_cache_group_nums}, pinned_i32);
+    }
+    if (total_block_copy_num > 0) {
+        model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 3}, pinned_i32);
     }
 
     if (need_cal_position_id) {
@@ -391,7 +400,19 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
 }
 
 void NormalModelInputGatherer::initializeKvCacheMetadata(GptModelInputs& model_input) const {
-    if (model_input.kv_cache_group_types.defined()) {
+    RTP_LLM_CHECK_WITH_INFO(config_.kv_cache_group_tags.size() == config_.kv_cache_group_nums
+                                && config_.kv_cache_group_types.size() == config_.kv_cache_group_nums,
+                            "cache group tag/type counts must match configured group count");
+    std::unordered_set<std::string> seen;
+    for (const auto& tag : config_.kv_cache_group_tags) {
+        RTP_LLM_CHECK_WITH_INFO(!tag.empty() && seen.insert(tag).second,
+                                "cache group tags must be non-empty and unique: tag=%s",
+                                tag.c_str());
+    }
+    model_input.kv_cache_group_tags = config_.kv_cache_group_tags;
+    if (config_.kv_cache_group_nums > 0) {
+        RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_group_types.defined(),
+                                "cache group types must be allocated for configured groups");
         auto* dst = model_input.kv_cache_group_types.data_ptr<int32_t>();
         for (size_t g = 0; g < config_.kv_cache_group_nums; ++g) {
             dst[g] = static_cast<int32_t>(config_.kv_cache_group_types[g]);
@@ -507,7 +528,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
             }
             ctx.batch_idx += 1;
         }
-        addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), config_.kv_cache_group_tags);
+        addCacheUpdateCopy(
+            ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), model_input.kv_cache_group_tags);
         stream->step();
     }
 
@@ -597,7 +619,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             ctx.token_idx += input_tokens.size();
         }
 
-        addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), config_.kv_cache_group_tags);
+        addCacheUpdateCopy(
+            ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), model_input.kv_cache_group_tags);
         stream->step();
     }
 
@@ -619,8 +642,21 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     return absl::OkStatus();
 }
 
-absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
-                                                                                   TensorHolder& host_holder) const {
+absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlockId(
+    const StreamGroups& stream_groups, const std::vector<std::string>& group_tags, TensorHolder& host_holder) const {
+    RTP_LLM_CHECK_WITH_INFO(group_tags.size() == config_.kv_cache_group_nums
+                                && config_.kv_cache_group_tags.size() == config_.kv_cache_group_nums,
+                            "kernel gather tag count must match configured group count");
+    std::unordered_set<std::string> requested_tags;
+    for (const auto& tag : group_tags) {
+        RTP_LLM_CHECK_WITH_INFO(!tag.empty() && requested_tags.insert(tag).second,
+                                "kernel gather tags must be non-empty and unique: tag=%s",
+                                tag.c_str());
+    }
+    for (const auto& tag : config_.kv_cache_group_tags) {
+        RTP_LLM_CHECK_WITH_INFO(
+            requested_tags.erase(tag) == 1, "kernel gather tag set differs from configuration: tag=%s", tag.c_str());
+    }
     const size_t total_batch_size = stream_groups.totalModelBatchSize();
     const size_t max_blocks_num   = stream_groups.curBlocksNum();
     if (max_blocks_num == 0 || total_batch_size == 0) {
@@ -640,18 +676,16 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
     auto fill_one_stream = [&](const GenerateStreamPtr& stream, int& batch_idx) {
         auto& kv_cache           = *stream->kvCachePtr();
         auto  current_batch_size = stream->currentBatchSize();
-        RTP_LLM_CHECK_WITH_INFO(kv_cache.groupNums() <= host_tensor.size(0) && batch_idx >= 0
+        RTP_LLM_CHECK_WITH_INFO(kv_cache.groupNums() == host_tensor.size(0) && batch_idx >= 0
                                     && static_cast<size_t>(batch_idx + current_batch_size) <= total_batch_size,
                                 "kernel block table group or batch exceeds destination");
         for (int i = 0; i < current_batch_size; ++i) {
-            for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
-                const auto& kernel_blocks = kv_cache.kernelBlocks(i, gid);
+            for (size_t row = 0; row < group_tags.size(); ++row) {
+                const auto& kernel_blocks = kv_cache.kernelBlocks(i, group_tags[row]);
                 RTP_LLM_CHECK_WITH_INFO(kernel_blocks.size() <= per_batch_stride,
-                                        "kernel block ids exceed destination row for group=%d",
-                                        gid);
-                int32_t* dst =
-                    dst_base
-                    + (static_cast<size_t>(gid) * total_batch_size + static_cast<size_t>(batch_idx)) * per_batch_stride;
+                                        "kernel block ids exceed destination row for tag=%s",
+                                        group_tags[row].c_str());
+                int32_t* dst = dst_base + (row * total_batch_size + static_cast<size_t>(batch_idx)) * per_batch_stride;
                 std::memcpy(dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
             }
             batch_idx += 1;

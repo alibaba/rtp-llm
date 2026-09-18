@@ -654,7 +654,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         )
         self._assert_replay_signature(
             runner,
-            _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}),
+            _build_decode_inputs(list(reversed(GROUP_TAGS)), {"full": 5, "aux": 3}),
             53,
         )
 
@@ -722,7 +722,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         )
         self._assert_replay_signature(
             runner,
-            _build_prefill_inputs(GROUP_TAGS, {"full": 4, "aux": 3}),
+            _build_prefill_inputs(list(reversed(GROUP_TAGS)), {"full": 4, "aux": 3}),
             52,
         )
 

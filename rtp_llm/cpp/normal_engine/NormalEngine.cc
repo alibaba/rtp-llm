@@ -526,8 +526,18 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
     executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
-    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    // preRun creates its stream through resource_context_; expose the same
+    // finalized warmup topology that the temporary executor owns.
+    auto previous_cache_manager     = std::move(resource_context_.cache_manager);
+    resource_context_.cache_manager = cache_manager;
+    try {
+        THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
+    } catch (...) {
+        resource_context_.cache_manager = std::move(previous_cache_manager);
+        throw;
+    }
+    resource_context_.cache_manager = std::move(previous_cache_manager);
+    const auto max_consumed         = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
