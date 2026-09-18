@@ -44,10 +44,11 @@ constexpr int    kLayerId        = 0;
 constexpr size_t kPhysicalBlocks = 8;
 
 struct TestCacheSpec: public KVCacheSpec {
-    TestCacheSpec(std::string cache_tag, size_t tokens_per_block, size_t bytes): bytes_(bytes) {
-        tag                = std::move(cache_tag);
-        seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
-        type               = KVCacheSpecType::OpaqueState;
+    TestCacheSpec(std::string cache_tag, size_t tokens_per_block, size_t bytes):
+        KVCacheSpec(
+            std::move(cache_tag), static_cast<uint32_t>(tokens_per_block), static_cast<uint32_t>(tokens_per_block), 1),
+        bytes_(bytes) {
+        type = KVCacheSpecType::OpaqueState;
     }
 
     size_t block_size() const override {
@@ -90,15 +91,11 @@ struct GroupSpec {
 
 CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
     CacheConfig config;
-    config.dtype                          = DataType::TYPE_INT8;
-    config.layer_num                      = 1;
-    config.layer_all_num                  = 1;
-    config.block_num                      = kPhysicalBlocks;
-    config.seq_size_per_block             = groups.front().tokens_per_block;
-    config.kernel_seq_size_per_block      = groups.front().tokens_per_block;
-    config.kv_block_stride_bytes          = groups.front().stride_bytes;
-    config.use_opaque_kv_cache_store      = true;
-    config.group_block_layout_initialized = true;
+    config.dtype                     = DataType::TYPE_INT8;
+    config.layer_num                 = 1;
+    config.block_num                 = kPhysicalBlocks;
+    config.seq_size_per_block        = groups.front().tokens_per_block;
+    config.use_opaque_kv_cache_store = true;
 
     std::vector<GroupBase>   topology_groups;
     std::vector<std::string> layer_tags;
@@ -110,11 +107,7 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
         group.spec   = std::make_shared<TestCacheSpec>(spec.tag, spec.tokens_per_block, spec.stride_bytes);
         group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
         group.policy.explicit_block_num = kPhysicalBlocks;
-        group.layer_ids                 = {kLayerId};
         group.block_num                 = kPhysicalBlocks;
-        group.seq_size_per_block        = spec.tokens_per_block;
-        group.kernel_seq_size_per_block = spec.tokens_per_block;
-        group.kv_block_stride_bytes     = spec.stride_bytes;
         topology_groups.push_back(std::move(group));
         layer_tags.push_back(spec.tag);
     }
@@ -136,7 +129,7 @@ LayoutAndBases makeLayout(const CacheConfig& config) {
     std::map<std::string, uintptr_t>      bases;
     for (const auto& group : config.topology().groups()) {
         auto storage =
-            torch::zeros({static_cast<int64_t>(kPhysicalBlocks), static_cast<int64_t>(group.kv_block_stride_bytes)},
+            torch::zeros({static_cast<int64_t>(kPhysicalBlocks), static_cast<int64_t>(group.kvBlockStrideBytes())},
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
         bases.emplace(group.tag, reinterpret_cast<uintptr_t>(storage.data_ptr()));
         layouts.emplace(group.tag,
@@ -525,9 +518,6 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
     description.attention_conf.kv_head_num   = 1;
     description.attention_conf.size_per_head = 1;
 
-    const auto&        active_config = scenario.mtp_cache_config_index.has_value() ?
-                                           manager->getMTPModuleCacheConfig(*scenario.mtp_cache_config_index) :
-                                           manager->cacheConfig();
     GptModelInitParams params{weights,
                               description,
                               cacheless_warmup ? std::nullopt : std::make_optional(scenario.layout),
@@ -542,8 +532,6 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                               MlaOpsType::AUTO,
                               /*max_seq_len=*/64,
                               /*hidden_size=*/1,
-                              active_config.seq_size_per_block,
-                              active_config.kernel_seq_size_per_block,
                               manager,
                               scenario.mtp_cache_config_index};
 
@@ -619,10 +607,9 @@ py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
                                   MlaOpsType::AUTO,
                                   /*max_seq_len=*/4,
                                   /*hidden_size=*/4,
-                                  config.seq_size_per_block,
-                                  config.kernel_seq_size_per_block,
                                   manager,
                                   /*mtp_cache_config_index=*/std::nullopt};
+        params.kernel_block_table_width = 1;
         try {
             PyWrappedModel model(params, py_model);
         } catch (const DirtyCudaGraphCaptureError&) {
@@ -689,10 +676,9 @@ py::dict runGenerationPrefillCaptureScenario(py::object py_model, const std::str
                               MlaOpsType::AUTO,
                               /*max_seq_len=*/4,
                               /*hidden_size=*/4,
-                              config.seq_size_per_block,
-                              config.kernel_seq_size_per_block,
                               manager,
                               /*mtp_cache_config_index=*/std::nullopt};
+    params.kernel_block_table_width = 1;
 
     size_t      available_during  = 0;
     bool        graph_enabled     = false;

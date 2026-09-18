@@ -104,7 +104,7 @@ public:
         resource_context_.cache_manager = std::move(previous_cache_manager_);
     }
 
-    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&)            = delete;
+    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&) = delete;
     ScopedWarmUpCacheManagerBinding& operator=(const ScopedWarmUpCacheManagerBinding&) = delete;
 
 private:
@@ -115,9 +115,6 @@ private:
 std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManager(const EngineInitParams& params) {
     auto cache_config = CacheConfigCreator::createBasicConfig(
         params.model_config_, params.parallelism_config, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
-    if (cache_config.kernel_seq_size_per_block == 0) {
-        cache_config.kernel_seq_size_per_block = cache_config.seq_size_per_block;
-    }
 
     RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0,
                             "generation prefill CUDA graph warmup requires a positive KV block size");
@@ -204,20 +201,19 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                                 "output_vocab_padded_size must be >= output_vocab_ids.size()");
     }
     if (propose_params_) {
-        const auto gamma = propose_params_->gen_num_per_circle;
-        if (propose_params_->sp_type == SP_TYPE_DSPARK) {
-            RTP_LLM_CHECK_WITH_INFO(gamma <= static_cast<size_t>(std::numeric_limits<int>::max()) / 3,
-                                    "DSpARK gen_num_per_circle is too large: %zu",
-                                    gamma);
-            // An async DSpark round can expose one extra accepted window before
-            // host bookkeeping catches up, then seed the next gamma-wide block.
-            reserve_step_ = static_cast<int>(3 * gamma);
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(gamma < static_cast<size_t>(std::numeric_limits<int>::max()),
-                                    "gen_num_per_circle is too large: %zu",
-                                    gamma);
-            reserve_step_ = static_cast<int>(gamma + 1);
-        }
+        RTP_LLM_CHECK_WITH_INFO(sp_config.type == propose_params_->sp_type,
+                                "speculative type mismatch: config=%s proposal=%s",
+                                SpeculativeExecutionConfig::to_string(sp_config.type).c_str(),
+                                SpeculativeExecutionConfig::to_string(propose_params_->sp_type).c_str());
+        RTP_LLM_CHECK_WITH_INFO(sp_config.gen_num_per_cycle >= 0,
+                                "speculative gen_num_per_cycle must be non-negative: %lld",
+                                static_cast<long long>(sp_config.gen_num_per_cycle));
+        RTP_LLM_CHECK_WITH_INFO(static_cast<uint64_t>(sp_config.gen_num_per_cycle)
+                                    == propose_params_->gen_num_per_circle,
+                                "speculative gamma mismatch: config=%lld proposal=%zu",
+                                static_cast<long long>(sp_config.gen_num_per_cycle),
+                                propose_params_->gen_num_per_circle);
+        reserve_step_ = static_cast<int>(sp_config.speculativeReserveStep());
     } else {
         reserve_step_ = 0;
     }
@@ -428,21 +424,15 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
 size_t NormalEngine::getWarmUpInputLength() const {
     const auto max_seq_len  = static_cast<size_t>(model_config_.max_seq_len);
     const auto reserve_step = reserve_step_ > 0 ? static_cast<size_t>(reserve_step_) : 0;
+    const auto input_len    = warmUpInputLength(max_seq_len, reserve_step);
     if (reserve_step > 0) {
-        RTP_LLM_CHECK_WITH_INFO(max_seq_len > reserve_step,
-                                "max_seq_len [%zu] should be greater than speculative reserve_step [%zu]",
-                                max_seq_len,
-                                reserve_step);
-        const auto input_len = max_seq_len - reserve_step;
         RTP_LLM_LOG_INFO("framework warm up input len adjusted by speculative reserve_step, "
                          "max_seq_len=%zu, reserve_step=%zu, input_len=%zu",
                          max_seq_len,
                          reserve_step,
                          input_len);
-        return input_len;
     }
-    RTP_LLM_CHECK_WITH_INFO(max_seq_len > 1, "max_seq_len [%zu] should be greater than 1", max_seq_len);
-    return max_seq_len - 1;
+    return input_len;
 }
 
 WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
@@ -645,7 +635,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
         RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
                          result.block_num,
-                         result.block_size_bytes / 1024);
+                         result.totalGroupBlockSizeBytes() / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
         resource_context_.cache_manager = make_shared<KVCacheManager>(result,
                                                                       false,

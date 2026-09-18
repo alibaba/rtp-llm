@@ -4,6 +4,7 @@
 #include <numeric>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -82,16 +83,17 @@ inline DeviceBlockPoolConfig createTestConfig(size_t   k_block_stride_bytes = 51
     auto               spec      = createTestKvCacheSpec(
         kLayerNum, dtype, local_head_num_kv, seq_size_per_block, k_block_stride_bytes, v_block_stride_bytes);
     CacheConfig cache_config;
-    cache_config.layer_num             = kLayerNum;
-    cache_config.layer_all_num         = kLayerNum;
-    cache_config.block_num             = kBlockNum;
-    cache_config.dtype                 = dtype;
-    cache_config.seq_size_per_block    = seq_size_per_block;
-    cache_config.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
-    cache_config.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
+    cache_config.layer_num          = kLayerNum;
+    cache_config.block_num          = kBlockNum;
+    cache_config.dtype              = dtype;
+    cache_config.seq_size_per_block = seq_size_per_block;
     std::vector<int> layer_ids(kLayerNum);
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    test::setGroupBlockLayout(cache_config,
+                              {kBlockNum},
+                              {k_block_stride_bytes + v_block_stride_bytes},
+                              {k_scale_stride_bytes + v_scale_stride_bytes});
     return DeviceBlockPoolConfigHelper::createConfig(cache_config);
 }
 

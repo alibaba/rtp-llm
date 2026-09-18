@@ -55,10 +55,10 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
     auto collector = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
     RTP_LLM_CHECK_WITH_INFO(resource != nullptr, "writeByLayer requires a cache resource");
-    RTP_LLM_CHECK_WITH_INFO(resource->layerNum() == static_cast<int>(config_.layer_all_num),
+    RTP_LLM_CHECK_WITH_INFO(resource->layerNum() == static_cast<int>(config_.layer_all_num()),
                             "P2P cache resource layer count mismatch: resource=%d configured=%u",
                             resource->layerNum(),
-                            config_.layer_all_num);
+                            config_.layer_all_num());
     const int64_t deadline_ms     = currentTimeMs() + store_wait_timeout_ms_;
     auto          computed_buffer = computed_buffers_->addBuffer(request_id, nullptr, deadline_ms);
     if (!computed_buffer->expectedBufferCount().has_value()) {
@@ -133,7 +133,7 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
 
     while (!cancel_flag->load() && currentTimeMs() < return_deadline_ms) {
         std::set<int> need_layer_ids;
-        for (int lid = 0; lid < static_cast<int>(config_.layer_all_num); ++lid) {
+        for (int lid = 0; lid < static_cast<int>(config_.layer_all_num()); ++lid) {
             need_layer_ids.insert(lid);
         }
 

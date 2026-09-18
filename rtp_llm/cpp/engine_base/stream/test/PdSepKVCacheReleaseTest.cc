@@ -1,4 +1,5 @@
 #include "gtest/gtest.h"
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include "gmock/gmock.h"
 
 #define private public
@@ -240,7 +241,7 @@ CacheConfig makeSingleBlockWriteConfig(const std::string& tag,
                                                    /*layer_num=*/1,
                                                    /*block_num=*/static_cast<int>(kBlockNum));
     config.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
-    config.setGroupBlockLayout({kBlockNum}, {kv_stride}, {kv_scale_stride});
+    rtp_llm::test::setGroupBlockLayout(config, {kBlockNum}, {kv_stride}, {kv_scale_stride});
     return config;
 }
 
@@ -257,7 +258,7 @@ torch_ext::PyCacheStoreInputs makeDsv4WriteInputs(int64_t                       
     inputs.request_id            = torch::tensor({request_id}, torch::kInt64);
     inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
     inputs.cache_keys            = torch::from_blob(const_cast<CacheKeyType*>(cache_keys.data()),
-                                                    {1, (int64_t)cache_keys.size()},
+                                         {1, (int64_t)cache_keys.size()},
                                          torch::TensorOptions(torch::kInt64))
                             .clone();
     return inputs;
@@ -1426,7 +1427,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
     // --- Call runtimeWriteCacheStore (event->synchronize() inside) ---
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto block_ids   = torch::from_blob(const_cast<int*>(resource->blocks(0, 0).data()),
-                                        {1, (int64_t)resource->blocks(0, 0).size()},
+                                      {1, (int64_t)resource->blocks(0, 0).size()},
                                       torch::kInt32)
                          .clone();
 

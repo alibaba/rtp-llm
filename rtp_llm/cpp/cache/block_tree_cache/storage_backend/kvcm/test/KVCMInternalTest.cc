@@ -10,25 +10,23 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
 
 namespace rtp_llm::kvcm {
 namespace {
 
 GroupBase makeGroup(std::string tag, int layer_id, CacheGroupType type, size_t kv_block_stride_bytes = 16) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 8;
+    (void)layer_id;
+    auto base_spec                       = test::makeResolvedMhaSpec(DataType::TYPE_UINT8, 1, 1, 8, tag);
+    base_spec->kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
+    auto spec                            = std::make_shared<test::TestLayoutSpec>(*base_spec, kv_block_stride_bytes, 0);
 
     GroupBase group;
-    group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(type);
-    group.layer_ids                 = {layer_id};
-    group.block_num                 = 16;
-    group.seq_size_per_block        = 8;
-    group.kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
-    group.kv_block_stride_bytes     = kv_block_stride_bytes;
+    group.tag       = std::move(tag);
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(type);
+    group.block_num = 16;
     return group;
 }
 
@@ -142,10 +140,10 @@ TEST(KVCMInternalTest, FullAggregateUsesCanonicalNameOrderIndependentOfNumericGr
 
 TEST(KVCMInternalTest, FullLinearPolicyPreservesTheSameCanonicalFullIdentityAndSortsCombinedSpecs) {
     auto                       topology = CacheTopology::create({makeGroup("z_group", 0, CacheGroupType::FULL),
-                                                                 makeGroup("a_group", 1, CacheGroupType::FULL),
-                                                                 makeGroup("z_linear", 2, CacheGroupType::LINEAR),
-                                                                 makeGroup("a_linear", 3, CacheGroupType::LINEAR)},
-                                                                {{0, {"z_group"}}, {1, {"a_group"}}, {2, {"z_linear"}}, {3, {"a_linear"}}});
+                                           makeGroup("a_group", 1, CacheGroupType::FULL),
+                                           makeGroup("z_linear", 2, CacheGroupType::LINEAR),
+                                           makeGroup("a_linear", 3, CacheGroupType::LINEAR)},
+                                          {{0, {"z_group"}}, {1, {"a_group"}}, {2, {"z_linear"}}, {3, {"a_linear"}}});
     FullLinearLayerGroupPolicy policy(
         *topology, unusedResolver(), /*full_group_ids=*/{0, 1}, /*other_group_ids=*/{2, 3}, /*write_interval=*/1);
     ASSERT_TRUE(policy.init());
@@ -562,6 +560,37 @@ TEST(KVCMInternalTest, PreservesHeterogeneousBlockSizesAndScalesLocationSpecsLin
     EXPECT_EQ(policy.spec_info_map().size(), static_cast<size_t>(group_count * 2));
     // One singleton per group and one reachable all-full aggregate.
     EXPECT_EQ(location_groups.size(), static_cast<size_t>(group_count + 1));
+}
+
+TEST(KVCMInternalTest, UsesExactMtpPhysicalSizeForRemoteBufferValidation) {
+    auto topology = CacheTopology::create({makeGroup("default", 0, CacheGroupType::FULL, /*stride=*/32)},
+                                          {{0, {"default"}}, {1, {"default"}}, {2, {"default"}}});
+    const std::array<size_t, 3>    layer_bytes{32, 64, 64};
+    std::array<uint8_t, 3>         storage{};
+    StorageBackend::BufferResolver resolver = [&layer_bytes, &storage](int layer_id, int group_id, int block_id) {
+        EXPECT_EQ(group_id, 0);
+        EXPECT_EQ(block_id, 7);
+        BlockInfo info;
+        info.is_cuda    = true;
+        info.addr       = &storage.at(static_cast<size_t>(layer_id));
+        info.size_bytes = layer_bytes.at(static_cast<size_t>(layer_id));
+        return std::vector<BlockInfo>{info};
+    };
+    FullLayerGroupPolicy policy(*topology,
+                                std::move(resolver),
+                                /*full_group_ids=*/{0},
+                                /*other_group_ids=*/{},
+                                /*exact physical group sizes=*/{160});
+    ASSERT_TRUE(policy.init());
+    EXPECT_EQ(policy.groups().at(0).block_size_bytes, 160u);
+
+    kv_cache_manager::BlockBuffers buffers;
+    ASSERT_TRUE(policy.genBlockBuffers(/*group_ids=*/{0}, /*block_ids=*/{7}, buffers));
+    ASSERT_EQ(buffers.size(), 1u);
+    ASSERT_EQ(buffers.front().iovs.size(), 3u);
+    EXPECT_EQ(buffers.front().iovs[0].size, 32u);
+    EXPECT_EQ(buffers.front().iovs[1].size, 64u);
+    EXPECT_EQ(buffers.front().iovs[2].size, 64u);
 }
 
 TEST(KVCMInternalTest, FullLinearLocationSpecsScaleLinearlyWithManyLinearGroups) {

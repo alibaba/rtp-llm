@@ -1400,7 +1400,7 @@ bool KVCacheAllocator::doInit() {
             full_group_ids_.push_back(group_id);
         }
 
-        RTP_LLM_CHECK_WITH_INFO(group->init(),
+        RTP_LLM_CHECK_WITH_INFO(group->init(config_.layerIdsForGroup(static_cast<size_t>(group_id))),
                                 "Failed to initialize KVCacheGroup %s(group_id %d)",
                                 pool_config.pool_name.c_str(),
                                 group_id);
@@ -1413,7 +1413,7 @@ bool KVCacheAllocator::doInit() {
 }
 
 int KVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
-    if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_all_num) {
+    if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_all_num()) {
         RTP_LLM_FAIL("invalid layer_id=%d", layer_id);
     }
     const auto& group    = config_.topology().soleGroupForLayer(layer_id);
@@ -1430,11 +1430,11 @@ int KVCacheAllocator::validateGroupIdForLayer(int layer_id, int group_id) const 
                             "invalid group id %d for layer %d",
                             group_id,
                             layer_id);
-    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config_.layer_all_num,
+    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config_.layer_all_num(),
                             "invalid layer id %d for layer_all_num=%u",
                             layer_id,
-                            config_.layer_all_num);
-    const auto& group_ids = config_.groupIdsForLayer(layer_id);
+                            config_.layer_all_num());
+    const auto group_ids = config_.groupIdsForLayer(layer_id);
     RTP_LLM_CHECK_WITH_INFO(std::find(group_ids.begin(), group_ids.end(), group_id) != group_ids.end(),
                             "layer %d does not own cache group %d",
                             layer_id,
@@ -1562,9 +1562,10 @@ void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>&
         const auto copy_type =
             BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
                                            group_block_pools_[static_cast<size_t>(group_id)]->where());
-        const auto&  group             = config_.topology().groupById(static_cast<size_t>(group_id));
-        const size_t buffers_per_layer = group.kv_scale_stride_bytes > 0 ? 2 : 1;
-        copy_nums[copy_type] += config_.layerIdsForGroup(static_cast<size_t>(group_id)).size() * buffers_per_layer;
+        for (int layer_id : config_.layerIdsForGroup(static_cast<size_t>(group_id))) {
+            const auto& physical_group = config_.physicalGroupForLayer(layer_id, mapping.tag);
+            copy_nums[copy_type] += physical_group.kvScaleStrideBytes() > 0 ? 2 : 1;
+        }
     }
 
     BatchCopyParams copy_params;
@@ -1576,15 +1577,15 @@ void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>&
         const auto group_id = static_cast<int>(config_.topology().groupIdForTag(mapping.tag));
         RTP_LLM_CHECK_WITH_INFO(
             static_cast<size_t>(group_id) < group_block_pools_.size(), "missing block pool for group %d", group_id);
-        const auto&  group               = config_.topology().groupById(static_cast<size_t>(group_id));
-        const size_t kv_block_size_bytes = group.kv_block_stride_bytes;
-        const size_t scale_block_bytes   = group.kv_scale_stride_bytes;
-        const auto   copy_type =
+        const auto copy_type =
             BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
                                            group_block_pools_[static_cast<size_t>(group_id)]->where());
 
         for (int layer_id : config_.layerIdsForGroup(static_cast<size_t>(group_id))) {
-            auto src_addr_info =
+            const auto&  physical_group      = config_.physicalGroupForLayer(layer_id, mapping.tag);
+            const size_t kv_block_size_bytes = physical_group.kvBlockStrideBytes();
+            const size_t scale_block_bytes   = physical_group.kvScaleStrideBytes();
+            auto         src_addr_info =
                 kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToAddr(layer_id, mapping.src);
             auto dst_addr_info =
                 kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToAddr(layer_id, mapping.dst);

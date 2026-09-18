@@ -65,7 +65,10 @@ cc_test(
     testonly = True,
     srcs = ["PerRankBlockTransferEngineHostDiskTest.cc"],
     copts = test_copts,
-    deps = test_deps + [":block_transfer_engine_test_utils"],
+    deps = test_deps + [
+        ":block_transfer_engine_test_utils",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    ],
     env = {},
 )
 

@@ -188,6 +188,11 @@ std::string GroupPolicy::debugString() const {
 }
 
 bool DefaultLayerGroupPolicy::init() {
+    RTP_LLM_CHECK_WITH_INFO(group_block_size_bytes_.empty()
+                                || group_block_size_bytes_.size() == topology_.groups().size(),
+                            "remote cache group byte-size count %zu does not match topology group count %zu",
+                            group_block_size_bytes_.size(),
+                            topology_.groups().size());
     std::vector<int> intersection;
     std::set_intersection(full_group_ids_.begin(),
                           full_group_ids_.end(),
@@ -237,11 +242,11 @@ bool DefaultLayerGroupPolicy::init() {
                                       group_idx);
                     return false;
                 }
-                const std::string prefix     = is_full_group ? "F" : GetOtherGroupPrefixName();
-                std::string       group_name = prefix + cache_tag;
-                const size_t      block_size_bytes =
-                    topology_group.layer_ids.size()
-                    * (topology_group.kv_block_stride_bytes + topology_group.kv_scale_stride_bytes);
+                const std::string prefix           = is_full_group ? "F" : GetOtherGroupPrefixName();
+                std::string       group_name       = prefix + cache_tag;
+                const size_t      block_size_bytes = group_block_size_bytes_.empty() ?
+                                                         topology_.blockSizeBytesForGroup(static_cast<size_t>(group_idx)) :
+                                                         group_block_size_bytes_.at(static_cast<size_t>(group_idx));
                 groups_[group_idx] = Group{is_full_group, group_name_bithash, group_name, cache_tag, block_size_bytes};
                 group_to_layer_ids_[group_idx] = {};
                 if (groups_.size() < 64) {
@@ -251,6 +256,9 @@ bool DefaultLayerGroupPolicy::init() {
             group_to_layer_ids_.at(group_idx).push_back(layer);
         }
     }
+    // The exact CacheConfig sizes are initialization input only. Group already
+    // owns the protocol field that KVCM needs; do not retain a second cache.
+    group_block_size_bytes_.clear();
     return true;
 }
 

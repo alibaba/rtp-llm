@@ -134,8 +134,8 @@ void initializeTestGroupSet(const GroupSetPtr&                     group_set,
         policy.sliding_window_size = static_cast<int>(swa->slidingWindowSize());
     }
 
-    std::vector<GroupBase> groups;
-    std::vector<size_t>    group_ids;
+    std::vector<block_transfer_engine_test::TestGroupConfig> groups;
+    std::vector<size_t>                                      group_ids;
     groups.reserve(device_pools.size());
     group_ids.reserve(device_pools.size());
     for (size_t group_id = 0; group_id < device_pools.size(); ++group_id) {
@@ -151,7 +151,7 @@ void initializeSingleMemberGroupSets(const std::vector<GroupSetPtr>&        grou
                                      const std::vector<DeviceBlockPoolPtr>& device_pools,
                                      size_t                                 logical_layer_bytes = 1) {
     RTP_LLM_CHECK(!group_sets.empty() && group_sets.size() == device_pools.size());
-    std::vector<GroupBase> groups;
+    std::vector<block_transfer_engine_test::TestGroupConfig> groups;
     groups.reserve(group_sets.size());
     for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
         const GroupSetPtr& group_set = group_sets[group_set_id];

@@ -183,8 +183,7 @@ std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> ty
     std::vector<GroupBase>   groups;
     std::vector<std::string> tags;
     for (size_t group_id = 0; group_id < types.size(); ++group_id) {
-        auto spec = std::make_shared<MHAKVCacheSpec>();
-        spec->tag = "group_" + std::to_string(group_id);
+        auto      spec = std::make_shared<MHAKVCacheSpec>("group_" + std::to_string(group_id), 1, 1, 1);
         GroupBase group;
         group.tag                        = spec->tag;
         group.spec                       = std::move(spec);
@@ -193,9 +192,6 @@ std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> ty
         if (types[group_id] == CacheGroupType::SWA) {
             group.policy.sliding_window_size = 2;
         }
-        group.layer_ids                 = {0};
-        group.seq_size_per_block        = 1;
-        group.kernel_seq_size_per_block = 1;
         tags.push_back(group.tag);
         groups.push_back(std::move(group));
     }
@@ -416,8 +412,9 @@ TEST(LoadAsyncContextTest, AllocatorCallbackPreservesRetryableCapacityStatus) {
     initBackend(*backend, pool);
     auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback(
-        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
+    context->setMatchCallback([](LoadAsyncContext&, size_t) {
+        return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
+    });
 
     context->startBackendMatch();
     backend->completeMatch(1);

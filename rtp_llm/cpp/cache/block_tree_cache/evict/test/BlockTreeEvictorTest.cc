@@ -196,9 +196,9 @@ DeviceBlockPoolPtr makeTestDevicePool(size_t usable_blocks, const std::string& n
     return pool;
 }
 
-void initializeGroups(const std::vector<GroupSetPtr>&        groups,
-                      const std::vector<DeviceBlockPoolPtr>& device_pools,
-                      std::vector<GroupBase>                 group_bases) {
+void initializeGroups(const std::vector<GroupSetPtr>&                          groups,
+                      const std::vector<DeviceBlockPoolPtr>&                   device_pools,
+                      std::vector<block_transfer_engine_test::TestGroupConfig> group_bases) {
     RTP_LLM_CHECK(groups.size() == device_pools.size());
     RTP_LLM_CHECK(groups.size() == group_bases.size());
     auto topology = block_transfer_engine_test::makeTestTopology(std::move(group_bases));

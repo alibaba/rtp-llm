@@ -159,12 +159,12 @@ TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers)
 
     std::vector<void*> expected_full_bases;
     std::vector<void*> expected_linear_bases;
-    for (const int layer_id : environment.cache_config.topology().groupById(1).layer_ids) {
+    for (const int layer_id : environment.cache_config.layerIdsForGroup(1)) {
         const auto block_info = environment.device_pool->convertIndexToBuffer(layer_id, environment.block_id);
         ASSERT_EQ(block_info.size(), 1u);
         expected_full_bases.push_back(block_info.front().addr);
     }
-    for (const int layer_id : environment.cache_config.topology().groupById(0).layer_ids) {
+    for (const int layer_id : environment.cache_config.layerIdsForGroup(0)) {
         const auto block_info = environment.device_pool->convertIndexToBuffer(layer_id, environment.block_id);
         ASSERT_EQ(block_info.size(), 1u);
         expected_linear_bases.push_back(block_info.front().addr);

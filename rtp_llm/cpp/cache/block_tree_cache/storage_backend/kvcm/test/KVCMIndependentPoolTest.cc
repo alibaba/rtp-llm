@@ -106,9 +106,9 @@ class KVCMIndependentPoolTest: public DeviceTestBase {
 protected:
     void SetUp() override {
         DeviceTestBase::SetUp();
-        auto environment                    = makeMultiGroupBackendEnvironment("independent_config", 2, 1, 1);
-        config_                             = environment.cache_config;
-        allocator_                          = std::make_shared<KVCacheAllocator>(config_);
+        auto environment = makeMultiGroupBackendEnvironment("independent_config", 2, 1, 1);
+        config_          = environment.cache_config;
+        allocator_       = std::make_shared<KVCacheAllocator>(config_);
         ASSERT_TRUE(allocator_->init());
         state_ = std::make_shared<PoolTransferState>();
         pools_ = allocator_->groupBlockPools();
@@ -213,7 +213,7 @@ protected:
 
     void fill(uint8_t value) {
         for (size_t group = 0; group < pools_.size(); ++group) {
-            for (int layer : config_.topology().groupById(group).layer_ids) {
+            for (int layer : config_.layerIdsForGroup(group)) {
                 for (const auto& buffer :
                      allocator_->convertIndexToBuffer(layer, static_cast<int>(group), blocks_[group])) {
                     ASSERT_EQ(cudaMemset(buffer.addr, value == 0 ? 0 : value + group, buffer.size_bytes), cudaSuccess);
@@ -270,7 +270,7 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
     ASSERT_TRUE(read(*backend_, request(), matched.match_meta));
     EXPECT_EQ(state_->reads, (std::vector<size_t>{1, 1, 1}));
     for (size_t group = 0; group < pools_.size(); ++group) {
-        for (int layer : config_.topology().groupById(group).layer_ids) {
+        for (int layer : config_.layerIdsForGroup(group)) {
             for (const auto& buffer :
                  allocator_->convertIndexToBuffer(layer, static_cast<int>(group), blocks_[group])) {
                 std::vector<uint8_t> bytes(buffer.size_bytes);

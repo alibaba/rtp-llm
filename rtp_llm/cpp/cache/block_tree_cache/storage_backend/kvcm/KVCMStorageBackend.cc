@@ -84,11 +84,19 @@ public:
             }
         }
         if (other_group_ids.empty()) {
-            group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(
-                topology, buffer_resolver, full_group_ids, other_group_ids);
+            group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(topology,
+                                                                         buffer_resolver,
+                                                                         full_group_ids,
+                                                                         other_group_ids,
+                                                                         cache_config_.groupBlockSizeBytesSnapshot());
         } else {
-            group_policy_ = std::make_unique<kvcm::FullLinearLayerGroupPolicy>(
-                topology, buffer_resolver, full_group_ids, other_group_ids, std::max(1, cache_config_.linear_step));
+            group_policy_ =
+                std::make_unique<kvcm::FullLinearLayerGroupPolicy>(topology,
+                                                                   buffer_resolver,
+                                                                   full_group_ids,
+                                                                   other_group_ids,
+                                                                   std::max(1, cache_config_.linear_step),
+                                                                   cache_config_.groupBlockSizeBytesSnapshot());
         }
         if (!group_policy_->init()) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM group policy init failed");

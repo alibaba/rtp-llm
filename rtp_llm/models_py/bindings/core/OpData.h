@@ -75,11 +75,12 @@ struct GptModelInputs {
     torch::Tensor request_id;             // int64, [context_batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
-    // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
+    // Bytes/physical block/layer for a single group; zero for multiple groups.
+    // Per-group addressing must use the corresponding cache layout, not these scalars.
     size_t kv_block_stride_bytes     = 0;
     size_t kv_scale_stride_bytes     = 0;
-    size_t seq_size_per_block        = 0;
-    size_t kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
+    size_t seq_size_per_block        = 0;  // tokens/base cache-key block
+    size_t kernel_seq_size_per_block = 0;  // tokens/kernel page for single group; 0 for multi-group topology
     bool   pd_separation             = false;
     bool   decode_entrance           = false;
     bool   use_opaque_kv_cache_store = false;

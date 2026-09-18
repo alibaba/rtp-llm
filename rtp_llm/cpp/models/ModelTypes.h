@@ -59,8 +59,6 @@ struct GptModelInitParams {
     MlaOpsType                                   mla_ops_type            = MlaOpsType::AUTO;
     int64_t                                      max_seq_len             = 0;
     int64_t                                      hidden_size             = 0;
-    size_t                                       tokens_per_block        = 0;
-    size_t                                       kernel_tokens_per_block = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
@@ -71,6 +69,9 @@ struct GptModelInitParams {
     // input_hiddens.
     int64_t                                    hc_mult = 1;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
+    // Final CUDA-graph kernel block-table width. Executors compute it from
+    // the published model topology, actual reserve, and fake caller bounds.
+    int64_t                                    kernel_block_table_width = 0;
 };
 
 enum GptModelInputIndex : size_t {

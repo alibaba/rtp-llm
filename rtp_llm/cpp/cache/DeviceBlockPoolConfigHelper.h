@@ -20,19 +20,21 @@ public:
      * @param cache_config The CacheConfig containing main model and optional MTP modules
      */
     static DeviceBlockPoolConfig createConfig(const CacheConfig& cache_config) {
-        RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() > 0, "cache groups must not be empty");
+        RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() == 1,
+                                "combined pool config requires exactly one cache group, got %d",
+                                cache_config.groupNums());
         DeviceBlockPoolConfig config;
         config.pool_type            = BlockPoolType::DEVICE;
         config.pool_name            = "default";
         config.physical_block_count = cache_config.block_num;
-        const bool  is_hybrid       = cache_config.groupNums() > 1;
-        auto        layer_num       = is_hybrid ? cache_config.group_layer_num : cache_config.layer_num;
+        const bool  is_hybrid       = false;
+        const auto  layer_num       = static_cast<uint32_t>(cache_config.layerIdsForGroup(0).size());
         const auto& main_spec       = cache_config.specForGroup(0);
         // linear block size is same with full block block size
         MemoryLayoutConfig main_layout = createMemoryLayoutConfig(is_hybrid,
                                                                   layer_num,
-                                                                  cache_config.kv_block_stride_bytes,
-                                                                  cache_config.kv_scale_stride_bytes,
+                                                                  cache_config.kvBlockStrideBytesForGroup(0),
+                                                                  cache_config.kvScaleStrideBytesForGroup(0),
                                                                   main_spec,
                                                                   cache_config,
                                                                   cache_config.localKvHeadNumForGroup(0),

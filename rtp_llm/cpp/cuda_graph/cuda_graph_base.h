@@ -38,16 +38,13 @@ struct CudaGraphState {
 };
 
 struct GraphParams {
-    bool             enable_cuda_graph            = false;
-    bool             enable_cuda_graph_debug_mode = false;
-    bool             is_prefill_cuda_graph_mode   = false;
-    bool             is_target_verify             = false;
-    CudaGraphRole    role                         = CudaGraphRole::AUTO;
-    int              max_seq_len                  = 0;
-    int              tokens_per_block             = 0;  // physical kv block size
-    int              kernel_tokens_per_block      = 0;  // must be explicitly configured
+    bool             enable_cuda_graph                  = false;
+    bool             enable_cuda_graph_debug_mode       = false;
+    bool             is_prefill_cuda_graph_mode         = false;
+    bool             is_target_verify                   = false;
+    CudaGraphRole    role                               = CudaGraphRole::AUTO;
+    int              max_seq_len                        = 0;
     int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
-    int              sp_steps               = 0;
     size_t           max_context_batch_size = 128;
     std::size_t      hidden_size            = 0;
     c10::ScalarType  model_data_type        = c10::ScalarType::Float;
@@ -60,6 +57,10 @@ struct GraphParams {
     // topology keeps the direct AttentionInputs fast path; multiple groups
     // require an exact tag -> AttentionInputs mapping at replay time.
     std::vector<std::string> kv_cache_group_tags;
+    // Final kernel block-table width, in kernel block IDs per row. Callers
+    // compute it from model topology and actual reserve/fake bounds before
+    // constructing the graph; this struct never re-derives page geometry.
+    int64_t kernel_block_table_width = 0;
     // Per-token position-id factor for combo_position_ids capture buffer.
     // 0 = model does not use combo_position_ids (no buffer allocated, capture skips it).
     // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from
@@ -73,6 +74,7 @@ struct GraphParams {
     // setting them after capture leaves the graph bound to undefined tensors.
     torch::Tensor position_encoding;
     torch::Tensor token_type_embedding;
+
 };
 
 class GraphBase {

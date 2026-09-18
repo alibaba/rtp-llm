@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 
 namespace rtp_llm {
 namespace {
@@ -15,6 +16,7 @@ namespace {
 using block_transfer_engine_test::makeTestGroupBase;
 using block_transfer_engine_test::makeTestGroupSet;
 using block_transfer_engine_test::makeTestTopology;
+using block_transfer_engine_test::TestGroupConfig;
 
 std::vector<GroupSetPtr> makeGroupSets(bool with_host = true, bool with_disk = true) {
     MemoryLayoutConfig memory_layout;
@@ -42,9 +44,9 @@ std::vector<GroupSetPtr> makeGroupSets(bool with_host = true, bool with_disk = t
     disk_config->disk_size_bytes = 128 * disk_config->stride_bytes;
     auto disk_pool               = std::make_shared<BlockTreeDiskBlockPool>(disk_config);
 
-    std::vector<GroupBase> groups(7, makeTestGroupBase());
+    std::vector<TestGroupConfig> groups(7, makeTestGroupBase());
     for (auto& group : groups) {
-        group.kv_block_stride_bytes = 128;
+        test::setGroupLayout(group.group, 128, 0);
     }
     const auto topology = makeTestTopology(std::move(groups));
 

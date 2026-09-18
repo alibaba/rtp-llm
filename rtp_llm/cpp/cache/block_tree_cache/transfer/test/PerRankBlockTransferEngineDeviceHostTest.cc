@@ -34,6 +34,7 @@ using block_tree_cache_test::BoundedThread;
 using block_transfer_engine_test::TempDirGuard;
 using block_transfer_engine_test::DirectAlignmentDiskBlockIO;
 using block_transfer_engine_test::StatusDiskBlockIO;
+using block_transfer_engine_test::TestGroupConfig;
 using block_transfer_engine_test::expectStatus;
 using block_transfer_engine_test::makeDescriptor;
 using block_transfer_engine_test::makeDiskPool;
@@ -147,13 +148,13 @@ static std::vector<uint8_t> readDeviceLayer(const DeviceBlockPoolPtr& pool, int 
     return out;
 }
 
-static GroupBase makeGroupBase(std::vector<int> layer_ids, size_t kv_bytes, size_t scale_bytes = 0) {
+static TestGroupConfig makeGroupBase(std::vector<int> layer_ids, size_t kv_bytes, size_t scale_bytes = 0) {
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
     policy.enable_prefix_reuse = true;
     return makeTestGroupBase(std::move(policy), std::move(layer_ids), kv_bytes, scale_bytes);
 }
 
-static GroupBase
+static TestGroupConfig
 makeGroupBase(CacheGroupType group_type, std::vector<int> layer_ids, size_t kv_bytes, size_t scale_bytes = 0) {
     auto policy                = defaultCacheGroupPolicy(group_type);
     policy.enable_prefix_reuse = true;
@@ -166,7 +167,7 @@ makeGroupBase(CacheGroupType group_type, std::vector<int> layer_ids, size_t kv_b
 static GroupSetPtr makeDeviceHostGroup(size_t                                  group_set_id,
                                        std::vector<DeviceBlockPoolPtr>         device_pools,
                                        std::shared_ptr<HostBlockPool>          host_pool,
-                                       std::vector<GroupBase>                  groups,
+                                       std::vector<TestGroupConfig>            groups,
                                        std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = nullptr) {
     auto                topology = makeTestTopology(std::move(groups));
     std::vector<size_t> group_ids(device_pools.size());

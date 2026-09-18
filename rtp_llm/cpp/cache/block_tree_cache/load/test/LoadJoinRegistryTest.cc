@@ -19,10 +19,12 @@ using block_transfer_engine_test::makeTestTopology;
 class LoadJoinRegistryTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        const GroupBase group = makeTestGroupBase();
+        const auto group_config = makeTestGroupBase();
         device_pool_ =
-            makeTestDevicePool({{group.kv_block_stride_bytes, group.kv_scale_stride_bytes}}, 16, "load_join_registry");
-        const GroupSetPtr group_set = makeTestGroupSet(0, makeTestTopology({group}), {0}, {device_pool_});
+            makeTestDevicePool({{group_config.group.kvBlockStrideBytes(), group_config.group.kvScaleStrideBytes()}},
+                               16,
+                               "load_join_registry");
+        const GroupSetPtr group_set = makeTestGroupSet(0, makeTestTopology({group_config}), {0}, {device_pool_});
         tree_                       = std::make_unique<BlockTree>(std::vector<GroupSetPtr>{group_set});
         target_blocks_              = device_pool_->malloc(10).value();
         coordinator_ = std::make_shared<LoadContextCoordinator>([](const auto&) { return true; }, [](auto&) {});
@@ -161,7 +163,6 @@ TEST_F(LoadJoinRegistryTest, EraseForContextPreservesOtherContexts) {
     EXPECT_TRUE(first_context->completeTransfers(1, true));
     EXPECT_TRUE(first_context->success());
 }
-
 
 TEST_F(LoadJoinRegistryTest, ExpiredJoinedContextIsNotKeptAlive) {
     LoadJoinRegistry                        registry(tree_.get());

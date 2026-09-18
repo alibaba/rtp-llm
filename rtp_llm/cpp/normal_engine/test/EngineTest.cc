@@ -34,6 +34,13 @@ TEST_F(NormalEngineTest, testDecodeWarmupReserveTokensAreConvertedToBlocksAfterA
         NormalEngine::warmUpReservedBlockCount(/*seq_len=*/1, /*reserve_tokens=*/1, /*tokens_per_block=*/0));
 }
 
+TEST_F(NormalEngineTest, testWarmUpInputLengthAccountsForReserve) {
+    EXPECT_EQ(warmUpInputLength(64, 0), 63u);
+    EXPECT_EQ(warmUpInputLength(64, 17), 47u);
+    EXPECT_ANY_THROW((void)warmUpInputLength(1, 0));
+    EXPECT_ANY_THROW((void)warmUpInputLength(17, 17));
+}
+
 TEST_F(NormalEngineTest, testRejectGenerationPrefillWithSpeculativeBeforeRunnerCreation) {
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
@@ -68,6 +75,32 @@ TEST_F(NormalEngineTest, testRejectGenerationPrefillWithSpeculativeBeforeRunnerC
             }
         }
     }
+}
+
+TEST_F(NormalEngineTest, testRejectMismatchedSpeculativeProposalBeforeWarmup) {
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.runtime_config.warm_up = false;
+
+    const auto check_error = [&](SpeculativeType config_type,
+                                 int64_t         config_gamma,
+                                 SpeculativeType proposal_type,
+                                 size_t          proposal_gamma,
+                                 const char*     expected) {
+        params.sp_config.type              = config_type;
+        params.sp_config.gen_num_per_cycle = config_gamma;
+        try {
+            NormalEngine engine(params, std::make_unique<ProposeModelEngineInitParams>(proposal_type, proposal_gamma));
+            FAIL() << "mismatched speculative parameters must fail initialization";
+        } catch (const std::exception& error) {
+            EXPECT_NE(std::string(error.what()).find(expected), std::string::npos) << error.what();
+        }
+    };
+    check_error(SP_TYPE_MTP, 2, SP_TYPE_EAGLE, 2, "speculative type mismatch");
+    check_error(SP_TYPE_MTP, 2, SP_TYPE_MTP, 3, "speculative gamma mismatch");
+    check_error(SP_TYPE_MTP, -1, SP_TYPE_MTP, 2, "speculative gen_num_per_cycle must be non-negative");
 }
 
 TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculativeConfig) {
