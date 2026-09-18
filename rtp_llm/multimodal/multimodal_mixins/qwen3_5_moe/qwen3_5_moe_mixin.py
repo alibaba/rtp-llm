@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import threading
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -17,8 +18,9 @@ from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import MMWorkEstimate
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.gpu_video import (
     GpuVideoInput,
+    PreparedGpuVideo,
+    VideoDecodePool,
     prepare_gpu_video,
-    preprocess_video_cuda,
 )
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_vit import (
     Qwen3_5MoeVisionConfig,
@@ -38,10 +40,20 @@ from rtp_llm.utils.database import CkptDatabase
 
 class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
     def __init__(self, mm_related_params: VitParameters):
+        self._video_pool_lock = threading.Lock()
+        self.video_decode_workers = int(
+            os.environ.get("QWEN35_VIDEO_DECODE_WORKERS", "16")
+        )
+        if self.video_decode_workers < 1:
+            raise ValueError("QWEN35_VIDEO_DECODE_WORKERS must be positive")
         self.video_backend = os.environ.get("QWEN35_VIDEO_BACKEND", "nvdec")
         if self.video_backend not in ("cpu", "nvdec"):
             raise ValueError("QWEN35_VIDEO_BACKEND must be cpu or nvdec")
-        logging.info("Qwen3.5 video preprocessing backend: %s", self.video_backend)
+        logging.info(
+            "Qwen3.5 video preprocessing backend: %s, decode workers: %d",
+            self.video_backend,
+            self.video_decode_workers,
+        )
         self.mm_processor = AutoProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
@@ -194,6 +206,39 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
             attention_work=patches**2,
         ).scaled(max_batch_media)
 
+    def _get_video_pool(self):
+        with self._video_pool_lock:
+            if not hasattr(self, "_video_decode_pool"):
+                self._video_decode_pool = VideoDecodePool(self.video_decode_workers)
+            return self._video_decode_pool
+
+    def prepare_embedding_inputs(self, data_list, mm_types):
+        """Run in admitted request threads, before the single ViT executor."""
+        videos = [data[0] for data in data_list if isinstance(data[0], GpuVideoInput)]
+        if not videos:
+            return data_list
+        prepared = []
+        with self._get_video_pool().preprocess(
+            videos, self.mm_processor.video_processor, self._device, self._data_type
+        ) as results:
+            for data in data_list:
+                if isinstance(data[0], GpuVideoInput):
+                    prepared.append((next(results), *data[1:]))
+                else:
+                    prepared.append(data)
+        return prepared
+
+    def _preprocess_batch(self, data_list):
+        # Also support direct model calls that do not pass through MMScheduler.
+        data_list = self.prepare_embedding_inputs(data_list, None)
+        pixels = []
+        for data in data_list:
+            value = data[0]
+            if isinstance(value, PreparedGpuVideo):
+                value = value.consume(torch.cuda.current_stream(self._device))
+            pixels.append(value.to(device=self._device, dtype=self._data_type))
+        return pixels
+
     @torch.inference_mode()
     def embedding(self, data, **kwargs):
         return self.batched_embedding(
@@ -215,16 +260,7 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
         estimates = [
             self.estimate_work(data, kind) for data, kind in zip(data_list, mm_types)
         ]
-        pixels = [
-            (
-                preprocess_video_cuda(
-                    data[0], self.mm_processor.video_processor, self._device
-                )
-                if isinstance(data[0], GpuVideoInput)
-                else data[0]
-            ).to(device=self._device, dtype=self._data_type)
-            for data in data_list
-        ]
+        pixels = self._preprocess_batch(data_list)
         pixel_values = pixels[0] if len(pixels) == 1 else torch.cat(pixels, dim=0)
         # Keep shape bookkeeping on CPU instead of copying it back from CUDA
         # inside every vision layer.
@@ -432,6 +468,20 @@ class Qwen3_5MoeMixin(Qwen3_VLMixin):
         self.mm_related_params.vit_weights = Qwen3_5MoeVitWeight(
             {"vit": self.mm_part.visual}
         )
+
+    def load_mm_weight(self, ctype: str, device: str):
+        from rtp_llm.utils.util import to_torch_dtype
+
+        if not self.weights:
+            raise RuntimeError(
+                f"No multimodal weights loaded from {self.ckpt_path!r}; "
+                "check checkpoint path and mixin configuration."
+            )
+        # Preserve the vLLM Parameter subclasses and invoke their QKV/row/column
+        # loaders. The generic RTP loader assigns param.data directly.
+        visual = self.mm_part.visual
+        visual.to(device=device, dtype=to_torch_dtype(ctype))
+        visual.load_weights(self.weights.items())
 
     def _prepare_vit_weights(self, database: CkptDatabase) -> None:
         vit_weights = self.mm_related_params.vit_weights

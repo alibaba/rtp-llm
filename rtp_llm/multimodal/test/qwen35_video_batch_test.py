@@ -1,3 +1,4 @@
+import copy
 import io
 import unittest
 from types import SimpleNamespace
@@ -5,6 +6,9 @@ from unittest import mock
 
 import torch
 from transformers import Qwen3VLVideoProcessor
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+    Qwen3_5MoeVisionModel as HFVisionModel,
+)
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_mixin import (
@@ -37,6 +41,9 @@ class Qwen35VideoBatchTest(unittest.TestCase):
         config.vit_attention_backend = "sdpa"
         self.part = object.__new__(Qwen3_5MoeImageEmbedding)
         self.part.visual = Qwen3_5MoeVisionModel(config).eval()
+        self.part.visual.load_weights(
+            HFVisionModel(copy.deepcopy(config)).state_dict().items()
+        )
         self.part.word_embedding_weight = torch.randn(128, 64)
         self.part.vision_start_token_id = 11
         self.part.vision_end_token_id = 12

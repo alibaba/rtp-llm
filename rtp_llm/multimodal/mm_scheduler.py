@@ -379,6 +379,13 @@ class MMScheduler:
         # to the next round so it is neither lost nor re-ordered behind newer
         # arrivals.
         self._pending: Optional[_EmbeddingChunk] = None
+        # Preparation runs in existing admitted caller threads, not the single
+        # forward executor. Count these requests against the same queue limit.
+        self._preparing = 0
+        # A GPU-preparing model may retain device inputs while queued. Limit
+        # ready+preparing callers to one additional request batch, even when
+        # the ordinary CPU-input queue is configured much larger.
+        self._preparation_limit = min(max_queue_size, max_batch_size)
         # Set by close(); the executor polls it to exit and submit rejects on it.
         self._stopped = threading.Event()
         # Orders submit's (stopped-check + enqueue) against close's set-stopped
@@ -683,21 +690,63 @@ class MMScheduler:
         req.submit_ms = submit_ms
         req.deadline = time.monotonic() + timeout_s
 
-        # Lock only the stopped-check + enqueue so it is atomic w.r.t. close();
-        # the blocking wait below stays outside the lock.
-        with self._lock:
-            if self._stopped.is_set():
-                raise RuntimeError("MMScheduler is closed, request rejected")
-            if self._waiting.qsize() >= self._max_queue_size:
-                kmonitor.report(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
-                error = MMSchedulerOverloadError(
-                    f"MMScheduler queue full (max_queue_size={self._max_queue_size}), request rejected"
+        prepare = getattr(self._mm_part, "prepare_embedding_inputs", None)
+        reserved = False
+        try:
+            with self._lock:
+                if self._stopped.is_set():
+                    raise RuntimeError("MMScheduler is closed, request rejected")
+                limit = (
+                    self._preparation_limit
+                    if prepare is not None
+                    else self._max_queue_size
                 )
-                vit_media.failure(
-                    "embedding.queue", error, vit_media.item_media(work_items)
+                if self._waiting.qsize() + self._preparing >= limit:
+                    kmonitor.report(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
+                    error = MMSchedulerOverloadError(
+                        f"MMScheduler queue full (admission_limit={limit}), "
+                        "request rejected"
+                    )
+                    vit_media.failure("embedding.queue", error, vit_media.item_media(work_items))
+                    raise error
+                if prepare is None:
+                    self._enqueue_chunk(req.chunks[0])
+                else:
+                    self._preparing += 1
+                    reserved = True
+
+            if prepare is not None:
+                # Work/image budgets were validated before admitting GPU work.
+                # Each model owns producer streams and allocator lifetime;
+                # batched_embedding establishes the dependency on those streams.
+                prepared = prepare(
+                    [wi.preprocess_result for wi in work_items],
+                    [wi.mm_type for wi in work_items],
                 )
-                raise error
-            self._enqueue_chunk(req.chunks[0])
+                if len(prepared) != len(work_items):
+                    raise OutputCountMismatchError(
+                        "prepare_embedding_inputs returned the wrong item count"
+                    )
+                timeout_s = req.deadline - time.monotonic()
+                with self._lock:
+                    self._preparing -= 1
+                    reserved = False
+                    if self._stopped.is_set():
+                        raise RuntimeError("MMScheduler closed during preparation")
+                    if timeout_s <= 0:
+                        raise MMSchedulerTimeoutError(
+                            "MMScheduler timed out during input preparation"
+                        )
+                    for wi, data in zip(work_items, prepared):
+                        wi.preprocess_result = data
+                    self._enqueue_chunk(req.chunks[0])
+        finally:
+            if reserved:
+                with self._lock:
+                    self._preparing -= 1
+            # The work items own prepared inputs after enqueue. Do not keep
+            # extra tensor references in this caller frame if forward fails.
+            prepared = data = wi = None
         return req
 
     @staticmethod
