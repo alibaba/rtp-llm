@@ -1118,15 +1118,17 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                          const BroadcastLoadRequestPB* request,
                                          BroadcastLoadResponsePB*      response) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto admission = acquireAdmission();
-    if (!admission.detail.admitted) {
-        return AdmissionGate::toGrpcStatus(admission.detail);
-    }
-    auto admission_lease = std::move(admission.lease);
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;
     }
+    // The admitted RemoteGenerate owns/joins these internal KV-load children.
+    // Allow them through all-rank drain, but never past the freeze barrier.
+    auto admission = acquireCacheTransferAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto admission_lease = std::move(admission.lease);
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
     GroupBlockIds             block_ids_by_group;

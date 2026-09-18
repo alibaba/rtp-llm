@@ -82,7 +82,9 @@ cc_test(
         "LocalRpcServerSleepAbortTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/connector:connector",
+    ],
     env = {},
 )
 
@@ -179,7 +181,11 @@ cc_test(
         "PrefillBatchRpcServerTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/connector:connector",
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+        "//rtp_llm/cpp/engine_base/sleep:drain_manager",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

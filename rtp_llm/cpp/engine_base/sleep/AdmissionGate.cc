@@ -84,6 +84,28 @@ grpc::Status AdmissionGate::check() const {
     return toGrpcStatus(checkDetail());
 }
 
+AdmissionAcquireResult AdmissionGate::acquireCacheTransfer() const {
+    AdmissionAcquireResult result;
+    if (controller_ == nullptr) {
+        return result;
+    }
+    auto controller_result = controller_->acquireCacheTransferAdmission();
+    if (!controller_result.admitted()) {
+        result.detail = makeCheckResult(instance_id_, controller_result.state, controller_result.sleep_epoch);
+        if (controller_result.state == SleepState::DRAINING) {
+            // Unlike a new root, a continuation can enter DRAINING until the
+            // freeze barrier closes its gate. Describe that distinct phase
+            // without changing the retryable domain code or wire schema.
+            result.detail.message =
+                "engine unavailable: cache-transfer continuation admission is frozen in DRAINING (sleep_epoch="
+                + std::to_string(result.detail.sleep_epoch)
+                + "), retry the inference request after wake or on another engine";
+        }
+    }
+    result.lease = std::move(controller_result.lease);
+    return result;
+}
+
 grpc::Status AdmissionGate::toGrpcStatus(const AdmissionCheckResult& result) {
     if (result.admitted) {
         return grpc::Status::OK;

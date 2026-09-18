@@ -23,6 +23,9 @@ struct DeferredPrefillContext {
         bool priority_finalizer_claimed{false};
     };
 
+    // Declared first so admission outlives context destruction, including
+    // downstream Finish, KV cleanup, TTL expiry and priority finalization.
+    AdmissionLease                   admission_lease;
     AtomicGuardPtr                   request_guard;
     std::shared_ptr<GenerateInputPB> input;
     // Members are destroyed in reverse order: context must go before input,
@@ -141,6 +144,7 @@ private:
 
     // One accepted request inside a group; carried across the EnqueueGroup phase methods.
     struct BatchSlot {
+        AdmissionLease                          admission_lease;
         std::shared_ptr<GenerateInputPB>        input;
         std::shared_ptr<DeferredPrefillContext> deferred;
         grpc::Status                            registration_status = grpc::Status::OK;

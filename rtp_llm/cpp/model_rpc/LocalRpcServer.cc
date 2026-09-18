@@ -1137,12 +1137,11 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
     }
 
-    // Admission must gate GPU/KV access before anything else: executeFunction
-    // issues P2P KV D2H/H2D copies that touch cache backing. Without a lease a
-    // copy could start after sleep closed the gate and released the KV VA ->
-    // use-after-unmap. Hold the lease for the full RPC; the async transfer tail
-    // is tracked by the connector_inflight drain counter.
-    auto admission = acquireAdmission();
+    // The connector dispatcher owns the continuation classification and its
+    // completion contract. Retain this lease until receiver-side copying has
+    // finished; connector_inflight tracks the initiating side, not this RPC.
+    const bool cache_continuation = KVCacheConnectorCoordinator::isCacheTransferContinuation(*request);
+    auto       admission          = cache_continuation ? acquireCacheTransferAdmission() : acquireAdmission();
     if (!admission.detail.admitted) {
         return AdmissionGate::toGrpcStatus(admission.detail);
     }

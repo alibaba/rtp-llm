@@ -8,6 +8,7 @@ is replaced by an AsyncMock, so no backend process is required.
 import asyncio
 import threading
 import unittest
+from dataclasses import dataclass, field
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -40,6 +41,21 @@ SLEEP_STATUS_OK: Dict[str, Any] = {
     "gpu_resource_state": "RELEASED",
     "last_error": "",
 }
+
+
+@dataclass
+class _SleepBudgetRank:
+    """Deterministic backend model: elapsed times never use wall-clock sleeps."""
+
+    address: str
+    continuation_finish_ms: int
+    state: str = "RUNNING"
+    token: str = ""
+    frozen: bool = False
+    quiesced: bool = False
+    releases: int = 0
+    rollbacks: int = 0
+    budgets: list[tuple[str, int, float]] = field(default_factory=list)
 
 
 def lifecycle_operation_for_state(state: str) -> str:
@@ -519,6 +535,132 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         defaults.update(kwargs)
         return pb2.SleepStatusResponsePB(**defaults)
 
+    async def _run_freeze_budget_case(self, drain_timeout_ms, continuation_finish_ms):
+        addresses = ["rank-0", "rank-1"]
+        wrapper, pb2 = self._build_wrapper(control_addresses=addresses)
+        ranks = [
+            _SleepBudgetRank(addresses[0], 0),
+            _SleepBudgetRank(addresses[1], continuation_finish_ms),
+        ]
+
+        def install(rank):
+            async def status(*args, **kwargs):
+                sleeping = rank.state == "SLEEPING"
+                return self._status_pb(
+                    pb2,
+                    state=rank.state,
+                    worker_incarnation=rank.address,
+                    kv_memory_state="PAUSED" if sleeping else "ACTIVE",
+                    device_kv_cache_valid=not sleeping,
+                    gpu_resource_state="RELEASED" if sleeping else "ACTIVE",
+                )
+
+            async def sleep(request, timeout):
+                if request.commit_only:
+                    self.assertTrue(rank.quiesced)
+                    rank.releases += 1
+                    rank.state = "SLEEPING"
+                else:
+                    self.assertTrue(request.drain_only)
+                    self.assertEqual(rank.state, "RUNNING")
+                    rank.budgets.append(("drain", request.timeout_ms, timeout))
+                    rank.token = request.quiesce_token
+                    rank.state = "DRAINING"
+                    # Model roots completing at their own deadline. Freeze must
+                    # still receive a fresh per-stage budget, not a remainder.
+                return pb2.EmptyPB()
+
+            async def quiesce(request, timeout):
+                self.assertEqual(request.token, rank.token)
+                self.assertEqual(rank.state, "DRAINING")
+                if request.freeze_only:
+                    rank.budgets.append(("freeze", request.timeout_ms, timeout))
+                    # Backend drain consumes at most its budget, then needs 1s
+                    # to deliver the result. No real timer/scheduling race is
+                    # needed to distinguish a server timeout from an RPC timeout.
+                    response_ms = (
+                        min(rank.continuation_finish_ms, request.timeout_ms) + 1000
+                    )
+                    if response_ms >= timeout * 1000:
+                        raise self._aio_error(
+                            grpc.StatusCode.DEADLINE_EXCEEDED, "freeze RPC deadline"
+                        )
+                    if rank.continuation_finish_ms > request.timeout_ms:
+                        raise self._aio_error(
+                            grpc.StatusCode.FAILED_PRECONDITION,
+                            "KV continuation drain failed; admission remains closed",
+                        )
+                    rank.frozen = True
+                    return pb2.SleepQuiesceResponsePB(frozen_round=13)
+                self.assertTrue(all(peer.frozen for peer in ranks))
+                rank.quiesced = True
+                return pb2.SleepQuiesceResponsePB(frozen_round=13)
+
+            async def wake(request, timeout):
+                self.assertEqual(request.cancel_quiesce_token, rank.token)
+                self.assertEqual(rank.state, "DRAINING")
+                rank.rollbacks += 1
+                rank.state = "RUNNING"
+                rank.frozen = rank.quiesced = False
+                return pb2.EmptyPB()
+
+            stub = wrapper._dp_stubs[rank.address]
+            stub.GetSleepStatus = AsyncMock(side_effect=status)
+            stub.SleepServing = AsyncMock(side_effect=sleep)
+            stub.QuiesceSleep = AsyncMock(side_effect=quiesce)
+            stub.WakeUpServing = AsyncMock(side_effect=wake)
+
+        for rank in ranks:
+            install(rank)
+        result = await wrapper.sleep_serving(
+            {"level": 1, "timeout_ms": drain_timeout_ms}
+        )
+        return result, ranks
+
+    async def test_freeze_preserves_backend_budget_and_rpc_margin_at_boundary(self):
+        for budget_ms in (0, 1, 2500, 60000, 3600000):
+            with self.subTest(budget_ms=budget_ms):
+                result, ranks = await self._run_freeze_budget_case(budget_ms, budget_ms)
+                self.assertEqual(result, {"status": "ok"})
+                rpc_timeout_s = max(60.0, budget_ms / 1000.0 + 30.0)
+                for rank in ranks:
+                    self.assertEqual(
+                        rank.budgets,
+                        [
+                            ("drain", budget_ms, rpc_timeout_s),
+                            ("freeze", budget_ms, rpc_timeout_s),
+                        ],
+                    )
+                    self.assertEqual(rank.state, "SLEEPING")
+                    self.assertEqual(rank.releases, 1)
+                    self.assertEqual(rank.rollbacks, 0)
+
+    async def test_freeze_one_ms_past_budget_rolls_back_all_ranks_without_release(self):
+        for budget_ms in (0, 1, 2500, 60000, 3600000):
+            with self.subTest(budget_ms=budget_ms):
+                result, ranks = await self._run_freeze_budget_case(
+                    budget_ms, budget_ms + 1
+                )
+                self.assertIn("rolled back", result["error"])
+                self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+                self.assertIn("KV continuation drain failed", str(result["details"]))
+                for rank in ranks:
+                    self.assertEqual(rank.state, "RUNNING")
+                    self.assertEqual(rank.releases, 0)
+                    self.assertEqual(rank.rollbacks, 1)
+                    self.assertFalse(rank.frozen)
+                    self.assertFalse(rank.quiesced)
+
+    async def test_freeze_backend_timeout_is_delivered_before_transport_deadline(self):
+        result, ranks = await self._run_freeze_budget_case(60000, 120000)
+        self.assertIn("rolled back", result["error"])
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertIn("KV continuation drain failed", str(result["details"]))
+        self.assertNotIn("freeze RPC deadline", str(result))
+        self.assertEqual([rank.state for rank in ranks], ["RUNNING", "RUNNING"])
+        self.assertEqual([rank.releases for rank in ranks], [0, 0])
+        self.assertEqual([rank.rollbacks for rank in ranks], [1, 1])
+
     async def test_round_fence_waits_for_all_freeze_acks_before_target(self):
         from rtp_llm.utils.lifecycle_quiesce import prepare_sleep_rounds
 
@@ -551,6 +693,10 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rpc, "QuiesceSleep")
             self.assertEqual(request.token, "attempt")
             if request.freeze_only:
+                # Backend work keeps the request's budget, not the 60s RPC
+                # timeout that includes transport headroom.
+                self.assertEqual(request.timeout_ms, 1000)
+                self.assertEqual(timeout, 60.0)
                 calls.append("freeze")
                 await asyncio.sleep(0)
                 calls.append("all_frozen")
@@ -564,7 +710,7 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             return [{"address": a} for a in addresses]
 
         results = await prepare_sleep_rounds(
-            pb2.SleepRequestPB(quiesce_token="attempt"),
+            pb2.SleepRequestPB(quiesce_token="attempt", timeout_ms=1000),
             addresses,
             statuses,
             drain,

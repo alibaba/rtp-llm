@@ -801,17 +801,28 @@ grpc::Status PrefillBatchRpcServer::admitGroup(const EnqueueGroupRequestPB* requ
     }
 
     slots.reserve(all_inputs.size());
-    const int group_size = static_cast<int>(all_inputs.size());
     for (const auto* input : all_inputs) {
+        // Acquire before resource preparation. Scheduler counters cannot see
+        // a request waiting on P->D allocation or on a later FetchResponse.
+        auto admission = acquireAdmission();
+        if (!admission.detail.admitted) {
+            addBatchError(response, input->request_id(), admission.detail.error_code, admission.detail.message);
+            continue;
+        }
         auto input_copy = std::make_shared<GenerateInputPB>(*input);
         // Worker status derives batch_id from stream metadata; the batch RPC envelope is authoritative.
-        input_copy->set_group_size(group_size);
         input_copy->mutable_group_id()->set_value(request->batch_id());
 
         BatchSlot slot;
+        slot.admission_lease         = std::move(admission.lease);
         slot.input                   = std::move(input_copy);
         slot.fetch_attach_timeout_ms = request->fetch_attach_timeout_ms();
         slots.push_back(std::move(slot));
+    }
+    // A sleep transition can split admission within this batch. Keep the
+    // group metadata consistent with the requests actually accepted.
+    for (auto& slot : slots) {
+        slot.input->set_group_size(static_cast<int>(slots.size()));
     }
 
     return grpc::Status::OK;
@@ -902,6 +913,7 @@ void PrefillBatchRpcServer::buildSlotContexts(std::vector<BatchSlot>& slots) {
         pfx_ctx->loading_cache_requests = &loading_cache_requests_;
         auto guard                      = std::make_shared<AtomicGuard>(onflight_requests_);
         auto deferred                   = std::make_shared<DeferredPrefillContext>();
+        deferred->admission_lease       = std::move(slot.admission_lease);
         deferred->context               = std::move(pfx_ctx);
         deferred->input                 = slot.input;
         deferred->request_guard         = std::move(guard);
