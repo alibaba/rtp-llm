@@ -9,6 +9,27 @@ import torch
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 
 
+class _V41ImageEmbedding(torch.nn.Module):
+    """Embedding wrapper splicing prepared image rows before the mHC expansion.
+
+    Wrapping the embed call (instead of overriding the hidden preparation hook)
+    keeps the prefill fast path enabled for image-carrying requests.
+    """
+
+    def __init__(self, base, owner):
+        super().__init__()
+        self.base = base
+        self.owner = owner
+
+    @property
+    def weight(self):
+        return self.base.weight
+
+    def forward(self, input):
+        hidden = self.base(input)
+        return self.owner._inject_image_rows(hidden, input)
+
+
 def configure_v41(model, model_config) -> None:
     config = dict(getattr(model_config, "deepseek_v41_config", None) or {})
     if not config:
@@ -24,6 +45,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
         configure_v41(self, model_config)
         self._engram_hash_state = None
         self._engram_layers = ()
+        self._image_plan = None
 
     def cuda_graph_engram_window_size(self) -> int:
         return 4
@@ -35,6 +57,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
             NgramHashState,
         )
 
+        if not isinstance(self.v4.embed, _V41ImageEmbedding):
+            self.v4.embed = _V41ImageEmbedding(self.v4.embed, self)
         config = self._v4_args.v41_config
         layout = EngramLayout(config)
         if not layout.layer_ids:
@@ -81,10 +105,90 @@ class DeepSeekV41Model(DeepSeekV4Model):
             layer.engram_hashes = hashes[:, hash_index].contiguous()
             layer.engram_token_mask = token_mask
 
+    def _prepare_image_features(self, inputs) -> None:
+        """Stash the gathered ViT features and their batch locations for the
+        embedding wrapper. Under CP the locations stay in the pre-split batch
+        coordinate space; the rank-local rows are derived in
+        ``_image_row_indices`` from the CP shuffle metadata."""
+        features = getattr(inputs, "multimodal_features", None)
+        if not features:
+            self._image_plan = None
+            return
+        locs = inputs.mm_features_locs
+        if not locs.is_cuda:
+            locs = locs.to(device=features[0].device, non_blocking=True)
+        lengths = [int(feature.shape[0]) for feature in features]
+        values = features[0] if len(features) == 1 else torch.cat(features)
+        cp = getattr(inputs.attention_inputs, "context_parallel_info", None)
+        self._image_plan = (values, locs, lengths, cp)
+
+    def _global_image_rows(self, total, locs, lengths, device):
+        rows = torch.full((total,), -1, dtype=torch.int64, device=device)
+        offset = 0
+        for loc, length in zip(locs.tolist(), lengths):
+            if loc >= 0 and length > 0 and loc < total:
+                visible = min(length, total - loc)
+                rows[loc : loc + visible] = torch.arange(
+                    offset, offset + visible, device=device
+                )
+            offset += length
+        return rows
+
+    def _image_row_indices(self, num_tokens, device):
+        """Map each (rank-local) token to its row in the concatenated image
+        features; -1 for text rows. Reuses are handled by clamping to the
+        visible window, so image spans may straddle any reuse boundary."""
+        values, locs, lengths, cp = self._image_plan
+        shuffle = (
+            getattr(cp, "prefill_shuffle_indices", None) if cp is not None else None
+        )
+        if shuffle is None or not int(shuffle.numel()):
+            return self._global_image_rows(num_tokens, locs, lengths, device)
+        actual = cp.prefill_actual_input_lengths_cpu.tolist()
+        num_decode = num_tokens - int(shuffle.numel())
+        prefill_lengths = actual[num_decode:]
+        total = num_decode + sum(prefill_lengths)
+        rows = self._global_image_rows(total, locs, lengths, device)
+        chunk = cp.prefill_cp_chunk_lengths.to(device=device, dtype=torch.int64)
+        shuffle = shuffle.to(device=device, dtype=torch.int64)
+        boundaries = torch.cumsum(chunk, 0)
+        local_index = torch.arange(int(shuffle.numel()), device=device)
+        request = torch.searchsorted(boundaries, local_index, right=True)
+        offsets = [num_decode]
+        for length in prefill_lengths[:-1]:
+            offsets.append(offsets[-1] + length)
+        request_offsets = torch.tensor(offsets, device=device, dtype=torch.int64)
+        positions = request_offsets[request] + shuffle.clamp(min=0)
+        local_rows = torch.where(
+            shuffle >= 0, rows[positions], torch.full_like(positions, -1)
+        )
+        if num_decode:
+            local_rows = torch.cat(
+                (
+                    torch.full((num_decode,), -1, dtype=torch.int64, device=device),
+                    local_rows,
+                )
+            )
+        return local_rows
+
+    def _inject_image_rows(self, hidden, input_ids):
+        if self._image_plan is None:
+            return hidden
+        rows = self._image_row_indices(int(input_ids.numel()), hidden.device)
+        selected = rows >= 0
+        if not bool(selected.any()):
+            return hidden
+        values = self._image_plan[0]
+        hidden.view(input_ids.numel(), -1)[selected] = values[
+            rows[selected].to(device=values.device)
+        ]
+        return hidden
+
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl: Any = None):
         if self.kv_cache is not None:
             self._prepare_engram(inputs)
+        self._prepare_image_features(inputs)
         try:
             return super().forward(inputs, fmha_impl)
         finally:
@@ -93,6 +197,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 layer = self.v4.layers[layer_id]
                 layer.engram_hashes = None
                 layer.engram_token_mask = None
+            self._image_plan = None
 
 
 __all__ = ["DeepSeekV41Model"]

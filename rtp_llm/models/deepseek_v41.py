@@ -18,6 +18,45 @@ from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 
 
 class DeepSeekV41Weight(DeepSeekV4Weight):
+    def _build_vision_weights(self):
+        """Declare the checkpoint's vision/aligner/delimiter tensors.
+
+        Names mirror ``DeepSeekV41VisionEmbedding.state_dict`` under the
+        ``v41.`` namespace; RMSNorm tensors keep their checkpoint FP32 dtype.
+        """
+        vision = self.model_config.deepseek_v41_config["vision_config"]
+        weights = []
+
+        def add(name, dtype=torch.bfloat16):
+            weights.append(
+                AtomicWeight(
+                    "v41." + name,
+                    [CkptWeightInfo(name, identity)],
+                    identity,
+                    data_type=dtype,
+                )
+            )
+
+        add("image_start")
+        add("image_newline")
+        add("image_end")
+        add("vision.patch_embed.proj.weight")
+        add("vision.patch_embed.proj.bias")
+        add("vision.norm.weight", torch.float32)
+        for layer in range(int(vision["num_hidden_layers"])):
+            prefix = f"vision.blocks.{layer}."
+            add(prefix + "norm1.weight", torch.float32)
+            add(prefix + "norm2.weight", torch.float32)
+            for name in ("attn.wqkv", "attn.wo"):
+                add(prefix + name + ".weight")
+                add(prefix + name + ".bias")
+            add(prefix + "mlp.w1.weight")
+            add(prefix + "mlp.w2.weight")
+        for name in ("w1", "w2"):
+            add(f"aligner.{name}.weight")
+            add(f"aligner.{name}.bias")
+        return weights
+
     def _get_hf_layer_weight_info(self, layer_id):
         # Reuse V4's common projections/MoE/mHC, whose checkpoint names match.
         # Ratios 1/2 deliberately do not enter V4's 4/128 compressor builders.
@@ -65,6 +104,7 @@ class DeepSeekV41Weight(DeepSeekV4Weight):
         info = super()._get_weight_info()
         obsolete_head = {W.v4_hc_head_base, W.v4_hc_head_fn, W.v4_hc_head_scale}
         info.weights = [w for w in info.weights if w.name not in obsolete_head]
+        info.weights.extend(self._build_vision_weights())
         return info
 
 
@@ -104,6 +144,27 @@ class DeepSeekV41(DeepSeekV4):
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.hw_kernel_config,
             device_resource_config=self.device_resource_config,
+        )
+
+    def init_multimodal(self, mm_model_config, vit_config, device):
+        # The framework's weight loader owns the vision tensors; bind them
+        # after loading in load_mm_weight. Subclasses (the DSpark draft)
+        # never carry the ViT part: their loader passes no vit_config.
+        self.mm_part = None
+
+    def _may_init_multimodal(self):
+        if type(self) is not DeepSeekV41:
+            return
+        super()._may_init_multimodal()
+
+    def load_mm_weight(self, model_config, ctype, tp_size, tp_rank, device):
+        from rtp_llm.config.dsv41_config import V41Config
+        from rtp_llm.models.multimodal.deepseek_v41_vision import (
+            DeepSeekV41VisionEmbedding,
+        )
+
+        self.mm_part = DeepSeekV41VisionEmbedding.from_model_weights(
+            V41Config.from_path(model_config.ckpt_path), self.weight.global_weights
         )
 
     @staticmethod
