@@ -836,6 +836,50 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             hw_kernel_config=hw_kernel_config,
         )
 
+    def _norm_output_project(self, x, z, *, enable_fusion=False):
+        if (
+            enable_fusion
+            and os.getenv("RTP_QWEN35_FUSED_GATED_RMSNORM_FP8", "0") == "1"
+        ):
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+                CudaFp8DeepGEMMLinear,
+            )
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+                CudaFp8GEMMLinear,
+            )
+            from rtp_llm.models_py.triton_kernels.common.gated_rmsnorm_fp8 import (
+                gated_rmsnorm_fp8,
+            )
+            from rtp_llm.models_py.triton_kernels.common.gated_rmsnorm_prefill import (
+                supports_gated_rmsnorm_prefill,
+            )
+
+            linear = self.out_proj
+            # LinearFactory wraps DeepGEMM; preserve its backend selection.
+            if isinstance(
+                linear, CudaFp8GEMMLinear
+            ) and not linear._should_use_flashinfer(x):
+                linear = linear._deepgemm_linear
+            if (
+                isinstance(linear, CudaFp8DeepGEMMLinear)
+                and self.norm.group_size == 128
+                and x.shape[1] % 512 == 0
+                and supports_gated_rmsnorm_prefill(
+                    x, z, self.norm.weight, self.norm.bias, 128
+                )
+            ):
+                q, scale = gated_rmsnorm_fp8(
+                    x,
+                    z,
+                    self.norm.weight,
+                    self.norm.bias,
+                    self.norm.eps,
+                    self.norm.activation,
+                    scale_ue8m0=linear.scale_ue8m0,
+                )
+                return linear.forward_quantized(q, scale)
+        return self.out_proj(self.norm(x, z))
+
     def _input_project(
         self,
         hidden_states: torch.Tensor,
@@ -1059,7 +1103,10 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         valid_mask = attn_meta.cp_local_valid_mask
         local_attn_out[valid_mask] = full_attn_out[attn_meta.cp_local_extract_indices]
 
-        return self._la_norm_out_proj(local_attn_out, z)
+        # CP keeps its original epilogue; decode tuning must not select it.
+        return self._norm_output_project(
+            local_attn_out.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
+        )
 
     def _la_norm_out_proj(
         self, attn_output: torch.Tensor, z: torch.Tensor
@@ -1112,7 +1159,14 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             attn_output = self.decode_gdn(
                 mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
             )
-        attn_output = self._la_norm_out_proj(attn_output, z)
+        if attention_inputs.is_prefill and not attn_meta.is_target_verify:
+            attn_output = self._norm_output_project(
+                attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim),
+                z,
+                enable_fusion=True,
+            )
+        else:
+            attn_output = self._la_norm_out_proj(attn_output, z)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
         return attn_output
