@@ -84,6 +84,7 @@ class ConstraintTreeMappedE2ETest {
                 when(route.getRoleEndpoints(RoleType.PDFUSION)).thenReturn(List.of(new org.flexlb.dao.route.Endpoint()));
                 String service = org.flexlb.util.IdUtils.getServiceIdByModelName("gul_item");
                 when(models.getServiceRoute(service)).thenReturn(route);
+                when(models.getServiceIds()).thenReturn(java.util.Set.of(service));
                 var handler = RouterFunctions.toHttpHandler(new org.flexlb.httpserver.ConstraintTreeBootstrapServer(
                         registry, models, leader).constraintTreeBootstrapRoutes());
                 var server = HttpServer.create().host("127.0.0.1").port(0).handle(new ReactorHttpHandlerAdapter(handler)).bindNow();
@@ -91,7 +92,7 @@ class ConstraintTreeMappedE2ETest {
                     if (masterGeneration == 0) { assertEquals(503, healthCode(port)); }
                     assertTrue(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION).isEmpty());
                     assertTrue(builds.getCurrentArtifact().isEmpty());
-                    bootstrapClient = bootstrapPython(clientPath, server.port(), port, service);
+                    bootstrapClient = bootstrapPython(clientPath, server.port(), port);
                     awaitBootstrap(coordinator, builds, registry, port);
                     assertEquals(4000, reads.get(), "one source read, not one per repeated registration");
                     assertTrue(bootstrapClient.isAlive(), "must renew until VIP handoff, even after tree is ready");
@@ -108,7 +109,7 @@ class ConstraintTreeMappedE2ETest {
                     visible.set(false);
                     builds.reconcileCurrent();
                     assertEquals(503, healthCode(port));
-                    bootstrapClient = bootstrapPython(clientPath, server.port(), port, service);
+                    bootstrapClient = bootstrapPython(clientPath, server.port(), port);
                     awaitBootstrap(coordinator, builds, registry, port);
                     assertSame(artifact, builds.getCurrentArtifact().orElseThrow());
                     assertEquals(4000, reads.get());
@@ -134,19 +135,20 @@ class ConstraintTreeMappedE2ETest {
         }
     }
 
-    private Process bootstrapPython(Path path, int masterPort, int workerPort, String service) throws Exception {
-        String script = "import importlib.util,sys,os,json; from types import SimpleNamespace; "
+    private Process bootstrapPython(Path path, int masterPort, int workerPort) throws Exception {
+        String script = "import importlib.util,sys,os; from types import SimpleNamespace; "
                 + "s=importlib.util.spec_from_file_location('bootstrap',sys.argv[1]); "
                 + "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
                 + "os.environ['CONSTRAINT_TREE_REQUIRED']='true'; "
                 + "os.environ['CONSTRAINT_TREE_MASTER_ENDPOINT']='tree.master.vip'; "
-                + "os.environ['MODEL_SERVICE_CONFIG']=json.dumps({'service_id':sys.argv[3]}); "
+                + "os.environ.pop('MODEL_SERVICE_CONFIG',None); "
                 + "sys.modules['rtp_llm.vipserver']=SimpleNamespace(get_host_list_by_domain_now="
                 + "lambda domain:[SimpleNamespace(ip='127.0.0.1',port=int(sys.argv[2].split(':')[1]))]); "
-                + "b=m.ConstraintTreeBootstrap.from_env(None,int(sys.argv[4]),'PDFUSION'); b.interval=0.05; "
+                + "b=m.ConstraintTreeBootstrap.from_env(None,int(sys.argv[3]),'PDFUSION'); b.interval=0.05; "
+                + "assert 'service_id' not in b.body; "
                 + "b.start(); b._thread.join(40); sys.exit(1 if b._thread.is_alive() else 0)";
         return new ProcessBuilder("python3", "-c", script, path.toString(), "127.0.0.1:" + masterPort,
-                service, Integer.toString(workerPort)).redirectErrorStream(true)
+                Integer.toString(workerPort)).redirectErrorStream(true)
                 .redirectOutput(ProcessBuilder.Redirect.INHERIT).start();
     }
 

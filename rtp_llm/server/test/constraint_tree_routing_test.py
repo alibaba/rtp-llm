@@ -31,7 +31,7 @@ class ConstraintTreeRoutingTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict(
             os.environ,
             {
-                "MODEL_SERVICE_CONFIG": '{"service_id":"service"}',
+                "MODEL_SERVICE_CONFIG": "",
                 "CONSTRAINT_TREE_MASTER_ENDPOINT": "tree.master.vip",
                 "CONSTRAINT_TREE_REQUIRED": "true",
             },
@@ -48,6 +48,7 @@ class ConstraintTreeRoutingTest(unittest.IsolatedAsyncioTestCase):
             bootstrap = ConstraintTreeBootstrap.from_env(
                 visitor.host_service, 23495, "PDFUSION"
             )
+            self.assertNotIn("service_id", bootstrap.body)
             with self.assertRaisesRegex(RuntimeError, "not yet discoverable"):
                 bootstrap._register_once(Mock())
             for _ in range(10):

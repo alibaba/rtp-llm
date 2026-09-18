@@ -36,7 +36,7 @@ class BootstrapTest(unittest.TestCase):
             {"CONSTRAINT_TREE_REQUIRED": "true", "MODEL_SERVICE_CONFIG": "{}"},
         ):
             self.assertIsNone(ConstraintTreeBootstrap.from_env(host, 12345, "PREFILL"))
-            with self.assertRaisesRegex(ValueError, "service_id"):
+            with self.assertRaisesRegex(ValueError, "CONSTRAINT_TREE_MASTER_ENDPOINT"):
                 ConstraintTreeBootstrap.from_env(host, 12345, "PDFUSION")
             with patch.dict(
                 os.environ,
@@ -54,6 +54,37 @@ class BootstrapTest(unittest.TestCase):
                 )
                 self.assertEqual(12345, bootstrap.body["http_port"])
                 self.assertEqual("DECODE", bootstrap.body["role"])
+
+    def test_tree_vip_only_needs_no_model_service_config(self):
+        for config in (None, "", "{}"):
+            with self.subTest(config=config), patch.dict(
+                os.environ,
+                {
+                    "CONSTRAINT_TREE_REQUIRED": "true",
+                    "CONSTRAINT_TREE_MASTER_ENDPOINT": "tree.master.vip",
+                },
+            ):
+                if config is None:
+                    os.environ.pop("MODEL_SERVICE_CONFIG", None)
+                else:
+                    os.environ["MODEL_SERVICE_CONFIG"] = config
+                host = Mock()
+                bootstrap = ConstraintTreeBootstrap.from_env(host, 23495, "PDFUSION")
+                self.assertEqual(
+                    {"http_port": 23495, "role": "PDFUSION"}, bootstrap.body
+                )
+                host.get_master_addr.assert_not_called()
+
+    def test_legacy_routing_master_still_requires_explicit_service(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CONSTRAINT_TREE_REQUIRED": "true",
+                "MODEL_SERVICE_CONFIG": '{"master_endpoint":{"address":"routing.vip"}}',
+            },
+        ):
+            with self.assertRaisesRegex(ValueError, "service_id"):
+                ConstraintTreeBootstrap.from_env(Mock(), 23495, "PDFUSION")
 
     def test_tree_vip_is_independent_of_inference_routing_and_refreshed(self):
         config = json.dumps({"service_id": "service"})

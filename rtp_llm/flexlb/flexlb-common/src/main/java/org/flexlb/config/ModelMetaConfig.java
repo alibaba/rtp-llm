@@ -32,4 +32,8 @@ public class ModelMetaConfig {
         return modelServiceRoute.get(serviceId);
 
     }
+
+    public Set<String> getServiceIds() {
+        return Set.copyOf(modelServiceRoute.keySet());
+    }
 }

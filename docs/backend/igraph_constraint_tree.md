@@ -206,26 +206,36 @@ and ordinary discovery are ready. Existing reconciliation pushes the current tre
 to restarted instances without rebuilding it manually.
 
 For colocated inference that does **not** use FlexLB scheduling, configure the
-Worker with a tree-only Master VIP and an identity-only inference configuration:
+Worker with only a tree Master VIP and the existing required-tree setting:
 
 ```text
 CONSTRAINT_TREE_MASTER_ENDPOINT=com.aicheng.whale.prod.<biz>.master.<deployment>
-MODEL_SERVICE_CONFIG={"service_id":"aigc.text-generation.generation.engine_service"}
 CONSTRAINT_TREE_REQUIRED=true
 ```
 
 `CONSTRAINT_TREE_MASTER_ENDPOINT` is a VIPServer domain, not a URL. It is resolved
 by the background bootstrap thread and never enables inference routing. The
-registration endpoint already redirects to the active Master. Do not add a
+registration endpoint already redirects to the active Master. With no explicit
+service identity, Master selects its sole configured service. No service configured
+yet returns HTTP 503 for retry; multiple services return HTTP 400 requiring an
+explicit `MODEL_SERVICE_CONFIG.service_id`. Unknown explicit identities and roles
+without configured endpoints remain rejected. An identity-only configuration is
+still supported, but is unnecessary for a dedicated single-service Master.
+
+Remove the old `MODEL_SERVICE_CONFIG` override used only for tree registration
+(check template/base/zone inheritance so an older route is not exposed). Do not add a
 `master_endpoint` to `MODEL_SERVICE_CONFIG` just for tree delivery: that field
 enables `/rtp_llm/schedule` calls on the inference request path. Also do not retain
-role endpoints in this identity-only override unless remote inference is intended.
+role endpoints unless remote inference is intended. Bootstrap never edits or disables
+an explicitly configured inference route on your behalf.
 
 Actual FlexLB/PD deployments must keep their existing inference route configuration.
 They may use a separate tree VIP; without it, bootstrap remains backward-compatible
-with `MODEL_SERVICE_CONFIG.master_endpoint`. Install the supporting Worker image
-before changing existing configurations. Changing only the environment on an old
-Worker image would prevent cold-start bootstrap. Stage the image and configuration
+with `MODEL_SERVICE_CONFIG.master_endpoint`. Upgrade Master first: older Masters
+require explicit `service_id` on registration; the new Master still accepts old
+Workers. Then install the supporting Worker image with the simplified configuration.
+Changing only the environment on an old Worker image would prevent cold-start
+bootstrap. Stage the Worker image and configuration
 together, verify one canary's tree/readiness and request errors, then expand.
 
 This fixes the missing-tree startup window, not all rollout errors. Tokenizer

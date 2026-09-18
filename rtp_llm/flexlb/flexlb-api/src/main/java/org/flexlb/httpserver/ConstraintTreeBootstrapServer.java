@@ -49,11 +49,12 @@ public class ConstraintTreeBootstrapServer {
                     : ServerResponse.temporaryRedirect(URI.create("http://" + leader + PATH)).build();
         }
         return request.bodyToMono(Registration.class).flatMap(value -> {
-            if (value.serviceId() == null || value.httpPort() < 1 || value.httpPort() > 65535
+            if (value.httpPort() < 1 || value.httpPort() > 65535
                     || (value.role() != RoleType.DECODE && value.role() != RoleType.PDFUSION)) {
-                throw new IllegalArgumentException("service_id, inference role and native HTTP port are required");
+                throw new IllegalArgumentException("inference role and native HTTP port are required");
             }
-            var route = models.getServiceRoute(value.serviceId());
+            String serviceId = resolveServiceId(value.serviceId());
+            var route = models.getServiceRoute(serviceId);
             if (route == null || route.getRoleEndpoints(value.role()).isEmpty()) {
                 throw new IllegalArgumentException("service/role is not configured on this Master");
             }
@@ -64,7 +65,7 @@ public class ConstraintTreeBootstrapServer {
             }
             String ip = peer.getAddress().getHostAddress();
             String host = ip.contains(":") ? "[" + ip + "]" : ip;
-            boolean discovered = registry.register(IdUtils.getModelNameByServiceId(value.serviceId()),
+            boolean discovered = registry.register(IdUtils.getModelNameByServiceId(serviceId),
                     URI.create("http://" + host + ":" + value.httpPort()));
             return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(Map.of("discovered", discovered));
@@ -74,5 +75,19 @@ public class ConstraintTreeBootstrapServer {
                 .onErrorResume(ServerWebInputException.class, e -> ServerResponse.badRequest().build())
                 .onErrorResume(IllegalStateException.class, e -> ServerResponse.status(503)
                         .bodyValue(Map.of("error", e.getMessage())));
+    }
+
+    private String resolveServiceId(String serviceId) {
+        if (serviceId != null && !serviceId.isBlank()) {
+            return serviceId;
+        }
+        var services = models.getServiceIds();
+        if (services.isEmpty()) {
+            throw new IllegalStateException("Master service configuration is not ready; retry registration");
+        }
+        if (services.size() != 1) {
+            throw new IllegalArgumentException("service_id is required when Master has multiple configured services");
+        }
+        return services.iterator().next();
     }
 }

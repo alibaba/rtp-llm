@@ -16,17 +16,18 @@ class ConstraintTreeBootstrap:
     def __init__(
         self,
         master_address: Callable[[], Optional[str]],
-        service_id: str,
+        service_id: Optional[str],
         http_port: int,
         role: str,
         interval: float = 10,
     ):
         self.master_address = master_address
         self.body = {
-            "service_id": service_id,
             "http_port": http_port,
             "role": role,
         }
+        if service_id:
+            self.body["service_id"] = service_id
         self.health_url = f"http://127.0.0.1:{http_port}/health"
         self.interval = interval
         self._stop = threading.Event()
@@ -45,11 +46,7 @@ class ConstraintTreeBootstrap:
         role_name = getattr(role, "name", str(role)).removeprefix("RoleType.")
         if role_name not in ("DECODE", "PDFUSION"):
             return None
-        config = json.loads(os.environ.get("MODEL_SERVICE_CONFIG", "{}"))
-        if not config.get("service_id"):
-            raise ValueError(
-                "CONSTRAINT_TREE_REQUIRED bootstrap needs MODEL_SERVICE_CONFIG.service_id"
-            )
+        config = json.loads(os.environ.get("MODEL_SERVICE_CONFIG", "") or "{}")
         domain = os.environ.get("CONSTRAINT_TREE_MASTER_ENDPOINT", "").strip()
         if domain:
             # Tree delivery must not enable Master scheduling for inference.
@@ -58,13 +55,18 @@ class ConstraintTreeBootstrap:
             master_address = lambda: cls._master_from_vip(domain)
         elif (config.get("master_endpoint") or {}).get("address"):
             # Existing FlexLB deployments may share their inference Master.
+            if not config.get("service_id"):
+                raise ValueError(
+                    "constraint-tree routing Master needs MODEL_SERVICE_CONFIG.service_id"
+                )
             master_address = host_service.get_master_addr
         else:
             raise ValueError(
                 "CONSTRAINT_TREE_REQUIRED bootstrap needs CONSTRAINT_TREE_MASTER_ENDPOINT "
                 "or MODEL_SERVICE_CONFIG.master_endpoint.address"
             )
-        return cls(master_address, config["service_id"], http_port, role_name)
+        # A dedicated, single-service Master can resolve its own service identity.
+        return cls(master_address, config.get("service_id"), http_port, role_name)
 
     @staticmethod
     def _master_from_vip(domain: str) -> Optional[str]:

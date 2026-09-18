@@ -19,12 +19,49 @@ import java.net.URI;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class ConstraintTreeBootstrapTest {
+    @Test
+    void implicitServiceRequiresExactlyOneConfiguredServiceAndPreservesRoleValidation() {
+        var registry = new ConstraintTreeBootstrapRegistry();
+        var models = mock(ModelMetaConfig.class);
+        var leader = mock(LBStatusConsistencyService.class);
+        when(leader.isMaster()).thenReturn(true);
+        String service = IdUtils.getServiceIdByModelName("a");
+        var route = mock(ServiceRoute.class);
+        when(route.getRoleEndpoints(RoleType.PDFUSION)).thenReturn(List.of(new Endpoint()));
+        when(models.getServiceRoute(service)).thenReturn(route);
+        var handler = RouterFunctions.toWebHandler(
+                new ConstraintTreeBootstrapServer(registry, models, leader).constraintTreeBootstrapRoutes());
+        String body = "{\"role\":\"PDFUSION\",\"http_port\":23495}";
+        for (var services : List.of(Set.<String>of(), Set.of(service, IdUtils.getServiceIdByModelName("b")),
+                Set.of(service))) {
+            when(models.getServiceIds()).thenReturn(services);
+            var exchange = MockServerWebExchange.from(MockServerHttpRequest.post(ConstraintTreeBootstrapServer.PATH)
+                    .remoteAddress(new InetSocketAddress("127.0.0.2", 54321))
+                    .header("Content-Type", "application/json").body(body));
+            handler.handle(exchange).block();
+            assertEquals(services.isEmpty() ? 503 : services.size() > 1 ? 400 : 200,
+                    exchange.getResponse().getRawStatusCode());
+            if (services.size() != 1) {
+                assertTrue(registry.pendingModels().isEmpty());
+            }
+        }
+        assertEquals(Map.of("127.0.0.2:23495", URI.create("http://127.0.0.2:23495")), registry.merge("a", Map.of()));
+        when(route.getRoleEndpoints(RoleType.PDFUSION)).thenReturn(List.of());
+        var exchange = MockServerWebExchange.from(MockServerHttpRequest.post(ConstraintTreeBootstrapServer.PATH)
+                .remoteAddress(new InetSocketAddress("127.0.0.3", 54321))
+                .header("Content-Type", "application/json").body(body));
+        handler.handle(exchange).block();
+        assertEquals(400, exchange.getResponse().getRawStatusCode());
+        assertFalse(registry.merge("a", Map.of()).containsKey("127.0.0.3:23495"));
+    }
+
     @Test
     void springWiresBootstrapWithoutOptionalIgraphPoller() {
         try (var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
@@ -91,6 +128,8 @@ class ConstraintTreeBootstrapTest {
         var registry = new ConstraintTreeBootstrapRegistry();
         var models = mock(ModelMetaConfig.class);
         var route = mock(ServiceRoute.class);
+        when(models.getServiceIds()).thenReturn(Set.of(IdUtils.getServiceIdByModelName("a"),
+                IdUtils.getServiceIdByModelName("b")));
         when(route.getRoleEndpoints(RoleType.PDFUSION)).thenReturn(List.of(new Endpoint()));
         when(models.getServiceRoute(IdUtils.getServiceIdByModelName("a"))).thenReturn(route);
         var leader = mock(LBStatusConsistencyService.class);
