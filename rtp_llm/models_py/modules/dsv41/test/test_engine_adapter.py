@@ -695,6 +695,7 @@ class EngineAdapterContractTest(unittest.TestCase):
         model = SimpleNamespace(
             _cp_rank=rank,
             _groups=groups,
+            _cp_publication=DeepSeekV41Model._cp_publication,
             kv_cache=SimpleNamespace(group_region_names=[""] * 6),
             layout=SimpleNamespace(cp_size=cp_size),
         )
