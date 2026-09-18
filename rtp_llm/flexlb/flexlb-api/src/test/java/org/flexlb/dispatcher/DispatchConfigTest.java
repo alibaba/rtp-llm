@@ -18,21 +18,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DispatchConfigTest {
     @Test
     void defaultsAndEnvironmentOverridesUseOneValidatedConfiguration() {
-        DispatchConfig defaults = load(Map.of("DISPATCH_FE_POOL_SERVICE_ID", "fe"));
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> load(Map.of("DISPATCH_FE_POOL_SERVICE_ID", "fe")))
+                .getMessage().contains("DISPATCH_ROUTING_TOKEN"));
+        DispatchConfig defaults = load(Map.of("DISPATCH_FE_POOL_SERVICE_ID", "fe",
+                "DISPATCH_ROUTING_TOKEN", "secret"));
         assertEquals("count:5", defaults.getSubBatch());
         assertEquals(FeAllocation.MASTER, defaults.getFeAllocation());
-        assertFalse(defaults.isPreAssignBe());
+        assertTrue(defaults.isPreAssignBe());
         assertEquals("/frontend_health", defaults.getProbePath());
+        assertEquals("secret", defaults.getTrustedRoutingToken());
+        assertFalse(JsonUtils.toString(defaults).contains("secret"));
         DispatchConfig cfg = load(Map.of(
                 "DISPATCH_FE_POOL_SERVICE_ID", "env", "DISPATCH_SUB_BATCH", "size:7",
-                "DISPATCH_FE_ALLOCATION", "local", "DISPATCH_PRE_ASSIGN_BE", "true",
-                "DISPATCH_ROUTING_TOKEN", "secret"));
+                "DISPATCH_FE_ALLOCATION", "local", "DISPATCH_PRE_ASSIGN_BE", "false"));
         assertEquals("env", cfg.getFePoolServiceId());
         assertEquals(new SubBatchSpec(SubBatchSpec.Mode.SIZE, 7), cfg.getSubBatchSpec());
         assertEquals(FeAllocation.LOCAL, cfg.getFeAllocation());
-        assertTrue(cfg.isPreAssignBe());
-        assertEquals("secret", cfg.getTrustedRoutingToken());
-        assertFalse(JsonUtils.toString(cfg).contains("secret"));
+        assertFalse(cfg.isPreAssignBe());
+        assertEquals("", cfg.getTrustedRoutingToken());
     }
 
     @ParameterizedTest
@@ -41,6 +45,7 @@ class DispatchConfigTest {
             "probe-path,health", "probe-path,//host/health", "probe-path,https://host/health", "probe-path,/health#fragment"})
     void invalidConfigurationFailsAtStartup(String key, String value) {
         MockEnvironment env = new MockEnvironment().withProperty("dispatch.fe-pool-service-id", "fe")
+                .withProperty("dispatch.pre-assign-be", "false")
                 .withProperty("dispatch." + key, value);
         assertThrows(RuntimeException.class, () -> DispatcherConfiguration.loadAndValidate(env));
     }

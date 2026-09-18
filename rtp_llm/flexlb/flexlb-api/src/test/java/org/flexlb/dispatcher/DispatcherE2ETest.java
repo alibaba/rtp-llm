@@ -103,6 +103,7 @@ class DispatcherE2ETest {
             """)
     void realHttpFanoutPreservesWireSchemas(String path, String fePath, String input, String first, String second,
                                            int firstStatus, int secondStatus, int status, String expected) throws Exception {
+        cfg.setPreAssignBe(false);
         reply(0, firstStatus, first);
         reply(1, secondStatus, second);
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get(path);
@@ -213,6 +214,7 @@ class DispatcherE2ETest {
     @ParameterizedTest
     @CsvSource({"request,1,413", "response,1,413", "count,1,413", "request,44,200", "request,43,413"})
     void requestAndResponseBudgetsEnforceTheWireBoundary(String limit, long bytes, int status) {
+        cfg.setPreAssignBe(false);
         boolean responseLimit = limit.equals("response");
         if (limit.equals("count")) {
             lb.getRouter().setBatchScheduleMaxCount(1);

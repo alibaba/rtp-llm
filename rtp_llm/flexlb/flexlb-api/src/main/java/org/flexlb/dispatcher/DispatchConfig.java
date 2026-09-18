@@ -25,7 +25,7 @@ public class DispatchConfig {
     private String probePath = "/frontend_health";
 
     private FeAllocation feAllocation = FeAllocation.MASTER;
-    private boolean preAssignBe = false;
+    private boolean preAssignBe = true;
 
     /** Required on dispatcher and receiving FEs for BE preassignment; loaded only from DISPATCH_ROUTING_TOKEN. */
     @JsonIgnore
