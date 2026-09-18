@@ -724,6 +724,16 @@ void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<Fu
     const int64_t restored_end   = read_context->resource()->dsv41RestoredCheckpointEnd();
     const int total_reuse_len =
         is_v41 ? std::min<int64_t>(data_reuse_len, restored_end) : data_reuse_len;
+    // V41PAIR-DIAG (temporary, V3Q-006): trace reuse length derivation on the read path.
+    if (is_v41) {
+        RTP_LLM_LOG_WARNING("V41PAIR reuse-lens: data=%d restored=%lld total=%d memory=%d device=%d remote=%d",
+                            data_reuse_len,
+                            (long long)restored_end,
+                            total_reuse_len,
+                            (int)(read_context->resource()->memoryReuseBlockNum() * block_tokens),
+                            (int)(read_context->resource()->deviceReuseBlockNum() * block_tokens),
+                            (int)(read_context->resource()->remoteReuseBlockNum() * block_tokens));
+    }
     // Adopt the checkpoint the read context restored so later gathers and the
     // end-of-request publication see it on the stream's own resource.
     const auto& restored_checkpoint = read_context->resource()->dsv41RestoredCheckpoint();

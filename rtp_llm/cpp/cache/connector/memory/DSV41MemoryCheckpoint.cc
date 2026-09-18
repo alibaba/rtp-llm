@@ -99,6 +99,19 @@ bool KVCacheMemoryConnector::bindDsv41ReadPlan(CopyPlan&                        
                 continue;
             const auto& blocks     = resource.blocks(slots[s].layer_id, slots[s].region_name);
             const auto  slot_index = dsv41SlotIndex(resource, index, slots[s]);
+            // V41PAIR-DIAG (temporary, V3Q-006): trace every pair/SWA read-bind decision.
+            if (slots[s].region_name == KVCacheRegionName::DSV41_PAIR_STATE) {
+                RTP_LLM_LOG_WARNING(
+                    "V41PAIR read-bind: key_index=%zu slot_index=%lld blocks=%zu block=%d key_aligned=%d deps=%zu "
+                    "meta=%d",
+                    index,
+                    slot_index ? (long long)*slot_index : -1LL,
+                    blocks.size(),
+                    (slot_index && *slot_index < blocks.size()) ? blocks[*slot_index] : -2,
+                    (int)resource.blockIdsAreKeyAligned(),
+                    resource.blockDependencies().size(),
+                    (int)(info.recovery_metadata != nullptr));
+            }
             if (!slot_index || *slot_index >= blocks.size() || blocks[*slot_index] <= 0) {
                 usable = false;
                 break;
@@ -245,6 +258,14 @@ bool KVCacheMemoryConnector::copyDsv41MemoryItems(const MemoryOperationRequestPB
                 return false;
             const auto gpu    = allocator_->convertIndexToBuffer(slot.layer_id, slot.region_name, item.gpu_blocks(s));
             size_t     copied = 0;
+            // V41PAIR-DIAG (temporary, V3Q-006): trace pair slot byte copies both ways.
+            if (slot.region_name == KVCacheRegionName::DSV41_PAIR_STATE) {
+                RTP_LLM_LOG_WARNING("V41PAIR memcopy: dir=%d mem_block=%d gpu_block=%d stride=%zu",
+                                    (int)direction,
+                                    item.mem_block(),
+                                    item.gpu_blocks(s),
+                                    slot.stride_bytes);
+            }
             for (const auto& segment : gpu) {
                 if (!segment.is_cuda || !segment.addr || copied + segment.size_bytes > slot.stride_bytes)
                     return false;

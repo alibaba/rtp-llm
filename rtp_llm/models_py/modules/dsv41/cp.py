@@ -858,6 +858,7 @@ class V41CPAttentionContext(V41AttentionContext):
     def restore_pair(self, owner, *, restored_state_ready=False):
         if not self.start:
             return PairCarry.empty(owner, self.cache.request_id, self.cache.identity)
+        page = self._physical(self.pair_tables[owner], self.previous, self.pair_pools[owner])
         received = self._fixed_receive(
             self.pair_pools[owner], self.pair_tables[owner], self.previous
         )
@@ -877,14 +878,20 @@ class V41CPAttentionContext(V41AttentionContext):
         valid = int(raw[4104:4108].view(torch.int32).item())
         if position != self.start or valid != position % 2:
             nonzero = [int(v) for v in (received[:, 1] != 0).sum(-1).cpu().tolist()]
+            nonzero_offsets = [
+                [int(i) for i in v.nonzero().flatten().cpu().tolist()[:8]]
+                for v in received[:, 1]
+            ]
             raise ValueError(
                 "CP pair slices disagree with the restored execution boundary: "
                 f"owner={owner} start={self.start} previous={self.previous} "
+                f"page={page} current={self.current} "
                 f"position={position} valid={valid} "
                 f"restored_state_ready={restored_state_ready} "
                 f"snapshots={self._pair_snapshots[owner]} "
                 f"reuse_unit={self.cache.layout.reuse_unit} "
-                f"rank_slice_nonzero_bytes={nonzero}"
+                f"rank_slice_nonzero_bytes={nonzero} "
+                f"rank_slice_nonzero_offsets={nonzero_offsets}"
             )
         return PairCarry(
             owner,

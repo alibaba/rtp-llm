@@ -195,6 +195,13 @@ bool HybridPoolKVCacheAllocator::cloneDsv41WritableBacking(KVCacheResource& reso
                 if (allocated.size() != 1)
                     throw std::runtime_error("V4.1 reuse cannot allocate private writable backing");
                 replacements.push_back({group, index, ids[index], allocated.front()});
+                // V41PAIR-DIAG (temporary, V3Q-006): trace every private backing clone.
+                RTP_LLM_LOG_WARNING("V41PAIR clone: group=%zu index=%zu old=%d fresh=%d bytes=%zu",
+                                    group,
+                                    index,
+                                    ids[index],
+                                    allocated.front(),
+                                    config_.cache_specs[group]->block_size_bytes());
                 for (int owner : config_.global_layer_ids[group]) {
                     const auto src = kv_cache_groups_[group]->convertIndexToAddr(owner, ids[index]);
                     const auto dst = kv_cache_groups_[group]->convertIndexToAddr(owner, allocated.front());
