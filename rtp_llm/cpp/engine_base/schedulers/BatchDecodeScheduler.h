@@ -37,6 +37,8 @@ public:
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
         scheduler_type_   = SchedulerType::kBatchDecode;
         dp_rank_          = dp_rank;
+        RTP_LLM_LOG_INFO("BatchDecodeScheduler poll interval is [%lld] ms",
+                         static_cast<long long>(poll_interval_.count()));
     }
     virtual ~BatchDecodeScheduler() = default;
 
@@ -203,7 +205,7 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        const auto poll_interval = force_poll_ ? std::chrono::milliseconds(10) : std::chrono::milliseconds(30000);
+        const auto                   poll_interval = force_poll_ ? poll_interval_ : std::chrono::milliseconds(30000);
         cond_.wait_for(lock, poll_interval, [this] {
             return stop_ || wake_requested_ || waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
                    || !loading_cache_streams_.empty();

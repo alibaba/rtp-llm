@@ -14,6 +14,8 @@ _DSV4_FP8_TEST_DEPS = [
 
 _DSV4_FP8_TESTS = [
     "test_attention_v41_cuda_graph",
+    "test_v41_decode_attention_fusion",
+    "test_v41_decode_preprocessing",
     "test_bf16_gemm_fp32",
     "test_compressor_disable_raw_path",
     "test_cp_pool_reader_owned_lens",
@@ -66,6 +68,24 @@ _DSV4_FP8_CPU_TESTS = [
     "test_indexer_forward_with_pending_nested",
     "test_prefill_mixed_layer_cache_store",
 ]
+
+py_test(
+    name = "test_v41_decode_global",
+    srcs = ["test_v41_decode_global.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
+
+py_test(
+    name = "test_v41_decode_indexer",
+    srcs = ["test_v41_decode_indexer.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
 
 py_test(
     name = "test_v41_prefill_indexer_cuda",

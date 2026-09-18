@@ -1,11 +1,13 @@
 #pragma once
 
+#include <chrono>
 #include <list>
 #include <memory>
 #include <utility>
 #include <vector>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
@@ -47,6 +49,17 @@ public:
         return {};
     }
     virtual void updateSchedulerInfo(const std::string& scheduler_info) {}
+
+protected:
+    static std::chrono::milliseconds readPollInterval() {
+        constexpr int default_interval_ms = 10;
+        const int     interval_ms = autil::EnvUtil::getEnv("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", default_interval_ms);
+        // A nonpositive timeout would turn idle collective polling into a busy loop.
+        return std::chrono::milliseconds(interval_ms > 0 ? interval_ms : default_interval_ms);
+    }
+
+    // Read once at construction; notifications still wake a timed wait immediately.
+    const std::chrono::milliseconds poll_interval_ = readPollInterval();
 };
 
 }  // namespace rtp_llm

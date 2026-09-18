@@ -23,6 +23,10 @@ rather than a per-token ``positions`` tensor.
 
 Validated by ``test/test_fused_inv_rope_fp8_quant.py`` (≤1 FP8 ULP vs
 eager inv-RoPE + per-group quant, and ≤2-ULP end-to-end vs wo_a GEMM).
+
+V4.1 additionally uses group32, an explicit BF16 RoPE intermediate, and the
+selected CUDA quantizer's scale floor. Its scale width is K/128 packed words.
+The V4 group128 defaults retain their original arithmetic.
 """
 
 from __future__ import annotations
@@ -62,10 +66,12 @@ def _fused_inv_rope_fp8_quant_per_head(
     scale_stride_k,  # for TMA-aligned layout this is ``tma_aligned_M``
     fp8_max: tl.constexpr,
     eps: tl.constexpr,
-    QUANT_GROUP_SIZE: tl.constexpr,  # 128
-    CHUNKS_PER_HEAD: tl.constexpr,  # head_dim // 128 (= 4 for dsv4 head_dim=512)
-    ROPE_START: tl.constexpr,  # nope_dim % QUANT_GROUP_SIZE
+    QUANT_GROUP_SIZE: tl.constexpr,
+    CHUNKS_PER_HEAD: tl.constexpr,
+    NOPE_DIM: tl.constexpr,
     HALF_ROPE: tl.constexpr,  # rope_head_dim // 2
+    ROUND_ROPE_TO_INPUT_DTYPE: tl.constexpr,
+    SCALE_MIN: tl.constexpr,
 ):
     # int64: stride multiply overflows int32 past num_tokens=32768 (IMA).
     pid_token = tl.program_id(0).to(tl.int64)
@@ -81,9 +87,13 @@ def _fused_inv_rope_fp8_quant_per_head(
             scale_ptr
             + g * scale_stride_group
             + pid_token  # M offset (innermost, stride=1)
-            + head_in_group * scale_stride_k
+            + (
+                head_in_group * (CHUNKS_PER_HEAD // 4)
+                + tl.arange(0, CHUNKS_PER_HEAD // 4)
+            )
+            * scale_stride_k
         )
-        tl.store(scale_addr, tl.zeros((), dtype=tl.int32))
+        tl.store(scale_addr, tl.zeros((CHUNKS_PER_HEAD // 4,), dtype=tl.int32))
         return
 
     input_base = o_ptr + pid_token * o_stride_token + global_head * o_stride_head
@@ -93,7 +103,7 @@ def _fused_inv_rope_fp8_quant_per_head(
     x = tl.load(input_base + offsets).to(tl.float32)
 
     # --- inverse RoPE on last RD columns ---------------------------------
-    rope_abs_start: tl.constexpr = (CHUNKS_PER_HEAD - 1) * QUANT_GROUP_SIZE + ROPE_START
+    rope_abs_start: tl.constexpr = NOPE_DIM
     is_rope = offsets >= rope_abs_start
     rope_local = offsets - rope_abs_start
 
@@ -121,12 +131,23 @@ def _fused_inv_rope_fp8_quant_per_head(
     is_even = (rope_local & 1) == 0
     rotated = tl.where(is_even, x_add, x_sub)
     x = tl.where(is_rope, rotated, x)
+    if ROUND_ROPE_TO_INPUT_DTYPE:
+        x = x.to(o_ptr.dtype.element_ty).to(tl.float32)
 
     # --- per-128-column FP8 quant ----------------------------------------
     x_2d = tl.reshape(tl.abs(x), (CHUNKS_PER_HEAD, QUANT_GROUP_SIZE))
     block_absmax = tl.maximum(tl.max(x_2d, axis=1), eps)
     scale_raw = block_absmax * (1.0 / fp8_max)
+    if SCALE_MIN > 0:
+        scale_raw = tl.maximum(scale_raw, SCALE_MIN)
+    elif ROUND_ROPE_TO_INPUT_DTYPE:
+        # Match the CUDA v2 quantizer's FTZ multiply and fast_pow2 exponent.
+        scale_raw = tl.where(scale_raw < 1.1754943508222875e-38, 0.0, scale_raw)
     scales = tl.math.exp2(tl.ceil(tl.log2(scale_raw)))  # UE8M0-round
+    if ROUND_ROPE_TO_INPUT_DTYPE and SCALE_MIN == 0:
+        raw_bits = scale_raw.to(tl.int32, bitcast=True)
+        scale_exp = ((raw_bits >> 23) & 0xFF) + ((raw_bits & 0x7FFFFF) != 0)
+        scales = (scale_exp << 23).to(tl.float32, bitcast=True)
 
     scales_exp = tl.reshape(
         tl.broadcast_to(
@@ -135,7 +156,13 @@ def _fused_inv_rope_fp8_quant_per_head(
         ),
         (HEAD_DIM,),
     )
-    x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(tl.float8e4nv)
+    if ROUND_ROPE_TO_INPUT_DTYPE and SCALE_MIN == 0:
+        inv = ((254 - (scales_exp.to(tl.int32, bitcast=True) >> 23)) << 23).to(
+            tl.float32, bitcast=True
+        )
+        x_quant = tl.clamp(x * inv, -fp8_max, fp8_max).to(tl.float8e4nv)
+    else:
+        x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(tl.float8e4nv)
 
     fp8_base = (
         fp8_ptr
@@ -145,21 +172,24 @@ def _fused_inv_rope_fp8_quant_per_head(
     )
     tl.store(fp8_base + offsets, x_quant)
 
-    # --- pack CHUNKS_PER_HEAD UE8M0 bytes into 1 int32 -------------------
+    # Pack each four UE8M0 bytes into an int32 (four words/head for group32).
     # fp32 bits [30:23] are the biased exponent (same 8-bit wire format
     # as UE8M0).  Since ``scales`` is already power-of-two via
     # exp2(ceil(log2(.))) above, mantissa is zero and ``bits >> 23 & 0xFF``
-    # is the exact UE8M0 byte.  Requires CHUNKS_PER_HEAD ≤ 4 (≤32 bits
-    # of shift total).
-    block_offsets = tl.arange(0, CHUNKS_PER_HEAD)
+    # is the exact UE8M0 byte. Each group of four bytes has its own word.
     scale_bits = scales.to(tl.int32, bitcast=True)
     ue8m0_bytes = (scale_bits >> 23) & 0xFF
-    packed_val = tl.sum(ue8m0_bytes << (block_offsets * 8))
+    packed_val = tl.sum(
+        tl.reshape(ue8m0_bytes, (CHUNKS_PER_HEAD // 4, 4))
+        << (tl.arange(0, 4)[None, :] * 8),
+        axis=1,
+    )
     scale_addr = (
         scale_ptr
         + g * scale_stride_group
         + pid_token  # M offset
-        + head_in_group * scale_stride_k
+        + (head_in_group * (CHUNKS_PER_HEAD // 4) + tl.arange(0, CHUNKS_PER_HEAD // 4))
+        * scale_stride_k
     )
     tl.store(scale_addr, packed_val)
 
@@ -185,8 +215,10 @@ def _fused_inv_rope_fp8_quant_group_heads(
     eps: tl.constexpr,
     QUANT_GROUP_SIZE: tl.constexpr,
     CHUNKS_PER_HEAD: tl.constexpr,
-    ROPE_START: tl.constexpr,
+    NOPE_DIM: tl.constexpr,
     HEADS_PER_CTA: tl.constexpr,
+    ROUND_ROPE_TO_INPUT_DTYPE: tl.constexpr,
+    SCALE_MIN: tl.constexpr,
 ):
     pid_token = tl.program_id(0).to(tl.int64)
     g = tl.program_id(1).to(tl.int64)
@@ -199,10 +231,14 @@ def _fused_inv_rope_fp8_quant_group_heads(
             scale_ptr
             + g * scale_stride_group
             + pid_token
-            + head_in_group * scale_stride_k
+            + (
+                head_in_group * (CHUNKS_PER_HEAD // 4)
+                + tl.arange(0, CHUNKS_PER_HEAD // 4)
+            )
+            * scale_stride_k
         )
         if pid_token >= num_tokens:
-            tl.store(scale_addr, tl.zeros((), dtype=tl.int32))
+            tl.store(scale_addr, tl.zeros((CHUNKS_PER_HEAD // 4,), dtype=tl.int32))
         else:
             global_head = g * heads_per_group + head_in_group
             input_base = (
@@ -213,14 +249,12 @@ def _fused_inv_rope_fp8_quant_group_heads(
             offsets = tl.arange(0, HEAD_DIM)
             x = tl.load(input_base + offsets).to(tl.float32)
 
-            rope_abs_start: tl.constexpr = (
-                (CHUNKS_PER_HEAD - 1) * QUANT_GROUP_SIZE + ROPE_START
-            )
+            rope_abs_start: tl.constexpr = NOPE_DIM
             is_rope = offsets >= rope_abs_start
             rope_local = offsets - rope_abs_start
-            x_partner = tl.load(
-                input_base + (offsets ^ 1), mask=is_rope, other=0.0
-            ).to(tl.float32)
+            x_partner = tl.load(input_base + (offsets ^ 1), mask=is_rope, other=0.0).to(
+                tl.float32
+            )
 
             cs_idx = tl.maximum(rope_local >> 1, 0)
             b_idx = pid_token // q_len_per_b
@@ -231,16 +265,24 @@ def _fused_inv_rope_fp8_quant_group_heads(
             x_add = x * cos_v + x_partner * sin_v
             x_sub = x * cos_v - x_partner * sin_v
             is_even = (rope_local & 1) == 0
-            x = tl.where(is_rope, tl.where(is_even, x_add, x_sub), x)
+            rotated = tl.where(is_even, x_add, x_sub)
+            x = tl.where(is_rope, rotated, x)
+            if ROUND_ROPE_TO_INPUT_DTYPE:
+                x = x.to(o_ptr.dtype.element_ty).to(tl.float32)
 
             x_2d = tl.reshape(tl.abs(x), (CHUNKS_PER_HEAD, QUANT_GROUP_SIZE))
             block_absmax = tl.maximum(tl.max(x_2d, axis=1), eps)
             scale_raw = block_absmax * (1.0 / fp8_max)
+            if SCALE_MIN > 0:
+                scale_raw = tl.maximum(scale_raw, SCALE_MIN)
+            elif ROUND_ROPE_TO_INPUT_DTYPE:
+                scale_raw = tl.where(scale_raw < 1.1754943508222875e-38, 0.0, scale_raw)
             scale_raw_bits = scale_raw.to(tl.int32, bitcast=True)
-            exp = ((scale_raw_bits >> 23) & 0xFF) + (
-                (scale_raw_bits & 0x7FFFFF) != 0
-            )
-            exp = tl.minimum(tl.maximum(exp, 1), 254)
+            exp = ((scale_raw_bits >> 23) & 0xFF) + ((scale_raw_bits & 0x7FFFFF) != 0)
+            if ROUND_ROPE_TO_INPUT_DTYPE and SCALE_MIN == 0:
+                exp = tl.minimum(tl.maximum(exp, 0), 254)
+            else:
+                exp = tl.minimum(tl.maximum(exp, 1), 254)
             scale_bits = exp << 23
             scales = scale_bits.to(tl.float32, bitcast=True)
 
@@ -251,7 +293,13 @@ def _fused_inv_rope_fp8_quant_group_heads(
                 ),
                 (HEAD_DIM,),
             )
-            x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(tl.float8e4nv)
+            if ROUND_ROPE_TO_INPUT_DTYPE and SCALE_MIN == 0:
+                inv = ((254 - (scales_exp.to(tl.int32, bitcast=True) >> 23)) << 23).to(
+                    tl.float32, bitcast=True
+                )
+                x_quant = tl.clamp(x * inv, -fp8_max, fp8_max).to(tl.float8e4nv)
+            else:
+                x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(tl.float8e4nv)
 
             fp8_base = (
                 fp8_ptr
@@ -261,8 +309,11 @@ def _fused_inv_rope_fp8_quant_group_heads(
             )
             tl.store(fp8_base + offsets, x_quant)
 
-            block_offsets = tl.arange(0, CHUNKS_PER_HEAD)
-            packed_val = tl.sum(exp << (block_offsets * 8))
+            packed_val = tl.sum(
+                tl.reshape(exp, (CHUNKS_PER_HEAD // 4, 4))
+                << (tl.arange(0, 4)[None, :] * 8),
+                axis=1,
+            )
             tl.store(scale_addr, packed_val)
 
 
@@ -308,6 +359,8 @@ def fused_inv_rope_fp8_quant(
     scale_buf: torch.Tensor | None = None,
     impl: str | None = None,
     heads_per_cta: int | None = None,
+    round_rope_to_input_dtype: bool = False,
+    scale_min: float = 0.0,
 ):
     """Fused inverse-RoPE + block-scaled FP8 quant for wo_a input.
 
@@ -320,8 +373,12 @@ def fused_inv_rope_fp8_quant(
            per-token ``[M, rope_head_dim // 2]`` complex64 rotations.
         n_groups, heads_per_group: wo_a grouping.
         nope_dim, rope_head_dim: per-head NoPE / RoPE split.
-        quant_group_size: FP8 quant block size along K (fixed at 128 for V4).
+        quant_group_size: FP8 quant block size along K (128 for V4, 32 for V4.1).
         eps: Numerical epsilon used inside absmax-scale computation.
+        round_rope_to_input_dtype: Preserve the eager RoPE intermediate dtype
+           before computing absmax and quantizing (used by V4.1).
+        scale_min: Clamp scale before UE8M0 rounding; V4.1 legacy CUDA quant
+           uses 1e-10, while v2 has no independent scale clamp.
         heads_per_cta: Optimized Triton path head grouping.  Valid values are
            1, 2, 4, and 8; ``None`` reads ``DSV4_INV_ROPE_HEADS_PER_CTA``.
            ``DSV4_INV_ROPE_NUM_WARPS`` is an experimental tuning override for
@@ -330,11 +387,11 @@ def fused_inv_rope_fp8_quant(
     Returns:
         (o_fp8, o_scale) where:
             o_fp8   shape ``[M, G, d]``     float8_e4m3fn
-            o_scale shape ``[M, G, K/512]`` int32, UE8M0 packed,
-                    stride ``(1, K/512 * tma_M, tma_M)``.
+            o_scale shape ``[M, G, K/(4*quant_group_size)]`` int32,
+                    stride ``(1, packed_sf_k * tma_M, tma_M)``.
         Both are drop-in inputs for
         ``deep_gemm.fp8_einsum("bhr,hdr->bhd", (o_fp8, o_scale),
-        (wo_a_fp8, wo_a_scale), out, recipe=(1, 1, 128))``.
+        (wo_a_fp8, wo_a_scale), out, recipe=(1, 1, quant_group_size))``.
     """
     # Normalize input to [M, H, D]
     if o.dim() == 4:
@@ -350,10 +407,18 @@ def fused_inv_rope_fp8_quant(
         o_flat = o
 
     chunks_per_head = D // quant_group_size
+    if (
+        quant_group_size not in (32, 128)
+        or D % quant_group_size
+        or chunks_per_head % 4
+        or H != n_groups * heads_per_group
+        or D != nope_dim + rope_head_dim
+    ):
+        raise ValueError("unsupported inverse RoPE FP8 quantization shape")
 
     d_per_group = heads_per_group * D
     num_scale_blocks = d_per_group // quant_group_size
-    packed_sf_k = num_scale_blocks // chunks_per_head  # = heads_per_group
+    packed_sf_k = num_scale_blocks // 4
 
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
 
@@ -394,8 +459,11 @@ def fused_inv_rope_fp8_quant(
             eps=eps,
             QUANT_GROUP_SIZE=quant_group_size,
             CHUNKS_PER_HEAD=chunks_per_head,
-            ROPE_START=nope_dim % quant_group_size,
+            NOPE_DIM=nope_dim,
             HALF_ROPE=rope_head_dim // 2,
+            ROUND_ROPE_TO_INPUT_DTYPE=round_rope_to_input_dtype,
+            SCALE_MIN=scale_min,
+            enable_fp_fusion=not round_rope_to_input_dtype,
             num_warps=1,
             num_stages=1,
         )
@@ -442,8 +510,11 @@ def fused_inv_rope_fp8_quant(
             eps=eps,
             QUANT_GROUP_SIZE=quant_group_size,
             CHUNKS_PER_HEAD=chunks_per_head,
-            ROPE_START=nope_dim % quant_group_size,
+            NOPE_DIM=nope_dim,
             HEADS_PER_CTA=selected_heads_per_cta,
+            ROUND_ROPE_TO_INPUT_DTYPE=round_rope_to_input_dtype,
+            SCALE_MIN=scale_min,
+            enable_fp_fusion=not round_rope_to_input_dtype,
             num_warps=selected_num_warps,
             num_stages=1,
         )

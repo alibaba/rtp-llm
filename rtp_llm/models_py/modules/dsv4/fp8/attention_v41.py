@@ -8,6 +8,8 @@ layers write global pools; consumers reuse source KV and index selections.
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn.functional as F
 
@@ -155,7 +157,16 @@ class AttentionV41FP8(AttentionFP8):
             )
 
     def _project_output(self, o, freqs, out=None):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_output_projection
+
         o = o.reshape(-1, self.n_heads, self.head_dim)
+        if _v41_output_projection.is_supported(
+            o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
+        ):
+            projected = _v41_output_projection.grouped_output_projection(
+                o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
+            )
+            return self.wo_b(projected, out=out)
         apply_rotary_emb(
             o[..., -self.rope_head_dim :].unsqueeze(0), freqs, inverse=True
         )
@@ -669,56 +680,91 @@ class AttentionV41FP8(AttentionFP8):
         from rtp_llm.models_py.modules.dsv4.fp8.compressor import _linear_bf16_bf16_fp32
 
         B, S, _ = x.shape
-        flat = x.reshape(B * S, -1)
-        values = _linear_bf16_bf16_fp32(flat, self.global_wkv)
-        if self.compress_ratio == 2:
-            scores = _linear_bf16_bf16_fp32(flat, self.global_wgate)
-            previous = self._read_state(
-                (starts - 1).clamp_min(0), torch.arange(B, device=x.device)
-            )
-            first = (torch.arange(B * S, device=x.device) % S == 0)[:, None]
-            value_prev = torch.where(
-                first, previous[req_ids, : self.head_dim], values.roll(1, 0)
-            )
-            score_prev = torch.where(
-                first, previous[req_ids, self.head_dim :], scores.roll(1, 0)
-            )
-            latent = compress_pairs(
-                torch.stack((value_prev, values), 1),
-                torch.stack((score_prev, scores), 1),
-                self.global_norm,
-                self.eps,
-            )
-            slots = self._slots(CSA_STATE, positions, req_ids, state_end=starts + S)
-            state_rows = torch.cat((values, scores), -1)
-            # Slot zero is the allocator's unallocated sentinel; invalid rows
-            # may overwrite it, but no live request ever reads that slot.
-            self._source_pool(CSA_STATE).index_copy_(
-                0,
-                slots.clamp_min(0),
-                torch.where((slots >= 0)[:, None], state_rows, 0.0),
-            )
-        else:
-            latent = rms_norm(values, self.global_norm, self.eps).to(torch.bfloat16)
-        freqs = self.freqs_cis[(positions // self.compress_ratio) * self.compress_ratio]
-        global_keys = rope_only(latent.clone(), freqs, self.rope_head_dim)
-        index_keys = rope_only(
-            rms_norm(F.linear(latent, self.index_wk), self.index_k_norm, self.eps),
-            freqs,
-            self.rope_head_dim,
+        from rtp_llm.models_py.modules.dsv4.fp8._v41_decode_global import (
+            try_produce_global,
         )
-        quantize_and_insert_k_cache(
-            global_keys.contiguous(),
-            self._source_pool(self._global_region()),
-            self._slots(self._global_region(), positions, req_ids),
-        )
+
+        if not try_produce_global(self, x, positions, req_ids, starts):
+            flat = x.reshape(B * S, -1)
+            values = _linear_bf16_bf16_fp32(flat, self.global_wkv)
+            if self.compress_ratio == 2:
+                scores = _linear_bf16_bf16_fp32(flat, self.global_wgate)
+                previous = self._read_state(
+                    (starts - 1).clamp_min(0), torch.arange(B, device=x.device)
+                )
+                first = (torch.arange(B * S, device=x.device) % S == 0)[:, None]
+                value_prev = torch.where(
+                    first, previous[req_ids, : self.head_dim], values.roll(1, 0)
+                )
+                score_prev = torch.where(
+                    first, previous[req_ids, self.head_dim :], scores.roll(1, 0)
+                )
+                latent = compress_pairs(
+                    torch.stack((value_prev, values), 1),
+                    torch.stack((score_prev, scores), 1),
+                    self.global_norm,
+                    self.eps,
+                )
+                slots = self._slots(CSA_STATE, positions, req_ids, state_end=starts + S)
+                state_rows = torch.cat((values, scores), -1)
+                # Slot zero is the allocator's unallocated sentinel; invalid rows
+                # may overwrite it, but no live request ever reads that slot.
+                self._source_pool(CSA_STATE).index_copy_(
+                    0,
+                    slots.clamp_min(0),
+                    torch.where((slots >= 0)[:, None], state_rows, 0.0),
+                )
+            else:
+                latent = rms_norm(values, self.global_norm, self.eps).to(torch.bfloat16)
+            freqs = self.freqs_cis[
+                (positions // self.compress_ratio) * self.compress_ratio
+            ]
+            global_keys = rope_only(latent.clone(), freqs, self.rope_head_dim)
+            index_keys = rope_only(
+                rms_norm(F.linear(latent, self.index_wk), self.index_k_norm, self.eps),
+                freqs,
+                self.rope_head_dim,
+            )
+            quantize_and_insert_k_cache(
+                global_keys.contiguous(),
+                self._source_pool(self._global_region()),
+                self._slots(self._global_region(), positions, req_ids),
+            )
+            index_pool = self._source_pool(INDEXER_KV)
+            quantize_indexer_k(
+                index_keys.contiguous(),
+                self._slots(INDEXER_KV, positions, req_ids),
+                index_pool,
+            )
         index_pool = self._source_pool(INDEXER_KV)
-        quantize_indexer_k(
-            index_keys.contiguous(),
-            self._slots(INDEXER_KV, positions, req_ids),
-            index_pool,
-        )
         capacity = self._rope_max_seq_len // self.compress_ratio
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _v41_decode_indexer as decode_indexer,
+        )
+
+        cp = self._cp_ctx
+        sharded = cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded
+        table = self._block_tables_by_type[INDEXER_KV][:B]
+        raw_tpb = require_pool_tokens_per_block(self._kv_cache, region=INDEXER_KV)
+        logical_entries = raw_tpb // self.compress_ratio
+        if (
+            not sharded
+            and raw_tpb % self.compress_ratio == 0
+            and index_pool.is_contiguous()
+            and logical_entries in (index_pool.shape[1], index_pool.shape[1] // 2)
+            and capacity <= table.shape[1] * logical_entries
+            and decode_indexer.is_supported(
+                x.device, index_pool.shape[1], self.index_n_heads, self.index_head_dim
+            )
+        ):
+            # Keep the owner's original FP8 bytes and paged layout. In V4.1's
+            # uniform INDEXER_KV pool, ratio 2 only fills half of each page.
+            self._shared_attention["global"] = {
+                self.layer_id: decode_indexer.DecodeIndexerKeys(
+                    index_pool, table, capacity, logical_entries
+                )
+            }
+            return
         ids = torch.arange(capacity, device=x.device, dtype=torch.long).expand(B, -1)
         read_positions = (ids + 1) * self.compress_ratio - 1
         read_req = torch.arange(B, device=x.device)[:, None].expand_as(ids)
@@ -741,16 +787,40 @@ class AttentionV41FP8(AttentionFP8):
         B, S, _ = x.shape
         T = B * S
         keys = shared["global"][self.kv_source_layer_id]
-        capacity = keys.shape[1]
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _v41_decode_indexer as decode_indexer,
+        )
+
+        paged = isinstance(keys, decode_indexer.DecodeIndexerKeys)
+        capacity = keys.capacity if paged else keys.shape[1]
         flat = x.reshape(T, -1)
         q = self._lin(self.index_wq, qr.reshape(T, -1)).view(
             T, self.index_n_heads, self.index_head_dim
         )
-        q = fp8_roundtrip(rope_only(q, self.freqs_cis[positions], self.rope_head_dim))
         weights = (
             F.linear(flat, self.index_weights).float()
             * (self.index_head_dim * self.index_n_heads) ** -0.5
         )
+        freqs = self.freqs_cis[positions]
+        visible_per_token = (positions + 1) // self.compress_ratio
+        if paged:
+            all_logits = decode_indexer.score_decode_indexer(
+                q.view(B, S, self.index_n_heads, self.index_head_dim),
+                weights.view(B, S, self.index_n_heads),
+                freqs,
+                keys.pool,
+                keys.block_table,
+                visible_per_token.view(B, S),
+                max_ctx_len=capacity,
+                rope_head_dim=self.rope_head_dim,
+                logical_entries_per_block=keys.logical_entries_per_block,
+            )
+            if all_logits is None:
+                raise RuntimeError(
+                    "V4.1 paged indexer support changed within a forward"
+                )
+        else:
+            q = fp8_roundtrip(rope_only(q, freqs, self.rope_head_dim))
         config = self.v41_config
         candidate_source = int(config.get("candidate_source_layer_id", -1))
         candidate_blocks = int(config.get("candidate_topk_blocks", 0))
@@ -773,14 +843,18 @@ class AttentionV41FP8(AttentionFP8):
         output = torch.full(
             (T, self.index_topk), -1, dtype=torch.int32, device=x.device
         )
-        columns = torch.arange(capacity, device=x.device)
+        columns = None if paged else torch.arange(capacity, device=x.device)
         for b in range(B):
             for start in range(b * S, (b + 1) * S, 16):
                 end = min(start + 16, (b + 1) * S)
-                logits = torch.einsum("thd,kd->thk", q[start:end], keys[b]).relu_()
-                logits = (logits * weights[start:end, :, None]).sum(1)
-                visible = (positions[start:end] + 1) // self.compress_ratio
-                logits.masked_fill_(columns[None] >= visible[:, None], -torch.inf)
+                if paged:
+                    logits = all_logits[start:end]
+                else:
+                    logits = torch.einsum("thd,kd->thk", q[start:end], keys[b]).relu_()
+                    logits = (logits * weights[start:end, :, None]).sum(1)
+                visible = visible_per_token[start:end]
+                if not paged:
+                    logits.masked_fill_(columns[None] >= visible[:, None], -torch.inf)
                 candidates = shared.get("candidates")
                 if candidates is not None:
                     if publish:
@@ -807,6 +881,45 @@ class AttentionV41FP8(AttentionFP8):
         shared["topk"] = {self.layer_id: output}
         return output
 
+    def _decode_global_slots(self, selected, req):
+        """Translate compressed indices without materializing token positions."""
+        region = self._global_region()
+        pool = self._source_pool(region)
+        table = self._block_tables_by_type[region]
+        raw_tpb = require_pool_tokens_per_block(self._kv_cache, region=region)
+        logical_entries = raw_tpb // self.compress_ratio
+        cp = self._cp_ctx
+        sharded = cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded
+        if (
+            os.environ.get("DSV41_FUSED_DECODE_SLOTS", "1") != "0"
+            and selected.is_cuda
+            and selected.dtype == torch.int32
+            and req.dtype == torch.int32
+            and table.dtype == torch.int32
+            and selected.shape[1] > 0
+            and not sharded
+            and raw_tpb % self.compress_ratio == 0
+            and pool.shape[1] == logical_entries
+        ):
+            from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
+                translate_local_to_global_slots,
+            )
+
+            return translate_local_to_global_slots(
+                req,
+                table,
+                selected,
+                entries_per_block=pool.shape[1],
+                tokens_per_block_for_block_table=logical_entries,
+            )
+        slots = self._slots(
+            region,
+            (selected.long().clamp_min(0) + 1).reshape(-1) * self.compress_ratio - 1,
+            req[:, None].expand_as(selected).reshape(-1),
+        ).reshape_as(selected)
+        slots.masked_fill_(selected < 0, -1)
+        return slots.int()
+
     def _forward_decode_body(self, x, metadata):
         from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
             decode_compute_qkv,
@@ -821,9 +934,9 @@ class AttentionV41FP8(AttentionFP8):
         if not self.compress_ratio:
             o = self._forward_decode_swa_only(qkv.q, B, S, metadata)
         else:
-            req = metadata.req_id_per_token[:T].long()
-            starts = metadata.start_pos[:B].long()
             if self.is_kv_source:
+                req = metadata.req_id_per_token[:T].long()
+                starts = metadata.start_pos[:B].long()
                 self._produce_global_decode(x, positions, req, starts)
             selected = self._select_indices_decode(x, qkv.qr, positions)
             from rtp_llm.models_py.modules.dsv4.fp8.decode.attention_kernels import (
@@ -833,13 +946,7 @@ class AttentionV41FP8(AttentionFP8):
                 get_or_build_sched_meta,
             )
 
-            slots = self._slots(
-                self._global_region(),
-                (selected.long().clamp_min(0) + 1).reshape(-1) * self.compress_ratio
-                - 1,
-                req[:, None].expand_as(selected).reshape(-1),
-            ).reshape_as(selected)
-            slots.masked_fill_(selected < 0, -1)
+            slots = self._decode_global_slots(selected, metadata.req_id_per_token[:T])
             o = attn_fp8_dual_paged(
                 q=qkv.q,
                 swa_pool_3d=self._pool_view_3d_fp8(SWA_KV),

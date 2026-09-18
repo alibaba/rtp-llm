@@ -48,6 +48,15 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_mhc_prenorm",
+    srcs = ["test_v41_mhc_prenorm.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
+
+py_test(
     name = "mega_moe_static_buf_test",
     srcs = ["mega_moe_static_buf_test.py"],
     deps = _DSV4_TEST_DEPS,
@@ -323,6 +332,15 @@ py_test(
     ],
     tags = ["SM100_ARM"],
     exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_v41_fused_inv_rope_fp8_quant",
+    srcs = ["test_v41_fused_inv_rope_fp8_quant.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
 )
 
 py_test(

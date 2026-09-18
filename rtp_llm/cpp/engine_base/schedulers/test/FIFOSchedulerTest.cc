@@ -22,9 +22,8 @@ namespace rtp_llm {
 namespace {
 
 bool enqueueIndividually(FIFOScheduler& scheduler, const vector<GenerateStreamPtr>& streams) {
-    return std::all_of(streams.begin(), streams.end(), [&scheduler](const auto& stream) {
-        return scheduler.enqueue(stream).ok();
-    });
+    return std::all_of(
+        streams.begin(), streams.end(), [&scheduler](const auto& stream) { return scheduler.enqueue(stream).ok(); });
 }
 
 }  // namespace
@@ -33,6 +32,43 @@ class FIFOSchedulerTest: public DeviceTestBase {
 public:
     FIFOSchedulerTest() {}
 };
+
+TEST(SchedulerPollIntervalTest, DefaultsAndEnvironmentValidation) {
+    const std::string env_name = "RTP_LLM_SCHEDULER_POLL_INTERVAL_MS";
+    autil::EnvGuard   restore_env(env_name, "");
+    const auto        check_interval = [](int expected_ms) {
+        RuntimeConfig runtime_config;
+        FIFOScheduler fifo(
+            runtime_config, ModelConfig{}, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, nullptr);
+        BatchDecodeScheduler batch(runtime_config, nullptr, nullptr);
+        EXPECT_EQ(fifo.poll_interval_.count(), expected_ms);
+        EXPECT_EQ(batch.poll_interval_.count(), expected_ms);
+    };
+    ASSERT_TRUE(autil::EnvUtil::unsetEnv(env_name));
+    check_interval(10);
+    for (const auto& value : {"", "0", "-1", "3ms", "invalid", "2147483648"}) {
+        SCOPED_TRACE(value);
+        ASSERT_TRUE(autil::EnvUtil::setEnv(env_name, value));
+        check_interval(10);
+    }
+    for (const auto& value : {"1", "3", "10", "25"}) {
+        SCOPED_TRACE(value);
+        ASSERT_TRUE(autil::EnvUtil::setEnv(env_name, value));
+        check_interval(std::stoi(value));
+    }
+}
+
+TEST(SchedulerPollIntervalTest, ConfigurationIsFixedForSchedulerLifetime) {
+    const std::string env_name = "RTP_LLM_SCHEDULER_POLL_INTERVAL_MS";
+    autil::EnvGuard   restore_env(env_name, "3");
+    RuntimeConfig     runtime_config;
+    FIFOScheduler     fifo(
+        runtime_config, ModelConfig{}, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, nullptr);
+    BatchDecodeScheduler batch(runtime_config, nullptr, nullptr);
+    ASSERT_TRUE(autil::EnvUtil::setEnv(env_name, "25"));
+    EXPECT_EQ(fifo.poll_interval_.count(), 3);
+    EXPECT_EQ(batch.poll_interval_.count(), 3);
+}
 
 TEST_F(FIFOSchedulerTest, testSimple) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
@@ -723,8 +759,8 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndSto
     auto tail_stream               = make_stream(1);
     auto errored_tail_stream       = make_stream(1);
     errored_tail_stream->reportError(ErrorCode::CANCELLED, "cancelled before admission");
-    ASSERT_TRUE(enqueueIndividually(
-        scheduler, {cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}));
+    ASSERT_TRUE(
+        enqueueIndividually(scheduler, {cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}));
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -1379,8 +1415,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    auto cached_stream =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(60, 1));
+    auto cached_stream = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(60, 1));
     cached_stream->reportEvent(StreamEvents::CanRun);
     ASSERT_EQ(cached_stream->moveToNext(), StreamState::RUNNING);
     cached_stream->setReuseLength(59);
@@ -1388,8 +1423,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
     ASSERT_EQ(cached_stream->contextLength(), 1);
     ASSERT_EQ(cached_stream->prefixLength(), 59);
 
-    auto short_stream =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(39, 1));
+    auto short_stream = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(39, 1));
     ASSERT_TRUE(enqueueIndividually(scheduler, {cached_stream, short_stream}));
 
     auto result = scheduler.schedule();
@@ -1417,9 +1451,8 @@ TEST_F(FIFOSchedulerTest, prefillShapeUsesCurrentBatchSizeAsWidth) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    auto long_single =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1));
-    auto batched_query                                   = std::make_shared<GenerateInput>();
+    auto long_single   = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1));
+    auto batched_query = std::make_shared<GenerateInput>();
     batched_query->input_ids                             = torch::ones({10}, torch::kInt32);
     batched_query->generate_config                       = std::make_shared<GenerateConfig>();
     batched_query->generate_config->num_return_sequences = 3;
@@ -2073,8 +2106,7 @@ TEST_F(FIFOSchedulerTest, blockedNormalLaneLeavesResidualCapacityToExplicitGroup
 
     // This ordinary stream is permanently too large for the per-round token
     // budget but valid against the Engine's total KV capacity.
-    auto blocked_normal = makeSingleStream(
-        model_config, runtime_config, resource_context, std::vector<int>(6, 1));
+    auto blocked_normal = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(6, 1));
     vector<GenerateStreamPtr> small_group = {
         makeSingleStream(model_config, runtime_config, resource_context, {1}),
         makeSingleStream(model_config, runtime_config, resource_context, {2}),
