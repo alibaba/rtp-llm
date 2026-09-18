@@ -1,6 +1,5 @@
 package org.flexlb.dao.master;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
@@ -84,10 +83,4 @@ public class TaskInfo {
     @JsonProperty("last_completed_prefill_step_id")
     private long lastCompletedPrefillStepId;
 
-    @JsonIgnore
-    private boolean kvcmMatchAvailable;
-    @JsonIgnore
-    private long kvcmLocalMatchTokens;
-    @JsonIgnore
-    private long kvcmGlobalMatchTokens;
 }

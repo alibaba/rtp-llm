@@ -159,7 +159,6 @@
 
     <springProfile name="pre,test">
         <!-- 降低 gRPC 客户端日志级别，避免测试环境中打印大量连接超时错误 -->
-        <logger name="org.flexlb.engine.grpc.EngineGrpcClient" level="OFF"/>
         <logger name="org.flexlb.engine.grpc.client.EngineGrpcClient" level="OFF"/>
     </springProfile>
 </configuration>
