@@ -465,7 +465,9 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
 
     size_t stream_index = 0;
     for (const auto& stream : stream_groups.allStreams()) {
-        if (!stream->isFakeStream() && stream->generateInput()->v41_inputs) {
+        const bool budget_exhausted =
+            static_cast<int64_t>(stream->seqLength()) >= static_cast<int64_t>(stream->maxTokenNum());
+        if (!stream->isFakeStream() && !budget_exhausted && stream->generateInput()->v41_inputs) {
             const auto& publications = draft_prefill_output.model_output.v41_execution_states;
             const auto publication = std::find_if(publications.begin(), publications.end(), [&](const auto& value) {
                 return value.request_id == stream->streamId();
