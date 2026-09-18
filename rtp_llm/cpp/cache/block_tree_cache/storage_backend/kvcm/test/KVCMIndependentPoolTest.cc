@@ -108,7 +108,6 @@ protected:
         DeviceTestBase::SetUp();
         auto environment                    = makeMultiGroupBackendEnvironment("independent_config", 2, 1, 1);
         config_                             = environment.cache_config;
-        config_.use_independent_block_pools = true;
         allocator_                          = std::make_shared<KVCacheAllocator>(config_);
         ASSERT_TRUE(allocator_->init());
         state_ = std::make_shared<PoolTransferState>();

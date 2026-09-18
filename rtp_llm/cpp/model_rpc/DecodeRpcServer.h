@@ -130,7 +130,7 @@ private:
     static int                 markLoadedCacheReuse(const std::shared_ptr<GenerateStream>& stream,
                                                     const LoadCacheResult&                 load_result,
                                                     int                                    seq_size_per_block,
-                                                    bool                                   use_independent_block_pools);
+                                                    size_t                                 group_num);
     static grpc::Status        generateRequestReadFailureStatus(bool cancelled);
     static ErrorInfo           cacheLoadClientError(int64_t request_id, ErrorCode error_code);
     // Classifies error.type for the synthesized Decode phase spans. Static and

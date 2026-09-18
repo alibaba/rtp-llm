@@ -213,26 +213,26 @@ TEST(DecodeRpcServerTest, CompletedHandoffPublishesOnlyReusablePromptBlocks) {
     EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
                                                     {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/10},
                                                     /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/true),
+                                                    /*group_num=*/2),
               2304);
     EXPECT_EQ(stream->initialReuseLength(), 2304);
     EXPECT_EQ(stream->reuseLength(), 2304);
     EXPECT_EQ(stream->localReuseLength(), 2304);
 }
 
-TEST(DecodeRpcServerTest, FailedOrSharedPoolHandoffDoesNotPublishReuse) {
+TEST(DecodeRpcServerTest, FailedOrSingleGroupHandoffDoesNotPublishReuse) {
     auto stream = makeGenerateStream(/*seq_length=*/513);
 
     EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
                   stream,
                   {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load failed"), /*loaded_cache_block_count=*/2},
                   /*seq_size_per_block=*/256,
-                  /*use_independent_block_pools=*/true),
+                  /*group_num=*/2),
               0);
     EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
                                                     {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/2},
                                                     /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/false),
+                                                    /*group_num=*/1),
               0);
     EXPECT_EQ(stream->initialReuseLength(), 0);
 }

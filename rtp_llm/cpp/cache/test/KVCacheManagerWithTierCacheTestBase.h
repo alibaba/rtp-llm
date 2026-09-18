@@ -339,7 +339,6 @@ inline ModelConfig makeCompactDsv4ModelConfig() {
     config.attn_config.tokens_per_block                              = 128;
     config.attn_config.layer_compress_ratios                         = {0, 4, 128, 4, 0};
     config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     setDsv4KvCacheSpecs(config, config.attn_config.layer_compress_ratios);
     setDsv4ExplicitPoolBlocks(config, "hca_state", 0);
     return config;

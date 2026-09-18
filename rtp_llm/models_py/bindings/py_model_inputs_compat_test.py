@@ -1,4 +1,5 @@
 import ast
+import pickle
 import unittest
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from rtp_llm.models_py.model_desc.block_map import (
     select_fmha_impl_for_group,
 )
 from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
-from rtp_llm.ops import HybridAttentionConfig, HybridAttentionType
+from rtp_llm.ops import HybridAttentionConfig, HybridAttentionType, KVCacheConfig
 from rtp_llm.ops.compute_ops import (
     CacheStoreWriter,
     KVCache,
@@ -44,20 +45,40 @@ class _ConcreteRoutingCache:
 
 
 class PyModelInputsCompatTest(unittest.TestCase):
+    def test_runtime_tier_knobs_survive_configuration_pickle(self) -> None:
+        config = KVCacheConfig()
+        values = {
+            "disk_cache_paths": "/cache/a,/cache/b",
+            "disk_cache_size_mb": 4096,
+            "disk_cache_staging_block_count": 17,
+            "block_tree_transfer_worker_count": 3,
+            "block_tree_business_queue_max_size": 29,
+            "block_tree_transfer_queue_max_size": 31,
+            "block_tree_device_evict_low_watermark_ratio": 0.61,
+            "block_tree_device_evict_high_watermark_ratio": 0.71,
+            "kvcm_server_address": "cache.example:1234",
+            "kvcm_storage_queue_size": 113,
+            "kvcm_model_user_data": "descriptor-driven",
+        }
+        for name, value in values.items():
+            setattr(config, name, value)
+        restored = pickle.loads(pickle.dumps(config))
+        for name, value in values.items():
+            with self.subTest(field=name):
+                self.assertEqual(getattr(restored, name), value)
+
     def test_hybrid_attention_config_has_explicit_constructors(self) -> None:
         default_config = HybridAttentionConfig()
         self.assertFalse(default_config.enable_hybrid_attention)
-        self.assertFalse(default_config.enable_independent_kv_cache_pools)
         self.assertEqual(default_config.hybrid_attention_types, [])
 
         attention_types = [HybridAttentionType.NONE, HybridAttentionType.LINEAR]
-        config = HybridAttentionConfig(True, True, attention_types)
+        config = HybridAttentionConfig(True, attention_types)
         self.assertTrue(config.enable_hybrid_attention)
-        self.assertTrue(config.enable_independent_kv_cache_pools)
         self.assertEqual(config.hybrid_attention_types, attention_types)
 
         with self.assertRaises(TypeError):
-            HybridAttentionConfig(True, True)
+            HybridAttentionConfig(True, True, attention_types)
 
     def test_sparse_group_routes_select_exact_tags_independent_of_topology_order(
         self,
