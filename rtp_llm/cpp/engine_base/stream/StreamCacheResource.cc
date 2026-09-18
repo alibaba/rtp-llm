@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/DSV41CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
@@ -13,6 +14,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include <algorithm>
 #include <thread>
 #include <torch/extension.h>
 
@@ -274,28 +276,9 @@ void StreamCacheResource::init(int batch_size) {
     if (resource_context_.cache_manager) {
         const auto& config = resource_context_.cache_manager->cacheConfig();
         if (config.dsv41_cache_layout_version != 0) {
-            const auto& revision = config.dsv41_model_revision;
-            RTP_LLM_CHECK_WITH_INFO(
-                revision.size() == 40
-                    && std::all_of(revision.begin(),
-                                   revision.end(),
-                                   [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }),
-                "V4.1 cache requires a fixed 40-hex model revision");
-            RTP_LLM_CHECK_WITH_INFO(config.dsv41_replay_mode == "full"
-                                        || config.dsv41_replay_mode == "bounded_checkpoint_v1",
-                                    "unsupported V4.1 replay mode");
-            auto swa = std::dynamic_pointer_cast<DSV41KVCacheSpec>(config.cache_specs.at(5));
-            RTP_LLM_CHECK_WITH_INFO(swa != nullptr, "V4.1 cache requires its physical SWA spec");
-            DSV41CacheIdentity identity{revision,
-                                        config.dsv41LayoutFingerprint(),
-                                        config.dsv41_replay_mode == "full" ? DSV41ReplayMode::FULL :
-                                                                             DSV41ReplayMode::BOUNDED_CHECKPOINT_V1,
-                                        config.dsv41_tail_policy_version,
-                                        128,
-                                        swa->entries_per_block};
+            const auto seed = dsv41CacheIdentity(config).cacheKeySeed();
             for (int batch = 0; batch < batch_size; ++batch)
-                batch_kv_cache_resource_->cacheResource(batch).setDsv41CacheState(
-                    std::make_shared<DSV41CacheState>(identity));
+                batch_kv_cache_resource_->cacheResource(batch).setDsv41CacheKeySeed(seed);
         }
     }
     resource_released_ = false;
@@ -736,12 +719,18 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
 void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
     const int block_tokens     = reuseBlockTokens();
     const int   data_reuse_len   = read_context->resource()->reuseBlockNum() * block_tokens;
-    const auto& state            = read_context->resource()->dsv41CacheState();
-    const bool  is_v41           = state || stream_->generateInput()->v41_inputs
+    const bool  is_v41           = stream_->generateInput()->v41_inputs
                         || (resource_context_.cache_manager
                             && resource_context_.cache_manager->cacheConfig().dsv41_cache_layout_version != 0);
+    const int64_t restored_end   = read_context->resource()->dsv41RestoredCheckpointEnd();
     const int total_reuse_len =
-        is_v41 ? (state ? std::min<int64_t>(data_reuse_len, state->view().target_ready_end) : 0) : data_reuse_len;
+        is_v41 ? std::min<int64_t>(data_reuse_len, restored_end) : data_reuse_len;
+    // Adopt the checkpoint the read context restored so later gathers and the
+    // end-of-request publication see it on the stream's own resource.
+    const auto& restored_checkpoint = read_context->resource()->dsv41RestoredCheckpoint();
+    if (restored_checkpoint) {
+        stream_->kvCachePtr()->cacheResource(0).setDsv41RestoredCheckpoint(restored_checkpoint, restored_end);
+    }
     const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * block_tokens;
     const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * block_tokens;
     const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * block_tokens;
@@ -760,129 +749,81 @@ void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<Fu
     }
 }
 
-std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
-    const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
-    RTP_LLM_PROFILE_FUNCTION();
-    auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
-    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
-    auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
-    if (resource_context_.write_cache_sync) {
-        waitStoreCacheDone(store_context);
-    }
-    return store_context;
+namespace {
+// Bounded checkpoints are published on a 1024-token policy grid (the delivery
+// suite pins 16384/64512), raised to the CP cache group when that is wider.
+int64_t dsv41CheckpointPolicyUnit(const CacheConfig& config, const DSV41KVCacheSpec* swa) {
+    return std::max<int64_t>(1024, config.seq_size_per_block * swa->cp_size);
 }
+}  // namespace
 
-void StreamCacheResource::publishDsv41Execution(const DSV41ExecutionState& publication,
-                                               int64_t materialized_end, bool finish_prefill,
-                                               const torch::Tensor& accepted_tokens) {
-    if (publication.request_id != stream_->streamId() || publication.materialized_end != materialized_end
-        || !resource_context_.cache_manager || batch_kv_cache_resource_->batchSize() != 1)
-        throw std::invalid_argument("V4.1 execution publication does not match its native request boundary");
-    auto& resource = batch_kv_cache_resource_->cacheResource(0);
-    const auto state = resource.dsv41CacheState();
-    const auto& config = resource_context_.cache_manager->cacheConfig();
-    const auto* swa = dynamic_cast<const DSV41KVCacheSpec*>(config.cache_specs.at(5).get());
-    if (!state || !swa)
-        throw std::invalid_argument("V4.1 execution publication has no native cache state");
-    publication.validate(state->view().identity, config.layer_all_num - config.layer_num);
-    const auto& canonical = stream_->generateInput()->v41_inputs;
-    if (!canonical)
-        throw std::invalid_argument("V4.1 execution publication has no canonical request");
-    if (materialized_end > stream_->seqLength()
-        && (!accepted_tokens.defined() || !accepted_tokens.device().is_cpu() || !accepted_tokens.is_contiguous()
-            || accepted_tokens.scalar_type() != torch::kInt32
-            || accepted_tokens.numel() < materialized_end - stream_->seqLength()))
-        throw std::invalid_argument("V4.1 speculative publication requires its canonical accepted tokens");
-    for (int64_t slot = 0; slot < 3; ++slot) {
-        const int64_t position = materialized_end - 3 + slot;
-        if (position < 0)
-            continue;
-        const bool image = position < canonical->image_mask.numel()
-                           && canonical->image_mask.data_ptr<bool>()[position];
-        const int32_t token = position < stream_->seqLength() ? stream_->completeTokenIdsPtr()->data(0)[position] :
-                                                                accepted_tokens.data_ptr<int32_t>()[position - stream_->seqLength()];
-        if (publication.history_token_ids[slot] != token
-            || publication.history_image_mask[slot] != static_cast<uint8_t>(image))
-            throw std::invalid_argument("V4.1 execution history differs from its canonical request");
-    }
-    state->publishExecution(publication, config.layer_all_num - config.layer_num);
-    const size_t unit = config.seq_size_per_block * swa->cp_size;
-    if (publication.draft_layers == 3 && publication.materialized_end % unit == 0) {
-        const auto metadata = publication.checkpoint(state->view().identity, unit);
-        state->completeDecoder(metadata, unit);
-        const size_t data_unit = config.seq_size_per_block * (swa->prefill_byte_slice ? swa->cp_size : 1);
-        resource.setDsv41RecoveryMetadata(publication.materialized_end / data_unit - 1,
-                                          std::make_shared<DSV41CheckpointMetadata>(metadata));
-    }
-    if (finish_prefill && state->view().final_handoff_end > 0)
-        state->finish(materialized_end);
-}
-
-std::shared_ptr<DSV41ExecutionContext> StreamCacheResource::createDsv41ExecutionContext() {
+std::shared_ptr<DSV41CheckpointPublisher> StreamCacheResource::createDsv41CheckpointPublisher() {
     if (!stream_->queryPdSep() || !isContextStream() || stream_->isFakeStream() || !resource_context_.cache_manager
         || batch_kv_cache_resource_->batchSize() != 1)
         return nullptr;
-    auto& resource = batch_kv_cache_resource_->cacheResource(0);
-    const auto state = resource.dsv41CacheState();
-    if (!state || state->view().identity.replay_mode != DSV41ReplayMode::BOUNDED_CHECKPOINT_V1)
-        return nullptr;
     const auto& config = resource_context_.cache_manager->cacheConfig();
+    const auto  model  = std::static_pointer_cast<const DSV41ModelIdentity>(config.dsv41_model_identity);
+    if (!model || model->replay_mode != "bounded_checkpoint_v1")
+        return nullptr;
     const auto* swa = dynamic_cast<const DSV41KVCacheSpec*>(config.cache_specs.at(5).get());
     RTP_LLM_CHECK_WITH_INFO(swa && stream_->generateInput()->v41_inputs,
-                            "V4.1 checkpoint selection requires the actual layout and canonical prompt");
-    const int64_t unit = config.seq_size_per_block * swa->cp_size;
-    const int64_t end = stream_->inputLength();
+                            "V4.1 checkpoint publication requires the actual layout and canonical prompt");
+    const int64_t unit   = dsv41CheckpointPolicyUnit(config, swa);
+    const int64_t end    = stream_->inputLength();
     const int64_t prefix = reuseCache() && enableMemoryCache() && config.layer_all_num == 43 ?
-                               stream_->generateInput()->v41_inputs->protectedCheckpointEnd(end, unit) : 0;
-    state->requireProtectedPrefix(prefix, end);
-    auto context = std::make_shared<DSV41ExecutionContext>();
-    context->request_id = stream_->streamId();
-    context->protected_prefix_end = prefix;
-    context->final_handoff_end = end;
+                               stream_->generateInput()->v41_inputs->protectedCheckpointEnd(end, unit) :
+                               0;
+    auto& resource  = batch_kv_cache_resource_->cacheResource(0);
+    auto  publisher = std::make_shared<DSV41CheckpointPublisher>();
+    publisher->request_id           = stream_->streamId();
+    publisher->protected_prefix_end = prefix;
+    publisher->final_handoff_end    = end;
     for (int group = 0; group < resource.groupNums(); ++group)
-        context->block_ids_by_group.emplace_back(resource.blocks(group));
+        publisher->block_ids_by_group.emplace_back(resource.blocks(group));
     std::weak_ptr<GenerateStream> request = stream_->shared_from_this();
-    context->is_active = [request, state] {
-        const auto owner = request.lock();
-        const auto view = state->view();
-        return owner && owner->isActive() && !view.cancelled && !view.finished;
-    };
-    context->report_progress = [request, state](const DSV41ExecutionProgress& progress) {
-        const auto owner = request.lock();
-        if (!owner || !owner->isActive())
-            throw std::runtime_error("V4.1 cannot advance a stopped prefill request");
-        state->publishProgress(progress);
-    };
-    context->protect_checkpoint = [request](const DSV41ExecutionState& publication,
-                                           const std::vector<std::vector<int32_t>>& actual_block_ids,
-                                           const DSV41ExecutionContext::WorkerBlockIds& worker_block_ids) {
+    publisher->publish                    = [request](const DSV41CheckpointPublication&                publication,
+                                   const std::vector<std::vector<int32_t>>&         actual_block_ids,
+                                   const DSV41CheckpointPublisher::WorkerBlockIds& worker_block_ids) {
         const auto owner = request.lock();
         return owner && owner->isActive()
-               && owner->streamCacheResource().protectDsv41Checkpoint(publication, actual_block_ids, worker_block_ids);
+               && owner->streamCacheResource().publishDsv41Checkpoint(
+                      publication, actual_block_ids, worker_block_ids);
     };
-    return context;
+    publisher->install                    = [request](const DSV41CheckpointPublication&                publication,
+                                   const std::vector<std::vector<int32_t>>&         actual_block_ids,
+                                   const DSV41CheckpointPublisher::WorkerBlockIds& worker_block_ids) {
+        const auto owner = request.lock();
+        return owner && owner->isActive()
+               && owner->streamCacheResource().installDsv41Checkpoint(
+                      publication, actual_block_ids, worker_block_ids);
+    };
+    return publisher;
 }
 
-bool StreamCacheResource::protectDsv41Checkpoint(const DSV41ExecutionState& publication,
-                                                 const std::vector<std::vector<int32_t>>& actual_block_ids,
-                                                 const DSV41ExecutionContext::WorkerBlockIds& worker_block_ids) {
+bool StreamCacheResource::prepareDsv41Checkpoint(
+    const DSV41CheckpointPublication&                       publication,
+    const std::vector<std::vector<int32_t>>&                actual_block_ids,
+    const std::vector<std::vector<std::vector<int32_t>>>&   worker_block_ids,
+    bool                                                    scheduling_rank) {
     if (stream_->hasError() || !reuseCache() || !enableMemoryCache() || !resource_context_.cache_manager
         || batch_kv_cache_resource_->batchSize() != 1 || publication.request_id != stream_->streamId())
         return false;
     auto& resource = batch_kv_cache_resource_->cacheResource(0);
-    const auto state = resource.dsv41CacheState();
-    if (!state || actual_block_ids.size() != static_cast<size_t>(resource.groupNums()))
+    if (actual_block_ids.size() != static_cast<size_t>(resource.groupNums()))
         return false;
     for (size_t group = 0; group < actual_block_ids.size(); ++group)
         if (actual_block_ids[group] != resource.blocks(group))
             throw std::invalid_argument("V4.1 checkpoint producer block IDs differ from its native request resource");
-    const auto view = state->view();
-    if (view.protected_prefix_end <= 0 || publication.materialized_end != view.protected_prefix_end)
-        throw std::invalid_argument("V4.1 checkpoint publication must occur at the selected protected boundary");
-    stream_->generateInput()->v41_inputs->validateChunk(0, publication.materialized_end);
     const auto& config = resource_context_.cache_manager->cacheConfig();
-    const auto* swa = dynamic_cast<const DSV41KVCacheSpec*>(config.cache_specs.at(5).get());
-    RTP_LLM_CHECK_WITH_INFO(swa && config.layer_all_num == 43, "V4.1 reusable checkpoint requires all three drafts");
+    const auto* swa    = dynamic_cast<const DSV41KVCacheSpec*>(config.cache_specs.at(5).get());
+    RTP_LLM_CHECK_WITH_INFO(swa && config.layer_all_num == 43 && stream_->generateInput()->v41_inputs,
+                            "V4.1 reusable checkpoint requires all three drafts");
+    const int64_t unit     = dsv41CheckpointPolicyUnit(config, swa);
+    const int64_t expected =
+        stream_->generateInput()->v41_inputs->protectedCheckpointEnd(stream_->inputLength(), unit);
+    if (expected <= 0 || publication.materialized_end != expected)
+        throw std::invalid_argument("V4.1 checkpoint publication must occur at the selected protected boundary");
+    stream_->generateInput()->v41_inputs->validateChunk(0, expected);
     const size_t workers = swa->prefill_byte_slice ? swa->cp_size : 1;
     if ((workers > 1 && worker_block_ids.size() != workers)
         || (!worker_block_ids.empty() && worker_block_ids.size() != workers))
@@ -898,19 +839,82 @@ bool StreamCacheResource::protectDsv41Checkpoint(const DSV41ExecutionState& publ
                     throw std::invalid_argument("V4.1 checkpoint worker block ID is outside its physical pool");
         }
     }
-    if (!worker_block_ids.empty() && worker_block_ids.front() != actual_block_ids)
-        throw std::invalid_argument("V4.1 scheduling-rank block IDs differ from its actual producer mapping");
+    if (!worker_block_ids.empty()) {
+        const bool mapped =
+            scheduling_rank ?
+                worker_block_ids.front() == actual_block_ids :
+                std::find(worker_block_ids.begin(), worker_block_ids.end(), actual_block_ids) != worker_block_ids.end();
+        if (!mapped)
+            throw std::invalid_argument(
+                scheduling_rank ? "V4.1 scheduling-rank block IDs differ from its actual producer mapping" :
+                                  "V4.1 checkpoint worker block IDs omit the installing rank's actual mapping");
+    }
+    if (publication.global_entries.size() != 4 || publication.index_entries.size() != 4
+        || publication.swa_valid_start.size() != 43 || publication.swa_valid_end.size() != 43
+        || publication.swa_replay_floor.size() != 43 || publication.history_token_ids.size() != 3
+        || publication.history_image_mask.size() != 3 || !publication.draft_committed)
+        throw std::invalid_argument("V4.1 checkpoint publication must cover every layer and the 3-token history");
+    auto metadata                      = std::make_shared<DSV41CheckpointMetadata>();
+    metadata->identity                 = dsv41CacheIdentity(config);
+    metadata->materialized_end         = publication.materialized_end;
+    metadata->encoder_materialized_end = publication.materialized_end;
+    metadata->decoder_checkpoint_end   = publication.materialized_end;
+    metadata->aux_valid_start          = publication.aux_valid_start;
+    metadata->aux_valid_end            = publication.aux_valid_end;
+    std::copy_n(publication.global_entries.begin(), 4, metadata->global_entries.begin());
+    std::copy_n(publication.index_entries.begin(), 4, metadata->index_entries.begin());
+    for (size_t layer = 0; layer < metadata->swa.size(); ++layer) {
+        const auto start = publication.swa_valid_start[layer];
+        const auto end   = publication.swa_valid_end[layer];
+        const auto floor = publication.swa_replay_floor[layer];
+        if (start < 0 || start > end || end != publication.materialized_end || floor < 0 || floor > end)
+            throw std::invalid_argument("V4.1 checkpoint SWA ranges must close at the protected boundary");
+        metadata->swa[layer] = {start, end, floor};
+    }
+    std::copy_n(publication.history_token_ids.begin(), 3, metadata->history_token_ids.begin());
+    std::copy_n(publication.history_image_mask.begin(), 3, metadata->history_image_mask.begin());
+    if (publication.aux_valid_start < 0 || publication.aux_valid_start > publication.aux_valid_end
+        || publication.aux_valid_end > publication.materialized_end)
+        throw std::invalid_argument("V4.1 checkpoint aux range must lie inside the protected prefix");
+    metadata->history_ready   = true;
+    metadata->draft_committed = true;
+    metadata->pair_empty      = publication.materialized_end % 2 == 0;
     resource.setDsv41WorkerBlockIds(worker_block_ids);
-    const auto unit = config.seq_size_per_block * swa->cp_size;
-    const auto metadata = publication.checkpoint(view.identity, unit);
+    resource.setDsv41RestoredCheckpoint(metadata, metadata->materialized_end);
+    return true;
+}
+
+bool StreamCacheResource::installDsv41Checkpoint(
+    const DSV41CheckpointPublication&                       publication,
+    const std::vector<std::vector<int32_t>>&                actual_block_ids,
+    const std::vector<std::vector<std::vector<int32_t>>>&   worker_block_ids) {
+    return prepareDsv41Checkpoint(publication, actual_block_ids, worker_block_ids, /*scheduling_rank=*/false);
+}
+
+bool StreamCacheResource::publishDsv41Checkpoint(
+    const DSV41CheckpointPublication&                       publication,
+    const std::vector<std::vector<int32_t>>&                actual_block_ids,
+    const std::vector<std::vector<std::vector<int32_t>>>&   worker_block_ids) {
+    if (!prepareDsv41Checkpoint(publication, actual_block_ids, worker_block_ids, /*scheduling_rank=*/true))
+        return false;
+    auto& resource = batch_kv_cache_resource_->cacheResource(0);
     // CP callers fence every producer rank before this callback and hold the
     // ranks at the boundary until the existing all-worker memory copy returns.
     runtimeSyncAndCheck();
-    state->publishExecution(publication, 3);
-    state->completeDecoder(metadata, unit);
     auto meta = std::make_shared<MetaImpl>(true, false, stream_->traceId());
-    return resource_context_.cache_manager->stageDsv41Checkpoint(
-        resource, [] { runtimeSyncAndCheck(); }, meta);
+    return resource_context_.cache_manager->stageDsv41Checkpoint(resource, [] { runtimeSyncAndCheck(); }, meta);
+}
+
+std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
+    const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
+    RTP_LLM_PROFILE_FUNCTION();
+    auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
+    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
+    auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
+    if (resource_context_.write_cache_sync) {
+        waitStoreCacheDone(store_context);
+    }
+    return store_context;
 }
 
 void StreamCacheResource::evictDeviceCacheToMemory() {

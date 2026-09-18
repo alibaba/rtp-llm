@@ -70,7 +70,7 @@ public:
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
-    std::vector<DSV41ExecutionState> commitV41RetainedRows(const torch::Tensor& retained_rows) override;
+    void            commitRetainedRows(const torch::Tensor& retained_rows) override;
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
@@ -155,7 +155,6 @@ private:
 
     std::atomic<bool>            prepared_attention_inputs_{false};
     torch_ext::PyAttentionInputs attention_inputs_;
-    std::optional<torch_ext::PyModelInputs> pending_v41_inputs_;
     CudaGraphState               graph_state_;
 };
 

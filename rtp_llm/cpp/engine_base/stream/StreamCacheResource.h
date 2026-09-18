@@ -11,8 +11,8 @@ namespace rtp_llm {
 
 class AsyncContext;
 class GenerateStream;
-struct DSV41ExecutionContext;
-struct DSV41ExecutionState;
+struct DSV41CheckpointPublication;
+struct DSV41CheckpointPublisher;
 
 class StreamCacheResource {
 public:
@@ -39,12 +39,16 @@ public:
     void         releaseResource();
     bool         asyncLoadCache();
     bool         loadCacheDone();
-    std::shared_ptr<DSV41ExecutionContext> createDsv41ExecutionContext();
-    bool protectDsv41Checkpoint(const DSV41ExecutionState& publication,
-                                const std::vector<std::vector<int32_t>>& actual_block_ids,
+    std::shared_ptr<DSV41CheckpointPublisher> createDsv41CheckpointPublisher();
+    bool publishDsv41Checkpoint(const DSV41CheckpointPublication&             publication,
+                                const std::vector<std::vector<int32_t>>&      actual_block_ids,
                                 const std::vector<std::vector<std::vector<int32_t>>>& worker_block_ids);
-    void publishDsv41Execution(const DSV41ExecutionState& publication, int64_t materialized_end,
-                               bool finish_prefill = false, const torch::Tensor& accepted_tokens = {});
+    // Non-scheduling CP ranks install the same restored checkpoint metadata on
+    // their own resource (no memory staging) so their local cache publication
+    // carries the recovery metadata and fixed-group slots.
+    bool installDsv41Checkpoint(const DSV41CheckpointPublication&             publication,
+                                const std::vector<std::vector<int32_t>>&      actual_block_ids,
+                                const std::vector<std::vector<std::vector<int32_t>>>& worker_block_ids);
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
@@ -134,6 +138,10 @@ private:
     void loadCacheSync();
     void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
     void updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context);
+    bool prepareDsv41Checkpoint(const DSV41CheckpointPublication&             publication,
+                                const std::vector<std::vector<int32_t>>&      actual_block_ids,
+                                const std::vector<std::vector<std::vector<int32_t>>>& worker_block_ids,
+                                bool                                                       scheduling_rank);
     std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
                                                   bool                                         enable_memory_cache,
                                                   bool                                         enable_remote_cache);

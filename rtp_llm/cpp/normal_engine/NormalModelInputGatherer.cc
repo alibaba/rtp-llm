@@ -22,37 +22,25 @@ bool asyncDebugEnabled() {
     return env != nullptr && std::string(env) == "1";
 }
 
-void copyV41ExecutionContext(GptModelInputs&                         model_input,
-                             const GenerateStreamPtr&                stream,
-                             const std::shared_ptr<DSV41CacheState>& state,
-                             size_t                                  batch) {
+void copyV41ExecutionContext(GptModelInputs&                                     model_input,
+                             const GenerateStreamPtr&                            stream,
+                             const std::shared_ptr<const DSV41CheckpointMetadata>& checkpoint,
+                             size_t                                              batch) {
     if (stream->isFakeStream())
         return;
     auto* context = model_input.v41_execution_context.data_ptr<int64_t>() + batch * 4;
     context[0]    = stream->inputLength();
-    if (!state)
+    context[1]    = checkpoint ? checkpoint->materialized_end : 0;
+    context[2]    = context[1];
+    context[3]    = 0;
+    if (!checkpoint)
         return;
-    const auto view = state->view();
-    context[1]      = view.encoder_materialized_end;
-    context[2]      = view.decoder_checkpoint_end;
-    context[3]      = view.protected_prefix_end;
-    if (view.encoder_materialized_end != view.decoder_checkpoint_end)
-        return;
-    auto* ranges    = model_input.v41_swa_ranges.data_ptr<int64_t>() + batch * 43 * 3;
-    if (view.execution && view.execution->materialized_end == view.decoder_checkpoint_end) {
-        const auto& execution = *view.execution;
-        for (size_t layer = 0; layer < execution.swa_valid_start.size(); ++layer) {
-            ranges[layer * 3]     = execution.swa_valid_start[layer];
-            ranges[layer * 3 + 1] = execution.swa_valid_end[layer];
-            ranges[layer * 3 + 2] = execution.swa_replay_floor[layer];
-        }
-    } else if (view.completed && view.completed->materialized_end == view.decoder_checkpoint_end) {
-        for (size_t layer = 0; layer < view.completed->swa.size(); ++layer) {
-            const auto& range     = view.completed->swa[layer];
-            ranges[layer * 3]     = range.valid_start;
-            ranges[layer * 3 + 1] = range.valid_end;
-            ranges[layer * 3 + 2] = range.replay_floor;
-        }
+    auto* ranges = model_input.v41_swa_ranges.data_ptr<int64_t>() + batch * 43 * 3;
+    for (size_t layer = 0; layer < checkpoint->swa.size(); ++layer) {
+        const auto& range     = checkpoint->swa[layer];
+        ranges[layer * 3]     = range.valid_start;
+        ranges[layer * 3 + 1] = range.valid_end;
+        ranges[layer * 3 + 2] = range.replay_floor;
     }
 }
 
@@ -64,6 +52,7 @@ struct GatherModelInputContext {
     int*         input_lengths;
     int*         combo_position_ids;
     BlockIdPair* kv_cache_update_mapping;
+    int32_t*     v41_state_copy_mapping;
     int          batch_idx;
     int*         sequence_lengths;
     bool         has_multimodal_input;
@@ -115,6 +104,9 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
         model_input.kv_cache_update_mapping.defined() ?
             reinterpret_cast<BlockIdPair*>(model_input.kv_cache_update_mapping.data_ptr()) + kv_cache_mapping_offset :
             nullptr;
+    ctx.v41_state_copy_mapping = model_input.v41_state_copy_mapping.defined() ?
+                                     model_input.v41_state_copy_mapping.data_ptr<int32_t>() :
+                                     nullptr;
 
     if (ctx.merged_text_mask) {
         size_t current_tokens_size = stream_groups.modelExecuteTokenSize();
@@ -245,6 +237,21 @@ void addCacheUpdateCopy(GatherModelInputContext& ctx, const std::vector<BlockIdP
     ctx.kv_cache_update_mapping += update_copy_num;
 }
 
+// Drain the writable-backing clones the rank-0 allocator recorded on the stream's
+// resource into the broadcast mapping; non-root ranks replay them on their pools.
+void addDsv41StateCopy(GatherModelInputContext& ctx, KVCacheResource& resource) {
+    if (!ctx.v41_state_copy_mapping) {
+        return;
+    }
+    const auto copies = resource.takeDsv41StateCopies();
+    if (!copies.empty()) {
+        std::memcpy(ctx.v41_state_copy_mapping,
+                    copies.data(),
+                    copies.size() * sizeof(KVCacheResource::Dsv41StateCopy));
+        ctx.v41_state_copy_mapping += copies.size() * 3;
+    }
+}
+
 torch::Tensor buildLmOutputIndexesOnCuda(const GptModelInputs& model_input, const StreamGroups& stream_groups) {
     const auto total_batch_size         = static_cast<int64_t>(stream_groups.totalModelBatchSize());
     const auto total_decode_batch_size  = static_cast<int64_t>(stream_groups.totalDecodeBatchSize());
@@ -359,7 +366,7 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
     model_input.sequence_lengths      = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
     model_input.prefix_lengths        = torch::empty({(int64_t)total_context_batch_size}, cuda_i32);
-    model_input.v41_execution_contexts.clear();
+    model_input.v41_checkpoint_publishers.clear();
     model_input.request_id            = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
 
@@ -396,6 +403,14 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.kernel_seq_size_per_block = config_.kernel_seq_size_per_block;
     model_input.pd_separation             = config_.role_type == RoleType::PREFILL;
     model_input.warmup                    = config_.warm_up;
+
+    size_t total_state_copy_num = 0;
+    for (const auto& stream : stream_groups.contextStreams()) {
+        if (!stream->isFakeStream()) {
+            total_state_copy_num += stream->kvCachePtr()->cacheResource(0).dsv41PendingStateCopyNum();
+        }
+    }
+    model_input.v41_state_copy_mapping = torch::empty({(int64_t)total_state_copy_num, 3}, pinned_i32);
     model_input.decode_entrance           = config_.decode_entrance;
     model_input.use_opaque_kv_cache_store = config_.use_opaque_kv_cache_store;
     model_input.is_fake_stream            = stream_groups.isFakeStream();
@@ -462,15 +477,13 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
             if (model_input.v41_request_id.defined()) {
                 model_input.v41_request_id.data_ptr<int64_t>()[ctx.batch_idx] = stream->streamId();
                 model_input.v41_is_fake.data_ptr<bool>()[ctx.batch_idx]       = stream->isFakeStream();
-                const auto state = kv_cache.cacheResource(i).dsv41CacheState();
-                copyV41ExecutionContext(model_input, stream, state, ctx.batch_idx);
+                const auto checkpoint                                         = std::static_pointer_cast<
+                    const DSV41CheckpointMetadata>(kv_cache.cacheResource(i).dsv41RestoredCheckpoint());
+                copyV41ExecutionContext(model_input, stream, checkpoint, ctx.batch_idx);
                 model_input.v41_state_ready.data_ptr<bool>()[ctx.batch_idx] =
-                    !stream->isFakeStream() && state && state->view().target_ready_end == stream->seqLength() - 1;
+                    !stream->isFakeStream() && checkpoint && checkpoint->materialized_end == stream->seqLength() - 1;
             }
             if (model_input.v41_token_types.defined() && !stream->isFakeStream()) {
-                RTP_LLM_CHECK_WITH_INFO(
-                    !stream->hasPendingAsyncBookkeeping(),
-                    "V4.1 canonical history requires committed token bookkeeping before decode gather");
                 stream->completeTokenIdsPtr()->writeV41Rows(
                     i,
                     stream->seqLength() - 1,
@@ -555,8 +568,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             RTP_LLM_LOG_TRACE("context stream: %s", stream->debugString().c_str());
         }
 
-        if (auto context = stream->streamCacheResource().createDsv41ExecutionContext())
-            model_input.v41_execution_contexts.push_back(std::move(context));
+        if (auto publisher = stream->streamCacheResource().createDsv41CheckpointPublisher())
+            model_input.v41_checkpoint_publishers.push_back(std::move(publisher));
 
         for (auto i = 0; i < current_batch_size; ++i) {
             const auto prefill_batch_idx = ctx.batch_idx - ctx.total_decode_batch_size;
@@ -566,12 +579,13 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             if (model_input.v41_request_id.defined()) {
                 model_input.v41_request_id.data_ptr<int64_t>()[ctx.batch_idx] = stream->streamId();
                 model_input.v41_is_fake.data_ptr<bool>()[ctx.batch_idx]       = stream->isFakeStream();
-                const auto state = kv_cache.cacheResource(i).dsv41CacheState();
-                copyV41ExecutionContext(model_input, stream, state, ctx.batch_idx);
+                const auto checkpoint                                         = std::static_pointer_cast<
+                    const DSV41CheckpointMetadata>(kv_cache.cacheResource(i).dsv41RestoredCheckpoint());
+                copyV41ExecutionContext(model_input, stream, checkpoint, ctx.batch_idx);
                 model_input.v41_state_ready.data_ptr<bool>()[ctx.batch_idx] =
                     !stream->isFakeStream()
                     && (stream->prefixLength() == 0
-                        || (state && state->view().target_ready_end == stream->prefixLength()));
+                        || (checkpoint && checkpoint->materialized_end == stream->prefixLength()));
             }
             if (model_input.v41_token_types.defined() && !stream->isFakeStream()) {
                 stream->generateInput()->v41_inputs->validateChunk(stream->prefixLength(),
@@ -633,6 +647,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         }
 
         addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping());
+        addDsv41StateCopy(ctx, stream->kvCachePtr()->cacheResource(0));
         stream->step();
     }
 

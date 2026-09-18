@@ -55,7 +55,7 @@ public:
     std::vector<CacheKeyType> memoryCacheKeys() const;
     std::vector<CacheKeyType> memoryCacheKeysForStatus() const;
 
-    bool stageDsv41Checkpoint(const KVCacheResource& resource,
+    bool stageDsv41Checkpoint(const KVCacheResource&       resource,
                               const std::function<void()>& wait_for_producer,
                               const std::shared_ptr<Meta>& meta);
 

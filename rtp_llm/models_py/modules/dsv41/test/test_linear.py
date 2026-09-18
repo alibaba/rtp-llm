@@ -1,6 +1,5 @@
 import os
 import unittest
-from unittest.mock import patch
 
 import torch
 
@@ -193,12 +192,13 @@ class Block32LinearTest(unittest.TestCase):
         torch.cuda.synchronize(self.device)
         torch.testing.assert_close(output, -expected * 2, rtol=0, atol=0)
         self.assertEqual(linear(source[:0]).shape, (0, 32768))
-        with patch.dict(
-            os.environ, {"DSV41_BLOCK32_CUDNN": "0", "DSV41_BLOCK32_CUTE": "0"}
-        ):
-            fallback = V41Block32Linear(
-                linear.weight, state["weight_scale"].to(torch.float8_e8m0fnu)
-            )
+        fallback = V41Block32Linear(
+            linear.weight, state["weight_scale"].to(torch.float8_e8m0fnu)
+        )
+        fallback._use_cudnn = False
+        fallback._use_cute = False
+        fallback._flashinfer_gemm = None
+        fallback._weight_scale_swizzled = None
         self.assertFalse(fallback._use_swizzled_gemm(2048))
         self.assertIsNone(fallback._weight_scale_swizzled)
         torch.testing.assert_close(fallback(source), output, rtol=0, atol=0)

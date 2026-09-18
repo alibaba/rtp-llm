@@ -100,9 +100,10 @@ def fixture_slices(root):
 class EngramGatherQuantTest(unittest.TestCase):
     def setUp(self):
         self.assertNotEqual(os.getuid(), 0)
-        self.temporary = tempfile.TemporaryDirectory(
-            dir=os.environ.get("DSV41_TEST_SHARED_ROOT", "/dev/shm")
-        )
+        shared_root = os.environ.get("DSV41_TEST_SHARED_ROOT", "/dev/shm")
+        if shared_root:
+            os.makedirs(shared_root, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=shared_root)
         root = Path(self.temporary.name)
         self.store = HostSharedWeightStore(root / "shared")
         self.shared = self.store.open_or_publish("a" * 40, fixture_slices(root))
@@ -283,12 +284,11 @@ class EngramGatherQuantTest(unittest.TestCase):
             ) + 12
             valid = torch.arange(count, device="cuda") % 3 != 1
             out = torch.empty(count, 24, 256, device="cuda", dtype=torch.bfloat16)
-            with patch.dict(os.environ, DSV41_ENGRAM_GATHER_QUANT="0"):
+            with patch.object(module, "_fused_lookup_supported", lambda: False):
                 expected = module(hidden, ids, valid, lookup_output=out)
                 expected_out = out.clone()
-            with patch.dict(os.environ, DSV41_ENGRAM_GATHER_QUANT="1"):
-                self.assertTrue(module._fused_lookup_supported())
-                actual = module(hidden, ids, valid, lookup_output=out)
+            self.assertTrue(module._fused_lookup_supported())
+            actual = module(hidden, ids, valid, lookup_output=out)
             torch.testing.assert_close(out, expected_out, rtol=0, atol=0)
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 

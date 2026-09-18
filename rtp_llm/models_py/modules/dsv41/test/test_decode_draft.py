@@ -14,6 +14,7 @@ from rtp_llm.models_py.model_desc.deepseek_v41_dspark_model import (
     DeepSeekV41DSparkModel,
     V41DraftFmhaImpl,
     _draft_query_width,
+    _native_cp_width,
 )
 from rtp_llm.models_py.modules.dsv41.cache_layout import CacheLayout, CacheRegion
 from rtp_llm.models_py.modules.dsv41.compact_reader import CompactPages
@@ -29,6 +30,28 @@ from rtp_llm.utils.model_weight import W
 
 
 class DraftDescriptorTest(unittest.TestCase):
+    def test_native_cp_width_mirrors_cache_config_helper(self):
+        cases = (
+            # (kv_cache_sharded, role, tp_size, prefill_cp_size, expected)
+            (False, "PREFILL", 4, 4, 1),
+            (False, "DECODE", 1, 4, 1),
+            (True, "PREFILL", 4, 4, 4),
+            (True, "PREFILL", 8, 8, 8),
+            (True, "PREFILL", 16, 16, 16),
+            (True, "DECODE", 1, 4, 4),
+            (True, "DECODE", 1, 8, 8),
+            (True, "DECODE", 1, 16, 16),
+        )
+        for sharded, role, tp_size, cp_size, expected in cases:
+            parallelism = SimpleNamespace(
+                role_type=role,
+                tp_size=tp_size,
+                prefill_cp_config=SimpleNamespace(
+                    kv_cache_sharded=sharded, prefill_cp_size=cp_size
+                ),
+            )
+            self.assertEqual(_native_cp_width(parallelism), expected)
+
     def test_prefill_initialization_does_not_bind_cp_shards_as_decode_pages(self):
         model = DeepSeekV41DSparkModel.__new__(DeepSeekV41DSparkModel)
         nn.Module.__init__(model)
@@ -370,6 +393,35 @@ class DraftDecodeGpuTest(unittest.TestCase):
                     )
             for stage, pages in model._pages.items():
                 torch.testing.assert_close(pages.data, expected[stage], rtol=0, atol=0)
+
+    def test_continuous_decode_derives_draft_ranges_without_engine_certificate(self):
+        with torch.inference_mode():
+            model, inputs, context = self.fixture(5, (127, 0), (5, 0))
+            inputs.v41_state_ready = torch.tensor([False, False])
+            inputs.v41_execution_context = torch.tensor(
+                [[0, 64, 64, 64], [0, 0, 0, 0]], dtype=torch.int64
+            )
+            inputs.v41_swa_ranges = torch.tensor(
+                [[[0, 64, 0]] * 43, [[0, 0, 0]] * 43], dtype=torch.int64
+            )
+            context.prepare_model_inputs(inputs)
+            start = 127
+            begin = max(start - model.layout.swa_entries, 0)
+            for stage in range(3):
+                binding = context.swa[stage]
+                self.assertEqual(int(binding.valid_starts[0]), begin)
+                self.assertEqual(int(binding.valid_ends[0]), start)
+                self.assertEqual(int(context.floors[stage][0]), 0)
+
+    def test_boundary_certificate_with_incomplete_draft_interval_is_rejected(self):
+        with torch.inference_mode():
+            model, inputs, context = self.fixture(5, (127, 0), (5, 0))
+            inputs.v41_swa_ranges = torch.tensor(
+                [[[0, 127, 0]] * 40 + [[0, 127, 1]] * 3, [[0, 0, 0]] * 43],
+                dtype=torch.int64,
+            )
+            with self.assertRaisesRegex(ValueError, "incomplete SWA interval"):
+                context.prepare_model_inputs(inputs)
 
 
 if __name__ == "__main__":

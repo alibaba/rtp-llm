@@ -1,7 +1,10 @@
 #include "rtp_llm/cpp/cache/DSV41CacheConfigHelper.h"
 
 #include <algorithm>
+#include <memory>
 #include <numeric>
+#include <sstream>
+#include <stdexcept>
 
 #include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 
@@ -16,7 +19,7 @@ uint32_t contextParallelSize(const ParallelismConfig& parallelism) {
     }
     const auto cp = parallelism.role_type == RoleType::PREFILL ? parallelism.tp_size :
                                                                  parallelism.prefill_cp_config.prefill_cp_size;
-    RTP_LLM_CHECK_WITH_INFO(cp == 8, "V4.1 sharded cache requires explicit CP8, got %ld", cp);
+    RTP_LLM_CHECK_WITH_INFO(cp >= 1, "V4.1 sharded cache requires an explicit CP width, got %ld", cp);
     return static_cast<uint32_t>(cp);
 }
 
@@ -79,9 +82,11 @@ void DSV41CacheConfigHelper::applyConfig(CacheConfig&             config,
 
     config.dsv41_cache_layout_version = 1;
     config.dsv41_draft_cache          = is_draft;
-    config.dsv41_model_revision       = model_config.dsv41_model_revision;
-    config.dsv41_replay_mode          = model_config.dsv41_replay_mode;
-    config.dsv41_tail_policy_version  = model_config.dsv41_tail_policy_version;
+    config.dsv41_model_identity       = std::make_shared<DSV41ModelIdentity>(DSV41ModelIdentity{
+        model_config.dsv41_model_revision,
+        model_config.dsv41_replay_mode,
+        static_cast<uint32_t>(model_config.dsv41_tail_policy_version),
+        128});
     config.layer_num = config.layer_all_num         = layers;
     config.use_mla                                  = false;
     config.is_sparse                                = true;
@@ -150,6 +155,45 @@ void DSV41CacheConfigHelper::populateOwnerMappings(CacheConfig& config) {
             }
         }
     }
+}
+
+std::string dsv41LayoutFingerprint(const CacheConfig& config) {
+    std::ostringstream output;
+    output << "dsv41-memory-v1:target40:draft"
+           << (config.layer_all_num > config.layer_num ? config.layer_all_num - config.layer_num : 0) << ':';
+    for (size_t group = 0; group < config.cache_specs.size(); ++group) {
+        output << group << ':' << config.cache_specs[group]->debugString() << ":owners=";
+        for (int owner : config.global_layer_ids.at(group))
+            output << owner << ',';
+        output << ';';
+    }
+    return output.str();
+}
+
+DSV41CacheIdentity dsv41CacheIdentity(const CacheConfig& config) {
+    const auto* swa = config.cache_specs.size() > 5 ?
+                          dynamic_cast<const DSV41KVCacheSpec*>(config.cache_specs[5].get()) :
+                          nullptr;
+    if (config.dsv41_cache_layout_version != 1 || !swa || swa->region != KVCacheRegionName::SWA_KV)
+        throw std::invalid_argument("V4.1 cache identity requires an explicit supported cache layout");
+    const auto model = std::static_pointer_cast<const DSV41ModelIdentity>(config.dsv41_model_identity);
+    if (!model)
+        throw std::invalid_argument("V4.1 cache identity requires the model identity payload");
+    RTP_LLM_CHECK_WITH_INFO(
+        model->model_revision.size() == 40
+            && std::all_of(model->model_revision.begin(),
+                           model->model_revision.end(),
+                           [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }),
+        "V4.1 cache requires a fixed 40-hex model revision");
+    RTP_LLM_CHECK_WITH_INFO(model->replay_mode == "full" || model->replay_mode == "bounded_checkpoint_v1",
+                            "unsupported V4.1 replay mode");
+    return DSV41CacheIdentity{model->model_revision,
+                              dsv41LayoutFingerprint(config),
+                              model->replay_mode == "full" ? DSV41ReplayMode::FULL :
+                                                             DSV41ReplayMode::BOUNDED_CHECKPOINT_V1,
+                              model->tail_policy_version,
+                              model->replay_window,
+                              swa->entries_per_block};
 }
 
 }  // namespace rtp_llm

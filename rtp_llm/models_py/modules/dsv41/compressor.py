@@ -8,7 +8,6 @@ are separate integration work. It never publishes a cache checkpoint itself.
 from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -37,22 +36,6 @@ def is_supported(values: torch.Tensor) -> bool:
         and values.dtype == torch.bfloat16
         and torch.cuda.get_device_capability(values.device)[0] == 10
     )
-
-
-def _require_execution(values: torch.Tensor) -> None:
-    if os.environ.get("DSV41_OWNER_COMPRESSOR", "0") != "1":
-        raise RuntimeError("owner compressor requires DSV41_OWNER_COMPRESSOR=1")
-    if not is_supported(values):
-        raise RuntimeError("owner compressor requires BF16 on a Blackwell CUDA GPU")
-    with torch.cuda.device(values.device):
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError(
-                "this eager compressor component does not support Graph capture"
-            )
-    if torch.is_autocast_enabled() or torch.backends.cuda.matmul.allow_tf32:
-        raise RuntimeError(
-            "official compressor FP32 boundaries require autocast and TF32 disabled"
-        )
 
 
 def _owner_ratio(layer: int) -> int:
@@ -247,7 +230,6 @@ def prepare_owner_hidden(
 ) -> torch.Tensor:
     """Apply incoming pre_mix, then attn_norm; L20 must not use an HC mean."""
     _owner_ratio(owner_layer)
-    _require_execution(hidden_hc)
     if hidden_hc.ndim != 3 or hidden_hc.shape[1:] != (4, 5120):
         raise ValueError("owner input must contain four 5120-wide HC streams per row")
     if pre_mix.device != hidden_hc.device:
@@ -302,7 +284,6 @@ class OwnerCompressor(nn.Module):
         identity: CacheIdentity,
         pair: Optional[PairCarry] = None,
     ) -> CompressedLatents:
-        _require_execution(normalized_hidden)
         if (
             normalized_hidden.ndim != 2
             or normalized_hidden.shape[1] != 5120
@@ -475,7 +456,6 @@ def prepare_owner_kv(
 ) -> OwnerKVRows:
     """Produce owner index K from the untouched normed main latent, then RoPE each."""
     _owner_ratio(source.owner_layer)
-    _require_execution(source.unrotated)
     if (
         index_weight.shape != (128, 512)
         or index_weight.dtype != torch.bfloat16

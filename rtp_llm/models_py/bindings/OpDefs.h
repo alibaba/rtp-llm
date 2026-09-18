@@ -351,7 +351,7 @@ struct PyModelInputs {
     torch::Tensor                             v41_is_fake;
     torch::Tensor                             v41_execution_context;
     torch::Tensor                             v41_swa_ranges;
-    std::vector<std::shared_ptr<rtp_llm::DSV41ExecutionContext>> v41_execution_contexts;
+    std::vector<std::shared_ptr<rtp_llm::DSV41CheckpointPublisher>> v41_checkpoint_publishers;
     torch::Tensor                             input_ids;
     torch::Tensor                             input_hiddens;
     PyAttentionInputs                         attention_inputs;
@@ -378,8 +378,6 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor          hidden_states;
-    std::vector<rtp_llm::DSV41ExecutionState> v41_execution_states;
-    std::vector<rtp_llm::DSV41ExecutionProgress> v41_execution_progress;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
 

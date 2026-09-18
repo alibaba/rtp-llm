@@ -1,7 +1,7 @@
-"""Local restoration of received CP8 pages for the V4.1 compact readers.
+"""Local restoration of received CP pages for the V4.1 compact readers.
 
-Communication is explicit caller work: inputs already contain all eight ranks
-in CP rank order. SWA rank-local page IDs may differ between ranks. Global and
+Communication is explicit caller work: inputs already contain all CP ranks in
+rank order. SWA rank-local page IDs may differ between ranks. Global and
 index pages retain their rank-major receive storage and only remap page IDs.
 These functions do not implement a collective, PD transport or a second cache.
 The receive buffers may contain a bounded working set with remapped local IDs;
@@ -32,8 +32,6 @@ from rtp_llm.models_py.modules.dsv41.compact_reader import (
 
 
 def _page(layout, slot):
-    if layout.cp_size != 8:
-        raise ValueError("CPRR restoration requires the declared CP8 layout")
     for page in layout.pages:
         if page.slot == slot:
             return page
@@ -51,7 +49,7 @@ def _received(received, page):
         or received.shape[2] != page.prefill_shard_bytes
         or not received.is_contiguous()
     ):
-        raise ValueError("received pages must match all eight rank-local strides")
+        raise ValueError("received pages must match every rank-local stride")
     if received.numel() > MAX_GATHER_BYTES:
         raise ValueError("CPRR receive workspace exceeds 1 GiB; tile selected pages")
 
@@ -85,8 +83,9 @@ def restore_cprr_swa(
 ) -> CprrSwaRestore:
     """Restore one complete ring per request, including its alignment padding.
 
-    received is [8, rank-local pages, shard bytes]; rank_page_ids is [8,
-    requests]. Output request i occupies page i+1; page zero is unmapped.
+    received is [cp_size, rank-local pages, shard bytes]; rank_page_ids is
+    [cp_size, requests]. Output request i occupies page i+1; page zero is
+    unmapped.
     A missing byte slice sets status=1, invalid IDs set status=2. Either error
     zeros the entire affected ring. Check status before consuming restored KV.
     Caller-owned output/status buffers support capture and changing IDs on replay.
@@ -95,7 +94,7 @@ def restore_cprr_swa(
     _received(received, page)
     device = received.device
     if rank_page_ids.ndim != 2 or rank_page_ids.shape[0] != layout.cp_size:
-        raise ValueError("SWA page IDs must contain all eight CP ranks")
+        raise ValueError("SWA page IDs must contain every CP rank")
     requests = rank_page_ids.shape[1]
     _integer_tensor(rank_page_ids, (layout.cp_size, requests), device)
     shape = (requests + 1, page.page_stride_bytes)
@@ -156,9 +155,10 @@ def bind_cprr_paged(
 ) -> CprrPagedRestore:
     """Map CPRR pages without copying or decoding their payload.
 
-    Tables are [8, requests, virtual blocks], using each rank's received local
-    page IDs. Logical block b belongs to rank b%8 and virtual block b//8,
-    exactly as RegionPage.paged_location. Missing IDs 0/-1 remain unmapped;
+    Tables are [cp_size, requests, virtual blocks], using each rank's received
+    local page IDs. Logical block b belongs to rank b%cp_size and virtual block
+    b//cp_size, exactly as RegionPage.paged_location. Missing IDs 0/-1 remain
+    unmapped;
     malformed IDs set status=2 without producing an out-of-bounds reader index.
     The returned pages alias received, which must remain alive and unchanged
     until its last consumer completes. New contents or IDs need no recapture.
@@ -168,7 +168,7 @@ def bind_cprr_paged(
         raise ValueError("SWA pages require complete byte-slice restoration")
     _received(received, page)
     if rank_page_tables.ndim != 3 or rank_page_tables.shape[0] != layout.cp_size:
-        raise ValueError("paged tables must contain all eight CP ranks")
+        raise ValueError("paged tables must contain every CP rank")
     device = received.device
     _integer_tensor(rank_page_tables, tuple(rank_page_tables.shape), device)
     _, requests, virtual_blocks = rank_page_tables.shape

@@ -209,7 +209,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("v41_is_fake", &PyModelInputs::v41_is_fake)
         .def_readwrite("v41_execution_context", &PyModelInputs::v41_execution_context)
         .def_readwrite("v41_swa_ranges", &PyModelInputs::v41_swa_ranges)
-        .def_readwrite("v41_execution_contexts", &PyModelInputs::v41_execution_contexts)
+        .def_readwrite("v41_checkpoint_publishers", &PyModelInputs::v41_checkpoint_publishers)
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
@@ -223,45 +223,40 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("engram_history_ids", &PyModelInputs::engram_history_ids, "Three canonical Engram predecessors")
         .def_readwrite("engram_history_valid", &PyModelInputs::engram_history_valid, "Canonical predecessor validity");
 
-    using rtp_llm::DSV41ExecutionState;
-    using rtp_llm::DSV41ExecutionProgress;
-    using rtp_llm::DSV41ExecutionContext;
-    pybind11::class_<DSV41ExecutionProgress>(m, "V41ExecutionProgress")
+    using rtp_llm::DSV41CheckpointPublication;
+    using rtp_llm::DSV41CheckpointPublisher;
+    pybind11::class_<DSV41CheckpointPublication>(m, "V41CheckpointPublication")
         .def(pybind11::init<>())
-        .def_readwrite("request_id", &DSV41ExecutionProgress::request_id)
-        .def_readwrite("encoder_materialized_end", &DSV41ExecutionProgress::encoder_materialized_end)
-        .def_readwrite("decoder_checkpoint_end", &DSV41ExecutionProgress::decoder_checkpoint_end);
-    pybind11::class_<DSV41ExecutionContext, std::shared_ptr<DSV41ExecutionContext>>(m, "V41ExecutionContext")
-        .def_readonly("request_id", &DSV41ExecutionContext::request_id)
-        .def_readonly("protected_prefix_end", &DSV41ExecutionContext::protected_prefix_end)
-        .def_readonly("final_handoff_end", &DSV41ExecutionContext::final_handoff_end)
-        .def_readonly("block_ids_by_group", &DSV41ExecutionContext::block_ids_by_group)
-        .def("is_active", &DSV41ExecutionContext::isActive, pybind11::call_guard<pybind11::gil_scoped_release>())
-        .def("report_progress", &DSV41ExecutionContext::reportProgress, pybind11::call_guard<pybind11::gil_scoped_release>())
-        .def("protect_checkpoint", &DSV41ExecutionContext::protectCheckpoint,
-             pybind11::arg("publication"), pybind11::arg("actual_block_ids_by_group"),
-             pybind11::arg("block_ids_by_rank") = DSV41ExecutionContext::WorkerBlockIds{},
+        .def_readwrite("request_id", &DSV41CheckpointPublication::request_id)
+        .def_readwrite("materialized_end", &DSV41CheckpointPublication::materialized_end)
+        .def_readwrite("global_entries", &DSV41CheckpointPublication::global_entries)
+        .def_readwrite("index_entries", &DSV41CheckpointPublication::index_entries)
+        .def_readwrite("swa_valid_start", &DSV41CheckpointPublication::swa_valid_start)
+        .def_readwrite("swa_valid_end", &DSV41CheckpointPublication::swa_valid_end)
+        .def_readwrite("swa_replay_floor", &DSV41CheckpointPublication::swa_replay_floor)
+        .def_readwrite("history_token_ids", &DSV41CheckpointPublication::history_token_ids)
+        .def_readwrite("history_image_mask", &DSV41CheckpointPublication::history_image_mask)
+        .def_readwrite("aux_valid_start", &DSV41CheckpointPublication::aux_valid_start)
+        .def_readwrite("aux_valid_end", &DSV41CheckpointPublication::aux_valid_end)
+        .def_readwrite("draft_committed", &DSV41CheckpointPublication::draft_committed);
+    pybind11::class_<DSV41CheckpointPublisher, std::shared_ptr<DSV41CheckpointPublisher>>(
+        m, "V41CheckpointPublisher")
+        .def_readonly("request_id", &DSV41CheckpointPublisher::request_id)
+        .def_readonly("protected_prefix_end", &DSV41CheckpointPublisher::protected_prefix_end)
+        .def_readonly("final_handoff_end", &DSV41CheckpointPublisher::final_handoff_end)
+        .def_readonly("block_ids_by_group", &DSV41CheckpointPublisher::block_ids_by_group)
+        .def("publish",
+             &DSV41CheckpointPublisher::publishCheckpoint,
+             pybind11::arg("publication"),
+             pybind11::arg("actual_block_ids_by_group"),
+             pybind11::arg("block_ids_by_rank") = DSV41CheckpointPublisher::WorkerBlockIds{},
+             pybind11::call_guard<pybind11::gil_scoped_release>())
+        .def("install",
+             &DSV41CheckpointPublisher::installCheckpoint,
+             pybind11::arg("publication"),
+             pybind11::arg("actual_block_ids_by_group"),
+             pybind11::arg("block_ids_by_rank") = DSV41CheckpointPublisher::WorkerBlockIds{},
              pybind11::call_guard<pybind11::gil_scoped_release>());
-    pybind11::class_<DSV41ExecutionState>(m, "V41ExecutionState")
-        .def(pybind11::init<>())
-        .def_readwrite("request_id", &DSV41ExecutionState::request_id)
-        .def_readwrite("materialized_end", &DSV41ExecutionState::materialized_end)
-        .def_readwrite("encoder_materialized_end", &DSV41ExecutionState::encoder_materialized_end)
-        .def_readwrite("decoder_checkpoint_end", &DSV41ExecutionState::decoder_checkpoint_end)
-        .def_readwrite("draft_layers", &DSV41ExecutionState::draft_layers)
-        .def_readwrite("aux_valid_start", &DSV41ExecutionState::aux_valid_start)
-        .def_readwrite("aux_valid_end", &DSV41ExecutionState::aux_valid_end)
-        .def_readwrite("global_entries", &DSV41ExecutionState::global_entries)
-        .def_readwrite("index_entries", &DSV41ExecutionState::index_entries)
-        .def_readwrite("swa_valid_start", &DSV41ExecutionState::swa_valid_start)
-        .def_readwrite("swa_valid_end", &DSV41ExecutionState::swa_valid_end)
-        .def_readwrite("swa_replay_floor", &DSV41ExecutionState::swa_replay_floor)
-        .def_readwrite("pair_positions", &DSV41ExecutionState::pair_positions)
-        .def_readwrite("pair_valid", &DSV41ExecutionState::pair_valid)
-        .def_readwrite("history_token_ids", &DSV41ExecutionState::history_token_ids)
-        .def_readwrite("history_image_mask", &DSV41ExecutionState::history_image_mask)
-        .def_readwrite("history_ready", &DSV41ExecutionState::history_ready)
-        .def_readwrite("draft_committed", &DSV41ExecutionState::draft_committed);
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
@@ -285,8 +280,6 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("params_ptr"),
              "Initialize with hidden states tensor and params pointer")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
-        .def_readwrite("v41_execution_states", &PyModelOutputs::v41_execution_states)
-        .def_readwrite("v41_execution_progress", &PyModelOutputs::v41_execution_progress)
         .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer");
 }
 

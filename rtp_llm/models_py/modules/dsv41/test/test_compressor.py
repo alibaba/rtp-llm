@@ -1,9 +1,7 @@
 """Owner compressor GPU probes against the actual frozen official definitions."""
 
-import os
 import unittest
 from dataclasses import replace
-from unittest.mock import patch
 
 import torch
 from official_compressor import load_official_compressor
@@ -420,16 +418,6 @@ class OwnerCompressorGpuTest(unittest.TestCase):
                 result = self.run_candidate(candidate, hidden)
                 self.assert_exact(result.unrotated, expected)
                 self.assertGreater(float(result.unrotated.abs().min()), 0.25)
-
-    def test_disabled_or_autocast_execution_does_not_silently_fall_back(self):
-        candidate, _ = self.models(2, sparse=True)
-        hidden = self.values(2)
-        with patch.dict(os.environ, {"DSV41_OWNER_COMPRESSOR": "0"}):
-            with self.assertRaisesRegex(RuntimeError, "DSV41_OWNER_COMPRESSOR"):
-                self.run_candidate(candidate, hidden)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            with self.assertRaisesRegex(RuntimeError, "autocast"):
-                self.run_candidate(candidate, hidden)
 
     def test_rope_base_frequencies_cached_and_unvalidated_hot_path_exact(self):
         positions = torch.tensor(

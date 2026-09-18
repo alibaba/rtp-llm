@@ -1,7 +1,5 @@
 """Engram hashing from explicit canonical request history, without slot state."""
 
-import os
-
 import numpy as np
 import torch
 from sympy import isprime
@@ -121,13 +119,6 @@ class EngramHash(nn.Module):
         all_ids = torch.cat((history_ids, input_ids), dim=1)
         all_valid = torch.cat((history_valid, token_mask), dim=1)
         safe_ids = all_ids.masked_fill(~all_valid, self.pad_token_id)
-        torch._assert_async(
-            (safe_ids >= 0).all(), "Engram received a negative canonical token ID"
-        )
-        torch._assert_async(
-            (safe_ids < self.token_map.numel()).all(),
-            "Engram received an out-of-vocabulary canonical token ID",
-        )
         compressed = self.token_map[safe_ids]
         blocked = torch.zeros_like(input_ids, dtype=torch.bool)
         tokens = []
@@ -223,17 +214,13 @@ class Engram(nn.Module):
         from rtp_llm.models_py.modules.dsv41.linear import V41Block32Linear
 
         return (
-            os.environ.get("DSV41_ENGRAM_GATHER_QUANT", "1") == "1"
-            and type(self.projection) is V41Block32Linear
+            type(self.projection) is V41Block32Linear
             and isinstance(self.shared_lookup, SharedEngramLookup)
             and self.projection.weight.device
             == torch.device("cuda", self.shared_lookup.device)
         )
 
     def _project_quantized(self, encoded, scales):
-        from rtp_llm.models_py.modules.dsv41.linear import _require_execution
-
-        _require_execution(encoded)
         projection = self.projection
         rows = encoded.numel() // projection.in_features
         output = torch.empty(

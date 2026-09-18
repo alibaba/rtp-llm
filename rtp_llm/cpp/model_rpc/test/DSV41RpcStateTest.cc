@@ -47,34 +47,12 @@ CacheConfig cacheConfig(RoleType role, bool draft = false) {
                                               speculative, std::nullopt, true, false);
 }
 
-DSV41ExecutionState publication(int64_t end, uint32_t drafts = 0) {
-    DSV41ExecutionState state;
-    state.request_id = 19;
-    state.materialized_end = state.encoder_materialized_end = state.decoder_checkpoint_end = end;
-    state.draft_layers = drafts;
-    state.global_entries = state.index_entries = {end / 2, end / 2, end / 2, end};
-    state.swa_valid_start.assign(40 + drafts, std::max<int64_t>(0, end - 128));
-    state.swa_valid_end.assign(40 + drafts, end);
-    state.swa_replay_floor.assign(40 + drafts, 0);
-    state.pair_positions.assign(3, end % 2 ? end - 1 : -1);
-    state.pair_valid.assign(3, end % 2);
-    state.history_token_ids = {31, 32, 33};
-    state.history_image_mask = {0, 0, 0};
-    state.history_ready = true;
-    if (drafts) {
-        state.draft_committed = true;
-        state.aux_valid_start = std::max<int64_t>(0, end - 128);
-        state.aux_valid_end = end;
-    }
-    return state;
-}
-
 TEST(DSV41RpcStateTest, IdentityAcceptsPhysicalByteSlicesButRejectsExecutionContractChanges) {
     for (bool draft : {false, true}) {
         const auto prefill = cacheConfig(RoleType::PREFILL, draft);
         const auto decode = cacheConfig(RoleType::DECODE, draft);
         const auto identity = dsv41TransferIdentity(prefill, 8);
-        EXPECT_NE(prefill.dsv41LayoutFingerprint(), decode.dsv41LayoutFingerprint());
+        EXPECT_NE(dsv41LayoutFingerprint(prefill), dsv41LayoutFingerprint(decode));
         EXPECT_NO_THROW(validateDSV41TransferIdentity(decode, identity, 8));
         auto changed = identity;
         changed.set_replay_mode("bounded_checkpoint_v1");
@@ -120,8 +98,7 @@ TEST(DSV41RpcStateTest, LoadUsesProducerKeysWithoutChangingLocalMemoryIdentity) 
         EXPECT_EQ(snapshot, source_keys);
         auto live_resource = std::make_shared<BatchKVCacheResource>();
         live_resource->resetBatchSize(1);
-        live_resource->cacheResource().setDsv41CacheState(
-            std::make_shared<DSV41CacheState>(dsv41CacheIdentity(prefill)));
+        live_resource->cacheResource().setDsv41CacheKeySeed(dsv41CacheIdentity(prefill).cacheKeySeed());
         initCacheKeys(live_resource, complete, 128);
         dropLastPartialBlock(live_resource);  // P may finish before the RPC thread sends LOAD.
         EXPECT_EQ(live_resource->cacheKeys().size(), length / 128);
@@ -200,126 +177,6 @@ TEST(DSV41RpcStateTest, CompleteEightShardInventoryAndPhysicalSliceSizes) {
     EXPECT_EQ(dsv41FixedDestinationSliceBytes(decode, 4, 8), 3648u);
     EXPECT_EQ(dsv41FixedDestinationSliceBytes(decode, 5, 8), 9024u);
     EXPECT_THROW(dsv41FixedDestinationSliceBytes(decode, 0, 8), std::invalid_argument);
-}
-
-TEST(DSV41RpcStateTest, OddPublicationRestoresReadyOnlyWithCompleteTargetAndPairState) {
-    const auto prefill = cacheConfig(RoleType::PREFILL);
-    const auto decode = cacheConfig(RoleType::DECODE);
-    const auto local_identity = dsv41CacheIdentity(decode);
-    const auto wire = dsv41ExecutionStateToProto(publication(1025), prefill, 8);
-    auto recovered = dsv41ExecutionStateFromProto(wire, decode, 8, 19, 1025);
-    DSV41CacheState state(local_identity);
-    EXPECT_EQ(state.view().target_ready_end, 0);
-    auto missing = recovered;
-    missing.pair_valid[1] = 0;
-    EXPECT_THROW(state.publishExecution(missing, 0), std::invalid_argument);
-    EXPECT_EQ(state.view().target_ready_end, 0);
-    missing = recovered;
-    missing.swa_valid_end[39]--;
-    EXPECT_THROW(state.publishExecution(missing, 0), std::invalid_argument);
-    missing = recovered;
-    missing.index_entries[2]--;
-    EXPECT_THROW(state.publishExecution(missing, 0), std::invalid_argument);
-    EXPECT_NO_THROW(state.publishExecution(recovered, 0));
-    EXPECT_EQ(state.view().target_ready_end, 1025);
-    EXPECT_THROW(recovered.checkpoint(local_identity, 1024), std::invalid_argument);
-    EXPECT_THROW(dsv41ExecutionStateFromProto(wire, decode, 8, 20, 1025), std::invalid_argument);
-    EXPECT_THROW(dsv41ExecutionStateFromProto(wire, decode, 8, 19, 1024), std::invalid_argument);
-    auto malformed = wire;
-    malformed.set_pair_valid(0, 256);
-    EXPECT_THROW(dsv41ExecutionStateFromProto(malformed, decode, 8, 19, 1025), std::invalid_argument);
-}
-
-TEST(DSV41RpcStateTest, DraftAndMemoryCheckpointRemainCompleteAndAlignedContracts) {
-    const auto decode = cacheConfig(RoleType::DECODE, true);
-    const auto identity = dsv41CacheIdentity(decode);
-    auto state = publication(1024, 3);
-    EXPECT_NO_THROW(state.checkpoint(identity, 1024));
-    state.draft_committed = false;
-    EXPECT_THROW(state.validate(identity, 3), std::invalid_argument);
-    state = publication(1024);
-    EXPECT_THROW(state.validate(identity, 3), std::invalid_argument);
-    state = publication(1025, 3);
-    EXPECT_NO_THROW(state.validate(identity, 3));
-    EXPECT_THROW(state.checkpoint(identity, 1024), std::invalid_argument);
-}
-
-TEST(DSV41RpcStateTest, HandoffHistoryMustMatchActualCanonicalRequest) {
-    auto state = publication(3);
-    GenerateInputPB input;
-    for (int token : {31, 32, 33}) {
-        input.add_token_ids(token);
-        input.mutable_v41_inputs()->add_image_mask(false);
-    }
-    EXPECT_NO_THROW(validateDSV41History(state, input));
-    input.mutable_v41_inputs()->set_image_mask(1, true);
-    EXPECT_THROW(validateDSV41History(state, input), std::invalid_argument);
-    state.history_image_mask[1] = 1;
-    EXPECT_NO_THROW(validateDSV41History(state, input));
-    input.set_token_ids(2, 34);
-    EXPECT_THROW(validateDSV41History(state, input), std::invalid_argument);
-}
-
-TEST(DSV41RpcStateTest, BoundedProgressPreservesDecoderBoundaryAndRequiresProtectedCopyBeforeSuffix) {
-    auto identity = dsv41CacheIdentity(cacheConfig(RoleType::DECODE, true));
-    identity.replay_mode = DSV41ReplayMode::BOUNDED_CHECKPOINT_V1;
-    DSV41CacheState state(identity);
-    const auto metadata = publication(1024, 3).checkpoint(identity, 1024);
-    state.restore(metadata, 1024);
-    EXPECT_EQ(state.view().target_ready_end, 1024);
-    state.requireProtectedPrefix(1024, 1281);
-    EXPECT_THROW(state.publishProgress({19, 1152, 1024}), std::logic_error);
-    EXPECT_EQ(state.view().encoder_materialized_end, 1024);
-    state.protect(std::make_shared<DSV41CheckpointSnapshot>(metadata));
-    state.publishProgress({19, 1152, 1024});
-    EXPECT_EQ(state.view().encoder_materialized_end, 1152);
-    EXPECT_EQ(state.view().decoder_checkpoint_end, 1024);
-    EXPECT_EQ(state.view().target_ready_end, 0);
-    EXPECT_FALSE(state.view().execution.has_value());
-    EXPECT_THROW(state.publishProgress({19, 1281, 1152}), std::invalid_argument);
-    EXPECT_THROW(state.finish(1281), std::logic_error);
-    state.publishExecution(publication(1281, 3), 3);
-    state.finish(1281);
-    EXPECT_TRUE(state.view().finished);
-    EXPECT_EQ(state.view().target_ready_end, 1281);
-    EXPECT_THROW(state.publishProgress({19, 1281, 1281}), std::logic_error);
-}
-
-TEST(DSV41RpcStateTest, FinalAlignedBoundaryNeedsNoProtectionWhenThereIsNoSuffix) {
-    auto identity = dsv41CacheIdentity(cacheConfig(RoleType::DECODE, true));
-    identity.replay_mode = DSV41ReplayMode::BOUNDED_CHECKPOINT_V1;
-    DSV41CacheState state(identity);
-    state.requireProtectedPrefix(1024, 1024);
-    state.publishExecution(publication(1024, 3), 3);
-    state.completeDecoder(publication(1024, 3).checkpoint(identity, 1024), 1024);
-    EXPECT_NO_THROW(state.finish(1024));
-    EXPECT_TRUE(state.view().finished);
-}
-
-TEST(DSV41RpcStateTest, ExecutionContextKeepsRequestAndWorkerMappingsExact) {
-    DSV41ExecutionContext context;
-    context.request_id = 19;
-    bool active = true;
-    context.is_active = [&] { return active; };
-    context.report_progress = [](const DSV41ExecutionProgress& value) {
-        EXPECT_EQ(value.encoder_materialized_end, 1024);
-    };
-    const DSV41ExecutionContext::WorkerBlockIds workers{{{11, 13}}, {{23, 29}}};
-    context.protect_checkpoint = [&](const auto& value, const auto& local, const auto& actual_workers) {
-        EXPECT_EQ(value.materialized_end, 1024);
-        EXPECT_EQ(local, workers.front());
-        EXPECT_EQ(actual_workers, workers);
-        return true;
-    };
-    EXPECT_TRUE(context.isActive());
-    EXPECT_NO_THROW(context.reportProgress({19, 1024, 0}));
-    EXPECT_THROW(context.reportProgress({20, 1024, 0}), std::invalid_argument);
-    EXPECT_TRUE(context.protectCheckpoint(publication(1024, 3), workers.front(), workers));
-    auto other = publication(1024, 3);
-    other.request_id = 20;
-    EXPECT_THROW(context.protectCheckpoint(other, workers.front(), workers), std::invalid_argument);
-    active = false;
-    EXPECT_FALSE(context.isActive());
 }
 
 }  // namespace

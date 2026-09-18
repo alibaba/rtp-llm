@@ -63,6 +63,10 @@ struct GptModelInputs {
     torch::Tensor kv_cache_layer_to_group;  // [layer_num], int32
     torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 2] kv cache update mapping
+    // int32 [n,3] (group, src_block, dst_block): V4.1 writable-backing clones
+    // decided by the rank-0 allocator, replayed by every non-root CP rank on its
+    // local pool in the model-input hook so fixed-group pages stay coherent.
+    torch::Tensor v41_state_copy_mapping;
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;      // text part in multimodal input tokens [cumulated_seq_len]
@@ -77,7 +81,7 @@ struct GptModelInputs {
     torch::Tensor v41_is_fake;           // bool [all requests], scheduler-only placeholders.
     torch::Tensor v41_execution_context;  // int64 [requests, 4]: prompt length, encoder end, decoder end, protected N.
     torch::Tensor v41_swa_ranges;         // int64 [requests, 43, 3]: valid start/end/replay floor; -1 is unknown.
-    std::vector<std::shared_ptr<DSV41ExecutionContext>> v41_execution_contexts; // Scheduling-rank callbacks only.
+    std::vector<std::shared_ptr<DSV41CheckpointPublisher>> v41_checkpoint_publishers;  // Per-rank publish/install seam.
 
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
@@ -124,8 +128,6 @@ struct GptModelOutputs {
     torch::Tensor softmax_result;
 
     std::vector<torch::Tensor> moe_gating;
-    std::vector<DSV41ExecutionState> v41_execution_states;
-    std::vector<DSV41ExecutionProgress> v41_execution_progress;
 };
 
 struct CopyParams {

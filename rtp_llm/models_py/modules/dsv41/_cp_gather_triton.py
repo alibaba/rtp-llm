@@ -10,7 +10,6 @@ def gather_selected_kernel(
     table,
     wanted,
     output,
-    status,
     ROWS: tl.constexpr,
     ENTRIES: tl.constexpr,
     ENTRY_BYTES: tl.constexpr,
@@ -20,6 +19,7 @@ def gather_selected_kernel(
     TABLE_STRIDE: tl.constexpr,
     WANTED_STRIDE: tl.constexpr,
     RANK: tl.constexpr,
+    CP_SIZE: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
     BLOCK_BYTES: tl.constexpr,
 ):
@@ -29,8 +29,8 @@ def gather_selected_kernel(
         tl.int64
     )
     logical = tl.maximum(position, 0) // ENTRIES
-    owned = (rows < ROWS) & (position >= 0) & (logical % 8 == RANK)
-    virtual = logical // 8
+    owned = (rows < ROWS) & (position >= 0) & (logical % CP_SIZE == RANK)
+    virtual = logical // CP_SIZE
     in_table = owned & (virtual < TABLE_WIDTH)
     page = tl.load(table + virtual * TABLE_STRIDE, in_table, other=0).to(tl.int64)
     valid = in_table & (page > 0) & (page < POOL_PAGES)
@@ -47,4 +47,3 @@ def gather_selected_kernel(
         values,
         (rows[:, None] < ROWS) & (columns[None, :] < ENTRY_BYTES),
     )
-    tl.store(status + tl.program_id(0), tl.sum((owned & ~valid).to(tl.int32), 0))

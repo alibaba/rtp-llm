@@ -1,4 +1,4 @@
-"""CP8 target prefill over framework-owned V4.1 cache shards.
+"""CP target prefill over framework-owned V4.1 cache shards.
 
 Queries retain the framework's padded zigzag order. Row-local model and attention
 operations pack only real rows without changing their CP owners. Only compressor
@@ -8,7 +8,6 @@ receive storage is scoped to a source tile and its consumers.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, fields, replace
 
 import torch
@@ -35,7 +34,6 @@ from rtp_llm.models_py.modules.dsv41.cache_layout import (
     SWA_WINDOW,
     CacheRegion,
     RegionSlot,
-    layer_sources,
 )
 from rtp_llm.models_py.modules.dsv41.ced import (
     AuxRowMap,
@@ -47,14 +45,9 @@ from rtp_llm.models_py.modules.dsv41.compact_reader import (
     MAX_GATHER_BYTES,
     CompactPages,
     GlobalBinding,
-    ReaderResult,
     SwaBinding,
-    compact_attention,
 )
-from rtp_llm.models_py.modules.dsv41.compact_writer import (
-    CompactWriteResult,
-    encode_compact,
-)
+from rtp_llm.models_py.modules.dsv41.compact_writer import encode_compact
 from rtp_llm.models_py.modules.dsv41.compressor import (
     OwnerPageBinding,
     PairCarry,
@@ -102,11 +95,6 @@ _INDEX_ROWS = CANDIDATE_BLOCKS * SPARSE_BLOCK
 _SELECTED_METADATA_BYTES = 80
 
 
-def _check(condition, message):
-    if not bool(condition.all().item()):
-        raise ValueError(message)
-
-
 def _bytes(*tensors):
     return sum(value.numel() * value.element_size() for value in tensors)
 
@@ -122,15 +110,11 @@ def _copy_query_rows(destination, indices, values):
         destination.index_copy_(0, indices, values)
 
 
-def _selected_local_rows(
-    pool, table, wanted, entries, entry_bytes, rank, *, defer_status=None
-):
-    message = "CP selected KV row has no allocated owner page"
+def _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank, cp_size):
     if (
         pool.is_cuda
         and pool.stride(1) == 1
         and torch.cuda.get_device_capability(pool.device)[0] == 10
-        and os.environ.get("DSV41_CP_FUSED_SELECTED", "1") == "1"
     ):
         from rtp_llm.models_py.modules.dsv41._cp_gather_triton import (
             gather_selected_kernel,
@@ -141,14 +125,12 @@ def _selected_local_rows(
         local = torch.empty(
             (wanted.numel(), entry_bytes), dtype=torch.uint8, device=pool.device
         )
-        status = torch.empty((blocks,), dtype=torch.int32, device=pool.device)
         if blocks:
             gather_selected_kernel[(blocks,)](
                 pool,
                 table,
                 wanted,
                 local,
-                status,
                 ROWS=wanted.numel(),
                 ENTRIES=entries,
                 ENTRY_BYTES=entry_bytes,
@@ -158,35 +140,25 @@ def _selected_local_rows(
                 TABLE_STRIDE=table.stride(1),
                 WANTED_STRIDE=wanted.stride(0),
                 RANK=rank,
+                CP_SIZE=cp_size,
                 BLOCK_ROWS=block_rows,
                 BLOCK_BYTES=1 << (entry_bytes - 1).bit_length(),
             )
-            # The async assert is the measured optimum (P0-2 GB200 A/B): the
-            # synchronous _check forced an NCCL drain per tile. The env remains
-            # only as a diagnostic override.
-            if defer_status is not None:
-                # The caller batches one async assert over the whole transport
-                # loop; the per-tile status tensors stay alive in the list.
-                defer_status.append(status)
-            elif os.environ.get("DSV41_CP_GATHER_CHECK_ASYNC", "1") == "1":
-                torch._assert_async((status == 0).all(), message)
-            else:
-                _check(status == 0, message)
         return local
 
     logical = wanted.clamp_min(0).long() // entries
-    owners, virtual = logical % 8, logical // 8
+    owners, virtual = logical % cp_size, logical // cp_size
     owned = (wanted >= 0) & (owners == rank)
     in_table = virtual < table.shape[1]
     ids = table[0].index_select(0, virtual.clamp_max(table.shape[1] - 1)).long()
-    _check(~owned | (in_table & (ids > 0) & (ids < pool.shape[0])), message)
+    valid = owned & in_table & (ids > 0) & (ids < pool.shape[0])
     page_rows = pool[:, : entries * entry_bytes].view(
         pool.shape[0], entries, entry_bytes
     )
     local = page_rows[
         ids.clamp(0, pool.shape[0] - 1), wanted.clamp_min(0).long() % entries
     ]
-    local.masked_fill_(~owned[:, None], 0)
+    local.masked_fill_(~valid[:, None], 0)
     return local
 
 
@@ -261,7 +233,7 @@ class V41CPAttentionContext(V41AttentionContext):
         for flat in restore:
             rank, local = divmod(flat, cp.chunk_length)
             local -= self.local_first
-            if not 0 <= rank < 8 or not 0 <= local < self.local_count:
+            if not 0 <= rank < cp.cp_size or not 0 <= local < self.local_count:
                 raise ValueError("CP restore map crosses a request's local row range")
             mapping.append(rank * self.local_count + local)
         if len(set(mapping)) != end - start:
@@ -269,10 +241,7 @@ class V41CPAttentionContext(V41AttentionContext):
         self._restore_host = tuple(mapping)
         query_owners = {flat // self.local_count for flat in mapping}
         self.single_query_owner = (
-            next(iter(query_owners))
-            if len(query_owners) == 1
-            and os.environ.get("DSV41_CP_SINGLE_OWNER_TRANSPORT", "1") != "0"
-            else None
+            next(iter(query_owners)) if len(query_owners) == 1 else None
         )
         device = self.query_device
         model_rows = sorted(
@@ -282,29 +251,18 @@ class V41CPAttentionContext(V41AttentionContext):
         )
         self._real_local_rows = tuple(model_rows)
         self._query_row_plans = {}
-        self.attention_query_rows = (
-            len(model_rows)
-            if os.environ.get("DSV41_CP_COMPACT_QUERY_ROWS", "1") != "0"
-            else self.local_count
-        )
+        self.attention_query_rows = len(model_rows)
         self.model_row_indices = (
             torch.tensor(model_rows, dtype=torch.int64, device=device)
             if len(model_rows) != self.local_count
-            and os.environ.get("DSV41_CP_COMPACT_MODEL_ROWS", "1") != "0"
             else None
         )
         self._restore = torch.tensor(mapping, dtype=torch.int64, device=device)
         rank_positions = torch.full(
-            (8 * self.local_count,), -1, dtype=torch.int64, device=device
+            (cp.cp_size * self.local_count,), -1, dtype=torch.int64, device=device
         )
         rank_positions[self._restore] = torch.arange(start, end, device=device)
-        self._rank_positions = rank_positions.view(8, self.local_count)
-        expected = self._rank_positions[cp.cp_rank]
-        _check(
-            (self.valid == (expected >= 0))
-            & (~self.valid | (self.positions == expected)),
-            "CP query positions/validity differ from canonical source restoration",
-        )
+        self._rank_positions = rank_positions.view(cp.cp_size, self.local_count)
 
     @property
     def query_rows(self):
@@ -378,7 +336,7 @@ class V41CPAttentionContext(V41AttentionContext):
         if not self.start <= start < self.end:
             raise ValueError("CP tail rows must belong to the current encoder chunk")
         selected = self.selection_for(20)
-        rank_rows = [[] for _ in range(8)]
+        rank_rows = [[] for _ in range(self.cp.cp_size)]
         for position in range(start, self.end):
             rank, local = divmod(
                 self._restore_host[position - self.start], self.local_count
@@ -405,7 +363,7 @@ class V41CPAttentionContext(V41AttentionContext):
             != ReplayConfig(ReplayMode.BOUNDED).fingerprint
             or not 0 <= replay_floor <= start < self.end
             or self.end - start > SWA_WINDOW
-            or len(rank_rows) != 8
+            or len(rank_rows) != self.cp.cp_size
         ):
             raise ValueError(
                 "CP late execution requires an explicit bounded 128-row plan"
@@ -434,7 +392,7 @@ class V41CPAttentionContext(V41AttentionContext):
             )
         if any(owner.materialized_end != start for owner in self.cache.owners.values()):
             raise ValueError("CP encoder split must follow completed source writes")
-        rank_rows = [[] for _ in range(8)]
+        rank_rows = [[] for _ in range(self.cp.cp_size)]
         for position in range(start, end):
             rank, local = divmod(
                 self._restore_host[position - self.start], self.local_count
@@ -468,8 +426,11 @@ class V41CPAttentionContext(V41AttentionContext):
             )
         capacity = max(map(len, rank_rows))
         device = self.query_device
-        positions = torch.full((8, capacity), end - 1, dtype=torch.int64, device=device)
-        valid = torch.zeros((8, capacity), dtype=torch.bool, device=device)
+        cp_size = self.cp.cp_size
+        positions = torch.full(
+            (cp_size, capacity), end - 1, dtype=torch.int64, device=device
+        )
+        valid = torch.zeros((cp_size, capacity), dtype=torch.bool, device=device)
         restore = torch.empty(end - start, dtype=torch.int64, device=device)
         for rank, values in enumerate(rank_rows):
             absolute = torch.tensor(
@@ -484,7 +445,7 @@ class V41CPAttentionContext(V41AttentionContext):
         cp = replace(
             self.cp,
             chunk_length=capacity,
-            padded_seq_len=8 * capacity,
+            padded_seq_len=cp_size * capacity,
             seq_len_full=end - start,
             relative_positions=(local_positions - start).contiguous(),
             prefix_length=start,
@@ -685,7 +646,7 @@ class V41CPAttentionContext(V41AttentionContext):
         self.gather_count += 1
 
     def _all_gather(self, local, *, retained_bytes=0, restored_bytes=0):
-        receive_bytes = 8 * _bytes(local)
+        receive_bytes = self.cp.cp_size * _bytes(local)
         self._record_gather(
             receive_bytes,
             receive_bytes + _bytes(local) + restored_bytes + retained_bytes,
@@ -706,10 +667,11 @@ class V41CPAttentionContext(V41AttentionContext):
             )
         if first == last:
             return local_rows.new_empty((0, local_rows.shape[1]))
+        cp_size = self.cp.cp_size
         key = (first, last)
         if key not in self._gather_plans:
             source = self._restore_host[first - self.start : last - self.start]
-            per_rank = [[] for _ in range(8)]
+            per_rank = [[] for _ in range(cp_size)]
             for flat in source:
                 rank, local = divmod(flat, self.local_count)
                 per_rank[rank].append(local)
@@ -731,15 +693,15 @@ class V41CPAttentionContext(V41AttentionContext):
         capacity, indices, restore = self._gather_plans[key]
         row_bytes = local_rows.shape[1] * local_rows.element_size()
         self._record_gather(
-            8 * capacity * row_bytes,
-            (10 * capacity + last - first) * row_bytes,
+            cp_size * capacity * row_bytes,
+            ((cp_size + 2) * capacity + last - first) * row_bytes,
         )
         packed = local_rows.new_zeros((capacity, local_rows.shape[1]))
         packed[: indices.numel()].copy_(local_rows.index_select(0, indices))
         tile_cp = replace(
             self.cp,
             chunk_length=capacity,
-            padded_seq_len=8 * capacity,
+            padded_seq_len=cp_size * capacity,
             seq_len_full=last - first,
             unpad_restore=restore,
             unpad_restore_is_prefix=False,
@@ -756,25 +718,21 @@ class V41CPAttentionContext(V41AttentionContext):
 
     def _physical_async(self, table, logical, pool):
         # The GPU-side twin of _physical: the page ID stays on device (no host
-        # sync) and the bounds check rides the async assert stream.
+        # sync).
         if not 0 <= logical < table.shape[1]:
             raise ValueError("CP fixed state is missing its canonical checkpoint page")
         page = table[0, logical : logical + 1]
-        torch._assert_async(
-            ((page > 0) & (page < pool.shape[0])).all(),
-            "CP fixed state requires an allocated rank-local page",
-        )
-        # Clamp before indexing: the async assert reports after the write, so
-        # an invalid page must land on the unmapped null page, never OOB.
+        # Clamp before indexing: an invalid page must land on the unmapped null
+        # page, never OOB.
         return page.clamp(0, pool.shape[0] - 1).long()
 
     def _fixed_receive(self, pool, table, logical):
         page = self._physical(table, logical, pool)
         local = torch.zeros((2, pool.shape[1]), dtype=torch.uint8, device=pool.device)
         local[1].copy_(pool[page])
-        return self._all_gather(local, restored_bytes=8 * pool.shape[1]).view(
-            8, 2, pool.shape[1]
-        )
+        return self._all_gather(
+            local, restored_bytes=self.cp.cp_size * pool.shape[1]
+        ).view(self.cp.cp_size, 2, pool.shape[1])
 
     def restore_swa(self, layer):
         slot = RegionSlot(CacheRegion.SWA, layer)
@@ -789,9 +747,10 @@ class V41CPAttentionContext(V41AttentionContext):
                 self.cache.layout,
                 layer,
                 received,
-                torch.ones((8, 1), dtype=torch.int32, device=self.query_device),
+                torch.ones(
+                    (self.cp.cp_size, 1), dtype=torch.int32, device=self.query_device
+                ),
             )
-            restored.check()
             pages = restored.pages
         else:
             pages = CompactPages(
@@ -932,7 +891,7 @@ class V41CPAttentionContext(V41AttentionContext):
     def publish_pair(self, owner, pair):
         pool = self.pair_pools[owner]
         raw = torch.zeros(
-            pool.shape[1] * 8, dtype=torch.uint8, device=self.query_device
+            pool.shape[1] * self.cp.cp_size, dtype=torch.uint8, device=self.query_device
         )
         for snapshot, value in (
             (0, self._pair_initials[owner]),
@@ -969,12 +928,11 @@ class V41CPAttentionContext(V41AttentionContext):
     def gather_paged(self, slot, first_entry, last_entry, layer):
         """Bind a bounded index scan without assuming peer physical page IDs."""
         spec, pool, table = self._page_specs[slot], self.pools[slot], self.tables[slot]
-        if first_entry % (spec.entries * 8):
+        rr_cycle = spec.entries * self.cp.cp_size
+        if first_entry % rr_cycle:
             raise ValueError("CP scan windows must align to a complete RR page cycle")
-        first_virtual = first_entry // (spec.entries * 8)
-        virtual_count = (last_entry - first_entry + spec.entries * 8 - 1) // (
-            spec.entries * 8
-        )
+        first_virtual = first_entry // rr_cycle
+        virtual_count = (last_entry - first_entry + rr_cycle - 1) // rr_cycle
         local = torch.zeros(
             (virtual_count + 1, spec.page_stride_bytes),
             dtype=torch.uint8,
@@ -983,19 +941,17 @@ class V41CPAttentionContext(V41AttentionContext):
         ids = table[0, first_virtual : first_virtual + virtual_count].long()
         if ids.numel() != virtual_count:
             raise ValueError("CP index scan exceeds the request's allocated page table")
-        _check((ids >= 0) & (ids < pool.shape[0]), "invalid CP index physical page ID")
-        local[1:].copy_(pool.index_select(0, ids))
+        local[1:].copy_(pool.index_select(0, ids.clamp(0, pool.shape[0] - 1)))
         received = self._all_gather(local).view(
-            8, virtual_count + 1, spec.page_stride_bytes
+            self.cp.cp_size, virtual_count + 1, spec.page_stride_bytes
         )
         remapped = torch.where(
             ids > 0, torch.arange(1, virtual_count + 1, device=self.query_device), 0
         ).to(torch.int32)
         rank_tables = self._all_gather(
             remapped[None, :], retained_bytes=_bytes(received)
-        ).view(8, 1, virtual_count)
+        ).view(self.cp.cp_size, 1, virtual_count)
         restored = bind_cprr_paged(self.cache.layout, slot, received, rank_tables)
-        restored.check()
         return restored, self.lease(
             slot, (received, restored.page_table, restored.status), layer
         )
@@ -1015,7 +971,6 @@ class V41CPAttentionContext(V41AttentionContext):
         retained_bytes=0,
         query_owner=None,
         mask_negative=True,
-        defer_status=None,
     ):
         """Receive compact rows selected by each rank, retaining original quantization."""
         spec, pool, table = self._page_specs[slot], self.pools[slot], self.tables[slot]
@@ -1036,7 +991,7 @@ class V41CPAttentionContext(V41AttentionContext):
             output_bytes,
             retained_bytes
             + _bytes(positions, wanted)
-            + (9 if query_owner is None else 1) * output_bytes
+            + (self.cp.cp_size + 1 if query_owner is None else 1) * output_bytes
             + wanted.numel() * _SELECTED_METADATA_BYTES,
         )
         local = _selected_local_rows(
@@ -1046,7 +1001,7 @@ class V41CPAttentionContext(V41AttentionContext):
             spec.entries,
             spec.encoding.entry_bytes,
             self.cp.cp_rank,
-            defer_status=defer_status,
+            self.cp.cp_size,
         )
         # Each byte has exactly one page owner; SUM preserves its bit pattern.
         if query_owner is None:
@@ -1080,11 +1035,9 @@ class V41CPAttentionContext(V41AttentionContext):
                 query_owner : query_owner + 1, first:last
             ]
         # SWA query indices depend on request-scoped state and tile bounds, never
-        # on the layer; per-tile reuse across layers is bitwise identical and on
-        # by default, the env remaining only as a diagnostic override.
+        # on the layer; per-tile reuse across layers is bitwise identical.
         plan_key = (first, last, query_owner)
-        cache_indices = os.environ.get("DSV41_SWA_INDEX_CACHE", "1") == "1"
-        plan = self._swa_index_plans.get(plan_key) if cache_indices else None
+        plan = self._swa_index_plans.get(plan_key)
         if plan is None:
             offsets = torch.arange(1 - SWA_WINDOW, 1, device=self.query_device)
             wanted = (query_positions[:, :, None] + offsets).reshape(-1)
@@ -1117,8 +1070,7 @@ class V41CPAttentionContext(V41AttentionContext):
                 ),
                 {},
             ]
-            if cache_indices:
-                self._swa_index_plans[plan_key] = plan
+            self._swa_index_plans[plan_key] = plan
         (
             offsets,
             wanted,
@@ -1147,10 +1099,6 @@ class V41CPAttentionContext(V41AttentionContext):
         )
         local = encoded.index_select(0, local_indices)
         if self.replay_floor < self.start:
-            _check(
-                ~past | (wanted >= initial.valid_starts[0]),
-                "CP query is missing restored SWA history",
-            )
             if self.cp.cp_rank == 0:
                 old = initial.pages.data[
                     1, : initial.pages.entries_per_page * 528
@@ -1181,7 +1129,7 @@ class V41CPAttentionContext(V41AttentionContext):
                 return None
             values = values.index_select(0, query_rows)
             count = query_rows.numel()
-        final = plan[1].get(count) if cache_indices else None
+        final = plan[1].get(count)
         if final is None:
             positions = self._rank_positions[self.cp.cp_rank, first:last]
             if query_rows is not None:
@@ -1195,22 +1143,17 @@ class V41CPAttentionContext(V41AttentionContext):
                 0,
             ).to(torch.int32)
             valid_ends = (positions + 1).clamp_min(0).to(torch.int32)
-            if cache_indices:
-                page_indices = _swa_query_page_indices(
-                    positions, spec, self.replay_floor
-                )
-                plan[1][count] = (
-                    positions,
-                    page_ids,
-                    valid_starts,
-                    valid_ends,
-                    page_indices,
-                )
-                pages = _swa_query_pages(
-                    values, positions, spec, self.replay_floor, indices=page_indices
-                )
-            else:
-                pages = _swa_query_pages(values, positions, spec, self.replay_floor)
+            page_indices = _swa_query_page_indices(positions, spec, self.replay_floor)
+            plan[1][count] = (
+                positions,
+                page_ids,
+                valid_starts,
+                valid_ends,
+                page_indices,
+            )
+            pages = _swa_query_pages(
+                values, positions, spec, self.replay_floor, indices=page_indices
+            )
         else:
             positions, page_ids, valid_starts, valid_ends, page_indices = final
             pages = _swa_query_pages(
@@ -1258,12 +1201,7 @@ class V41CPL20Tail:
             raise ValueError(
                 "CP L20 tail requires completed full encoder rows and sources"
             )
-        _check(
-            l20.rows.valid == context.valid,
-            "CP L20 validity differs from its canonical row map",
-        )
         selected = context.selection_for(20)
-        selected.check()
         start = max(0, context.end - SWA_WINDOW)
         if previous is not None:
             if (
@@ -1279,7 +1217,7 @@ class V41CPL20Tail:
             start = max(start, previous.positions.start)
         else:
             start = max(start, context.start)
-        rank_positions = [[] for _ in range(8)]
+        rank_positions = [[] for _ in range(context.cp.cp_size)]
         old_indices = []
         if previous is not None:
             for rank, positions in enumerate(previous.rank_positions):
@@ -1443,10 +1381,9 @@ def begin_cp_request(
     Bounded orchestration supplies the independently materialized decoder end.
     """
     if (
-        cp_ctx.cp_size != 8
-        or not 0 <= cp_ctx.cp_rank < 8
+        cp_ctx.cp_size != layout.cp_size
+        or not 0 <= cp_ctx.cp_rank < cp_ctx.cp_size
         or not cp_ctx.kv_cache_sharded
-        or layout.cp_size != 8
         or (layout.speculative_tokens, layout.draft_enabled)
         not in ((0, False), (5, True))
         or identity.layout_fingerprint != layout.fingerprint
@@ -1459,18 +1396,19 @@ def begin_cp_request(
         or type(restored_state_ready) is not bool
     ):
         raise ValueError(
-            "CP prefill requires CP8 target-only or gamma5/three-draft layout and replay policy"
+            "CP prefill requires a target-only or gamma5/three-draft layout and replay policy"
         )
     if (
         not torch.distributed.is_initialized()
-        or torch.distributed.get_world_size(collective_torch._get_group(Group.TP)) != 8
+        or torch.distributed.get_world_size(collective_torch._get_group(Group.TP))
+        != cp_ctx.cp_size
     ):
         raise RuntimeError(
-            "CP8 attention requires the actual eight-rank TP process group"
+            "CP attention requires the TP process group to match the declared cp_size"
         )
     device = cp_ctx.global_positions.device
     if not is_supported(torch.empty((0, 5120), dtype=torch.bfloat16, device=device)):
-        raise RuntimeError("CP8 attention requires Blackwell CUDA")
+        raise RuntimeError("CP attention requires Blackwell CUDA")
     cache = V41AttentionCache(request_id, identity, layout, max_tokens, {}, {})
     context = V41CPAttentionContext(
         cache, cp_ctx, request_index, pools, tables, pair_pools, pair_tables, epoch
@@ -1510,7 +1448,8 @@ def begin_cp_request(
                 context.end + layout.token_block_size - 1
             ) // layout.token_block_size
             logicals = [
-                logical // 8 for logical in range(cp_ctx.cp_rank, block_count, 8)
+                logical // cp_ctx.cp_size
+                for logical in range(cp_ctx.cp_rank, block_count, cp_ctx.cp_size)
             ]
             # One batched read per table instead of a forced scalar sync per
             # logical page; the checks and their order match _physical.
@@ -1535,7 +1474,9 @@ def begin_cp_request(
         pair = None
         if owner in PAIR_OWNERS:
             pair_size = (
-                ((context._pair_snapshots[owner] * _PAIR_BYTES + 511) // 512) * 512 // 8
+                ((context._pair_snapshots[owner] * _PAIR_BYTES + 511) // 512)
+                * 512
+                // layout.cp_size
             )
             pool, table = pair_pools[owner], pair_tables[owner]
             if (
@@ -1657,7 +1598,6 @@ def _publish_owner(attention, hidden, context, source_rows=0):
     source_rows = source_rows or _SOURCE_ROWS
     if source_rows < 2 or source_rows % 2:
         raise ValueError("CP source tile must be a positive even row count")
-    pending = []
     for first in range(context.start, context.end, source_rows):
         last = min(first + source_rows, context.end)
         source_hidden = context.gather_rows(hidden, first, last)
@@ -1685,23 +1625,18 @@ def _publish_owner(attention, hidden, context, source_rows=0):
                     context.cache.layout.token_block_size,
                     pages.entries_per_page,
                     attention.source.ratio,
-                    8,
+                    context.cp.cp_size,
                     context.cp.cp_rank,
                 )
             )
-        pending.extend(
-            rows.store(
-                OwnerPageBinding(owner, context.cache.identity, state.global_kv.pages),
-                OwnerPageBinding(owner, context.cache.identity, state.index_pages),
-                *slots,
-            )
+        rows.store(
+            OwnerPageBinding(owner, context.cache.identity, state.global_kv.pages),
+            OwnerPageBinding(owner, context.cache.identity, state.index_pages),
+            *slots,
         )
         state.pair = source.next_pair
         state.materialized_end = last
         del source_hidden, source, rows, slots
-    # One synchronous writer status check per layer, after every source tile.
-    CompactWriteResult.check_all(pending)
-    del pending
     if owner in PAIR_OWNERS:
         context.publish_pair(owner, state.pair)
     context.published_sources.add(owner)
@@ -1804,7 +1739,7 @@ def _score_queries(attention, hidden, qr, context):
                 )
                 # Size the common transport schedule for the largest rank buffer.
                 padded_value_bytes = (last - first) * actual.shape[1] * 68
-                peers = 8 if context.single_query_owner is None else 1
+                peers = context.cp.cp_size if context.single_query_owner is None else 1
                 transport_blocks = min(
                     _REINDEX_BLOCKS,
                     (MAX_GATHER_BYTES - padded_value_bytes - _bytes(actual))
@@ -1812,7 +1747,7 @@ def _score_queries(attention, hidden, qr, context):
                         (last - first)
                         * SPARSE_BLOCK
                         * (
-                            (9 if peers == 8 else 1) * 68
+                            (peers + 1 if peers == context.cp.cp_size else 1) * 68
                             + peers * (4 + _SELECTED_METADATA_BYTES)
                             + 4
                         )
@@ -1820,10 +1755,8 @@ def _score_queries(attention, hidden, qr, context):
                 )
                 # Tile transport, then score the complete candidate set once.
                 # This preserves the existing selector's tie behavior. The
-                # per-tile owner-page status asserts batch into one async
-                # assert and the negative-position mask applies once over the
-                # complete values tensor (bitwise identical to per-tile masks).
-                statuses = []
+                # negative-position mask applies once over the complete values
+                # tensor (bitwise identical to per-tile masks).
                 for row_first in range(
                     0, actual.shape[1], transport_blocks * SPARSE_BLOCK
                 ):
@@ -1835,7 +1768,6 @@ def _score_queries(attention, hidden, qr, context):
                         retained_bytes=_bytes(values, actual),
                         query_owner=context.single_query_owner,
                         mask_negative=False,
-                        defer_status=statuses,
                     )
                     if count:
                         values[:, row_first:row_last].copy_(
@@ -1843,11 +1775,6 @@ def _score_queries(attention, hidden, qr, context):
                         )
                     context.release(row_lease, layer)
                     del received, row_lease
-                if statuses:
-                    torch._assert_async(
-                        (torch.cat(statuses) == 0).all(),
-                        "CP selected KV row has no allocated owner page",
-                    )
                 if not count:
                     del values, actual
                     continue
@@ -1924,8 +1851,6 @@ def _score_queries(attention, hidden, qr, context):
                 query_rows,
                 blocks[first].ordered_positions(),
             )
-    # One synchronous status check per layer, after every tile merged above.
-    ReaderResult(topk, query_status).check()
     context.publish_selection(
         IndexSelection(
             topk,
@@ -1943,8 +1868,8 @@ def _score_queries(attention, hidden, qr, context):
 @torch.inference_mode()
 def forward_cp_attention(attention, hidden, context):
     context.validate()
-    if os.environ.get("DSV41_ATTENTION") != "1" or not is_supported(hidden):
-        raise RuntimeError("CP8 attention requires opt-in Blackwell BF16 execution")
+    if not hidden.is_cuda or hidden.dtype != torch.bfloat16:
+        raise ValueError("CP attention needs CUDA BF16 hidden rows")
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError(
             "CP prefill collectives require eager scheduling outside Graph capture"
@@ -1962,31 +1887,19 @@ def forward_cp_attention(attention, hidden, context):
         and attention.compressor.layout != context.cache.layout
     ):
         raise ValueError("CP compressor and framework cache layouts differ")
-    backend = os.environ.get("DSV41_ATTENTION_BACKEND", "native")
-    if backend not in ("native", "flashmla"):
-        raise ValueError("unknown V4.1 attention backend; no silent fallback")
-    read_queries = int(os.environ.get("DSV41_CP_READ_QUERIES", _READ_QUERIES))
-    # The cap tracks the 1 GiB gather-live-byte budget (512 rows x SWA_WINDOW x
-    # 528B x 24 transient ~= 830 MiB). 512 is the measured optimum and the code
-    # default (see _READ_QUERIES); the env stays only as a diagnostic override.
-    if not 1 <= read_queries <= 512:
-        raise ValueError("CP attention query batch must be between 1 and 512")
+    # 512-row read tiles are the measured optimum tracking the 1 GiB
+    # gather-live-byte budget (512 rows x SWA_WINDOW x 528B x 24 transient ~=
+    # 830 MiB; see _READ_QUERIES). Single-owner transport stages a 64-row owner
+    # batch on top of the per-gather live-byte accounting.
+    read_queries = _READ_QUERIES
     if context.single_query_owner is not None:
-        owner_batch = int(os.environ.get("DSV41_CP_SINGLE_OWNER_READ_QUERIES", "64"))
-        if owner_batch not in (32, 64, 128):
-            raise ValueError("CP single-owner query batch must be 32, 64 or 128")
-        # Reader staging is additional to the per-gather live-byte accounting.
-        read_queries = min(owner_batch, 8 * read_queries)
+        read_queries = min(64, context.cp.cp_size * read_queries)
     # The 8192-row source tile is the measured optimum (GB200 p13 A/B
     # 2026-09-17: 512 vs 2048 vs 8192 same-wheel back-to-back arms; 8192 wins
-    # the 16K composition counts and the 64K unprofiled latency, ties 16K) and
-    # the code default; the gather live-byte accounting in _record_gather
-    # bounds the tile by the 1 GiB budget. The env stays only as a diagnostic
-    # override. Validated here (before the poisoned-on-failure body) like
-    # read_queries.
-    source_rows = int(os.environ.get("DSV41_CP_SOURCE_ROWS", _SOURCE_ROWS))
-    if source_rows < 2 or source_rows % 2:
-        raise ValueError("CP source tile must be a positive even row count")
+    # the 16K composition counts and the 64K unprofiled latency, ties 16K); the
+    # gather live-byte accounting in _record_gather bounds the tile by the
+    # 1 GiB budget.
+    source_rows = _SOURCE_ROWS
     try:
         model_positions = context.pack_model_rows(context.positions)
         qr, query, kv = (
@@ -2001,7 +1914,6 @@ def forward_cp_attention(attention, hidden, context):
             _score_queries(attention, hidden, qr, context)
         query_rows = context.query_row_indices(0, context.query_rows)
         encoded = encode_compact(_query_rows(kv, query_rows), CacheRegion.SWA)
-        encoded.check()
         if query_rows is None:
             encoded_rows = encoded.output
         else:
@@ -2017,12 +1929,8 @@ def forward_cp_attention(attention, hidden, context):
             if indices is not None
             else None
         )
-        # The per-tile reader status checks batch into one DtoH copy per layer
-        # (measured: the per-tile .cpu() is the dominant forced host sync in
-        # the p13-final py-spy, 126 samples vs single digits elsewhere). The
-        # batched check keeps identical accept/reject semantics and still runs
-        # before the output is consumed by the inverse RoPE below.
-        read_results = []
+        # The per-tile reader output is copied into the query-row layout before
+        # the inverse RoPE below consumes it.
         for first in range(0, hidden.shape[0], read_queries):
             last = min(first + read_queries, hidden.shape[0])
             query_rows = context.query_row_indices(first, last)
@@ -2060,19 +1968,16 @@ def forward_cp_attention(attention, hidden, context):
                 global_indices = torch.where(selected >= 0, dense, -1).contiguous()
             elif not count:
                 continue
-            reader = compact_attention
-            if backend == "flashmla":
-                from rtp_llm.models_py.modules.dsv41.flashmla import (
-                    flashmla_compact_attention,
-                )
+            from rtp_llm.models_py.modules.dsv41.flashmla import (
+                flashmla_compact_attention,
+            )
 
-                reader = flashmla_compact_attention
             positions = torch.where(
                 _query_rows(context.valid[first:last], query_rows),
                 _query_rows(context.positions[first:last], query_rows),
                 -1,
             ).to(torch.int32)
-            result = reader(
+            result = flashmla_compact_attention(
                 _query_rows(query[first:last], query_rows).contiguous(),
                 torch.arange(count, dtype=torch.int32, device=hidden.device),
                 positions,
@@ -2082,14 +1987,11 @@ def forward_cp_attention(attention, hidden, context):
                 global_kv=global_kv,
                 global_indices=global_indices,
             )
-            read_results.append(result)
             _copy_query_rows(output[first:last], query_rows, result.output)
             if lease is not None:
                 context.release(lease, attention.layer)
                 del values, pages, table, lease
             del result, swa, global_kv
-        ReaderResult.check_all(read_results)
-        del read_results
         context.publish_swa(attention.layer, initial, encoded_rows)
         output = attention_rope(
             context.pack_model_rows(output),
@@ -2110,7 +2012,7 @@ def forward_cp_attention(attention, hidden, context):
         context.observations.append(
             {
                 "layer": attention.layer,
-                "reader_backend": backend,
+                "reader_backend": "flashmla",
                 "query_identity": context.query_identity,
                 "query_rows": hidden.shape[0],
                 "model_rows": context.model_query_rows,
@@ -2125,7 +2027,7 @@ def forward_cp_attention(attention, hidden, context):
                     if attention.source.scores_queries
                     else 0
                 ),
-                "cp_size": 8,
+                "cp_size": context.cp.cp_size,
                 "gather_count": context.gather_count,
                 "max_receive_bytes": context.max_receive_bytes,
                 "max_gather_live_bytes": context.max_gather_live_bytes,

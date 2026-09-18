@@ -81,6 +81,7 @@ enum GptModelInputIndex : size_t {
     kvCacheLayerToGroupLen,
     kvCacheGroupTypesLen,
     kvCacheUpdateCopyNum,
+    v41StateCopyNum,
     lmOutputIndexes,
     comboPositionIds,
     textTokensMask,
@@ -148,8 +149,8 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
-    virtual std::vector<DSV41ExecutionState> commitV41RetainedRows(const torch::Tensor& /*retained_rows*/) {
-        throw std::logic_error("V4.1 target model does not implement retained-row commit");
+    virtual void commitRetainedRows(const torch::Tensor& /*retained_rows*/) {
+        throw std::logic_error("target model does not implement retained-row commit");
     }
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-

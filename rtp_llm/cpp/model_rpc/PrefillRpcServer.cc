@@ -469,23 +469,6 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     generate_request.set_client_id(process_id_);
     generate_request.set_request_id(prefill_context.request_id);
     generate_request.set_first_generate_token_id(first_token);
-    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
-    if (cache_config.dsv41_cache_layout_version != 0) {
-        const auto& state = stream->kvCachePtr()->cacheResource(0).dsv41CacheState();
-        const auto  view  = state ? state->view() : DSV41CacheState::View{};
-        if (!view.execution || view.execution->request_id != prefill_context.request_id
-            || view.execution->materialized_end != stream->inputLength()) {
-            prefill_context.error_status =
-                grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                             "V4.1 PD requires actual completed producer state at prompt end");
-            return;
-        }
-        const auto& cp_config = maga_init_params_.parallelism_config.prefill_cp_config;
-        const int   cp_size   = cp_config.kv_cache_sharded ? maga_init_params_.parallelism_config.tp_size : 1;
-        *generate_request.mutable_v41_execution_state() =
-            dsv41ExecutionStateToProto(*view.execution, cache_config, cp_size);
-        validateDSV41History(*view.execution, *prefill_context.rpc_context.request);
-    }
     auto context_position_ids = stream->getContextPositionIds();
     if (context_position_ids.defined()) {
         generate_request.mutable_position_ids()->CopyFrom(

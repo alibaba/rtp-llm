@@ -78,8 +78,6 @@ class FlashMLAGpuTest(unittest.TestCase):
             torch.empty(0, device="cuda")
         ):
             raise RuntimeError("FlashMLA required probes need a real SM100/SM103 GPU")
-        if os.environ.get("DSV41_FLASHMLA") != "1":
-            raise RuntimeError("set DSV41_FLASHMLA=1 for this explicit candidate")
         cls.quant, cls.reference = load_reference(os.environ["DSV41_FLASHMLA_SOURCE"])
         torch.backends.cuda.matmul.allow_tf32 = False
         print(

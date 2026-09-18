@@ -71,18 +71,18 @@ class TargetHeadBindingTest(unittest.TestCase):
         shard = base.head.chunk(8, dim=0)[0]
         with self.assertRaisesRegex(ValueError, "head shape"):
             self.model(base, shard)
-        for size, rank in (
-            (True, 0),
-            (2, 0),
-            (4, 0),
-            (16, 0),
-            (8, -1),
-            (8, 8),
-            (1, 1),
-            (8, False),
+        for size, rank, message in (
+            (True, 0, "head partition"),
+            (2, 0, "head shape"),
+            (4, 0, "head shape"),
+            (16, 0, "head shape"),
+            (8, -1, "head partition"),
+            (8, 8, "head partition"),
+            (1, 1, "head partition"),
+            (8, False, "head partition"),
         ):
             with self.subTest(size=size, rank=rank):
-                with self.assertRaisesRegex(ValueError, "head partition"):
+                with self.assertRaisesRegex(ValueError, message):
                     self.model(base, shard, head_tp_size=size, head_tp_rank=rank)
         with self.assertRaisesRegex(ValueError, "head shape"):
             self.model(base, base.head, head_tp_size=8, head_tp_rank=0)

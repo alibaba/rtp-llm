@@ -889,6 +889,16 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+    {
+        // Replay the rank-0 allocator's V4.1 writable-backing clones on this
+        // rank's local pools; rank 0 already performed them locally, and only
+        // rank 0 runs the allocator, so non-root ranks replay them here.
+        if (parallelism_config_.tp_rank != 0 && model_input.v41_state_copy_mapping.defined()
+            && model_input.v41_state_copy_mapping.numel() > 0) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(v41_state_copy)");
+            cache_manager_->dsv41StateBlockCopy(model_input.v41_state_copy_mapping);
+        }
+    }
 
     ProfileStepGuard profile_step(model_input.is_fake_stream ? nullptr : step_profiler_);
     metrics_collector.not_skip = true;
@@ -940,20 +950,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
         if (!model_input.is_fake_stream) {
-            const auto status = NormalOutputDispatcher::prepareV41Sampling(stream_groups, model_output);
-            if (!status.ok())
-                return status;
-            if (v41_prefill_commit && !warm_up_) {
-                for (const auto& stream : streams) {
-                    const auto found = std::find_if(model_output.v41_execution_states.begin(),
-                                                    model_output.v41_execution_states.end(), [&](const auto& value) {
-                        return value.request_id == stream->streamId() && value.draft_layers == 3
-                               && value.materialized_end == stream->seqLength() && value.draft_committed;
-                    });
-                    RTP_LLM_CHECK_WITH_INFO(found != model_output.v41_execution_states.end(),
-                                            "V4.1 prefill must commit selected draft rows before sampling");
-                }
-            }
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
@@ -1498,7 +1494,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             applySpecLogitsAcceptLenCap(
                 sampler_input, sampler_output, speculative_sampler_output, batch_size, propose_step_);
             if (v41_decode)
-                batch_stream_processor_->truncateV41AcceptedRows(stream_groups, speculative_sampler_output);
+                batch_stream_processor_->truncateAcceptedRows(stream_groups, speculative_sampler_output);
         }
 
         if (is_dspark_) {
@@ -1556,7 +1552,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                   torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
         if (parallelism_config_.tp_size > 1)
             execBroadcast({{retained}, 0});
-        draft_prefill_model_output.v41_execution_states = model_->commitV41RetainedRows(retained);
+        model_->commitRetainedRows(retained);
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -2077,9 +2073,6 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.prepare_streams(stream_size=%zu)", streams.size());
 
     for (auto& stream : streams) {
-        if (cache_manager_ && cache_manager_->cacheConfig().dsv41_cache_layout_version == 1
-            && !stream->isFakeStream() && (stream->isFinished() || stream->hasError()))
-            continue;
         // split streams into prefill and decode
         if (stream->isContextStream()) {
             prefill_streams.push_back(stream);
@@ -2128,10 +2121,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     // bookkeeping round. DROP_BROAD_SYNC lets draft/verify consume the state
     // already published on GPU and waits only at later host consumers such as
     // spec-logits processing and target sampling.
-    const bool v41_canonical_history = cache_manager_ && cache_manager_->cacheConfig().dsv41_cache_layout_version == 1;
-    // V4.1 gathers canonical predecessor tokens and completed execution state
-    // together, so its previous native publication must precede input gather.
-    if (useStreamAsync() && (!useDropBroadSync() || v41_canonical_history)) {
+    if (useStreamAsync() && !useDropBroadSync()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.wait_prev_bookkeeping(stream_count=%zu)", streams.size());
         spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
     }

@@ -6,11 +6,6 @@ py_test(
         "//rtp_llm:rtp_llm_lib",
     ],
     data = ["//:rtp_compute_ops"],
-    env = {
-        "DSV41_BLOCK32_LINEAR": "1",
-        "DSV41_FLASHMLA": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
@@ -21,15 +16,6 @@ py_test(
         "//rtp_llm:rtp_llm_lib",
     ],
     data = ["//:rtp_compute_ops"],
-    env = {
-        "DSV41_ATTENTION": "1",
-        "DSV41_DECODE_ATTENTION": "1",
-        "DSV41_DECODE_OWNER_COMPRESSOR": "1",
-        "DSV41_OWNER_COMPRESSOR": "1",
-        "DSV41_SPARSE_INDEXER": "1",
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
@@ -42,15 +28,7 @@ py_test(
     ],
     data = ["//:rtp_compute_ops"],
     env = {
-        "DSV41_ATTENTION": "1",
         "DSV41_ATTENTION_BACKEND": "flashmla",
-        "DSV41_FLASHMLA": "1",
-        "DSV41_DECODE_ATTENTION": "1",
-        "DSV41_DECODE_OWNER_COMPRESSOR": "1",
-        "DSV41_OWNER_COMPRESSOR": "1",
-        "DSV41_SPARSE_INDEXER": "1",
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
     },
 )
 
@@ -58,26 +36,12 @@ py_test(
     name = "test_decode_attention",
     srcs = ["test_decode_attention.py", "test_attention.py", "official_compressor.py", "test_compact_writer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_ATTENTION": "1",
-        "DSV41_DECODE_ATTENTION": "1",
-        "DSV41_DECODE_OWNER_COMPRESSOR": "1",
-        "DSV41_OWNER_COMPRESSOR": "1",
-        "DSV41_SPARSE_INDEXER": "1",
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
     name = "test_decode_compressor",
     srcs = ["test_decode_compressor.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_DECODE_OWNER_COMPRESSOR": "1",
-        "DSV41_OWNER_COMPRESSOR": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
@@ -120,7 +84,6 @@ py_test(
     name = "test_flashmla_compact",
     srcs = ["test_flashmla_compact.py", "test_flashmla.py", "official_flashmla.py", "test_compact_reader.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {"DSV41_FLASHMLA": "1"},
 )
 
 py_test(
@@ -136,7 +99,6 @@ py_test(
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     env = {
         "DSV41_CPRR_READER_BACKEND": "native",
-        "DSV41_NATIVE_COMPACT_READER": "1",
     },
 )
 
@@ -147,40 +109,6 @@ py_test(
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     env = {
         "DSV41_CPRR_READER_BACKEND": "flashmla",
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_FLASHMLA": "1",
-    },
-)
-
-py_test(
-    name = "test_generation_lifecycle",
-    srcs = ["test_generation_lifecycle.py", "test_generation.py", "test_prefill.py", "test_attention.py", "test_transformer.py", "fixture.py", "official_compressor.py", "test_compact_writer.py"],
-    deps = [
-        "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm:models",
-    ],
-    env = {
-        "DSV41_ATTENTION": "1",
-        "DSV41_OWNER_COMPRESSOR": "1",
-        "DSV41_SPARSE_INDEXER": "1",
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
-)
-
-py_test(
-    name = "test_generation",
-    srcs = ["test_generation.py", "test_prefill.py", "test_attention.py", "test_transformer.py", "fixture.py", "official_compressor.py", "test_compact_writer.py"],
-    deps = [
-        "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm:models",
-    ],
-    env = {
-        "DSV41_ATTENTION": "1",
-        "DSV41_OWNER_COMPRESSOR": "1",
-        "DSV41_SPARSE_INDEXER": "1",
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
     },
 )
 
@@ -191,13 +119,6 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:models",
     ],
-    env = {
-        "DSV41_ATTENTION": "1",
-        "DSV41_OWNER_COMPRESSOR": "1",
-        "DSV41_SPARSE_INDEXER": "1",
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
@@ -207,23 +128,12 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:models",
     ],
-    env = {
-        "DSV41_ATTENTION": "1",
-        "DSV41_OWNER_COMPRESSOR": "1",
-        "DSV41_SPARSE_INDEXER": "1",
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
     name = "test_compact_writer_alias",
     srcs = ["test_compact_writer_alias.py", "test_compact_writer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
@@ -239,68 +149,42 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:models",
     ],
-    env = {
-        "DSV41_ATTENTION": "1",
-        "DSV41_OWNER_COMPRESSOR": "1",
-        "DSV41_SPARSE_INDEXER": "1",
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
     name = "test_flashmla_multikey",
     srcs = ["test_flashmla_multikey.py", "test_flashmla.py", "official_flashmla.py", "test_compact_reader.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {"DSV41_FLASHMLA": "1"},
 )
 
 py_test(
     name = "test_flashmla",
     srcs = ["test_flashmla.py", "official_flashmla.py", "test_compact_reader.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {"DSV41_FLASHMLA": "1"},
 )
 
 py_test(
     name = "test_deepselect",
     srcs = ["test_deepselect.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {"DSV41_DEEPSELECT": "1"},
 )
 
 py_test(
     name = "test_attention",
     srcs = ["test_attention.py", "official_compressor.py", "test_compact_writer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_ATTENTION": "1",
-        "DSV41_OWNER_COMPRESSOR": "1",
-        "DSV41_SPARSE_INDEXER": "1",
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
     name = "test_indexer",
     srcs = ["test_indexer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_SPARSE_INDEXER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
     name = "test_compressor",
     srcs = ["test_compressor.py", "official_compressor.py", "test_compact_writer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_OWNER_COMPRESSOR": "1",
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_library(
@@ -322,24 +206,18 @@ py_test(
     name = "test_engram_gather_quant",
     srcs = ["test_engram_gather_quant.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {"DSV41_BLOCK32_LINEAR": "1"},
 )
 
 py_test(
     name = "test_compact_writer",
     srcs = ["test_compact_writer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_NATIVE_COMPACT_READER": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(
     name = "test_compact_reader",
     srcs = ["test_compact_reader.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {"DSV41_NATIVE_COMPACT_READER": "1"},
 )
 
 py_test(
@@ -361,6 +239,12 @@ py_test(
 )
 
 py_test(
+    name = "test_contract_lint",
+    srcs = ["test_contract_lint.py", "standalone_load.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
+
+py_test(
     name = "test_math",
     srcs = ["test_math.py", "standalone_load.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
@@ -370,14 +254,12 @@ py_test(
     name = "test_linear",
     srcs = ["test_linear.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {"DSV41_BLOCK32_LINEAR": "1"},
 )
 
 py_test(
     name = "test_moe",
     srcs = ["test_moe.py", "fixture.py", "official_compressor.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {"DSV41_MOE": "1"},
     tags = ["requires-dsv41-component-inputs"],
 )
 
@@ -388,7 +270,6 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:models",
     ],
-    env = {"DSV41_BLOCK32_LINEAR": "1"},
     tags = ["requires-full-engram-host-memory"],
     timeout = "long",
 )
@@ -409,10 +290,6 @@ py_test(
     name = "test_draft",
     srcs = ["test_draft.py", "fixture.py", "official_compressor.py", "test_compact_writer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    env = {
-        "DSV41_BLOCK32_LINEAR": "1",
-        "DSV41_NATIVE_COMPACT_WRITER": "1",
-    },
 )
 
 py_test(

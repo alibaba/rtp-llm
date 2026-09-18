@@ -16,8 +16,6 @@
 
 namespace rtp_llm {
 
-struct DSV41CheckpointMetadata;
-
 class PrefixTreeMemoryBlockCache {
 public:
     static constexpr size_t kKindCount = 2;
@@ -37,7 +35,7 @@ public:
         uint32_t             subtree_ref_count{0};
         std::vector<uint8_t> slot_valid_mask;
 
-        std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata;
+        std::shared_ptr<const void> recovery_metadata;
     };
 
     struct CacheItem {
@@ -52,7 +50,7 @@ public:
         int64_t              created_time_us{0};
         std::vector<uint8_t> slot_valid_mask;
         // Published with this backing generation; KV matches do not require it.
-        std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata;
+        std::shared_ptr<const void> recovery_metadata;
     };
 
     struct MatchResult {
@@ -65,7 +63,7 @@ public:
         int64_t              created_time_us{0};
         std::vector<uint8_t> slot_valid_mask;
 
-        std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata;
+        std::shared_ptr<const void> recovery_metadata;
     };
 
     bool contains(CacheKeyType cache_key, CacheBlockKind kind) const;

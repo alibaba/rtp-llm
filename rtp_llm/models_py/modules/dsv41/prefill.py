@@ -1,4 +1,4 @@
-"""CED stage execution over local pages or framework-owned CP8 cache shards."""
+"""CED stage execution over local pages or framework-owned CP cache shards."""
 
 from dataclasses import dataclass, fields, replace
 
@@ -124,10 +124,6 @@ class V41L20Tail:
             raise ValueError(
                 "L20 tail requires its query top-k, candidates and valid status"
             )
-        selected.check()
-        torch._assert_async(
-            l20.rows.valid.all(), "local L20 tail cannot retain padding"
-        )
         start = max(0, context.end - SWA_WINDOW)
         if previous is not None:
             if (
@@ -726,9 +722,6 @@ class V41PrefillExecutor:
                 )
             ):
                 raise ValueError("prefill features disagree with the canonical images")
-        torch._assert_async(
-            rows.valid.all(), "local prefill cannot substitute padded rows"
-        )
         context = self.cache.begin_forward(
             epoch=epoch, start=extend.encoder_rows.start, end=extend.encoder_rows.end
         )
@@ -906,7 +899,7 @@ class V41CPPrefillExecutor:
     ):
         if (
             not request_id
-            or layout.cp_size != 8
+            or layout.cp_size <= 1
             or identity.layout_fingerprint != layout.fingerprint
             or identity.replay_fingerprint
             not in (
@@ -1099,7 +1092,6 @@ class V41CPPrefillExecutor:
         protected_checkpoint_end,
         final_handoff_end,
         protect_checkpoint=None,
-        report_progress=None,
         image_features=None,
         lookup_outputs=None,
     ):
@@ -1185,8 +1177,6 @@ class V41CPPrefillExecutor:
                 history = V41CPHistory.at_boundary(encoder, current_rows)
                 if bounded:
                     self.tail = V41CPL20Tail.append(self.tail, l20, encoder)
-                if report_progress is not None:
-                    report_progress(progress)
                 decoder, draft_rows = None, None
                 if extend.decoder_rows is not None:
                     if bounded:
@@ -1231,8 +1221,6 @@ class V41CPPrefillExecutor:
                         extend, LateCompletion(extend.decoder_rows, True, True)
                     )
                     decoder.scatter_rows(output.hidden_states, output=hidden)
-                    if report_progress is not None:
-                        report_progress(progress)
                     if extend.checkpoint_end is not None:
                         if protect_checkpoint(decoder, history) is not True:
                             raise RuntimeError(

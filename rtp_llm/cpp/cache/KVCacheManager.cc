@@ -287,6 +287,10 @@ void KVCacheManager::blockBatchCopy(const BlockIdPair* copy_mapping_begin, const
     return allocator_->blockBatchCopy(copy_mapping_begin, copy_mapping_end);
 }
 
+void KVCacheManager::dsv41StateBlockCopy(const torch::Tensor& copy_triples) {
+    return allocator_->dsv41StateBlockCopy(copy_triples);
+}
+
 bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                    const std::vector<int>&        block_src_batch,
                                    bool                           copy_last_block,
@@ -738,9 +742,9 @@ KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteC
     return coordinator_->asyncWrite(connector_context);
 }
 
-bool KVCacheManager::stageDsv41Checkpoint(const KVCacheResource& resource,
-                                         const std::function<void()>& wait_for_producer,
-                                         const std::shared_ptr<Meta>& meta) {
+bool KVCacheManager::stageDsv41Checkpoint(const KVCacheResource&       resource,
+                                          const std::function<void()>& wait_for_producer,
+                                          const std::shared_ptr<Meta>& meta) {
     return coordinator_ && coordinator_->stageDsv41Checkpoint(resource, wait_for_producer, meta);
 }
 

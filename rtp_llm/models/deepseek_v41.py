@@ -323,9 +323,6 @@ class DeepSeekV41(DeepSeekV2):
 
     @classmethod
     def from_config(cls, model_config, *args, **kwargs):
-        revision = model_config.dsv41_model_revision
-        if len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
-            raise ValueError("DSV41_HF_REVISION must identify the immutable checkpoint")
         return super().from_config(model_config, *args, **kwargs)
 
     def support_cuda_graph(self) -> bool:

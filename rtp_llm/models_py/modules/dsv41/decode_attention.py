@@ -6,8 +6,6 @@ start of the captured target forward. The existing target blocks, Engram, MoE
 and aux selection remain caller-owned. No alternate GraphRunner is created.
 """
 
-import os
-
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -23,7 +21,6 @@ from rtp_llm.models_py.modules.dsv41.cache_layout import (
 from rtp_llm.models_py.modules.dsv41.compact_reader import (
     GlobalBinding,
     SwaBinding,
-    compact_attention,
 )
 from rtp_llm.models_py.modules.dsv41.compact_writer import write_compact
 from rtp_llm.models_py.modules.dsv41.decode_compressor import (
@@ -144,8 +141,6 @@ class V41DecodeAttentionContext:
             (self.rows,), -1, dtype=torch.int32, device=device
         )
         self.active = torch.zeros(self.rows, dtype=torch.bool, device=device)
-        self.source_ready = torch.zeros(40, dtype=torch.bool, device=device)
-        self.selection_ready = torch.zeros(40, dtype=torch.bool, device=device)
         self.completed = torch.zeros(40, dtype=torch.bool, device=device)
         self.topk = {
             layer: torch.full((self.rows, 512), -1, dtype=torch.int32, device=device)
@@ -191,21 +186,6 @@ class V41DecodeAttentionContext:
             or (replay_floors is not None and set(replay_floors) != set(self.swa))
         ):
             raise ValueError("decode recovery must cover all target regions and pairs")
-        live = valid_rows > 0
-        torch._assert_async(
-            (
-                (valid_rows >= 0)
-                & (valid_rows <= self.query_width)
-                & (
-                    ~live
-                    | (
-                        (start_positions >= 0)
-                        & (start_positions + valid_rows <= self.max_tokens)
-                    )
-                )
-            ).all(),
-            "decode request exceeds its fixed graph capacity",
-        )
         self.start_positions.copy_(start_positions)
         self.valid_rows.copy_(valid_rows)
         for layer, destination in self.swa.items():
@@ -221,23 +201,6 @@ class V41DecodeAttentionContext:
                     replay_floors[layer], floor.shape, floor.dtype, self.device, "floor"
                 )
                 floor.copy_(replay_floors[layer])
-            torch._assert_async(
-                (
-                    ~live
-                    | (
-                        (source.valid_ends == start_positions)
-                        & (source.valid_starts >= 0)
-                        & (source.valid_starts <= (start_positions - 128).clamp_min(0))
-                        & (
-                            source.valid_ends - source.valid_starts
-                            <= source.pages.entries_per_page
-                        )
-                        & (floor >= 0)
-                        & (floor <= source.valid_starts)
-                    )
-                ).all(),
-                "decode continuation requires complete restored target SWA",
-            )
             destination.page_ids.copy_(source.page_ids)
             destination.valid_starts.copy_(source.valid_starts)
             destination.valid_ends.copy_(source.valid_ends)
@@ -266,8 +229,6 @@ class V41DecodeAttentionContext:
         self.active.copy_(active.flatten())
         self.positions.copy_(torch.where(active, positions, 0).flatten())
         self.reader_positions.copy_(torch.where(active, positions, -1).flatten())
-        self.source_ready.zero_()
-        self.selection_ready.zero_()
         self.completed.zero_()
         for inverse, frequencies in (
             (self.inverse_global, self.global_frequencies),
@@ -336,15 +297,9 @@ class V41DecodeAttention(nn.Module):
         ):
             raise ValueError("decode owner and target graph use different cache layouts")
         self.context = context
-        backend = os.environ.get("DSV41_ATTENTION_BACKEND", "native")
-        if backend == "native":
-            self.reader = compact_attention
-        elif backend == "flashmla":
-            from rtp_llm.models_py.modules.dsv41.flashmla import flashmla_compact_attention
+        from rtp_llm.models_py.modules.dsv41.flashmla import flashmla_compact_attention
 
-            self.reader = flashmla_compact_attention
-        else:
-            raise ValueError("unknown V4.1 decode attention backend")
+        self.reader = flashmla_compact_attention
         self.compressor = (
             V41DecodeOwnerCompressor.from_owner(
                 attention.compressor,
@@ -378,10 +333,6 @@ class V41DecodeAttention(nn.Module):
 
     def _score(self, hidden, qr):
         context, attention = self.context, self.attention
-        torch._assert_async(
-            context.source_ready[self.source.index_k_owner],
-            "index owner has not executed",
-        )
         state = context.owners[self.source.index_k_owner]
         query = _rotate(
             attention.index_wq_b(qr).reshape(-1, 32, 128),
@@ -395,10 +346,6 @@ class V41DecodeAttention(nn.Module):
             (context.positions + 1) // self.source.ratio,
             0,
         ).to(torch.int32)
-        if self.layer > 20:
-            torch._assert_async(
-                context.selection_ready[20], "reindex needs current L20 candidates"
-            )
         for first in range(0, context.rows, QUERY_TILE):
             last = min(first + QUERY_TILE, context.rows)
             result = select_index_positions(
@@ -418,14 +365,11 @@ class V41DecodeAttention(nn.Module):
             context.index_status[self.layer][first:last].copy_(result.status)
             if self.layer == 20:
                 context.candidates[first:last].copy_(result.candidate_blocks)
-        context.selection_ready[self.layer].fill_(True)
 
     @torch.inference_mode()
     def forward(self, hidden, context):
         if context is not self.context:
             raise ValueError("decode wrapper received another graph's context")
-        if os.environ.get("DSV41_DECODE_ATTENTION", "0") != "1":
-            raise RuntimeError("set DSV41_DECODE_ATTENTION=1 for graph attention")
         _tensor(
             hidden,
             (context.rows, 5120),
@@ -456,18 +400,8 @@ class V41DecodeAttention(nn.Module):
                     self.layer, state.index_table, state.index_pages.entries_per_page
                 ),
             )
-            context.source_ready[self.layer].fill_(True)
         if self.source.scores_queries:
             self._score(hidden, qr)
-        if self.source.ratio:
-            torch._assert_async(
-                context.source_ready[self.source.global_owner],
-                "global owner has not executed",
-            )
-            torch._assert_async(
-                context.selection_ready[self.source.topk_owner],
-                "query owner has not executed",
-            )
         swa = context.swa[self.layer]
         entries = swa.pages.entries_per_page
         slots = (

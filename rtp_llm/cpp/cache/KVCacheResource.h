@@ -1,18 +1,17 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
-
-class DSV41CacheState;
-struct DSV41CheckpointMetadata;
 
 using CacheKeyType = int64_t;
 using BlockIdxType = int32_t;
@@ -91,22 +90,48 @@ public:
     void setDsv41WorkerBlockIds(WorkerBlockIds ids) {
         dsv41_worker_block_ids_ = std::move(ids);
     }
-    void setDsv41CacheState(std::shared_ptr<DSV41CacheState> state) {
-        dsv41_cache_state_ = std::move(state);
+    void setDsv41CacheKeySeed(int64_t seed) {
+        dsv41_cache_key_seed_ = seed;
     }
-    const std::shared_ptr<DSV41CacheState>& dsv41CacheState() const {
-        return dsv41_cache_state_;
+    int64_t dsv41CacheKeySeed() const {
+        return dsv41_cache_key_seed_;
     }
-    std::shared_ptr<const DSV41CheckpointMetadata> dsv41RecoveryMetadata(size_t block) const {
+    // Opaque model-extension payload: the restored checkpoint (interpreted only
+    // by model-side code) and the reuse boundary derived from it.
+    void setDsv41RestoredCheckpoint(std::shared_ptr<const void> checkpoint, int64_t materialized_end) {
+        dsv41_restored_checkpoint_end_ = checkpoint ? materialized_end : 0;
+        dsv41_restored_checkpoint_     = std::move(checkpoint);
+    }
+    const std::shared_ptr<const void>& dsv41RestoredCheckpoint() const {
+        return dsv41_restored_checkpoint_;
+    }
+    int64_t dsv41RestoredCheckpointEnd() const {
+        return dsv41_restored_checkpoint_end_;
+    }
+    std::shared_ptr<const void> dsv41RecoveryMetadata(size_t block) const {
         return block < dsv41_recovery_metadata_.size() ? dsv41_recovery_metadata_[block] : nullptr;
     }
-    void setDsv41RecoveryMetadata(size_t block, std::shared_ptr<const DSV41CheckpointMetadata> metadata) {
+    void setDsv41RecoveryMetadata(size_t block, std::shared_ptr<const void> metadata) {
         if (dsv41_recovery_metadata_.size() <= block)
             dsv41_recovery_metadata_.resize(block + 1);
         dsv41_recovery_metadata_[block] = std::move(metadata);
     }
     void clearDsv41RecoveryMetadata() {
         dsv41_recovery_metadata_.clear();
+    }
+    // Writable-backing clones decided by the (rank-0) allocator that still must be
+    // physically executed on every CP rank's local pool. Each entry is
+    // (group_id, src_block, dst_block); the rank-0 gatherer ships them through the
+    // tpSync broadcast and non-root ranks execute them via the model-input hook.
+    using Dsv41StateCopy = std::array<int32_t, 3>;
+    void appendDsv41StateCopy(int32_t group_id, int32_t src_block, int32_t dst_block) {
+        dsv41_pending_state_copies_.push_back({group_id, src_block, dst_block});
+    }
+    size_t dsv41PendingStateCopyNum() const {
+        return dsv41_pending_state_copies_.size();
+    }
+    std::vector<Dsv41StateCopy> takeDsv41StateCopies() {
+        return std::exchange(dsv41_pending_state_copies_, {});
     }
     bool blockIdsAreKeyAligned() const {
         return block_ids_are_key_aligned_;
@@ -192,8 +217,11 @@ public:
 
 private:
     WorkerBlockIds dsv41_worker_block_ids_;
-    std::shared_ptr<DSV41CacheState> dsv41_cache_state_;
-    std::vector<std::shared_ptr<const DSV41CheckpointMetadata>> dsv41_recovery_metadata_;
+    int64_t        dsv41_cache_key_seed_{0};
+    std::shared_ptr<const void>              dsv41_restored_checkpoint_;
+    int64_t                                  dsv41_restored_checkpoint_end_{0};
+    std::vector<std::shared_ptr<const void>> dsv41_recovery_metadata_;
+    std::vector<Dsv41StateCopy>              dsv41_pending_state_copies_;
     // layer_id -> block_indices
     LayerBlockIds layer_block_ids;
     // layer_id -> region_name -> block_indices

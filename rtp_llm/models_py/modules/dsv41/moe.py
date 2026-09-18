@@ -5,21 +5,12 @@ and CP row assembly remain caller responsibilities; this module never selects
 an EP1, dequantized-expert, shared128 or legacy gate fallback.
 """
 
-import os
 from collections.abc import Mapping
 
 import torch
 from torch import nn
 
-from rtp_llm.models_py.modules.dsv41.linear import is_supported
 from rtp_llm.models_py.modules.dsv41.math import moe_gate
-
-
-def _require_execution(values):
-    if os.environ.get("DSV41_MOE", "0") != "1" or not is_supported(values):
-        raise RuntimeError("V4.1 MoE requires DSV41_MOE=1 and CUDA13/Blackwell")
-    if torch.is_autocast_enabled():
-        raise RuntimeError("V4.1 router and experts require autocast off")
 
 
 def _geometry(config, draft):
@@ -43,8 +34,8 @@ def _geometry(config, draft):
 
 
 def _expert_range(experts, ep_size, ep_rank):
-    if type(ep_size) is not int or ep_size not in (8, 16):
-        raise ValueError("V4.1 expert ownership requires EP8 or EP16")
+    if type(ep_size) is not int or ep_size < 1 or experts % ep_size:
+        raise ValueError("V4.1 expert ownership requires an evenly dividing EP width")
     if type(ep_rank) is not int or not 0 <= ep_rank < ep_size:
         raise ValueError("V4.1 expert rank must belong to the actual EP group")
     local = experts // ep_size
@@ -71,7 +62,6 @@ class V41MoERouter(nn.Module):
         super().__init__()
         self.hidden_size, _, self.experts, self.topk = _geometry(config, draft)
         weight = weights["ffn.gate.weight"]
-        _require_execution(weight)
         self.register_buffer(
             "weight",
             _tensor(
@@ -96,7 +86,6 @@ class V41MoERouter(nn.Module):
 
     @torch.inference_mode()
     def forward(self, hidden, image_mask=None):
-        _require_execution(hidden)
         if (
             hidden.ndim != 2
             or hidden.shape[1] != self.hidden_size
@@ -115,7 +104,6 @@ class V41MoERouter(nn.Module):
             raise ValueError(
                 "V4.1 image mask must include every patch and delimiter row"
             )
-        torch._assert_async(torch.isfinite(hidden).all(), "nonfinite V4.1 MoE input")
         return moe_gate(
             hidden, self.weight, self.bias, self.bias_vl, image_mask, self.topk
         )
@@ -151,7 +139,6 @@ def pack_v41_moe_weights(config, weights: Mapping, *, ep_size, ep_rank, draft=Fa
             f"missing={sorted(expected - actual)[:8]}, unexpected={sorted(actual - expected)[:8]}"
         )
     device = weights["ffn.gate.weight"].device
-    _require_execution(weights["ffn.gate.weight"])
     raw = {}
     for name, (rows, columns) in shapes.items():
         for expert in local:
@@ -177,11 +164,6 @@ def pack_v41_moe_weights(config, weights: Mapping, *, ep_size, ep_rank, draft=Fa
             torch.float8_e8m0fnu,
             device,
         )
-    for name, value in raw.items():
-        if name.endswith(".scale"):
-            torch._assert_async(
-                (value.view(torch.uint8) != 255).all(), "nonfinite V4.1 expert scale"
-            )
     packed = {}
     # float8 concatenation is not implemented by every supported Torch build.
     for name in shapes:

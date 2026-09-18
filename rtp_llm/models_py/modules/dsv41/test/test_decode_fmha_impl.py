@@ -236,7 +236,9 @@ class DecodeFmhaGpuTest(unittest.TestCase):
                     )
                     retained = 1 if start == 127 or width == 1 else 3
                     if width == 6:
-                        self.assertEqual(impl.get_execution_states(inputs), [])
+                        self.assertNotEqual(
+                            int(impl._committed_epoch), impl._prepare_generation
+                        )
                         for layer in PAIR_OWNERS:
                             snapshots = V41DecodePairState(
                                 impl.context.layers[layer].compressor.pair_snapshots
@@ -253,28 +255,12 @@ class DecodeFmhaGpuTest(unittest.TestCase):
                             ),
                             draft_committed=True,
                         )
-                    states = impl.get_execution_states(inputs)
-                    self.assertEqual(len(states), 1)
-                    self.assertEqual(states[0].materialized_end, start + retained)
-                    if width == 6:
-                        self.assertTrue(states[0].draft_committed)
-                        self.assertLessEqual(
-                            states[0].aux_valid_start, max(0, start + retained - 128)
-                        )
-                        self.assertEqual(states[0].aux_valid_end, start + retained)
-                    else:
+                        self.assertTrue(impl._draft_committed)
+                    self.assertEqual(int(impl._committed_epoch), impl._prepare_generation)
+                    self.assertEqual(int(impl._retained_rows[0]), retained)
+                    for layer in range(40):
                         self.assertEqual(
-                            (states[0].aux_valid_start, states[0].aux_valid_end), (0, 0)
-                        )
-                    self.assertEqual(
-                        len(states[0].swa_valid_end), 43 if width == 6 else 40
-                    )
-                    self.assertTrue(
-                        all(end == start + retained for end in states[0].swa_valid_end)
-                    )
-                    if retained == 3:
-                        self.assertEqual(
-                            states[0].history_token_ids, [token, token + 1, token + 2]
+                            int(impl.context.swa[layer].valid_ends[0]), start + retained
                         )
                     for layer in PAIR_OWNERS:
                         pool = model._pair_pools[layer]
@@ -292,6 +278,38 @@ class DecodeFmhaGpuTest(unittest.TestCase):
                         )
                         self.assertEqual(int(pair.positions[0]), start + retained)
                         self.assertEqual(int(pair.valid[0]), (start + retained) % 2)
+
+    def test_continuous_decode_derives_ranges_without_engine_certificate(self):
+        with torch.inference_mode():
+            _, model = self.model(1)
+            inputs = self.inputs(model, 1, 127, 100)
+            inputs.v41_state_ready = torch.tensor([False, False])
+            inputs.v41_execution_context = torch.tensor(
+                [[0, 64, 64, 64], [0, 0, 0, 0]], dtype=torch.int64
+            )
+            inputs.v41_swa_ranges = torch.tensor(
+                [[[0, 64, 0]] * 43, [[0, 0, 0]] * 43], dtype=torch.int64
+            )
+            impl = V41DecodeFmhaImpl(model, inputs, query_width=1)
+            impl.prepare_model_inputs(inputs)
+            start = 127
+            begin = max(0, start - model.layout.swa_entries)
+            for layer in range(40):
+                binding = impl.context.swa[layer]
+                self.assertEqual(int(binding.valid_starts[0]), begin)
+                self.assertEqual(int(binding.valid_ends[0]), start)
+                self.assertEqual(int(impl._floors[layer][0]), 0)
+
+    def test_boundary_certificate_with_malformed_ranges_is_rejected(self):
+        with torch.inference_mode():
+            _, model = self.model(1)
+            inputs = self.inputs(model, 1, 127, 100)
+            inputs.v41_swa_ranges = torch.tensor(
+                [[[0, 127, 1]] * 43, [[0, 0, 0]] * 43], dtype=torch.int64
+            )
+            impl = V41DecodeFmhaImpl(model, inputs, query_width=1)
+            with self.assertRaisesRegex(ValueError, "exact complete SWA ranges"):
+                impl.prepare_model_inputs(inputs)
 
 
 if __name__ == "__main__":

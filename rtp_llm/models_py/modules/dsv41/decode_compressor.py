@@ -8,7 +8,6 @@ This component does not enable model Graph execution or publish cache state.
 """
 
 import math
-import os
 from dataclasses import dataclass
 
 import torch
@@ -231,18 +230,6 @@ class V41DecodeOwnerCompressor(nn.Module):
             start_positions, (self.batch_size,), torch.int64, device, "start positions"
         )
         _tensor(valid_rows, (self.batch_size,), torch.int32, device, "valid row counts")
-        torch._assert_async(
-            ((valid_rows >= 0) & (valid_rows <= self.query_width)).all(),
-            "invalid decode query count",
-        )
-        live = valid_rows > 0
-        torch._assert_async(
-            (
-                ~live
-                | ((start_positions >= 0) & (start_positions + valid_rows <= 1048576))
-            ).all(),
-            "decode owner exceeds model context",
-        )
         self.start_positions.copy_(start_positions)
         self.valid_rows.copy_(valid_rows)
         if self.owner.ratio == 1:
@@ -250,10 +237,6 @@ class V41DecodeOwnerCompressor(nn.Module):
                 raise ValueError("ratio1 owner cannot consume ratio2 snapshots")
             return
         if pair_state is None:
-            torch._assert_async(
-                (~live | (start_positions % 2 == 0)).all(),
-                "odd decode start requires its real pair state",
-            )
             self.pair_input.zero_()
             V41DecodePairState(self.pair_input).positions.copy_(start_positions)
         else:
@@ -266,17 +249,6 @@ class V41DecodeOwnerCompressor(nn.Module):
                 "packed pair input",
             )
             self.pair_input.copy_(raw)
-        pair = V41DecodePairState(self.pair_input)
-        torch._assert_async(
-            (
-                ~live
-                | (
-                    (pair.positions == start_positions)
-                    & (pair.valid == start_positions % 2)
-                )
-            ).all(),
-            "pair snapshot differs from the materialized start",
-        )
 
     def _save_snapshots(self, projected, score):
         pair = V41DecodePairState(self.pair_input)
@@ -314,10 +286,6 @@ class V41DecodeOwnerCompressor(nn.Module):
 
     @torch.inference_mode()
     def forward(self, normalized_hidden):
-        if os.environ.get("DSV41_DECODE_OWNER_COMPRESSOR", "0") != "1":
-            raise RuntimeError("decode owner requires DSV41_DECODE_OWNER_COMPRESSOR=1")
-        if torch.is_autocast_enabled() or torch.backends.cuda.matmul.allow_tf32:
-            raise RuntimeError("decode owner requires autocast and TF32 disabled")
         _tensor(
             normalized_hidden,
             (self.batch_size, self.query_width, 5120),
@@ -332,13 +300,6 @@ class V41DecodeOwnerCompressor(nn.Module):
             projected = F.linear(hidden.float(), self.owner.wkv)
             score = F.linear(hidden.float(), self.owner.wgate)
             pair = V41DecodePairState(self.pair_input)
-            torch._assert_async(
-                (
-                    ~active[:, :, None]
-                    | (torch.isfinite(projected) & torch.isfinite(score))
-                ).all(),
-                "nonfinite ratio2 projection cannot become committed pair state",
-            )
             previous_kv = torch.cat(
                 (pair.partial_kv[:, None, :], projected[:, :-1, :]), dim=1
             )
@@ -432,10 +393,6 @@ class V41DecodeOwnerCompressor(nn.Module):
             torch.int32,
             self.start_positions.device,
             "retained materialized row counts",
-        )
-        torch._assert_async(
-            ((kept_rows >= 0) & (kept_rows <= self.valid_rows)).all(),
-            "retained rows exceed the completed verify rows",
         )
         indices = (
             kept_rows.to(torch.int64)

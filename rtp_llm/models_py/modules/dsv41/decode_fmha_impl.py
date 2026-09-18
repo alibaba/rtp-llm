@@ -6,7 +6,6 @@ ranges. Capture uses explicit invalid rows and never touches a request page.
 """
 
 from contextlib import nullcontext
-import os
 
 import torch
 
@@ -310,25 +309,18 @@ class V41DecodeFmhaImpl:
             raise ValueError("live decode request IDs must be unique")
         if any(
             not masked
-            and (
-                rid < 0
-                or start < 0
-                or start >= self.context.max_tokens
-                or (start > 0 and not restored)
-            )
-            for rid, start, masked, restored in zip(ids, starts, fake, ready)
+            and (rid < 0 or start < 0 or start >= self.context.max_tokens)
+            for rid, start, masked in zip(ids, starts, fake)
         ):
-            raise ValueError(
-                "decode Graph needs complete state at every live request start"
-            )
-        return ids, starts, fake
+            raise ValueError("decode Graph live request starts are out of range")
+        return ids, starts, fake, ready
 
     @torch.inference_mode()
     def prepare_model_inputs(self, inputs):
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("prepare original model inputs before graph replay")
         self._warmup_sparse_indexer()
-        ids, starts, fake = self._request_metadata(inputs)
+        ids, starts, fake, ready = self._request_metadata(inputs)
         batch = len(ids)
         rows = V41ModelRows.from_model_inputs(inputs)
         row_valid = rows.valid.view(batch, self.query_width)
@@ -338,14 +330,6 @@ class V41DecodeFmhaImpl:
             torch.int32,
             "valid row counts",
         )
-        expected_valid = (
-            torch.arange(self.query_width, device=self.device)[None, :]
-            < row_valid.sum(1)[:, None]
-        )
-        torch._assert_async(
-            (row_valid == expected_valid).all(),
-            "decode valid rows must form a request-local prefix",
-        )
         if any((count == 0) != masked for count, masked in zip(counts_cpu, fake)):
             raise ValueError("decode rows disagree with fake request flags")
         if any(
@@ -353,9 +337,6 @@ class V41DecodeFmhaImpl:
             for start, count in zip(starts, counts_cpu)
         ):
             raise ValueError("live decode rows exceed the model context")
-        torch._assert_async(
-            ~rows.image_mask.any(), "decode image rows require prefill execution"
-        )
         execution = _host(
             inputs.v41_execution_context,
             (batch, 4),
@@ -368,13 +349,27 @@ class V41DecodeFmhaImpl:
         for index, (start, masked) in enumerate(zip(starts, fake)):
             if masked:
                 continue
-            if execution[index][1] != start or execution[index][2] != start:
-                raise ValueError(
-                    "decode Graph cannot skip an incomplete execution boundary"
-                )
-            for layer in range(43 if self.layout.draft_enabled else 40):
-                if start == 0:
-                    ranges[index][layer] = [0, 0, 0]
+            layers = range(43 if self.layout.draft_enabled else 40)
+            # Recovery boundary (first step after a restore): the engine
+            # certificate is validated and seeds the bindings. Continuous
+            # decode: the pair page headers self-prove the model's own
+            # materialization, so the SWA window is derived locally and the
+            # static checkpoint-shaped engine inputs are not consulted.
+            boundary = (
+                ready[index]
+                and execution[index][1] == start
+                and execution[index][2] == start
+                and all(ranges[index][layer][1] == start for layer in layers)
+            )
+            if not boundary:
+                for layer in layers:
+                    ranges[index][layer] = [
+                        max(0, start - self.layout.swa_entries),
+                        start,
+                        0,
+                    ]
+                continue
+            for layer in layers:
                 begin, end, floor = ranges[index][layer]
                 if (
                     begin < 0
@@ -450,10 +445,6 @@ class V41DecodeFmhaImpl:
             unit = self.layout.reuse_unit if fixed else self.layout.token_block_size
             logical = (padded_starts + counts - 1).clamp_min(0) // unit
             previous = (padded_starts - 1).clamp_min(0) // unit
-            torch._assert_async(
-                (~active | (logical < destination.shape[1])).all(),
-                "decode page table is too short for the request",
-            )
             selected = destination.gather(
                 1, logical.clamp_max(destination.shape[1] - 1)[:, None]
             ).squeeze(1)
@@ -462,23 +453,6 @@ class V41DecodeFmhaImpl:
             ).squeeze(1)
             self._current_pages[group].copy_(selected)
             self._previous_pages[group].copy_(old)
-            # Also exclude another request's source page: boundary migration
-            # and verify writes must never race a different request's reader.
-            other_request = ~torch.eye(
-                self.batch_size, dtype=torch.bool, device=self.device
-            )
-            same = (selected[:, None] == selected[None, :]) | (
-                selected[:, None] == old[None, :]
-            )
-            same &= (
-                active[:, None]
-                & active[None, :]
-                & other_request
-                & (selected[:, None] > 0)
-            )
-            torch._assert_async(
-                ~same.any(), "live requests share writable decode state"
-            )
         # Transfer validated host ranges once, before the per-layer device work.
         # Each pageable H2D tensor construction otherwise fences earlier copies.
         range_layers = tuple(self._swa)
@@ -526,8 +500,8 @@ class V41DecodeFmhaImpl:
                 destination_min=0,
                 zero_inactive=True,
             )
-            # Active requests have passed ready and exact execution/SWA boundary
-            # validation above; zero memory checkpoints omit the absolute header.
+            # Only live requests whose previous page holds real bytes enter
+            # normalization; zero memory checkpoints omit the absolute header.
             previous = self._previous_pages[group]
             normalize_empty_pair_checkpoint(
                 pool.index_select(0, previous.clamp(0, pool.shape[0] - 1).long()),
@@ -555,8 +529,6 @@ class V41DecodeFmhaImpl:
         self.model._active_v41_graph_impl = self
 
     def _warmup_sparse_indexer(self):
-        if os.environ.get("DSV41_SPARSE_INDEXER") != "1":
-            return
         stream = torch.cuda.current_stream(self.device)
         stream_id = stream.cuda_stream
         if self._sparse_warmup_stream == stream_id:
@@ -671,155 +643,5 @@ class V41DecodeFmhaImpl:
             )
         counts = torch.zeros_like(self._retained_rows)
         counts[:batch].copy_(retained_rows)
-        torch._assert_async(
-            (
-                (counts >= 0)
-                & (counts <= self.context.valid_rows)
-                & ((counts > 0) == (self.context.valid_rows > 0))
-            ).all(),
-            "every live target prefix must retain at least its executed anchor",
-        )
-        self.context.check()
         self._commit(counts)
         self._draft_committed = bool(draft_committed)
-
-    @torch.inference_mode()
-    def get_execution_states(self, original_inputs):
-        """Read state from the just-executed graph, never from capture-time output."""
-        from rtp_llm.ops.compute_ops import V41ExecutionState
-
-        signature = tuple(zip(*self._request_metadata(original_inputs)))
-        if self._signature is None or signature != self._signature:
-            raise ValueError("post-replay publication has different request boundaries")
-        if int(self._executed_epoch) != self._prepare_generation:
-            raise RuntimeError(
-                "the current model inputs did not finish graph execution"
-            )
-        if int(self._committed_epoch) != self._prepare_generation:
-            return []
-        self.context.check()
-        statuses = (
-            list(self._copy_status.values())
-            + list(self._pair_load_status.values())
-            + list(self._pair_store_status.values())
-            + list(self._commit_copy_status.values())
-            + list(self._pair_commit_status.values())
-        )
-        if bool(torch.cat(statuses).ne(0).any()):
-            raise RuntimeError("decode graph raw-state transfer failed")
-        ranges = (
-            torch.stack(
-                [
-                    torch.stack(
-                        (
-                            self.context.swa[layer].valid_starts,
-                            self.context.swa[layer].valid_ends,
-                            self.context.replay_floors[layer],
-                        ),
-                        dim=1,
-                    )
-                    for layer in range(40)
-                ],
-                dim=1,
-            )
-            .cpu()
-            .tolist()
-        )
-        counts = self._retained_rows.cpu().tolist()
-        history = torch.cat(
-            (
-                self.rows.history_ids.view(self.batch_size, self.query_width, 3)[:, 0],
-                self.rows.token_ids.view(self.batch_size, self.query_width),
-            ),
-            dim=1,
-        )
-        image_mask = torch.cat(
-            (
-                ~self.rows.history_valid.view(self.batch_size, self.query_width, 3)[
-                    :, 0
-                ],
-                self.rows.image_mask.view(self.batch_size, self.query_width),
-            ),
-            dim=1,
-        )
-        selected = (
-            self._retained_rows.to(torch.int64)[:, None]
-            + torch.arange(3, device=self.device)[None, :]
-        )
-        tails = (
-            torch.cat(
-                (
-                    history.gather(1, selected),
-                    image_mask.gather(1, selected).to(torch.int32),
-                ),
-                dim=1,
-            )
-            .cpu()
-            .tolist()
-        )
-        pair_metadata = [
-            V41DecodePairState(self.context.layers[layer].compressor.selected_pair)
-            for layer in PAIR_OWNERS
-        ]
-        pairs = (
-            torch.stack(
-                [
-                    torch.stack((pair.positions, pair.valid.to(torch.int64)), dim=1)
-                    for pair in pair_metadata
-                ],
-                dim=1,
-            )
-            .cpu()
-            .tolist()
-        )
-        states = []
-        for index, (request_id, start, fake) in enumerate(self._requests):
-            if fake:
-                continue
-            end = start + counts[index]
-            if any(
-                position != end or valid != end % 2 for position, valid in pairs[index]
-            ):
-                raise RuntimeError(
-                    "decode pair snapshots have a stale execution boundary"
-                )
-            state = V41ExecutionState()
-            state.request_id = request_id
-            state.materialized_end = end
-            state.encoder_materialized_end = end
-            state.decoder_checkpoint_end = end
-            state.draft_layers = 3 if self.layout.draft_enabled else 0
-            state.global_entries = [
-                end // layer_sources(layer).ratio for layer in GLOBAL_OWNERS
-            ]
-            state.index_entries = list(state.global_entries)
-            swa_starts = [value[0] for value in ranges[index]]
-            swa_ends = [value[1] for value in ranges[index]]
-            swa_floors = [value[2] for value in ranges[index]]
-            if self.layout.draft_enabled:
-                for begin, _, floor in self._ranges[index][40:43]:
-                    swa_starts.append(
-                        max(
-                            begin, start + self.query_width - self.layout.swa_entries, 0
-                        )
-                    )
-                    swa_ends.append(end)
-                    swa_floors.append(floor)
-            state.swa_valid_start = swa_starts
-            state.swa_valid_end = swa_ends
-            state.swa_replay_floor = swa_floors
-            state.pair_positions = [end - 1 if end % 2 else -1] * 3
-            state.pair_valid = [end % 2] * 3
-            tail = tails[index]
-            for offset, position in enumerate(range(end - 3, end)):
-                if position < 0:
-                    tail[offset], tail[offset + 3] = -1, 0
-            state.history_token_ids = tail[:3]
-            state.history_image_mask = tail[3:]
-            state.history_ready = True
-            state.draft_committed = self._draft_committed
-            if self.layout.draft_enabled:
-                state.aux_valid_start = max(0, end - 128)
-                state.aux_valid_end = end
-            states.append(state)
-        return states

@@ -455,6 +455,45 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
     execBatchCopy(copy_params);
 }
 
+void HybridPoolKVCacheAllocator::dsv41StateBlockCopy(const torch::Tensor& copy_triples) {
+    if (!copy_triples.defined() || copy_triples.numel() == 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(copy_triples.dim() == 2 && copy_triples.size(1) == 3
+                                && copy_triples.scalar_type() == torch::kInt32,
+                            "V4.1 state copy mapping must be int32 [n,3] (group, src, dst)");
+    const auto  triples = copy_triples.cpu().contiguous();
+    const auto* ptr     = triples.data_ptr<int32_t>();
+    const auto  count   = static_cast<size_t>(triples.size(0));
+
+    BatchCopyParams copy_params;
+    for (size_t i = 0; i < count; ++i) {
+        const int32_t group = ptr[i * 3 + 0];
+        const int32_t src   = ptr[i * 3 + 1];
+        const int32_t dst   = ptr[i * 3 + 2];
+        RTP_LLM_CHECK_WITH_INFO(group >= 0 && static_cast<size_t>(group) < kv_cache_groups_.size(),
+                                "V4.1 state copy group %d is outside the native layout",
+                                group);
+        const auto&  pool        = group_block_pools_[static_cast<size_t>(group)];
+        const auto   copy_type   = BatchCopyParams::get_copy_type(pool->where(), pool->where());
+        const size_t kv_bytes    = config_.cache_specs[static_cast<size_t>(group)]->block_size_bytes();
+        const size_t scale_bytes = config_.cache_specs[static_cast<size_t>(group)]->scale_block_size_bytes();
+        for (int layer_id : config_.global_layer_ids[static_cast<size_t>(group)]) {
+            auto src_addr = kv_cache_groups_[static_cast<size_t>(group)]->convertIndexToAddr(layer_id, src);
+            auto dst_addr = kv_cache_groups_[static_cast<size_t>(group)]->convertIndexToAddr(layer_id, dst);
+            RTP_LLM_CHECK_WITH_INFO(src_addr.kv_addr && dst_addr.kv_addr,
+                                    "V4.1 state copy block is outside its physical pool (group %d layer %d)",
+                                    group,
+                                    layer_id);
+            copy_params.add(dst_addr.kv_addr, src_addr.kv_addr, kv_bytes, copy_type);
+            if (scale_bytes > 0 && src_addr.kv_scale_addr && dst_addr.kv_scale_addr) {
+                copy_params.add(dst_addr.kv_scale_addr, src_addr.kv_scale_addr, scale_bytes, copy_type);
+            }
+        }
+    }
+    execBatchCopy(copy_params);
+}
+
 size_t HybridPoolKVCacheAllocator::freeBlocksNum() const {
     size_t total = 0;
     for (const auto& pool : group_block_pools_) {

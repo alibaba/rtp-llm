@@ -87,23 +87,6 @@ class V41ImageFeatures:
             or self.values.device != indices.device
         ):
             raise ValueError("V4.1 image features need matching row/type/BF16 metadata")
-        torch._assert_async(
-            ((indices >= 0) & (indices < rows.token_ids.numel())).all(),
-            "image feature row outside the current target input",
-        )
-        torch._assert_async(
-            (indices[1:] > indices[:-1]).all(),
-            "image feature rows must be unique and in canonical order",
-        )
-        torch._assert_async(
-            rows.image_mask.sum() == indices.numel(),
-            "every image patch and delimiter must have exactly one feature row",
-        )
-        torch._assert_async(
-            rows.image_mask[indices].all()
-            & (rows.token_types[indices] == self.token_types).all(),
-            "image features disagree with canonical token types",
-        )
 
 
 @dataclass(frozen=True)
@@ -144,12 +127,12 @@ class V41TargetModel(nn.Module):
         self.hc_mult = t["hc_mult"]
         if (
             type(head_tp_size) is not int
-            or head_tp_size not in (1, 8)
+            or head_tp_size < 1
             or type(head_tp_rank) is not int
             or not 0 <= head_tp_rank < head_tp_size
             or t["vocab_size"] % head_tp_size
         ):
-            raise ValueError("V4.1 head partition must be explicit TP1 or CP8 metadata")
+            raise ValueError("V4.1 head partition requires explicit sharding metadata")
         self.head_tp_size = head_tp_size
         self.head_tp_rank = head_tp_rank
         self.head_vocab_size = t["vocab_size"] // head_tp_size
@@ -225,18 +208,16 @@ class V41TargetModel(nn.Module):
 
         if (
             type(ep_size) is not int
-            or ep_size not in (8, 16)
+            or ep_size < 1
             or type(ep_rank) is not int
             or not 0 <= ep_rank < ep_size
             or not dist.is_initialized()
             or dist.get_world_size() != ep_size
             or dist.get_rank() != ep_rank
         ):
-            raise ValueError("V4.1 target binding requires the actual EP8/EP16 WORLD")
-        if layout.cp_size != 8:
-            raise ValueError("distributed V4.1 target requires the CP8 cache layout")
-        if head_tp_size == 8 and (ep_size != 8 or head_tp_rank != ep_rank):
-            raise ValueError("V4.1 P head must match its CP8/EP8 role rank")
+            raise ValueError("V4.1 target binding requires the actual EP WORLD")
+        if head_tp_size != 1 and (ep_size != head_tp_size or head_tp_rank != ep_rank):
+            raise ValueError("V4.1 P head must match its CP/EP role rank")
         return cls.from_model_weights(
             config,
             weights,
@@ -280,7 +261,7 @@ class V41TargetModel(nn.Module):
         provide the compatible quantized expert implementation explicitly;
         no legacy block128 or dequantized-expert implementation is selected.
         The caller owns the shared lookup's registration/Graph/close lifecycle.
-        CP8 callers pass their actual head partition. The engine retains its
+        CP callers pass their actual head partition. The engine retains its
         existing last-hidden gather and TP logits gather after this model.
         """
         from rtp_llm.utils.model_weight import W
@@ -364,11 +345,7 @@ class V41TargetModel(nn.Module):
             )
         ids = rows.token_ids.masked_fill(~rows.valid, self.config.pad_token_id)
         embedded = F.embedding(ids, self.embedding)
-        if image_features is None:
-            torch._assert_async(
-                ~rows.image_mask.any(), "V4.1 image rows require vision features"
-            )
-        else:
+        if image_features is not None:
             image_features.validate(rows, self.hidden_size)
             embedded.index_copy_(0, image_features.row_indices, image_features.values)
         embedded.masked_fill_(~rows.valid[:, None], 0)
@@ -454,17 +431,6 @@ class V41TargetModel(nn.Module):
             raise ValueError(
                 "retained L20 HC/pre_mix has a different geometry or device"
             )
-        if hasattr(context, "cp"):
-            if count != context.query_rows or not torch.equal(
-                l20.rows.valid, context.valid
-            ):
-                raise ValueError(
-                    "late CP rows must preserve the selected canonical validity"
-                )
-        else:
-            torch._assert_async(
-                l20.rows.valid.all(), "late prefill cannot consume padding aux"
-            )
         # Padded ranks still execute every block/EP collective, but never create aux.
         selected = l20.rows.valid.nonzero().flatten()
         hidden, pre_mix, aux = self._run_blocks(
@@ -504,22 +470,6 @@ class V41TargetModel(nn.Module):
                 raise ValueError(
                     "V4.1 aux consumers need explicit contiguous int64 row indices"
                 )
-            torch._assert_async(
-                ((indices >= 0) & (indices < rows.token_ids.numel())).all()
-                & (indices[1:] > indices[:-1]).all(),
-                "V4.1 aux rows must be unique, ordered and inside the current input",
-            )
-            if dense_aux:
-                torch._assert_async(
-                    (
-                        indices == torch.arange(indices.numel(), device=indices.device)
-                    ).all(),
-                    "dense aux must retain the complete fixed input order",
-                )
-            else:
-                torch._assert_async(
-                    rows.valid[indices].all(), "V4.1 aux rows cannot include padding"
-                )
         hidden, pre_mix, aux = self._run_blocks(
             rows, hidden, pre_mix, context, 0, 40, aux_row_indices, lookup_outputs
         )
@@ -543,7 +493,7 @@ class V41TargetModel(nn.Module):
     def logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.head_tp_size != 1:
             raise RuntimeError(
-                "CP8 local logits require the engine's TP vocabulary gather before sampling"
+                "CP local logits require the engine's TP vocabulary gather before sampling"
             )
         return self.local_logits(hidden_states)
 

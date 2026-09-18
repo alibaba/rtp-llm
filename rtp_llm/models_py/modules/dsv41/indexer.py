@@ -3,12 +3,10 @@
 Q is the projected, post-RoPE BF16 index query; weights already include the
 official head/dimension scaling. Only query owners may call this component.
 CP gather/ready and forward/tail lifetimes belong to the explicit caller.
-This is an opt-in component, not a release-qualified backend selection.
 The selected-block planar scratch uses at most 64 MiB for a 32-query tile;
 DeepGEMM metadata, stream workspace and Torch selection buffers are additional.
 """
 
-import os
 from dataclasses import dataclass, replace
 from typing import Optional
 
@@ -33,8 +31,6 @@ def warmup_sparse_indexer(device) -> None:
     use the largest graph bucket and the fixed V4.1 block geometry once during
     model construction.
     """
-    if os.environ.get("DSV41_SPARSE_INDEXER") != "1":
-        return
     with torch.cuda.device(device):
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
@@ -89,16 +85,10 @@ def _retain(
     if previous is not None:
         scores = torch.cat((previous.scores, scores), dim=-1)
         positions = torch.cat((previous.positions, positions), dim=-1)
-    if os.environ.get("DSV41_DEEPSELECT") == "1":
-        from rtp_llm.models_py.modules.dsv41.deepselect import topk
+    from rtp_llm.models_py.modules.dsv41.deepselect import topk
 
-        selected = topk(scores, min(capacity, scores.shape[-1]))
-        torch._assert_async(
-            (selected.status == 0).all(), "invalid DeepSelect index selection"
-        )
-        values, offsets = selected.values, selected.indices.clamp_min(0).long()
-    else:
-        values, offsets = scores.topk(min(capacity, scores.shape[-1]), dim=-1)
+    selected = topk(scores, min(capacity, scores.shape[-1]))
+    values, offsets = selected.values, selected.indices.clamp_min(0).long()
     return RankedPositions(values, positions.gather(-1, offsets))
 
 
@@ -112,12 +102,7 @@ class IndexScoreTile:
     packed_kv_bytes: int = 0
 
     def topk(self, previous: Optional[RankedPositions] = None) -> RankedPositions:
-        scores = (
-            self.logits
-            if os.environ.get("DSV41_DEEPSELECT") == "1"
-            else self.logits.float()
-        )
-        return _retain(scores, self.positions, INDEX_TOPK, previous)
+        return _retain(self.logits, self.positions, INDEX_TOPK, previous)
 
     def block_topk(self, previous: Optional[RankedPositions] = None) -> RankedPositions:
         scores = self.logits.float().unflatten(-1, (-1, SPARSE_BLOCK)).amax(-1)
@@ -174,10 +159,6 @@ def _validate(query, weights, pages, page_table, request_ids, visible_lengths, l
     source = layer_sources(layer)
     if not source.scores_queries:
         raise ValueError("only the eight V4.1 index query owners may score queries")
-    if os.environ.get("DSV41_SPARSE_INDEXER") != "1":
-        raise RuntimeError("set DSV41_SPARSE_INDEXER=1 for this component")
-    if not query.is_cuda or torch.cuda.get_device_capability(query.device)[0] != 10:
-        raise RuntimeError("V4.1 sparse scoring requires Blackwell")
     if (
         query.ndim != 3
         or query.shape[1:] != (32, 128)

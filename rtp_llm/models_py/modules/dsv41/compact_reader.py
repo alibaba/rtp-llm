@@ -1,6 +1,6 @@
 """Experimental native V4.1 compact KV reader.
 
-Set DSV41_NATIVE_COMPACT_READER=1 explicitly. The attention kernel reads at most
+The attention kernel reads at most
 128 SWA rows and 512 selected global rows per query, in 16-row tiles. There is no
 history-sized score or decoded-KV allocation. It is a correctness candidate,
 with no performance-selection or release-acceptance claim.
@@ -14,7 +14,6 @@ followed by its scales; FP4 packs the even channel in the low nibble.
 from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -34,15 +33,6 @@ _FORMAT_IDS = {CacheRegion.SWA: 0, CacheRegion.GLOBAL: 1, CacheRegion.INDEX_K: 2
 
 def is_supported(tensor: torch.Tensor) -> bool:
     return tensor.is_cuda and torch.cuda.get_device_capability(tensor.device)[0] == 10
-
-
-def _require_enabled(tensor: torch.Tensor) -> None:
-    if os.environ.get("DSV41_NATIVE_COMPACT_READER", "0") != "1":
-        raise RuntimeError(
-            "native compact reader requires DSV41_NATIVE_COMPACT_READER=1"
-        )
-    if not is_supported(tensor):
-        raise RuntimeError("native compact reader requires a Blackwell CUDA device")
 
 
 def _integer_tensor(tensor: torch.Tensor, shape: Tuple[int, ...], device) -> None:
@@ -227,7 +217,6 @@ def gather_compact(
     """
     if not isinstance(pages, CompactPages):
         raise TypeError("native gather requires row-interleaved compact pages")
-    _require_enabled(pages.data)
     pages.validate(pages.data.device)
     if positions.ndim != 2 or page_table.ndim != 2:
         raise ValueError("positions and page table must be matrices")
@@ -310,7 +299,6 @@ def compact_attention(
         global_kv is not None and not isinstance(global_kv, GlobalBinding)
     ):
         raise TypeError("native attention requires row-interleaved compact bindings")
-    _require_enabled(query)
     if (
         query.ndim != 3
         or query.shape[-1] != 512

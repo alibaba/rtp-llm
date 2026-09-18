@@ -138,7 +138,7 @@ class CacheLayoutTest(unittest.TestCase):
 
     def test_invalid_layout_fails_before_pool_allocation(self):
         for values in (
-            {"cp_size": 4},
+            {"cp_size": 0},
             {"token_block_size": 64},
             {"page_alignment": 256},
             {"speculative_tokens": -1},

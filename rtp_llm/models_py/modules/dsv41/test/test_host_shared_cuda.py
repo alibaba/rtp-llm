@@ -68,9 +68,10 @@ class HostSharedCudaTest(TestCase):
                 raise RuntimeError(reason)
 
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(
-            dir=os.environ.get("DSV41_TEST_SHARED_ROOT")
-        )
+        shared_root = os.environ.get("DSV41_TEST_SHARED_ROOT")
+        if shared_root:
+            os.makedirs(shared_root, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=shared_root)
         self.root = Path(self.temporary.name)
         self.slices = initialized_slices(self.root / "source", self.shared_module)
         self.store = self.shared_module.HostSharedWeightStore(self.root / "shared")

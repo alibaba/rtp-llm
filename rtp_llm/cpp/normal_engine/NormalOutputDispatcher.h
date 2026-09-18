@@ -12,7 +12,6 @@ public:
     NormalOutputDispatcher() = default;
 
     absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
-    static absl::Status prepareV41Sampling(const StreamGroups& stream_groups, const GptModelOutputs& model_output);
 
 private:
     void dispatchSingleStream(GenerateStreamPtr    stream,

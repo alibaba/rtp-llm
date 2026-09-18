@@ -269,11 +269,23 @@ class EngineAdapterContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "compact pool geometry"):
             model.initialize(SimpleNamespace(kv_cache=cache, is_speculative=False))
 
-    def test_global_hits_do_not_replace_execution_state(self):
+    def test_continuous_decode_readiness_derives_from_pair_bytes(self):
         model, _ = framework_fixture()
-        inputs, rows = request_fixture(starts=(128,))
+        inputs, rows = request_fixture(starts=(128,), ready=(False,))
+        for layer, pool in model._pair_pools.items():
+            _write_pair(
+                _pair_view(pool, 1, 1),
+                PairCarry.empty(layer, "101", model.identity, 128),
+            )
+        requests = model._requests(inputs, rows)
+        self.assertEqual(requests[0].context.start, 128)
+        self.assertEqual(requests[0].context.end, 130)
+
+    def test_continuous_decode_rejects_mismatched_pair_bytes(self):
+        model, _ = framework_fixture()
+        inputs, rows = request_fixture(starts=(128,), ready=(False,))
         before = model._pages[RegionSlot(CacheRegion.SWA, 0)].data.clone()
-        with self.assertRaisesRegex(ValueError, "restored state"):
+        with self.assertRaisesRegex(ValueError, "execution boundary"):
             model._requests(inputs, rows)
         torch.testing.assert_close(
             model._pages[RegionSlot(CacheRegion.SWA, 0)].data, before
@@ -567,16 +579,12 @@ class EngineAdapterContractTest(unittest.TestCase):
             with (
                 patch.object(impl, "begin_forward", create=True) as begin,
                 patch.object(impl, "finish_forward", create=True) as finish,
-                patch.object(
-                    impl, "get_execution_states", create=True, return_value=[]
-                ) as states,
                 patch("torch.cuda.is_current_stream_capturing", return_value=False),
             ):
                 model._active_v41_graph_impl = impl
                 output = model(inputs, impl)
             self.assertEqual(begin.call_count, 1)
             self.assertEqual(finish.call_count, 1)
-            self.assertEqual(states.call_count, 1)
             self.assertEqual(tuple(output.hidden_states.shape), (width, 5120))
             aux = model.get_mtp_target_hidden_states(width)
             self.assertEqual(aux.data_ptr(), buffer_ptr)
@@ -585,70 +593,171 @@ class EngineAdapterContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fixed decode buffer"):
             model.get_mtp_target_hidden_states(7)
 
-    def test_restored_cp_protects_original_boundary_and_predecessors(self):
-        model, _ = framework_fixture()
-        _, rows = request_fixture(starts=(1024,), lengths=(3,), ready=(True,))
-        rows.history_ids[0] = torch.tensor([31, 129264, 37])
-        rows.history_valid[0] = torch.tensor([True, False, True])
-        native = object()
-
-        def gather(values, first, last):
-            self.assertEqual((first, last), (1024, 1025))
-            return values[:1]
-
-        context = SimpleNamespace(start=1024, end=1027, gather_rows=gather)
-        ranges = torch.tensor([[896, 1024, 0]] * 43, dtype=torch.int64)
-        with patch.object(model, "_cp_protect", return_value=True) as protect:
-            model._protect_restored_cp(native, context, rows, ranges)
-        protect.assert_called_once()
-        self.assertIs(protect.call_args.args[0], native)
-        self.assertIs(protect.call_args.args[1], context)
-        self.assertEqual(protect.call_args.args[2].token_ids, (31, 129264, 37))
-        self.assertEqual(protect.call_args.args[2].image_mask, (False, True, False))
-        self.assertEqual(protect.call_args.kwargs["publication_end"], 1024)
-        self.assertIs(protect.call_args.kwargs["swa_ranges"], ranges)
-        self.assertEqual(context.end, 1027)
-
-    def test_restored_publication_uses_native_ranges_before_python_swa_exists(self):
-        layout = CacheLayout(cp_size=8, speculative_tokens=5, draft_enabled=True)
+    def test_cp_publication_reports_materialized_boundary_facts(self):
         cache = SimpleNamespace(
             request_id="101",
-            layout=layout,
-            swa={},
+            layout=SimpleNamespace(draft_enabled=True),
             swa_ends={layer: 1024 for layer in range(43)},
             owners={
-                layer: SimpleNamespace(
-                    materialized_end=1024, pair=SimpleNamespace(next_position=1024)
-                )
+                layer: SimpleNamespace(materialized_end=1024)
                 for layer in GLOBAL_OWNERS
             },
+            swa={
+                layer: SimpleNamespace(valid_starts=[896], valid_ends=[1024])
+                for layer in range(43)
+            },
         )
-        context = SimpleNamespace(cache=cache, start=1024, end=1027)
-        ranges = torch.tensor(
-            [[896, 1024, 0 if layer <= 20 else 896] for layer in range(43)],
-            dtype=torch.int64,
+        decoder = SimpleNamespace(cache=cache, end=1024, replay_floor=896)
+        history = SimpleNamespace(token_ids=(31, 129264, 37), image_mask=(False, True, False))
+        publication = DeepSeekV41Model._cp_publication(decoder, history)
+        self.assertEqual(publication.request_id, 101)
+        self.assertEqual(publication.materialized_end, 1024)
+        self.assertEqual(len(publication.global_entries), 4)
+        self.assertEqual(list(publication.swa_valid_end), [1024] * 43)
+        self.assertEqual(list(publication.swa_replay_floor), [0] * 21 + [896] * 22)
+        self.assertEqual((publication.aux_valid_start, publication.aux_valid_end), (896, 1024))
+        self.assertEqual(list(publication.history_token_ids), [31, 129264, 37])
+        self.assertEqual(list(publication.history_image_mask), [0, 1, 0])
+        self.assertTrue(publication.draft_committed)
+
+    def test_cp_publication_rejects_swa_not_at_the_boundary(self):
+        cache = SimpleNamespace(
+            request_id="101",
+            layout=SimpleNamespace(draft_enabled=True),
+            swa_ends={layer: 1024 for layer in range(43)},
+            owners={layer: SimpleNamespace(materialized_end=1024) for layer in GLOBAL_OWNERS},
+            swa={
+                layer: SimpleNamespace(valid_starts=[896], valid_ends=[1024])
+                for layer in range(43)
+            },
         )
-        state = DeepSeekV41Model._context_state(
-            context,
-            (31, 129264, 37),
-            (False, True, False),
-            publication_end=1024,
-            swa_ranges=ranges,
+        cache.swa_ends[20] = 896
+        decoder = SimpleNamespace(cache=cache, end=1024, replay_floor=896)
+        history = SimpleNamespace(token_ids=(31, 129264, 37), image_mask=(False, True, False))
+        with self.assertRaisesRegex(RuntimeError, "actual boundary"):
+            DeepSeekV41Model._cp_publication(decoder, history)
+
+    @staticmethod
+    def _cp_publish_fixture(rank, install_result=True, publish_result=True):
+        from unittest.mock import Mock
+
+        from rtp_llm.models_py.modules.dsv41.cache_layout import CacheRegion
+        from rtp_llm.ops.compute_ops import KVCacheRegionName
+
+        cp_size = 2
+        counts = [1] * 6
+        native = SimpleNamespace(
+            block_ids_by_group=[[gid] for gid in range(6)],
+            publish=Mock(return_value=publish_result),
+            install=Mock(return_value=install_result),
         )
-        self.assertEqual(state.materialized_end, 1024)
-        self.assertEqual(state.swa_valid_end, [1024] * 43)
-        self.assertEqual(state.swa_replay_floor, [0] * 21 + [896] * 22)
-        self.assertEqual((state.aux_valid_start, state.aux_valid_end), (896, 1024))
-        self.assertEqual(cache.swa, {})
-        ranges[-1, 1] = 1027
-        with self.assertRaisesRegex(ValueError, "checkpoint boundary"):
-            DeepSeekV41Model._context_state(
-                context,
-                (31, 129264, 37),
-                (False, True, False),
-                publication_end=1024,
-                swa_ranges=ranges,
-            )
+
+        class Slot:
+            def __init__(self, owner_layer, region):
+                self.owner_layer = owner_layer
+                self.region = region
+
+        tables = {}
+        groups = {}
+        for gid, (owner, region) in enumerate(
+            [(2, CacheRegion.GLOBAL), (8, CacheRegion.GLOBAL),
+             (2, CacheRegion.INDEX_K), (8, CacheRegion.INDEX_K)]
+        ):
+            slot = Slot(owner, region)
+            tables[slot] = torch.tensor([[10 + gid], [20 + gid]])
+            groups[(owner, int(KVCacheRegionName.DSV41_GLOBAL_KV if region == CacheRegion.GLOBAL
+                                  else KVCacheRegionName.DSV41_INDEX_KV))] = gid
+        swa_slot = Slot(0, CacheRegion.SWA)
+        tables[swa_slot] = torch.tensor([[50], [60]])
+        groups[(0, int(KVCacheRegionName.SWA_KV))] = 5
+        groups[(2, int(KVCacheRegionName.DSV41_PAIR_STATE))] = 4
+        groups[(8, int(KVCacheRegionName.DSV41_PAIR_STATE))] = 4
+        groups[(14, int(KVCacheRegionName.DSV41_PAIR_STATE))] = 4
+        cache = SimpleNamespace(
+            request_id="101",
+            layout=SimpleNamespace(draft_enabled=True),
+            swa_ends={layer: 1024 for layer in range(43)},
+            owners={layer: SimpleNamespace(materialized_end=1024) for layer in GLOBAL_OWNERS},
+            swa={
+                layer: SimpleNamespace(valid_starts=[896], valid_ends=[1024])
+                for layer in range(43)
+            },
+        )
+        decoder = SimpleNamespace(
+            cache=cache,
+            end=1024,
+            replay_floor=896,
+            query_device="cpu",
+            tables=tables,
+            pair_tables={2: torch.tensor([[30], [40]])},
+        )
+        history = SimpleNamespace(token_ids=(31, 129264, 37), image_mask=(False, True, False))
+        model = SimpleNamespace(
+            _cp_rank=rank,
+            _groups=groups,
+            _cp_publication=DeepSeekV41Model._cp_publication,
+            kv_cache=SimpleNamespace(group_region_names=[""] * 6),
+            layout=SimpleNamespace(cp_size=cp_size),
+        )
+        remote_flat = [110, 111, 112, 113, 130, 150]
+        local_flat = [10, 11, 12, 13, 30, 50]
+        gathered = local_flat + remote_flat if rank == 0 else remote_flat + local_flat
+
+        def fake_broadcast(tensor, src, group):
+            tensor.copy_(torch.tensor(counts, dtype=torch.int64))
+
+        def fake_all_gather(tensor, group):
+            return torch.tensor(gathered)
+
+        def fake_all_reduce(tensor, group):
+            return tensor + (cp_size - 1)
+
+        patches = (
+            patch("rtp_llm.models_py.distributed.collective_torch.broadcast", fake_broadcast),
+            patch("rtp_llm.models_py.distributed.collective_torch.all_gather", fake_all_gather),
+            patch("rtp_llm.models_py.distributed.collective_torch.all_reduce", fake_all_reduce),
+            patch("rtp_llm.models_py.distributed.collective_torch.barrier", lambda group: None),
+            patch("torch.cuda.current_stream", return_value=SimpleNamespace(synchronize=lambda: None)),
+        )
+        return model, native, decoder, history, patches
+
+    def test_cp_publish_installs_checkpoint_on_every_producer_rank(self):
+        model, native, decoder, history, patches = self._cp_publish_fixture(rank=1)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            self.assertTrue(DeepSeekV41Model._cp_publish(model, native, decoder, history))
+        self.assertEqual(native.publish.call_count, 0)
+        self.assertEqual(native.install.call_count, 1)
+        publication, actual, workers = native.install.call_args.args
+        self.assertEqual(publication.request_id, 101)
+        self.assertEqual(publication.materialized_end, 1024)
+        self.assertEqual(actual, [[10], [11], [12], [13], [30], [50]])
+        self.assertEqual(workers[0], [[110], [111], [112], [113], [130], [150]])
+        self.assertEqual(workers[1], actual)
+
+        model, native, decoder, history, patches = self._cp_publish_fixture(rank=0)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            self.assertTrue(DeepSeekV41Model._cp_publish(model, native, decoder, history))
+        self.assertEqual(native.install.call_count, 0)
+        self.assertEqual(native.publish.call_count, 1)
+        _, actual, workers = native.publish.call_args.args
+        self.assertEqual(actual, [[10], [11], [12], [13], [30], [50]])
+        self.assertEqual(workers[1], [[110], [111], [112], [113], [130], [150]])
+
+    def test_cp_publish_fails_when_a_worker_install_fails(self):
+        model, native, decoder, history, patches = self._cp_publish_fixture(
+            rank=1, install_result=False
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            with self.assertRaisesRegex(RuntimeError, "producer rank"):
+                DeepSeekV41Model._cp_publish(model, native, decoder, history)
+        self.assertEqual(native.install.call_count, 1)
+
+    def test_cp_publish_skips_non_root_rank_without_a_publisher(self):
+        # Non-root TP ranks hold no scheduler streams, so no native publisher
+        # exists there; the publish protocol must not require one.
+        model, native, decoder, history, patches = self._cp_publish_fixture(rank=1)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            self.assertTrue(DeepSeekV41Model._cp_publish(model, None, decoder, history))
 
 
 if __name__ == "__main__":

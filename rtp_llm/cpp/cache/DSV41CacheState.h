@@ -1,12 +1,8 @@
 #pragma once
 
-#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -17,6 +13,15 @@ namespace rtp_llm {
 enum class DSV41ReplayMode {
     FULL,
     BOUNDED_CHECKPOINT_V1
+};
+
+// Model-side identity payload: the execution-policy strings the generic cache
+// config carries as an opaque model extension (see CacheConfig::dsv41_model_identity).
+struct DSV41ModelIdentity {
+    std::string model_revision;
+    std::string replay_mode{"full"};
+    uint32_t    tail_policy_version{1};
+    uint32_t    replay_window{128};
 };
 
 struct DSV41CacheIdentity {
@@ -37,19 +42,13 @@ struct DSV41CacheIdentity {
     bool operator<(const DSV41CacheIdentity& rhs) const {
         return fields() < rhs.fields();
     }
+    // Seeds the rolling cache-key hash. Behavior-sensitive: the seed value is
+    // part of every live cache key and must not change.
     int64_t cacheKeySeed() const {
-        validate();
         return static_cast<int64_t>(std::hash<std::string>{}(
             model_revision + ':' + layout_fingerprint + ':' + std::to_string(static_cast<int>(replay_mode)) + ':'
             + std::to_string(tail_policy_version) + ':' + std::to_string(replay_window) + ':'
             + std::to_string(physical_swa_entries)));
-    }
-    void validate() const {
-        if (model_revision.empty() || layout_fingerprint.empty() || tail_policy_version != 1 || replay_window != 128
-            || physical_swa_entries < replay_window
-            || (replay_mode != DSV41ReplayMode::FULL && replay_mode != DSV41ReplayMode::BOUNDED_CHECKPOINT_V1)) {
-            throw std::invalid_argument("invalid V4.1 checkpoint model/layout/mode identity");
-        }
     }
 };
 
@@ -108,362 +107,62 @@ struct DSV41CheckpointMetadata {
                                   rhs.draft_committed,
                                   rhs.pair_empty);
     }
-
-    void validate(size_t reuse_unit) const {
-        identity.validate();
-        if ((reuse_unit != 128 && reuse_unit != 256 && reuse_unit != 1024 && reuse_unit != 2048)
-            || materialized_end <= 0 || materialized_end > 1048576 || materialized_end % reuse_unit != 0
-            || encoder_materialized_end != materialized_end || decoder_checkpoint_end != materialized_end
-            || !history_ready || !draft_committed || !pair_empty) {
-            throw std::invalid_argument("V4.1 prefix requires a complete aligned target/draft checkpoint");
-        }
-        const int64_t needed_start = std::max<int64_t>(0, materialized_end - 128);
-        if (aux_valid_start < 0 || aux_valid_start > needed_start || aux_valid_end != materialized_end) {
-            throw std::invalid_argument("V4.1 checkpoint has incomplete draft aux rows");
-        }
-        for (size_t owner = 0; owner < 4; ++owner) {
-            const auto entries = materialized_end / (owner == 3 ? 1 : 2);
-            if (global_entries[owner] != entries || index_entries[owner] != entries) {
-                throw std::invalid_argument("V4.1 checkpoint is missing owner global/index entries");
-            }
-        }
-        for (size_t layer = 0; layer < swa.size(); ++layer) {
-            const auto& range = swa[layer];
-            if (range.valid_start < 0 || range.valid_start > needed_start || range.valid_end != materialized_end
-                || range.valid_end - range.valid_start > identity.physical_swa_entries || range.replay_floor < 0
-                || range.replay_floor > range.valid_start
-                || ((identity.replay_mode == DSV41ReplayMode::FULL || layer <= 20) && range.replay_floor != 0)) {
-                throw std::invalid_argument("V4.1 checkpoint has incomplete or inconsistent SWA ranges");
-            }
-        }
-        for (auto mask : history_image_mask) {
-            if (mask > 1) {
-                throw std::invalid_argument("invalid V4.1 canonical history image mask");
-            }
-        }
-    }
 };
 
-// Published by the model after producing the named rows and persistent state.
-// Unlike a reusable checkpoint, a PD boundary may be odd or target-only.
-struct DSV41ExecutionState {
-    int64_t              request_id{-1};
+// Model-side execution facts for one bounded checkpoint publication. The engine
+// owns the identity, layout and policy boundary; the model only reports the
+// materialized state it produced at that boundary.
+struct DSV41CheckpointPublication {
+    int64_t              request_id{0};
     int64_t              materialized_end{0};
-    int64_t              encoder_materialized_end{0};
-    int64_t              decoder_checkpoint_end{0};
-    uint32_t             draft_layers{0};
-    int64_t              aux_valid_start{0};
-    int64_t              aux_valid_end{0};
     std::vector<int64_t> global_entries;
     std::vector<int64_t> index_entries;
     std::vector<int64_t> swa_valid_start;
     std::vector<int64_t> swa_valid_end;
     std::vector<int64_t> swa_replay_floor;
-    std::vector<int64_t> pair_positions;
-    std::vector<uint8_t> pair_valid;
     std::vector<int64_t> history_token_ids;
     std::vector<uint8_t> history_image_mask;
-    bool                 history_ready{false};
+    int64_t              aux_valid_start{0};
+    int64_t              aux_valid_end{0};
     bool                 draft_committed{false};
-
-    void validate(const DSV41CacheIdentity& identity, uint32_t expected_draft_layers) const {
-        identity.validate();
-        if (request_id < 0 || materialized_end <= 0 || materialized_end > 1048576
-            || encoder_materialized_end != materialized_end || decoder_checkpoint_end != materialized_end
-            || (expected_draft_layers != 0 && expected_draft_layers != 3) || draft_layers != expected_draft_layers
-            || global_entries.size() != 4 || index_entries.size() != 4 || pair_positions.size() != 3
-            || pair_valid.size() != 3 || history_token_ids.size() != 3 || history_image_mask.size() != 3
-            || !history_ready || swa_valid_start.size() != 40 + draft_layers
-            || swa_valid_end.size() != swa_valid_start.size() || swa_replay_floor.size() != swa_valid_start.size()) {
-            throw std::invalid_argument("V4.1 execution publication is incomplete or has an invalid boundary");
-        }
-        const int64_t needed_start = std::max<int64_t>(0, materialized_end - 128);
-        if (draft_layers == 0 && (draft_committed || aux_valid_start != 0 || aux_valid_end != 0)) {
-            throw std::invalid_argument("V4.1 target-only publication cannot certify draft/aux state");
-        }
-        if (draft_layers != 0
-            && (!draft_committed || aux_valid_start < 0 || aux_valid_start > needed_start
-                || aux_valid_end != materialized_end)) {
-            throw std::invalid_argument("V4.1 execution publication is missing committed draft/aux state");
-        }
-        for (size_t owner = 0; owner < global_entries.size(); ++owner) {
-            const int64_t entries = materialized_end / (owner == 3 ? 1 : 2);
-            if (global_entries[owner] != entries || index_entries[owner] != entries) {
-                throw std::invalid_argument("V4.1 execution publication is missing owner KV/index entries");
-            }
-        }
-        for (size_t layer = 0; layer < swa_valid_start.size(); ++layer) {
-            if (swa_valid_start[layer] < 0 || swa_valid_start[layer] > needed_start
-                || swa_valid_end[layer] != materialized_end
-                || swa_valid_end[layer] - swa_valid_start[layer] > identity.physical_swa_entries
-                || swa_replay_floor[layer] < 0 || swa_replay_floor[layer] > swa_valid_start[layer]
-                || ((identity.replay_mode == DSV41ReplayMode::FULL || layer <= 20) && swa_replay_floor[layer] != 0)) {
-                throw std::invalid_argument("V4.1 execution publication has incomplete SWA ranges");
-            }
-        }
-        for (size_t owner = 0; owner < pair_valid.size(); ++owner) {
-            const bool pending = materialized_end % 2 != 0;
-            if (pair_valid[owner] != static_cast<uint8_t>(pending)
-                || pair_positions[owner] != (pending ? materialized_end - 1 : -1)) {
-                throw std::invalid_argument("V4.1 execution publication has stale ratio2 pair state");
-            }
-        }
-        for (size_t i = 0; i < history_token_ids.size(); ++i) {
-            const bool missing = materialized_end + static_cast<int64_t>(i) < 3;
-            if (history_image_mask[i] > 1 || (missing && (history_token_ids[i] != -1 || history_image_mask[i] != 0))
-                || (!missing && history_token_ids[i] < 0)) {
-                throw std::invalid_argument("V4.1 execution publication has invalid canonical history");
-            }
-        }
-    }
-
-    DSV41CheckpointMetadata checkpoint(const DSV41CacheIdentity& identity, size_t reuse_unit) const {
-        validate(identity, 3);
-        DSV41CheckpointMetadata metadata;
-        metadata.identity                 = identity;
-        metadata.materialized_end         = materialized_end;
-        metadata.encoder_materialized_end = encoder_materialized_end;
-        metadata.decoder_checkpoint_end   = decoder_checkpoint_end;
-        metadata.aux_valid_start          = aux_valid_start;
-        metadata.aux_valid_end            = aux_valid_end;
-        std::copy(global_entries.begin(), global_entries.end(), metadata.global_entries.begin());
-        std::copy(index_entries.begin(), index_entries.end(), metadata.index_entries.begin());
-        for (size_t layer = 0; layer < metadata.swa.size(); ++layer)
-            metadata.swa[layer] = {swa_valid_start[layer], swa_valid_end[layer], swa_replay_floor[layer]};
-        std::copy(history_token_ids.begin(), history_token_ids.end(), metadata.history_token_ids.begin());
-        std::copy(history_image_mask.begin(), history_image_mask.end(), metadata.history_image_mask.begin());
-        metadata.history_ready   = history_ready;
-        metadata.draft_committed = draft_committed;
-        metadata.pair_empty      = materialized_end % 2 == 0;
-        metadata.validate(reuse_unit);
-        return metadata;
-    }
 };
 
-struct DSV41ExecutionProgress {
-    int64_t request_id{-1};
-    int64_t encoder_materialized_end{0};
-    int64_t decoder_checkpoint_end{0};
-};
-
-// The scheduling rank supplies these callbacks for a real in-flight prefill.
-// Storage and copy completion remain owned by the existing memory connector.
-struct DSV41ExecutionContext {
-    int64_t request_id{-1};
-    int64_t protected_prefix_end{0};
-    int64_t final_handoff_end{0};
-    std::vector<std::vector<int32_t>> block_ids_by_group;
-    std::function<void(const DSV41ExecutionProgress&)> report_progress;
-    std::function<bool()> is_active;
+// The scheduling rank hands this narrow seam to the model for a real in-flight
+// prefill. Storage and copy completion remain owned by the memory connector;
+// no progress reports or protection ring are carried here.
+struct DSV41CheckpointPublisher {
+    int64_t                            request_id{-1};
+    int64_t                            protected_prefix_end{0};
+    int64_t                            final_handoff_end{0};
+    std::vector<std::vector<int32_t>>  block_ids_by_group;
     using WorkerBlockIds = std::vector<std::vector<std::vector<int32_t>>>;
-    std::function<bool(const DSV41ExecutionState&, const std::vector<std::vector<int32_t>>&, const WorkerBlockIds&)>
-        protect_checkpoint;
+    std::function<bool(const DSV41CheckpointPublication&,
+                       const std::vector<std::vector<int32_t>>&,
+                       const WorkerBlockIds&)>
+        publish;
+    // Non-scheduling CP ranks install the same restored checkpoint metadata on
+    // their own resource; the memory copy itself is staged by the scheduling
+    // rank alone through publish.
+    std::function<bool(const DSV41CheckpointPublication&,
+                       const std::vector<std::vector<int32_t>>&,
+                       const WorkerBlockIds&)>
+        install;
 
-    void reportProgress(const DSV41ExecutionProgress& progress) const {
-        if (progress.request_id != request_id || !report_progress)
-            throw std::invalid_argument("V4.1 progress callback belongs to another request");
-        report_progress(progress);
-    }
-    bool isActive() const {
-        return is_active && is_active();
-    }
-    bool protectCheckpoint(const DSV41ExecutionState& publication,
-                           const std::vector<std::vector<int32_t>>& actual_block_ids,
-                           const WorkerBlockIds& worker_block_ids = {}) const {
-        if (publication.request_id != request_id || !protect_checkpoint)
-            throw std::invalid_argument("V4.1 checkpoint callback belongs to another request");
-        return protect_checkpoint(publication, actual_block_ids, worker_block_ids);
-    }
-};
-
-// The connector owns the immutable CPU snapshot. Keeping this handle protects
-// N's complete state while the live GPU rings advance towards T.
-class DSV41CheckpointSnapshot {
-public:
-    explicit DSV41CheckpointSnapshot(DSV41CheckpointMetadata metadata): metadata_(std::move(metadata)) {}
-    virtual ~DSV41CheckpointSnapshot() = default;
-    const DSV41CheckpointMetadata& metadata() const {
-        return metadata_;
+    bool publishCheckpoint(const DSV41CheckpointPublication&             publication,
+                           const std::vector<std::vector<int32_t>>&      actual_block_ids,
+                           const WorkerBlockIds&                         worker_block_ids = {}) const {
+        if (publication.request_id != request_id || !publish)
+            throw std::invalid_argument("V4.1 checkpoint publisher belongs to another request");
+        return publish(publication, actual_block_ids, worker_block_ids);
     }
 
-private:
-    const DSV41CheckpointMetadata metadata_;
-};
-
-class DSV41CacheState {
-public:
-    struct View {
-        DSV41CacheIdentity                                    identity;
-        int64_t                                               encoder_materialized_end{0};
-        int64_t                                               decoder_checkpoint_end{0};
-        int64_t                                               target_ready_end{0};
-        int64_t                                               protected_prefix_end{0};
-        int64_t                                               final_handoff_end{0};
-        bool                                                  finished{false};
-        bool                                                  cancelled{false};
-        std::optional<DSV41CheckpointMetadata>                completed;
-        std::optional<DSV41ExecutionState>                    execution;
-        std::vector<std::shared_ptr<DSV41CheckpointSnapshot>> snapshots;
-    };
-
-    explicit DSV41CacheState(DSV41CacheIdentity identity) {
-        identity.validate();
-        state_.identity = std::move(identity);
+    bool installCheckpoint(const DSV41CheckpointPublication&             publication,
+                           const std::vector<std::vector<int32_t>>&      actual_block_ids,
+                           const WorkerBlockIds&                         worker_block_ids = {}) const {
+        if (publication.request_id != request_id || !install)
+            throw std::invalid_argument("V4.1 checkpoint publisher belongs to another request");
+        return install(publication, actual_block_ids, worker_block_ids);
     }
-    View view() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return state_;
-    }
-    void requireProtectedPrefix(int64_t prefix_end, int64_t handoff_end) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        active();
-        if (prefix_end < 0 || (prefix_end > 0 && prefix_end < state_.encoder_materialized_end) || prefix_end > handoff_end
-            || handoff_end <= 0 || handoff_end > 1048576
-            || (state_.final_handoff_end > 0
-                && (state_.protected_prefix_end != prefix_end || state_.final_handoff_end != handoff_end))) {
-            throw std::invalid_argument("V4.1 protected prefix must be selected before advancing past N");
-        }
-        state_.protected_prefix_end = prefix_end;
-        state_.final_handoff_end    = handoff_end;
-    }
-    void advanceEncoder(int64_t end) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        active();
-        advanceEncoderLocked(end);
-    }
-    void publishProgress(const DSV41ExecutionProgress& progress) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        active();
-        if (state_.identity.replay_mode != DSV41ReplayMode::BOUNDED_CHECKPOINT_V1 || progress.request_id < 0
-            || progress.decoder_checkpoint_end != state_.decoder_checkpoint_end) {
-            throw std::invalid_argument("V4.1 encoder-only progress cannot complete decoder state");
-        }
-        advanceEncoderLocked(progress.encoder_materialized_end);
-    }
-
-private:
-    void advanceEncoderLocked(int64_t end) {
-        if (end < state_.encoder_materialized_end || end > 1048576
-            || (state_.final_handoff_end > 0 && end > state_.final_handoff_end)) {
-            throw std::invalid_argument("invalid V4.1 encoder progress");
-        }
-        if (state_.protected_prefix_end > 0 && end > state_.protected_prefix_end && !prefixProtected()) {
-            throw std::logic_error("V4.1 must snapshot complete N before advancing to T");
-        }
-        state_.encoder_materialized_end = end;
-        if (end > state_.decoder_checkpoint_end) {
-            state_.target_ready_end = 0;
-            state_.execution.reset();
-        }
-    }
-
-public:
-    void completeDecoder(const DSV41CheckpointMetadata& metadata, size_t reuse_unit) {
-        metadata.validate(reuse_unit);
-        std::lock_guard<std::mutex> lock(mutex_);
-        active();
-        if (!(metadata.identity == state_.identity) || metadata.materialized_end != state_.encoder_materialized_end
-            || metadata.materialized_end < state_.decoder_checkpoint_end) {
-            throw std::invalid_argument("V4.1 decoder checkpoint does not match encoder progress or identity");
-        }
-        state_.decoder_checkpoint_end = metadata.materialized_end;
-        state_.completed              = metadata;
-        state_.target_ready_end = metadata.materialized_end;
-    }
-    void markTargetReady(int64_t end) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        active();
-        if (state_.identity.replay_mode != DSV41ReplayMode::FULL || end < state_.encoder_materialized_end || end <= 0
-            || end > 1048576
-            || (state_.protected_prefix_end > 0 && end > state_.protected_prefix_end && !prefixProtected()))
-            throw std::invalid_argument("V4.1 target completion has an invalid execution boundary");
-        state_.encoder_materialized_end = end;
-        state_.target_ready_end         = end;
-    }
-    void publishExecution(const DSV41ExecutionState& execution, uint32_t expected_draft_layers) {
-        execution.validate(state_.identity, expected_draft_layers);
-        std::lock_guard<std::mutex> lock(mutex_);
-        active();
-        if (execution.materialized_end < state_.encoder_materialized_end
-            || (state_.final_handoff_end > 0 && execution.materialized_end > state_.final_handoff_end)
-            || (state_.protected_prefix_end > 0 && execution.materialized_end > state_.protected_prefix_end
-                && !prefixProtected())) {
-            throw std::invalid_argument("V4.1 execution publication is stale or bypasses protected N");
-        }
-        state_.encoder_materialized_end = execution.materialized_end;
-        state_.decoder_checkpoint_end   = execution.materialized_end;
-        state_.target_ready_end         = execution.materialized_end;
-        state_.execution                = execution;
-    }
-    void protect(const std::shared_ptr<DSV41CheckpointSnapshot>& snapshot) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        active();
-        if (!snapshot || !state_.completed || !(snapshot->metadata() == *state_.completed)
-            || snapshot->metadata().materialized_end != state_.decoder_checkpoint_end
-            || state_.encoder_materialized_end != state_.decoder_checkpoint_end) {
-            throw std::invalid_argument("V4.1 cannot protect an incomplete or stale checkpoint");
-        }
-        state_.snapshots.push_back(snapshot);
-    }
-    void completeHandoff(int64_t end, bool target_swa_ready, bool draft_swa_ready, bool aux_ready) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        active();
-        if (end != state_.encoder_materialized_end || end != state_.final_handoff_end || !target_swa_ready
-            || !draft_swa_ready || !aux_ready) {
-            throw std::invalid_argument("V4.1 handoff requires complete target/draft SWA and valid aux at T");
-        }
-        state_.decoder_checkpoint_end = end;
-    }
-    void finish(int64_t end) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        active();
-        if (end != state_.encoder_materialized_end || end != state_.decoder_checkpoint_end
-            || (state_.final_handoff_end > 0 && end != state_.final_handoff_end)
-            || (state_.protected_prefix_end > 0 && state_.protected_prefix_end < end && !prefixProtected())) {
-            throw std::logic_error("V4.1 cannot finish before both axes and protected N are complete");
-        }
-        state_.finished = true;
-    }
-    void restore(const DSV41CheckpointMetadata& metadata, size_t reuse_unit) {
-        metadata.validate(reuse_unit);
-        std::lock_guard<std::mutex> lock(mutex_);
-        active();
-        if (!(metadata.identity == state_.identity) || state_.encoder_materialized_end > metadata.materialized_end
-            || state_.encoder_materialized_end != state_.decoder_checkpoint_end) {
-            throw std::invalid_argument("V4.1 restore requires a same-mode complete prior boundary");
-        }
-        state_.encoder_materialized_end = metadata.materialized_end;
-        state_.decoder_checkpoint_end   = metadata.materialized_end;
-        state_.completed                = metadata;
-        state_.target_ready_end = metadata.materialized_end;
-        state_.execution.reset();
-    }
-    void cancel() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        state_.cancelled = true;
-        state_.finished  = false;
-        state_.snapshots.clear();
-        state_.completed.reset();
-        state_.execution.reset();
-        state_.target_ready_end = 0;
-    }
-
-private:
-    void active() const {
-        if (state_.finished || state_.cancelled) {
-            throw std::logic_error("V4.1 cache request is no longer active");
-        }
-    }
-    bool prefixProtected() const {
-        for (const auto& snapshot : state_.snapshots) {
-            if (snapshot->metadata().materialized_end == state_.protected_prefix_end) {
-                return true;
-            }
-        }
-        return false;
-    }
-    mutable std::mutex mutex_;
-    View               state_;
 };
 
 }  // namespace rtp_llm

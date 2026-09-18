@@ -568,16 +568,23 @@ protected:
         resource.initGroups(1, 40, cache_config_.layer_to_group_id);
         for (int batch = 0; batch < choices; ++batch) {
             resource.setBatchBlocks(batch, 0, {1 + 4 * batch, 2 + 4 * batch, 3 + 4 * batch, 4 + 4 * batch});
-            resource.cacheResource(batch).setDsv41CacheState(std::make_shared<DSV41CacheState>(
-                DSV41CacheIdentity{std::string(40, 'a'), std::string(64, 'b'), DSV41ReplayMode::FULL, 1, 128, 128}));
+            resource.cacheResource(batch).setDsv41CacheKeySeed(
+                DSV41CacheIdentity{std::string(40, 'a'), std::string(64, 'b'), DSV41ReplayMode::FULL, 1, 128, 128}
+                    .cacheKeySeed());
         }
         stream->setKVCache(resource);
         stream->generate_status_->status = StreamState::RUNNING;
         return stream;
     }
 
-    static std::shared_ptr<DSV41CacheState> state(const GenerateStreamPtr& stream, int batch = 0) {
-        return stream->kvCachePtr()->cacheResource(batch).dsv41CacheState();
+    static void restore(const GenerateStreamPtr& stream, int64_t end, int batch = 0) {
+        auto metadata              = std::make_shared<DSV41CheckpointMetadata>();
+        metadata->materialized_end = end;
+        stream->kvCachePtr()->cacheResource(batch).setDsv41RestoredCheckpoint(metadata, end);
+    }
+
+    static int64_t restoredEnd(const GenerateStreamPtr& stream, int batch = 0) {
+        return stream->kvCachePtr()->cacheResource(batch).dsv41RestoredCheckpointEnd();
     }
 
     static MergedOutput sampled(const std::vector<int32_t>& tokens) {
@@ -606,16 +613,17 @@ TEST_F(V41BatchStreamProcessorTest, PrefillDispatchMakesEverySequenceReadyForIts
     EXPECT_EQ(toVec<bool>(gathered->v41_state_ready), (std::vector<bool>{true, true, true}));
     EXPECT_EQ(toVec<bool>(gathered->v41_is_fake), (std::vector<bool>{false, false, false}));
     EXPECT_EQ(toVec<int>(gathered->combo_tokens), (std::vector<int>{11, 12, 13, 11, 12, 13, 21, 22}));
-    EXPECT_EQ(state(first, 0)->view().target_ready_end, 0);
-    EXPECT_EQ(state(first, 1)->view().target_ready_end, 0);
+    EXPECT_EQ(restoredEnd(first, 0), 0);
+    EXPECT_EQ(restoredEnd(first, 1), 0);
 
     ASSERT_TRUE(processor_->dispatch(prefill, sampled({31, 32, 41})).ok());
     EXPECT_FALSE(first->isContextStream());
     EXPECT_EQ(first->seqLength(), 4);
     EXPECT_EQ(second->seqLength(), 3);
-    EXPECT_EQ(state(first, 0)->view().target_ready_end, 3);
-    EXPECT_EQ(state(first, 1)->view().target_ready_end, 3);
-    EXPECT_EQ(state(second)->view().target_ready_end, 2);
+    // Dispatch no longer publishes execution readiness into the cache resource.
+    EXPECT_EQ(restoredEnd(first, 0), 0);
+    EXPECT_EQ(restoredEnd(first, 1), 0);
+    EXPECT_EQ(restoredEnd(second), 0);
     StreamGroups decode(streams);
     gathered = processor_->gatherModelInput(decode, holder);
     ASSERT_TRUE(gathered.ok());
@@ -623,16 +631,18 @@ TEST_F(V41BatchStreamProcessorTest, PrefillDispatchMakesEverySequenceReadyForIts
     EXPECT_EQ(toVec<int64_t>(gathered->v41_request_id), (std::vector<int64_t>{first_id, first_id, second_id}));
     EXPECT_EQ(toVec<int>(gathered->sequence_lengths), (std::vector<int>{3, 3, 2}));
     EXPECT_EQ(toVec<int>(gathered->combo_tokens), (std::vector<int>{31, 32, 41}));
-    EXPECT_EQ(toVec<bool>(gathered->v41_state_ready), (std::vector<bool>{true, true, true}));
+    EXPECT_EQ(toVec<bool>(gathered->v41_state_ready), (std::vector<bool>{false, false, false}));
     EXPECT_EQ(toVec<int>(gathered->engram_history_ids), (std::vector<int>{11, 12, 13, 11, 12, 13, 0, 21, 22}));
     EXPECT_EQ(toVec<bool>(gathered->engram_history_valid),
               (std::vector<bool>{true, true, true, true, true, true, false, true, true}));
 
     ASSERT_TRUE(processor_->dispatch(decode, sampled({33, 34, 42})).ok());
-    EXPECT_EQ(state(first, 0)->view().target_ready_end, 4);
-    EXPECT_EQ(state(first, 1)->view().target_ready_end, 4);
-    EXPECT_EQ(state(second)->view().target_ready_end, 3);
-    first->kvCachePtr()->cacheResource(1).setDsv41CacheState(nullptr);
+    EXPECT_EQ(restoredEnd(first, 0), 0);
+    EXPECT_EQ(restoredEnd(first, 1), 0);
+    EXPECT_EQ(restoredEnd(second), 0);
+    // A restored checkpoint covering the decode start reports readiness.
+    restore(first, 4, 0);
+    restore(second, 3);
     StreamGroups next_decode(streams);
     gathered = processor_->gatherModelInput(next_decode, holder);
     ASSERT_TRUE(gathered.ok());
@@ -643,7 +653,7 @@ TEST_F(V41BatchStreamProcessorTest, FakeRankRowsStayInvalidAndDoNotPublishTarget
     auto fake = makeStream({7}, 0, 1, false);
     fake->setIsFakeStream(true);
     fake->update({.new_tokens = hostIntBuffer({0}).reshape({1, 1}), .num_new_tokens = 1});
-    state(fake)->markTargetReady(1);
+    restore(fake, 1);
     std::list<GenerateStreamPtr> streams{fake};
     StreamGroups                 groups(streams);
     TensorHolder                 holder;
@@ -659,8 +669,7 @@ TEST_F(V41BatchStreamProcessorTest, FakeRankRowsStayInvalidAndDoNotPublishTarget
     EXPECT_EQ(toVec<int>(gathered->engram_history_ids), (std::vector<int>{0, 0, 0}));
     EXPECT_EQ(toVec<bool>(gathered->engram_history_valid), (std::vector<bool>{false, false, false}));
     ASSERT_TRUE(processor_->dispatch(groups, sampled({9})).ok());
-    EXPECT_EQ(state(fake)->view().target_ready_end, 1);
-    EXPECT_EQ(state(fake)->view().encoder_materialized_end, 1);
+    EXPECT_EQ(restoredEnd(fake), 1);
 }
 
 TEST_F(V41BatchStreamProcessorTest, CacheDataHitsCannotAdvancePastRestoredTargetState) {
@@ -681,10 +690,6 @@ TEST_F(V41BatchStreamProcessorTest, CacheDataHitsCannotAdvancePastRestoredTarget
     EXPECT_EQ(stream->reuseLength(), 0);
     EXPECT_EQ(stream->initialReuseLength(), 0);
 
-    restored->setDsv41CacheState(nullptr);
-    resource.waitLoadCacheDone(loaded);
-    EXPECT_EQ(stream->reuseLength(), 0);
-    EXPECT_EQ(stream->initialReuseLength(), 0);
     std::list<GenerateStreamPtr> streams{stream};
     TensorHolder                 holder;
     StreamGroups                 unrecovered(streams);
@@ -693,8 +698,10 @@ TEST_F(V41BatchStreamProcessorTest, CacheDataHitsCannotAdvancePastRestoredTarget
     EXPECT_EQ(toVec<int>(gathered->prefix_lengths), (std::vector<int>{0}));
     EXPECT_EQ(toVec<int>(gathered->combo_tokens), tokens);
 
-    restored->setDsv41CacheState(state(stream));
-    state(stream)->markTargetReady(128);
+    auto checkpoint              = std::make_shared<DSV41CheckpointMetadata>();
+    checkpoint->materialized_end = 128;
+    restored->setDsv41RestoredCheckpoint(checkpoint, 128);
+    stream->kvCachePtr()->cacheResource(0).setDsv41RestoredCheckpoint(checkpoint, 128);
     resource.waitLoadCacheDone(loaded);
     EXPECT_EQ(restored->reuseBlockNum(), 2);
     EXPECT_EQ(stream->reuseLength(), 128);

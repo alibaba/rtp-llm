@@ -21,6 +21,18 @@ def _prefill_role(parallelism):
     return str(parallelism.role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
 
 
+def _native_cp_width(parallelism):
+    # Mirror DSV41CacheConfigHelper::contextParallelSize: the native cache
+    # groups are sized block*cp, with cp taken from the TP group on PREFILL
+    # and from the explicit prefill CP width on DECODE.
+    cp = parallelism.prefill_cp_config
+    if not cp.kv_cache_sharded:
+        return 1
+    if _prefill_role(parallelism):
+        return int(parallelism.tp_size)
+    return int(cp.prefill_cp_size)
+
+
 def _draft_query_width(inputs):
     lengths = inputs.attention_inputs.input_lengths
     if (
@@ -195,13 +207,28 @@ class V41DraftFmhaImpl:
             if (
                 rid < 0
                 or start <= 0
-                or not ready[index]
                 or not 0 < counts[index] <= self.query_width
                 or start + counts[index] > self.model.config.max_seq_len
-                or execution[index][1] != start
-                or execution[index][2] != start
             ):
                 raise ValueError("draft requires complete canonical target/draft state")
+            # Recovery boundary: validate the engine certificate and seed the
+            # bindings from it. Continuous decode: the target pair page headers
+            # already self-prove the materialization, so derive the draft SWA
+            # window locally instead of consuming the static engine inputs.
+            boundary = (
+                ready[index]
+                and execution[index][1] == start
+                and execution[index][2] == start
+                and all(end == start for _, end, _ in ranges[index][40:43])
+            )
+            if not boundary:
+                for stage in range(3):
+                    ranges[index][40 + stage] = [
+                        max(start - self.model.layout.swa_entries, 0),
+                        start,
+                        0,
+                    ]
+                continue
             for begin, end, floor in ranges[index][40:43]:
                 if (
                     begin < 0
@@ -377,8 +404,12 @@ class DeepSeekV41DSparkModel(GptModelBase):
             raise ValueError("V4.1 DSpark requires three stages and gamma5")
         self._prefill_only = _prefill_role(parallelism_config)
         self.layout = CacheLayout(
-            token_block_size=kv_cache_config.seq_size_per_block,
-            cp_size=8,
+            token_block_size=(
+                kv_cache_config.seq_size_per_block
+                if kv_cache_config.seq_size_per_block > 0
+                else 128
+            ),
+            cp_size=_native_cp_width(parallelism_config),
             speculative_tokens=5,
             draft_enabled=True,
         )
@@ -540,11 +571,6 @@ class DeepSeekV41DSparkModel(GptModelBase):
         return PyModelOutputs(
             torch.zeros((0, 5120), dtype=torch.bfloat16, device=self.device)
         )
-
-    def get_execution_states(self, original_inputs):
-        if self._active_v41_draft_impl is not None:
-            self._active_v41_draft_impl.check(original_inputs)
-        return []
 
     def forward(self, inputs, fmha_impl=None):
         raise RuntimeError(
