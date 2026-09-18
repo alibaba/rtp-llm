@@ -940,6 +940,13 @@ TEST(HybridPoolConfigCreatorTest, V41AllocatesGlobalPoolsOnlyOnSources) {
     EXPECT_EQ(ratio2->entries_per_block, 64u);
     EXPECT_EQ(ratio1->entries_per_block, 128u);
     EXPECT_EQ(index->entries_per_block, 128u);
+    // V4.1-Flash FP4 pool geometry: GLOBAL 288B entries, INDEX_K 68B entries.
+    EXPECT_EQ(ratio2->entry_elems, 288u);
+    EXPECT_EQ(ratio1->entry_elems, 288u);
+    EXPECT_EQ(index->entry_elems, 68u);
+    EXPECT_EQ(ratio2->block_size_bytes(), 64u * 288u);
+    EXPECT_EQ(ratio1->block_size_bytes(), 128u * 288u);
+    EXPECT_EQ(index->block_size_bytes(), 128u * 68u);
     EXPECT_EQ(state->state_dim, 1024u);
     EXPECT_EQ(state->entries_per_block, 6u);
 }

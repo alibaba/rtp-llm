@@ -26,6 +26,13 @@ constexpr uint32_t kDsv4KvEntryBytesBf16      = 1024;
 constexpr uint32_t kDsv4IndexerEntryBytesBf16 = 256;
 constexpr uint32_t kDsv4KvEntryBytesFp8       = 584;
 constexpr uint32_t kDsv4IndexerEntryBytesFp8  = 132;
+// V4.1-Flash FP4 pools (fixed; no dtype switch): the GLOBAL regions hold the
+// official compressed-KV form (256B packed e2m1 payload + 32B E4M3 group-16
+// scales, row-interleaved), the INDEXER_KV region holds the official index
+// form (64B e2m1 payload + 4B packed UE8M0 group-32 scales per entry, stored
+// as a per-block payload plane followed by a scale plane for DeepGEMM).
+constexpr uint32_t kDsv4KvEntryBytesFp4      = 288;
+constexpr uint32_t kDsv4IndexerEntryBytesFp4 = 68;
 constexpr size_t   kDsv4PoolNum               = 7;
 
 struct DSV4LayerSets {
@@ -294,8 +301,12 @@ std::vector<DSV4PoolDesc> buildDSV41PoolDescs(const DSV4LayerSets&     sets,
                                               uint32_t                 physical_tokens_per_block,
                                               const ParallelismConfig& parallelism_config,
                                               int                      gen_num_per_cycle) {
+    // V4.1: the GLOBAL and INDEXER_KV pools are fixed to the V4.1-Flash FP4
+    // layouts (feature enablement, not a dtype option). The SWA_KV pool keeps
+    // the shared FP8 typed layout, so the FP8 cache-dtype requirement below
+    // still guards the SWA region.
     RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8,
-                            "DeepSeek V4.1 requires FP8 typed KV pools");
+                            "DeepSeek V4.1 requires FP8 typed SWA KV pools");
     auto pools = buildDSV4PoolDescs(
         sets, model_config, kernel_tokens_per_block, physical_tokens_per_block, parallelism_config, gen_num_per_cycle);
     pools[0].entries_per_block = kernel_tokens_per_block / 2;
@@ -309,6 +320,9 @@ std::vector<DSV4PoolDesc> buildDSV41PoolDescs(const DSV4LayerSets&     sets,
     pools[4].entries_per_block = maybeAdjustFixedEntriesForCpSharding(
         computeStateRing(2, 0, gen_num_per_cycle), parallelism_config, KVCacheRegionName::CSA_STATE);
     pools[5].layer_ids = &sets.empty_layers;
+    pools[0].entry_elems = kDsv4KvEntryBytesFp4;
+    pools[1].entry_elems = kDsv4KvEntryBytesFp4;
+    pools[2].entry_elems = kDsv4IndexerEntryBytesFp4;
     return pools;
 }
 

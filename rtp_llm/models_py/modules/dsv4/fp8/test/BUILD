@@ -163,6 +163,14 @@ py_test(
 ]
 
 py_test(
+    name = "test_v41_fp4_codec",
+    srcs = ["test_v41_fp4_codec.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["requires-dsv41-weights"],
+    timeout = "moderate",
+)
+
+py_test(
     name = "test_fused_decode_meta_comprehensive",
     srcs = ["test_fused_decode_meta_comprehensive.py"],
     deps = _DSV4_FP8_TEST_DEPS,

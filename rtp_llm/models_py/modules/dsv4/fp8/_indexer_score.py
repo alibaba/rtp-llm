@@ -53,10 +53,16 @@ try:
         _deep_gemm, "get_paged_mqa_logits_metadata"
     )
     _HAS_DEEP_GEMM_MQA = hasattr(_deep_gemm, "fp8_mqa_logits")
+    _HAS_DEEP_GEMM_FP4_MQA = hasattr(_deep_gemm, "fp8_fp4_mqa_logits")
+    _HAS_DEEP_GEMM_FP4_PAGED_MQA = hasattr(
+        _deep_gemm, "fp8_fp4_paged_mqa_logits"
+    ) and hasattr(_deep_gemm, "get_paged_mqa_logits_metadata")
 except ImportError:
     _deep_gemm = None
     _HAS_DEEP_GEMM = False
     _HAS_DEEP_GEMM_MQA = False
+    _HAS_DEEP_GEMM_FP4_MQA = False
+    _HAS_DEEP_GEMM_FP4_PAGED_MQA = False
 
 
 def has_fp8_paged_mqa_logits() -> bool:
@@ -65,6 +71,58 @@ def has_fp8_paged_mqa_logits() -> bool:
 
 def has_fp8_mqa_logits() -> bool:
     return _HAS_DEEP_GEMM_MQA
+
+
+def has_fp8_fp4_mqa_logits() -> bool:
+    return _HAS_DEEP_GEMM_FP4_MQA
+
+
+def has_fp8_fp4_paged_mqa_logits() -> bool:
+    return _HAS_DEEP_GEMM_FP4_PAGED_MQA
+
+
+# ---------------------------------------------------------------------------
+# V4.1 FP4 (MX mode) prefill indexer wrapper around
+# ``deep_gemm.fp8_fp4_mqa_logits``.
+#
+# Shape contract:
+#   q_payload  [M, H, 64]  int8   (packed e2m1; logical head_dim 128)
+#   q_sf       [M, H]      int32  (packed UE8M0, one int32 per token/head)
+#   k_payload  [N, 64]     int8
+#   k_sf       [N]         int32
+#   weights    [M, H]      fp32   (raw head weights; scales live in the SFs)
+#
+# Returns ``[M, N] fp32`` logits — same semantics as the FP8 path: each row
+# is the per-K-token score after fused einsum + ReLU + per-head weighted sum.
+# ---------------------------------------------------------------------------
+
+
+def fp8_fp4_mqa_indexer_score(
+    q_payload: torch.Tensor,  # [M, H, 64] int8
+    q_sf: torch.Tensor,  # [M, H] int32
+    k_payload: torch.Tensor,  # [N, 64] int8
+    k_sf: torch.Tensor,  # [N] int32
+    weights: torch.Tensor,  # [M, H] fp32
+    cu_seqlen_ks: torch.Tensor,  # [M] int32 (K start, inclusive)
+    cu_seqlen_ke: torch.Tensor,  # [M] int32 (K end, exclusive)
+    *,
+    clean_logits: bool = True,
+    max_seqlen_k: int = 0,
+) -> torch.Tensor:
+    """MX-mode FP4 prefill indexer logits via DeepGEMM.
+
+    Both scale factors use DeepGEMM's packed-UE8M0 int32 form (group 32 along
+    the head dim), matching the V4.1-Flash official indexer quantization.
+    """
+    return _deep_gemm.fp8_fp4_mqa_logits(
+        (q_payload.contiguous(), q_sf.contiguous()),
+        (k_payload.contiguous(), k_sf.contiguous()),
+        weights.contiguous(),
+        cu_seqlen_ks.contiguous(),
+        cu_seqlen_ke.contiguous(),
+        clean_logits,
+        max_seqlen_k,
+    )
 
 
 _sched_cache: Optional[torch.Tensor] = None
