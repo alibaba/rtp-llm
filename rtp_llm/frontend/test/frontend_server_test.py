@@ -242,6 +242,24 @@ class BatchFrontendWorkerTest(TestCase):
                 self.assertFalse(request.is_streaming)
                 self.assertEqual(37, request.generate_configs[0].max_new_tokens)
 
+    def test_root_inference_preserves_null_stream_flag_with_incremental(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+        worker._inference = MagicMock()
+        args = {
+            request_id_field_name: 700,
+            "prompt": "hello",
+            "return_incremental": True,
+        }
+        worker.inference(yield_generator=None, **args)
+        request = worker._inference.call_args.args[0]
+        self.assertIsNone(request.is_streaming)
+        self.assertTrue(request.incremental)
+        with self.assertRaises(FtRuntimeException) as raised:
+            worker.inference(yield_generator=False, **args)
+        self.assertEqual(
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR, raised.exception.exception_type
+        )
+
     def test_prepared_batch_invokes_backend_once_with_group_identity(self):
         pipeline = Pipeline.__new__(Pipeline)
         pipeline.tokenizer = MagicMock()

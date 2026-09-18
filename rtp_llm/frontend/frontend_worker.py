@@ -154,7 +154,12 @@ class FrontendWorker:
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "batch_infer only supports non-streaming requests",
             )
-        if request.input_texts and not request.is_streaming and request.incremental:
+        # Preserve mainline's distinction between False and an explicit null stream flag.
+        if (
+            request.input_texts
+            and request.is_streaming is False
+            and request.incremental
+        ):
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "request is non_stream but use incremental decoder",
