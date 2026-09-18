@@ -121,7 +121,8 @@ void invokeSelectExpertsForTokens(float const*                    input,
                                   int const                       end_expert,
                                   float                           mixer_epsilon,
                                   MOEExpertScaleNormalizationMode norm_mode,
-                                  cudaStream_t                    stream);
+                                  cudaStream_t                    stream,
+                                  bool                            use_fused_512 = false);
 
 void sortAndScanSoftmaxOutput(int*               expert_for_source_row,
                               int*               source_rows,

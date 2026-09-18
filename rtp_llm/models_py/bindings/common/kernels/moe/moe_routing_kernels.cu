@@ -262,7 +262,12 @@ struct TopkConstants {
 };
 }  // namespace detail
 
-template<int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG, typename TOPK_T>
+template<int VPT,
+         int NUM_EXPERTS,
+         int WARPS_PER_CTA,
+         int BYTES_PER_LDG,
+         typename TOPK_T,
+         bool MATCH_FALLBACK_REDUCTION = false>
 __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
     void topkGatingSoftmax(float const*                    input,
                            bool const*                     finished,
@@ -328,12 +333,36 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
 #pragma unroll
     for (int ii = 0; ii < VPT; ++ii) {
         row_chunk[ii] = expf(row_chunk[ii] - thread_max);
-        row_sum += row_chunk[ii];
+        if constexpr (!MATCH_FALLBACK_REDUCTION) {
+            row_sum += row_chunk[ii];
+        }
     }
 
+    if constexpr (MATCH_FALLBACK_REDUCTION) {
+        static_assert(NUM_EXPERTS == 512 && VPT == 16 && ELTS_PER_LDG == 1);
+        // Match moeSoftmax<256>'s CUB block reduction exactly: each virtual
+        // thread first sums columns tid and tid + 256, each of eight warps
+        // reduces with shuffle-down offsets 1,2,4,8,16, then warp 0 lane 0
+        // folds the eight warp totals in order. A different association can
+        // change router weights by one ULP and fail long-prefill logits.
 #pragma unroll
-    for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-        row_sum += __shfl_xor_sync(0xFFFFFFFF, row_sum, mask, THREADS_PER_ROW);
+        for (int group = 0; group < 8; ++group) {
+            float subtotal = row_chunk[group] + row_chunk[group + 8];
+#pragma unroll
+            for (int offset = 1; offset < 32; offset *= 2) {
+                float other = __shfl_down_sync(0xFFFFFFFF, subtotal, offset);
+                if (thread_group_idx + offset < 32) {
+                    subtotal += other;
+                }
+            }
+            row_sum += subtotal;
+        }
+        row_sum = __shfl_sync(0xFFFFFFFF, row_sum, 0);
+    } else {
+#pragma unroll
+        for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+            row_sum += __shfl_xor_sync(0xFFFFFFFF, row_sum, mask, THREADS_PER_ROW);
+        }
     }
 
     float const reciprocal_row_sum = 1.f / row_sum;
@@ -408,7 +437,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
 
 // ====================== Launcher helpers ======================
 
-template<int EXPERTS, int WARPS_PER_TB, typename TOPK_T>
+template<int EXPERTS, int WARPS_PER_TB, typename TOPK_T, bool MATCH_FALLBACK_REDUCTION = false>
 void topkGatingSoftmaxLauncherHelper(float const*                    input,
                                      bool const*                     finished,
                                      float*                          output,
@@ -422,7 +451,7 @@ void topkGatingSoftmaxLauncherHelper(float const*                    input,
                                      int const                       end_expert,
                                      MOEExpertScaleNormalizationMode norm_mode,
                                      cudaStream_t                    stream) {
-    static constexpr std::size_t MAX_BYTES_PER_LDG = 16;
+    static constexpr std::size_t MAX_BYTES_PER_LDG = MATCH_FALLBACK_REDUCTION ? 4 : 16;
     static constexpr int         BYTES_PER_LDG     = std::min(MAX_BYTES_PER_LDG, sizeof(float) * EXPERTS);
     using Constants                                = detail::TopkConstants<EXPERTS, BYTES_PER_LDG>;
     static constexpr int VPT                       = Constants::VPT;
@@ -430,8 +459,19 @@ void topkGatingSoftmaxLauncherHelper(float const*                    input,
     int64_t const        num_warps                 = (num_rows + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
     int64_t const        num_blocks                = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
     dim3                 block_dim(WARP_SIZE, WARPS_PER_TB);
-    topkGatingSoftmax<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG><<<num_blocks, block_dim, 0, stream>>>(
-        input, finished, output, num_rows, indices, source_row, k, startk, endk, start_expert, end_expert, norm_mode);
+    topkGatingSoftmax<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, TOPK_T, MATCH_FALLBACK_REDUCTION>
+        <<<num_blocks, block_dim, 0, stream>>>(input,
+                                               finished,
+                                               output,
+                                               num_rows,
+                                               indices,
+                                               source_row,
+                                               k,
+                                               startk,
+                                               endk,
+                                               start_expert,
+                                               end_expert,
+                                               norm_mode);
 }
 
 template<typename TOPK_T>
@@ -666,7 +706,32 @@ void invokeSelectExpertsForTokens(float const*                    input,
                                   int const                       end_expert,
                                   float                           mixer_epsilon,
                                   MOEExpertScaleNormalizationMode norm_mode,
-                                  cudaStream_t                    stream) {
+                                  cudaStream_t                    stream,
+                                  bool                            use_fused_512) {
+    // 512-expert geometry based on vLLM topk_softmax_kernels.cu case 512:
+    // 16 FP32 values per lane, one row per warp, four warps per CTA.
+    // Scalar coalesced loads allow matching the baseline CUB reduction order.
+    // Reuse the existing TensorRT-LLM-derived kernel and RTP routing semantics.
+    if (use_fused_512 && num_experts == 512 && input == input_with_bias
+        && norm_mode != MOEExpertScaleNormalizationMode::SPARSE_MIXER) {
+        if (num_rows > 0) {
+            topkGatingSoftmaxLauncherHelper<512, 4, TOPK_T, true>(input,
+                                                                  nullptr,
+                                                                  output,
+                                                                  indices,
+                                                                  source_row,
+                                                                  num_rows,
+                                                                  k,
+                                                                  0,
+                                                                  k,
+                                                                  start_expert,
+                                                                  end_expert,
+                                                                  norm_mode,
+                                                                  stream);
+            check_cuda_error();
+        }
+        return;
+    }
     if (input == input_with_bias) {
         if (norm_mode == MOEExpertScaleNormalizationMode::SPARSE_MIXER) {
             TLLM_CHECK_WITH_INFO(mixer_temp_output, "Sparse mixer output is null when running sparse mixer");
@@ -733,7 +798,8 @@ template void invokeSelectExpertsForTokens<int>(float const*,
                                                 int const,
                                                 float,
                                                 MOEExpertScaleNormalizationMode,
-                                                cudaStream_t);
+                                                cudaStream_t,
+                                                bool);
 
 template void invokeSelectExpertsForTokens<int64_t>(float const*,
                                                     float const*,
@@ -749,7 +815,8 @@ template void invokeSelectExpertsForTokens<int64_t>(float const*,
                                                     int const,
                                                     float,
                                                     MOEExpertScaleNormalizationMode,
-                                                    cudaStream_t);
+                                                    cudaStream_t,
+                                                    bool);
 
 // ====================== CubKeyValueSorter ======================
 
