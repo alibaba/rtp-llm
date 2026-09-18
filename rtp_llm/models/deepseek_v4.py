@@ -102,6 +102,7 @@ def _dsv4_pool_blocks(config_value: int | None, env_name: str) -> int:
         return 0
     return value if value > 0 else 0
 
+
 def _require_n_shared_experts(config_json: dict) -> int:
     """Return the explicitly declared shared-expert count.
 
@@ -637,9 +638,7 @@ class DeepSeekV4(DeepSeekV2):
         )
 
         fixed_pool_blocks = _dsv4_pool_blocks(
-            None
-            if kv_cache_config is None
-            else kv_cache_config.dsv4_fixed_pool_blocks,
+            None if kv_cache_config is None else kv_cache_config.dsv4_fixed_pool_blocks,
             "DSV4_FIXED_POOL_BLOCKS",
         )
         if fixed_pool_blocks > 0:
@@ -652,15 +651,15 @@ class DeepSeekV4(DeepSeekV2):
             )
         # HCA_STATE takes a dedicated override that wins over the shared value.
         hca_state_pool_blocks = _dsv4_pool_blocks(
-            None
-            if kv_cache_config is None
-            else kv_cache_config.dsv4_hca_state_pool_blocks,
+            (
+                None
+                if kv_cache_config is None
+                else kv_cache_config.dsv4_hca_state_pool_blocks
+            ),
             "DSV4_HCA_STATE_POOL_BLOCKS",
         )
         if hca_state_pool_blocks > 0:
-            apply_dsv4_explicit_pool_blocks(
-                descs, HCA_STATE_TAG, hca_state_pool_blocks
-            )
+            apply_dsv4_explicit_pool_blocks(descs, HCA_STATE_TAG, hca_state_pool_blocks)
             logging.info(
                 "DeepSeek-V4 pinned HCA_STATE pool to %d blocks",
                 hca_state_pool_blocks,
@@ -1036,7 +1035,9 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
             [weight for weight in layer if weight.name in layer_names]
             for layer in info.layer_weights
         ]
-        info.weights = [weight for weight in info.weights if weight.name in global_names]
+        info.weights = [
+            weight for weight in info.weights if weight.name in global_names
+        ]
         logging.info(
             "[DeepSeekV4DSparkWeight] PREFILL commit-only descriptors: "
             "layers=%d per-layer=%s globals=%s",

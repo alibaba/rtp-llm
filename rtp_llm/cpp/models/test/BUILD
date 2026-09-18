@@ -72,11 +72,14 @@ cc_library(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
+        "@havenask//aios/kmonitor:kmonitor_client_cpp",
     ] + select({
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",

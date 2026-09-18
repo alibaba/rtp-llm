@@ -27,6 +27,30 @@ ModelConfig makeHybridAttentionModelConfig() {
     return model_config;
 }
 
+ModelConfig makeDsv4ModelConfig(bool include_hca_state, bool explicit_hca_state) {
+    ModelConfig model_config;
+    model_config.num_layers                                                = 1;
+    model_config.attn_config.head_num                                      = 16;
+    model_config.attn_config.kv_head_num                                   = 1;
+    model_config.attn_config.size_per_head                                 = 128;
+    model_config.attn_config.indexer_head_dim                              = 128;
+    model_config.attn_config.tokens_per_block                              = 128;
+    model_config.attn_config.kv_cache_dtype                                = KvCacheDataType::FP8;
+    model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    setDsv4KvCacheSpecs(model_config, {include_hca_state ? 128 : 0});
+    if (!include_hca_state) {
+        return model_config;
+    }
+    if (!explicit_hca_state) {
+        for (auto& desc : model_config.kv_cache_spec_descs[0]) {
+            if (desc.tag == "hca_state") {
+                desc.capacity.reset();
+            }
+        }
+    }
+    return model_config;
+}
+
 TEST(HybridPoolConfigCreatorTest, MhaPhysicalStrideIsNotRepeatedPerKernelBlock) {
     auto model_config = makeHybridAttentionModelConfig();
 
@@ -42,6 +66,38 @@ TEST(HybridPoolConfigCreatorTest, MhaPhysicalStrideIsNotRepeatedPerKernelBlock) 
     ASSERT_EQ(config.specForGroup(full_gid)->type, KVCacheSpecType::MultiHeadAttention);
     EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(full_gid), 4u);
     EXPECT_EQ(config.kvBlockStrideBytesForGroup(full_gid), config.specForGroup(full_gid)->block_size_bytes());
+}
+
+TEST(HybridPoolConfigCreatorTest, HcaStateExplicitDescriptorIsNotOverwritten) {
+    auto              model_config = makeDsv4ModelConfig(true, true);
+    ParallelismConfig parallelism_config;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.dsv4_hca_state_pool_blocks = 321;
+
+    auto config = HybridPoolConfigCreator::createConfig(model_config, parallelism_config, kv_cache_config, false, 0);
+
+    EXPECT_EQ(config.explicitIndependentBlocks(config.groupIdForTag("hca_state")), 256u);
+}
+
+TEST(HybridPoolConfigCreatorTest, HcaStateConfigValueFillsDefaultDescriptor) {
+    auto              model_config = makeDsv4ModelConfig(true, false);
+    ParallelismConfig parallelism_config;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.dsv4_hca_state_pool_blocks = 321;
+
+    auto config = HybridPoolConfigCreator::createConfig(model_config, parallelism_config, kv_cache_config, false, 0);
+
+    EXPECT_EQ(config.explicitIndependentBlocks(config.groupIdForTag("hca_state")), 321u);
+}
+
+TEST(HybridPoolConfigCreatorTest, HcaStateConfigValueIsIgnoredWithoutHcaStateGroup) {
+    auto              model_config = makeHybridAttentionModelConfig();
+    ParallelismConfig parallelism_config;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.dsv4_hca_state_pool_blocks = 321;
+
+    EXPECT_NO_FATAL_FAILURE(
+        HybridPoolConfigCreator::createConfig(model_config, parallelism_config, kv_cache_config, false, 0));
 }
 
 }  // namespace

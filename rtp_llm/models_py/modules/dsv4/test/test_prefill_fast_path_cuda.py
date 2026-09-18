@@ -183,6 +183,35 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
             forwarded, torch.tensor([0, 2, 4], dtype=torch.int32)
         )
 
+    def test_eager_forward_prefill_moves_cuda_only_mirror_to_host(self):
+        device = torch.device("cuda", torch.cuda.current_device())
+        self.assertFalse(torch.cuda.is_current_stream_capturing())
+        for host_cu_seqlens in (
+            None,
+            torch.empty(0, dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),
+        ):
+            with self.subTest(host_cu_seqlens=host_cu_seqlens):
+                attn = SimpleNamespace(
+                    cu_seqlens=host_cu_seqlens,
+                    cu_seqlens_device=torch.tensor(
+                        [0, 2, 4], dtype=torch.int32, device=device
+                    ),
+                    combo_position_ids=torch.tensor(
+                        [0, 1, 0, 1], dtype=torch.long, device=device
+                    ),
+                    input_lengths=None,
+                    input_lengths_device=None,
+                )
+                forwarded = self._forwarded_cu_seqlens(
+                    self._run_forward_prefill_with(attn, device=device)
+                )
+                self.assertEqual(forwarded.device.type, "cpu")
+                self.assertTrue(forwarded.is_contiguous())
+                torch.testing.assert_close(
+                    forwarded, torch.tensor([0, 2, 4], dtype=torch.int32)
+                )
+
     def test_full_forward_prefill_is_cuda_graph_capture_safe(self):
         for host_mirror_present in (False, True):
             with self.subTest(host_mirror_present=host_mirror_present):
