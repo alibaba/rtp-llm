@@ -102,6 +102,12 @@ public:
                                                  GptModelInputs&     model_input,
                                                  TensorHolder&       host_holder);
 
+    // Flag budget-exhausted (finished, unreaped) streams as draft padding so the
+    // draft's zero-row validity contract stays consistent.
+    void markExhaustedDSparkStreamsAsPadding(const StreamGroups& stream_groups,
+                                             GptModelInputs&      model_input,
+                                             const torch::Tensor& row_limits) const;
+
     // Convert the proposal-stage input into dense target-verify rows.
     void updateDSparkTargetVerifyModelInput(const DSparkRoundHead& round_head,
                                             GptModelInputs&        model_input,

@@ -966,9 +966,33 @@ MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::prepareDSparkD
     if (!round_head.anchors.defined() || round_head.anchors.numel() == 0) {
         return round_head;
     }
+    markExhaustedDSparkStreamsAsPadding(stream_groups, model_input, round_head.v41_row_limits);
     buildDSparkProposeInput(
         model_input, round_head.anchors, round_head.committed_ends, host_holder, round_head.v41_row_limits);
     return round_head;
+}
+
+void MtpBatchStreamProcessor::markExhaustedDSparkStreamsAsPadding(const StreamGroups& stream_groups,
+                                                                  GptModelInputs&      model_input,
+                                                                  const torch::Tensor& row_limits) const {
+    // A stream whose token budget is exhausted (finished in the previous round,
+    // still awaiting scheduler reaping) contributes zero draft rows this round.
+    // The draft's row-validity contract reads "no valid rows" as fake padding,
+    // so flag those streams accordingly instead of breaking the round.
+    if (!row_limits.defined() || row_limits.numel() == 0 || !model_input.v41_is_fake.defined()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(row_limits.is_cpu() && model_input.v41_is_fake.is_cpu(),
+                            "dspark padding flags must be host tensors when the round head is built");
+    const auto* limits = row_limits.data_ptr<int32_t>();
+    auto*       fake   = model_input.v41_is_fake.data_ptr<bool>();
+    int64_t     row    = 0;
+    for (const auto& stream : stream_groups.allStreams()) {
+        if (!stream->isFakeStream() && limits[row] == 0) {
+            fake[row] = true;
+        }
+        ++row;
+    }
 }
 
 void MtpBatchStreamProcessor::updateDSparkTargetVerifyModelInput(const DSparkRoundHead& round_head,
