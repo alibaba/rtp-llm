@@ -5,8 +5,8 @@ from unittest.mock import Mock, patch
 import torch
 from torch import nn
 
-import rtp_llm.models_py.model_desc.kimi_k3 as kimi_k3
 import rtp_llm.models_py.distributed.sequence_parallel as sequence_parallel
+import rtp_llm.models_py.model_desc.kimi_k3 as kimi_k3
 import rtp_llm.models_py.modules.hybrid.test.collective_gemm_reference as reference
 import rtp_llm.models_py.modules.kimi_k3.all_gather_gemm as kimi_k3_ag_gemm
 import rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter as kimi_k3_gemm_reduce_scatter
@@ -19,8 +19,8 @@ from rtp_llm.models_py.model_desc.kimi_k3 import (
     KimiK3Model,
 )
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
-from rtp_llm.models_py.modules.kimi_k3.parallel_mode import KimiK3ParallelMode
 from rtp_llm.models_py.modules.kimi_k3.parallel_mode import (
+    KimiK3ParallelMode,
     resolve_kimi_k3_parallel_mode,
 )
 from rtp_llm.ops import RoleType
@@ -48,7 +48,9 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         model._k3_page_tokens = None
         model._kda_checkpoint_tokens = None
         model._ktp_capture_buckets = ()
-        model.execution_spec = SimpleNamespace(chunk_tokens=0, sp_type="", tp_size=8, tp_rank=0)
+        model.execution_spec = SimpleNamespace(
+            chunk_tokens=0, sp_type="", tp_size=8, tp_rank=0
+        )
         model.layers = nn.ModuleList([])
         model.layer_num = 0
 
@@ -356,6 +358,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         module._projected_qkv_a_for_forward = [projected]
 
         from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLAContext
+
         actual_qkv_a, actual_gate = module._project_qkv_a_input(
             local_input, KimiK3MLAContext(module._sp_layout_for_forward, [projected])
         )
@@ -479,7 +482,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         self.assertTrue(enabled)
         reserve.assert_called_once_with(group, 1 * 16 * 2)
 
-    def test_rs_has_no_length_policy_or_backend_switch(self):
+    def test_rs_backend_selection_is_internal(self):
         self.assertFalse(
             hasattr(kimi_k3_gemm_reduce_scatter, "should_use_gemm_reduce_scatter")
         )
@@ -487,7 +490,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             hasattr(kimi_k3_gemm_reduce_scatter, "gemm_reduce_scatter_backend")
         )
 
-    def test_gemm_reduce_scatter_fuses_all_nonempty_prefill_sizes(self):
+    def test_gemm_reduce_scatter_fuses_prefill_from_512_input_rows(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required")
         device = torch.device("cuda", torch.cuda.current_device())
@@ -505,7 +508,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             workspace,
         )
         weight = torch.empty((8, 16), dtype=torch.bfloat16, device=device)
-        for m in (0, 1, 7, 8, 9, 32760, 32768):
+        for m in (0, 1, 7, 8, 9, 511, 512, 513, 32760, 32768):
             with (
                 self.subTest(m=m),
                 patch.dict(
@@ -513,6 +516,9 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                     {(group, device.index): state},
                     clear=True,
                 ),
+                patch.object(
+                    kimi_k3_gemm_reduce_scatter.dist, "reduce_scatter_tensor"
+                ) as nccl,
             ):
                 launch.reset_mock()
                 x = torch.ones((m, 16), dtype=torch.bfloat16, device=device)[:, ::2]
@@ -523,8 +529,14 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 self.assertEqual(out.shape, (physical // 8, 16))
                 if m == 0:
                     launch.assert_not_called()
+                    nccl.assert_not_called()
+                    continue
+                if m < 512:
+                    launch.assert_not_called()
+                    nccl.assert_called_once()
                     continue
                 launch.assert_called_once()
+                nccl.assert_not_called()
                 actual_x = launch.call_args.args[0]
                 self.assertTrue(actual_x.is_contiguous())
                 torch.testing.assert_close(actual_x[:m], x, atol=0, rtol=0)
@@ -544,9 +556,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             logical_sizes = (*range(1, 2 * tp_size + 2), 32761, 32768, 32769)
             for logical_tokens in logical_sizes:
                 source = torch.arange(logical_tokens * 3).reshape(logical_tokens, 3)
-                physical_tokens = (
-                    (logical_tokens + tp_size - 1) // tp_size * tp_size
-                )
+                physical_tokens = (logical_tokens + tp_size - 1) // tp_size * tp_size
                 padded = source.new_zeros((physical_tokens, 3))
                 padded[:logical_tokens].copy_(source)
                 shards = []
@@ -1060,7 +1070,9 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 nn.Module.__init__(model)
                 self._prepare_model_init_stub(model)
                 model.config = SimpleNamespace(
-                    max_seq_len=32768, hidden_size=7168, gen_num_per_cycle=3,
+                    max_seq_len=32768,
+                    hidden_size=7168,
+                    gen_num_per_cycle=3,
                     k3_attention_quant_config=object() if fp8 else None,
                 )
                 model.parallelism_config = SimpleNamespace(get_attn_tp_size=lambda: 8)
@@ -1071,12 +1083,16 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 model._all_gather_gemm_configured = False
                 model._gemm_reduce_scatter_configured = False
                 resource = SimpleNamespace(
-                    kv_cache=None, is_decode_role=True, max_context_batch_size=1,
+                    kv_cache=None,
+                    is_decode_role=True,
+                    max_context_batch_size=1,
                     max_decode_graph_batch_size=8,
                 )
-                with patch.object(kimi_k3, "get_process_group", return_value=object()), patch.object(
-                    kimi_k3, "configure_all_gather_gemm"
-                ) as ag, patch.object(kimi_k3, "configure_gemm_reduce_scatter") as rs:
+                with (
+                    patch.object(kimi_k3, "get_process_group", return_value=object()),
+                    patch.object(kimi_k3, "configure_all_gather_gemm") as ag,
+                    patch.object(kimi_k3, "configure_gemm_reduce_scatter") as rs,
+                ):
                     self.assertTrue(model.initialize(resource))
                 for configure in (ag, rs):
                     self.assertFalse(configure.call_args.kwargs["use_fused"])
@@ -1092,14 +1108,17 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 nn.Module.__init__(model)
                 model.config = SimpleNamespace(max_seq_len=32)
                 model.parallelism_config = SimpleNamespace(get_attn_tp_size=lambda: 8)
-                model.embedding = SimpleNamespace(weight=torch.empty(1, dtype=torch.bfloat16))
+                model.embedding = SimpleNamespace(
+                    weight=torch.empty(1, dtype=torch.bfloat16)
+                )
                 model.hidden_size = 16
                 model._max_batch = 8
                 model._proposal_steps = 3
                 model._all_gather_gemm_configured = False
                 model._gemm_reduce_scatter_configured = False
                 resource = SimpleNamespace(
-                    is_decode_role=decode, max_context_batch_size=1,
+                    is_decode_role=decode,
+                    max_context_batch_size=1,
                     max_decode_graph_batch_size=8,
                 )
                 with (
@@ -1111,7 +1130,9 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 ):
                     self.assertTrue(model.initialize(resource))
                 for configure in (ag, rs):
-                    self.assertEqual(configure.call_args.kwargs["use_fused"], not decode)
+                    self.assertEqual(
+                        configure.call_args.kwargs["use_fused"], not decode
+                    )
                     self.assertEqual(configure.call_args.kwargs["max_m"], 32)
                 if decode:
                     self.assertEqual(tuple(model._recurrent.shape), (32, 16))
@@ -1159,7 +1180,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             model.get_mtp_target_hidden_states(12), captured, rtol=0, atol=0
         )
 
-    def test_cached_bf16_rs_workspace_validates_fp8_abi(self):
+    def test_cached_bf16_rs_workspace_validates_public_fp8_api(self):
         import rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter as rs
 
         for tp in (2, 4, 8):
@@ -1172,7 +1193,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 tp,
                 32768,
                 7168,
-                SimpleNamespace(_C=SimpleNamespace(bf16_gemm_rs_reduce=Mock())),
+                SimpleNamespace(),
                 workspace,
             )
             with patch.dict(rs._STATES, {(group, 0): state}, clear=True):
@@ -1180,20 +1201,18 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 self.assertTrue(
                     rs.configure_gemm_reduce_scatter(group, "cuda:0", **kwargs)
                 )
-                with self.assertRaisesRegex(RuntimeError, "FP8 peer-output RS ABI"):
+                with self.assertRaisesRegex(RuntimeError, "fp8_gemm_rs_nt"):
                     rs.configure_gemm_reduce_scatter(
                         group, "cuda:0", fp8=True, **kwargs
                     )
-                workspace._data_offset_bytes = 128
-                workspace._mapping_handle = object()
-                workspace._launch_lock = object()
-                workspace._last_stream = None
-                workspace._barrier = Mock()
+                state.deep_gemm.fp8_gemm_rs_nt = Mock()
                 self.assertTrue(
                     rs.configure_gemm_reduce_scatter(
                         group, "cuda:0", fp8=True, **kwargs
                     )
                 )
+                self.assertTrue(state.fp8)
+                self.assertIs(state.workspace, workspace)
 
     def test_missing_fp8_workspace_is_an_error_not_a_reference_path(self):
         import rtp_llm.models_py.modules.kimi_k3.all_gather_gemm as ag

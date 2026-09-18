@@ -1,4 +1,4 @@
-"""Prefill fused GEMM/RS, with NCCL for Decode and TP16."""
+"""Fused GEMM/RS for Prefill M >= 512; NCCL for smaller M, Decode and TP16."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
 from rtp_llm.models_py.modules.kimi_k3._collective_gemm import collective_gemm_state_key
 
 _SUPPORTED_WORLD_SIZES = (2, 4, 8)
+_MIN_FUSED_M = 512
 
 
 @dataclass
@@ -33,20 +34,18 @@ class _GemmReduceScatterState:
 _STATES: dict[tuple[dist.ProcessGroup, int], _GemmReduceScatterState] = {}
 
 
-def _validate_fp8_workspace(deep_gemm: Any, workspace: Any) -> None:
-    required = ("_mapping_handle", "_launch_lock", "_last_stream", "_barrier")
-    if (
-        getattr(workspace, "_data_offset_bytes", None) != 128
-        or any(not hasattr(workspace, key) for key in required)
-        or not hasattr(getattr(deep_gemm, "_C", None), "bf16_gemm_rs_reduce")
-    ):
-        raise RuntimeError("installed DeepGEMM lacks the FP8 peer-output RS ABI")
+def _validate_fp8_backend(deep_gemm: Any) -> None:
+    if not callable(getattr(deep_gemm, "fp8_gemm_rs_nt", None)):
+        raise RuntimeError("installed DeepGEMM lacks the public fp8_gemm_rs_nt API")
 
 
 def configure_gemm_reduce_scatter(
     group, device, *, max_m, n, fp8=False, use_fused=True
 ) -> bool:
-    """Select one backend for warmup, capture and replay; TP16 always uses NCCL."""
+    """Enable Prefill fusion eligibility; execution also requires M >= 512.
+
+    Decode callers pass use_fused=False. TP16 always uses NCCL.
+    """
     use_fused = use_fused and int(group.size()) != 16
     key = collective_gemm_state_key(group, device)
     device = torch.device("cuda", key[1])
@@ -61,7 +60,8 @@ def configure_gemm_reduce_scatter(
                 "K3 GEMM/RS was already configured with a different shape or backend"
             )
         if fp8 and existing.use_fused:
-            _validate_fp8_workspace(existing.deep_gemm, existing.workspace)
+            _validate_fp8_backend(existing.deep_gemm)
+        existing.fp8 = existing.fp8 or fp8
         return True
     world_size = int(group.size())
     if world_size not in _SUPPORTED_WORLD_SIZES and world_size != 16:
@@ -94,6 +94,8 @@ def configure_gemm_reduce_scatter(
         ]
         if missing:
             failure_reason = f"DeepGEMM is missing {missing}"
+        if fp8:
+            _validate_fp8_backend(deep_gemm)
         capability = torch.cuda.get_device_capability(device)
         if capability not in ((10, 0), (10, 3)):
             failure_reason = f"DeepGEMM GEMM/RS requires SM100/SM103, got {capability}"
@@ -108,8 +110,6 @@ def configure_gemm_reduce_scatter(
             failure_reason or "at least one TP rank cannot use DeepGEMM GEMM/RS"
         )
     workspace = deep_gemm.GemmRSBuffer(group, max_m=max_m, n=n, device=device)
-    if fp8:
-        _validate_fp8_workspace(deep_gemm, workspace)
     _STATES[key] = _GemmReduceScatterState(
         group, device, world_size, max_m, n, deep_gemm, workspace, fp8=fp8
     )
@@ -160,6 +160,8 @@ def gemm_reduce_scatter(
         )
 
     m = int(x.shape[0])
+    # Decide from the input M, before any TP padding (511 -> 512 is not fused).
+    use_fused = state.use_fused and state.world_size != 16 and m >= _MIN_FUSED_M
     physical_m = (
         ((m + state.world_size - 1) // state.world_size) * state.world_size
         if pad_rows
@@ -170,9 +172,16 @@ def gemm_reduce_scatter(
             f"K3 GEMM/RS M={physical_m} must be divisible by TP{state.world_size}"
         )
     if not isinstance(weight, torch.Tensor):
-        if state.world_size == 16 or not state.use_fused:
+        # The public API has no bias epilogue or disable_ue8m0_cast option.
+        # K3's Blackwell weights use packed UE8M0; preserve other projections'
+        # existing semantics via their own forward method and NCCL.
+        if (
+            not use_fused
+            or not weight.scale_ue8m0
+            or getattr(weight, "bias", None) is not None
+        ):
             return _fp8_nccl_gemm_reduce_scatter(x, weight, state, physical_m)
-        return _fp8_remote_gemm_reduce_scatter(x, weight, state, physical_m)
+        return _fp8_fused_gemm_reduce_scatter(x, weight, state, physical_m)
     if (
         weight.ndim != 2
         or weight.dtype != torch.bfloat16
@@ -206,7 +215,7 @@ def gemm_reduce_scatter(
     output = x.new_empty((physical_m // state.world_size, state.n))
     if physical_m == 0:
         return output
-    if state.world_size == 16 or not state.use_fused:
+    if not use_fused:
         with torch.profiler.record_function(
             "RTP::kimi_k3.gemm_reduce_scatter.bf16_nccl"
         ):
@@ -230,14 +239,9 @@ def gemm_reduce_scatter(
 __all__ = ["configure_gemm_reduce_scatter", "gemm_reduce_scatter"]
 
 
-def _fp8_remote_gemm_reduce_scatter(x, projection, state, physical_m):
-    """Write FP8 GEMM BF16 outputs directly to destination-owned source slots.
-
-    Destination-sized GEMMs reuse DeepGEMM's existing TMA output descriptor.
-    No full local partial or post-GEMM peer copy is materialized. The published
-    BF16 source-slot layout and both barriers match GemmRSBuffer's ABI.
-    """
-    if projection.K != x.shape[1] or projection.N != state.n:
+def _fp8_fused_gemm_reduce_scatter(x, projection, state, physical_m):
+    """Run the public FP8 GEMM/RS API using the shared BF16/FP8 workspace."""
+    if not state.fp8 or projection.K != x.shape[1] or projection.N != state.n:
         raise ValueError("FP8 RS projection does not match the configured workspace")
     if physical_m > state.max_m:
         raise RuntimeError("FP8 RS exceeds the configured token capacity")
@@ -249,45 +253,21 @@ def _fp8_remote_gemm_reduce_scatter(x, projection, state, physical_m):
         x = padded
     else:
         x = x.contiguous()
-    workspace = state.workspace
     rows = physical_m // state.world_size
     output = torch.empty((rows, state.n), dtype=torch.bfloat16, device=x.device)
     if physical_m == 0:
         return output
-    if workspace is None or workspace._mapping_handle is None:
-        raise RuntimeError("FP8 RS requires a live DeepGEMM symmetric workspace")
-    if workspace._data_offset_bytes != 128:
-        raise RuntimeError("unsupported DeepGEMM GEMM/RS workspace ABI")
-    slot_offset = workspace._data_offset_bytes // 2 + workspace.rank * rows * state.n
-    # Materialize all peer views before the first collective write.
-    peers = [
-        workspace._mapping_handle.get_buffer(
-            dst, (rows, state.n), torch.bfloat16, storage_offset=slot_offset
+    assert state.deep_gemm is not None and state.workspace is not None
+    with torch.profiler.record_function("RTP::kimi_k3.gemm_reduce_scatter.fp8_fused"):
+        # quantize_input preserves an existing QuantizedActivation's packed
+        # UE8M0 values/scales; BF16 inputs use the projection's quantizer.
+        state.deep_gemm.fp8_gemm_rs_nt(
+            projection.quantize_input(x),
+            (projection.weight, projection.weight_scales),
+            output,
+            state.workspace,
+            compiled_dims="nk",
         )
-        for dst in range(state.world_size)
-    ]
-    with workspace._launch_lock, torch.cuda.device(workspace.device):
-        stream = torch.cuda.current_stream(workspace.device)
-        if workspace._last_stream is not None and workspace._last_stream != stream:
-            stream.wait_stream(workspace._last_stream)
-        with torch.profiler.record_function(
-            "RTP::kimi_k3.gemm_reduce_scatter.fp8_remote"
-        ):
-            for step in range(state.world_size):
-                dst = (workspace.rank + step) % state.world_size
-                if isinstance(x, QuantizedActivation):
-                    shard = x.narrow_rows(dst * rows, rows)
-                    projection.forward_quantized(
-                        shard.values, shard.scales, out=peers[dst]
-                    )
-                else:
-                    projection(x.narrow(0, dst * rows, rows), out=peers[dst])
-            workspace._barrier(0)
-            state.deep_gemm._C.bf16_gemm_rs_reduce(
-                output, workspace.buffer, state.world_size, physical_m, state.n
-            )
-            workspace._barrier(1)
-            workspace._last_stream = stream
     return output
 
 
@@ -315,5 +295,7 @@ def _fp8_nccl_gemm_reduce_scatter(x, projection, state, physical_m):
             partial = projection.forward_quantized(x.values, x.scales)
         else:
             partial = projection(x)
-        dist.reduce_scatter_tensor(output, partial, op=dist.ReduceOp.SUM, group=state.group)
+        dist.reduce_scatter_tensor(
+            output, partial, op=dist.ReduceOp.SUM, group=state.group
+        )
     return output

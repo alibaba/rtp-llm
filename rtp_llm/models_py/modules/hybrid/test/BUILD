@@ -182,3 +182,12 @@ py_test(
     deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
     timeout = "short",
 )
+
+py_test(
+    name = "kimi_k3_gemm_rs_gpu_test",
+    srcs = ["kimi_k3_gemm_rs_gpu_test.py"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    timeout = "long",
+    tags = ["manual", "B300"],
+    exec_properties = {"gpu": "B300"},
+)
