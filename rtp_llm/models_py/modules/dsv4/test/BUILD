@@ -186,6 +186,15 @@ py_test(
 )
 
 py_test(
+    name = "test_sm120_a2a_payload_guard",
+    srcs = ["test_sm120_a2a_payload_guard.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_indexer_topk_backend",
     srcs = ["test_indexer_topk_backend.py"],
     deps = [

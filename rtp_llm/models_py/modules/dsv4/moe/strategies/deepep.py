@@ -12,12 +12,64 @@ Direct port of the pre-refactor ``_routed_experts_deepep`` +
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import replace
 from typing import Dict, Optional, Tuple
 
 import torch
+
+_logger = logging.getLogger(__name__)
 _DIAG_CT = [0]
+
+# All-to-all dispatch payload bound, in tokens. A batch whose summed recv_counts exceeds it cannot
+# use the all-to-all path and falls back to fixed-EP. That fallback is correct, but it allocates an
+# O(world * tokens * hidden) FP32 reduction buffer per layer, so at prefill scale it is a large
+# latency cliff. It used to be observable only under DSV4_DIAG, which let a prefill admission bound
+# larger than this guard cost roughly double the time-to-first-token with nothing in the log; the
+# fallback now warns (rate-limited to the first few fires per process).
+_A2A_PAYLOAD_TOKEN_BOUND = 65536
+_A2A_OVERSIZE_WARN_CT = [0]
+_A2A_OVERSIZE_WARN_MAX = 3
+
+
+def _a2a_payload_bound_exceeded(recv_counts) -> bool:
+    """True when a dispatch batch cannot use the all-to-all path.
+
+    A negative count is a sentinel for a failed count exchange, so it is rejected too. Any exception
+    while summing is treated as exceeded: the fixed-EP fallback is the safe branch.
+    """
+    try:
+        return (sum(recv_counts) > _A2A_PAYLOAD_TOKEN_BOUND) or any(
+            (c < 0) or (c > _A2A_PAYLOAD_TOKEN_BOUND) for c in recv_counts)
+    except Exception:
+        return True
+
+
+def _warn_a2a_oversize(recv_counts) -> None:
+    """Rate-limited, always-on warning for the fixed-EP fallback (see the bound's comment).
+
+    Host-side logging only, so it is safe under CUDA-graph capture and costs nothing on the
+    all-to-all path (it is called only from the fallback branch). Capped so a long-running prefill
+    leg that repeatedly exceeds the bound cannot flood the log.
+    """
+    if _A2A_OVERSIZE_WARN_CT[0] >= _A2A_OVERSIZE_WARN_MAX:
+        return
+    _A2A_OVERSIZE_WARN_CT[0] += 1
+    try:
+        total = sum(recv_counts)
+    except Exception:
+        total = -1
+    _logger.warning(
+        "SM120 MoE all-to-all dispatch fell back to the fixed-EP path: recv_counts=%r (sum=%d) "
+        "violates the %d-token payload bound. The fallback is correct but allocates an "
+        "O(world * tokens * hidden) FP32 reduction buffer per layer and is much slower at prefill "
+        "scale. On a prefill leg this means the context batch is larger than the guard allows, so "
+        "cap the admission token bound (max_batch_tokens_size) to keep one batch under %d tokens. "
+        "(warning %d/%d)",
+        recv_counts, total, _A2A_PAYLOAD_TOKEN_BOUND, _A2A_PAYLOAD_TOKEN_BOUND,
+        _A2A_OVERSIZE_WARN_CT[0], _A2A_OVERSIZE_WARN_MAX)
+
 
 # P0 slice 1: eager decode-round commit MoE via the fixed_ep path. 0 = off
 # (legacy all_to_all for every eager call); N > 0 routes eager calls with
@@ -1006,7 +1058,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                 dist.all_gather_into_tensor(gathered, pair, group=group)
             recv_counts = [int(v) for v in gathered.view(-1).cpu().tolist()]
             try:
-                _bad = (sum(recv_counts) > 65536) or any((c < 0) or (c > 65536) for c in recv_counts)
+                _bad = _a2a_payload_bound_exceeded(recv_counts)
             except Exception:
                 _bad = True
             if not _bad and len(_COUNT_CACHE) < 64:
@@ -1016,6 +1068,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                 if recv_counts == send_counts:
                     _COUNT_CACHE[_cc_key] = list(recv_counts)
         if _bad:
+            _warn_a2a_oversize(recv_counts)
             if os.environ.get("DSV4_DIAG"):
                 import sys
                 print("[DIAG5] rank=%d FALLBACK->fixed_ep counts=%r" % (
