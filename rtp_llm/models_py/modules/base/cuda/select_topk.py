@@ -1,3 +1,5 @@
+import os
+
 import torch
 from torch import nn
 
@@ -9,7 +11,10 @@ class SelectTopk(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.select_topk_op = compute_ops.SelectTopkOp(self.config)
+        self.select_topk_op = compute_ops.SelectTopkOp(
+            self.config,
+            use_fused_512=os.environ.get("RTP_FUSED_TOPK_512", "0") == "1",
+        )
 
     def forward(
         self,
