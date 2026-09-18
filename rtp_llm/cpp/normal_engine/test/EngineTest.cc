@@ -103,6 +103,45 @@ TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculat
     }
 }
 
+TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
+    CustomConfig config;
+
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    runtime_config.warm_up = true;
+    auto params            = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+
+    const KVCacheSpecDesc default_desc{"default", KVCacheSpecType::MultiHeadAttention};
+    const KVCacheSpecDesc indexer_desc{"indexer_kv", KVCacheSpecType::MultiHeadAttention};
+    params.model_config_.kv_cache_spec_descs.assign(static_cast<size_t>(params.model_config_.num_layers),
+                                                    {default_desc, indexer_desc});
+
+    bool saw_cacheless_warmup          = false;
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams& init_params) {
+        if (init_params.cache_manager == nullptr) {
+            EXPECT_FALSE(init_params.kv_cache_layer_layout.has_value());
+            return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
+                EXPECT_FALSE(saw_cacheless_warmup);
+                saw_cacheless_warmup = true;
+                EXPECT_TRUE(inputs.warmup);
+                EXPECT_FALSE(inputs.kv_cache_block_id.defined());
+                EXPECT_FALSE(inputs.kv_cache_kernel_block_id.defined());
+            });
+        }
+        return std::make_unique<MockModel>(model_config.vocab_size);
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+
+    EXPECT_TRUE(saw_cacheless_warmup);
+}
+
 TEST_F(NormalEngineTest, testFp8KVCache) {
     CustomConfig config;
     config.kv_cache_data_type = DataType::TYPE_FP8_E4M3;

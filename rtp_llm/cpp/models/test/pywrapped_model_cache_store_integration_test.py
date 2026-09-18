@@ -313,6 +313,33 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(result["available_after"], result["available_before"])
         self.assertFalse(result["manager_retained"])
 
+    def test_cacheless_multigroup_warmup_exposes_single_input(self):
+        class WarmupModel(CacheStoreForwardModel):
+            def _forward_one(self, inputs):
+                assert self.kv_cache is None
+                attention_inputs = inputs.attention_inputs
+                assert not isinstance(attention_inputs, dict)
+                assert attention_inputs.is_prefill
+                assert not attention_inputs.is_target_verify
+                assert attention_inputs.kv_cache_block_id is None
+                assert attention_inputs.kv_cache_block_id_device is None
+                assert attention_inputs.kv_cache_kernel_block_id is None
+                assert attention_inputs.kv_cache_kernel_block_id_device is None
+                assert attention_inputs.cache_store_inputs is None
+                return PyModelOutputs(
+                    torch.zeros(
+                        (inputs.input_ids.numel(), 1),
+                        dtype=torch.float16,
+                        device=inputs.input_ids.device,
+                    )
+                )
+
+        model = WarmupModel()
+        result = run_scenario(model, "cacheless_warmup")
+
+        self.assertEqual(model.forward_calls, 1)
+        self.assertEqual(result["records"], [])
+
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "multi_tag")

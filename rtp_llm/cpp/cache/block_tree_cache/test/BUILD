@@ -63,6 +63,7 @@ cc_test(
     deps = pool_test_deps + [
         ":block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils",
+        "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:kv_cache_allocator",
         "//rtp_llm/cpp/testing:device_test_utils",
     ],
