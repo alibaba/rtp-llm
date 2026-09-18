@@ -12,7 +12,6 @@ import urllib.request
 from functools import partial
 from typing import Optional
 
-import grpc
 from fastapi import FastAPI
 from fastapi import Request as RawRequest
 from fastapi.middleware import Middleware
@@ -26,10 +25,6 @@ from uvicorn.loops.auto import auto_loop_setup
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import StatusVersionPB
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
-    MultimodalRpcServiceStub,
-)
 from rtp_llm.server.vit_proxy_server import (
     VitProxyServer,
     resolve_default_rpc_timeout_seconds,
@@ -86,10 +81,12 @@ def vit_proxy_start_server(
         load_balance_strategy=load_balance_strategy,
         default_rpc_timeout_seconds=default_timeout_seconds,
         transport_config=py_env_configs.vit_config.output_transport,
+        min_healthy_workers=py_env_configs.vit_config.vit_proxy_min_healthy_workers,
     )
     logging.info(
         f"[VIT_PROXY] Using load balance strategy: {load_balance_strategy}, "
-        f"default RPC timeout: {default_timeout_seconds}s"
+        f"default RPC timeout: {default_timeout_seconds}s, "
+        f"minimum healthy workers: {proxy_server.min_healthy_workers}/{len(worker_addresses)}"
     )
 
     try:
@@ -199,48 +196,47 @@ def create_proxy_app(
     async def health():
         """
         健康检查接口
-        只有当所有 VIT worker 进程都准备就绪时才返回健康状态。
+        健康 worker 数达到配置阈值时返回健康状态。
 
-        复用 proxy_server.connection_pool 里的长连 stub（避免每次新建 channel
-        TCP+HTTP2 握手），并用 asyncio.to_thread 把 sync gRPC 调用挪到线程池
-        后并行 gather，避免阻塞 FastAPI 事件循环、把串行 2s*N 降到并行 2s。
+        与 gRPC 状态查询、后台恢复共用探测和 LB 状态；等待探测时不阻塞事件循环。
         """
         if not worker_addresses:
-            return {"status": "ok"}
+            return ORJSONResponse(
+                status_code=503, content={"error": "No VIT workers configured"}
+            )
 
-        req = StatusVersionPB()
-
-        async def probe(addr: str):
-            try:
-                stub = proxy_server.connection_pool.get_stub(addr)
-                resp = await asyncio.to_thread(stub.GetWorkerStatus, req, timeout=2)
-                return addr, bool(resp.alive)
-            except Exception as e:
-                logging.warning(
-                    f"[VIT_PROXY_HEALTH] Failed to check worker {addr}: {e}"
-                )
-                return addr, False
-
-        results = await asyncio.gather(*(probe(a) for a in worker_addresses))
-        healthy_count = sum(1 for _, ok in results if ok)
+        if proxy_server.proxy_servicer is None:
+            return ORJSONResponse(
+                status_code=503, content={"error": "VIT proxy is not started"}
+            )
+        results = await asyncio.to_thread(
+            proxy_server.proxy_servicer.refresh_worker_health, timeout_s=2.0
+        )
+        healthy_count = sum(results.values())
         n = len(worker_addresses)
 
-        for addr, ok in results:
+        for addr, ok in results.items():
             if ok:
                 logging.debug(f"[VIT_PROXY_HEALTH] Worker {addr} is ready")
             else:
                 logging.warning(f"[VIT_PROXY_HEALTH] Worker {addr} is not alive")
 
-        if healthy_count == n:
-            logging.debug(f"[VIT_PROXY_HEALTH] All {n} workers are healthy")
+        required = proxy_server.min_healthy_workers
+        if healthy_count >= required:
+            logging.debug(
+                f"[VIT_PROXY_HEALTH] {healthy_count}/{n} workers healthy, required={required}"
+            )
             return {"status": "ok"}
         else:
             logging.warning(
-                f"[VIT_PROXY_HEALTH] Only {healthy_count}/{n} workers are healthy"
+                f"[VIT_PROXY_HEALTH] {healthy_count}/{n} workers healthy, required={required}"
             )
             return ORJSONResponse(
                 status_code=503,
-                content={"error": f"Only {healthy_count}/{n} VIT workers are healthy"},
+                content={
+                    "error": f"Only {healthy_count}/{n} VIT workers are healthy; "
+                    f"required={required}"
+                },
             )
 
     # ------------------------------------------------------------------
