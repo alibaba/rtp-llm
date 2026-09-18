@@ -283,7 +283,7 @@ DeviceSamplingFromProb(uint32_t                                                 
 
 #pragma unroll
         for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-            if (greater_than_u_diff[j]) {
+            if (greater_than_u_diff[j] && greater_than_u[j]) {
                 atomicMin(&(temp_storage->sampled_id), (i * BLOCK_THREADS + tx) * VEC_SIZE + j);
             }
         }
@@ -309,6 +309,66 @@ DeviceSamplingFromProb(uint32_t                                                 
     aggregate += aggregate_local;
 }
 
+// The first round validates every probability while reusing the sampling
+// loads. After finding a candidate, only validation continues through the tail.
+// Later rounds can stop at the first CDF tile containing the sample.
+template<bool                 VALIDATE,
+         uint32_t             VEC_SIZE,
+         uint32_t             BLOCK_THREADS,
+         BlockScanAlgorithm   SCAN_ALGORITHM,
+         BlockReduceAlgorithm REDUCE_ALGORITHM,
+         bool                 DETERMINISTIC>
+__device__ __forceinline__ bool
+SampleProbabilityRound(const float*                                                          probs,
+                       uint32_t                                                              row_idx,
+                       uint32_t                                                              d,
+                       double                                                                low,
+                       float                                                                 u,
+                       SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>& temp_storage) {
+    ValueCount<float> local{0, 0};
+    float             aggregate = 0;
+#pragma unroll 2
+    for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
+        vec_t<float, VEC_SIZE> probs_vec;
+        probs_vec.fill(0);
+        if ((i * BLOCK_THREADS + threadIdx.x) * VEC_SIZE < d) {
+            probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + threadIdx.x) * VEC_SIZE);
+        }
+        if constexpr (VALIDATE) {
+#pragma unroll
+            for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+                const float value = probs_vec[j];
+                local.count += !isfinite(value) || value < 0;
+                local.value += value;
+            }
+        }
+        if (!VALIDATE || aggregate <= u) {
+            DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
+                i, d, [&](float x) { return x > low; }, u, probs_vec, aggregate, &temp_storage);
+        }
+        if constexpr (!VALIDATE) {
+            if (aggregate > u) {
+                break;
+            }
+        }
+    }
+    if constexpr (VALIDATE) {
+        auto row_aggregate =
+            BlockReduce<ValueCount<float>, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce_value_count)
+                .Sum(local);
+        if (threadIdx.x == 0) {
+            temp_storage.block_aggregate.pair = row_aggregate;
+        }
+        __syncthreads();
+        row_aggregate    = temp_storage.block_aggregate.pair;
+        const bool valid = row_aggregate.count == 0 && isfinite(row_aggregate.value) && row_aggregate.value > 0;
+        // All threads must finish reading before subsequent rounds reuse storage.
+        __syncthreads();
+        return valid;
+    }
+    return true;
+}
+
 template<uint32_t             BLOCK_THREADS,
          BlockScanAlgorithm   SCAN_ALGORITHM,
          BlockReduceAlgorithm REDUCE_ALGORITHM,
@@ -323,7 +383,8 @@ __global__ void TopKSamplingFromProbKernel(DType*    probs,
                                            uint32_t  top_k_val,
                                            uint32_t  d,
                                            uint64_t* philox_seed,
-                                           uint64_t* philox_offset) {
+                                           uint64_t* philox_offset,
+                                           bool*     success) {
     const uint32_t              batch_size = gridDim.x;
     const uint32_t              bx = blockIdx.x, tx = threadIdx.x;
     hiprandStatePhilox4_32_10_t state;
@@ -339,30 +400,36 @@ __global__ void TopKSamplingFromProbKernel(DType*    probs,
     auto&             temp_storage =
         reinterpret_cast<SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>&>(smem_sampling);
 
+    // Keep a failure sentinel until a validated row produces a legal sample.
+    if (tx == 0) {
+        output[bx] = -1;
+        if (success != nullptr) {
+            success[bx] = false;
+        }
+    }
     vec_t<float, VEC_SIZE> probs_vec;
-    float                  aggregate;
-    float                  q   = 1;
+    bool                   first_round = true;
+    float                  q           = 1;
     double                 low = 0, high = 1.f;
-    int                    sampled_id;
-    int                    round = 0;
+    int                    sampled_id = -1;
+    int                    round      = 0;
     do {
         round += 1;
-        temp_storage.sampled_id = d;
+        if (tx == 0) {
+            temp_storage.sampled_id    = d;
+            temp_storage.last_valid_id = -1;
+        }
         __syncthreads();
-        float u   = hiprand_uniform(&state) * q;
-        aggregate = 0;
-#pragma unroll 2
-        for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
-            probs_vec.fill(0);
-            if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
-                probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
+        const float u = hiprand_uniform(&state) * q;
+        if (first_round) {
+            if (!SampleProbabilityRound<true, VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
+                    probs, row_idx, d, low, u, temp_storage)) {
+                return;
             }
-
-            DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
-                i, d, [&](float x) { return x > low; }, u, probs_vec, aggregate, &temp_storage);
-            if (aggregate > u) {
-                break;
-            }
+            first_round = false;
+        } else {
+            SampleProbabilityRound<false, VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
+                probs, row_idx, d, low, u, temp_storage);
         }
         __syncthreads();
         sampled_id = temp_storage.sampled_id;
@@ -371,6 +438,14 @@ __global__ void TopKSamplingFromProbKernel(DType*    probs,
             // and the sum of probabilities is smaller than u
             // In this case, we use the last valid index as the sampled id
             sampled_id = temp_storage.last_valid_id;
+        }
+        // No finite, positive candidate survived this round. All threads observe
+        // the same shared indices, so return before using the failure sentinel.
+        if (sampled_id < 0 || sampled_id >= d) {
+            if (tx == 0) {
+                output[bx] = -1;
+            }
+            return;
         }
         double pivot_0 = probs[row_idx * d + sampled_id];
         double pivot_1 = (pivot_0 + high) / 2;
@@ -428,6 +503,9 @@ __global__ void TopKSamplingFromProbKernel(DType*    probs,
     __syncthreads();
     if (tx == 0) {
         output[bx] = sampled_id;
+        if (success != nullptr) {
+            success[bx] = true;
+        }
     }
 }
 
@@ -445,7 +523,8 @@ __global__ void TopPSamplingFromProbKernel(DType*    probs,
                                            float     top_p_val,
                                            uint32_t  d,
                                            uint64_t* philox_seed,
-                                           uint64_t* philox_offset) {
+                                           uint64_t* philox_offset,
+                                           bool*     success) {
     const uint32_t              batch_size = gridDim.x;
     const uint32_t              bx = blockIdx.x, tx = threadIdx.x;
     hiprandStatePhilox4_32_10_t state;
@@ -458,28 +537,34 @@ __global__ void TopPSamplingFromProbKernel(DType*    probs,
     auto&             temp_storage =
         reinterpret_cast<SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>&>(smem_sampling);
 
+    // Keep a failure sentinel until a validated row produces a legal sample.
+    if (tx == 0) {
+        output[bx] = -1;
+        if (success != nullptr) {
+            success[bx] = false;
+        }
+    }
     vec_t<float, VEC_SIZE> probs_vec;
-    float                  aggregate;
-    float                  q   = 1;
+    bool                   first_round = true;
+    float                  q           = 1;
     double                 low = 0, high = 1.f;
-    int                    sampled_id;
+    int                    sampled_id = -1;
     do {
-        temp_storage.sampled_id = d;
+        if (tx == 0) {
+            temp_storage.sampled_id    = d;
+            temp_storage.last_valid_id = -1;
+        }
         __syncthreads();
-        float u   = hiprand_uniform(&state) * q;
-        aggregate = 0;
-#pragma unroll 2
-        for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
-            probs_vec.fill(0);
-            if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
-                probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
+        const float u = hiprand_uniform(&state) * q;
+        if (first_round) {
+            if (!SampleProbabilityRound<true, VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
+                    probs, row_idx, d, low, u, temp_storage)) {
+                return;
             }
-
-            DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
-                i, d, [&](float x) { return x > low; }, u, probs_vec, aggregate, &temp_storage);
-            if (aggregate > u) {
-                break;
-            }
+            first_round = false;
+        } else {
+            SampleProbabilityRound<false, VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
+                probs, row_idx, d, low, u, temp_storage);
         }
         __syncthreads();
         sampled_id = temp_storage.sampled_id;
@@ -488,6 +573,14 @@ __global__ void TopPSamplingFromProbKernel(DType*    probs,
             // and the sum of probabilities is smaller than u
             // In this case, we use the last valid index as the sampled id
             sampled_id = temp_storage.last_valid_id;
+        }
+        // No finite, positive candidate survived this round. All threads observe
+        // the same shared indices, so return before using the failure sentinel.
+        if (sampled_id < 0 || sampled_id >= d) {
+            if (tx == 0) {
+                output[bx] = -1;
+            }
+            return;
         }
         double pivot_0 = probs[row_idx * d + sampled_id];
         double pivot_1 = (pivot_0 + high) / 2;
@@ -541,6 +634,9 @@ __global__ void TopPSamplingFromProbKernel(DType*    probs,
     __syncthreads();
     if (tx == 0) {
         output[bx] = sampled_id;
+        if (success != nullptr) {
+            success[bx] = true;
+        }
     }
 }
 
@@ -560,7 +656,8 @@ __global__ void TopKTopPSamplingFromProbKernel(DType*    probs,
                                                float     top_p_val,
                                                uint32_t  d,
                                                uint64_t* philox_seed,
-                                               uint64_t* philox_offset) {
+                                               uint64_t* philox_offset,
+                                               bool*     success) {
     const uint32_t              batch_size = gridDim.x;
     const uint32_t              bx = blockIdx.x, tx = threadIdx.x;
     hiprandStatePhilox4_32_10_t state;
@@ -574,28 +671,34 @@ __global__ void TopKTopPSamplingFromProbKernel(DType*    probs,
     auto&             temp_storage =
         reinterpret_cast<SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>&>(smem_sampling);
 
+    // Keep a failure sentinel until a validated row produces a legal sample.
+    if (tx == 0) {
+        output[bx] = -1;
+        if (success != nullptr) {
+            success[bx] = false;
+        }
+    }
     vec_t<float, VEC_SIZE> probs_vec;
-    float                  aggregate;
-    float                  q   = 1;
+    bool                   first_round = true;
+    float                  q           = 1;
     double                 low = 0, high = 1.f;
-    int                    sampled_id;
+    int                    sampled_id = -1;
     do {
-        temp_storage.sampled_id = d;
+        if (tx == 0) {
+            temp_storage.sampled_id    = d;
+            temp_storage.last_valid_id = -1;
+        }
         __syncthreads();
-        float u   = hiprand_uniform(&state) * q;
-        aggregate = 0;
-#pragma unroll 2
-        for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
-            probs_vec.fill(0);
-            if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
-                probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
+        const float u = hiprand_uniform(&state) * q;
+        if (first_round) {
+            if (!SampleProbabilityRound<true, VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
+                    probs, row_idx, d, low, u, temp_storage)) {
+                return;
             }
-
-            DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
-                i, d, [&](float x) { return x > low; }, u, probs_vec, aggregate, &temp_storage);
-            if (aggregate > u) {
-                break;
-            }
+            first_round = false;
+        } else {
+            SampleProbabilityRound<false, VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
+                probs, row_idx, d, low, u, temp_storage);
         }
         __syncthreads();
         sampled_id = temp_storage.sampled_id;
@@ -604,6 +707,14 @@ __global__ void TopKTopPSamplingFromProbKernel(DType*    probs,
             // and the sum of probabilities is smaller than u
             // In this case, we use the last valid index as the sampled id
             sampled_id = temp_storage.last_valid_id;
+        }
+        // No finite, positive candidate survived this round. All threads observe
+        // the same shared indices, so return before using the failure sentinel.
+        if (sampled_id < 0 || sampled_id >= d) {
+            if (tx == 0) {
+                output[bx] = -1;
+            }
+            return;
         }
         double pivot_0 = probs[row_idx * d + sampled_id];
         double pivot_1 = (pivot_0 + high) / 2;
@@ -661,6 +772,26 @@ __global__ void TopKTopPSamplingFromProbKernel(DType*    probs,
     __syncthreads();
     if (tx == 0) {
         output[bx] = sampled_id;
+        if (success != nullptr) {
+            success[bx] = true;
+        }
+    }
+}
+
+// Healthy rows only read a status bit (and optionally their selected probability).
+// Clear the full probability row only on failure; never gather with the -1 sentinel.
+__global__ void
+FinalizeSamplingProbKernel(float* probs, const int* samples, const bool* success, float* log_probs, uint32_t d) {
+    const uint32_t row = blockIdx.x;
+    if (!success[row]) {
+        for (uint32_t col = threadIdx.x; col < d; col += blockDim.x) {
+            probs[static_cast<size_t>(row) * d + col] = 0.0f;
+        }
+        if (threadIdx.x == 0 && log_probs != nullptr) {
+            log_probs[row] = -INFINITY;
+        }
+    } else if (threadIdx.x == 0 && log_probs != nullptr) {
+        log_probs[row] = logf(probs[static_cast<size_t>(row) * d + samples[row]]);
     }
 }
 
@@ -675,7 +806,8 @@ hipError_t TopKSamplingFromProb(T*          probs,
                                 bool        deterministic,
                                 uint64_t*   philox_seed,
                                 uint64_t*   philox_offset,
-                                hipStream_t stream = 0) {
+                                hipStream_t stream  = 0,
+                                bool*       success = nullptr) {
     const uint32_t vec_size = std::gcd(VEC_BYTES / sizeof(T), d);
 
     auto compute_capacity = GetCudaComputeCapability();
@@ -683,7 +815,7 @@ hipError_t TopKSamplingFromProb(T*          probs,
         const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
         dim3           nblks(batch_size);
         dim3           nthrs(BLOCK_THREADS);
-        void*          args[] = {&probs, &output, &indices, &top_k_arr, &top_k_val, &d, &philox_seed, &philox_offset};
+        void* args[] = {&probs, &output, &indices, &top_k_arr, &top_k_val, &d, &philox_seed, &philox_offset, &success};
 
         DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
                                       auto kernel = TopKSamplingFromProbKernel<BLOCK_THREADS,
@@ -713,7 +845,8 @@ hipError_t TopPSamplingFromProb(T*          probs,
                                 bool        deterministic,
                                 uint64_t*   philox_seed,
                                 uint64_t*   philox_offset,
-                                hipStream_t stream = 0) {
+                                hipStream_t stream  = 0,
+                                bool*       success = nullptr) {
     const uint32_t vec_size = std::gcd(VEC_BYTES / sizeof(T), d);
 
     auto compute_capacity = GetCudaComputeCapability();
@@ -721,7 +854,7 @@ hipError_t TopPSamplingFromProb(T*          probs,
         const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
         dim3           nblks(batch_size);
         dim3           nthrs(BLOCK_THREADS);
-        void*          args[] = {&probs, &output, &indices, &top_p_arr, &top_p_val, &d, &philox_seed, &philox_offset};
+        void* args[] = {&probs, &output, &indices, &top_p_arr, &top_p_val, &d, &philox_seed, &philox_offset, &success};
 
         DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
                                       auto kernel = TopPSamplingFromProbKernel<BLOCK_THREADS,
@@ -753,7 +886,8 @@ hipError_t TopKTopPSamplingFromProb(T*          probs,
                                     bool        deterministic,
                                     uint64_t*   philox_seed,
                                     uint64_t*   philox_offset,
-                                    hipStream_t stream = 0) {
+                                    hipStream_t stream  = 0,
+                                    bool*       success = nullptr) {
     const uint32_t vec_size = std::gcd(VEC_BYTES / sizeof(T), d);
 
     auto compute_capacity = GetCudaComputeCapability();
@@ -770,7 +904,8 @@ hipError_t TopKTopPSamplingFromProb(T*          probs,
                                  &top_p_val,
                                  &d,
                                  &philox_seed,
-                                 &philox_offset};
+                                 &philox_offset,
+                                 &success};
 
         DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
                                       auto kernel = TopKTopPSamplingFromProbKernel<BLOCK_THREADS,
