@@ -77,11 +77,15 @@ class DelayedHCUnit(HCUnitBase):
     def _pre_impl(self, x: torch.Tensor, dbg_tag=None):
         shape = x.shape
         if x.is_cuda and x.dtype == torch.bfloat16:
+            from rtp_llm.models_py.modules.dsv4.hc.v41_prenorm import prenorm
+
             ops = _tile_ops()
             residual = x.reshape(1, -1, self.hc_mult, self.dim)
-            mixes = ops.mhc_pre_norm_fn(
-                residual, self.fn, None, self.norm_eps, n_splits=1
-            )
+            mixes = prenorm(residual, self.fn, self.norm_eps)
+            if mixes is None:
+                mixes = ops.mhc_pre_norm_fn(
+                    residual, self.fn, None, self.norm_eps, n_splits=1
+                )
             pre, post, comb = ops.mhc_pre_split_mixes(
                 mixes, self.scale, self.base, self.hc_mult, 2.0, self.hc_eps
             )
