@@ -73,14 +73,10 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo>
                           convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
-    virtual BlockAddrInfo convertIndexToAddr(int layer_id, int group_id, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
-    virtual std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, int group_id, int block_id, int partition_count, int partition_id) const;
-    virtual BlockAddrInfo          convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBufferByTag(
-        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const;
+    virtual BlockAddrInfo convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
     virtual std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector = false);
     virtual GroupedCacheLayerLayout allLayerCacheBase() const;
@@ -106,7 +102,7 @@ public:
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
-    virtual void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    virtual void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
     virtual const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const {
         return group_block_pools_;

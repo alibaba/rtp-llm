@@ -927,16 +927,17 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ConvertIndexToAddrAndBufferByGroup) {
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
-    auto addr_default   = allocator->convertIndexToAddr(/*layer_id=*/0, /*group_id=*/0, /*block_id=*/1);
-    auto addr_via_layer = allocator->convertIndexToAddr(/*layer_id=*/0, /*block_id=*/1);
+    const auto& group_tag      = config.soleGroupForLayer(0).tag;
+    auto        addr_default   = allocator->convertIndexToAddr(/*layer_id=*/0, group_tag, /*block_id=*/1);
+    auto        addr_via_layer = allocator->convertIndexToAddr(/*layer_id=*/0, /*block_id=*/1);
     EXPECT_EQ(addr_default.kv_addr, addr_via_layer.kv_addr);
 
-    auto bufs_default = allocator->convertIndexToBuffer(/*layer_id=*/0, /*group_id=*/0, /*block_id=*/1);
+    auto bufs_default = allocator->convertIndexToBuffer(/*layer_id=*/0, group_tag, /*block_id=*/1);
     ASSERT_FALSE(bufs_default.empty());
     EXPECT_NE(bufs_default[0].addr, nullptr);
 
     auto bufs_partitioned = allocator->convertIndexToBuffer(
-        /*layer_id=*/0, /*group_id=*/0, /*block_id=*/1, /*partition_count=*/1, /*partition_id=*/0);
+        /*layer_id=*/0, group_tag, /*block_id=*/1, /*partition_count=*/1, /*partition_id=*/0);
     ASSERT_FALSE(bufs_partitioned.empty());
     EXPECT_NE(bufs_partitioned[0].addr, nullptr);
 }
@@ -2184,18 +2185,17 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToAddrByTagRoutesToCorrec
 
     // csa_kv tag routes to group_id=0; it must produce a non-null kv address that
     // matches the CSA group's pool.
-    auto addr_csa = allocator->convertIndexToAddrByTag(csa_layer, "csa_kv", 1);
+    auto addr_csa = allocator->convertIndexToAddr(csa_layer, "csa_kv", 1);
     EXPECT_NE(addr_csa.kv_addr, nullptr);
-    const auto csa_group_id = config.groupIdForTag("csa_kv");
-    EXPECT_EQ(addr_csa.kv_addr, allocator->convertIndexToAddr(csa_layer, csa_group_id, 1).kv_addr);
+    EXPECT_EQ(addr_csa.kv_addr, allocator->convertIndexToBuffer(csa_layer, "csa_kv", 1).front().addr);
 
-    auto addr_swa = allocator->convertIndexToAddrByTag(csa_layer, "swa_kv", 1);
+    auto addr_swa = allocator->convertIndexToAddr(csa_layer, "swa_kv", 1);
     EXPECT_NE(addr_swa.kv_addr, nullptr);
 
     // The two tags live in different pools, so their addresses cannot alias.
     EXPECT_NE(addr_csa.kv_addr, addr_swa.kv_addr);
-    EXPECT_THROW((void)allocator->convertIndexToAddrByTag(csa_layer, "missing", 1), std::exception);
-    EXPECT_THROW((void)allocator->convertIndexToAddr(csa_layer, config.groupNums(), 1), std::exception);
+    EXPECT_THROW((void)allocator->convertIndexToAddr(csa_layer, "missing", 1), std::exception);
+    EXPECT_THROW((void)allocator->convertIndexToAddr(csa_layer, "hca_kv", 1), std::exception);
 
     // Default single-group access is ambiguous for multi-tag layers.
     EXPECT_THROW((void)allocator->convertIndexToAddr(csa_layer, /*block_id=*/1), std::exception);
@@ -2216,12 +2216,12 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToBufferByTagAndPartition
     }
     ASSERT_GE(csa_layer, 0);
 
-    auto buf = allocator->convertIndexToBufferByTag(csa_layer, "csa_kv", /*block_id=*/1);
+    auto buf = allocator->convertIndexToBuffer(csa_layer, "csa_kv", /*block_id=*/1);
     ASSERT_FALSE(buf.empty());
     EXPECT_NE(buf[0].addr, nullptr);
 
-    auto buf_part = allocator->convertIndexToBufferByTag(
-        csa_layer, "csa_kv", /*block_id=*/1, /*partition_count=*/1, /*partition_id=*/0);
+    auto buf_part =
+        allocator->convertIndexToBuffer(csa_layer, "csa_kv", /*block_id=*/1, /*partition_count=*/1, /*partition_id=*/0);
     ASSERT_FALSE(buf_part.empty());
     EXPECT_NE(buf_part[0].addr, nullptr);
 }

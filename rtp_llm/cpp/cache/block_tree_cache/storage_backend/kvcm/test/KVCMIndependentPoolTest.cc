@@ -197,7 +197,7 @@ protected:
             config_, options, RuntimeConfig{}, parallel, SpeculativeExecutionConfig{}, nullptr, wrapper_);
         if (fail_second || rank != 0) {
             return backend_->init(config_.topologyPtr(), pools_, [&](int layer, int group, int block) {
-                return allocator_->convertIndexToBuffer(layer, group, block);
+                return allocator_->convertIndexToBuffer(layer, config_.tagForGroup(group), block);
             });
         }
         cache_ = createBlockTreeCache(config_, options, allocator_, parallel, backend_);
@@ -215,7 +215,7 @@ protected:
         for (size_t group = 0; group < pools_.size(); ++group) {
             for (int layer : config_.layerIdsForGroup(group)) {
                 for (const auto& buffer :
-                     allocator_->convertIndexToBuffer(layer, static_cast<int>(group), blocks_[group])) {
+                     allocator_->convertIndexToBuffer(layer, config_.tagForGroup(group), blocks_[group])) {
                     ASSERT_EQ(cudaMemset(buffer.addr, value == 0 ? 0 : value + group, buffer.size_bytes), cudaSuccess);
                 }
             }
@@ -272,7 +272,7 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
     for (size_t group = 0; group < pools_.size(); ++group) {
         for (int layer : config_.layerIdsForGroup(group)) {
             for (const auto& buffer :
-                 allocator_->convertIndexToBuffer(layer, static_cast<int>(group), blocks_[group])) {
+                 allocator_->convertIndexToBuffer(layer, config_.tagForGroup(group), blocks_[group])) {
                 std::vector<uint8_t> bytes(buffer.size_bytes);
                 ASSERT_EQ(cudaMemcpy(bytes.data(), buffer.addr, bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
                 EXPECT_EQ(bytes, std::vector<uint8_t>(bytes.size(), 17 + group));

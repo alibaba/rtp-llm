@@ -2666,7 +2666,7 @@ TEST_F(DSV4AllocatorTest, AddressLookupAllGroups) {
     for (int gid = 0; gid < 7; gid++) {
         ASSERT_FALSE(config.layerIdsForGroup(gid).empty()) << "group " << gid << " has no layers";
         int  layer_id = config.layerIdsForGroup(gid)[0];
-        auto addr     = allocator->convertIndexToAddr(layer_id, gid, /*block_id=*/1);
+        auto addr     = allocator->convertIndexToAddr(layer_id, config.tagForGroup(gid), /*block_id=*/1);
         EXPECT_NE(addr.kv_addr, nullptr) << "null kv_addr for group " << gid << " layer " << layer_id;
     }
 }
@@ -2697,7 +2697,7 @@ TEST_F(DSV4AllocatorTest, ConvertIndexToBufferAllGroups) {
     // convertIndexToBuffer should work for layers in each of the 7 groups
     for (int gid = 0; gid < 7; gid++) {
         int  layer_id = config.layerIdsForGroup(gid)[0];
-        auto buf      = allocator->convertIndexToBuffer(layer_id, gid, /*block_id=*/1);
+        auto buf      = allocator->convertIndexToBuffer(layer_id, config.tagForGroup(gid), /*block_id=*/1);
         ASSERT_FALSE(buf.empty()) << "empty buffer for group " << gid;
         EXPECT_NE(buf[0].addr, nullptr) << "null addr for group " << gid;
     }
@@ -2815,7 +2815,7 @@ TEST_F(DSV4AllocatorTest, FlashAddressLookupAllGroups) {
     for (int gid = 0; gid < 7; gid++) {
         ASSERT_FALSE(config.layerIdsForGroup(gid).empty()) << "Flash group " << gid << " has no layers";
         int  layer_id = config.layerIdsForGroup(gid)[0];
-        auto addr     = allocator->convertIndexToAddr(layer_id, gid, /*block_id=*/1);
+        auto addr     = allocator->convertIndexToAddr(layer_id, config.tagForGroup(gid), /*block_id=*/1);
         EXPECT_NE(addr.kv_addr, nullptr) << "Flash null kv_addr for group " << gid;
     }
 }

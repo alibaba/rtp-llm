@@ -87,7 +87,7 @@ public:
     void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     void blockBatchCopy(const torch::Tensor& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
-    void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,
@@ -99,14 +99,10 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
                   convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id, int group_id) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, int group_id) const;
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int block_index, int layer_id, int group_id, int partition_count, int partition_id) const;
-    BlockAddrInfo          convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const;
-    std::vector<BlockInfo> convertIndexToBufferByTag(int block_index, int layer_id, const std::string& tag) const;
-    std::vector<BlockInfo> convertIndexToBufferByTag(
-        int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const;
+    BlockAddrInfo convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
 
     GroupedCacheLayerLayout allLayerCacheBase() const;
 

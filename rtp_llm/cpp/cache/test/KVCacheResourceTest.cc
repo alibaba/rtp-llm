@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -47,6 +48,33 @@ TEST(BlockIdsTest, NonFull_MirrorsKernelBlocks) {
     ids.setAt(1, 9);
     ASSERT_EQ(ids.blocks(), (BlockIndicesType{3, 9, 1}));
     ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{3, 9, 1}));
+}
+
+TEST(KVCacheResourceTest, SwapBlocksUsesTagAcrossDifferentGroupOrders) {
+    for (const bool reversed : {false, true}) {
+        std::vector<GroupBase> groups{makeResourceGroup("full", CacheGroupType::FULL),
+                                      makeResourceGroup("linear", CacheGroupType::LINEAR)};
+        if (reversed) {
+            std::reverse(groups.begin(), groups.end());
+        }
+        const auto           topology = CacheTopology::create(std::move(groups), {{0, {"full"}}, {1, {"linear"}}});
+        BatchKVCacheResource resource;
+        resource.resetBatchSize(2);
+        resource.initGroups(topology);
+        for (int batch = 0; batch < 2; ++batch) {
+            resource.mutableBlockIds(batch, "full").assign({2, 5});
+            resource.mutableBlockIds(batch, "linear").assign({3, 7});
+        }
+        resource.swapBlocks(1, "linear", 0, 1);
+        EXPECT_EQ(resource.blocksForLayer(1, 1, "linear"), (BlockIndicesType{7, 3}));
+        EXPECT_EQ(resource.blocksForLayer(0, 1, "linear"), (BlockIndicesType{3, 7}));
+        EXPECT_EQ(resource.blocksForLayer(1, 0, "full"), (BlockIndicesType{2, 5}));
+        resource.swapBlocks(1, "full", 0, 1);
+        EXPECT_EQ(resource.kernelBlocksForLayer(1, 0, "full"), (BlockIndicesType{20, 21, 22, 23, 8, 9, 10, 11}));
+        EXPECT_ANY_THROW(resource.swapBlocks(1, "missing", 0, 1));
+        EXPECT_ANY_THROW(resource.swapBlocks(2, "linear", 0, 1));
+        EXPECT_ANY_THROW(resource.blocksForLayer(1, 0, "linear"));
+    }
 }
 
 TEST(BlockIdsTest, Full_ExpandsKernelBlocks) {
