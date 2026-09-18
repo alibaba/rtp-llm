@@ -1,6 +1,8 @@
 """Opt-in FP8 MegaMoE executor. Static weights are packed during construction."""
 
+import inspect
 import logging
+import os
 
 import torch
 import torch.distributed as dist
@@ -80,6 +82,25 @@ class MegaMoeFp8Executor(FusedMoeExpertExecutor):
             raise RuntimeError(
                 "mega_moe_fp8 requires SM10x and DeepGEMM mega_fp8 support"
             )
+        self.gated_shared_expert_requested = (
+            os.getenv("RTP_QWEN35_FUSED_MEGAMOE_GATED_SE", "0") == "1"
+        )
+        self.uses_shared_expert_gates = False
+        self.shared_l1 = self.shared_l2 = None
+        if self.gated_shared_expert_requested:
+            from deep_gemm import mega_fp8
+
+            if (
+                "shared_expert_gates"
+                not in inspect.signature(mega_fp8.fp8_fp8_mega_moe).parameters
+            ):
+                raise RuntimeError(
+                    "Gated MegaMoE requires a DeepGEMM build with shared_expert_gates"
+                )
+            if getattr(mega_fp8, "RTP_GATED_SHARED_EXPERT_SEMANTICS", 0) != 1:
+                raise RuntimeError(
+                    "Gated MegaMoE requires RTP BF16/group-128 shared-expert semantics v1"
+                )
         self.group = get_validated_world_ep_group(config, dist)
         self.capacity = mega_moe_fp8_capacity(config)
         self.l1, self.l2 = prepare_mega_moe_fp8_weights(
@@ -102,6 +123,53 @@ class MegaMoeFp8Executor(FusedMoeExpertExecutor):
             self.capacity,
         )
 
+    def configure_gated_shared_expert(self, shared_expert):
+        from deep_gemm import mega_fp8
+
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+            CudaFp8DeepGEMMLinear,
+        )
+
+        linears = [
+            getattr(p, "_deepgemm_linear", p)
+            for p in (shared_expert.up_proj, shared_expert.down_proj)
+        ]
+        if not all(
+            isinstance(p, CudaFp8DeepGEMMLinear) and p.scale_ue8m0 and p.bias is None
+            for p in linears
+        ):
+            raise ValueError(
+                "Gated MegaMoE needs bias-free FP8 UE8M0 shared-expert linears"
+            )
+        up, down = linears
+        inter = self.config.moe_inter_dim
+        hidden = self.config.hidden_size
+        if tuple(up.weight.shape) != (2 * inter, hidden) or tuple(
+            down.weight.shape
+        ) != (hidden, inter):
+            raise ValueError(
+                "Gated MegaMoE requires one shared expert with matching intermediate width"
+            )
+        # Preserve checkpoint tensors: decode or another model may still use them.
+        self.shared_l1, self.shared_l2 = mega_fp8.transform_weights_for_mega_moe_fp8(
+            (up.weight, expand_fp8_scale(up.weight_scales, 2 * inter, hidden)),
+            (down.weight, expand_fp8_scale(down.weight_scales, hidden, inter)),
+        )
+        # UTCCP scales are MN-major, matching routed-expert preparation.
+        self.shared_l1, self.shared_l2 = tuple(
+            (weight, scale.transpose(-1, -2).contiguous().transpose(-1, -2))
+            for weight, scale in (self.shared_l1, self.shared_l2)
+        )
+        self.includes_shared_expert = True
+        self.uses_shared_expert_gates = True
+        self._ready_streams.clear()
+        self._weight_ready.record(torch.cuda.current_stream())
+        logging.info(
+            "MegaMoE gated shared expert configured: intermediate=%d, DeepGEMM=%s",
+            inter,
+            mega_fp8.__file__,
+        )
+
     def _buffer(self):
         from deep_gemm import mega_fp8
 
@@ -114,6 +182,7 @@ class MegaMoeFp8Executor(FusedMoeExpertExecutor):
             c.moe_k,
             c.hidden_size,
             c.moe_inter_dim,
+            int(self.uses_shared_expert_gates),
         )
         if key not in _BUFFER_CACHE:
             sym = mega_fp8.get_symm_buffer_for_mega_moe_fp8(
@@ -123,6 +192,7 @@ class MegaMoeFp8Executor(FusedMoeExpertExecutor):
                 c.moe_k,
                 c.hidden_size,
                 c.moe_inter_dim,
+                num_shared_experts=int(self.uses_shared_expert_gates),
                 use_fp8_dispatch=True,
             )
             _BUFFER_CACHE[key] = [sym, None, torch.cuda.Event()]
@@ -151,11 +221,19 @@ class MegaMoeFp8Executor(FusedMoeExpertExecutor):
 
         if activation.lower() not in ("silu", "siglu", "swiglu"):
             raise ValueError("mega_moe_fp8 supports SwiGLU only")
+        extra = dict(extra_expert_args or {})
+        shared_gates = extra.pop("shared_expert_gates", None)
+        if self.gated_shared_expert_requested and not self.uses_shared_expert_gates:
+            raise RuntimeError("Gated shared expert was requested but not configured")
+        if self.uses_shared_expert_gates != (shared_gates is not None):
+            raise ValueError(
+                "Shared-expert gate presence does not match MegaMoE configuration"
+            )
         if (
             expert_map is not None
             or a2_scale is not None
             or apply_router_weight_on_input
-            or extra_expert_args
+            or extra
         ):
             raise ValueError(
                 "mega_moe_fp8 does not support expert remapping or externally scaled activations"
@@ -190,9 +268,39 @@ class MegaMoeFp8Executor(FusedMoeExpertExecutor):
             # Preserve the existing 128-element input quantization exactly.
             q, sf = DeepepNormalRouterBase._do_quant_fp8_per_block(None, x)
             sym.x[:n].copy_(q)
-            sym.x_sf[:n].copy_(expand_fp8_scale(sf, n, h))
+            expanded_sf = expand_fp8_scale(sf, n, h)
+            sym.x_sf[:n].copy_(expanded_sf)
+            if self.uses_shared_expert_gates:
+                from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_inputs import (
+                    stage_shared_scales,
+                )
+
+                block_m = mega_fp8.get_block_m_for_mega_moe_fp8(
+                    self.config.ep_size,
+                    self.config.expert_num,
+                    sym.num_max_tokens_per_rank,
+                    n,
+                    self.config.moe_k,
+                )
+                stage_shared_scales(sym.shared_l1_acts_sf, expanded_sf, block_m)
             sym.topk_idx[:n].copy_(ids)
             sym.topk_weights[:n].copy_(weights)
+        kwargs = {}
+        if self.uses_shared_expert_gates:
+            if (
+                shared_gates.shape != (n,)
+                or shared_gates.dtype != torch.float32
+                or shared_gates.device != x.device
+                or not shared_gates.is_contiguous()
+            ):
+                raise ValueError(
+                    "Shared gates must be contiguous CUDA FP32 [local_tokens]"
+                )
+            kwargs = dict(
+                shared_l1_weights=self.shared_l1,
+                shared_l2_weights=self.shared_l2,
+                shared_expert_gates=shared_gates,
+            )
         output = torch.empty_like(x)
         mega_fp8.fp8_fp8_mega_moe(
             output,
@@ -202,5 +310,6 @@ class MegaMoeFp8Executor(FusedMoeExpertExecutor):
             recipe=(1, 1, 32),
             weight_recipe=(1, 32),
             fast_math=False,
+            **kwargs,
         )
         return CombineForwardPayload(fused_expert_output=output)
