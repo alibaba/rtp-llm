@@ -65,8 +65,9 @@ class WhaleModeConfigurationTest {
         var monitor = new WhaleMockMonitor(sink);
         var prefill = java.util.Map.of("role", "ROLE_TYPE_PREFILL", "engine", "p-1",
                 "hippo_role", "mock.prefill_part0", "hippo_app", "mock-app");
-        monitor.reportEvent(java.util.Map.of("rtp_llm_first_token_latency_us", 415_000), prefill);
-        monitor.reportEvent(java.util.Map.of("rtp_llm_first_token_latency_us", 42_000),
+        monitor.reportEvent(java.util.Map.of("mock_backend_ttft_us", 415_000), prefill);
+        monitor.reportEvent(java.util.Map.of("rtp_llm_first_token_latency_us", 90_000), prefill);
+        monitor.reportEvent(java.util.Map.of("mock_backend_ttft_us", 42_000),
                 java.util.Map.of("role", "ROLE_TYPE_DECODE", "hippo_role", "mock.decode_part0"));
         assertEquals(List.of(415.0), values);
         assertEquals(List.of(java.util.Map.of("hippo_role", "mock.prefill_part0", "hippo_app", "mock-app")),
@@ -103,15 +104,35 @@ class WhaleModeConfigurationTest {
         assertFalse(reports.stream().anyMatch(s -> s.startsWith("rtp_llm_context_tps=")));
         assertFalse(reports.stream().anyMatch(s -> s.startsWith("mock_context_tokens_total=")));
         reports.clear();
-        monitor.reportEvent(java.util.Map.of("rtp_llm_latency_us", 425_000), d, true);
-        assertTrue(reports.contains("rtp_llm_latency_us=425000.0"));
+        monitor.reportEvent(java.util.Map.of("mock_backend_latency_us", 425_000), d, true);
+        assertTrue(reports.contains("mock_backend_latency_us=425000.0"));
         assertTrue(reports.contains("py_rtp_framework_rt=425.0"));
         reports.clear();
-        monitor.reportEvent(java.util.Map.of("rtp_llm_latency_us", 425_000), d, false);
+        monitor.reportEvent(java.util.Map.of("mock_backend_latency_us", 425_000), d, false);
         assertFalse(reports.stream().anyMatch(s -> s.startsWith("py_rtp_framework_rt=")));
         reports.clear();
-        monitor.reportEvent(java.util.Map.of("rtp_llm_latency_us", 425_000), p, true);
+        monitor.reportEvent(java.util.Map.of("rtp_llm_latency_us", 100_000), d, true);
+        assertFalse(reports.stream().anyMatch(s -> s.startsWith("py_rtp_framework_rt=")));
+        reports.clear();
+        monitor.reportEvent(java.util.Map.of("mock_backend_latency_us", 425_000), p, true);
         assertTrue(reports.isEmpty());
+    }
+
+    @Test
+    void backendLatencyAcceptsMicrosecondAndMillisecondRequestStamps() {
+        long nowMs = System.currentTimeMillis();
+        var micro = org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                .setStartTime((nowMs - 120) * 1000).build();
+        var milli = org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                .setStartTime(nowMs - 120).build();
+        var missing = org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.getDefaultInstance();
+        assertEquals(nowMs - 120,
+                JavaMockEngineCluster.FastRpcService.requestStartEpochMs(micro, nowMs));
+        assertEquals(nowMs - 120,
+                JavaMockEngineCluster.FastRpcService.requestStartEpochMs(milli, nowMs));
+        assertEquals(0, JavaMockEngineCluster.FastRpcService.requestStartEpochMs(missing, nowMs));
+        assertEquals(0, JavaMockEngineCluster.FastRpcService.requestStartEpochMs(
+                micro.toBuilder().setStartTime((nowMs + 10_000) * 1000).build(), nowMs));
     }
 
     @Test
@@ -278,7 +299,8 @@ class WhaleModeConfigurationTest {
             assertNotEquals(p.whaleMetricTags().get("engine_port"), d.whaleMetricTags().get("engine_port"));
             channel = io.grpc.ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();
             var input = org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
-                    .setRequestId(42).addAllTokenIds(java.util.Collections.nCopies(513, 123))
+                    .setRequestId(42).setStartTime(System.currentTimeMillis() * 1000L)
+                    .addAllTokenIds(java.util.Collections.nCopies(513, 123))
                     .setGenerateConfig(org.flexlb.engine.grpc.EngineRpcService.GenerateConfigPB.newBuilder()
                             .setMaxNewTokens(eos ? 393216 : 8).setMinNewTokens(8)
                             .setReuseCache(true).setEnableDeviceCache(true).setEnableMemoryCache(true)
@@ -328,8 +350,11 @@ class WhaleModeConfigurationTest {
             assertEquals(8, ((Number) d.getSnapshot().get("cache_keys")).intValue(),
                     "D must cache its eight 64-token blocks, not one P 512-token key");
             assertEquals(1, eventMetrics.stream().filter(m -> m.containsKey("rtp_llm_first_token_latency_us")).count());
+            assertEquals(1, eventMetrics.stream().filter(m -> m.containsKey("mock_backend_ttft_us")).count());
             assertEquals(1, decodeEvents.stream().filter(m -> m.containsKey("rtp_llm_latency_us")).count(),
                     "D terminal reports inference residence without Fetch");
+            assertEquals(1, decodeEvents.stream().filter(m -> m.containsKey("mock_backend_latency_us")).count(),
+                    "the original request stamp reaches D without Fetch");
             var pForwards = eventMetrics.stream().filter(m -> m.containsKey("rtp_llm_model_forward_us"))
                     .map(m -> m.get("rtp_llm_model_forward_us").doubleValue()).toList();
             var dForwards = decodeEvents.stream().filter(m -> m.containsKey("rtp_llm_model_forward_us"))

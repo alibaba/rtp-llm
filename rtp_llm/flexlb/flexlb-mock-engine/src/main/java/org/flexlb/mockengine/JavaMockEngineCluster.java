@@ -3793,6 +3793,11 @@ public final class JavaMockEngineCluster {
                             reportMetricEvent(Map.of("rtp_llm_first_token_latency_us",
                                     Math.max(0L, doneTsMs - arrived) * 1000L));
                         }
+                        long requestStartMs = requestStartEpochMs(shape.input(), doneTsMs);
+                        if (requestStartMs != 0) {
+                            reportMetricEvent(Map.of("mock_backend_ttft_us",
+                                    (doneTsMs - requestStartMs) * 1000L));
+                        }
                     }
                     writePrefillDoneEvent(shape, requestId, member.batchId(), doneTsMs,
                             executionMs, shapes.size(), alreadyCancelled);
@@ -4753,6 +4758,14 @@ public final class JavaMockEngineCluster {
                 // steps. Emit at the terminal, independent of client Fetch.
                 reportMetricEvent(Map.of("rtp_llm_latency_us",
                         Math.max(0L, System.currentTimeMillis() - arrivedMs) * 1000L));
+            }
+            if (!alreadyCancelled) {
+                long doneMs = System.currentTimeMillis();
+                long requestStartMs = requestStartEpochMs(shape.input(), doneMs);
+                if (requestStartMs != 0) {
+                    reportMetricEvent(Map.of("mock_backend_latency_us",
+                            (doneMs - requestStartMs) * 1000L));
+                }
             }
             // The status terminal was published by claimDecodeTerminalLocked.
             // Feed the per-sample decode completion window (java_mock_stats
@@ -6285,6 +6298,16 @@ public final class JavaMockEngineCluster {
 
         private static long orZero(Long value) {
             return value != null ? value : 0L;
+        }
+
+        // Production trans_input uses epoch microseconds; the Java replay
+        // client and older case fixtures use epoch milliseconds. A missing or
+        // implausible stamp must not become a fabricated end-to-end latency.
+        static long requestStartEpochMs(EngineRpcService.GenerateInputPB input, long doneMs) {
+            long raw = input.getStartTime();
+            long startMs = raw >= 100_000_000_000_000L ? raw / 1000L : raw;
+            return startMs >= 1_000_000_000_000L && startMs <= doneMs
+                    && doneMs - startMs <= TimeUnit.HOURS.toMillis(1) ? startMs : 0L;
         }
 
         /**

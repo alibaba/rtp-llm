@@ -216,15 +216,21 @@ is already covered by the client_events × engine_events rid join — the
 same join full_e2e / engine_exec uses — making the aggregate assertion
 redundant).
 
-**Whale no-Fetch latency**: with `FETCH_OUTPUT_STREAM=0`, P reports
-`rtp_llm_first_token_latency_us` at successful prefill completion and the
-dashboard alias `py_rtp_response_first_token_rt` in milliseconds. D reports
-`rtp_llm_latency_us` at successful decode completion; in no-Fetch mode it also
-reports `py_rtp_framework_rt` in milliseconds. Both aliases retain engine
-`hippo_role` tags. Their clock starts at arrival at the respective engine:
-they exclude frontend/master routing and transport, so they are engine-side
-proxies, not frontend end-to-end TTFT or response time. The D alias is not
-emitted when Fetch is enabled; the frontend then owns response timing.
+**Whale no-Fetch latency**: `GenerateInputPB.start_time` survives master
+dispatch and the P→D handoff. The production frontend sets it in epoch
+microseconds; the Java replay client sets epoch milliseconds. On successful
+completion P reports `mock_backend_ttft_us` and D reports
+`mock_backend_latency_us`, each measured from that request stamp. These feed
+the dashboard's `py_rtp_response_first_token_rt` and (only with
+`FETCH_OUTPUT_STREAM=0`) `py_rtp_framework_rt`, respectively, in milliseconds
+with P/D `hippo_role` tags. Missing/invalid stamps suppress these aliases
+rather than substituting an engine arrival time. The original
+`rtp_llm_first_token_latency_us` and `rtp_llm_latency_us` still measure local
+P/D residence. The backend stamp is taken after frontend ingress and some
+preprocessing, so the aliases remain shorter than true frontend request →
+response latency. The P value uses prefill completion as its first-token
+boundary; it does not observe when a streamed token reaches the client. With
+Fetch enabled, the frontend owns completion timing.
 
 **Block-pool observability series (`mock_engine_*`, 20260902)**: `/metrics`
 reports the KV v2 block-pool state as time series in BOTH emission modes

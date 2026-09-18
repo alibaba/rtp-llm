@@ -32,12 +32,13 @@ final class WhaleMockMonitor implements AutoCloseable {
             "mock_cache_key_hits_total", "mock_cache_keys_requested_total",
             "rtp_llm_context_batch_size", "rtp_llm_context_tps",
             "rtp_llm_context_tps_with_cache", "rtp_llm_context_wall_tps",
-            "rtp_llm_context_wall_tps_with_cache", "rtp_llm_first_token_latency_us");
+            "rtp_llm_context_wall_tps_with_cache", "rtp_llm_first_token_latency_us",
+            "mock_backend_ttft_us");
     private static final java.util.Set<String> DECODE_METRICS = java.util.Set.of(
             "mock_generate_tokens_total", "mock_decode_step_tokens_total",
             "mock_decode_waiting_requests", "mock_decode_reserved_requests",
             "mock_decode_running_requests", "rtp_llm_generate_batch_size",
-            "rtp_llm_generate_tps", "rtp_llm_latency_us");
+            "rtp_llm_generate_tps", "rtp_llm_latency_us", "mock_backend_latency_us");
 
     private static boolean belongsToRole(String name, Map<String, String> labels) {
         String role = labels.get("role");
@@ -85,16 +86,16 @@ final class WhaleMockMonitor implements AutoCloseable {
             if (!belongsToRole(name, labels)) return;
             if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
             monitor.report(name, tags, value.doubleValue());
-            if (name.equals("rtp_llm_first_token_latency_us")
+            if (name.equals("mock_backend_ttft_us")
                     && "ROLE_TYPE_PREFILL".equals(labels.get("role"))) {
                 String alias = "py_rtp_response_first_token_rt";
                 if (registered.add(alias)) monitor.register(alias, FlexMetricType.GAUGE);
                 monitor.report(alias, dashboardTags(labels), value.doubleValue() / 1000.0);
             }
-            if (noFetch && name.equals("rtp_llm_latency_us")
+            if (noFetch && name.equals("mock_backend_latency_us")
                     && "ROLE_TYPE_DECODE".equals(labels.get("role"))) {
                 // Schedule-only has no frontend response terminal. This alias
-                // is D arrival -> D completion, not frontend request -> response.
+                // starts at GenerateInputPB.start_time, not frontend ingress.
                 String alias = "py_rtp_framework_rt";
                 if (registered.add(alias)) monitor.register(alias, FlexMetricType.GAUGE);
                 monitor.report(alias, dashboardTags(labels), value.doubleValue() / 1000.0);
