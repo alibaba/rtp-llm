@@ -41,7 +41,9 @@ class HttpLoadBalanceServerTest {
                 endpointRegistry,
                 mock(WorkerDirectory.class),
                 synchronizer,
-                new ServerScheduleLatencyRecorder());
+                new ServerScheduleLatencyRecorder(),
+                mock(org.flexlb.service.BatchScheduleCoordinator.class),
+                mock(org.flexlb.service.monitor.EngineHealthReporter.class));
         WebTestClient client = WebTestClient
                 .bindToRouterFunction(server.loadBalancePrefill())
                 .build();
@@ -89,7 +91,9 @@ class HttpLoadBalanceServerTest {
                 endpointRegistry,
                 mock(WorkerDirectory.class),
                 mock(MasterEngineSynchronizer.class),
-                new ServerScheduleLatencyRecorder());
+                new ServerScheduleLatencyRecorder(),
+                mock(org.flexlb.service.BatchScheduleCoordinator.class),
+                mock(org.flexlb.service.monitor.EngineHealthReporter.class));
         WebTestClient client = WebTestClient
                 .bindToRouterFunction(server.loadBalancePrefill())
                 .build();
@@ -123,7 +127,9 @@ class HttpLoadBalanceServerTest {
                 mock(EndpointRegistry.class),
                 mock(WorkerDirectory.class),
                 mock(MasterEngineSynchronizer.class),
-                new ServerScheduleLatencyRecorder());
+                new ServerScheduleLatencyRecorder(),
+                mock(org.flexlb.service.BatchScheduleCoordinator.class),
+                mock(org.flexlb.service.monitor.EngineHealthReporter.class));
         WebTestClient client = WebTestClient
                 .bindToRouterFunction(server.loadBalancePrefill())
                 .build();

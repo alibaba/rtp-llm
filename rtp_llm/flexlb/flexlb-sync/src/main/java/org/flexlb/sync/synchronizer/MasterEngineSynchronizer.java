@@ -6,7 +6,9 @@ import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.EngineType;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -17,7 +19,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -33,6 +37,9 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_IN
 public final class MasterEngineSynchronizer {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+
+    // Embedding workers expose ARPC, so discovery is their availability source.
+    private volatile Map<RoleType, List<WorkerHost>> embeddingWorkers = Map.of();
 
     private final String modelName;
     private final List<RoleType> requiredRoles;
@@ -119,6 +126,15 @@ public final class MasterEngineSynchronizer {
         logger.debug("sync engine status start, times:{}, modelName:{}",
                 syncCount.longValue(), modelName);
         try {
+            if (flexlbConfig.getWorkerRegistry().getEngineType() == EngineType.EMBEDDING) {
+                Map<RoleType, List<WorkerHost>> discovered = new EnumMap<>(RoleType.class);
+                for (RoleType role : requiredRoles) {
+                    discovered.put(role, List.copyOf(
+                            workerAddressService.getEngineWorkerList(modelName, role)));
+                }
+                embeddingWorkers = Map.copyOf(discovered);
+                return;
+            }
             for (RoleType roleType : requiredRoles) {
                 engineSyncExecutor.submit(new EngineSyncRunner(
                         modelName, workerDirectory,
@@ -136,7 +152,16 @@ public final class MasterEngineSynchronizer {
         }
     }
 
+    public List<WorkerHost> embeddingWorkerSnapshot(RoleType role) {
+        return embeddingWorkers.getOrDefault(role, List.of());
+    }
+
     public boolean isReady() {
+        if (flexlbConfig.getWorkerRegistry().getEngineType() == EngineType.EMBEDDING) {
+            Map<RoleType, List<WorkerHost>> snapshot = embeddingWorkers;
+            return requiredRoles.stream().allMatch(
+                    role -> !snapshot.getOrDefault(role, List.of()).isEmpty());
+        }
         return requiredRoles.stream()
                 .allMatch(role -> workerDirectory.routingCapacity(role) > 0);
     }
