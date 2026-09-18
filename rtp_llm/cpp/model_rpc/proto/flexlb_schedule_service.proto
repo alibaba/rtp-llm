@@ -77,6 +77,9 @@ message FlexlbServerStatusPB {
     reserved 5;
     // Present only for a multi-engine frontend; zero is a valid selected index.
     optional int32 engine_index = 6;
+    // Requests on this Decode engine that must finish cancellation and resource
+    // release before the incoming request executes. Empty means no preemption.
+    repeated string preempt_request_ids = 7;
 }
 
 // Why an incoming request was rejected by the admission decision.  This is

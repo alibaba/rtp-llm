@@ -3,6 +3,7 @@ package org.flexlb.balance.eviction;
 import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityDeficit;
 import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
+import org.flexlb.config.EngineCancellationConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.enums.DecodeTaskPhase;
@@ -114,7 +115,9 @@ public final class EvictionPlanner {
                 && preemption.allows(VictimStage.DECODE_RESERVED);
         boolean engineCancelEnabled = preemption != null
                 && preemption.allows(VictimStage.DECODE_ENGINE_OWNED)
-                && channel != null && channel.isSupported(ep.endpoint());
+                && (preemption.getEngineCancellation().getMode()
+                        == EngineCancellationConfig.Mode.RETURN
+                    || channel != null && channel.isSupported(ep.endpoint()));
         DecodeEvictionProposal local = localEvictionEnabled
                 ? planDecodeOneOwnership(incomingPriority, hardKvTokens, expectedKvTokens, ep, deficit,
                         VictimOwnership.MASTER_LOCAL, failures) : null;
