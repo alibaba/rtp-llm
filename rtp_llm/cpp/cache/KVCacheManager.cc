@@ -287,6 +287,10 @@ void KVCacheManager::blockBatchCopy(const BlockIdPair* copy_mapping_begin, const
     return allocator_->blockBatchCopy(copy_mapping_begin, copy_mapping_end);
 }
 
+void KVCacheManager::dsv41StateBlockCopy(const torch::Tensor& copy_triples) {
+    return allocator_->dsv41StateBlockCopy(copy_triples);
+}
+
 bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                    const std::vector<int>&        block_src_batch,
                                    bool                           copy_last_block,

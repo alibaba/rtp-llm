@@ -35,6 +35,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types.numel() : 0;
     shape_hints[GptModelInputIndex::kvCacheUpdateCopyNum] =
         inputs.kv_cache_update_mapping.defined() ? inputs.kv_cache_update_mapping.size(0) : 0;
+    shape_hints[GptModelInputIndex::v41StateCopyNum] =
+        inputs.v41_state_copy_mapping.defined() ? inputs.v41_state_copy_mapping.size(0) : 0;
     shape_hints[GptModelInputIndex::lmOutputIndexes] =
         inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 0;
     shape_hints[GptModelInputIndex::comboPositionIds] =
@@ -277,6 +279,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         inputs.request_id            = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
         inputs.request_pd_separation = allocBuf(rtp_llm::DataType::TYPE_BOOL, {request_length});
+        inputs.v41_state_copy_mapping =
+            allocBuf(rtp_llm::DataType::TYPE_INT32,
+                     {checkedHint(GptModelInputIndex::v41StateCopyNum, "v41StateCopyNum"), 3});
         inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                 {checkedHint(GptModelInputIndex::lmOutputIndexes, "lmOutputIndexes")},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
@@ -387,6 +392,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
+    collect(inputs.v41_state_copy_mapping);
     collect(inputs.lm_output_indexes);
     if (combo_position_ids_size) {
         collect(inputs.combo_position_ids);

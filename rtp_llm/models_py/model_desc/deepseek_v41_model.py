@@ -861,16 +861,20 @@ class DeepSeekV41Model(GptModelBase):
         try:
             if self._cp_rank == 0:
                 completed = native.publish(publication, per_rank[0], per_rank)
-            else:
-                if native is None:
-                    raise RuntimeError(
-                        "V4.1 producer rank lacks its native checkpoint publisher"
-                    )
+            elif native is not None:
                 # Every producer rank installs the same restored checkpoint on its
                 # own resource so its local cache publication carries the recovery
                 # metadata and its own fixed-group pages; the scheduling rank alone
                 # stages the memory copy.
                 completed = native.install(publication, per_rank[self._cp_rank], per_rank)
+            else:
+                # Only rank 0 schedules streams (NormalEngine), so non-root TP
+                # ranks have no local stream and no publisher to install with.
+                # The recovery metadata is consumed solely by the rank-0
+                # allocator; this rank's fixed-group pages stay coherent through
+                # the tpSync-broadcast writable-backing clone replayed in the
+                # model-input hook, so there is nothing to install here.
+                completed = True
             if completed is False:
                 raise RuntimeError("V4.1 native checkpoint copy did not complete")
         except Exception as exc:

@@ -216,6 +216,11 @@ bool HybridPoolKVCacheAllocator::cloneDsv41WritableBacking(KVCacheResource& reso
         runtimeSyncAndCheck();
         for (auto& item : replacements) {
             resource.mutableBlockIds(item.group).setAt(item.index, item.fresh);
+            // The GPU-direct copy above only covers this (rank-0) pool; every
+            // other CP rank must replay the same clone on its local pool. Ship
+            // the (group, src, dst) triple through the tpSync-broadcast model
+            // input so non-root ranks execute it in the model-input hook.
+            resource.appendDsv41StateCopy(item.group, item.old, item.fresh);
             item.fresh = NULL_BLOCK_IDX;
             group_block_pools_[item.group]->requestFree(item.old);
         }

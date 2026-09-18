@@ -889,6 +889,16 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+    {
+        // Replay the rank-0 allocator's V4.1 writable-backing clones on this
+        // rank's local pools; rank 0 already performed them locally, and only
+        // rank 0 runs the allocator, so non-root ranks replay them here.
+        if (parallelism_config_.tp_rank != 0 && model_input.v41_state_copy_mapping.defined()
+            && model_input.v41_state_copy_mapping.numel() > 0) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(v41_state_copy)");
+            cache_manager_->dsv41StateBlockCopy(model_input.v41_state_copy_mapping);
+        }
+    }
 
     ProfileStepGuard profile_step(model_input.is_fake_stream ? nullptr : step_profiler_);
     metrics_collector.not_skip = true;

@@ -81,6 +81,7 @@ enum GptModelInputIndex : size_t {
     kvCacheLayerToGroupLen,
     kvCacheGroupTypesLen,
     kvCacheUpdateCopyNum,
+    v41StateCopyNum,
     lmOutputIndexes,
     comboPositionIds,
     textTokensMask,

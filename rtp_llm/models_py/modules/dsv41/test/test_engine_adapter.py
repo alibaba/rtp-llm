@@ -752,6 +752,13 @@ class EngineAdapterContractTest(unittest.TestCase):
                 DeepSeekV41Model._cp_publish(model, native, decoder, history)
         self.assertEqual(native.install.call_count, 1)
 
+    def test_cp_publish_skips_non_root_rank_without_a_publisher(self):
+        # Non-root TP ranks hold no scheduler streams, so no native publisher
+        # exists there; the publish protocol must not require one.
+        model, native, decoder, history, patches = self._cp_publish_fixture(rank=1)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            self.assertTrue(DeepSeekV41Model._cp_publish(model, None, decoder, history))
+
 
 if __name__ == "__main__":
     unittest.main()

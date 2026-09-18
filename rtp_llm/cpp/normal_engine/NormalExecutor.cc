@@ -280,6 +280,16 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
     }
     {
+        // Replay the rank-0 allocator's V4.1 writable-backing clones on this
+        // rank's local pools; rank 0 already performed them locally, and only
+        // rank 0 runs the allocator, so non-root ranks replay them here.
+        if (parallelism_config_.tp_rank != 0 && model_input.v41_state_copy_mapping.defined()
+            && model_input.v41_state_copy_mapping.numel() > 0) {
+            RTP_LLM_PROFILE_SCOPE("executor.v41_state_copy");
+            cache_manager_->dsv41StateBlockCopy(model_input.v41_state_copy_mapping);
+        }
+    }
+    {
         bool force = tp_rank_ == 0 && enable_detail_log_;
         if (force) {
             RTP_LLM_LOG_INFO("model_input: %s", model_input.debugString(force).c_str());

@@ -52,6 +52,7 @@ struct GatherModelInputContext {
     int*         input_lengths;
     int*         combo_position_ids;
     BlockIdPair* kv_cache_update_mapping;
+    int32_t*     v41_state_copy_mapping;
     int          batch_idx;
     int*         sequence_lengths;
     bool         has_multimodal_input;
@@ -103,6 +104,9 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
         model_input.kv_cache_update_mapping.defined() ?
             reinterpret_cast<BlockIdPair*>(model_input.kv_cache_update_mapping.data_ptr()) + kv_cache_mapping_offset :
             nullptr;
+    ctx.v41_state_copy_mapping = model_input.v41_state_copy_mapping.defined() ?
+                                     model_input.v41_state_copy_mapping.data_ptr<int32_t>() :
+                                     nullptr;
 
     if (ctx.merged_text_mask) {
         size_t current_tokens_size = stream_groups.modelExecuteTokenSize();
@@ -231,6 +235,21 @@ void addCacheUpdateCopy(GatherModelInputContext& ctx, const std::vector<BlockIdP
     size_t update_copy_num = update_mapping.size();
     std::memcpy(ctx.kv_cache_update_mapping, update_mapping.data(), update_copy_num * sizeof(BlockIdPair));
     ctx.kv_cache_update_mapping += update_copy_num;
+}
+
+// Drain the writable-backing clones the rank-0 allocator recorded on the stream's
+// resource into the broadcast mapping; non-root ranks replay them on their pools.
+void addDsv41StateCopy(GatherModelInputContext& ctx, KVCacheResource& resource) {
+    if (!ctx.v41_state_copy_mapping) {
+        return;
+    }
+    const auto copies = resource.takeDsv41StateCopies();
+    if (!copies.empty()) {
+        std::memcpy(ctx.v41_state_copy_mapping,
+                    copies.data(),
+                    copies.size() * sizeof(KVCacheResource::Dsv41StateCopy));
+        ctx.v41_state_copy_mapping += copies.size() * 3;
+    }
 }
 
 torch::Tensor buildLmOutputIndexesOnCuda(const GptModelInputs& model_input, const StreamGroups& stream_groups) {
@@ -384,6 +403,14 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.kernel_seq_size_per_block = config_.kernel_seq_size_per_block;
     model_input.pd_separation             = config_.role_type == RoleType::PREFILL;
     model_input.warmup                    = config_.warm_up;
+
+    size_t total_state_copy_num = 0;
+    for (const auto& stream : stream_groups.contextStreams()) {
+        if (!stream->isFakeStream()) {
+            total_state_copy_num += stream->kvCachePtr()->cacheResource(0).dsv41PendingStateCopyNum();
+        }
+    }
+    model_input.v41_state_copy_mapping = torch::empty({(int64_t)total_state_copy_num, 3}, pinned_i32);
     model_input.decode_entrance           = config_.decode_entrance;
     model_input.use_opaque_kv_cache_store = config_.use_opaque_kv_cache_store;
     model_input.is_fake_stream            = stream_groups.isFakeStream();
@@ -620,6 +647,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         }
 
         addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping());
+        addDsv41StateCopy(ctx, stream->kvCachePtr()->cacheResource(0));
         stream->step();
     }
 

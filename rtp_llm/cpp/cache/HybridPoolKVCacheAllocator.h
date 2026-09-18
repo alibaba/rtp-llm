@@ -31,6 +31,7 @@ public:
                                                 int               partition_count,
                                                 int               partition_id) const override;
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end) override;
+    void dsv41StateBlockCopy(const torch::Tensor& copy_triples) override;
 
     CacheLayerLayout allLayerCacheBase() const override;
 

@@ -1,9 +1,11 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -117,6 +119,20 @@ public:
     void clearDsv41RecoveryMetadata() {
         dsv41_recovery_metadata_.clear();
     }
+    // Writable-backing clones decided by the (rank-0) allocator that still must be
+    // physically executed on every CP rank's local pool. Each entry is
+    // (group_id, src_block, dst_block); the rank-0 gatherer ships them through the
+    // tpSync broadcast and non-root ranks execute them via the model-input hook.
+    using Dsv41StateCopy = std::array<int32_t, 3>;
+    void appendDsv41StateCopy(int32_t group_id, int32_t src_block, int32_t dst_block) {
+        dsv41_pending_state_copies_.push_back({group_id, src_block, dst_block});
+    }
+    size_t dsv41PendingStateCopyNum() const {
+        return dsv41_pending_state_copies_.size();
+    }
+    std::vector<Dsv41StateCopy> takeDsv41StateCopies() {
+        return std::exchange(dsv41_pending_state_copies_, {});
+    }
     bool blockIdsAreKeyAligned() const {
         return block_ids_are_key_aligned_;
     }
@@ -205,6 +221,7 @@ private:
     std::shared_ptr<const void>              dsv41_restored_checkpoint_;
     int64_t                                  dsv41_restored_checkpoint_end_{0};
     std::vector<std::shared_ptr<const void>> dsv41_recovery_metadata_;
+    std::vector<Dsv41StateCopy>              dsv41_pending_state_copies_;
     // layer_id -> block_indices
     LayerBlockIds layer_block_ids;
     // layer_id -> region_name -> block_indices

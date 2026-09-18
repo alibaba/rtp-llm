@@ -59,6 +59,9 @@ public:
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
+    // V4.1 writable-backing clones shipped from the rank-0 allocator: int32
+    // [n,3] (group, src_block, dst_block), executed on every CP rank's local pool.
+    virtual void dsv41StateBlockCopy(const torch::Tensor& copy_triples);
 
     BlockPoolPtr getBlockPool() const {
         return block_pool_;

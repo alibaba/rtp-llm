@@ -229,9 +229,14 @@ void KVCacheAllocator::blockBatchCopy(const torch::Tensor& copy_mapping) {
     blockBatchCopy(begin_ptr, begin_ptr + copy_num);
 }
 
+void KVCacheAllocator::dsv41StateBlockCopy(const torch::Tensor& /*copy_triples*/) {
+    // Base allocators have no V4.1 group pools; the V4.1 state copy only reaches
+    // the pool allocator, which overrides this. A call here means the rank-0
+    // scheduler shipped state clones to a non-V4.1 layout, which is a no-op.
+}
+
 void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockIdPair* end_ptr) {
     using CopyType = BatchCopyParams::CopyType;
-
     if (end_ptr == begin_ptr) {
         return;
     }

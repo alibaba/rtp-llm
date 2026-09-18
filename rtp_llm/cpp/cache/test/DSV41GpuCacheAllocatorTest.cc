@@ -337,6 +337,44 @@ TEST_F(DSV41GpuCacheAllocatorTest, SameKeysKeepModeIdentityAndRestoreExactBytesI
     EXPECT_NE(full.group_blocks[5], bounded.group_blocks[5]);
 }
 
+TEST_F(DSV41GpuCacheAllocatorTest, WritableBackingCloneIsRecordedForCrossRankReplay) {
+    auto source = resource(1);
+    fill(source, 67);
+    const auto expected = bytes(source->cacheResource(), 1);
+    ready(source, 1);
+    allocator_->insertIntoCache(InsertInfo{source, tokens(129), false});
+    free(source);
+    auto destination = resource(1, DSV41ReplayMode::FULL, false);
+    auto result      = allocator_->malloc(MallocInfo{destination, tokens(129)});
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 128);
+    // The rank-0 allocator already cloned locally; the same (group, src, dst)
+    // triples must be recorded so every other CP rank replays the clone on its
+    // own pool through the model-input hook.
+    const auto pending = destination->cacheResource().takeDsv41StateCopies();
+    ASSERT_EQ(pending.size(), 2);
+    std::map<int32_t, std::pair<int32_t, int32_t>> by_group;
+    for (const auto& triple : pending)
+        by_group[triple[0]] = {triple[1], triple[2]};
+    ASSERT_EQ(by_group.count(4), 1);
+    ASSERT_EQ(by_group.count(5), 1);
+    EXPECT_EQ(by_group[4].first, source->blocks(0, 4)[0]);
+    EXPECT_EQ(by_group[4].second, destination->blocks(0, 4)[0]);
+    EXPECT_EQ(by_group[5].first, source->blocks(0, 5)[0]);
+    EXPECT_EQ(by_group[5].second, destination->blocks(0, 5)[0]);
+    EXPECT_EQ(destination->cacheResource().dsv41PendingStateCopyNum(), 0);
+    // Replaying the recorded triples reproduces the donor bytes at the fresh
+    // pages (idempotent against the rank-local clone).
+    auto mapping = torch::empty({static_cast<int64_t>(pending.size()), 3}, torch::kInt32);
+    auto* mapping_ptr = mapping.data_ptr<int32_t>();
+    for (size_t i = 0; i < pending.size(); ++i)
+        for (size_t j = 0; j < 3; ++j)
+            mapping_ptr[i * 3 + j] = pending[i][j];
+    allocator_->dsv41StateBlockCopy(mapping);
+    EXPECT_EQ(bytes(destination->cacheResource(), 1), expected);
+    free(destination);
+}
+
 TEST_F(DSV41GpuCacheAllocatorTest, ValidKvBlocksDoNotRequireCompleteTailAndStaleTailIsNotPublished) {
     auto incomplete = resource(1);
     fill(incomplete, 11);
