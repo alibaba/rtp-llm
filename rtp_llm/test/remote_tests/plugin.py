@@ -785,7 +785,7 @@ class RemoteREAPIPlugin:
         )
         log.info(
             "Input root uploaded: %s (%d bytes)",
-            self._input_root.hash[:12],
+            self._input_root.hash,
             self._input_root.size_bytes,
         )
 
@@ -1491,12 +1491,12 @@ class RemoteREAPIPlugin:
         )
         log.info(
             "Input root uploaded: %s (%d bytes)",
-            input_root.hash[:12],
+            input_root.hash,
             input_root.size_bytes,
         )
         log.info(
             "[SESSION_INPUT] input_root=%s size_bytes=%d",
-            input_root.hash[:12],
+            input_root.hash,
             input_root.size_bytes,
         )
 
