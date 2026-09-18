@@ -1543,6 +1543,60 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
     return result;
 }
 
+py::object
+runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string& action, bool is_speculative_target) {
+    ensureRuntimeInitialized();
+
+    Weights weights;
+    weights.layers.resize(1);
+    GptModelDescription description;
+    description.data_type                    = DataType::TYPE_FP16;
+    description.norm_type                    = NormType::rmsnorm;
+    description.attention_conf.head_num      = 1;
+    description.attention_conf.kv_head_num   = 1;
+    description.attention_conf.size_per_head = 1;
+
+    GptModelInitParams params{weights,
+                              description,
+                              std::nullopt,
+                              /*model_id=*/0,
+                              ParallelismConfig{},
+                              HWKernelConfig{},
+                              ProfilingDebugLoggingConfig{},
+                              RuntimeConfig{},
+                              ConcurrencyConfig{},
+                              SpeculativeExecutionConfig{},
+                              DeviceResourceConfig{},
+                              MlaOpsType::AUTO,
+                              /*max_seq_len=*/64,
+                              /*hidden_size=*/1,
+                              /*tokens_per_block=*/0,
+                              /*kernel_tokens_per_block=*/0,
+                              /*cache_manager=*/nullptr,
+                              /*mtp_cache_config_index=*/std::nullopt};
+    PyWrappedModel     model(params,
+                         std::move(py_model),
+                         /*is_prefill_cuda_graph_mode=*/false,
+                         /*use_spec_decoding=*/is_speculative_target);
+
+    if (action == "has_hooks") {
+        return py::bool_(model.hasSpeculativeTargetCommitHooks());
+    }
+    if (action == "prepare") {
+        auto accept_len =
+            torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
+        return py::str(model.prepareSpeculativeTargetCommit(accept_len));
+    }
+    if (action == "abort") {
+        (void)model.finishSpeculativeTargetCommit(false);
+        return py::none();
+    }
+    if (action == "commit") {
+        return py::str(model.finishSpeculativeTargetCommit(true));
+    }
+    throw std::invalid_argument("unknown PyWrappedModel speculative commit bridge action: " + action);
+}
+
 }  // namespace
 }  // namespace rtp_llm::test
 
@@ -1577,4 +1631,9 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           py::arg("py_model"),
           py::arg("expected_error_substring") = "",
           py::arg("forward_flags")            = std::vector<std::pair<bool, bool>>{});
+    m.def("run_speculative_commit_bridge",
+          &rtp_llm::test::runPyWrappedModelSpeculativeCommitBridge,
+          py::arg("py_model"),
+          py::arg("action"),
+          py::arg("is_speculative_target") = true);
 }

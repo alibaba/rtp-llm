@@ -1845,10 +1845,10 @@ void CudaGraphRunner::initCapture() {
         if (engram_window_size_ > 0) {
             inputs.engram_token_windows = torch::full({max_num_token_, engram_window_size_}, -1, options_cuda_int32_);
         }
-        // input_hidden_size_ is the width of one input_hiddens row. PyWrappedModel sets it
-        // to hidden_size * hc_mult for regular (MTP) graphs and to
-        // len(target_layer_ids) * hidden_size for a DSpARK draft graph, so it must be used
-        // instead of recomputing hc_mult_ * hidden_size_ here.
+        // input_hidden_size_ is the configured width of one input_hiddens row.
+        // It defaults to hidden_size * hc_mult, may be model-overridden for a
+        // regular MTP graph, and is Python-overridden for a DSpARK draft graph.
+        // Never recompute it from hc_mult_ here.
         if (isGenerationPrefillCudaGraph()) {
             // Generation prefill consumes token ids and builds its
             // embeddings inside the captured model. input_hiddens is an MTP /

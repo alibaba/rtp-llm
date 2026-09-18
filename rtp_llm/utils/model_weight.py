@@ -1446,6 +1446,51 @@ class W:
     v4_hc_head_fn = "v4.hc.head_fn"
     v4_hc_head_scale = "v4.hc.head_scale"
 
+    # qwen4_exp gated residual (per-layer). A different mechanism from the DSv4
+    # mHC above: no sinkhorn, the mix is a low-rank silu/sigmoid element-wise
+    # gate, and the norm lives inside the unit instead of in the block.
+    qwen4_hc_attn_norm = "qwen4.hc.attn_norm"
+    qwen4_hc_attn_mix_down = "qwen4.hc.attn_mix_down"
+    qwen4_hc_attn_mix_up = "qwen4.hc.attn_mix_up"
+    qwen4_hc_attn_inject = "qwen4.hc.attn_inject"
+    qwen4_hc_mlp_norm = "qwen4.hc.mlp_norm"
+    qwen4_hc_mlp_mix_down = "qwen4.hc.mlp_mix_down"
+    qwen4_hc_mlp_mix_up = "qwen4.hc.mlp_mix_up"
+    qwen4_hc_mlp_inject = "qwen4.hc.mlp_inject"
+    # qwen4_exp gated residual GLOBAL (lives in `weights`, not `layer_weights`).
+    # The mixer is built with use_combine=False, hence no inject tensor.
+    qwen4_hc_mixer_norm = "qwen4.hc.mixer_norm"
+    qwen4_hc_mixer_mix_down = "qwen4.hc.mixer_mix_down"
+    qwen4_hc_mixer_mix_up = "qwen4.hc.mixer_mix_up"
+
+    # qwen4_exp MTP uses two independent hidden-size projections.  Keep these
+    # distinct at runtime: the checkpoint does not contain Qwen3.5's single
+    # concat projection (`mtp.fc.weight`).
+    qwen4_mtp_fc_embedding_w = "qwen4.mtp.fc_embedding.weight"
+    qwen4_mtp_fc_hidden_w = "qwen4.mtp.fc_hidden.weight"
+
+    # qwen4_exp QSA indexer (per full-attention layer). No `plus_one` on the
+    # layernorms -- see qwen4_exp_weight's class docstring on why every plain
+    # RMSNorm in this checkpoint is stored raw.
+    qwen4_indexer_qk_proj_w = "qwen4.indexer.qk_proj.weight"
+    qwen4_indexer_q_ln_gamma = "qwen4.indexer.q_ln.gamma"
+    qwen4_indexer_k_ln_gamma = "qwen4.indexer.k_ln.gamma"
+
+    # qwen4_exp PLE (per PLE layer): n-gram table shards + short conv + gate
+    # projections. `qwen4_ple_ngram_shards` is a descriptor namespace; the
+    # rank-local loader emits one runtime tensor per checkpoint shard as
+    # `qwen4.ple.ngram_shards.<global shard index>` and never stacks the table.
+    qwen4_ple_conv_w = "qwen4.ple.conv.weight"
+    qwen4_ple_key_proj_w = "qwen4.ple.key_proj.weight"
+    qwen4_ple_value_proj_w = "qwen4.ple.value_proj.weight"
+    qwen4_ple_norm_conv_gamma = "qwen4.ple.norm_conv.gamma"
+    qwen4_ple_norm_key_gamma = "qwen4.ple.norm_key.gamma"
+    qwen4_ple_norm_query_gamma = "qwen4.ple.norm_query.gamma"
+    qwen4_ple_multipliers = "qwen4.ple.multipliers"
+    qwen4_ple_ngram_offsets = "qwen4.ple.ngram_offsets"
+    qwen4_ple_ngram_vocab_sizes = "qwen4.ple.ngram_vocab_sizes"
+    qwen4_ple_ngram_shards = "qwen4.ple.ngram_shards"
+
     # MoE (per-layer)
     v4_ffn_norm = "v4.ffn_norm.weight"
     v4_router_w = "v4.router.weight"
@@ -1651,6 +1696,37 @@ class W:
         v4_hc_head_base: sp_id,
         v4_hc_head_fn: sp_id,
         v4_hc_head_scale: sp_id,
+        # Gates over the whole hc_mult*hidden stream: replicated, never sharded.
+        qwen4_hc_attn_norm: sp_id,
+        qwen4_hc_attn_mix_down: sp_id,
+        qwen4_hc_attn_mix_up: sp_id,
+        qwen4_hc_attn_inject: sp_id,
+        qwen4_hc_mlp_norm: sp_id,
+        qwen4_hc_mlp_mix_down: sp_id,
+        qwen4_hc_mlp_mix_up: sp_id,
+        qwen4_hc_mlp_inject: sp_id,
+        qwen4_hc_mixer_norm: sp_id,
+        qwen4_hc_mixer_mix_down: sp_id,
+        qwen4_hc_mixer_mix_up: sp_id,
+        qwen4_mtp_fc_embedding_w: sp_id,
+        qwen4_mtp_fc_hidden_w: sp_id,
+        # qwen4_exp QSA indexer: replicated per rank (the indexer runs
+        # rank-locally, matching DSv4's indexer strategy above).
+        qwen4_indexer_qk_proj_w: sp_id,
+        qwen4_indexer_q_ln_gamma: sp_id,
+        qwen4_indexer_k_ln_gamma: sp_id,
+        # qwen4_exp PLE projections and hash metadata are small and replicated.
+        # The n-gram table descriptor has its own load-before-split path and does
+        # not use this generic strategy map.
+        qwen4_ple_conv_w: sp_id,
+        qwen4_ple_key_proj_w: sp_id,
+        qwen4_ple_value_proj_w: sp_id,
+        qwen4_ple_norm_conv_gamma: sp_id,
+        qwen4_ple_norm_key_gamma: sp_id,
+        qwen4_ple_norm_query_gamma: sp_id,
+        qwen4_ple_multipliers: sp_id,
+        qwen4_ple_ngram_offsets: sp_id,
+        qwen4_ple_ngram_vocab_sizes: sp_id,
         v4_ffn_norm: sp_id,
         v4_router_w: sp_id,
         v4_router_bias: sp_id,

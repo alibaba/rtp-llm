@@ -78,6 +78,20 @@ def resolve_ssm_state_dtype(
 
 
 class ModelConfig(CppModelConfig):
+    # Defaults for Python-only feature flags. Some config helpers construct a
+    # bare ModelConfig before model-specific parsing; those objects must keep
+    # the legacy, feature-disabled behavior instead of raising AttributeError.
+    enable_qwen4_ple: bool = False
+    enable_qwen4_qsa: bool = False
+
+    # Model-specific weight estimators add to these fields when needed. Class
+    # defaults keep the generic estimator statically visible and zero-cost for
+    # every existing model.
+    _extra_weight_bytes: float = 0.0
+    _tp_sharded_extra_weight_bytes: float = 0.0
+    _replicated_extra_weight_bytes: float = 0.0
+    _extra_weight_param_count: int = 0
+
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
@@ -113,6 +127,8 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "enable_qwen4_ple",
+        "enable_qwen4_qsa",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -168,6 +184,7 @@ class ModelConfig(CppModelConfig):
         "moe_normalize_expert_scale",
         "scoring_func",
         "hc_mult",
+        "mtp_input_hidden_size",
         "hc_sinkhorn_iters",
         "hc_eps",
         "swiglu_limit",
@@ -273,7 +290,32 @@ class ModelConfig(CppModelConfig):
                 self.mm_related_params, self.extra_data_path, self.local_extra_data_path
             )
 
+        # Some model-specific tensors are not represented by the generic
+        # attention/FFN formulas above. Keep their already-byte-sized estimate
+        # separate so non-quantized tables (for example qwen4 PLE BF16) are not
+        # accidentally scaled by the model's main weight bit width.
+        model_size += self._extra_weight_bytes
         return model_size
+
+    def eval_model_weight_size_per_rank(self, tp_size: int, ep_size: int) -> float:
+        """Estimate the resident weight bytes for one loader rank.
+
+        Generic weights retain the existing ``max(EP, TP)`` approximation.
+        Model-specific TP-only tables must be divided by attention TP instead:
+        using EP for them underestimates memory whenever ``EP > TP``. Replicated
+        model-specific tensors are charged in full on every rank.
+        """
+        if tp_size <= 0 or ep_size <= 0:
+            raise ValueError(
+                f"tp_size and ep_size must be positive, got {tp_size}, {ep_size}"
+            )
+        checkpoint_extra = self._extra_weight_bytes
+        tp_extra = self._tp_sharded_extra_weight_bytes
+        replicated_extra = self._replicated_extra_weight_bytes
+        generic_size = self.eval_model_weight_size() - checkpoint_extra
+        return (
+            generic_size / max(ep_size, tp_size) + tp_extra / tp_size + replicated_extra
+        )
 
     def eval_model_size(self) -> float:
         model_size = self.eval_model_weight_size()
@@ -369,6 +411,7 @@ class ModelConfig(CppModelConfig):
             ).eval_mm_model_param_count(
                 self.mm_related_params, self.extra_data_path, self.local_extra_data_path
             )
+        param_count += self._extra_weight_param_count
         return param_count
 
     def word_emb_param_count(self, vocab_size: int) -> int:

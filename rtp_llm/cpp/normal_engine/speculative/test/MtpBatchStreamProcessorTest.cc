@@ -533,10 +533,12 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config = makeProcessorCacheConfig();
 
-    model_config.max_seq_len    = 2048;
-    model_config.vocab_size     = 4;
-    model_config.num_layers     = 1;
-    sp_config.gen_num_per_cycle = 1;
+    model_config.max_seq_len                           = 2048;
+    model_config.vocab_size                            = 4;
+    model_config.num_layers                            = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    sp_config.gen_num_per_cycle                        = 1;
 
     auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
                                                           /*block_num=*/10,
@@ -627,6 +629,21 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     vector<int> expect_lm_output_indexes = {0, 1, 2, 3};
     EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
+
+    // Qwen4 target verification consumes two adjacent text positions per
+    // stream. All three MRoPE components must advance together; otherwise the
+    // sparse target and draft indexer disagree about the accepted row.
+    auto position_ids = toVec<int>(model_input.combo_position_ids);
+    ASSERT_EQ(position_ids.size(), 2 * 2 * 3);
+    for (size_t batch = 0; batch < 2; ++batch) {
+        for (size_t dim = 0; dim < 3; ++dim) {
+            const size_t first  = (batch * 2) * 3 + dim;
+            const size_t second = (batch * 2 + 1) * 3 + dim;
+            EXPECT_EQ(position_ids[first], expect_prefix_lengths[batch]);
+            EXPECT_EQ(position_ids[second], expect_prefix_lengths[batch] + 1);
+            EXPECT_EQ(position_ids[second], position_ids[first] + 1);
+        }
+    }
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDeviceState) {
@@ -638,10 +655,12 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config = makeProcessorCacheConfig();
 
-    model_config.max_seq_len    = 2048;
-    model_config.vocab_size     = 4;
-    model_config.num_layers     = 1;
-    sp_config.gen_num_per_cycle = 1;
+    model_config.max_seq_len                           = 2048;
+    model_config.vocab_size                            = 4;
+    model_config.num_layers                            = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    sp_config.gen_num_per_cycle                        = 1;
 
     auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
                                                           /*block_num=*/10,
@@ -727,7 +746,57 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
     vector<int> expect_input_lengths = {2, 2};
     EXPECT_TRUE(model_input.input_lengths.is_cuda());
     EXPECT_EQ(expect_input_lengths, toVec<int>(model_input.input_lengths));
+
+    auto position_ids = toVec<int>(model_input.combo_position_ids);
+    ASSERT_EQ(position_ids.size(), 2 * 2 * 3);
+    EXPECT_TRUE(model_input.combo_position_ids.is_cuda());
+    EXPECT_EQ(model_input.combo_position_ids.scalar_type(), torch::kInt32);
+    EXPECT_TRUE(model_input.combo_position_ids.is_contiguous());
+    for (size_t batch = 0; batch < 2; ++batch) {
+        for (size_t dim = 0; dim < 3; ++dim) {
+            const size_t first  = (batch * 2) * 3 + dim;
+            const size_t second = (batch * 2 + 1) * 3 + dim;
+            EXPECT_EQ(position_ids[first], expect_prefix_lengths[batch]);
+            EXPECT_EQ(position_ids[second], expect_prefix_lengths[batch] + 1);
+            EXPECT_EQ(position_ids[second], position_ids[first] + 1);
+        }
+    }
     unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testExpandTargetVerifyPositionIdsPreservesMropeOffsetFromDevicePrefix) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len                           = 2048;
+    model_config.vocab_size                            = 4;
+    model_config.num_layers                            = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    sp_config.gen_num_per_cycle                        = 1;
+
+    ResourceContext resource_context;
+    auto            stream = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 4}, 1);
+    // The final multimodal row has max position 12. Relative to the canonical
+    // input-length anchor 3, decode positions therefore carry offset 9.
+    stream->setContextPositionIds(torch::tensor({0, 0, 0, 1, 1, 1, 7, 9, 8, 10, 12, 11}, torch::kInt32));
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    GptModelInputs model_input;
+    model_input.combo_position_ids = torch::zeros({3}, torch::kInt32);
+    auto authoritative_prefix      = torch::tensor({20}, torch::kInt32).to(torch::kCUDA);
+
+    processor.expandTargetVerifyPositionIds(StreamGroups({stream}), model_input, authoritative_prefix);
+
+    EXPECT_TRUE(model_input.combo_position_ids.is_cuda());
+    EXPECT_EQ(model_input.combo_position_ids.scalar_type(), torch::kInt32);
+    EXPECT_TRUE(model_input.combo_position_ids.is_contiguous());
+    EXPECT_EQ((vector<int>{29, 29, 29, 30, 30, 30}), toVec<int>(model_input.combo_position_ids));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
@@ -738,10 +807,12 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config = makeProcessorCacheConfig();
 
-    model_config.max_seq_len    = 2048;
-    model_config.vocab_size     = 4;
-    model_config.num_layers     = 1;
-    sp_config.gen_num_per_cycle = 2;
+    model_config.max_seq_len                           = 2048;
+    model_config.vocab_size                            = 4;
+    model_config.num_layers                            = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    sp_config.gen_num_per_cycle                        = 2;
 
     auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
                                                           /*block_num=*/10,
@@ -803,8 +874,9 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
-    auto& model_input            = model_input_status.value();
-    model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
+    auto& model_input                = model_input_status.value();
+    model_input.sequence_lengths     = torch::tensor({1, 2}, torch::kInt32);
+    const auto original_position_ids = model_input.combo_position_ids.clone();
 
     processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
 
@@ -828,6 +900,8 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
             EXPECT_EQ(expected_sequence, toVec<int>(input.prefix_lengths));
         };
     expect_positions(model_input, {1, 2}, {1, 2});
+    ASSERT_EQ(model_input.combo_position_ids.numel(), 2 * 3);
+    EXPECT_TRUE(torch::equal(model_input.combo_position_ids, original_position_ids));
 
     // Legacy GPU propose-token path receives the normal decode position.
     stream1->getSPOutputBuffer()->propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
@@ -836,6 +910,7 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
 
     expect_positions(model_input, {4, 5}, {4, 5});
+    EXPECT_TRUE(torch::equal(model_input.combo_position_ids, original_position_ids));
 
     // Device state includes the carried target token. Draft KV and target
     // verification both start one slot before that committed length.
@@ -853,6 +928,7 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
 
     expect_positions(model_input, {6, 3}, {6, 3});
+    EXPECT_TRUE(torch::equal(model_input.combo_position_ids, original_position_ids));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, DraftCacheWritesRemainContiguousAcrossPreparationPaths) {
@@ -1338,10 +1414,20 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDens
 
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    GptModelInputs                        model_input;
+    GptModelInputs model_input;
+    model_input.input_lengths    = torch::tensor({3, 3}, torch::kInt32).to(torch::kCUDA);
+    model_input.prefix_lengths   = torch::tensor({7, 11}, torch::kInt32).to(torch::kCUDA);
+    model_input.sequence_lengths = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    model_input.combo_position_ids =
+        torch::tensor({10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 60, 61, 62}, torch::kInt32)
+            .to(torch::kCUDA);
+    const auto                            dense_position_ids = model_input.combo_position_ids.clone();
     speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len    = torch::tensor({3, 1}, torch::kInt32).to(torch::kCUDA);
-    spec_decode_output.accept_tokens = torch::tensor({{2, 3, 1}, {2, 0, 0}}, torch::kInt32).to(torch::kCUDA);
+    // Exercise both ends of the legal interval [1, gamma + 1]. Device state
+    // deliberately keeps the verify rows dense; the output indexes carry the
+    // per-stream accepted boundary into the next draft prefill.
+    spec_decode_output.accept_len    = torch::tensor({1, 3}, torch::kInt32).to(torch::kCUDA);
+    spec_decode_output.accept_tokens = torch::tensor({{2, 0, 0}, {2, 3, 1}}, torch::kInt32).to(torch::kCUDA);
     GptModelOutputs model_output;
     model_output.all_hidden_states =
         torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f}, torch::kFloat32)
@@ -1354,9 +1440,13 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDens
         model_input, model_output, spec_decode_output, 2, hidden_states_d_t, holder);
 
     EXPECT_TRUE(model_input.combo_tokens.is_cuda());
-    EXPECT_EQ((vector<int>{2, 3, 1, 2, 0, 0}), toVec<int>(model_input.combo_tokens));
+    EXPECT_EQ((vector<int>{2, 0, 0, 2, 3, 1}), toVec<int>(model_input.combo_tokens));
+    EXPECT_EQ((vector<int>{3, 3}), toVec<int>(model_input.input_lengths));
+    EXPECT_EQ((vector<int>{7, 11}), toVec<int>(model_input.prefix_lengths));
+    EXPECT_EQ(0, model_input.sequence_lengths.numel());
     EXPECT_TRUE(model_input.lm_output_indexes.is_cuda());
-    EXPECT_EQ((vector<int>{2, 3}), toVec<int>(model_input.lm_output_indexes));
+    EXPECT_EQ((vector<int>{0, 5}), toVec<int>(model_input.lm_output_indexes));
+    EXPECT_TRUE(torch::equal(model_input.combo_position_ids, dense_position_ids));
     EXPECT_EQ(6, model_input.last_hidden_states.size(0));
     unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
 }
@@ -1406,6 +1496,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputCompactsC
     EXPECT_TRUE(model_input_status.ok());
 
     auto& model_input              = model_input_status.value();
+    model_input.prefix_lengths     = torch::tensor({7, 11, 13}, torch::kInt32);
+    model_input.sequence_lengths   = torch::empty({0}, torch::kInt32);
     model_input.combo_position_ids = torch::tensor(
         {10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 60, 61, 62, 70, 71, 72, 80, 81, 82, 90, 91, 92},
         torch::kInt32);
@@ -1443,6 +1535,14 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputCompactsC
     processor.updateDecodePostDraftModelInput(
         model_input, model_output, spec_decode_output, 3, hidden_states_d_t, holder);
 
+    EXPECT_EQ((vector<int>{2, 3, 1, 2, 3, 2}), toVec<int>(model_input.combo_tokens));
+    EXPECT_EQ((vector<int>{3, 2, 1}), toVec<int>(model_input.input_lengths));
+    EXPECT_EQ((vector<int>{7, 11, 13}), toVec<int>(model_input.prefix_lengths));
+    EXPECT_EQ(0, model_input.sequence_lengths.numel());
+    EXPECT_EQ((vector<int>{2, 4, 5}), toVec<int>(model_input.lm_output_indexes));
+    // PyWrappedModel prefixes this cumsum with zero to build cu_seqlens.
+    EXPECT_EQ((vector<int>{3, 5, 6}), toVec<int>(model_input.input_lengths.cumsum(0, torch::kInt32)));
+    EXPECT_EQ(6, model_input.last_hidden_states.size(0));
     auto        combo_position_ids        = model_input.combo_position_ids;
     vector<int> expect_combo_position_ids = {10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 70, 71, 72};
     EXPECT_EQ(expect_combo_position_ids, toVec<int>(combo_position_ids));

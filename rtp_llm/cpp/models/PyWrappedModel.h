@@ -96,6 +96,10 @@ public:
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
+    bool            hasSpeculativeTargetCommitHooks() const override;
+    std::string     prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
+    std::string     finishSpeculativeTargetCommit(bool commit) override;
+    std::string     finalizeSpeculativeTargetCommit() override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;
@@ -175,6 +179,7 @@ private:
     bool use_spec_decoding_{false};
     bool has_mtp_hidden_buffer_{false};
     bool supports_micro_batch_{false};
+    bool has_speculative_target_commit_hooks_{false};
     bool enable_device_perf_{false};
     bool check_nan_{false};
 
@@ -350,6 +355,24 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_                 = py_instance;
     supports_micro_batch_     = py::hasattr(py_model_, "forward_micro_batch");
+    // MtpExecutor passes use_spec_decoding only to its target wrapper. The
+    // normal and draft wrappers may share the same Python class, but must not
+    // activate target transactions or inherit their CUDA Graph restriction.
+    if (use_spec_decoding_) {
+        const bool has_prepare_speculative_target_commit = py::hasattr(py_model_, "prepare_speculative_target_commit");
+        const bool has_finish_speculative_target_commit  = py::hasattr(py_model_, "finish_speculative_target_commit");
+        const bool has_finalize_speculative_target_commit =
+            py::hasattr(py_model_, "finalize_speculative_target_commit");
+        RTP_LLM_CHECK_WITH_INFO(has_prepare_speculative_target_commit == has_finish_speculative_target_commit
+                                    && has_prepare_speculative_target_commit == has_finalize_speculative_target_commit,
+                                "Python speculative target model must implement prepare_speculative_target_commit and "
+                                "finish_speculative_target_commit as a pair, together with "
+                                "finalize_speculative_target_commit");
+        has_speculative_target_commit_hooks_ = has_prepare_speculative_target_commit;
+        RTP_LLM_CHECK_WITH_INFO(!has_speculative_target_commit_hooks_ || !enable_cuda_graph_,
+                                "speculative target side-state transactions do not support CUDA Graph yet");
+    }
+
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);
@@ -387,10 +410,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.max_seq_len                  = params.max_seq_len;
         graph_params.hidden_size                  = params.hidden_size;
         graph_params.hc_mult                      = params.hc_mult;
-        // Default input_hiddens row width for MTP: hc_mult * hidden_size. DSpARK
-        // consumes len(target_layer_ids) * hidden_size instead, which only the
-        // Python model knows.
-        graph_params.input_hidden_size = static_cast<size_t>(params.hidden_size) * static_cast<size_t>(params.hc_mult);
+        // Keep CUDA Graph capture on the same MTP input-hidden ABI as eager
+        // execution. Zero remains a compatibility fallback for direct/test
+        // GptModelInitParams construction sites.
+        RTP_LLM_CHECK_WITH_INFO(params.hidden_size > 0 && params.hc_mult > 0 && params.mtp_input_hidden_size >= 0,
+                                "invalid MTP input width inputs: hidden_size=%ld hc_mult=%ld explicit_width=%ld",
+                                params.hidden_size,
+                                params.hc_mult,
+                                params.mtp_input_hidden_size);
+        const size_t configured_mtp_input_hidden_size = params.mtp_input_hidden_size == 0 ?
+                                                            static_cast<size_t>(params.hidden_size)
+                                                                * static_cast<size_t>(params.hc_mult) :
+                                                            static_cast<size_t>(params.mtp_input_hidden_size);
+        graph_params.input_hidden_size      = configured_mtp_input_hidden_size;
         graph_params.input_embedding_scalar = description_.input_embedding_scalar;
         if (weights_.position_encoding) {
             graph_params.position_encoding = weights_.position_encoding->kernel.cuda();
@@ -398,6 +430,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (weights_.token_type_embedding) {
             graph_params.token_type_embedding = weights_.token_type_embedding->kernel.cuda();
         }
+        // DSpARK consumes len(target_layer_ids) * hidden_size instead, which
+        // only the Python model knows.
         if (dspark_model_role_ != DSparkModelRole::NONE) {
             auto width = py_instance.attr("cuda_graph_input_hidden_size")().cast<int64_t>();
             RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK CUDA graph input hidden width must be positive, got %ld", width);
