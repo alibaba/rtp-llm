@@ -34,6 +34,9 @@ class MMProcessEngine:
         else:
             return [tensor]
 
+    def submit_v41(self, images):
+        return MMEmbeddingRes(self.model.mm_part.encode_prepared_images(images))
+
     def submit(
         self,
         urls: List[str],

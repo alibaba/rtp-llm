@@ -702,7 +702,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
-        if (int(device_props_.enable_layer_micro_batch)) {
+        if (int(device_props_.enable_layer_micro_batch) && !inputs.multimodal_features.has_value()) {
             return forwardMicroBatched(inputs);
         }
         PyContextParallelParams cp_params;
@@ -742,6 +742,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         auto py_model_inputs = PyModelInputs(token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs);
         py_model_inputs.engram_token_windows = inputs.engram_token_windows;
+        py_model_inputs.multimodal_features  = inputs.multimodal_features;
+        if (inputs.mm_features_locs.defined()) {
+            py_model_inputs.mm_features_locs = inputs.mm_features_locs;
+        }
         if (py_model_inputs.engram_token_windows.defined() && !py_model_inputs.engram_token_windows.is_cuda()) {
             // Host history exists only at request gathering / prefill CP
             // boundaries. Python execution and graph staging consume CUDA

@@ -349,6 +349,8 @@ struct PyModelInputs {
     torch::Tensor       input_hiddens;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
+    std::optional<std::vector<torch::Tensor>> multimodal_features;  // gathered ViT features
+    torch::Tensor       mm_features_locs;                           // batch-local feature starts
 
     PyModelInputs() = default;
     PyModelInputs(torch::Tensor       input_ids,

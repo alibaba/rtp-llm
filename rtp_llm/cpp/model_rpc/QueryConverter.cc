@@ -195,6 +195,34 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     generate_input->input_ids =
         torch::from_blob(const_cast<int*>(input->token_ids().data()), {(int64_t)input->token_ids_size()}, torch::kInt32)
             .clone();
+    if (input->has_v41_inputs()) {
+        const auto& typed = input->v41_inputs();
+        auto prepared = std::make_shared<V41RequestInputs>();
+        prepared->token_types =
+            torch::from_blob(const_cast<int32_t*>(typed.token_types().data()),
+                             {typed.token_types_size()},
+                             torch::kInt32)
+                .clone();
+        prepared->image_mask = torch::empty({typed.image_mask_size()}, torch::kBool);
+        for (int index = 0; index < typed.image_mask_size(); ++index) {
+            prepared->image_mask.data_ptr<bool>()[index] = typed.image_mask(index);
+        }
+        for (const auto& source : typed.images()) {
+            V41ImageInput image;
+            image.start              = source.start();
+            image.n_vit_h            = source.n_vit_h();
+            image.n_vit_w            = source.n_vit_w();
+            image.patches            = transTensor(source.patches());
+            image.types =
+                torch::from_blob(const_cast<int32_t*>(source.types().data()), {source.types_size()}, torch::kInt32)
+                    .clone();
+            image.content_sha256     = source.content_sha256();
+            image.processor_identity = source.processor_identity();
+            prepared->images.push_back(std::move(image));
+        }
+        generate_input->v41_inputs        = std::move(prepared);
+        generate_input->multimodal_inputs = std::vector<MultimodalInput>{};
+    }
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (int i = 0; i < input->multimodal_inputs_size(); i++) {

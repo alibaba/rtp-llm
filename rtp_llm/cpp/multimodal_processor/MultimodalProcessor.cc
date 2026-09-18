@@ -177,6 +177,45 @@ ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_ou
 }
 
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input) {
+    if (input->v41_inputs) {
+        const auto& prepared = *input->v41_inputs;
+        std::vector<torch::Tensor> features;
+        if (!prepared.images.empty()) {
+            if (mm_process_engine_.is_none()) {
+                return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "V4.1 prepared images require a local ViT engine");
+            }
+            try {
+                py::gil_scoped_acquire acquire;
+                py::list images;
+                for (const auto& image : prepared.images) {
+                    py::dict record;
+                    record["start"]              = image.start;
+                    record["n_vit_h"]            = image.n_vit_h;
+                    record["n_vit_w"]            = image.n_vit_w;
+                    record["patches"]            = image.patches;
+                    record["types"]              = image.types;
+                    record["content_sha256"]     = image.content_sha256;
+                    record["processor_identity"] = image.processor_identity;
+                    images.append(std::move(record));
+                }
+                auto result = mm_process_engine_.attr("submit_v41")(images);
+                for (auto item : result.attr("embeddings")) {
+                    features.push_back(py::cast<torch::Tensor>(item));
+                }
+            } catch (const py::error_already_set& error) {
+                return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error.what());
+            }
+        }
+        auto locs = torch::empty({static_cast<int64_t>(features.size())}, torch::kInt32);
+        for (size_t index = 0; index < features.size(); ++index) {
+            locs.data_ptr<int32_t>()[index] = prepared.images[index].start;
+        }
+        input->multimodal_features = std::move(features);
+        input->text_tokens_mask    = prepared.image_mask.logical_not().to(torch::kInt32);
+        input->mm_locs             = std::move(locs);
+        input->mm_position_ids.reset();
+        return ErrorInfo::OkStatus();
+    }
     if (input->generate_config && input->generate_config->calculate_loss) {
         return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
     }
