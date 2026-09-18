@@ -418,9 +418,9 @@ class TemplateTest(TestCase):
             )
         ).rendered_prompt
 
-        self.assertEqual(default_prompt, "template-default")
-        self.assertEqual(disabled_prompt, "template-default")
-        self.assertEqual(enabled_prompt, "template-default")
+        self.assertEqual(default_prompt, "disabled")
+        self.assertEqual(disabled_prompt, "disabled")
+        self.assertEqual(enabled_prompt, "enabled")
         self.assertEqual(kwargs_disabled_prompt, "disabled")
 
     def test_qwen_agent(self):

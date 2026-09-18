@@ -26,6 +26,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
     private static final Runnable NO_STATUS_PROJECTION = () -> { };
+    private static final long VIT_SYNC_REQUEST_TIMEOUT_MS = Long.parseLong(
+            System.getenv().getOrDefault("VIT_SYNC_REQUEST_TIMEOUT_MS", "1000"));
 
     private final String ipPort;
     private final String modelName;

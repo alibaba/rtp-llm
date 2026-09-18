@@ -24,6 +24,17 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         help="最大 batch tokens 大小。",
     )
     fifo_scheduler_group.add_argument(
+        "--max_batch_kv_len",
+        env_name="MAX_BATCH_KV_LEN",
+        bind_to=[(fifo_scheduler_config, "max_batch_kv_len")],
+        type=int,
+        default=0,
+        help=(
+            "Prefill单轮凑批的完整KV token总量上限。0表示关闭并保留"
+            "MAX_BATCH_TOKENS_SIZE的原有语义；大于0时仅使用本限制。"
+        ),
+    )
+    fifo_scheduler_group.add_argument(
         "--max_batch_tokens_without_cache",
         env_name="MAX_BATCH_TOKENS_WITHOUT_CACHE",
         bind_to=[(fifo_scheduler_config, "max_batch_tokens_without_cache")],

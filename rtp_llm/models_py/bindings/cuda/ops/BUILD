@@ -69,6 +69,11 @@ cc_library(
         "//rtp_llm/cpp/utils:profiling_scope",
         ":flashmla",
     ] + select({
+        # using_cuda13_* is a strict specialization of using_cuda12, so Bazel
+        # picks these empty branches on CUDA 13. SM90 XQA fails the include
+        # scanner on the CUDA 13.2 toolkit; FlashInfer XQA covers decode.
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12": [
             "//3rdparty/xqa:xqa"
         ],

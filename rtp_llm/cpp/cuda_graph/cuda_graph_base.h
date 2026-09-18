@@ -81,6 +81,9 @@ public:
     virtual ~GraphBase() {}
     virtual void           initCapture()                                                 = 0;
     virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state)   = 0;
+    virtual torch::Tensor  getMtpTargetHiddenStates(const CudaGraphState&, int64_t) {
+        return torch::Tensor();
+    }
     virtual void           setPositionEncoding(torch::Tensor position_encoding)          = 0;
     virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)     = 0;
     virtual void           setInputEmbeddingScalar(float input_embedding_scalar)         = 0;

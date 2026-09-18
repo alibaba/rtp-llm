@@ -30,6 +30,7 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
     ChatCompletionRequest,
+    ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
     ChatMessage,
     DebugInfo,
@@ -44,6 +45,7 @@ from rtp_llm.openai.api_datatype import (
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers import custom_renderer
+from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
 from rtp_llm.openai.renderers.deepseekv31_renderer import DeepseekV31Renderer
 from rtp_llm.openai.renderers.kimik2_renderer import KimiK2Renderer
@@ -176,6 +178,24 @@ async def fake_output_generator_once(
 
 
 MAX_SEQ_LEN = 1024
+
+
+class ThinkingTemplateTokenizer:
+    chat_template = (
+        "{{ thinking_mode }}|"
+        "{% if enable_thinking is defined %}{{ enable_thinking }}"
+        "{% else %}unset{% endif %}"
+    )
+    default_chat_template = None
+    special_tokens_map = {}
+    additional_special_tokens = []
+    path = ""
+
+    def encode(self, text, *args, **kwargs):
+        return list(text.encode("utf-8"))
+
+    def decode(self, token_ids, *args, **kwargs):
+        return bytes(token_ids).decode("utf-8")
 
 
 class BaseToolCallTestSuite:

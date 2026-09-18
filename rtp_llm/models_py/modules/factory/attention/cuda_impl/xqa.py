@@ -7,6 +7,11 @@ import torch
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm, is_sm12x
+
+
+def _xqa_has_kernel_image() -> bool:
+    """XQA cubin is sm_90. SM103/B300 raises cudaErrorSymbolNotFound."""
+    return get_sm()[0] == 9
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
@@ -88,7 +93,7 @@ class XQAImpl(FMHAImplBase):
         # at first forward. C++ XQAAttnOp.support gate is `>= kSM_90` and
         # passes sm_120 erroneously — short-circuit here so dispatch falls
         # through to PyFlashinferPaged. See blockers.md R-4.
-        if is_sm12x():
+        if is_sm12x() or not _xqa_has_kernel_image():
             return False
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
@@ -182,7 +187,7 @@ class XQADecodeImpl(FMHAImplBase):
         # sm_120a binding anyway. Gate it off so decode dispatch falls through
         # to PyFlashinferDecodeImpl (the working sm_120 path), mirroring the
         # XQAImpl.support gate.
-        if is_sm12x():
+        if is_sm12x() or not _xqa_has_kernel_image():
             return False
         if get_sm()[0] not in [9, 10]:
             return False

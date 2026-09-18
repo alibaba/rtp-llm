@@ -13,6 +13,7 @@ _CLASS_TO_MODULE: Dict[str, str] = {
     "KimiK25Renderer": "rtp_llm.openai.renderers.kimi_k25_renderer",
     "KimiK2Renderer": "rtp_llm.openai.renderers.kimik2_renderer",
     "LlavaRenderer": "rtp_llm.openai.renderers.llava_renderer",
+    "MiniMaxM3VLRenderer": "rtp_llm.openai.renderers.minimax_m3_vl_renderer",
     "Qwen3CoderRenderer": "rtp_llm.openai.renderers.qwen3_code_renderer",
     "Qwen35Renderer": "rtp_llm.openai.renderers.qwen35_renderer",
     "QwenAgentRenderer": "rtp_llm.openai.renderers.qwen_agent_renderer",

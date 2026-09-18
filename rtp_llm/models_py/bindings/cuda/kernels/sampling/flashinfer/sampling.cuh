@@ -482,7 +482,6 @@ __global__ void OnlineSoftmaxMapKernel(DType*                logits,
             running_max = new_max;
         }
     }
-
     running_denominator =
         cub::BlockReduce<float, BLOCK_THREADS>(temp_storage.block_prim.reduce).Sum(threadlocal_running_denominator);
     if (tx == 0) {
@@ -739,7 +738,6 @@ __device__ __forceinline__ uint64_t SamplingPhiloxSubsequence(uint32_t bx, uint6
     // independent requests with the same random_seed produce different samples.
     return (seed_arr != nullptr || offset_arr != nullptr) ? 0 : static_cast<uint64_t>(bx);
 }
-
 template<uint32_t             BLOCK_THREADS,
          BlockScanAlgorithm   SCAN_ALGORITHM,
          BlockReduceAlgorithm REDUCE_ALGORITHM,
@@ -952,7 +950,6 @@ __global__ void TopKSamplingFromProbKernel(DType*    probs,
             if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
                 probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
             }
-
             ValueCount<float> probs_gt_pivot_0[VEC_SIZE], probs_gt_pivot_1[VEC_SIZE];
 #pragma unroll
             for (uint32_t j = 0; j < VEC_SIZE; ++j) {

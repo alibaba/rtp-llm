@@ -41,6 +41,7 @@ import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.VitCacheDirectory;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -462,7 +463,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 new CostBasedDecodeStrategy(workers),
                 new RandomStrategy(workers),
                 configService,
-                modelMeta);
+                modelMeta,
+                mock(VitCacheDirectory.class));
     }
 
     private static ServerStatus server(

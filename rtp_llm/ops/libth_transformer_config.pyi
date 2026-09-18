@@ -1672,6 +1672,7 @@ class SpeculativeExecutionConfig:
     checkpoint_path: str
     force_score_context_attention: bool
     force_stream_sample: bool
+    deterministic_draft_exact_match: bool
     gen_num_per_cycle: int
     model_type: str
     quantization: str

@@ -1040,6 +1040,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("tree_decode_config", &SpeculativeExecutionConfig::tree_decode_config)
         .def_readwrite("gen_num_per_cycle", &SpeculativeExecutionConfig::gen_num_per_cycle)
         .def_readwrite("force_stream_sample", &SpeculativeExecutionConfig::force_stream_sample)
+        .def_readwrite("deterministic_draft_exact_match", &SpeculativeExecutionConfig::deterministic_draft_exact_match)
         .def_readwrite("force_score_context_attention", &SpeculativeExecutionConfig::force_score_context_attention)
         .def_readwrite("quantization", &SpeculativeExecutionConfig::quantization)
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
@@ -1059,10 +1060,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.quantization,
                                       self.checkpoint_path,
                                       self.sp_dspark_mask_token_id,
-                                      self.sp_dspark_sample_from_anchor);
+                                      self.sp_dspark_sample_from_anchor,
+                                      self.deterministic_draft_exact_match);
             },
             [](py::tuple t) {
-                if (t.size() != 10 && t.size() != 11 && t.size() != 12)
+                // 10/11/12 are the historical layouts (10: no dspark fields;
+                // 11: + sp_dspark_mask_token_id; 12: + sp_dspark_sample_from_anchor).
+                // 13 appends deterministic_draft_exact_match. 14 is the MiniMax
+                // layout that also stored fp8_kv_cache before it moved off this
+                // struct; keep it loadable.
+                if (t.size() != 10 && t.size() != 11 && t.size() != 12 && t.size() != 13 && t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -1076,12 +1083,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.force_score_context_attention = t[7].cast<bool>();
                     c.quantization                  = t[8].cast<std::string>();
                     c.checkpoint_path               = t[9].cast<std::string>();
-                    if (t.size() == 11) {
+                    if (t.size() >= 11) {
                         c.sp_dspark_mask_token_id = t[10].cast<int64_t>();
                     }
-                    if (t.size() == 12) {
-                        c.sp_dspark_mask_token_id      = t[10].cast<int64_t>();
+                    if (t.size() >= 12) {
                         c.sp_dspark_sample_from_anchor = t[11].cast<bool>();
+                    }
+                    if (t.size() == 13) {
+                        c.deterministic_draft_exact_match = t[12].cast<bool>();
+                    }
+                    if (t.size() == 14) {
+                        c.deterministic_draft_exact_match = t[13].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());

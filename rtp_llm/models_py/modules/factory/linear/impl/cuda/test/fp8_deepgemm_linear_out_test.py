@@ -110,7 +110,7 @@ class CudaFp8DeepGEMMLinearOutContractTest(unittest.TestCase):
         returned = CudaFp8GEMMLinear.forward(wrapper, input_tensor, out=out)
 
         self.assertIs(returned, out)
-        deepgemm.assert_called_once_with(input_tensor, out=out)
+        deepgemm.assert_called_once_with(input_tensor, out=out, input_scales=None)
         flashinfer.assert_not_called()
 
 

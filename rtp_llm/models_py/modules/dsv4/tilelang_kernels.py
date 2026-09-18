@@ -115,7 +115,7 @@ def _ensure_libz3_loadable() -> None:
 _ensure_libz3_loadable()
 _ensure_tvm_tmpdir_writable()
 
-try:  # noqa: broad except — ImportError / OSError (CDLL symbol miss) / RuntimeError
+try:  # noqa: broad except — tilelang/tvm/tvm_ffi version skew must not abort init
     import tilelang
     import tilelang.language as T
 
@@ -237,7 +237,12 @@ try:  # noqa: broad except — ImportError / OSError (CDLL symbol miss) / Runtim
 
         return sparse_attn_kernel_
 
-except (ImportError, OSError, RuntimeError) as _e:  # pragma: no cover
+except Exception as _e:  # pragma: no cover
+    # CUDA13 CI injects apache-tvm-ffi 0.1.12 onto PYTHONPATH. tilelang's
+    # bundled TVM then fails inside tvm_ffi.registry with
+    # ``AttributeError: attribute '__dict__' of 'type' objects is not writable``
+    # while defining ``tvm.ir.attrs.DictAttrs``. That is not ImportError, so
+    # the old 3-type except let initialize() die and killed every DSv4 smoke.
     _log.warning(
         "[dsv4] tilelang unavailable (%s: %s); sparse attention falls "
         "back to the Python reference",

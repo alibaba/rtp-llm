@@ -8,6 +8,12 @@ cuda13_cc_test(
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        # cuda_graph_runner.cc takes the CUDA graph forward flags through
+        # exec_ops_hdr. exec_ops_test_lib is ExecOps.cc only; sample/copy
+        # symbols live in exec_ctx_ops. Keep ops before state so ARM ld
+        # can resolve the under-linked test .so.
+        "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "//rtp_llm/cpp/utils:torch_cuda_oom",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),

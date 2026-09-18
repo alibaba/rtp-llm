@@ -27,6 +27,39 @@ bool isActiveThinkState(const StreamThinkInfo& info) {
     return info.process_state == ThinkProcessState::IN_THINK || info.process_state == ThinkProcessState::CLOSING_THINK;
 }
 
+bool advanceAdaptiveStart(StreamThinkInfo& info, int32_t token_id) {
+    if (info.process_state == ThinkProcessState::UNDECIDED) {
+        if (info.begin_think_token_ids.empty() || token_id != info.begin_think_token_ids.front()) {
+            info.process_state = ThinkProcessState::NO_THINK;
+            return true;
+        }
+        info.begin_think_token_index = 1;
+        if (info.begin_think_token_index == info.begin_think_token_ids.size()) {
+            info.process_state             = ThinkProcessState::IN_THINK;
+            info.think_start_output_length = info.current_output_length;
+        } else {
+            info.process_state = ThinkProcessState::OPENING_THINK;
+        }
+        return true;
+    }
+    if (info.process_state != ThinkProcessState::OPENING_THINK) {
+        return false;
+    }
+
+    const auto expected = info.begin_think_token_ids[info.begin_think_token_index];
+    if (token_id != expected) {
+        RTP_LLM_LOG_WARNING("adaptive think start token mismatch, expected=%d actual=%d", expected, token_id);
+        info.process_state = ThinkProcessState::NO_THINK;
+        return true;
+    }
+    ++info.begin_think_token_index;
+    if (info.begin_think_token_index == info.begin_think_token_ids.size()) {
+        info.process_state             = ThinkProcessState::IN_THINK;
+        info.think_start_output_length = info.current_output_length;
+    }
+    return true;
+}
+
 bool transitionToAfterThinkIfClosed(StreamThinkInfo& info) {
     if (!info.dfa_ptr || !info.dfa_ptr->isFinished()) {
         return false;
@@ -47,7 +80,7 @@ bool thinkBudgetExhausted(const SamplerInputs& inputs, size_t batch_idx, const S
     }
 
     const int observed_output_tokens = std::max(generatedTokens(inputs, batch_idx), info.current_output_length);
-    return observed_output_tokens >= info.max_thinking_tokens;
+    return observed_output_tokens - info.think_start_output_length >= info.max_thinking_tokens;
 }
 
 bool thinkEndCloseInProgress(const StreamThinkInfo& info) {
@@ -101,7 +134,7 @@ bool bitmaskAllowsToken(const int32_t* row, size_t words, int32_t token_id) {
 
 bool specThinkBudgetExhausted(const StreamThinkInfo& info) {
     return info.dfa_ptr && !info.end_think_token_ids.empty() && info.max_thinking_tokens > 0
-           && info.current_output_length >= info.max_thinking_tokens;
+           && info.current_output_length - info.think_start_output_length >= info.max_thinking_tokens;
 }
 
 bool forceThinkEndTokenInBitmask(int32_t* row, size_t words, const StreamThinkInfo& info) {
@@ -119,6 +152,13 @@ bool forceThinkEndTokenInBitmask(int32_t* row, size_t words, const StreamThinkIn
 void applyThinkSpecRowMask(int32_t* row, size_t words, StreamThinkInfo& info) {
     std::fill_n(row, words, SpecLogitsProcessorRequest::kBitmaskAllowAll);
     switch (info.process_state) {
+        case ThinkProcessState::UNDECIDED:
+            break;
+        case ThinkProcessState::OPENING_THINK:
+            if (info.begin_think_token_index < info.begin_think_token_ids.size()) {
+                forceTokenInBitmask(row, words, info.begin_think_token_ids[info.begin_think_token_index]);
+            }
+            break;
         case ThinkProcessState::NO_THINK:
         case ThinkProcessState::AFTER_THINK: {
             maskThinkBeginTokenInBitmask(row, words, info);
@@ -158,6 +198,9 @@ void advanceThinkStateForSpec(StreamThinkInfo& info, int32_t token_id) {
     }
 
     info.current_output_length += 1;
+    if (advanceAdaptiveStart(info, token_id)) {
+        return;
+    }
     if (!isActiveThinkState(info) || info.max_thinking_tokens <= 0 || !info.dfa_ptr) {
         return;
     }
@@ -201,6 +244,15 @@ ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
         size_t batch_idx = i + start_idx;
 
         switch (info.process_state) {
+            case ThinkProcessState::UNDECIDED:
+                break;
+            case ThinkProcessState::OPENING_THINK:
+                if (info.begin_think_token_index < info.begin_think_token_ids.size()) {
+                    memFill(inputs.logits[batch_idx],
+                            inputs.vocab_size,
+                            static_cast<size_t>(info.begin_think_token_ids[info.begin_think_token_index]));
+                }
+                break;
             case ThinkProcessState::NO_THINK:
             case ThinkProcessState::AFTER_THINK: {
                 maskThinkBeginToken(inputs.logits[batch_idx], inputs.vocab_size, info);
@@ -290,11 +342,8 @@ std::optional<ErrorInfo> ThinkModeLogitsProcessor::updateStatus(const torch::Ten
 
     for (size_t i = 0; i < think_infos_.size(); i++) {
         auto& info = think_infos_[i];
-        if (!isActiveThinkState(info) && info.pending_forced_think_end_token_ids.empty()) {
-            info.current_output_length += num_new_tokens;
-            continue;
-        }
-        if (info.max_thinking_tokens <= 0 || !info.dfa_ptr) {
+        if ((info.process_state == ThinkProcessState::NO_THINK || info.process_state == ThinkProcessState::AFTER_THINK)
+            && info.pending_forced_think_end_token_ids.empty()) {
             info.current_output_length += num_new_tokens;
             continue;
         }
@@ -320,7 +369,13 @@ std::optional<ErrorInfo> ThinkModeLogitsProcessor::updateStatus(const torch::Ten
             }
 
             info.current_output_length += 1;
+            if (advanceAdaptiveStart(info, current_token_id)) {
+                continue;
+            }
             if (!isActiveThinkState(info)) {
+                continue;
+            }
+            if (!info.dfa_ptr) {
                 continue;
             }
 
@@ -401,13 +456,23 @@ ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::sha
                                                                         int32_t                        num) {
     auto generate_config         = generate_input->generate_config;
     auto end_think_token_ids     = generate_config->end_think_token_ids;
-    // Match main's admission gate: only think-mode requests with a budget get a
-    // processor, so non-think requests never mask the think boundary tokens.
-    if (!generate_config->in_think_mode || generate_config->max_thinking_tokens == 0) {
+    auto thinking_mode = generate_config->thinking_mode;
+    if (thinking_mode == ThinkingMode::UNSPECIFIED) {
+        thinking_mode = generate_config->in_think_mode ? ThinkingMode::ENABLED : ThinkingMode::DISABLED;
+    }
+
+    // Preserve main's admission gate while allowing adaptive thinking, whose
+    // legacy in_think_mode flag is false until the model emits a begin tag.
+    const bool uses_think_processor = thinking_mode == ThinkingMode::ENABLED || thinking_mode == ThinkingMode::ADAPTIVE;
+    if (!generate_config->enable_think_logits_processor || !uses_think_processor
+        || generate_config->max_thinking_tokens == 0) {
         return nullptr;
     }
-    bool has_think_budget =
-        generate_config->in_think_mode && generate_config->max_thinking_tokens > 0 && !end_think_token_ids.empty();
+    if (thinking_mode == ThinkingMode::ADAPTIVE && generate_config->begin_think_token_ids.empty()) {
+        RTP_LLM_LOG_WARNING("adaptive thinking requires non-empty begin_think_token_ids; disable think processor");
+        return nullptr;
+    }
+    const bool has_think_budget = !end_think_token_ids.empty();
 
     auto processor_ptr = std::make_shared<ThinkModeLogitsProcessor>();
     for (size_t i = 0; i < num; i++) {
@@ -415,7 +480,7 @@ ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::sha
         if (has_think_budget) {
             dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids);
         }
-        StreamThinkInfo              think_info(generate_config->in_think_mode,
+        StreamThinkInfo              think_info(thinking_mode,
                                    generate_config->max_thinking_tokens,
                                    generate_config->begin_think_token_ids,
                                    end_think_token_ids,

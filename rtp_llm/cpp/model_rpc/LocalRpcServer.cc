@@ -241,10 +241,11 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
 
 ErrorInfo LocalRpcServer::updateMultimodalFeaturesWithTrace(
     std::shared_ptr<GenerateInput>&                                     input,
-    const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span) {
+    const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
+    grpc::ServerContext*                                                server_context) {
     if (!telemetry::TelemetryRuntime::isActive() || parent_span == nullptr || !input->multimodal_inputs
         || input->multimodal_inputs->empty()) {
-        return mm_processor_->updateMultimodalFeatures(input);
+        return mm_processor_->updateMultimodalFeatures(input, server_context);
     }
 
     opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span;
@@ -261,7 +262,7 @@ ErrorInfo LocalRpcServer::updateMultimodalFeaturesWithTrace(
     } catch (...) {}
 
     // Include preprocessing, embedding transport and token expansion in one operation.
-    auto result = mm_processor_->updateMultimodalFeatures(input);
+    auto result = mm_processor_->updateMultimodalFeatures(input, server_context);
     if (!result.ok()) {
         status = grpc::Status(grpc::StatusCode::INTERNAL, "");
         try {
@@ -277,11 +278,12 @@ ErrorInfo LocalRpcServer::updateMultimodalFeaturesWithTrace(
 ErrorInfo
 LocalRpcServer::prepareInput(const GenerateInputPB&                                              input_pb,
                              std::shared_ptr<GenerateInput>&                                     output,
-                             const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span) {
+                             const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
+                             grpc::ServerContext*                                                context) {
     output = QueryConverter::transQuery(&input_pb);
     if (mm_processor_ != nullptr && output->multimodal_inputs) {
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
-        auto mm_res = updateMultimodalFeaturesWithTrace(output, parent_span);
+        auto mm_res = updateMultimodalFeaturesWithTrace(output, parent_span, context);
         if (!mm_res.ok()) {
             return mm_res;
         }
@@ -378,7 +380,8 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
                                    input,
                                    generate_context.trace_span_guard ?
                                        generate_context.trace_span_guard->sharedSpan() :
-                                       opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{});
+                                       opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{},
+                                   context);
         if (!mm_res.ok()) {
             generate_context.error_info = mm_res;
             generate_context.error_status =
@@ -422,7 +425,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
     inputs.reserve(batch_size);
     for (int i = 0; i < batch_size; i++) {
         std::shared_ptr<GenerateInput> input;
-        auto                           err = prepareInput(request->inputs(i), input);
+        auto                           err = prepareInput(request->inputs(i), input, {}, context);
         if (!err.ok()) {
             // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping
             for (int j = 0; j < batch_size; j++) {
@@ -1022,7 +1025,30 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         RTP_LLM_LOG_WARNING("execute function failed, cache manager is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
-    if (!cache_manager->executeFunction(*request, *response)) {
+    const bool    is_memory_copy = request->has_mem_request();
+    const int64_t copy_begin_us  = currentTimeUs();
+    if (is_memory_copy) {
+        const auto& mem_request = request->mem_request();
+        RTP_LLM_LOG_INFO("memory cache worker copy begin, plan_id=%lu direction=%s items=%d peer=%s",
+                         mem_request.copy_plan_id(),
+                         mem_request.copy_direction() == MemoryOperationRequestPB::H2D ? "H2D" : "D2H",
+                         mem_request.copy_items_size(),
+                         context->peer().c_str());
+    }
+    const bool execute_success = cache_manager->executeFunction(*request, *response);
+    if (is_memory_copy) {
+        const auto& mem_request = request->mem_request();
+        RTP_LLM_LOG_INFO("memory cache worker copy end, plan_id=%lu direction=%s items=%d elapsed_us=%ld success=%d "
+                         "cancelled=%d peer=%s",
+                         mem_request.copy_plan_id(),
+                         mem_request.copy_direction() == MemoryOperationRequestPB::H2D ? "H2D" : "D2H",
+                         mem_request.copy_items_size(),
+                         currentTimeUs() - copy_begin_us,
+                         execute_success,
+                         context->IsCancelled(),
+                         context->peer().c_str());
+    }
+    if (!execute_success) {
         RTP_LLM_LOG_WARNING("execute function failed, request: [%s]", request->DebugString().c_str());
         const std::string error_msg = "execute function failed, request: [" + request->DebugString() + "]";
         return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);

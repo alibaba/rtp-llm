@@ -11,6 +11,7 @@ import unittest
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    PyFlashinferPrefillImplBase,
     PyFlashinferPrefillPagedAttnOp,
     quantize_to_fp8_if_needed,
 )
@@ -30,8 +31,22 @@ PAGE_SIZE = 16
 class _PrefillPagedCudaGraphTestMixin:
     """Shared setup for BASE and FP8 CUDA graph tests."""
 
+    def _assert_graph_plan_ready(self, wrapper) -> None:
+        """FA2 stores split-KV in plan[-1]; FA3's 8-field plan does not."""
+        plan_info = getattr(wrapper, "_plan_info", None)
+        self.assertIsNotNone(plan_info)
+        self.assertGreater(len(plan_info), 0)
+        backend = getattr(wrapper, "_backend", None)
+        if backend == "fa2" and len(plan_info) == 15:
+            self.assertTrue(bool(plan_info[-1]))
+
     def _make_inputs(
-        self, input_lengths, prefix_lengths, with_copy_params=False, max_seq_len=0
+        self,
+        input_lengths,
+        prefix_lengths,
+        with_copy_params=False,
+        max_seq_len=0,
+        is_cuda_graph=None,
     ):
         """Create PyAttentionInputs for prefill (single or multi batch)."""
         if isinstance(input_lengths, int):
@@ -40,7 +55,7 @@ class _PrefillPagedCudaGraphTestMixin:
 
         batch_size = len(input_lengths)
         inp = PyAttentionInputs()
-        inp.is_cuda_graph = with_copy_params
+        inp.is_cuda_graph = with_copy_params if is_cuda_graph is None else is_cuda_graph
         inp.is_prefill = True
         inp.input_lengths = torch.tensor(
             input_lengths, dtype=torch.int32, device="cuda"
@@ -83,6 +98,41 @@ class _PrefillPagedCudaGraphTestMixin:
             inp.prefill_cuda_graph_copy_params = cp
 
         return inp
+
+    def _make_paged_kv_cache(
+        self, k, v, seq_lengths, head_num_kv, size_per_head, block_table=None
+    ):
+        if block_table is None:
+            max_blocks = max(math.ceil(s / PAGE_SIZE) for s in seq_lengths)
+            block_table = torch.zeros(
+                len(seq_lengths), max_blocks, dtype=torch.int32
+            )
+            offset = 0
+            for i, seq_len in enumerate(seq_lengths):
+                num_blocks = math.ceil(seq_len / PAGE_SIZE)
+                block_table[i, :num_blocks] = torch.arange(offset, offset + num_blocks)
+                offset += num_blocks
+        offsets = [0]
+        for seq_len in seq_lengths:
+            offsets.append(offsets[-1] + seq_len)
+        return fill_paged_kv_cache(
+            [k[offsets[i] : offsets[i + 1]] for i in range(len(seq_lengths))],
+            [v[offsets[i] : offsets[i + 1]] for i in range(len(seq_lengths))],
+            seq_lengths,
+            block_table,
+            PAGE_SIZE,
+            head_num_kv,
+            size_per_head,
+            self.cache_dtype(
+                self._create_config(
+                    head_num=8,
+                    head_num_kv=head_num_kv,
+                    size_per_head=size_per_head,
+                    seq_size_per_block=PAGE_SIZE,
+                ).attn_configs
+            ),
+            self.device,
+        )
 
     def _test_forward_match(
         self,
@@ -178,6 +228,8 @@ class _PrefillPagedCudaGraphTestMixin:
         )
         cg_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, cg_init)
         cg_op.prepare(cg_init)
+        self.assertTrue(cg_op.prefill_wrapper.is_cuda_graph_enabled)
+        self._assert_graph_plan_ready(cg_op.prefill_wrapper)
         cg_replay = self._make_inputs(input_lengths, prefix_lengths, True, max_seq_len)
         cg_op.prepare(cg_replay, forbid_realloc=True)
         self.assertTrue(
@@ -253,6 +305,82 @@ class TestPrefillPagedCudaGraph(_PrefillPagedCudaGraphTestMixin, BaseAttentionTe
 
     def test_multi_batch_single_tokens(self):
         self._test_forward_match([1, 1, 1], [100, 200, 300])
+
+    def test_compact_cuda_graph_replans_split_kv(self):
+        input_lengths = [4, 4]
+        capture_prefix_lengths = [512, 384]
+        replay_prefix_lengths = [128, 256]
+        head_num = 8
+        head_num_kv = 2
+        size_per_head = 64
+
+        config = self._create_config(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=size_per_head,
+            seq_size_per_block=PAGE_SIZE,
+        )
+        capture_inputs = self._make_inputs(
+            input_lengths,
+            capture_prefix_lengths,
+            is_cuda_graph=True,
+        )
+        compact_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, capture_inputs)
+        compact_op.prepare(capture_inputs)
+
+        self.assertTrue(compact_op.prefill_wrapper.is_cuda_graph_enabled)
+        self._assert_graph_plan_ready(compact_op.prefill_wrapper)
+
+        replay_inputs = self._make_inputs(
+            input_lengths,
+            replay_prefix_lengths,
+            is_cuda_graph=True,
+        )
+        compact_op.prepare(replay_inputs, forbid_realloc=True)
+        self._assert_graph_plan_ready(compact_op.prefill_wrapper)
+
+        seq_lengths = [
+            prefix + input_len
+            for prefix, input_len in zip(replay_prefix_lengths, input_lengths)
+        ]
+        total_q = sum(input_lengths)
+        total_kv = sum(seq_lengths)
+        q = torch.randn(
+            total_q,
+            head_num,
+            size_per_head,
+            dtype=torch.float16,
+            device=self.device,
+        )
+        k = torch.randn(
+            total_kv,
+            head_num_kv,
+            size_per_head,
+            dtype=torch.float16,
+            device=self.device,
+        )
+        v = torch.randn_like(k)
+        normal_inputs = self._make_inputs(input_lengths, replay_prefix_lengths)
+        kv_cache = self._make_paged_kv_cache(
+            k,
+            v,
+            seq_lengths,
+            head_num_kv,
+            size_per_head,
+            block_table=normal_inputs.kv_cache_kernel_block_id,
+        )
+        normal_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, normal_inputs)
+        normal_op.prepare(normal_inputs)
+        expected = normal_op.forward(q, kv_cache)
+        actual = compact_op.forward(q, kv_cache)
+
+        compare_tensors(
+            expected,
+            actual,
+            rtol=1e-3,
+            atol=1e-3,
+            name="compact CUDA graph split-KV replay",
+        )
 
 
 class TestPrefillPagedCudaGraphFP8(TestPrefillPagedCudaGraph):

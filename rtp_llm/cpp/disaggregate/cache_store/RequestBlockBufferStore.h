@@ -5,6 +5,7 @@
 #include <atomic>
 #include <mutex>
 #include <functional>
+#include <unordered_set>
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 
@@ -24,6 +25,9 @@ public:
     void stop();
     bool setRequestBlockBuffer(const std::shared_ptr<RequestBlockBuffer>& layer_cache);
     bool setRequestBlockBufferWatchFunc(const std::string& requestid, RequestBlockBuffer::WatchFunc&& func);
+    bool setRequestBlockBufferWatchFunc(const std::string&                                     requestid,
+                                        RequestBlockBuffer::WatchFunc&&                        func,
+                                        std::shared_ptr<const std::unordered_set<std::string>> filter_keys);
 
     std::shared_ptr<BlockBuffer> getBlockBuffer(const std::string& requestid, const std::string& blockid) const;
 
