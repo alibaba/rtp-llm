@@ -436,6 +436,38 @@ Scenario makeMtpScenario() {
     return scenario;
 }
 
+Scenario makeMixedBatchScenario() {
+    auto config = makeCacheConfig({{"full", 2, 16}, {"linear", 2, 24}});
+    auto layout = makeLayout(config);
+    auto inputs = makeInputs(/*input_lengths=*/{1, 1, 3},
+                             /*request_ids=*/{0, 0, 501},
+                             /*cache_keys=*/{0, 0, 0, 0, 5101, 5102},
+                             /*cache_keys_width=*/2,
+                             /*block_ids=*/{1, -1, 2, -1, 3, 4, 5, -1, 6, -1, 7, 0},
+                             /*group_count=*/2,
+                             /*block_table_width=*/2,
+                             /*global_tokens_per_block=*/2,
+                             /*global_stride_bytes=*/16);
+
+    inputs.combo_tokens          = pinnedTensor({11, 12, 21, 22, 23}, {5});
+    inputs.input_lengths         = pinnedTensor({8, 9, 3}, {3});
+    inputs.sequence_lengths      = pinnedTensor({7, 8}, {2});
+    inputs.prefix_lengths        = pinnedTensor({0}, {1});
+    inputs.lm_output_indexes     = pinnedTensor({0, 1, 4}, {3});
+    inputs.request_id            = pinnedLongTensor({501}, {1});
+    inputs.request_pd_separation = pinnedBoolTensor(1, true);
+    inputs.cache_keys            = pinnedLongTensor({5101, 5102}, {1, 2});
+    inputs.combo_position_ids    = pinnedTensor(
+        {100, 101, 102, 103, 104, 105, 106, 107, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211}, {20});
+    inputs.text_tokens_mask = pinnedTensor({1, 1, 0, 0, 1}, {5});
+    inputs.mm_features_locs = pinnedTensor({3}, {1});
+    inputs.multimodal_features =
+        std::vector<torch::Tensor>{torch::ones({1, 1}, torch::TensorOptions().dtype(torch::kFloat16))};
+    inputs.trace_ids = {"decode-0", "decode-1", "context-0"};
+
+    return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
+}
+
 Scenario makeScenario(const std::string& name) {
     if (name == "multi_tag") {
         return makeMultiTagScenario();
@@ -448,6 +480,9 @@ Scenario makeScenario(const std::string& name) {
     }
     if (name == "mtp_sub_config") {
         return makeMtpScenario();
+    }
+    if (name == "mixed_batch") {
+        return makeMixedBatchScenario();
     }
     throw std::invalid_argument("unknown PyWrappedModel cache-store integration scenario: " + name);
 }
@@ -498,9 +533,14 @@ void ensureTestRuntime() {
     });
 }
 
-py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::string& scenario_name) {
+py::dict runPyWrappedModelCacheStoreScenario(py::object          py_model,
+                                             const std::string& scenario_name,
+                                             bool               need_all_logits,
+                                             bool               need_all_hidden_states) {
     ensureTestRuntime();
     auto scenario    = makeScenario(scenario_name);
+    scenario.inputs.need_all_logits        = need_all_logits;
+    scenario.inputs.need_all_hidden_states = need_all_hidden_states;
     auto cache_store = std::make_shared<RecordingCacheStore>();
     auto manager     = std::make_shared<KVCacheManager>(scenario.manager_config,
                                                     /*warmup=*/true,
@@ -511,6 +551,12 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
 
     Weights weights;
     weights.layers.resize(1);
+    if (scenario_name == "mixed_batch") {
+        auto lm_head    = std::make_shared<DenseWeights>();
+        lm_head->kernel = torch::ones(
+            {1, 1}, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA));
+        weights.lm_head = std::move(lm_head);
+    }
     GptModelDescription description;
     description.data_type                    = DataType::TYPE_FP16;
     description.norm_type                    = NormType::rmsnorm;
@@ -540,14 +586,44 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                               manager,
                               scenario.mtp_cache_config_index};
 
+    GptModelOutputs outputs;
+    bool            mixed_split_host_tensors_pinned = false;
     {
         PyWrappedModel model(params, std::move(py_model));
         if (scenario.replace_cp_processor) {
             model.context_parallel_processor_ = std::make_unique<TestContextParallelProcessor>(scenario.parallelism);
         }
-        (void)model.forward(scenario.inputs);
+        if (scenario_name == "mixed_batch") {
+            const auto [decode, context]     = model.splitMixedInputs(scenario.inputs);
+            const auto is_pinned_host_tensor = [](const torch::Tensor& tensor) {
+                return !tensor.defined() || !tensor.device().is_cpu() || tensor.numel() == 0 || tensor.is_pinned();
+            };
+            mixed_split_host_tensors_pinned = is_pinned_host_tensor(decode.kv_cache_block_id)
+                                              && is_pinned_host_tensor(decode.kv_cache_kernel_block_id)
+                                              && is_pinned_host_tensor(context.kv_cache_block_id)
+                                              && is_pinned_host_tensor(context.kv_cache_kernel_block_id)
+                                              && is_pinned_host_tensor(context.lm_output_indexes)
+                                              && is_pinned_host_tensor(context.mm_features_locs);
+        }
+        outputs = model.forward(scenario.inputs);
     }
-    return serializeResult(*cache_store, scenario.base_addresses);
+    auto result = serializeResult(*cache_store, scenario.base_addresses);
+    if (outputs.logits.defined()) {
+        result["logits"] = outputs.logits.cpu();
+    }
+    if (outputs.hidden_states.defined()) {
+        result["hidden_states"] = outputs.hidden_states.cpu();
+    }
+    if (outputs.all_hidden_states.defined()) {
+        result["all_hidden_states"] = outputs.all_hidden_states.cpu();
+    }
+    if (outputs.all_logits.defined()) {
+        result["all_logits"] = outputs.all_logits.cpu();
+    }
+    if (scenario_name == "mixed_batch") {
+        result["mixed_split_host_tensors_pinned"] = mixed_split_host_tensors_pinned;
+    }
+    return result;
 }
 
 CacheConfig makeMropeGraphCacheConfig(const AttentionConfigs& attention) {
@@ -739,6 +815,8 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     m.def("run_scenario",
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),
-          py::arg("scenario_name"));
+          py::arg("scenario_name"),
+          py::arg("need_all_logits") = false,
+          py::arg("need_all_hidden_states") = false);
     m.def("run_mrope_graph_preparation", &rtp_llm::test::runMropeGraphPreparationScenario, py::arg("py_model"));
 }

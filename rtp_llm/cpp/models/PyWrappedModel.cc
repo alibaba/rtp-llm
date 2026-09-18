@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include <atomic>
 #include <cstdint>
 #include <stdexcept>
 #include <mutex>
@@ -108,9 +109,9 @@ torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tenso
 }
 
 void PyWrappedModel::releaseBuffers() {
-    if (held_attn_pyobj_.ptr()) {
+    if (!held_attn_pyobjs_.empty()) {
         py::gil_scoped_acquire gil;
-        held_attn_pyobj_ = py::object();
+        held_attn_pyobjs_.clear();
     }
     // TensorHolder release point (PyWrappedModel): advances model-internal
     // host staging buffers from tensorHoldHostAndToCuda()/holdInputsHostBuffers().
@@ -148,7 +149,7 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
-        held_attn_pyobj_   = py::object();
+        held_attn_pyobjs_.clear();
         py_forward_method_ = py::object();
         // Always release py_model_ since it's always initialized now
         py_model_.release();
@@ -776,6 +777,13 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
+
+    const auto decode_batch_size = static_cast<size_t>(inputs.sequence_lengths.size(0));
+    const auto total_batch_size  = static_cast<size_t>(inputs.input_lengths.size(0));
+    if (decode_batch_size > 0 && total_batch_size > decode_batch_size) {
+        return forwardMixedBatched(inputs);
+    }
+
     holdInputsHostBuffers(inputs);
 
     // RAII guard: ensure prepared_attention_inputs_ is always reset to false on scope exit,
@@ -877,8 +885,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
-            held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
-            auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
+            held_attn_pyobjs_.emplace_back(py_model_.attr("prepare_fmha_impl")(py_model_inputs, false));
+            auto outputs = py_forward_method_(py_model_inputs, held_attn_pyobjs_.back());
             py_model_outputs = outputs.cast<PyModelOutputs>();
             hidden_states    = py_model_outputs.hidden_states.clone();
         }
@@ -925,7 +933,34 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
 // --- Methods absorbed from GptModel ---
 
-static torch::Tensor
+namespace {
+
+torch::Tensor contiguousPreservingPinned(const torch::Tensor& tensor) {
+    if (!tensor.defined() || tensor.is_contiguous()) {
+        return tensor;
+    }
+    if (!tensor.device().is_cpu() || !tensor.is_pinned()) {
+        return tensor.contiguous();
+    }
+    auto result = torch::empty(tensor.sizes(), tensor.options().pinned_memory(true));
+    result.copy_(tensor);
+    return result;
+}
+
+torch::Tensor subtractScalarPreservingPinned(const torch::Tensor& tensor, int64_t offset) {
+    if (!tensor.defined() || offset == 0) {
+        return tensor;
+    }
+    if (!tensor.device().is_cpu()) {
+        return tensor - offset;
+    }
+    auto result = torch::empty(tensor.sizes(), tensor.options().pinned_memory(tensor.is_pinned()));
+    result.copy_(tensor);
+    result.sub_(offset);
+    return result;
+}
+
+torch::Tensor
 sliceKvCacheBlockIdByBatch(const torch::Tensor& kv_cache_block_id, size_t batch_offset, size_t batch_size) {
     if (!kv_cache_block_id.defined()) {
         return torch::Tensor();
@@ -935,9 +970,312 @@ sliceKvCacheBlockIdByBatch(const torch::Tensor& kv_cache_block_id, size_t batch_
     }
     if (kv_cache_block_id.dim() == 3) {
         // [group, batch, max_blocks] → narrow on dim 1
-        return kv_cache_block_id.narrow(1, batch_offset, batch_size).contiguous();
+        return contiguousPreservingPinned(kv_cache_block_id.narrow(1, batch_offset, batch_size));
     }
     return kv_cache_block_id;
+}
+
+torch::Tensor emptyLike(const torch::Tensor& tensor) {
+    return tensor.defined() ? tensor.narrow(0, 0, 0) : torch::Tensor();
+}
+
+torch::Tensor sliceBatchTensor(const torch::Tensor& tensor, size_t offset, size_t count, const char* name) {
+    if (!tensor.defined()) {
+        return torch::Tensor();
+    }
+    RTP_LLM_CHECK_WITH_INFO(tensor.dim() > 0 && offset + count <= static_cast<size_t>(tensor.size(0)),
+                            "%s cannot be sliced by batch: dim=%ld size0=%ld offset=%zu count=%zu",
+                            name,
+                            tensor.dim(),
+                            tensor.dim() > 0 ? tensor.size(0) : -1,
+                            offset,
+                            count);
+    return tensor.narrow(0, offset, count);
+}
+
+torch::Tensor
+sliceTokenTensor(const torch::Tensor& tensor, size_t total_tokens, size_t offset, size_t count, const char* name) {
+    if (!tensor.defined()) {
+        return torch::Tensor();
+    }
+    RTP_LLM_CHECK_WITH_INFO(total_tokens > 0 && tensor.dim() > 0,
+                            "%s must be token-aligned: dim=%ld numel=%ld total_tokens=%zu",
+                            name,
+                            tensor.dim(),
+                            tensor.numel(),
+                            total_tokens);
+    if (static_cast<size_t>(tensor.size(0)) == total_tokens) {
+        return tensor.narrow(0, offset, count);
+    }
+    if (tensor.dim() == 1 && static_cast<size_t>(tensor.numel()) % total_tokens == 0) {
+        const size_t width = static_cast<size_t>(tensor.numel()) / total_tokens;
+        return tensor.narrow(0, offset * width, count * width);
+    }
+    RTP_LLM_FAIL("%s must have token-major storage: dim=%ld size0=%ld numel=%ld total_tokens=%zu",
+                 name,
+                 tensor.dim(),
+                 tensor.size(0),
+                 tensor.numel(),
+                 total_tokens);
+}
+
+torch::Tensor concatOutputTensors(const torch::Tensor& decode, const torch::Tensor& context, const char* name) {
+    if (!decode.defined() && !context.defined()) {
+        return torch::Tensor();
+    }
+    RTP_LLM_CHECK_WITH_INFO(decode.defined() && context.defined(),
+                            "mixed model output %s must be defined by both passes or neither",
+                            name);
+    RTP_LLM_CHECK_WITH_INFO(decode.dim() > 0 && context.dim() == decode.dim(),
+                            "mixed model output %s rank mismatch: decode=%ld context=%ld",
+                            name,
+                            decode.dim(),
+                            context.dim());
+    RTP_LLM_CHECK_WITH_INFO(decode.scalar_type() == context.scalar_type(),
+                            "mixed model output %s dtype mismatch: decode=%d context=%d",
+                            name,
+                            static_cast<int>(decode.scalar_type()),
+                            static_cast<int>(context.scalar_type()));
+    for (int64_t dim = 1; dim < decode.dim(); ++dim) {
+        RTP_LLM_CHECK_WITH_INFO(decode.size(dim) == context.size(dim),
+                                "mixed model output %s shape mismatch at dim %ld: decode=%ld context=%ld",
+                                name,
+                                dim,
+                                decode.size(dim),
+                                context.size(dim));
+    }
+    return torch::cat({decode, context}, 0);
+}
+
+GptModelOutputs mergeMixedOutputs(const GptModelOutputs& decode,
+                                  const GptModelOutputs& context,
+                                  bool                   need_all_hidden_states) {
+    GptModelOutputs merged;
+    merged.logits        = concatOutputTensors(decode.logits, context.logits, "logits");
+    merged.hidden_states = concatOutputTensors(decode.hidden_states, context.hidden_states, "hidden_states");
+    if (need_all_hidden_states) {
+        merged.all_hidden_states =
+            concatOutputTensors(decode.all_hidden_states, context.all_hidden_states, "all_hidden_states");
+    }
+    merged.all_logits     = concatOutputTensors(decode.all_logits, context.all_logits, "all_logits");
+    merged.softmax_result = concatOutputTensors(decode.softmax_result, context.softmax_result, "softmax_result");
+
+    RTP_LLM_CHECK_WITH_INFO(decode.moe_gating.size() == context.moe_gating.size(),
+                            "mixed model output moe_gating count mismatch: decode=%zu context=%zu",
+                            decode.moe_gating.size(),
+                            context.moe_gating.size());
+    merged.moe_gating.reserve(decode.moe_gating.size());
+    for (size_t i = 0; i < decode.moe_gating.size(); ++i) {
+        merged.moe_gating.emplace_back(
+            concatOutputTensors(decode.moe_gating[i], context.moe_gating[i], "moe_gating"));
+    }
+    return merged;
+}
+
+torch::Tensor selectMixedLastHiddenRows(const torch::Tensor& hidden_states,
+                                        const GptModelInputs& inputs,
+                                        const char*           name) {
+    if (!hidden_states.defined()) {
+        return torch::Tensor();
+    }
+    RTP_LLM_CHECK_WITH_INFO(inputs.lm_output_indexes.defined(),
+                            "mixed %s is defined but lm_output_indexes is missing",
+                            name);
+    RTP_LLM_CHECK_WITH_INFO(inputs.lm_output_indexes.numel() == inputs.input_lengths.numel(),
+                            "mixed %s lm_output_indexes count must match batch size: indexes=%ld batch=%ld",
+                            name,
+                            inputs.lm_output_indexes.numel(),
+                            inputs.input_lengths.numel());
+    auto indexes = inputs.lm_output_indexes;
+    if (indexes.device() != hidden_states.device()) {
+        indexes = indexes.to(hidden_states.device(), /*non_blocking=*/true);
+    }
+    if (indexes.scalar_type() != torch::kLong) {
+        indexes = indexes.to(torch::kLong);
+    }
+    auto selected = torch::index_select(hidden_states, 0, indexes);
+    RTP_LLM_CHECK_WITH_INFO(selected.size(0) == inputs.lm_output_indexes.numel(),
+                            "mixed %s selected row count mismatch: selected=%ld expected=%ld",
+                            name,
+                            selected.size(0),
+                            inputs.lm_output_indexes.numel());
+    return selected;
+}
+
+}  // namespace
+
+std::pair<GptModelInputs, GptModelInputs> PyWrappedModel::splitMixedInputs(const GptModelInputs& inputs) const {
+    const size_t decode_batch_size = static_cast<size_t>(inputs.sequence_lengths.size(0));
+    const size_t total_batch_size  = static_cast<size_t>(inputs.input_lengths.size(0));
+    RTP_LLM_CHECK_WITH_INFO(decode_batch_size > 0 && total_batch_size > decode_batch_size,
+                            "splitMixedInputs requires both decode and context rows: decode=%zu total=%zu",
+                            decode_batch_size,
+                            total_batch_size);
+    RTP_LLM_CHECK_WITH_INFO(!inputs.is_target_verify && !use_spec_decoding_,
+                            "mixed continuous batching is not supported with speculative decoding");
+
+    const size_t context_batch_size = total_batch_size - decode_batch_size;
+    const size_t total_tokens       = static_cast<size_t>(inputs.combo_tokens.numel());
+    RTP_LLM_CHECK_WITH_INFO(total_tokens >= decode_batch_size,
+                            "mixed token layout is too short: tokens=%zu decode=%zu",
+                            total_tokens,
+                            decode_batch_size);
+    const size_t context_tokens = total_tokens - decode_batch_size;
+
+    GptModelInputs decode  = inputs;
+    GptModelInputs context = inputs;
+
+    decode.combo_tokens  = inputs.combo_tokens.narrow(0, 0, decode_batch_size);
+    context.combo_tokens = inputs.combo_tokens.narrow(0, decode_batch_size, context_tokens);
+
+    decode.input_lengths = sliceBatchTensor(inputs.input_lengths, 0, decode_batch_size, "input_lengths");
+    context.input_lengths =
+        sliceBatchTensor(inputs.input_lengths, decode_batch_size, context_batch_size, "input_lengths");
+    decode.sequence_lengths  = inputs.sequence_lengths;
+    context.sequence_lengths = emptyLike(inputs.sequence_lengths);
+    decode.prefix_lengths    = emptyLike(inputs.prefix_lengths);
+    context.prefix_lengths   = inputs.prefix_lengths;
+    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(context.prefix_lengths.numel()) == context_batch_size,
+                            "mixed prefix length count mismatch: prefix=%ld context=%zu",
+                            context.prefix_lengths.numel(),
+                            context_batch_size);
+
+    decode.sequence_lengths_plus_1  = inputs.sequence_lengths_plus_1;
+    context.sequence_lengths_plus_1 = emptyLike(inputs.sequence_lengths_plus_1);
+    decode.lm_output_indexes  = sliceBatchTensor(inputs.lm_output_indexes, 0, decode_batch_size, "lm_output_indexes");
+    context.lm_output_indexes = subtractScalarPreservingPinned(
+        sliceBatchTensor(inputs.lm_output_indexes, decode_batch_size, context_batch_size, "lm_output_indexes"),
+        static_cast<int64_t>(decode_batch_size));
+    decode.lm_output_lengths = sliceBatchTensor(inputs.lm_output_lengths, 0, decode_batch_size, "lm_output_lengths");
+    context.lm_output_lengths =
+        sliceBatchTensor(inputs.lm_output_lengths, decode_batch_size, context_batch_size, "lm_output_lengths");
+
+    decode.combo_tokens_type_ids =
+        sliceTokenTensor(inputs.combo_tokens_type_ids, total_tokens, 0, decode_batch_size, "combo_tokens_type_ids");
+    context.combo_tokens_type_ids = sliceTokenTensor(
+        inputs.combo_tokens_type_ids, total_tokens, decode_batch_size, context_tokens, "combo_tokens_type_ids");
+    decode.combo_position_ids =
+        sliceTokenTensor(inputs.combo_position_ids, total_tokens, 0, decode_batch_size, "combo_position_ids");
+    context.combo_position_ids = sliceTokenTensor(
+        inputs.combo_position_ids, total_tokens, decode_batch_size, context_tokens, "combo_position_ids");
+    decode.text_tokens_mask =
+        sliceTokenTensor(inputs.text_tokens_mask, total_tokens, 0, decode_batch_size, "text_tokens_mask");
+    context.text_tokens_mask =
+        sliceTokenTensor(inputs.text_tokens_mask, total_tokens, decode_batch_size, context_tokens, "text_tokens_mask");
+
+    if (inputs.last_hidden_states.defined()) {
+        decode.last_hidden_states =
+            sliceTokenTensor(inputs.last_hidden_states, total_tokens, 0, decode_batch_size, "last_hidden_states");
+        context.last_hidden_states = sliceTokenTensor(
+            inputs.last_hidden_states, total_tokens, decode_batch_size, context_tokens, "last_hidden_states");
+    }
+    if (inputs.attention_mask.defined()) {
+        decode.attention_mask = sliceBatchTensor(inputs.attention_mask, 0, decode_batch_size, "attention_mask");
+        context.attention_mask =
+            sliceBatchTensor(inputs.attention_mask, decode_batch_size, context_batch_size, "attention_mask");
+    }
+
+    decode.kv_cache_block_id = sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, 0, decode_batch_size);
+    context.kv_cache_block_id =
+        sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, decode_batch_size, context_batch_size);
+    decode.kv_cache_kernel_block_id = sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, 0, decode_batch_size);
+    context.kv_cache_kernel_block_id =
+        sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, decode_batch_size, context_batch_size);
+
+    decode.multimodal_features.reset();
+    decode.mm_extra_input.reset();
+    decode.mm_features_locs = emptyLike(inputs.mm_features_locs);
+    if (context.mm_features_locs.defined()) {
+        context.mm_features_locs =
+            subtractScalarPreservingPinned(context.mm_features_locs, static_cast<int64_t>(decode_batch_size));
+    }
+    decode.input_embeddings.reset();
+    decode.input_embeddings_locs = emptyLike(inputs.input_embeddings_locs);
+    if (context.input_embeddings_locs.defined()) {
+        context.input_embeddings_locs =
+            subtractScalarPreservingPinned(context.input_embeddings_locs, static_cast<int64_t>(decode_batch_size));
+    }
+
+    decode.request_id             = emptyLike(inputs.request_id);
+    decode.request_pd_separation  = emptyLike(inputs.request_pd_separation);
+    decode.cache_keys             = emptyLike(inputs.cache_keys);
+    decode.pd_separation          = false;
+    context.request_id            = inputs.request_id;
+    context.request_pd_separation = inputs.request_pd_separation;
+    context.cache_keys            = inputs.cache_keys;
+
+    if (!inputs.trace_ids.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.trace_ids.size() == total_batch_size,
+                                "mixed trace id count mismatch: trace_ids=%zu batch=%zu",
+                                inputs.trace_ids.size(),
+                                total_batch_size);
+        decode.trace_ids.assign(inputs.trace_ids.begin(), inputs.trace_ids.begin() + decode_batch_size);
+        context.trace_ids.assign(inputs.trace_ids.begin() + decode_batch_size, inputs.trace_ids.end());
+    }
+    return {std::move(decode), std::move(context)};
+}
+
+GptModelOutputs PyWrappedModel::forwardMixedBatched(const GptModelInputs& inputs) {
+    RTP_LLM_PROFILE_SCOPE("py_model.forwardMixedBatched");
+    DevicePerfWrapper wrapper(enable_device_perf_, "py model mixed forward");
+    static std::atomic<uint64_t> mixed_batch_count{0};
+    const auto                   mixed_count = mixed_batch_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    if ((mixed_count & (mixed_count - 1)) == 0) {
+        RTP_LLM_LOG_INFO("mixed continuous batch #%llu: decode_batch_size=%ld context_batch_size=%ld",
+                         static_cast<unsigned long long>(mixed_count),
+                         inputs.sequence_lengths.size(0),
+                         inputs.input_lengths.size(0) - inputs.sequence_lengths.size(0));
+    }
+
+    struct PreparedFlagGuard {
+        std::atomic<bool>& flag;
+        ~PreparedFlagGuard() {
+            flag.store(false, std::memory_order_release);
+        }
+    } flag_guard{prepared_attention_inputs_};
+
+    try {
+        RTP_LLM_CHECK_WITH_INFO(!device_props_.enable_prefill_cp,
+                                "mixed continuous batching is not supported with prefill context parallelism");
+        RTP_LLM_CHECK_WITH_INFO(int(device_props_.enable_layer_micro_batch) == 0,
+                                "mixed continuous batching is not supported with layer micro batching");
+
+        auto [decode_inputs, context_inputs] = splitMixedInputs(inputs);
+
+        // Preserve the scheduler's same-round admission while keeping each
+        // model pass numerically identical to its native execution path.
+        // Combining decode rows with a long prefill changes FP8 GEMM and MoE
+        // kernel shapes, which can flip greedy top-1 tokens. Running two pure
+        // passes lets decode retain CUDA Graph / masked MoE and lets context
+        // retain its regular prefill path.
+        prepared_attention_inputs_.store(false, std::memory_order_release);
+        auto decode_outputs = forward(decode_inputs);
+
+        // forward() clears this flag through its scope guard. Store explicitly
+        // as a defensive boundary in case a caller pre-prepared the original
+        // mixed batch.
+        prepared_attention_inputs_.store(false, std::memory_order_release);
+        auto context_outputs = forward(context_inputs);
+
+        // need_all_logits keeps every context-token logit for prompt-logprob
+        // consumers, and forwardPostLayers consequently leaves hidden_states
+        // token-aligned as well. The sampler/dispatcher contract still expects
+        // one last-hidden row per request, so select those rows before merging.
+        if (inputs.need_all_logits) {
+            decode_outputs.hidden_states =
+                selectMixedLastHiddenRows(decode_outputs.hidden_states, decode_inputs, "decode hidden_states");
+            context_outputs.hidden_states =
+                selectMixedLastHiddenRows(context_outputs.hidden_states, context_inputs, "context hidden_states");
+        }
+
+        return mergeMixedOutputs(decode_outputs, context_outputs, inputs.need_all_hidden_states);
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python error during mixed forward call: %s", e.what());
+        throw std::runtime_error(std::string("pybind11 error during mixed forward call: ") + e.what());
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("C++ error during mixed forward call: %s", e.what());
+        throw std::runtime_error(std::string("C++ error during mixed forward call: ") + e.what());
+    }
 }
 
 torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input) {

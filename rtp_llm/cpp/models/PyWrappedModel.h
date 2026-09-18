@@ -80,7 +80,9 @@ public:
     std::string     waitCacheStorePublication() override;
 
 private:
-    std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
+    std::optional<PyCacheStoreInputs>         prepareWriteCacheParams(const GptModelInputs& inputs);
+    GptModelOutputs                           forwardMixedBatched(const GptModelInputs& inputs);
+    std::pair<GptModelInputs, GptModelInputs> splitMixedInputs(const GptModelInputs& inputs) const;
 
 private:
     // Helper functions to reduce code duplication
@@ -135,7 +137,12 @@ private:
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
     py::object py_forward_method_;
-    py::object held_attn_pyobj_;
+    // Keep every eager-attention preparation object alive until the executor
+    // releases this forward cycle. Mixed continuous batching performs a pure
+    // decode pass followed by a pure context pass, so a single object would
+    // release decode-side workspaces while their CUDA kernels may still be in
+    // flight.
+    std::vector<py::object> held_attn_pyobjs_;
     bool       enable_cuda_graph_{false};
     bool       is_prefill_cuda_graph_mode_{false};
     bool       use_spec_decoding_{false};
