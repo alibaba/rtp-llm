@@ -104,6 +104,12 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     batch_ptr,
     token_chunk_offset_ptr,
     o_ptr,  # (dim, seqlen) - actually pointing to x_ptr
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    QK_CHANNELS: tl.constexpr,
+    V_CHANNELS: tl.constexpr,
+    FUSED_QKV_NORM: tl.constexpr,
     # Matrix dimensions
     batch: tl.int32,  # actually padded_batch
     dim: tl.constexpr,
@@ -339,7 +345,52 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             + (idx_feats * stride_o_dim)
         )
 
-        tl.store(o_ptrs, acc, mask=mask_1d)
+        if FUSED_QKV_NORM:
+            # Preserve the intermediate BF16 store before the L2 normalization.
+            rounded = acc.to(q_ptr.dtype.element_ty).to(tl.float32)
+            token = sequence_start_index + token_offset + idx_token
+            channel = tl.program_id(1) * BLOCK_N
+            if channel < 2 * QK_CHANNELS:
+                values = tl.reshape(rounded, (BLOCK_N // 128, 4, 32))
+                # Spell out the CUDA warp butterfly order. The convolution's
+                # vectorized layout holds two adjacent channels per thread;
+                # tl.sum would add those first and change BF16 tie rounding.
+                partial = values * values
+                for shift in tl.static_range(4, -1, -1):
+                    indices = tl.broadcast_to(
+                        (tl.arange(0, 32) ^ (1 << shift))[None, None, :],
+                        (BLOCK_N // 128, 4, 32),
+                    )
+                    partial = partial + tl.gather(partial, indices, axis=2)
+                segments = tl.gather(
+                    partial, tl.full((BLOCK_N // 128, 4, 1), 0, tl.int32), 2
+                ).reshape(BLOCK_N // 128, 4)
+                s0 = tl.gather(segments, tl.full((BLOCK_N // 128, 1), 0, tl.int32), 1)
+                s1 = tl.gather(segments, tl.full((BLOCK_N // 128, 1), 1, tl.int32), 1)
+                s2 = tl.gather(segments, tl.full((BLOCK_N // 128, 1), 2, tl.int32), 1)
+                s3 = tl.gather(segments, tl.full((BLOCK_N // 128, 1), 3, tl.int32), 1)
+                inv = 1.0 / tl.sqrt((s0 + s2) + (s1 + s3) + 1e-6)
+                normalized = tl.reshape(
+                    tl.reshape(rounded, (BLOCK_N // 128, 128)) * inv, (BLOCK_N,)
+                )
+                if channel < QK_CHANNELS:
+                    tl.store(
+                        q_ptr + token * QK_CHANNELS + idx_feats, normalized, mask_1d
+                    )
+                else:
+                    tl.store(
+                        k_ptr + token * QK_CHANNELS + idx_feats - QK_CHANNELS,
+                        normalized,
+                        mask_1d,
+                    )
+            else:
+                tl.store(
+                    v_ptr + token * V_CHANNELS + idx_feats - 2 * QK_CHANNELS,
+                    rounded,
+                    mask_1d,
+                )
+        else:
+            tl.store(o_ptrs, acc, mask=mask_1d)
 
         dest_idx = prefix_length + idx_token + token_offset
         # when token is the last token of the block or the last token of the sequence, write back
@@ -458,6 +509,8 @@ def causal_conv1d_fn(
     pad_slot_id: int = PAD_SLOT_ID,
     metadata: Optional[CausalConv1dMetadata] = None,
     validate_data=False,
+    *,
+    fused_qkv_heads=None,
 ):
     """support varlen + continuous batching when x is 2D tensor
 
@@ -511,7 +564,29 @@ def causal_conv1d_fn(
     # Store original dtype to cast back at the end
     original_x_dtype = x.dtype
     x = x.to(weight.dtype)
-    out = torch.empty_like(x)
+    if fused_qkv_heads is not None:
+        hq, hv = fused_qkv_heads
+        if (
+            original_x_dtype != torch.bfloat16
+            or weight.dtype != torch.bfloat16
+            or hq <= 0
+            or hv <= 0
+            or hq % 2
+            or hv % 2
+            or x.ndim != 2
+            or x.shape[0] != (2 * hq + hv) * 128
+        ):
+            raise ValueError(
+                "Fused conv/QK norm requires BF16 and even 128-dim QK/V head counts"
+            )
+        q = torch.empty((1, x.shape[1], hq, 128), device=x.device, dtype=x.dtype)
+        k = torch.empty_like(q)
+        v = torch.empty((1, x.shape[1], hv, 128), device=x.device, dtype=x.dtype)
+        out = q[0].reshape(x.shape[1], -1).T  # only used to supply inert output strides
+    else:
+        q = k = v = None
+        hq = hv = 0
+        out = torch.empty_like(x)
 
     # Prepare metadata if not provided
     if metadata is None:
@@ -581,7 +656,8 @@ def causal_conv1d_fn(
         batch_ptr = batch_ptr.to(x.device)
         token_chunk_offset_ptr = token_chunk_offset_ptr.to(x.device)
 
-    grid = (grid_x, triton.cdiv(dim, BLOCK_N))
+    block_n = 512 if fused_qkv_heads is not None and hq % 4 == hv % 4 == 0 else BLOCK_N
+    grid = (grid_x, triton.cdiv(dim, block_n))
     _causal_conv1d_fwd_kernel[grid](
         # Pointers to matrices
         x,
@@ -602,6 +678,12 @@ def causal_conv1d_fn(
         batch_ptr,
         token_chunk_offset_ptr,
         out,
+        q,
+        k,
+        v,
+        hq * 128,
+        hv * 128,
+        fused_qkv_heads is not None,
         # Matrix dimensions
         padded_batch,
         dim,
@@ -630,9 +712,10 @@ def causal_conv1d_fn(
         USE_PAD_SLOT=pad_slot_id is not None,
         NP2_STATELEN=np2_statelen,
         BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
+        BLOCK_N=block_n,
+        enable_fp_fusion=fused_qkv_heads is None,
     )
-    return out.to(original_x_dtype)
+    return (q, k, v) if fused_qkv_heads is not None else out.to(original_x_dtype)
 
 
 @triton.jit()
@@ -797,8 +880,7 @@ def _causal_conv1d_update_kernel(
             idx_tokens_offset = idx_tokens - idx
 
             conv_state_ptrs_target = (
-                conv_state_base
-                + (idx_tokens_offset * stride_conv_state_tok)[:, None]
+                conv_state_base + (idx_tokens_offset * stride_conv_state_tok)[:, None]
             )  # [BLOCK_M, BLOCK_N]
             mask = (
                 (idx_tokens_offset >= 0)[:, None]

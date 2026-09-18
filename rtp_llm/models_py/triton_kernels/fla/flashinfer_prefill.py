@@ -50,6 +50,7 @@ def flashinfer_gdn_prefill(
     initial_state: Optional[torch.Tensor] = None,
     scale: Optional[float] = None,
     checkpoint_interval: int = 2048,
+    qk_normalized: bool = False,
 ):
     """Return (output[1,T,H,V], final[N,H,V,K], checkpoints, checkpoint_starts).
 
@@ -95,7 +96,9 @@ def flashinfer_gdn_prefill(
         raise ValueError("Expected nonempty packed sequence offsets")
     if q.shape[1] == 0 or q.shape[2] == 0:
         raise ValueError("Expected positive token and head counts")
-    if supports_exact_qk_norm(q, k):
+    if qk_normalized:
+        qn, kn = q, k
+    elif supports_exact_qk_norm(q, k):
         qn, kn = fused_l2norm_qk_exact(q, k)
     else:
         qn, kn = l2norm_fwd(q.contiguous()), l2norm_fwd(k.contiguous())
