@@ -763,6 +763,9 @@ class BuildPackagingContractTest(TestCase):
             for name in ("context_parallel", "eplb")
         }
         expected["//rtp_llm/cpp/cache/test:cache_config_creator_py_test"] = "libcache_config_creator_py_test.so"
+        for name in ("context_parallel", "eplb"):
+            source = (PROJECT_ROOT / f"rtp_llm/cpp/models/{name}/test/{name}_py_wrapper_test.py").read_text()
+            self.assertNotIn("TEST_SRCDIR", source)
         entries = setup_module._selected_bazel_staged_outputs("cuda12_9", ["--config=cuda12_9"])
         selected = [entry for entry in entries if entry[1] in expected]
         self.assertEqual({entry[1] for entry in selected}, set(expected))
