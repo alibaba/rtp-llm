@@ -139,13 +139,13 @@ class AttentionV41CudaGraphTest(unittest.TestCase):
             torch.ones(64, 32, device=device), torch.randn(64, 32, device=device)
         )
         pools = {
-            CSA_KV: torch.zeros(3, 64 * 584, device=device, dtype=torch.uint8),
-            INDEXER_KV: torch.zeros(3, 128 * 132, device=device, dtype=torch.uint8),
+            CSA_KV: torch.zeros(3, 64 * 288, device=device, dtype=torch.uint8),
+            INDEXER_KV: torch.zeros(3, 128 * 68, device=device, dtype=torch.uint8),
             CSA_STATE: torch.zeros(3, 8 * 1024, device=device, dtype=torch.float32),
         }
         attn._pool_spec = {
-            CSA_KV: (torch.uint8, 584),
-            INDEXER_KV: (torch.uint8, 132),
+            CSA_KV: (torch.uint8, 288),
+            INDEXER_KV: (torch.uint8, 68),
             CSA_STATE: (torch.float32, 1024),
         }
         attn._kv_cache = SimpleNamespace(

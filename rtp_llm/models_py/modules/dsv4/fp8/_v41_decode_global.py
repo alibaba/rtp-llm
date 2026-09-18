@@ -1,11 +1,13 @@
 """Fuse V4.1 decode compression, normalization, RoPE and typed cache stores.
 
 The two-stage organization follows vLLM's V4.1 fused compressor/indexer
-stores, with RTP's 584-byte main cache and continuous index FP8 scales.
-Stage A reads the previous speculative state before any state writes.
-Stage B runs after the unchanged BF16 index projection, and commits state.
-This kernel boundary prevents a token CTA from overwriting another CTA's
-history when the state ring wraps. All metadata stays on the device.
+stores, with RTP's FP4 main cache (288B row-interleaved: 256B e2m1 payload
++ 32B E4M3 group-16 scales) and FP4 index cache (planar 64B payload +
+packed-UE8M0 int32 scales per entry). Stage A reads the previous
+speculative state before any state writes. Stage B runs after the unchanged
+BF16 index projection, and commits state. This kernel boundary prevents a
+token CTA from overwriting another CTA's history when the state ring wraps.
+All metadata stays on the device.
 """
 
 from __future__ import annotations
@@ -25,6 +27,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     invalid_kv_access_validation_enabled,
     trap_invalid_kv_access_enabled,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
+    _round_e2m1,
+    _round_power_of_two_scale,
 )
 
 
@@ -156,30 +162,23 @@ def _compress_norm_main_store_kernel(
             if block >= MAIN_BLOCKS:
                 _trap()
         rotated = _rope_bf16(latent, frequencies, (position // RATIO) * RATIO, 512)
-        # Match quantize_and_insert_k_cache's BF16 input and 64-column UE8M0
-        # groups. The eighth tile is RoPE and is not written as FP8.
-        grouped = tl.reshape(rotated, (8, 64))
-        maxima = tl.maximum(tl.max(tl.abs(grouped), 1), 1e-4)
-        exponent = tl.ceil(tl.log2(maxima / 448.0))
-        scale = tl.exp2(exponent)
-        quantized = tl.clamp(grouped / scale[:, None], -448.0, 448.0).to(tl.float8e4nv)
+        # FP4 GLOBAL store: group-16 E4M3 scales, the official compressed-KV
+        # quantization. Byte-identical to quantize_and_insert_k_cache_fp4.
+        grouped = tl.reshape(rotated.to(tl.float32), (32, 16))
+        maxima = tl.maximum(tl.max(tl.abs(grouped), 1), 6.0 * (2.0**-9))
+        scale_fp8 = tl.div_rn(maxima, 6.0).to(
+            tl.float8e4nv, fp_downcast_rounding="rtne"
+        )
+        scale = scale_fp8.to(tl.float32)
+        normalized = tl.minimum(tl.maximum(tl.div_rn(grouped, scale[:, None]), -6.0), 6.0)
+        codes = _round_e2m1(normalized).reshape((256, 2))
+        even, odd = tl.split(codes)
+        payload = even | (odd << 4)
         base = main_cache + block * MAIN_CACHE_STRIDE
+        tl.store(base + offset * 288 + tl.arange(0, 256), payload)
         tl.store(
-            base + offset * 576 + columns,
-            tl.reshape(quantized, (512,)).to(tl.uint8, bitcast=True),
-            columns < 448,
-        )
-        rope_columns = tl.arange(0, 64)
-        rope_values = tl.gather(rotated, rope_columns + 448, axis=0)
-        tl.store(
-            (base + offset * 576 + 448).to(tl.pointer_type(tl.bfloat16)) + rope_columns,
-            rope_values,
-        )
-        groups = tl.arange(0, 8)
-        encoded = tl.clamp(exponent + 127.0, 0.0, 255.0).to(tl.uint8)
-        tl.store(
-            base + MAIN_EB * 576 + offset * 8 + groups,
-            tl.where(groups < 7, encoded, 0),
+            base + offset * 288 + 256 + tl.arange(0, 32),
+            scale_fp8.to(tl.uint8, bitcast=True),
         )
 
 
@@ -237,15 +236,19 @@ def _index_norm_store_state_kernel(
         rotated = _rope_bf16(
             normalized, frequencies, (position // RATIO) * RATIO, 128
         ).to(tl.float32)
-        # RTP uses continuous FP32 scales here, unlike vLLM's power-of-two
-        # index-store option. Scales follow ALL physical key rows in a page.
-        scale = tl.maximum(tl.max(tl.abs(rotated), 0) / 448.0, 1e-12)
-        quantized = (rotated / scale).to(tl.float8e4nv)
+        # FP4 INDEX_K store: group-32 UE8M0 scales, the official indexer
+        # quantization. Byte-identical to quantize_indexer_k_fp4; the packed
+        # scale int32s follow ALL physical payload rows in a block.
+        grouped = tl.reshape(rotated, (4, 32))
+        maxima = tl.maximum(tl.max(tl.abs(grouped), 1), 6.0 * (2.0**-126))
+        scale, exponent = _round_power_of_two_scale(maxima, 1.0 / 6.0)
+        normalized = tl.minimum(tl.maximum(tl.div_rn(grouped, scale[:, None]), -6.0), 6.0)
+        codes = _round_e2m1(normalized).reshape((64, 2))
+        even, odd = tl.split(codes)
+        payload = even | (odd << 4)
         base = index_cache + block * INDEX_CACHE_STRIDE
-        tl.store(base + offset * 128 + columns, quantized.to(tl.uint8, bitcast=True))
-        tl.store(
-            (base + INDEX_EB * 128 + offset * 4).to(tl.pointer_type(tl.float32)), scale
-        )
+        tl.store(base + offset * 64 + tl.arange(0, 64), payload)
+        tl.store(base + INDEX_EB * 64 + offset * 4 + tl.arange(0, 4), exponent)
 
     if RATIO == 2:
         # Every stage-A CTA has finished reading the old ring. Preserve raw
@@ -370,7 +373,7 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
             pool.dtype != torch.uint8
             or pool.ndim != 3
             or (region == INDEXER_KV and not pool.is_contiguous())
-            or pool.shape[2] != (132 if region == INDEXER_KV else 584)
+            or pool.shape[2] != (68 if region == INDEXER_KV else 288)
             or pool.stride(2) != 1
             or pool.stride(1) != pool.shape[2]
             or pool.stride(0) < pool.shape[1] * pool.shape[2]

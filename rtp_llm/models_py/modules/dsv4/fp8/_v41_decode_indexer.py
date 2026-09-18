@@ -1,8 +1,10 @@
-"""V4.1 decode index scoring directly from the source layer's packed FP8 cache.
+"""V4.1 decode index scoring directly from the source layer's packed FP4 cache.
 
-The cache has grouped storage within each block: all 128-byte K rows, then
-all FP32 scales. Its nominal [blocks, entries, 132] view is not a per-row
-K/scale interleave. No full-capacity dequantization or [T,H,K] score is made.
+The cache has grouped storage within each block: all 64-byte FP4 payload
+rows, then all packed-UE8M0 int32 scales. Its nominal [blocks, entries, 68]
+view is not a per-row payload/scale interleave. No full-capacity
+dequantization or [T,H,K] score is made; DeepGEMM's MX-mode paged kernel
+reads the fused bytes directly.
 """
 
 from __future__ import annotations
@@ -109,12 +111,12 @@ def is_supported(
         or block_size not in (64, 128)
     ):
         return False
-    from ._indexer_score import has_fp8_paged_mqa_logits
+    from ._indexer_score import has_fp8_fp4_paged_mqa_logits
 
-    if not has_fp8_paged_mqa_logits():
+    if not has_fp8_fp4_paged_mqa_logits():
         return False
     major = torch.cuda.get_device_capability(device)[0]
-    return major == 10 or (major == 9 and block_size == 64)
+    return major == 10
 
 
 def prepare_indexer_q(
@@ -122,12 +124,13 @@ def prepare_indexer_q(
     weights: torch.Tensor,
     freqs_cis: torch.Tensor,
     rope_head_dim: int = 64,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """RoPE->BF16 rounding->continuous FP8 scale; keep FP32 head weights.
+):
+    """RoPE the queries, then quantize to the group-32 UE8M0 FP4 MX form.
 
-    ``q`` is pre-RoPE BF16 [B,S,32,128], ``weights`` is FP32 [B,S,32],
-    and frequencies are complex64 [B*S,rope_head_dim/2]. The returned
-    FP32 weights include each positive Q scale, preserving signed weights.
+    ``q`` is pre-RoPE BF16 [B,S,32,128], ``weights`` is FP32 [B,S,32] (used
+    raw by DeepGEMM's MX mode — the query scales live in the packed SF), and
+    ``frequencies`` are complex64 [B*S, rope_head_dim/2]. Returns
+    ``(payload [B,S,32,64] int8, sf [B,S,32] int32)``.
     """
     if q.ndim != 4 or q.shape[2:] != (32, 128) or q.dtype != torch.bfloat16:
         raise ValueError("V4.1 indexer Q must be BF16 [B,S,32,128]")
@@ -143,9 +146,16 @@ def prepare_indexer_q(
         raise ValueError("V4.1 indexer frequencies must match every query token")
     if weights.device != q.device or freqs_cis.device != q.device:
         raise ValueError("V4.1 indexer Q, weights and frequencies must share a device")
-    from ._indexer_q_quant_triton import indexer_q_rope_fp8_quant_fold
+    from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import quantize_rows_fp4
+    from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
 
-    return indexer_q_rope_fp8_quant_fold(q, weights, freqs_cis, rope_head_dim)
+    b, s, h, d = q.shape
+    flat = q.reshape(b * s, h, d).clone()
+    apply_rotary_emb(
+        flat[..., -rope_head_dim:].unsqueeze(0), freqs_cis.reshape(b * s, -1)
+    )
+    payload, sf = quantize_rows_fp4(flat)
+    return payload.view(b, s, h, d // 2), sf.view(b, s, h)
 
 
 def score_decode_indexer(
@@ -163,15 +173,17 @@ def score_decode_indexer(
     """Return FP32 [B*S,max_ctx_len], or None for an unsupported fast path.
 
     Pool and block table must come from the same KV source layer. Pool is the
-    contiguous, unpadded uint8 [blocks,typed_entries_per_block,132] view;
-    entries are physical cache rows, not raw allocator blocks. With uniform
-    V4.1 cache layout, ratio-2 occupies only the first half of every physical
-    block; pass that half as ``logical_entries_per_block``. Its scale region
-    still follows ALL physical K rows, so reinterpreting it as a half-sized
-    cache block is incorrect. Score the physical extent and compact logits.
-    ``context_lens[b,s]`` is the device-side causal visible key count for that
-    individual speculative token, in [0,max_ctx_len]. Static max_ctx_len must
-    fit the table coverage. No device scalar is read during capture/replay.
+    contiguous, unpadded uint8 [blocks,typed_entries_per_block,68] view over
+    the per-block planar FP4 layout (payload plane then packed-UE8M0 scale
+    plane); entries are physical cache rows, not raw allocator blocks. With
+    uniform V4.1 cache layout, ratio-2 occupies only the first half of every
+    physical block; pass that half as ``logical_entries_per_block``. Its scale
+    region still follows ALL physical payload rows, so reinterpreting it as a
+    half-sized cache block is incorrect. Score the physical extent and
+    compact logits. ``context_lens[b,s]`` is the device-side causal visible
+    key count for that individual speculative token, in [0,max_ctx_len].
+    Static max_ctx_len must fit the table coverage. No device scalar is read
+    during capture/replay.
 
     DeepGEMM leaves columns >= context_lens undefined. The output kernel sets
     them to -inf and restores score zero for visible unallocated table entries
@@ -183,10 +195,10 @@ def score_decode_indexer(
     if (
         pool.ndim != 3
         or pool.shape[0] < 1
-        or pool.shape[2] != 132
+        or pool.shape[2] != 68
         or pool.dtype != torch.uint8
     ):
-        raise ValueError("V4.1 indexer pool must be uint8 [blocks,entries,132]")
+        raise ValueError("V4.1 indexer pool must be uint8 [blocks,entries,68]")
     if not pool.is_contiguous():
         raise ValueError("V4.1 indexer packed pool must have no block padding")
     if q.ndim != 4:
@@ -218,9 +230,9 @@ def score_decode_indexer(
         torch.int64,
     ):
         raise ValueError("V4.1 indexer block table and lengths must be integers")
-    from ._indexer_score import fp8_paged_indexer_score
+    from ._indexer_score import fp8_fp4_paged_indexer_score
 
-    q_fp8, folded = prepare_indexer_q(q, weights, freqs_cis, rope_head_dim)
+    q_payload, q_sf = prepare_indexer_q(q, weights, freqs_cis, rope_head_dim)
     lengths = context_lens.to(torch.int32).contiguous()
     physical_lengths = torch.empty_like(lengths)
     safe_table = torch.empty(block_table.shape, dtype=torch.int32, device=q.device)
@@ -245,10 +257,11 @@ def score_decode_indexer(
         if logical_entries == block_size
         else triton.cdiv(max_ctx_len, logical_entries) * block_size
     )
-    logits = fp8_paged_indexer_score(
-        q_fp8,
-        folded.view(b * s, h),
-        pool.flatten(0, 1),
+    logits = fp8_fp4_paged_indexer_score(
+        q_payload,
+        q_sf,
+        pool,
+        weights.reshape(b * s, h),
         safe_table,
         physical_lengths,
         block_size,

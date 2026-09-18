@@ -9,9 +9,10 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_decode_indexer as fused
-from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
-    dequantize_indexer_k,
-    quantize_indexer_k,
+from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_indexer as prefill
+from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
+    dequantize_indexer_k_fp4,
+    quantize_indexer_k_fp4,
 )
 
 
@@ -22,29 +23,25 @@ def make_case(b, s, capacity, physical, logical, ratio, seed=42):
     blocks = (capacity + logical - 1) // logical
     table = torch.randperm(b * blocks, device=device).add_(1).view(b, blocks).int()
     pool = torch.full(
-        (b * blocks + 1, physical, 132), 127, dtype=torch.uint8, device=device
+        (b * blocks + 1, physical, 68), 127, dtype=torch.uint8, device=device
     )
     ids = torch.arange(capacity, device=device)
     slots = table[:, ids // logical].long() * physical + ids.remainder(logical)
     keys = torch.randn(b, capacity, 128, dtype=torch.bfloat16, device=device) * 0.4
-    quantize_indexer_k(keys.flatten(0, 1), slots.flatten(), pool)
+    quantize_indexer_k_fp4(keys.flatten(0, 1), slots.flatten(), pool)
     # Interpret the documented physical bytes independently of the dequant
-    # kernel. Re-quantizing with PyTorch would change rare FP8 subnormal ties;
-    # both old and new production scorers consume these existing cache bytes.
-    raw_blocks = pool.view(-1, physical * 132)
-    packed_q = (
-        raw_blocks[:, : physical * 128]
-        .view(-1, physical, 128)
-        .view(torch.float8_e4m3fn)
-    )
-    packed_scales = raw_blocks[:, physical * 128 :].view(torch.float32)
+    # kernel. Re-quantizing with PyTorch would change rare rounding ties; both
+    # old and new production scorers consume these existing cache bytes.
+    raw_blocks = pool.view(-1, physical * 68)
+    packed_q = raw_blocks[:, : physical * 64].view(-1, physical, 64).view(torch.int8)
+    packed_sf = raw_blocks[:, physical * 64 :].view(torch.int32)
     physical_ids, offsets = slots // physical, slots % physical
-    keys_ref = (
-        packed_q[physical_ids, offsets].float()
-        * packed_scales[physical_ids, offsets, None]
-    )
-    restored = dequantize_indexer_k(pool, slots.flatten()).view_as(keys_ref)
-    torch.testing.assert_close(restored, keys_ref, rtol=2e-6, atol=2e-6)
+    keys_ref = _decode_fp4(
+        packed_q[physical_ids, offsets].reshape(-1, 64),
+        packed_sf[physical_ids, offsets].reshape(-1),
+    ).view(b, capacity, 128)
+    restored = dequantize_indexer_k_fp4(pool, slots.flatten()).view_as(keys_ref)
+    torch.testing.assert_close(restored, keys_ref, rtol=0, atol=0)
     q = torch.randn(b, s, 32, 128, dtype=torch.bfloat16, device=device) * 0.4
     weights = torch.randn(b, s, 32, dtype=torch.float32, device=device) / 64
     angles = torch.randn(b * s, 32, dtype=torch.float32, device=device)
@@ -66,20 +63,36 @@ def make_case(b, s, capacity, physical, logical, ratio, seed=42):
     }, keys_ref
 
 
+def _decode_fp4(payload, sf):
+    """Decode packed int8 e2m1 payload + packed-UE8M0 int32 scales to fp32."""
+    rows = payload.shape[0]
+    flat = payload.view(torch.uint8)
+    low = flat & 15
+    high = flat >> 4
+    codes = torch.stack((low, high), dim=-1).reshape(rows, -1)
+    magnitude = codes & 7
+    normal = torch.exp2((magnitude >> 1).float() - 1.0) * (
+        1.0 + (magnitude & 1).float() * 0.5
+    )
+    values = torch.where(magnitude < 2, magnitude.float() * 0.5, normal)
+    values = torch.where(codes.ge(8), -values, values)
+    exponent = sf.view(torch.uint8).view(rows, 4).float() - 127.0
+    scale = torch.exp2(exponent)
+    return values.reshape(rows, 4, 32) * scale[:, :, None]
+
+
 def reference_q(q, freqs):
     value = q.clone()
     b, s, h, _ = q.shape
     pairs = torch.view_as_complex(value[..., -64:].float().reshape(b * s, h, 32, 2))
     rotated = torch.view_as_real(pairs * freqs[:, None]).flatten(-2)
     value[..., -64:] = rotated.reshape(b, s, h, 64).to(torch.bfloat16)
-    value = value.float()
-    scale = (value.abs().amax(-1, keepdim=True) / 448.0).clamp_min(1e-12)
-    return (value / scale).to(torch.float8_e4m3fn), scale
+    _, _, values = prefill._fp4_rows_torch(value)
+    return values.view(b, s, h, 128)
 
 
 def reference(case, keys):
-    q, scale = reference_q(case["q"], case["freqs_cis"])
-    q = q.float() * scale
+    q = reference_q(case["q"], case["freqs_cis"])
     logits = torch.einsum("bshd,bkd->bshk", q, keys).relu_()
     logits = (logits * case["weights"][..., None]).sum(2)
     return mask(logits.flatten(0, 1), case)
@@ -232,12 +245,12 @@ class V41DecodeIndexerTest(unittest.TestCase):
                 fused.is_supported(torch.device("cuda"), 128, num_heads=64)
             )
             with patch.object(
-                _indexer_score, "has_fp8_paged_mqa_logits", return_value=True
+                _indexer_score, "has_fp8_fp4_paged_mqa_logits", return_value=True
             ):
                 with patch.object(
                     torch.cuda, "get_device_capability", return_value=(9, 0)
                 ):
-                    self.assertTrue(fused.is_supported(torch.device("cuda"), 64))
+                    self.assertFalse(fused.is_supported(torch.device("cuda"), 64))
                     self.assertFalse(fused.is_supported(torch.device("cuda"), 128))
                 with patch.object(
                     torch.cuda, "get_device_capability", return_value=(10, 3)
@@ -251,7 +264,7 @@ class V41DecodeIndexerTest(unittest.TestCase):
         freqs = torch.empty(6, 32, dtype=torch.complex64)
         with self.assertRaisesRegex(ValueError, "remain FP32"):
             fused.prepare_indexer_q(q, weights, freqs)
-        pool = torch.empty(2, 128, 136, dtype=torch.uint8)[..., :132]
+        pool = torch.empty(2, 128, 72, dtype=torch.uint8)[..., :68]
         with self.assertRaisesRegex(ValueError, "no block padding"):
             fused.score_decode_indexer(
                 q,

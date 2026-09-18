@@ -51,13 +51,13 @@ def _layout_owner(device, ratio, batch, *, ring_entries=_STATE_EB):
     }
     pools = {
         main_region: torch.full(
-            (batch * pages + 1, _KV_TPB // ratio, 584),
+            (batch * pages + 1, _KV_TPB // ratio, 288),
             0x5A,
             device=device,
             dtype=torch.uint8,
         ),
         INDEXER_KV: torch.full(
-            (batch * pages + 1, _KV_TPB, 132),
+            (batch * pages + 1, _KV_TPB, 68),
             0x7F,
             device=device,
             dtype=torch.uint8,
@@ -213,30 +213,35 @@ def _write_mask(case, region):
     mask = torch.zeros(pool.shape[0], entries * pool.shape[2], dtype=torch.bool)
     for slot in slots[slots >= 0].tolist():
         block, offset = divmod(slot, entries)
-        data_bytes, scale_bytes = (128, 4) if region == INDEXER_KV else (576, 8)
-        mask[block, offset * data_bytes : (offset + 1) * data_bytes] = True
-        start = entries * data_bytes + offset * scale_bytes
-        mask[block, start : start + scale_bytes] = True
+        if region == INDEXER_KV:
+            # Planar per block: payload plane then packed-scale plane.
+            mask[block, offset * 64 : (offset + 1) * 64] = True
+            start = entries * 64 + offset * 4
+            mask[block, start : start + 4] = True
+        else:
+            # Row-interleaved 288B entries: payload + E4M3 scales per row.
+            mask[block, offset * 288 : (offset + 1) * 288] = True
     return mask.reshape_as(pool).to(pool.device)
 
 
 def _canonical_cache_zero_signs(pool, region):
     """Only the zero-input test permits semantically equal signed-zero data.
 
-    Main NoPE bytes, all scales, padding, and untouched regions remain exact.
-    Main differences are permitted only for BF16 RoPE ±0; index differences
-    only for E4M3 ±0. This does not admit a one-ULP difference in nonzero data.
+    Main payload bytes, indexer payload bytes, padding, and untouched
+    regions remain exact. Differences are permitted only for e2m1 ±0
+    nibbles (byte & 0x77 == 0). E4M3 group scales never round to zero
+    (the codec floors the group maximum at 6 * 2**-9). This does not
+    admit a one-ULP difference in nonzero data.
     """
     canonical = pool.contiguous().clone()
     blocks, entries, _ = canonical.shape
     raw = canonical.view(blocks, -1)
     if region == INDEXER_KV:
-        keys = raw[:, : entries * 128]
-        keys.masked_fill_((keys & 0x7F) == 0, 0)
+        payload = raw[:, : entries * 64]
+        payload.masked_fill_((payload & 0x77) == 0, 0)
     else:
-        data = raw[:, : entries * 576].view(blocks, entries, 576)
-        rope_bits = data[:, :, 448:].view(torch.int16)
-        rope_bits.masked_fill_((rope_bits & 0x7FFF) == 0, 0)
+        data = raw.view(blocks, entries, 288)[..., :256]
+        data.masked_fill_((data & 0x77) == 0, 0)
     return canonical
 
 
@@ -434,14 +439,14 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                     for case in (old, new):
                         region = case.owner._global_region()
                         pool = case.owner._test_pools[region]
-                        width = pool.shape[1] * 584
+                        width = pool.shape[1] * 288
                         backing = torch.full(
                             (pool.shape[0], width + 256),
                             0xA5,
                             dtype=torch.uint8,
                             device="cuda",
                         )
-                        padded = backing.as_strided(pool.shape, (width + 256, 584, 1))
+                        padded = backing.as_strided(pool.shape, (width + 256, 288, 1))
                         padded.copy_(pool)
                         case.owner._test_pools[region] = padded
                         backings.append((backing[:, width:], 0xA5))

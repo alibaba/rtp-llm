@@ -87,6 +87,7 @@ class SparseAttnV4DecodeFp8Op:
         extra_k_cache: Optional[torch.Tensor] = None,
         extra_topk_idxs: Optional[torch.Tensor] = None,
         extra_topk_length: Optional[torch.Tensor] = None,
+        return_lse: bool = False,
     ) -> torch.Tensor:
         """Single- or dual-pool sparse attention.
 
@@ -102,6 +103,12 @@ class SparseAttnV4DecodeFp8Op:
         (3D ``[B, q_len, extra_topk]`` int32 global slot ids) to attend
         over a second FP8 KV pool in a single FlashMLA invocation. The
         kernel merges softmax across both pools natively.
+
+        ``return_lse=True`` additionally returns FlashMLA's softmax LSE
+        ``[B, num_heads_q, seq_len_q]`` fp32 (the raw ``log Z`` — unaffected
+        by ``attn_sink``). V4.1's FP4 GLOBAL reader merges it with its own
+        Triton softmax; empty rows report ``+inf`` and must be guarded by
+        the consumer.
         """
         assert _FLASH_MLA_AVAILABLE, (
             "flash_mla wheel is required for FP8 sparse decode "
@@ -119,6 +126,7 @@ class SparseAttnV4DecodeFp8Op:
             extra_k_cache,
             extra_topk_idxs,
             extra_topk_length,
+            return_lse,
         )
 
     def _forward_flash_mla(
@@ -134,6 +142,7 @@ class SparseAttnV4DecodeFp8Op:
         extra_k_cache: Optional[torch.Tensor] = None,
         extra_topk_idxs: Optional[torch.Tensor] = None,
         extra_topk_length: Optional[torch.Tensor] = None,
+        return_lse: bool = False,
     ) -> torch.Tensor:
         from flash_mla import flash_mla_with_kvcache  # type: ignore[import-not-found]
 
@@ -173,7 +182,7 @@ class SparseAttnV4DecodeFp8Op:
         # shape [n_heads], non-zero ~0.3..0.6 mean). FlashMLA kernel applies
         # output *= exp(lse) / (exp(lse) + exp(attn_sink)). Mirrors vLLM
         # ``deepseek_v4_attention.py:860`` (both single- and dual-pool calls).
-        attn_out, _ = flash_mla_with_kvcache(
+        attn_out, lse = flash_mla_with_kvcache(
             q=q,
             k_cache=kv_4d,
             block_table=block_table,
@@ -191,4 +200,7 @@ class SparseAttnV4DecodeFp8Op:
             extra_topk_length=extra_topk_length,
         )
 
-        return attn_out.view(B, q_len, H, self.head_dim).contiguous()
+        attn_out = attn_out.view(B, q_len, H, self.head_dim).contiguous()
+        if return_lse:
+            return attn_out, lse
+        return attn_out
