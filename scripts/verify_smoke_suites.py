@@ -65,6 +65,7 @@ EXPECTED_INTERNAL_SUITE_COUNTS = {
     "ppu_qwen35": 6,
     "ppu_qwen35_w8a8_manual": 4,
     "rocm_embedding_internal": 2,
+    "rocm_visionbert_internal": 1,
     "sm120_basic_internal": 1,
 }
 
