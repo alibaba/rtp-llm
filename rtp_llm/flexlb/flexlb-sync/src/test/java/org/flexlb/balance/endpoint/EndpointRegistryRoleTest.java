@@ -2,7 +2,6 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -33,7 +32,7 @@ class EndpointRegistryRoleTest {
     @BeforeEach
     void setUp() {
         ConfigService configService = Mockito.mock(ConfigService.class);
-        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointTestSupport.TestRequestRuntime requestRuntime =
                 EndpointTestSupport.requestRuntime();
         registry = new EndpointRegistry(
@@ -285,8 +284,7 @@ class EndpointRegistryRoleTest {
         try (WorkerEndpoint.GenerationPin pin =
                      oldEndpoint.tryPinGeneration()) {
             assertTrue(pin != null);
-            oldReservation = oldEndpoint.tryReserveQueuedPinned(
-                    pin, 41L, 100L, 110L, 50);
+            oldReservation = oldEndpoint.reserve(pin, 41L, 100L, 110L, 50);
         }
 
         retire(RoleType.DECODE, ipPort, oldEndpoint.getStatus());
@@ -300,8 +298,8 @@ class EndpointRegistryRoleTest {
         assertNull(oldEndpoint.reservationHandle(oldReservation.requestId()),
                 "close must retire A's queued ownership before B is routable");
         assertNull(replacement.reservationHandle(oldReservation.requestId()));
-        replacement.releaseReservationExact(oldReservation);
-        assertTrue(replacement.layeredAdmissionView().reserved().isEmpty(),
+        replacement.release(oldReservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        assertTrue(replacement.resourceSnapshot().reserved().isEmpty(),
                 "A's exact generation handle must never mutate same-address B");
     }
 

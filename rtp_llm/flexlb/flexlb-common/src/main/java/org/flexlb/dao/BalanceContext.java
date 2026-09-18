@@ -8,6 +8,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -21,7 +22,7 @@ public class BalanceContext {
 
     //======================== Basic =======================//
 
-    private FlexlbConfig config;
+    private final FlexlbConfig config;
 
     private Request request;
 
@@ -64,6 +65,10 @@ public class BalanceContext {
 
     private long enqueueTime;
 
+    /** Stable worker-queue age and tie-breaker across local route withdrawals. */
+    private long firstWorkerEnqueueTime;
+    private long workerEnqueueSequence;
+
     /**
      * Timestamp (ms) when the engine acknowledges the batch in BATCH mode.
      * Set when RequestScheduler confirms the EnqueueBatch acknowledgement.
@@ -90,7 +95,7 @@ public class BalanceContext {
 
     /**
      * priority scheduling plan type that finally placed the request:
-     * normal / prefill_evict / decode_evict. Empty when not applicable.
+     * normal / decode_evict. Empty when not applicable.
      */
     private String planType = "";
 
@@ -101,6 +106,10 @@ public class BalanceContext {
     private int victimCount;
 
     //===================== Method ===================//
+
+    public BalanceContext(FlexlbConfig config) {
+        this.config = Objects.requireNonNull(config, "config");
+    }
 
     public long getRequestId() {
         return request.getRequestId();

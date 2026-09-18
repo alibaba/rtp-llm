@@ -69,8 +69,20 @@ public class FormulaPredictor
         }
         PrefillTimeVariableBindings.EvaluationVariables vars =
                 PrefillTimeVariableBindings.batchVariables(features);
-        return (double) formula.evaluate(
+        return formula.evaluateAsDouble(
                 vars.topLevelVars(), vars.itemVars());
+    }
+
+    @Override
+    public BatchPrediction newBatchPrediction() {
+        ArithmeticFormula.Aggregation aggregation = formula.newAggregation();
+        if (aggregation == null) return PrefillTimePredictor.Evaluator.super.newBatchPrediction();
+        var bindings = new PrefillTimeVariableBindings.AppendBindings();
+        return (seqLen, hitCache) -> {
+            bindings.append(seqLen, hitCache);
+            aggregation.append(bindings.item);
+            return aggregation.evaluate(bindings.batch);
+        };
     }
 
     @Override

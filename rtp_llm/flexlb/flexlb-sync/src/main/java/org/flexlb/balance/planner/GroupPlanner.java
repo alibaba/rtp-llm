@@ -177,6 +177,23 @@ public final class GroupPlanner {
             ItemAccess<T> access,
             Constraints constraints,
             ToDoubleFunction<List<T>> predictor) {
+        return selectWithPrediction(orderedItems, access, constraints,
+                predictor == null ? null : (added, prefix) -> predictor.applyAsDouble(prefix));
+    }
+
+    /**
+     * Owned by one selection: invoked once per visited prefix in append order.
+     * The last tentative member may exceed the prediction budget and be excluded from the result.
+     * Callbacks must not retain the mutable prefix list.
+     */
+    @FunctionalInterface
+    public interface PrefixPrediction<T> {
+        double append(T added, List<T> prefix);
+    }
+
+    public static <T> Selection<T> selectWithPrediction(
+            Iterable<T> orderedItems, ItemAccess<T> access, Constraints constraints,
+            PrefixPrediction<T> predictor) {
         Iterator<T> ordered = orderedItems.iterator();
         if (!ordered.hasNext()) {
             return new Selection<>(List.of(), Shape.empty(),
@@ -185,40 +202,50 @@ public final class GroupPlanner {
 
         int maxRequests = constraints.maxRequests();
         T head = ordered.next();
-        Selection<T> singleton = selectSingleton(
-                head, access, constraints, predictor);
-        if (maxRequests == 1
-                || singleton.predictionBoundaryTriggered()
-                || !ordered.hasNext()) {
-            return singleton;
+        boolean mayGrow = maxRequests > 1 && ordered.hasNext();
+        List<T> picked;
+        if (mayGrow) {
+            picked = new ArrayList<>(Math.min(maxRequests, INITIAL_SELECTION_CAPACITY));
+            picked.add(head);
+        } else {
+            picked = List.of(head);
         }
-
-        List<T> picked = new ArrayList<>(Math.min(
-                maxRequests, INITIAL_SELECTION_CAPACITY));
-        picked.add(head);
-        Shape shape = singleton.shape();
-        long windowOpenedAtMs = singleton.windowOpenedAtMs();
+        long headTokens = Math.max(0L, access.seqLen(head));
+        long maxSeqLen = headTokens;
+        long paddedTokens = headTokens;
+        long kvTokens = headTokens;
+        long windowOpenedAtMs = access.enqueuedAtMs(head);
         boolean predictionEnabled = predictor != null
                 && constraints.predictedExecutionBudgetMs() > 0L;
-        OptionalDouble selectedPredictionMs = singleton.selectedPredictionMs();
+        double selectedPredictionMs = 0.0;
         boolean predictionBoundaryTriggered = false;
+        if (predictionEnabled) {
+            selectedPredictionMs = requireValidPrediction(predictor.append(head, picked));
+            predictionBoundaryTriggered = predictionDispatchBoundaryReached(
+                    selectedPredictionMs, constraints.predictedExecutionBudgetMs());
+        }
 
-        while (ordered.hasNext()
+        while (mayGrow && ordered.hasNext()
                 && picked.size() < maxRequests
                 && !predictionBoundaryTriggered) {
             T item = ordered.next();
-
-            Shape candidate = shape.add(access.seqLen(item));
-            if (!candidate.fitsCompute(constraints.batchTokenCapacity())) {
+            long itemTokens = Math.max(0L, access.seqLen(item));
+            long nextMaxSeqLen = Math.max(maxSeqLen, itemTokens);
+            long nextPaddedTokens = Shape.saturatedMultiply(nextMaxSeqLen, picked.size() + 1);
+            long nextKvTokens = saturatedAdd(kvTokens, itemTokens);
+            if (constraints.batchTokenCapacity() <= 0L
+                    || nextPaddedTokens >= constraints.batchTokenCapacity()) {
                 break;
             }
-            if (!candidate.fitsKv(constraints.batchKvCapacity())) {
+            if (constraints.batchKvCapacity() != Long.MAX_VALUE
+                    && (constraints.batchKvCapacity() < 0L
+                        || nextKvTokens > constraints.batchKvCapacity())) {
                 break;
             }
 
             picked.add(item);
             if (predictionEnabled) {
-                double predictedMs = validatedPrediction(predictor, picked);
+                double predictedMs = requireValidPrediction(predictor.append(item, picked));
                 if (predictionGrowthLimitExceeded(
                         predictedMs, constraints.predictedExecutionBudgetMs())) {
                     predictionBoundaryTriggered = true;
@@ -227,23 +254,20 @@ public final class GroupPlanner {
                     picked.remove(picked.size() - 1);
                     break;
                 }
-                selectedPredictionMs = OptionalDouble.of(predictedMs);
-                if (predictionDispatchBoundaryReached(
-                        predictedMs, constraints.predictedExecutionBudgetMs())) {
-                    shape = candidate;
-                    windowOpenedAtMs = Math.min(
-                            windowOpenedAtMs, access.enqueuedAtMs(item));
-                    predictionBoundaryTriggered = true;
-                    break;
-                }
+                selectedPredictionMs = predictedMs;
+                predictionBoundaryTriggered = predictionDispatchBoundaryReached(
+                        predictedMs, constraints.predictedExecutionBudgetMs());
             }
-            shape = candidate;
-            windowOpenedAtMs = Math.min(
-                    windowOpenedAtMs, access.enqueuedAtMs(item));
+            maxSeqLen = nextMaxSeqLen;
+            paddedTokens = nextPaddedTokens;
+            kvTokens = nextKvTokens;
+            windowOpenedAtMs = Math.min(windowOpenedAtMs, access.enqueuedAtMs(item));
         }
 
-        return new Selection<>(picked, shape, windowOpenedAtMs,
-                predictionBoundaryTriggered, selectedPredictionMs);
+        return new Selection<>(picked,
+                new Shape(picked.size(), maxSeqLen, paddedTokens, kvTokens), windowOpenedAtMs,
+                predictionBoundaryTriggered,
+                predictionEnabled ? OptionalDouble.of(selectedPredictionMs) : OptionalDouble.empty());
     }
 
     /** Evaluate one selection against an explicit clock value. */
@@ -280,26 +304,6 @@ public final class GroupPlanner {
                 select(orderedItems, access, constraints, predictor), constraints, nowMs);
     }
 
-    private static <T> Selection<T> selectSingleton(
-            T item,
-            ItemAccess<T> access,
-            Constraints constraints,
-            ToDoubleFunction<List<T>> predictor) {
-        List<T> selected = List.of(item);
-        Shape shape = Shape.empty().add(access.seqLen(item));
-        long windowOpenedAtMs = access.enqueuedAtMs(item);
-        if (predictor == null || constraints.predictedExecutionBudgetMs() <= 0L) {
-            return new Selection<>(selected, shape, windowOpenedAtMs,
-                    false, OptionalDouble.empty());
-        }
-
-        double predictedMs = validatedPrediction(predictor, selected);
-        return new Selection<>(selected, shape, windowOpenedAtMs,
-                predictionDispatchBoundaryReached(
-                        predictedMs, constraints.predictedExecutionBudgetMs()),
-                OptionalDouble.of(predictedMs));
-    }
-
     public static boolean windowElapsed(long windowOpenedAtMs,
                                         long nowMs,
                                         long collectionWindowMs) {
@@ -328,11 +332,6 @@ public final class GroupPlanner {
         if (selectedPredictionMs.isPresent()) {
             requireValidPrediction(selectedPredictionMs.getAsDouble());
         }
-    }
-
-    private static <T> double validatedPrediction(
-            ToDoubleFunction<List<T>> predictor, List<T> items) {
-        return requireValidPrediction(predictor.applyAsDouble(items));
     }
 
     private static double requireValidPrediction(double predictedMs) {

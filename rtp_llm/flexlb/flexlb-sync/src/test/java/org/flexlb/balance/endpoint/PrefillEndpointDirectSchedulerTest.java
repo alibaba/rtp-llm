@@ -23,11 +23,11 @@ class PrefillEndpointDirectSchedulerTest {
 
     @ParameterizedTest
     @EnumSource(value = RoleType.class, names = {"PREFILL", "PDFUSION"})
-    void directCapacityIsAtomicAndReusableAfterRollback(RoleType role) throws Exception {
-        FlexlbConfig config = new FlexlbConfig();
+    void directRequestLimitIsAtomicAndReusableAfterRollback(RoleType role) throws Exception {
+        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         config.setScheduler(SchedulerConfig.direct());
         config.setDispatcher(DispatcherConfig.nonBatch());
-        config.getDispatcher().setMaxInflightRequestsPerPrefillWorker(4);
+        config.getDispatcher().setMaxInflightPerPrefillWorker(4);
         var runtime = EndpointTestSupport.requestRuntime();
         PrefillEndpoint endpoint = new PrefillEndpoint(
                 EndpointTestSupport.workerStatus(role, "127.0.0.82", 8082, 9082),
@@ -35,17 +35,17 @@ class PrefillEndpointDirectSchedulerTest {
                 mock(BatchSchedulerReporter.class));
         endpoint.startGeneration();
         try (var executor = Executors.newFixedThreadPool(8)) {
-            List<Future<PrefillState.ReservationResult<PrefillState.DirectRegistration>>> futures =
+            List<Future<PrefillState.ReservationResult<PrefillState.RouteReservation>>> futures =
                     new ArrayList<>();
             for (long id = 1; id <= 64; id++) {
                 long requestId = id;
                 futures.add(executor.submit(() -> {
                     try (var pin = endpoint.tryPinGeneration()) {
-                        return endpoint.registerDirectRequest(pin, requestId, 10L);
+                        return endpoint.reserveUnqueuedRoute(pin, item(requestId), 10L);
                     }
                 }));
             }
-            List<PrefillState.DirectRegistration> owned = new ArrayList<>();
+            List<PrefillState.RouteReservation> owned = new ArrayList<>();
             for (var future : futures) {
                 var result = future.get();
                 if (result.status() == PrefillState.CapacityStatus.ACQUIRED) {
@@ -55,16 +55,21 @@ class PrefillEndpointDirectSchedulerTest {
                 }
             }
             assertEquals(4, owned.size());
-            assertEquals(4, endpoint.admissionPendingRequestCount());
-            owned.forEach(PrefillState.DirectRegistration::close);
-            assertEquals(0, endpoint.admissionPendingRequestCount());
+            assertEquals(4, endpoint.observedRequestCount());
             try (var pin = endpoint.tryPinGeneration()) {
-                var result = endpoint.registerDirectRequest(pin, 65L, 10L);
+                var full = endpoint.reserveUnqueuedRoute(pin, item(100L), 10L);
+                assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, full.status(),
+                        "four exact owners already consume the four-request limit");
+            }
+            owned.forEach(PrefillState.RouteReservation::close);
+            assertEquals(0, endpoint.observedRequestCount());
+            try (var pin = endpoint.tryPinGeneration()) {
+                var result = endpoint.reserveUnqueuedRoute(pin, item(65L), 10L);
                 assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
                 result.reservation().close();
                 result.reservation().close();
             }
-            assertEquals(0, endpoint.admissionPendingRequestCount());
+            assertEquals(0, endpoint.observedRequestCount());
         } finally {
             endpoint.close();
         }
@@ -72,7 +77,7 @@ class PrefillEndpointDirectSchedulerTest {
 
     @Test
     void directSchedulerCanConstructPrefillEndpoint() {
-        FlexlbConfig config = new FlexlbConfig();
+        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         config.setScheduler(SchedulerConfig.direct());
         config.setDispatcher(DispatcherConfig.nonBatch());
 
@@ -89,6 +94,13 @@ class PrefillEndpointDirectSchedulerTest {
             return created;
         });
         endpoint.close();
+    }
+
+    private static org.flexlb.balance.scheduler.ScheduledRequest item(long requestId) {
+        var item = mock(org.flexlb.balance.scheduler.ScheduledRequest.class);
+        org.mockito.Mockito.when(item.requestId()).thenReturn(requestId);
+        org.mockito.Mockito.when(item.seqLen()).thenReturn(128L);
+        return item;
     }
 
     private static WorkerStatus workerStatus() {

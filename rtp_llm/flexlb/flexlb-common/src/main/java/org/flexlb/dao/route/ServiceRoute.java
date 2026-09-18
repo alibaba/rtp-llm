@@ -8,6 +8,7 @@ import org.apache.commons.lang3.tuple.Pair;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -20,6 +21,12 @@ public class ServiceRoute {
 
     @JsonProperty("role_endpoints")
     private List<GroupRoleEndPoint> roleEndpoints = new ArrayList<>();
+
+    @JsonProperty("hosts")
+    private Map<String, List<String>> hosts = Map.of();
+
+    @JsonProperty("discovery_file")
+    private String discoveryFile;
 
     @JsonProperty("load_balance")
     private Boolean loadBalance;

@@ -18,7 +18,6 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
-import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -35,6 +34,7 @@ import java.util.function.BiConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -53,12 +53,10 @@ class FlexlbServiceImplTest {
     private RouteService routeService;
     private LBStatusConsistencyService lbStatusConsistencyService;
     private EngineHealthReporter engineHealthReporter;
-    private ActiveRequestCounter activeRequestCounter;
     private FlexlbGrpcForwarder grpcForwarder;
     private ConfigService configService;
     private BatchSchedulerReporter batchSchedulerReporter;
     private ServerScheduleLatencyRecorder serverLatencyRecorder;
-    private ActiveRequestCounter.RequestToken requestToken;
     private FlexlbServiceImpl service;
     private ch.qos.logback.classic.Logger pvLogger;
     private ListAppender<ILoggingEvent> pvAppender;
@@ -69,23 +67,19 @@ class FlexlbServiceImplTest {
         routeService = mock(RouteService.class);
         lbStatusConsistencyService = mock(LBStatusConsistencyService.class);
         engineHealthReporter = mock(EngineHealthReporter.class);
-        activeRequestCounter = mock(ActiveRequestCounter.class);
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
         batchSchedulerReporter = mock(BatchSchedulerReporter.class);
         serverLatencyRecorder = mock(ServerScheduleLatencyRecorder.class);
 
         configService = mock(ConfigService.class);
-        FlexlbConfig flexlbConfig = new FlexlbConfig();
+        FlexlbConfig flexlbConfig = org.flexlb.mock.TestFlexlbConfigs.create();
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
 
-        requestToken = mock(ActiveRequestCounter.RequestToken.class);
-        when(activeRequestCounter.acquire()).thenReturn(requestToken);
 
         service = new FlexlbServiceImpl(
                 routeService,
                 lbStatusConsistencyService,
                 engineHealthReporter,
-                activeRequestCounter,
                 grpcForwarder,
                 configService,
                 batchSchedulerReporter,
@@ -108,6 +102,9 @@ class FlexlbServiceImplTest {
 
     @Test
     void testSchedule_localRouting() {
+        FlexlbConfig requestConfig = org.flexlb.mock.TestFlexlbConfigs.create();
+        when(configService.loadBalanceConfig()).thenReturn(requestConfig)
+                .thenThrow(new IllegalStateException("configuration must only be read once"));
         // Given: not master, no consistency needed
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
 
@@ -137,6 +134,10 @@ class FlexlbServiceImplTest {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
         assertTrue(resp.getSuccess());
         assertEquals(200, resp.getCode());
+        ArgumentCaptor<BalanceContext> contextCaptor = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(contextCaptor.capture());
+        assertSame(requestConfig, contextCaptor.getValue().getConfig());
+        verify(configService).loadBalanceConfig();
         assertPvContains("\"scheduleOrigin\":\"LOCAL_STANDALONE\"");
         verify(serverLatencyRecorder).recordArrival(anyLong());
         verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());
@@ -163,7 +164,6 @@ class FlexlbServiceImplTest {
         verify(routeService).cancelRequest(
                 12_356L, 0L, CancelReason.CLIENT_CANCELLED);
         verifyNoInteractions(observer);
-        verify(requestToken).close();
 
         Response lateRoute = new Response();
         lateRoute.setSuccess(true);
@@ -171,7 +171,6 @@ class FlexlbServiceImplTest {
         pendingRoute.complete(lateRoute);
 
         verifyNoInteractions(observer);
-        verify(requestToken, times(1)).close();
     }
 
     @Test
@@ -194,7 +193,6 @@ class FlexlbServiceImplTest {
         inOrder.verify(routeService).cancelRequest(
                 12_357L, 0L, CancelReason.CLIENT_CANCELLED);
         verifyNoInteractions(observer);
-        verify(requestToken).close();
     }
 
     @Test
@@ -312,7 +310,6 @@ class FlexlbServiceImplTest {
                 () -> service.schedule(request, observer));
 
         verifyNoInteractions(observer);
-        verify(requestToken, never()).close();
         verify(routeService, never()).route(any());
 
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB response =
@@ -329,7 +326,6 @@ class FlexlbServiceImplTest {
 
         verify(observer, times(1)).onNext(response);
         verify(observer, times(1)).onCompleted();
-        verify(requestToken, times(1)).close();
         verify(routeService, never()).route(any());
     }
 
@@ -364,7 +360,6 @@ class FlexlbServiceImplTest {
 
         verify(observer, times(1)).onNext(response);
         verify(observer, times(1)).onCompleted();
-        verify(requestToken, times(1)).close();
         verify(routeService, never()).route(any());
     }
 
@@ -391,7 +386,6 @@ class FlexlbServiceImplTest {
         assertFalse(response.getValue().getSuccess());
         assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
                 response.getValue().getCode());
-        verify(requestToken, times(1)).close();
         verify(routeService, never()).route(any());
     }
 
@@ -456,7 +450,6 @@ class FlexlbServiceImplTest {
         verify(routeService, never()).route(any());
         verify(observer, times(1)).onNext(any());
         verify(observer, never()).onCompleted();
-        verify(requestToken, times(1)).close();
     }
 
     @Test
@@ -897,7 +890,8 @@ class FlexlbServiceImplTest {
                 {
                   "scheduler":{"type":"QUEUE","queueTimeoutMs":7777,
                     "ordering":{"type":"FIFO"}},
-                  "dispatcher":{"type":"NON_BATCH"}
+                  "dispatcher":{"type":"NON_BATCH"},
+                  "requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2}}
                 }
                 """);
         when(configService.loadBalanceConfig()).thenReturn(queueConfig);
@@ -924,7 +918,8 @@ class FlexlbServiceImplTest {
         FlexlbConfig directConfig = ConfigService.parse("""
                 {
                   "scheduler":{"type":"DIRECT"},
-                  "dispatcher":{"type":"NON_BATCH"}
+                  "dispatcher":{"type":"NON_BATCH"},
+                  "requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2}}
                 }
                 """);
         when(configService.loadBalanceConfig()).thenReturn(directConfig);

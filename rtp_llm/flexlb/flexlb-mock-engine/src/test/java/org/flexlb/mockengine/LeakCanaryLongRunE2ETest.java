@@ -1,6 +1,5 @@
 package org.flexlb.mockengine;
 
-import org.flexlb.config.VictimStage;
 import org.flexlb.dao.loadbalance.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -17,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Task35 场景 D：泄漏金丝雀长跑（≥60s）—— 混合优先级流量 + 队列驱逐 +
+ * Task35 场景 D：泄漏金丝雀长跑（≥60s）—— 混合优先级队列流量 +
  * reducer deadline 超时收敛全程生效，中途注入两轮瞬态故障（enqueue 延迟 / enqueue
  * 拒绝），结束后强断言：
  * <ul>
@@ -34,24 +33,39 @@ class LeakCanaryLongRunE2ETest {
     private static final int[] PRIORITIES = {30, 50, 70};
 
     @Test
+    @Timeout(15)
+    void prefillRejectionRetainsDecodeUntilInactivityExpiry() throws Exception {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "5", 1.0, true)) {
+            h.config.getRequestLifecycle().getRequest().setTimeoutMs(2_000L);
+            h.fixedWindowDecision().setMaxRequests(1);
+            h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
+                    .failOnEnqueue(true).enqueueErrorMessage("reject before admission").build());
+            h.startAutoPump(10);
+            Response rejected = h.scheduler.submit(h.context(99_999L, 50)).get(5, TimeUnit.SECONDS);
+            assertEquals(8510, rejected.getCode());
+            assertEquals(1, h.decodeEndpoint(0).getInflightCount(),
+                    "Prefill rejection alone cannot prove that Decode is safe to release");
+            assertTrue(h.decodeEndpoint(0).routingView().inflightHardKv() > 0);
+            AutoTpmE2EHarness.await(() -> h.decodeEndpoint(0).getInflightCount() == 0,
+                    7_000, "an unobserved rejected request must expire without a Decode terminal report");
+            assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv());
+            assertEquals(0, h.prefillEndpoint(0).queuedRequestCount());
+            assertEquals(0, h.decodeEngines.get(0).getAcceptedCount(),
+                    "this scenario must not manufacture a Decode completion to reclaim ownership");
+        }
+    }
+
+    @Test
     @Timeout(115)
     void d_long_run_mixed_traffic_with_transient_faults_leaks_nothing() throws Exception {
-        // Use the mock's authoritative Cancel channel. An unsupported channel
-        // intentionally retains post-delivery ambiguous ownership behind an
-        // EngineFence, which is a production safety property rather than a leak.
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, true)) {
-            h.allowPreemption(VictimStage.PREFILL_QUEUED);
-            // PR-D: rescue removed — reducer deadline + exact ownership cleanup
-            // 小队列制造真实驱逐压力；小批次 + 快派发形成持续流转
-            h.config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(64);
+            // Prefill rejection is not Decode terminal evidence. Requests that
+            // never reach Decode must settle through bounded inactivity cleanup.
+            h.config.getRequestLifecycle().getRequest().setTimeoutMs(5_000L);
+            // Priority ordering and exact terminal cleanup remain active without preemption.
+            // 小批次与快速派发维持持续流量。
             h.fixedWindowDecision().setMaxRequests(4);
             h.fixedWindowDecision().setMaxCollectionWaitMs(5);
-            // This canary verifies queue eviction and the two injected
-            // EnqueueBatch fault windows. Keep the independent post-success
-            // backpressure gate out of the way, otherwise it can reject the
-            // whole tail as 8431 before the injected 8510 path is exercised.
-            h.config.queueScheduler().getLifecycle()
-                    .setMaxDeliveredNotAcceptedRequestsGlobal(0);
             h.prefillSelector = ctx -> (int) (ctx.getRequestId() % 2);
             h.startAutoPump(10);
 
@@ -101,7 +115,7 @@ class LeakCanaryLongRunE2ETest {
                 codeTally.merge(code, 1, Integer::sum);
                 assertTrue(code == 200 || code == 8400 || code == 8429
                                 || code == 8430 || code == 8431
-                                || code == 8502 || code == 8510 || code == 8515,
+                                || code == 8510 || code == 8511 || code == 8515,
                         "unexpected terminal code " + code + ": " + response.getErrorMessage());
             }
 
@@ -117,13 +131,14 @@ class LeakCanaryLongRunE2ETest {
                         "LEAK on engine " + svc.getGrpcPort());
             }
 
-            // 调度器账目必须由 finished 上报正常收敛，不依赖 TTL 清扫
-            // 掩盖完成游标丢记录。
+            // Successful engine work settles through finished reports. Rejected
+            // work has no Decode terminal and expires after its observation window;
+            // the final rejection burst ended over 19 seconds before this check.
             assertEquals(0, h.decodeEndpoint(0).getInflightCount(),
                     "decode shadow inflight must settle to zero");
             assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv(),
                     "no orphaned hard-KV reservation");
-            assertEquals(0, h.decodeEndpoint(0).layeredAdmissionView().acceptedCount());
+            assertEquals(0, h.decodeEndpoint(0).resourceSnapshot().acceptedCount());
             assertEquals(0, h.prefillEndpoint(0).queuedRequestCount());
             assertEquals(0, h.prefillEndpoint(1).queuedRequestCount());
 
