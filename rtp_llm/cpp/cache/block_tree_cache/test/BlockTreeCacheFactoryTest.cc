@@ -16,9 +16,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
@@ -124,7 +122,7 @@ CacheConfig makeHybridConfig(bool independent_pools, bool disable_linear_reuse =
     return config;
 }
 
-CacheConfig makeSharedBackingCascadeConfig() {
+CacheConfig makeIndependentWatermarkConfig() {
     CacheConfig config = makeHybridConfig(/*independent_pools=*/false);
 
     const std::shared_ptr<const KVCacheSpec>& linear_spec     = config.specForGroup(0);
@@ -138,8 +136,8 @@ CacheConfig makeSharedBackingCascadeConfig() {
         linear_spec->clone(),
     };
 
-    // Put FULL first so a watermark primary plan cascades to LINEAR.
-    // The HybridType allocator still uses one physical DeviceBlockPool for both logical groups.
+    // Put FULL before LINEAR to check watermark tracking for each group set.
+    // Each group owns an independent device pool.
     test::configureIndexedTestGroups(config,
                                      reordered_specs,
                                      {{0, 2}, {1, 3}},
@@ -378,19 +376,28 @@ std::shared_ptr<Allocator> initAllocator(const CacheConfig& config) {
     return allocator;
 }
 
-class GroupViewHybridPoolAllocator: public HybridPoolKVCacheAllocator {
+class GroupViewHybridPoolAllocator: public KVCacheAllocator {
 public:
-    using HybridPoolKVCacheAllocator::HybridPoolKVCacheAllocator;
+    using KVCacheAllocator::KVCacheAllocator;
 
     void overrideGroups(std::vector<KVCacheGroupPtr> groups) {
         exposed_groups_ = std::move(groups);
     }
 
     std::vector<KVCacheGroupPtr> cacheGroups() const override {
-        return exposed_groups_.empty() ? HybridPoolKVCacheAllocator::cacheGroups() : exposed_groups_;
+        return exposed_groups_.empty() ? KVCacheAllocator::cacheGroups() : exposed_groups_;
+    }
+
+    void reversePoolOrder() {
+        exposed_pools_ = KVCacheAllocator::groupBlockPools();
+        std::reverse(exposed_pools_.begin(), exposed_pools_.end());
+    }
+    const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const override {
+        return exposed_pools_.empty() ? KVCacheAllocator::groupBlockPools() : exposed_pools_;
     }
 
 private:
+    std::vector<DeviceBlockPoolPtr> exposed_pools_;
     std::vector<KVCacheGroupPtr> exposed_groups_;
 };
 
@@ -401,9 +408,10 @@ std::shared_ptr<GroupViewHybridPoolAllocator> initViewAllocator(const CacheConfi
     return allocator;
 }
 
-KVCacheGroupPtr cloneGroupWithId(const KVCacheGroupPtr& source, int group_id) {
+KVCacheGroupPtr cloneGroupWithTag(const KVCacheGroupPtr& source, const std::string& tag) {
     GroupBase group  = source->config();
-    auto      result = std::make_shared<FullKVCacheGroup>(std::move(group), source->blockPool(), group_id);
+    group.tag        = tag;
+    auto result      = std::make_shared<FullKVCacheGroup>(std::move(group), source->blockPool(), source->group_id());
     EXPECT_TRUE(result->init());
     return result;
 }
@@ -658,7 +666,7 @@ TEST(BlockTreeCacheFactoryUtilityTest, ResolveDiskMountPathUsesLocalRankAndRejec
 
 TEST_F(BlockTreeCacheFactoryTest, SingleTypeBindsExistingTargetGroupAndPool) {
     const auto config    = makeSingleConfig();
-    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_EQ(allocator->cacheGroups().size(), 1u);
@@ -671,9 +679,9 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteResolverMatchesAllocatorForNonContiguous
         const auto                        config = makeHybridConfig(independent);
         std::shared_ptr<KVCacheAllocator> allocator;
         if (independent) {
-            allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+            allocator = initAllocator<KVCacheAllocator>(config);
         } else {
-            allocator = initAllocator<HybridTypeKVCacheAllocator>(config);
+            allocator = initAllocator<KVCacheAllocator>(config);
         }
         auto          backend = std::make_shared<CountingStorageBackend>();
         KVCacheConfig kv_cache_config;
@@ -701,7 +709,7 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteResolverMatchesAllocatorForNonContiguous
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteBackendResolverDoesNotKeepAttachedCacheAndAllocatorAlive) {
     const auto    config         = makeSingleConfig();
-    auto          allocator      = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto          allocator      = initAllocator<KVCacheAllocator>(config);
     auto          shutdown_count = std::make_shared<size_t>(0);
     auto          resolved_count = std::make_shared<size_t>(0);
     auto          backend        = std::make_shared<ShutdownCountingStorageBackend>(shutdown_count, resolved_count);
@@ -732,7 +740,7 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteMatchSkipsBackendWhenNoGroupSupportsPref
     policies[0].enable_prefix_reuse = false;
     config.setGroupPolicies(std::move(policies));
 
-    auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto          allocator = initAllocator<KVCacheAllocator>(config);
     auto          backend   = std::make_shared<CountingStorageBackend>();
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_remote_cache = true;
@@ -752,7 +760,7 @@ TEST_F(BlockTreeCacheFactoryTest, DiskCacheAllowsNoPrefixReusableGroups) {
     policies[0].enable_prefix_reuse = false;
     config.setGroupPolicies(std::move(policies));
 
-    auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto                                     allocator = initAllocator<KVCacheAllocator>(config);
     block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_empty_l3");
     KVCacheConfig                            kv_cache_config;
     kv_cache_config.enable_disk_cache      = true;
@@ -768,7 +776,7 @@ TEST_F(BlockTreeCacheFactoryTest, DiskCacheAllowsNoPrefixReusableGroups) {
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteMatchReceivesCompleteKeysAndExplicitLocalBoundary) {
     const auto    config    = makeSingleConfig();
-    auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto          allocator = initAllocator<KVCacheAllocator>(config);
     auto          backend   = std::make_shared<CountingStorageBackend>();
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_remote_cache = true;
@@ -806,7 +814,7 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteMatchReceivesCompleteKeysAndExplicitLoca
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteBackendInitFailureIsFatal) {
     const auto    config    = makeSingleConfig();
-    auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto          allocator = initAllocator<KVCacheAllocator>(config);
     auto          backend   = std::make_shared<FailingInitStorageBackend>();
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_remote_cache = true;
@@ -818,7 +826,7 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteBackendInitFailureIsFatal) {
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteBackendIsDroppedWhenRemoteCacheDisabled) {
     const auto    config    = makeSingleConfig();
-    auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto          allocator = initAllocator<KVCacheAllocator>(config);
     auto          backend   = std::make_shared<CountingStorageBackend>();
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_remote_cache = false;
@@ -839,7 +847,7 @@ TEST_F(BlockTreeCacheFactoryTest, CpSwaWindowUsesCanonicalKeysWithoutChangingPhy
     auto policies                   = config.groupPoliciesSnapshot();
     policies[0].sliding_window_size = 128;
     config.setGroupPolicies(policies);
-    auto allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto allocator = initAllocator<KVCacheAllocator>(config);
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 16));
     auto cache = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
@@ -863,7 +871,7 @@ TEST_F(BlockTreeCacheFactoryTest, CpSwaWindowUsesCanonicalKeysWithoutChangingPhy
 TEST_F(BlockTreeCacheFactoryTest, SwaGroupSetUsesDeclaredPolicyWindow) {
     const auto config = makeSwaConfig();
     ASSERT_EQ(config.policyForGroup(0).sliding_window_size, 128);
-    auto allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto allocator = initAllocator<KVCacheAllocator>(config);
     auto cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_NE(cache, nullptr);
@@ -876,7 +884,7 @@ TEST_F(BlockTreeCacheFactoryTest, SwaGroupSetUsesDeclaredPolicyWindow) {
 
 TEST_F(BlockTreeCacheFactoryTest, HybridTypeBindsExistingTargetGroupsById) {
     const auto config    = makeHybridConfig(/*independent_pools=*/false);
-    auto       allocator = initAllocator<HybridTypeKVCacheAllocator>(config);
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_EQ(allocator->cacheGroups().size(), 2u);
@@ -885,7 +893,7 @@ TEST_F(BlockTreeCacheFactoryTest, HybridTypeBindsExistingTargetGroupsById) {
 
 TEST_F(BlockTreeCacheFactoryTest, HybridPoolBindsIndependentPoolsAndNonContiguousLayerViews) {
     const auto config    = makeHybridConfig(/*independent_pools=*/true);
-    auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_EQ(allocator->cacheGroups().size(), 2u);
@@ -909,7 +917,7 @@ TEST_F(BlockTreeCacheFactoryTest, HybridPoolBindsIndependentPoolsAndNonContiguou
 
 TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguousGlobalLayerProjectionRoundTrip) {
     const auto    config    = makeHybridConfig(/*independent_pools=*/true);
-    auto          allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto          allocator = initAllocator<KVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache  = true;
     kv_cache_config.memory_cache_size_mb = 1;
@@ -965,13 +973,14 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     full_group->blockPool()->decRef(*device_blocks);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, ReorderedAllocatorGroupsStillMapByEmbeddedGroupId) {
+TEST_F(BlockTreeCacheFactoryTest, ReorderedAllocatorGroupsAndPoolsBindByTag) {
     const auto config    = makeHybridConfig(/*independent_pools=*/true);
     auto       allocator = initViewAllocator(config);
-    auto       groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
+    auto       groups    = allocator->KVCacheAllocator::cacheGroups();
     ASSERT_EQ(groups.size(), 2u);
     std::reverse(groups.begin(), groups.end());
     allocator->overrideGroups(groups);
+    allocator->reversePoolOrder();
 
     auto cache = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     expectTargetGroupsBoundById(cache, allocator);
@@ -980,37 +989,59 @@ TEST_F(BlockTreeCacheFactoryTest, ReorderedAllocatorGroupsStillMapByEmbeddedGrou
     EXPECT_EQ(cache->groupSets()[1]->groupIds(), (std::vector<size_t>{1}));
 }
 
-TEST_F(BlockTreeCacheFactoryTest, DuplicateMissingAndOutOfRangeGroupIdsFailClosed) {
+TEST_F(BlockTreeCacheFactoryTest, FactoryBindingIgnoresAllocatorLocalGroupIds) {
+    const auto config    = makeCompatibleFullGroupsConfig();
+    auto       allocator = initViewAllocator(config);
+    const auto groups    = allocator->KVCacheAllocator::cacheGroups();
+    ASSERT_EQ(groups.size(), 2u);
+    auto first  = std::make_shared<FullKVCacheGroup>(groups[0]->config(), groups[0]->blockPool(), 1);
+    auto second = std::make_shared<FullKVCacheGroup>(groups[1]->config(), groups[1]->blockPool(), 0);
+    ASSERT_TRUE(first->init());
+    ASSERT_TRUE(second->init());
+    allocator->overrideGroups({second, first});
+    allocator->reversePoolOrder();
+
+    auto cache = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    ASSERT_NE(cache, nullptr);
+    ASSERT_EQ(cache->groupSets().size(), 1u);
+    const auto& member_pools = cache->groupSets()[0]->devicePools();
+    ASSERT_EQ(member_pools.size(), 2u);
+    EXPECT_EQ(member_pools[0], groups[0]->blockPool());
+    EXPECT_EQ(member_pools[1], groups[1]->blockPool());
+    EXPECT_EQ(allocator->blockTreeCache(), nullptr);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DuplicateMissingAndUnknownGroupTagsFailClosed) {
     const auto config = makeHybridConfig(/*independent_pools=*/true);
 
     {
         auto allocator = initViewAllocator(config);
-        auto groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
+        auto groups    = allocator->KVCacheAllocator::cacheGroups();
         allocator->overrideGroups({groups[0], groups[0]});
         expectFactoryRejects(config, allocator);
     }
     {
         auto allocator = initViewAllocator(config);
-        auto groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
+        auto groups    = allocator->KVCacheAllocator::cacheGroups();
         allocator->overrideGroups({groups[0]});
         expectFactoryRejects(config, allocator);
     }
     {
         auto allocator = initViewAllocator(config);
-        auto groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
-        allocator->overrideGroups({groups[0], cloneGroupWithId(groups[1], 2)});
+        auto groups    = allocator->KVCacheAllocator::cacheGroups();
+        allocator->overrideGroups({groups[0], cloneGroupWithTag(groups[1], "unknown")});
         expectFactoryRejects(config, allocator);
     }
     {
         auto allocator = initViewAllocator(config);
-        auto groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
-        allocator->overrideGroups({groups[0], cloneGroupWithId(groups[1], -1)});
+        auto groups    = allocator->KVCacheAllocator::cacheGroups();
+        allocator->overrideGroups({groups[0], cloneGroupWithTag(groups[1], "")});
         expectFactoryRejects(config, allocator);
     }
     {
         auto allocator = initViewAllocator(config);
-        auto groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
-        allocator->overrideGroups({cloneGroupWithId(groups[0], 1), groups[1]});
+        auto groups    = allocator->KVCacheAllocator::cacheGroups();
+        allocator->overrideGroups({cloneGroupWithTag(groups[0], groups[1]->tag()), groups[1]});
         expectFactoryRejects(config, allocator);
     }
 }
@@ -1020,14 +1051,14 @@ TEST_F(BlockTreeCacheFactoryTest, AllocatorConfigAndDirectPoolMismatchesFailClos
 
     {
         auto allocator = initViewAllocator(config);
-        auto groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
+        auto groups    = allocator->KVCacheAllocator::cacheGroups();
         ASSERT_EQ(groups.size(), 2u);
         allocator->overrideGroups({groups[0], cloneGroupWithBlockNum(groups[1], groups[1]->config().block_num + 1)});
         expectFactoryRejects(config, allocator);
     }
     {
         auto allocator = initViewAllocator(config);
-        auto groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
+        auto groups    = allocator->KVCacheAllocator::cacheGroups();
         ASSERT_EQ(groups.size(), 2u);
         allocator->overrideGroups({groups[0], cloneGroupWithPool(groups[1], groups[0]->blockPool())});
         expectFactoryRejects(config, allocator);
@@ -1036,7 +1067,7 @@ TEST_F(BlockTreeCacheFactoryTest, AllocatorConfigAndDirectPoolMismatchesFailClos
 
 TEST_F(BlockTreeCacheFactoryTest, PrefixReuseDisabledGroupStaysAllocatorOwnedButIsExcludedFromTree) {
     const auto config    = makeHybridConfig(/*independent_pools=*/true, /*disable_linear_reuse=*/true);
-    auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_NE(cache, nullptr);
@@ -1047,7 +1078,7 @@ TEST_F(BlockTreeCacheFactoryTest, PrefixReuseDisabledGroupStaysAllocatorOwnedBut
 
 TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPackedTransfer) {
     const auto config    = makeSparseMlaIndexerConfig();
-    auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto       allocator    = initAllocator<KVCacheAllocator>(config);
     const auto cache_groups = allocator->cacheGroups();
     ASSERT_EQ(cache_groups.size(), 2u);
     ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
@@ -1133,7 +1164,7 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
 
 TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentPhysicalLayoutsAggregate) {
     const CacheConfig                           config    = makePhysicallyDifferentFullGroupsConfig();
-    std::shared_ptr<HybridPoolKVCacheAllocator> allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    std::shared_ptr<KVCacheAllocator>           allocator = initAllocator<KVCacheAllocator>(config);
     BlockTreeCachePtr                           cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_NE(cache, nullptr);
@@ -1149,14 +1180,14 @@ TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentPhysicalLayoutsAggr
 
 TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentLogicalBlockSizesAreRejected) {
     const CacheConfig                           config    = makeLogicallyIncompatibleFullGroupsConfig();
-    std::shared_ptr<HybridPoolKVCacheAllocator> allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    std::shared_ptr<KVCacheAllocator>           allocator = initAllocator<KVCacheAllocator>(config);
 
     expectFactoryRejects(config, allocator);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, CompatibleGroupsAggregate) {
     const auto    config    = makeCompatibleFullGroupsConfig();
-    auto          allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto          allocator = initAllocator<KVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
     auto          cache = createBlockTreeCache(config, kv_cache_config, allocator);
 
@@ -1168,7 +1199,7 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleGroupsAggregate) {
 
 TEST_F(BlockTreeCacheFactoryTest, ProductionEvictionConfigurationPropagatesToBlockTreeCache) {
     const auto config    = makeSingleConfig();
-    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
 
     KVCacheConfig kv_cache_config;
     kv_cache_config.device_eviction_policy = "FIFO";
@@ -1193,7 +1224,7 @@ TEST_F(BlockTreeCacheFactoryTest, UnsupportedProductionEvictionPolicyFailsClosed
     const auto config = makeSingleConfig();
     for (const auto& [tier, policy_field] : policy_fields) {
         SCOPED_TRACE(tier);
-        auto              allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto              allocator = initAllocator<KVCacheAllocator>(config);
         KVCacheConfig     kv_cache_config;
         BlockTreeCachePtr cache;
         kv_cache_config.*policy_field = "clock";
@@ -1207,7 +1238,7 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleSwaGroupsAggregateWhenPolicyWindowsM
     const CacheConfig                           config    = makeCompatibleSwaGroupsConfig(/*second_window=*/128,
                                                              /*second_active_tail_blocks=*/2,
                                                              CpBlockMappingMode::COMPACT_LAST_RANK);
-    std::shared_ptr<HybridPoolKVCacheAllocator> allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    std::shared_ptr<KVCacheAllocator>           allocator = initAllocator<KVCacheAllocator>(config);
     BlockTreeCachePtr                           cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_NE(cache, nullptr);
@@ -1219,7 +1250,7 @@ TEST_F(BlockTreeCacheFactoryTest, SwaGroupsWithDifferentPolicyWindowsAreRejected
     const CacheConfig                           config    = makeCompatibleSwaGroupsConfig(/*second_window=*/64,
                                                              /*second_active_tail_blocks=*/2,
                                                              CpBlockMappingMode::COMPACT_LAST_RANK);
-    std::shared_ptr<HybridPoolKVCacheAllocator> allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    std::shared_ptr<KVCacheAllocator>           allocator = initAllocator<KVCacheAllocator>(config);
 
     expectFactoryRejects(config, allocator);
 }
@@ -1228,7 +1259,7 @@ TEST_F(BlockTreeCacheFactoryTest, SwaGroupsWithDifferentActiveTailBlocksAreRejec
     const CacheConfig                           config    = makeCompatibleSwaGroupsConfig(/*second_window=*/128,
                                                              /*second_active_tail_blocks=*/1,
                                                              CpBlockMappingMode::COMPACT_LAST_RANK);
-    std::shared_ptr<HybridPoolKVCacheAllocator> allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    std::shared_ptr<KVCacheAllocator>           allocator = initAllocator<KVCacheAllocator>(config);
 
     expectFactoryRejects(config, allocator);
 }
@@ -1237,14 +1268,14 @@ TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentCpMappingsAreReject
     const CacheConfig                           config    = makeCompatibleSwaGroupsConfig(/*second_window=*/128,
                                                              /*second_active_tail_blocks=*/2,
                                                              CpBlockMappingMode::NONE);
-    std::shared_ptr<HybridPoolKVCacheAllocator> allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    std::shared_ptr<KVCacheAllocator>           allocator = initAllocator<KVCacheAllocator>(config);
 
     expectFactoryRejects(config, allocator);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, CompatibleLinearGroupsAggregateWhenActiveTailBlocksMatch) {
     const CacheConfig config = makeCompatibleLinearGroupsConfig(/*second_active_tail_blocks=*/1);
-    std::shared_ptr<HybridPoolKVCacheAllocator> allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    std::shared_ptr<KVCacheAllocator> allocator = initAllocator<KVCacheAllocator>(config);
     BlockTreeCachePtr                           cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_NE(cache, nullptr);
@@ -1254,14 +1285,14 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleLinearGroupsAggregateWhenActiveTailB
 
 TEST_F(BlockTreeCacheFactoryTest, LinearGroupsWithDifferentActiveTailBlocksAreRejected) {
     const CacheConfig config = makeCompatibleLinearGroupsConfig(/*second_active_tail_blocks=*/2);
-    std::shared_ptr<HybridPoolKVCacheAllocator> allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    std::shared_ptr<KVCacheAllocator> allocator = initAllocator<KVCacheAllocator>(config);
 
     expectFactoryRejects(config, allocator);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, CompatibleInsertPacksOneGroupSetResourceInGroupIdOrder) {
     const auto config    = makeCompatibleFullGroupsConfig();
-    auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
@@ -1281,7 +1312,7 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleInsertPacksOneGroupSetResourceInGrou
 
 TEST_F(BlockTreeCacheFactoryTest, BlockTreeCacheCanOnlyBeAttachedOnce) {
     const auto config    = makeSingleConfig();
-    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
 
@@ -1293,7 +1324,7 @@ TEST_F(BlockTreeCacheFactoryTest, BlockTreeCacheCanOnlyBeAttachedOnce) {
 
 TEST_F(BlockTreeCacheFactoryTest, SurvivingGroupCallbackKeepsBlockTreeCacheAliveWithoutAllocator) {
     const auto config    = makeSingleConfig();
-    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
@@ -1320,7 +1351,7 @@ TEST_F(BlockTreeCacheFactoryTest, SurvivingGroupCallbackKeepsBlockTreeCacheAlive
 
 TEST_F(BlockTreeCacheFactoryTest, MiddleDisabledGroupIsExcludedWithoutShiftingReusableGroupIds) {
     const auto config    = makeReusableGroupsAroundDisabledConfig();
-    auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
@@ -1341,9 +1372,9 @@ TEST_F(BlockTreeCacheFactoryTest, MiddleDisabledGroupIsExcludedWithoutShiftingRe
     releaseInsertedRequestBlocks(allocator, blocks);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingReleasesAcrossGroupSets) {
-    const auto config    = makeSharedBackingCascadeConfig();
-    auto       allocator = initAllocator<HybridTypeKVCacheAllocator>(config);
+TEST_F(BlockTreeCacheFactoryTest, IndependentPoolsWatermarkTracksEachGroupSet) {
+    const auto config    = makeIndependentWatermarkConfig();
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
 
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache  = true;
@@ -1354,13 +1385,13 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingRel
 
     const auto allocator_groups = allocator->cacheGroups();
     ASSERT_EQ(allocator_groups.size(), 2u);
-    ASSERT_EQ(allocator_groups[0]->blockPool().get(), allocator_groups[1]->blockPool().get());
+    ASSERT_NE(allocator_groups[0]->blockPool().get(), allocator_groups[1]->blockPool().get());
     auto backing = allocator_groups[0]->blockPool();
     ASSERT_EQ(backing->totalBlocksNum(), 7u);
 
     ASSERT_EQ(cache->groupSets().size(), 2u);
     ASSERT_EQ(cache->groupSets()[0]->devicePools()[0].get(), backing.get());
-    ASSERT_EQ(cache->groupSets()[1]->devicePools()[0].get(), backing.get());
+    ASSERT_EQ(cache->groupSets()[1]->devicePools()[0], allocator_groups[1]->blockPool());
 
     auto scripted_copy = std::make_shared<block_tree_cache_test::ScriptedPerRankBlockTransferEngine>(
         cache->groupSets(), true, cache->isDiskCacheEnabled());
@@ -1368,7 +1399,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingRel
     block_tree_cache_test::BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.6);
 
     std::vector<std::vector<BlockIdxType>> request_blocks;
-    for (CacheKeyType key : {800, 801, 802}) {
+    for (CacheKeyType key : {800, 801, 802, 803, 804, 805}) {
         request_blocks.push_back(insertOneKeyThroughAllocator(config, allocator, key));
     }
     ASSERT_EQ(backing->freeBlocksNum(), 1u);
@@ -1378,16 +1409,12 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingRel
 
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
-    // The first GroupSet submits the two descriptors required to move the
-    // shared pool from six used blocks to low=4. Both GroupSets share the
-    // pending count for their common backing pool, so the second GroupSet does
-    // not submit an additional batch. Their distribution is not a fairness
-    // contract.
-    EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 2u);
+    // Each independent pool releases two cached blocks to reach its own low watermark.
+    EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 4u);
     EXPECT_EQ(backing->freeBlocksNum(), 3u);
     EXPECT_LT(backing->freeBlocksNum(), backing->totalBlocksNum());
     const auto descriptors = scripted_copy->descriptors();
-    ASSERT_EQ(descriptors.size(), 2u);
+    ASSERT_EQ(descriptors.size(), 4u);
     for (const auto& descriptor : descriptors) {
         ASSERT_EQ(descriptor.source_tier, Tier::DEVICE);
         ASSERT_EQ(descriptor.target_tier, Tier::HOST);
@@ -1401,7 +1428,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingRel
 
 TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesOnNextTrigger) {
     const auto config    = makeSingleConfig();
-    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
 
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache  = true;
@@ -1440,7 +1467,7 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
 
 TEST_F(BlockTreeCacheFactoryTest, DeviceWatermarkKeepsCacheBelowHighThreshold) {
     const auto config    = makeSingleConfig();
-    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
 
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache  = true;
@@ -1465,7 +1492,7 @@ TEST_F(BlockTreeCacheFactoryTest, DeviceWatermarkKeepsCacheBelowHighThreshold) {
 
 TEST_F(BlockTreeCacheFactoryTest, PhysicallyDifferentGroupsShareGroupSetResource) {
     const CacheConfig                           config    = makePhysicallyDifferentFullGroupsConfig();
-    std::shared_ptr<HybridPoolKVCacheAllocator> allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    std::shared_ptr<KVCacheAllocator>           allocator = initAllocator<KVCacheAllocator>(config);
     BlockTreeCachePtr                           cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
@@ -1490,7 +1517,7 @@ TEST_F(BlockTreeCacheFactoryTest, PhysicallyDifferentGroupsShareGroupSetResource
 
 TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) {
     const CacheConfig config    = makeHybridConfig(/*independent_pools=*/true);
-    auto              allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto              allocator = initAllocator<KVCacheAllocator>(config);
     KVCacheConfig     kv_cache_config;
     kv_cache_config.enable_memory_cache  = true;
     kv_cache_config.memory_cache_size_mb = 1;
@@ -1629,7 +1656,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
 
 TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGroupPayloads) {
     const auto config    = makeCompatibleFullGroupsConfig();
-    auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->groupSets().size(), 1u);
@@ -1683,10 +1710,10 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
     groups[1]->blockPool()->decRef(*second);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, SharedPoolGroupSetPayloadUsesTopologyLogicalStrides) {
+TEST_F(BlockTreeCacheFactoryTest, IndependentPoolGroupSetPayloadUsesTopologyLogicalStrides) {
     auto config = makeHybridConfig(/*independent_pools=*/false);
     ASSERT_EQ(config.layer_to_block_stride_bytes.size(), 4u);
-    auto allocator = initAllocator<HybridTypeKVCacheAllocator>(config);
+    auto allocator = initAllocator<KVCacheAllocator>(config);
     auto cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_NE(cache, nullptr);
@@ -1706,7 +1733,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPoolGroupSetPayloadUsesTopologyLogicalSt
               linear.kv_block_stride_bytes + linear.kv_scale_stride_bytes);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, SharedPoolGroupSetDoesNotDependOnPhysicalStrideTable) {
+TEST_F(BlockTreeCacheFactoryTest, IndependentPoolGroupSetDoesNotDependOnPhysicalStrideTable) {
     for (int malformed_case = 0; malformed_case < 3; ++malformed_case) {
         SCOPED_TRACE(malformed_case);
         auto config = makeHybridConfig(/*independent_pools=*/false);
@@ -1717,7 +1744,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPoolGroupSetDoesNotDependOnPhysicalStrid
         } else {
             config.layer_to_block_stride_bytes[3] = -1;
         }
-        auto allocator = initAllocator<HybridTypeKVCacheAllocator>(config);
+        auto allocator = initAllocator<KVCacheAllocator>(config);
         auto cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
         ASSERT_NE(cache, nullptr);
         ASSERT_EQ(cache->groupSets().size(), 2u);
@@ -1730,7 +1757,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPoolGroupSetDoesNotDependOnPhysicalStrid
 TEST_F(BlockTreeCacheFactoryTest, LegacySingleGroupAllowsMissingPhysicalStrideTableFallback) {
     auto config = makeSingleConfig();
     config.layer_to_block_stride_bytes.clear();
-    auto allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto allocator = initAllocator<KVCacheAllocator>(config);
     auto cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_NE(cache, nullptr);
@@ -1743,7 +1770,7 @@ TEST_F(BlockTreeCacheFactoryTest, LegacySingleGroupAllowsMissingPhysicalStrideTa
 
 TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutHostCache) {
     const auto                               config    = makeSingleConfig();
-    auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto                                     allocator = initAllocator<KVCacheAllocator>(config);
     block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_l3_only");
     KVCacheConfig                            kv_cache_config;
     kv_cache_config.enable_memory_cache    = false;
@@ -1776,7 +1803,7 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutHostCache) {
 
 TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheForReusableLinearGroupSet) {
     const auto    config    = makeHybridConfig(/*independent_pools=*/false);
-    auto          allocator = initAllocator<HybridTypeKVCacheAllocator>(config);
+    auto          allocator = initAllocator<KVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_disk_cache  = true;
     kv_cache_config.disk_cache_size_mb = 1;
@@ -1787,7 +1814,7 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheForReusableLinearGroupSet) {
 
 TEST_F(BlockTreeCacheFactoryTest, DiskCacheAllowsDisabledLinearReuse) {
     const auto config    = makeHybridConfig(/*independent_pools=*/false, /*disable_linear_reuse=*/true);
-    auto       allocator = initAllocator<HybridTypeKVCacheAllocator>(config);
+    auto       allocator = initAllocator<KVCacheAllocator>(config);
     block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_disabled_linear_l3");
     KVCacheConfig                            kv_cache_config;
     kv_cache_config.enable_disk_cache      = true;
@@ -1814,7 +1841,7 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
     };
 
     {
-        auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto                                     allocator = initAllocator<KVCacheAllocator>(config);
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_staging_overrides");
         auto                                     kv_cache_config = makeDiskKvCacheConfig(disk_dir.path);
         kv_cache_config.disk_cache_staging_block_count           = 2;
@@ -1825,7 +1852,7 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
     }
 
     for (const int64_t bad_block_count : {int64_t{0}, int64_t{-1}, int64_t{3}}) {
-        auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto                                     allocator = initAllocator<KVCacheAllocator>(config);
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_staging_bad_blocks");
         auto                                     kv_cache_config = makeDiskKvCacheConfig(disk_dir.path);
         kv_cache_config.disk_cache_staging_block_count           = bad_block_count;
@@ -1834,7 +1861,7 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
 
     // Disk disabled: staging block count is not validated and creation succeeds.
     {
-        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto          allocator = initAllocator<KVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
         kv_cache_config.disk_cache_staging_block_count = 0;
         auto cache                                     = createBlockTreeCache(config, kv_cache_config, allocator);
@@ -1845,7 +1872,7 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
 TEST_F(BlockTreeCacheFactoryTest, TransferBatchLimitPropagatesAndValidates) {
     const auto config = makeSingleConfig();
     {
-        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto          allocator = initAllocator<KVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
         kv_cache_config.memory_cache_max_descriptors_per_transfer_batch = 17;
         auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
@@ -1853,7 +1880,7 @@ TEST_F(BlockTreeCacheFactoryTest, TransferBatchLimitPropagatesAndValidates) {
         EXPECT_EQ(cache->config().max_descriptors_per_transfer_batch, 17u);
     }
     for (const int64_t invalid_limit : {int64_t{0}, int64_t{-1}}) {
-        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto          allocator = initAllocator<KVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
         kv_cache_config.memory_cache_max_descriptors_per_transfer_batch = invalid_limit;
         expectFactoryRejects(config, allocator, kv_cache_config);
@@ -1863,7 +1890,7 @@ TEST_F(BlockTreeCacheFactoryTest, TransferBatchLimitPropagatesAndValidates) {
 TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidates) {
     const auto config = makeSingleConfig();
     {
-        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto          allocator = initAllocator<KVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
         kv_cache_config.block_tree_transfer_worker_count   = 7;
         kv_cache_config.block_tree_business_queue_max_size = 211;
@@ -1875,7 +1902,7 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
         EXPECT_EQ(cache->config().transfer_queue_max_size, 307u);
     }
     {
-        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto          allocator = initAllocator<KVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
         kv_cache_config.block_tree_business_queue_max_size = 0;
         kv_cache_config.block_tree_transfer_queue_max_size = 0;
@@ -1885,7 +1912,7 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
         EXPECT_EQ(cache->config().transfer_queue_max_size, 0u);
     }
     for (const auto invalid_field : {std::string("worker"), std::string("business"), std::string("transfer")}) {
-        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto          allocator = initAllocator<KVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
         if (invalid_field == "worker") {
             kv_cache_config.block_tree_transfer_worker_count = 0;
@@ -1900,7 +1927,7 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
 
 TEST_F(BlockTreeCacheFactoryTest, TierWatermarksPropagateAndInvalidCombinationsAreRejected) {
     const auto                               config    = makeSingleConfig();
-    auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto                                     allocator = initAllocator<KVCacheAllocator>(config);
     block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_watermarks");
     KVCacheConfig                            kv_cache_config;
     kv_cache_config.enable_memory_cache                          = true;
@@ -1929,7 +1956,7 @@ TEST_F(BlockTreeCacheFactoryTest, TierWatermarksPropagateAndInvalidCombinationsA
                                                 std::pair<double, double>{-0.1, 0.8},
                                                 std::pair<double, double>{0.1, 1.1},
                                                 std::pair<double, double>{0.0, 0.8}}) {
-        auto          invalid_allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto          invalid_allocator = initAllocator<KVCacheAllocator>(config);
         KVCacheConfig invalid_config;
         invalid_config.block_tree_device_evict_low_watermark_ratio  = low_ratio;
         invalid_config.block_tree_device_evict_high_watermark_ratio = high_ratio;
@@ -1940,7 +1967,7 @@ TEST_F(BlockTreeCacheFactoryTest, TierWatermarksPropagateAndInvalidCombinationsA
 TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
     const auto config = makeSingleConfig();
     {
-        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto          allocator = initAllocator<KVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
         auto          cache = createBlockTreeCache(config, kv_cache_config, allocator);
         ASSERT_NE(cache, nullptr);
@@ -1961,7 +1988,7 @@ TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
         owner.dp_rank    = 1;
         owner.tp_rank    = 0;
 
-        auto allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto allocator = initAllocator<KVCacheAllocator>(config);
         auto cache     = createBlockTreeCache(config, scan_enabled, allocator, owner);
         ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 5000);
@@ -1974,7 +2001,7 @@ TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
         follower.world_rank = 1;
         follower.tp_rank    = 1;
 
-        auto allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto allocator = initAllocator<KVCacheAllocator>(config);
         auto cache     = createBlockTreeCache(config, scan_enabled, allocator, follower);
         ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
@@ -1986,14 +2013,14 @@ TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
         ffn.ffn_disaggregate_config.enable_ffn_disaggregate = true;
         ffn.ffn_disaggregate_config.is_ffn_rank             = true;
 
-        auto allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto allocator = initAllocator<KVCacheAllocator>(config);
         auto cache     = createBlockTreeCache(config, scan_enabled, allocator, ffn);
         ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
     }
 
     for (const int64_t invalid_interval : {int64_t{-1}, int64_t{999}, std::numeric_limits<int64_t>::max()}) {
-        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto          allocator = initAllocator<KVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
         kv_cache_config.block_tree_full_prefix_scan_interval_ms = invalid_interval;
         expectFactoryRejects(config, allocator, kv_cache_config);
@@ -2008,7 +2035,7 @@ TEST_F(BlockTreeCacheFactoryTest, DerivesEachLocalTierFromItsOwnSwitch) {
             for (const bool disk_on : {false, true}) {
                 SCOPED_TRACE("L1=" + std::to_string(device_on) + " L2=" + std::to_string(host_on)
                              + " L3=" + std::to_string(disk_on));
-                auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+                auto                                     allocator = initAllocator<KVCacheAllocator>(config);
                 block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_tier_matrix");
                 KVCacheConfig                            kv_cache_config;
                 kv_cache_config.enable_device_cache = device_on;
@@ -2044,7 +2071,7 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsOverflowingTierBudgetsBeforeAllocating)
     // This previously wrapped to exactly 1 MiB and could create a tiny pool.
     const int64_t overflowing_mb = static_cast<int64_t>(std::numeric_limits<size_t>::max() / (1024UL * 1024UL)) + 2;
     for (bool memory : {true, false}) {
-        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto          allocator = initAllocator<KVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_memory_cache  = memory;
         kv_cache_config.enable_disk_cache    = !memory;
@@ -2060,7 +2087,7 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsTierEnabledWithoutItsOwnCapacity) {
     const auto config = makeSingleConfig();
 
     {
-        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto          allocator = initAllocator<KVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_memory_cache  = true;
         kv_cache_config.memory_cache_size_mb = 0;
@@ -2068,7 +2095,7 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsTierEnabledWithoutItsOwnCapacity) {
     }
 
     {
-        auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto                                     allocator = initAllocator<KVCacheAllocator>(config);
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_l3_no_capacity");
         KVCacheConfig                            kv_cache_config;
         kv_cache_config.enable_disk_cache  = true;
@@ -2078,7 +2105,7 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsTierEnabledWithoutItsOwnCapacity) {
     }
 
     {
-        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto          allocator = initAllocator<KVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_disk_cache  = true;
         kv_cache_config.disk_cache_size_mb = 1;
@@ -2121,7 +2148,7 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     cache_config.layer_to_block_stride_bytes = {
         static_cast<int>(stride), static_cast<int>(stride), static_cast<int>(stride)};
 
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(cache_config);
+    auto allocator = std::make_shared<KVCacheAllocator>(cache_config);
     allocator->setUseDeviceMallocBlockPool(true);
     ASSERT_TRUE(allocator->init());
     ASSERT_EQ(allocator->groupBlockPools().size(), 3u);

@@ -1,4 +1,4 @@
-// CP-shard (Stage 5, Plan A) UTs for HybridKVCacheAllocator.
+// CP-shard (Stage 5, Plan A) UTs for KVCacheAllocator.
 //
 // These exercise the cp_slot_mapper plumbing in initMallocForCommonLen,
 // incrMalloc, insertIntoCache, and getNeedBlocks. The shape of the tests
@@ -13,7 +13,7 @@
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/BlockTreeCacheAllocatorTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -23,7 +23,7 @@
 namespace rtp_llm {
 namespace test {
 
-using TestHybridTypeKVCacheAllocator = BlockTreeCacheTestAllocator<HybridTypeKVCacheAllocator>;
+using TestHybridTypeKVCacheAllocator = BlockTreeCacheTestAllocator<KVCacheAllocator>;
 
 namespace {
 
