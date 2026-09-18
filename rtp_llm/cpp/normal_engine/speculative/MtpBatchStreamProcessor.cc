@@ -427,10 +427,20 @@ void MtpBatchStreamProcessor::truncateV41AcceptedRows(const StreamGroups& stream
         RTP_LLM_CHECK_WITH_INFO(stream->currentBatchSize() == 1 && stream->nextBatchSize() == 1,
                                 "V4.1 speculative retained rows require one beam per request");
         if (!stream->isFakeStream()) {
-            lengths.data_ptr<int32_t>()[row] = stream->previewSpeculativeRetainedRows(
-                tokens[row], lengths.data_ptr<int32_t>()[row]);
-            RTP_LLM_CHECK_WITH_INFO(lengths.data_ptr<int32_t>()[row] > 0,
-                                    "V4.1 cannot commit a speculative round for a request with no remaining tokens");
+            const bool budget_exhausted =
+                static_cast<int64_t>(stream->seqLength()) >= static_cast<int64_t>(stream->maxTokenNum());
+            if (budget_exhausted) {
+                // The stream finished in a previous round and is only riding this
+                // round as padding (v41_is_fake was flagged at the round head).
+                // Commit nothing so the sampler's matches on padding rows cannot
+                // append tokens past the request budget.
+                lengths.data_ptr<int32_t>()[row] = 0;
+            } else {
+                lengths.data_ptr<int32_t>()[row] = stream->previewSpeculativeRetainedRows(
+                    tokens[row], lengths.data_ptr<int32_t>()[row]);
+                RTP_LLM_CHECK_WITH_INFO(lengths.data_ptr<int32_t>()[row] > 0,
+                                        "V4.1 cannot commit a speculative round for a request with no remaining tokens");
+            }
         }
         ++row;
     }
