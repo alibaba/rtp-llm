@@ -7,6 +7,9 @@ from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
+    quantized_linear_for,
+)
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
@@ -83,8 +86,9 @@ class CausalAttention(nn.Module):
         quantized_input: Optional[QuantizedInput] = None,
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
-        if quantized_input is not None and hasattr(self.qkv_proj, "forward_quantized"):
-            qkv = self.qkv_proj.forward_quantized(*quantized_input)
+        qkv_linear = quantized_linear_for(self.qkv_proj)
+        if quantized_input is not None and qkv_linear is not None:
+            qkv = qkv_linear.forward_quantized(*quantized_input)
         else:
             qkv = self.qkv_proj(hidden_states)
         if self.qk_fuse_norm is not None:
@@ -96,9 +100,14 @@ class CausalAttention(nn.Module):
                 maybe_sigmoid_mul_fp8_quant,
             )
 
-            fused = maybe_sigmoid_mul_fp8_quant(attn_output, gate)
-            if fused is not None and hasattr(self.o_proj, "forward_quantized"):
-                output = self.o_proj.forward_quantized(*fused)
+            output_linear = quantized_linear_for(self.o_proj)
+            fused = (
+                maybe_sigmoid_mul_fp8_quant(attn_output, gate)
+                if output_linear is not None
+                else None
+            )
+            if fused is not None:
+                output = output_linear.forward_quantized(*fused)
             else:
                 attn_output = attn_output * torch.sigmoid(gate)
                 output = self.o_proj(attn_output)

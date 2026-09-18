@@ -57,6 +57,10 @@ from rtp_llm.models_py.triton_kernels.fla.gdn_gating_prefill import (
 from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.conv1d_gdn_gating import (
     maybe_fused_conv1d_update_gdn_gating,
 )
+from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
+    fusion_phase,
+    quantized_linear_for,
+)
 from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fused_add_rmsnorm_fp8_quant import (
     maybe_fused_add_rmsnorm_fp8_quant,
 )
@@ -679,8 +683,9 @@ class Qwen3NextAttention(CausalAttention):
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
         quantized_input: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        if quantized_input is not None and hasattr(self.gate, "forward_quantized"):
-            gate = self.gate.forward_quantized(*quantized_input)
+        gate_linear = quantized_linear_for(self.gate)
+        if quantized_input is not None and gate_linear is not None:
+            gate = gate_linear.forward_quantized(*quantized_input)
         else:
             gate = self.gate(hidden_states)
         attn_out = super().forward(
@@ -823,11 +828,10 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         if self._qkvz_ba_fused:
             fused = self.in_proj_fused(hidden_states)
             return fused[..., : self._qkvz_size], fused[..., self._qkvz_size :]
-        if quantized_input is not None and hasattr(
-            self.in_proj_qkvz, "forward_quantized"
-        ):
+        qkvz_linear = quantized_linear_for(self.in_proj_qkvz)
+        if quantized_input is not None and qkvz_linear is not None:
             return (
-                self.in_proj_qkvz.forward_quantized(*quantized_input),
+                qkvz_linear.forward_quantized(*quantized_input),
                 self.in_proj_ba(hidden_states),
             )
         return self.in_proj_qkvz(hidden_states), self.in_proj_ba(hidden_states)
@@ -1157,6 +1161,26 @@ class Qwen3NextDecoderLayer(nn.Module):
         )
 
     def forward(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[LayerKVCache] = None,
+        attention_inputs: Optional[PyAttentionInputs] = None,
+        attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        is_prefill = attention_inputs is not None and attention_inputs.is_prefill
+        with fusion_phase(is_prefill=is_prefill):
+            return self._forward_with_phase(
+                hidden_states,
+                residual,
+                fmha_impl,
+                kv_cache,
+                attention_inputs,
+                attn_meta,
+            )
+
+    def _forward_with_phase(
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
