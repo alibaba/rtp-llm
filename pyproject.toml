@@ -677,6 +677,11 @@ gpu_type = "SM100_ARM"
 minimum_count = 1
 expected_count = 104
 forbid_skips = true
+# Mainline routes these native wrapper tests to A10; ARM has no test libraries.
+ignore_paths = [
+    "rtp_llm/cpp/models/context_parallel/test/context_parallel_py_wrapper_test.py",
+    "rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py",
+]
 markexpr = "SM100_ARM and not smoke and not perf and not manual"
 
 [tool.rtp_llm.pytest_ci.profiles.py_ut_sm120]

@@ -708,6 +708,7 @@ class BuildPackagingContractTest(TestCase):
         for name in ("py_ut_sm8x", "py_ut_oss_sm8x"):
             profile = profiles[name]
             self.assertTrue(restored <= set(profile["isolated_paths"]))
+            self.assertFalse(restored & set(profile.get("ignore_paths", [])))
             for path in restored:
                 self.assertTrue((PROJECT_ROOT / path).is_file())
                 self.assertTrue(any(path == root or path.startswith(root.rstrip("/") + "/")
@@ -778,7 +779,7 @@ class BuildPackagingContractTest(TestCase):
             (root / "bazel-bin" / target[2:].split(":")[0] / library).unlink()
             with self.assertRaisesRegex(RuntimeError, library):
                 setup_module.stage_bazel_outputs(root, selected)
-        for config in ("rocm", "cuda13", "cuda13_arm", "cuda13_ppu"):
+        for config in ("rocm", "cuda12_9_arm", "cuda13", "cuda13_arm", "cuda13_ppu"):
             entries = setup_module._selected_bazel_staged_outputs(config, [f"--config={config}"])
             self.assertFalse(any(entry[1] in expected for entry in entries))
 
@@ -992,6 +993,10 @@ class BuildPackagingContractTest(TestCase):
                 internal_profiles["py_ut_gb200"].get("expected_count"), 104
             )
             self.assertTrue(internal_profiles["py_ut_gb200"].get("forbid_skips"))
+            self.assertEqual(
+                internal_profiles["py_ut_gb200"].get("ignore_paths"),
+                profiles["py_ut_sm100_arm"]["ignore_paths"],
+            )
             self.assertEqual(internal_profiles["py_ut_ppu"].get("minimum_count"), 1)
             self.assertEqual(internal_profiles["py_ut_ppu"].get("expected_count"), 23)
 
@@ -1483,7 +1488,10 @@ class BuildPackagingContractTest(TestCase):
         dsv4_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4"]
         self.assertEqual(profiles["py_ut_sm8x"]["ignore_paths"], dsv4_paths)
         self.assertEqual(profiles["py_ut_sm9x"]["ignore_paths"], dsv4_paths)
-        self.assertNotIn("ignore_paths", profiles["py_ut_sm100_arm"])
+        self.assertEqual(profiles["py_ut_sm100_arm"]["ignore_paths"], [
+            "rtp_llm/cpp/models/context_parallel/test/context_parallel_py_wrapper_test.py",
+            "rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py",
+        ])
 
     def test_dsv4_decode_bazel_targets_are_routed_to_sm100_pytest(self):
         from rtp_llm.test.ci_profile_plugin import _get_profile
