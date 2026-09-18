@@ -83,6 +83,7 @@ std::string ParallelismConfig::to_string() const {
         << "enable_sp: " << enable_sp << "\n"
         << "role_type: " << static_cast<int>(role_type) << "\n"
         << "decode_cp_kv_cache_sharded: " << decode_cp_kv_cache_sharded << "\n"
+        << "decode_cp_q_replicated: " << decode_cp_q_replicated << "\n"
         << "local_kv_page_rr_shard_count: " << local_kv_page_rr_shard_count() << "\n"
         << "upstream_kv_page_rr_shard_count: " << upstream_kv_page_rr_shard_count() << "\n"
         << "ffn_disaggregate_config: {\n"

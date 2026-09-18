@@ -1126,6 +1126,7 @@ class PDSepConfig:
         ...
 class ParallelismConfig:
     decode_cp_kv_cache_sharded: bool
+    decode_cp_q_replicated: bool
     dp_rank: int
     dp_size: int
     enable_sp: bool

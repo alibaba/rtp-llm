@@ -145,6 +145,7 @@ Important optional variables:
                                  and >64K single/batched chunk cases
   SMOKE_EXPECTED_LAYERS     checkpoint layer count; defaults to 93. Set to 4
                             only for the required four-layer RDMA flow smoke.
+  SMOKE_DECODE_Q_REPLICATED  1 replicates Decode Q-B/K-C weights; requires a DCP Decode topology.
   SMOKE_DCP_PADDING_REGRESSION
                             1 runs the optional DCP draft-width-3 regression; defaults to 0.
   SMOKE_BLOCK_SIZE          physical cache page size; defaults to 1024
@@ -208,6 +209,9 @@ smoke_decode_tp_size="${SMOKE_DECODE_TP_SIZE:-${TP_SIZE:-${KIMI_K3_TP_SIZE:-4}}}
 smoke_decode_default_dp=1
 [[ "${smoke_decode_tp_size}" != 4 ]] || smoke_decode_default_dp=2
 smoke_decode_dp_size="${SMOKE_DECODE_DP_SIZE:-${smoke_decode_default_dp}}"
+smoke_decode_q_replicated="${SMOKE_DECODE_Q_REPLICATED:-0}"
+[[ "${smoke_decode_q_replicated}" == "0" || "${smoke_decode_q_replicated}" == "1" ]] \
+    || die "SMOKE_DECODE_Q_REPLICATED must be 0 or 1"
 for topology_size in "${smoke_prefill_tp_size}" "${smoke_decode_tp_size}" "${smoke_decode_dp_size}"; do
     [[ "${topology_size}" =~ ^[1-9][0-9]*$ && "${#topology_size}" -le 1 ]] \
         || die "smoke topology sizes must be integers in 1..8"
@@ -694,6 +698,7 @@ verify_role_environment() {
         "${smoke_tp_size}" \
         "${smoke_dp_size}" \
         "${smoke_prefill_tp_size}" \
+        "${smoke_decode_q_replicated}" \
         "${smoke_decode_topology}" \
         "${smoke_proposal_tokens}" \
         "${FT_CORE_DUMP_ON_EXCEPTION}" <<'PY'
@@ -720,6 +725,7 @@ import sys
     tp_size,
     dp_size,
     prefill_tp_size,
+    decode_q_replicated,
     decode_topology,
     proposal_tokens,
     core_dump_on_exception,
@@ -802,6 +808,7 @@ else:
         "DECODE_CAPTURE_CONFIG": "1,2,4,8",
         "KIMI_K3_DECODE_TOPOLOGY": decode_topology,
         "DECODE_CP_KV_CACHE_SHARDED": "1",
+        "DECODE_CP_Q_REPLICATED": decode_q_replicated,
         "NCCL_GRAPH_REGISTER": "0",
         "RTP_MLA_DECODE_KERNEL": "tokenspeed_mla",
         "MOE_STRATEGY": "mega_moe_se",
@@ -899,6 +906,7 @@ apply_validated_common_profile() {
     export KIMI_K3_TP_SIZE="${smoke_tp_size}"
     export KIMI_K3_EP_SIZE="${smoke_ep_size}"
     # Discard legacy auxiliary-layer settings inherited from the shell.
+    export SMOKE_DECODE_Q_REPLICATED="${smoke_decode_q_replicated}"
     unset KIMI_K3_EAGLE3_AUX_LAYER_IDS
     export RTP_LLM_SERVICE_ID="kimi-k3-full-pd-${SMOKE_RUN_ID}"
     # Keep TP Unix-domain sockets below Linux's 107-byte path limit even when
@@ -920,7 +928,7 @@ apply_validated_common_profile() {
 apply_validated_prefill_profile() {
     # Admit the full HTTP batch: the uneven DP stage submits 4+3+2+1 requests.
     export CONCURRENCY_LIMIT=32
-    unset DECODE_CP_KV_CACHE_SHARDED
+    unset DECODE_CP_KV_CACHE_SHARDED DECODE_CP_Q_REPLICATED
     export MAX_SEQ_LEN=1258294
     export MAX_BATCH_TOKENS_SIZE=1258291
     export KV_CACHE_MEM_MB="${smoke_prefill_kv_cache_mem_mb}"
@@ -957,8 +965,8 @@ apply_validated_decode_profile() {
     export DECODE_CAPTURE_CONFIG=1,2,4,8
     export KIMI_K3_DECODE_TOPOLOGY="${smoke_decode_topology}"
     export DECODE_CP_KV_CACHE_SHARDED=1
-    # Avoid Graph replay hangs/wrong answers with expandable-segment buffers.
-    export NCCL_GRAPH_REGISTER=0
+    export DECODE_CP_Q_REPLICATED="${smoke_decode_q_replicated}"
+    export NCCL_GRAPH_REGISTER="${NCCL_GRAPH_REGISTER:-0}"
     export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
@@ -981,6 +989,7 @@ echo "[${role}] sp_type=${smoke_sp_type} sp_model_type=${smoke_sp_model_type}"
 echo "[${role}] draft_checkpoint=${sp_checkpoint_real} (${sp_checkpoint_fs}:${sp_checkpoint_source})"
 echo "[${role}] decode_topology=${smoke_decode_topology} decode_dp=${smoke_decode_dp_size} draft_ktp=1"
 echo "[${role}] source_cache=page-rr/${smoke_prefill_tp_size} destination_cache=page-rr/${smoke_decode_tp_size}"
+echo "[${role}] decode_q_replicated=${smoke_decode_q_replicated}"
 echo "[${role}] endpoints prefill=${PREFILL_ENDPOINT} decode=${DECODE_ENDPOINT}"
 
 setsid "${launcher}" "${role}" >"${service_log}" 2>&1 &

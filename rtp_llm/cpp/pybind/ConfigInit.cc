@@ -1194,6 +1194,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
         .def_readwrite("prefill_cp_config", &ParallelismConfig::prefill_cp_config)
         .def_readwrite("decode_cp_kv_cache_sharded", &ParallelismConfig::decode_cp_kv_cache_sharded)
+        .def_readwrite("decode_cp_q_replicated", &ParallelismConfig::decode_cp_q_replicated)
         .def("to_string", &ParallelismConfig::to_string)
         .def("get_attn_tp_size", &ParallelismConfig::get_attn_tp_size)
         .def("get_attn_tp_rank", &ParallelismConfig::get_attn_tp_rank)
@@ -1226,10 +1227,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.prefill_cp_config,
                                       self.use_ub_comm,
                                       self.role_type,
-                                      self.decode_cp_kv_cache_sharded);
+                                      self.decode_cp_kv_cache_sharded,
+                                      self.decode_cp_q_replicated);
             },
             [](py::tuple t) {
-                if (t.size() != 21)
+                if (t.size() != 22)
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
@@ -1254,6 +1256,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_ub_comm             = t[18].cast<bool>();
                     c.role_type               = t[19].cast<RoleType>();
                     c.decode_cp_kv_cache_sharded = t[20].cast<bool>();
+                    c.decode_cp_q_replicated = t[21].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }

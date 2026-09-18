@@ -18,11 +18,24 @@ from .tokenspeed_mla_impl import (
 
 
 class PageRRMlaDecodeOp:
-    def __init__(self, attn_configs, parallelism, weights, communicator, cache_group_id=0, workspace=None):
+    def __init__(
+        self,
+        attn_configs,
+        parallelism,
+        weights,
+        communicator,
+        cache_group_id=0,
+        workspace=None,
+        q_replicated=False,
+    ):
         if attn_configs.is_sparse:
             raise ValueError("Decode Page-RR requires dense MLA")
         self.num_heads = attn_configs.head_num
         self.all_heads = self.num_heads * parallelism.tp_size
+        # The replicated KC tensor is the layout contract for this path:
+        # full-head KC means Q-B also produced all heads on this rank.
+        self.q_replicated = q_replicated
+        self.query_heads = self.all_heads if q_replicated else self.num_heads
         self.kv_lora_rank = attn_configs.kv_lora_rank
         self.qk_rope_head_dim = attn_configs.rope_head_dim
         self.qk_nope_head_dim = attn_configs.nope_head_dim
@@ -37,6 +50,12 @@ class PageRRMlaDecodeOp:
         projection = next((w[W.mla_kc] for w in weights if W.mla_kc in w and W.mla_vc in w), None)
         if projection is None:
             raise ValueError("Decode Page-RR requires absorbed K/V projection weights")
+        if projection.shape[0] != self.query_heads:
+            raise ValueError(
+                "Decode Page-RR KC head layout does not match the configured "
+                f"query layout: got {projection.shape[0]}, expected "
+                f"{self.query_heads}"
+            )
         expected_cache_dtype = KvCacheDataType.FP8 if self.fp8_compute else KvCacheDataType.BASE
         if attn_configs.kv_cache_dtype != expected_cache_dtype:
             raise ValueError(f"Decode Page-RR requires {expected_cache_dtype} cache")
@@ -65,7 +84,18 @@ class PageRRMlaDecodeOp:
         batch, queries = self.metadata.local_causal_lens.shape
         tokens = batch * queries
         dim = self.kv_lora_rank + self.qk_rope_head_dim
-        local_query = torch.empty((self.num_heads, tokens, dim), dtype=q_nope.dtype, device=q_nope.device)
+        expected_heads = self.query_heads
+        if q_nope.shape[1] != expected_heads or q_pe.shape[1] != expected_heads:
+            raise ValueError(
+                "Decode Page-RR query head layout does not match its KC layout: "
+                f"q_nope={q_nope.shape[1]}, q_pe={q_pe.shape[1]}, "
+                f"expected={expected_heads}"
+            )
+        local_query = torch.empty(
+            (self.query_heads, tokens, dim),
+            dtype=q_nope.dtype,
+            device=q_nope.device,
+        )
         torch.bmm(
             q_nope.transpose(0, 1), self.weights[layer_id][W.mla_kc],
             out=local_query[..., :self.kv_lora_rank],
@@ -73,7 +103,11 @@ class PageRRMlaDecodeOp:
         local_query[..., self.kv_lora_rank:].copy_(q_pe.transpose(0, 1))
         if self.fp8_compute:
             local_query = quantize_fp8(local_query, self.q_scale, name="page_rr_absorbed_q")
-        gathered = self.communicator.query_gather(local_query)
+        gathered = (
+            local_query
+            if self.q_replicated
+            else self.communicator.query_gather(local_query)
+        )
         page_size = self.metadata.kernel_page_size
         partial, lse = tokenspeed_mla_page_rr_decode(
             gathered.transpose(0, 1).view(batch, queries, self.all_heads, dim),
@@ -122,6 +156,7 @@ class PageRRMlaDecodeImpl(MlaFlashInferImplBase):
             PageRRMlaDecodeOp(
                 attn_configs, parallelism_config, weights, communicator, group_id,
                 getattr(attn_inputs, "cuda_graph_fmha_workspace", None),
+                q_replicated=bool(parallelism_config.decode_cp_q_replicated),
             ),
             NewMlaRotaryEmbeddingOp(cos_sin_cache, attn_configs.rope_config.is_neox_style),
             MlaKVCacheWriteOp(

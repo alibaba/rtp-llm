@@ -239,6 +239,14 @@ def set_parallelism_config(
             == parallelism_config.tp_size * parallelism_config.dp_size
         ), f"ep_size must be equal to 1 or tp_size * dp_size, got ep_size={parallelism_config.ep_size}, tp_size={parallelism_config.tp_size}, dp_size={parallelism_config.dp_size}"
 
+    if parallelism_config.decode_cp_q_replicated:
+        if not parallelism_config.decode_cp_kv_cache_sharded:
+            raise ValueError(
+                "decode_cp_q_replicated requires decode_cp_kv_cache_sharded"
+            )
+        if parallelism_config.tp_size <= 1:
+            raise ValueError("decode_cp_q_replicated requires attention TP")
+
     ktp_size = int(parallelism_config.ktp_size)
     if parallelism_config.decode_cp_kv_cache_sharded:
         assert ktp_size == 1, "Decode DCP and Projection KTP are mutually exclusive"

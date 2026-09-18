@@ -28,12 +28,18 @@ class MlaAttention(nn.Module):
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         global_weights: Optional[Dict[str, torch.Tensor]] = None,
+        replicate_query_heads: bool = False,
     ):
         super().__init__()
         self.attn_config = attn_config
         self.parallelism_config = parallelism_config
-        self.num_heads = (
+        self.output_num_heads = (
             attn_config.head_num // self.parallelism_config.get_attn_tp_size()
+        )
+        self.num_heads = (
+            attn_config.head_num
+            if replicate_query_heads
+            else self.output_num_heads
         )
         self.qk_nope_head_dim = attn_config.nope_head_dim
         self.qk_rope_head_dim = attn_config.rope_head_dim
@@ -235,10 +241,12 @@ class MlaAttention(nn.Module):
             )
 
         if attn_output is not None:
-            attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+            attn_output = (
+                attn_output.reshape(*input_shape, -1).contiguous()
+            )
         else:
             attn_output = torch.zeros(
-                (*input_shape, self.num_heads * self.v_head_dim),
+                (*input_shape, self.output_num_heads * self.v_head_dim),
                 dtype=q.dtype,
                 device=q.device,
             )

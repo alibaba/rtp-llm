@@ -58,7 +58,19 @@ def _rotate(value, positions, cos_sin):
     return torch.cat((x * cos - y * sin, y * cos + x * sin), dim=-1).to(value.dtype)
 
 
-def _fixture(rank, size, queries, fp8, generation=0, *, draft=False, prefix_lengths=None, page=128, kernel_page=64):
+def _fixture(
+    rank,
+    size,
+    queries,
+    fp8,
+    generation=0,
+    *,
+    draft=False,
+    q_replicated=False,
+    prefix_lengths=None,
+    page=128,
+    kernel_page=64,
+):
     torch.manual_seed(1701 + generation)
     device = torch.device("cuda", rank)
     heads, latent, rope, nope, value = 96, 512, 64, 128, 128
@@ -177,7 +189,10 @@ def _fixture(rank, size, queries, fp8, generation=0, *, draft=False, prefix_leng
         rope_config=SimpleNamespace(is_neox_style=True),
     )
     head_slice = slice(rank * local_heads, (rank + 1) * local_heads)
-    weights = [{W.mla_kc: kc[head_slice], W.mla_vc: vc[head_slice]}]
+    weights = [{
+        W.mla_kc: kc if q_replicated else kc[head_slice],
+        W.mla_vc: vc[head_slice],
+    }]
     if not draft:
         weights.insert(0, {})  # The target starts with LINEAR, not FULL MLA.
     absorbed = torch.bmm(q_rotated[..., :nope].transpose(0, 1), kc).transpose(0, 1)
@@ -220,7 +235,9 @@ def _fixture(rank, size, queries, fp8, generation=0, *, draft=False, prefix_leng
     ].reshape(tokens, local_heads, value)
     return SimpleNamespace(
         config=config, inputs=inputs, weights=weights, cos_sin=cos_sin,
-        q=q_all[:, head_slice].contiguous(), ckv=ckv, k_pe=k_pe,
+        q=(q_all if q_replicated else q_all[:, head_slice]).contiguous(),
+        ckv=ckv,
+        k_pe=k_pe,
         cache=SimpleNamespace(kv_cache_base=raw_cache), expected=expected,
         positions=positions, canonical=encoded, prefix_groups=prefix_groups,
         prefixes=prefixes, dtype=dtype,
@@ -272,63 +289,104 @@ def _worker(rank, size, port):
     init_distributed_environment(parallelism, NcclCommConfig(nccl_ip="127.0.0.1"), port, timeout=180)
     graph = None
     try:
-        for fp8 in (False, True):
-            for batch, queries, prefixes in _CASES:
-                assert batch * queries <= 512
-                fixture = _fixture(rank, size, queries, fp8, draft=not fp8, prefix_lengths=prefixes)
-                if queries == 1:
-                    # Match the runner's synthetic capture descriptor;
-                    # replay below switches to live plus-one lengths.
-                    fixture.inputs.sequence_lengths_plus_1_d.zero_()
-                impl = get_mla_impl(
-                    fixture.config,
-                    SimpleNamespace(weights=fixture.weights, get_global_weight=lambda key: fixture.cos_sin),
-                    fixture.inputs, parallelism_config=parallelism,
-                    is_cuda_graph=True,
-                )
-                assert isinstance(impl, PageRRMlaDecodeImpl)
-                comm = mla_dcp_comm.get_mla_dcp(fixture.config, fixture.q.device, fixture.dtype)
-                assert comm.backend == "a2a"
-                assert impl.fmha_params.cache_group_id == fixture.group_id, (
-                    f"Page-RR selected group {impl.fmha_params.cache_group_id}, expected {fixture.group_id}"
-                )
-                output = impl.forward(fixture.q.clone(), fixture.ckv, fixture.k_pe.clone(), fixture.cache, fixture.layer_id)
-                _assert_result(fixture, impl, output, rank, size)
-                q, k_pe = fixture.q.clone(), fixture.k_pe.clone()
-                stream = torch.cuda.Stream()
-                stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(stream):
-                    for _ in range(2):
-                        impl.forward(q, fixture.ckv, k_pe, fixture.cache, fixture.layer_id)
-                torch.cuda.current_stream().wait_stream(stream)
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    output = impl.forward(q, fixture.ckv, k_pe, fixture.cache, fixture.layer_id)
-                addresses = tuple(x.data_ptr() for x in (impl.fmha_params.positions_d, impl.fmha_params.slot_mapping, impl.fmha_params.local_causal_lens, impl.fmha_params.query_block_tables))
-                for generation in (1, 2):
-                    live = _fixture(rank, size, queries, fp8, generation, draft=not fp8, prefix_lengths=prefixes)
-                    # Weights/RoPE stay fixed; mutate live tensors at
-                    # their captured addresses, including physical IDs.
-                    q.copy_(live.q)
-                    k_pe.copy_(live.k_pe)
-                    fixture.ckv.copy_(live.ckv)
-                    fixture.cache.kv_cache_base.copy_(live.cache.kv_cache_base)
-                    for field in ("prefix_lengths", "sequence_lengths", "sequence_lengths_plus_1_d"):
-                        getattr(fixture.inputs, field).copy_(getattr(live.inputs, field))
-                    fixture.inputs.kv_cache_kernel_block_id_device_by_group[fixture.group_id].copy_(live.inputs.kv_cache_kernel_block_id_device_by_group[live.group_id])
-                    impl.prepare_cuda_graph(fixture.inputs)
-                    allocated = torch.cuda.memory_allocated()
-                    graph.replay()
+        total_cases = len(_CASES)
+        for q_replicated in (False, True):
+            parallelism.decode_cp_q_replicated = q_replicated
+            for fp8 in (False, True):
+                for case_index, (batch, queries, prefixes) in enumerate(
+                    _CASES, start=1
+                ):
+                    assert batch * queries <= 512
+                    if rank == 0:
+                        print(
+                            f"DCP START ranks={size} q_replicated={q_replicated} "
+                            f"dtype={'FP8' if fp8 else 'BF16'} "
+                            f"case={case_index}/{total_cases} "
+                            f"batch={batch} q={queries}",
+                            flush=True,
+                        )
+                    fixture = _fixture(
+                        rank,
+                        size,
+                        queries,
+                        fp8,
+                        draft=not fp8,
+                        q_replicated=q_replicated,
+                        prefix_lengths=prefixes,
+                    )
+                    if queries == 1:
+                        # Match the runner's synthetic capture descriptor;
+                        # replay below switches to live plus-one lengths.
+                        fixture.inputs.sequence_lengths_plus_1_d.zero_()
+                    impl = get_mla_impl(
+                        fixture.config,
+                        SimpleNamespace(weights=fixture.weights, get_global_weight=lambda key: fixture.cos_sin),
+                        fixture.inputs, parallelism_config=parallelism,
+                        is_cuda_graph=True,
+                    )
+                    assert isinstance(impl, PageRRMlaDecodeImpl)
+                    if rank == 0:
+                        print(
+                            f"DCP READY ranks={size} q_replicated={q_replicated} "
+                            f"dtype={'FP8' if fp8 else 'BF16'} "
+                            f"case={case_index}/{total_cases} backend=page_rr",
+                            flush=True,
+                        )
+                    comm = mla_dcp_comm.get_mla_dcp(fixture.config, fixture.q.device, fixture.dtype)
+                    assert comm.backend == "a2a"
+                    assert impl.fmha_params.cache_group_id == fixture.group_id, (
+                        f"Page-RR selected group {impl.fmha_params.cache_group_id}, expected {fixture.group_id}"
+                    )
+                    output = impl.forward(fixture.q.clone(), fixture.ckv, fixture.k_pe.clone(), fixture.cache, fixture.layer_id)
+                    _assert_result(fixture, impl, output, rank, size)
+                    q, k_pe = fixture.q.clone(), fixture.k_pe.clone()
+                    stream = torch.cuda.Stream()
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        for _ in range(2):
+                            impl.forward(q, fixture.ckv, k_pe, fixture.cache, fixture.layer_id)
+                    torch.cuda.current_stream().wait_stream(stream)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        output = impl.forward(q, fixture.ckv, k_pe, fixture.cache, fixture.layer_id)
+                    addresses = tuple(x.data_ptr() for x in (impl.fmha_params.positions_d, impl.fmha_params.slot_mapping, impl.fmha_params.local_causal_lens, impl.fmha_params.query_block_tables))
+                    for generation in (1, 2):
+                        live = _fixture(
+                            rank,
+                            size,
+                            queries,
+                            fp8,
+                            generation,
+                            draft=not fp8,
+                            q_replicated=q_replicated,
+                            prefix_lengths=prefixes,
+                        )
+                        # Weights/RoPE stay fixed; mutate live tensors at
+                        # their captured addresses, including physical IDs.
+                        q.copy_(live.q)
+                        k_pe.copy_(live.k_pe)
+                        fixture.ckv.copy_(live.ckv)
+                        fixture.cache.kv_cache_base.copy_(live.cache.kv_cache_base)
+                        for field in ("prefix_lengths", "sequence_lengths", "sequence_lengths_plus_1_d"):
+                            getattr(fixture.inputs, field).copy_(getattr(live.inputs, field))
+                        fixture.inputs.kv_cache_kernel_block_id_device_by_group[fixture.group_id].copy_(live.inputs.kv_cache_kernel_block_id_device_by_group[live.group_id])
+                        impl.prepare_cuda_graph(fixture.inputs)
+                        allocated = torch.cuda.memory_allocated()
+                        graph.replay()
+                        torch.cuda.synchronize()
+                        assert torch.cuda.memory_allocated() == allocated
+                        live.cache = fixture.cache
+                        _assert_result(live, impl, output, rank, size)
+                        assert addresses == tuple(x.data_ptr() for x in (impl.fmha_params.positions_d, impl.fmha_params.slot_mapping, impl.fmha_params.local_causal_lens, impl.fmha_params.query_block_tables))
+                    graph.reset()
+                    graph = None
                     torch.cuda.synchronize()
-                    assert torch.cuda.memory_allocated() == allocated
-                    live.cache = fixture.cache
-                    _assert_result(live, impl, output, rank, size)
-                    assert addresses == tuple(x.data_ptr() for x in (impl.fmha_params.positions_d, impl.fmha_params.slot_mapping, impl.fmha_params.local_causal_lens, impl.fmha_params.query_block_tables))
-                graph.reset()
-                graph = None
-                torch.cuda.synchronize()
-                if rank == 0:
-                    print(f"DCP PASS ranks={size} backend=a2a dtype={fixture.dtype} batch={batch} q={queries}", flush=True)
+                    if rank == 0:
+                        print(
+                            f"DCP PASS ranks={size} backend=a2a q_replicated={q_replicated} "
+                            f"dtype={fixture.dtype} batch={batch} q={queries}",
+                            flush=True,
+                        )
 
         fixture = _fixture(rank, size, 1, False)
         a2a = MlaDcpCommunicator(96 // size, 576, 512, fixture.dtype, fixture.q.device)

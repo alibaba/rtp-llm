@@ -77,6 +77,34 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
                     for key in settings:
                         self.assertNotIn(key, forwarded)
 
+    def test_forwards_decode_q_replicated_to_both_roles(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"SMOKE_DECODE_Q_REPLICATED": "1"}, clear=True
+        ):
+            for role in ("prefill", "decode"):
+                self.assertEqual(
+                    driver.forwarded_optional_environment(role)[
+                        "SMOKE_DECODE_Q_REPLICATED"
+                    ],
+                    "1",
+                )
+
+    def test_decode_q_replicated_defaults_to_absent(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            for role in ("prefill", "decode"):
+                self.assertNotIn(
+                    "SMOKE_DECODE_Q_REPLICATED",
+                    driver.forwarded_optional_environment(role),
+                )
+
+    def test_forwards_service_environment_isolation_to_both_roles(self) -> None:
+        settings = {"PYTHONNOUSERSITE": "1", "NCCL_GRAPH_REGISTER": "0"}
+        with mock.patch.dict(os.environ, settings, clear=True):
+            for role in ("prefill", "decode"):
+                forwarded = driver.forwarded_optional_environment(role)
+                for key, value in settings.items():
+                    self.assertEqual(forwarded[key], value)
+
     def test_precision_modes_and_prefix_budget_reach_both_role_commands(self) -> None:
         args = argparse.Namespace(
             prefill_repo_root="/data1/prefill",

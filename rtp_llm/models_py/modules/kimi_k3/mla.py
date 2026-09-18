@@ -57,6 +57,7 @@ class KimiK3MLA(MlaAttention):
         layer_idx: int = -1,
         latent_norm_eps: float = _MLA_LATENT_NORM_EPS,
     ) -> None:
+        q_replicated = bool(parallelism_config.decode_cp_q_replicated)
         super().__init__(
             config.attn_config,
             parallelism_config,
@@ -64,6 +65,7 @@ class KimiK3MLA(MlaAttention):
             layer_idx,
             latent_norm_eps,
             getattr(config, "k3_attention_quant_config", None) or config.quant_config,
+            replicate_query_heads=q_replicated,
         )
         # The framework RMSNorm consumes dense rows. The previous K3 wrapper
         # also materialized these split views before invoking the same kernel.
@@ -77,6 +79,9 @@ class KimiK3MLA(MlaAttention):
                 f"MLA heads {total_heads} must be divisible by attention TP {tp_size}"
             )
         self.local_heads = total_heads // tp_size
+        self.q_replicated = q_replicated
+        if self.q_replicated and parallelism_config.role_type != RoleType.DECODE:
+            raise ValueError("replicated decode Q is only valid for the decode role")
         self.q_lora_rank = int(config.attn_config.q_lora_rank)
         self.kv_lora_rank = int(config.attn_config.kv_lora_rank)
         self.suffix_dim = int(config.attn_config.rope_head_dim)

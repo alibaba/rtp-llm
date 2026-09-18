@@ -91,6 +91,7 @@ struct ParallelismConfig {
     // Context Parallel configuration
     PrefillCPConfig prefill_cp_config;
     bool decode_cp_kv_cache_sharded = false;
+    bool decode_cp_q_replicated = false;
 
     bool kv_page_rr_enabled() const {
         const bool sharded =

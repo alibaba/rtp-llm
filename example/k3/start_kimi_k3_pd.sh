@@ -86,6 +86,7 @@ Role-specific high-performance paths:
   KIMI_K3_DECODE_TOPOLOGY               legacy, tp8_ep8, tp16_ep16,
                                          dp8_ktp8_ep8, or dp16_ktp16_ep16
   DECODE_CP_KV_CACHE_SHARDED             Decode only; defaults to 0, uses the TP group
+  DECODE_CP_Q_REPLICATED                  Decode only; defaults to 0; requires Decode DCP
   ENABLE_CUDA_GRAPH_DEBUG_MODE           defaults to 0
 
 Runtime, build and diagnostics:
@@ -291,6 +292,7 @@ if [[ "${role}" == "PREFILL" ]]; then
     [[ "${ENABLE_CUDA_GRAPH:-0}" == "0" ]] \
         || die "Prefill CUDA Graph is unsupported; set ENABLE_CUDA_GRAPH=0"
     decode_cp_kv_cache_sharded=0
+    decode_cp_q_replicated=0
     enable_cuda_graph=0
     decode_capture_config=
     prefill_capture_config="${PREFILL_CAPTURE_CONFIG:-}"
@@ -299,6 +301,12 @@ if [[ "${role}" == "PREFILL" ]]; then
 else
     enable_cuda_graph="${ENABLE_CUDA_GRAPH:-1}"
     decode_cp_kv_cache_sharded="${DECODE_CP_KV_CACHE_SHARDED:-0}"
+    decode_cp_q_replicated="${DECODE_CP_Q_REPLICATED:-0}"
+    [[ "${decode_cp_q_replicated}" == "0" || "${decode_cp_q_replicated}" == "1" ]] \
+        || die "DECODE_CP_Q_REPLICATED must be 0 or 1"
+    if [[ "${decode_cp_q_replicated}" == "1" && "${decode_cp_kv_cache_sharded}" != "1" ]]; then
+        die "DECODE_CP_Q_REPLICATED=1 requires DECODE_CP_KV_CACHE_SHARDED=1"
+    fi
     decode_capture_config="${DECODE_CAPTURE_CONFIG:-1}"
     prefill_capture_config=
     unset KIMI_K3_PREFILL_CHUNK_TOKENS
@@ -571,6 +579,7 @@ if [[ "${role}" == "DECODE" ]]; then
     echo "  decode topology: ${decode_topology}"
     echo "  decode MLA:      ${RTP_MLA_DECODE_KERNEL:-default}"
     echo "  Decode Page-RR:  ${decode_cp_kv_cache_sharded} (backend=a2a)"
+    echo "  Decode Q replicate: ${decode_cp_q_replicated}"
 fi
 echo "  load method:     ${LOAD_METHOD}"
 echo "  DeepGEMM JIT:    ${deepgemm_jit_compiler}"
@@ -609,6 +618,7 @@ server_args=(
     --dp_size "${dp_size}"
     --ktp_size "${ktp_size}"
     --decode_cp_kv_cache_sharded "${decode_cp_kv_cache_sharded}"
+    --decode_cp_q_replicated "${decode_cp_q_replicated}"
     --ep_size "${ep_size}"
     --world_size "${world_size}"
     --world_rank "${world_rank}"

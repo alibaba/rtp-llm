@@ -133,6 +133,7 @@ class ModelFactory:
             "ffn_disaggregate_config",
             "prefill_cp_config",
             "decode_cp_kv_cache_sharded",
+            "decode_cp_q_replicated",
         ):
             setattr(result, name, getattr(parallelism_config, name))
         result.ktp_size = 1

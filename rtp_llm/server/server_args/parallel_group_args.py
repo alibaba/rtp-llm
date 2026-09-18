@@ -116,6 +116,14 @@ def init_parallel_group_args(
         default=False,
         help="Shard Kimi K3 Decode MLA KV pages across the attention TP group; requires KTP_SIZE=1.",
     )
+    parallel_group.add_argument(
+        "--decode_cp_q_replicated",
+        env_name="DECODE_CP_Q_REPLICATED",
+        bind_to=(parallelism_config, "decode_cp_q_replicated"),
+        type=str2bool,
+        default=False,
+        help="Replicate Kimi K3 Decode Q-B/K-C weights and skip the query all-gather.",
+    )
     prefill_cp_size_bind_to = (
         (prefill_cp_config, "prefill_cp_size")
         if hasattr(prefill_cp_config, "prefill_cp_size")

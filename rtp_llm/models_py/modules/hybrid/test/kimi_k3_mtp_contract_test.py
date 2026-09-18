@@ -370,6 +370,8 @@ class KimiK3MtpContractTest(unittest.TestCase):
                     parallel.tp_rank = parallel.ep_rank = rank
                     parallel.prefill_cp_config.kv_cache_sharded = True
                     parallel.prefill_cp_config.prefill_cp_size = tp_size
+                    parallel.decode_cp_kv_cache_sharded = True
+                    parallel.decode_cp_q_replicated = True
                     engine = MagicMock()
                     engine.parallelism_config = parallel
                     engine.sp_config.type = SpeculativeType.EAGLE3
@@ -398,8 +400,15 @@ class KimiK3MtpContractTest(unittest.TestCase):
                         parallel.prefill_cp_config.prefill_cp_size, tp_size
                     )
                     # Native MTP retains the target's FULL Page-RR placement.
-                    mtp = ModelFactory._propose_parallelism_config(parallel)
+                    mtp = ModelFactory._propose_parallelism_config(
+                        parallel, model_type="kimi_k3_mtp"
+                    )
                     self.assertTrue(mtp.kv_page_rr_enabled())
+                    self.assertTrue(mtp.decode_cp_q_replicated)
+                    eagle = ModelFactory._propose_parallelism_config(
+                        parallel, model_type="kimi_k3_mla_swa_eagle3"
+                    )
+                    self.assertTrue(eagle.decode_cp_q_replicated)
 
     def test_factory_rejects_wrong_mode_and_cp_before_loading(self):
         from rtp_llm.model_factory import ModelFactory

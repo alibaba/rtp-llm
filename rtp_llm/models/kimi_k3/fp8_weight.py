@@ -29,7 +29,15 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
     def support(cls, quant_config, src_weight_info):
         return False
 
-    def __init__(self, src_weight_info, quant_config, *, derive_mla=False, layer_id=-1):
+    def __init__(
+        self,
+        src_weight_info,
+        quant_config,
+        *,
+        derive_mla=False,
+        layer_id=-1,
+        replicate_q_weights=False,
+    ):
         if src_weight_info.name not in self.w8a8_weight_list:
             raise ValueError(
                 f"not a K3 FP8 attention projection: {src_weight_info.name}"
@@ -39,6 +47,7 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
         self.tp_ranges = None
         self.source = src_weight_info
         self.derive_mla = derive_mla
+        self.replicate_q_weights = replicate_q_weights
         if derive_mla:
             for name in (W.mla_kc, W.mla_vc):
                 self.sub_weights[name] = AtomicWeight(name, [])
@@ -123,6 +132,24 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
             rows.append(weight[offset:])
             blocks.append(scale[offset // 128 :])
             weight, scale = torch.cat(rows), torch.cat(blocks)
+        elif name == W.mla_q_b_w and self.replicate_q_weights:
+            # Q-B normally shards its output rows by TP. Replicated decode Q
+            # needs every rank to produce every attention head, so retain the
+            # complete matrix and skip only this TP slice.
+            self.tp_ranges = {
+                "axis": 0,
+                "parallel": "replicated",
+                "replicated": [(0, weight.shape[0])],
+            }
+        elif name == W.mla_kv_b_w and self.derive_mla and self.replicate_q_weights:
+            # KC is derived head-major from the same kv_b matrix; when Q is
+            # replicated KC needs all heads, so keep kv_b whole here and let
+            # the postprocess VC derivation slice only the local heads.
+            self.tp_ranges = {
+                "axis": 0,
+                "parallel": "replicated",
+                "replicated": [(0, weight.shape[0])],
+            }
         elif name != W.mla_fusedqkrope_w:
             axis = 1 if name in (W.attn_o_w, W.linear_attn_out_w) else 0
             width = weight.shape[axis]
@@ -177,10 +204,28 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
                 ]
             )
             dense = dense.to(torch.bfloat16)
-            heads = cfg.head_num // load_config.tp_size
-            args = (heads, cfg.nope_head_dim, cfg.v_head_dim, cfg.kv_lora_rank)
-            result[W.mla_kc] = transpose_slice_k([dense], *args).contiguous()
-            result[W.mla_vc] = transpose_slice_v([dense], *args).contiguous()
+            local_heads = cfg.head_num // load_config.tp_size
+            # KC follows Q-B's full-head layout; VC stays local because the
+            # DCP combine returns only this rank's output heads.
+            kc_heads = cfg.head_num if self.replicate_q_weights else local_heads
+            kc_args = (kc_heads, cfg.nope_head_dim, cfg.v_head_dim, cfg.kv_lora_rank)
+            vc_args = (local_heads, cfg.nope_head_dim, cfg.v_head_dim, cfg.kv_lora_rank)
+            result[W.mla_kc] = transpose_slice_k([dense], *kc_args).contiguous()
+            if self.replicate_q_weights:
+                # kv_b stays whole (all heads) for the KC derivation; VC must
+                # still hold only this rank's heads. Take this rank's head rows
+                # of [heads*(nope+v), lora] and produce [local_heads, v, lora].
+                window = local_heads
+                span = window * (cfg.nope_head_dim + cfg.v_head_dim)
+                begin = load_config.tp_rank * span
+                vc_rows = dense[begin:begin + span].view(
+                    window, cfg.nope_head_dim + cfg.v_head_dim, dense.shape[1]
+                )
+                result[W.mla_vc] = (
+                    vc_rows[:, cfg.nope_head_dim:, :].permute(0, 2, 1).contiguous()
+                )
+            else:
+                result[W.mla_vc] = transpose_slice_v([dense], *vc_args).contiguous()
         if self.use_ue8m0:
             scale = _transform_scale_ue8m0(scale, mn=weight.shape[0])
         else:

@@ -217,8 +217,21 @@ class _KimiExpertByteWeight(MoeAtomicWeight):
         return sp_id
 
 
+class _MlaReplicatedWeight(MlaAttnAtomicWeight):
+    """MLA weight whose head dimension is replicated for Decode DCP."""
+
+    def _get_split_func(self):
+        return sp_id
+
+
 class KimiK3Weight(ModelDeployWeightInfo):
     """Describe every text-model tensor in the Kimi K3 checkpoint."""
+
+    def __init__(self, model_config, parallelism_config, *args, **kwargs):
+        super().__init__(model_config, parallelism_config, *args, **kwargs)
+        self.decode_cp_q_replicated = bool(
+            parallelism_config.decode_cp_q_replicated
+        )
 
     MODEL_PREFIX = "language_model.model."
     LAYER_PREFIX = MODEL_PREFIX + "layers.{i}."
@@ -581,9 +594,13 @@ class KimiK3Weight(ModelDeployWeightInfo):
         """
 
         cfg = self._mla_config()
+        replicate_query_heads = self.decode_cp_q_replicated
 
-        def _mla(name, suffix, process_fun):
-            return MlaAttnAtomicWeight(
+        def _mla(name, suffix, process_fun, *, replicated=False):
+            # Q-B and absorbed K-C must share one head layout: either both are
+            # TP-local (legacy) or both are full-head (replicated Decode DCP).
+            weight_cls = _MlaReplicatedWeight if replicated else MlaAttnAtomicWeight
+            return weight_cls(
                 name,
                 [CkptWeightInfo(self._layer_ckpt(suffix), identity)],
                 process_fun,
@@ -605,7 +622,12 @@ class KimiK3Weight(ModelDeployWeightInfo):
             ),
             _mla(W.mla_kv_b_w, "self_attn.kv_b_proj.weight", transpose),
             _mla(W.mla_kv_a_ln_gamma, "self_attn.kv_a_layernorm.weight", identity),
-            _mla(W.mla_q_b_w, "self_attn.q_b_proj.weight", transpose),
+            _mla(
+                W.mla_q_b_w,
+                "self_attn.q_b_proj.weight",
+                transpose,
+                replicated=replicate_query_heads,
+            ),
             _mla(W.mla_q_a_ln_gamma, "self_attn.q_a_layernorm.weight", identity),
             # Q-A and KV-A are replicated; g_proj contributes this rank's heads.
             MlaAttnAtomicWeight(
@@ -654,6 +676,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
                         v_head_dim=self.v_head_dim,
                         lora_rank=self.kv_lora_rank,
                     ),
+                    replicated=replicate_query_heads,
                 )
             )
             weights.append(
@@ -848,6 +871,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
                             quant_config,
                             derive_mla=derive_mla and w.name == W.mla_kv_b_w,
                             layer_id=layer_id,
+                            replicate_q_weights=self.decode_cp_q_replicated,
                         )
                         if w.name in KimiK3LoadFp8Weight.w8a8_weight_list
                         else w

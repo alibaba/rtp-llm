@@ -7,6 +7,7 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
+    setup_default_args,
 )
 from rtp_llm.server.server_args.server_args import setup_args
 
@@ -65,6 +66,31 @@ class GenerateConfigTest(TestCase):
                     configs = setup_args()
                 with self.assertRaisesRegex(error, message):
                     setup_default_args(configs)
+
+    def test_decode_cp_q_replication_uses_parallelism_config(self):
+        env = {
+            "MODEL_TYPE": "kimi_k3",
+            "ROLE_TYPE": "DECODE",
+            "TP_SIZE": "8",
+            "WORLD_SIZE": "8",
+            "DECODE_CP_KV_CACHE_SHARDED": "1",
+        }
+        with patch.dict("os.environ", env, clear=True), patch(
+            "sys.argv", ["test", "--decode_cp_q_replicated", "1"]
+        ):
+            configs = setup_args()
+            setup_default_args(configs)
+        self.assertTrue(configs.parallelism_config.decode_cp_q_replicated)
+
+        env.pop("DECODE_CP_KV_CACHE_SHARDED")
+        with patch.dict("os.environ", env, clear=True), patch(
+            "sys.argv", ["test", "--decode_cp_q_replicated", "1"]
+        ):
+            configs = setup_args()
+            with self.assertRaisesRegex(
+                ValueError, "requires decode_cp_kv_cache_sharded"
+            ):
+                setup_default_args(configs)
 
     def test_projection_ktp_decode_topology(self):
         from rtp_llm.ops import ParallelismConfig

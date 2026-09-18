@@ -26,6 +26,7 @@ class _GatedEagle3MLA(MlaAttention):
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
     ) -> None:
+        q_replicated = bool(parallelism_config.decode_cp_q_replicated)
         super().__init__(
             config.attn_config,
             parallelism_config,
@@ -33,6 +34,7 @@ class _GatedEagle3MLA(MlaAttention):
             layer_idx=0,
             layernorm_eps=config.layernorm_eps,
             quant_config=config.quant_config,
+            replicate_query_heads=q_replicated,
         )
 
     def _project_qkv_a_input(
