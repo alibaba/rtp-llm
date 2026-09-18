@@ -159,8 +159,18 @@ class DeepSeekV41Model(DeepSeekV4Model):
             offsets.append(offsets[-1] + length)
         request_offsets = torch.tensor(offsets, device=device, dtype=torch.int64)
         positions = request_offsets[request] + shuffle.clamp(min=0)
+        # Zigzag shuffle indices live in the per-request PADDED coordinate
+        # space (the odd pair reads from the padded tail, so entries can
+        # reach the padded length): entries at or beyond the request's
+        # actual length are CP padding. They must stay text rows, or the
+        # gather below would read out of bounds on the last request and
+        # silently cross into the next request's span otherwise.
+        request_lengths = torch.tensor(prefill_lengths, device=device, dtype=torch.int64)
+        padding = (shuffle < 0) | (shuffle >= request_lengths[request])
         local_rows = torch.where(
-            shuffle >= 0, rows[positions], torch.full_like(positions, -1)
+            padding,
+            torch.full_like(positions, -1),
+            rows[positions.clamp(max=rows.numel() - 1)],
         )
         if num_decode:
             local_rows = torch.cat(
