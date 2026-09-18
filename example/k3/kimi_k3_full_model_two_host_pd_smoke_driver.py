@@ -233,6 +233,7 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_EXPECTED_LAYERS",
         "SMOKE_PAGE_RR",
         "SMOKE_DECODE_PAGE_RR",
+        "SMOKE_DCP_PADDING_REGRESSION",
         "SMOKE_BLOCK_SIZE",
         "SMOKE_KERNEL_BLOCK_SIZE",
         "SMOKE_CHUNK_TOKENS",

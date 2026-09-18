@@ -23,6 +23,11 @@
 #    SMOKE_SUITE=all \
 #    python3 ./example/k3/kimi_k3_full_model_two_host_pd_smoke_driver.py
 #
+# Additional DCP padding regression: add SMOKE_DCP_PADDING_REGRESSION=1
+# to the driver command above (use a new SMOKE_RUN_ID). It selects Decode DCP
+# and GEN_NUM_PER_CIRCLE=2: TP8 with query width 3 exercises unequal dummy
+# lengths in the old padding path. Keep the default run as a separate baseline.
+#
 # Manual role startup remains available for debugging. Run from the RTP-LLM
 # repository root inside lhc_GPU. Start Decode first and wait for its health
 # endpoint before starting Prefill, matching the controller driver:
@@ -145,6 +150,10 @@ Important optional variables:
                             1 enables the two-host P8 -> DP8 Page-RR profile
   SMOKE_DECODE_PAGE_RR      1 selects one Decode TP/DCP group instead of KTP;
                             combine with SMOKE_PAGE_RR=0/1 for P1D8/P8D8
+  SMOKE_DCP_PADDING_REGRESSION
+                            1 selects Decode DCP, GEN_NUM_PER_CIRCLE=2 and
+                            SMOKE_SUITE=all; defaults to 0. Run separately with
+                            a new SMOKE_RUN_ID. Conflicting overrides are rejected.
   SMOKE_BLOCK_SIZE          physical cache page size; defaults to 4096
                             (128 when SMOKE_PAGE_RR=1)
   SMOKE_KERNEL_BLOCK_SIZE   attention kernel page size; defaults to 128
@@ -193,6 +202,18 @@ EOF
 role="${1,,}"
 [[ "${role}" == "prefill" || "${role}" == "decode" ]] \
     || die "role must be decode or prefill"
+
+smoke_dcp_padding_regression="${SMOKE_DCP_PADDING_REGRESSION:-0}"
+[[ "${smoke_dcp_padding_regression}" == "0" || "${smoke_dcp_padding_regression}" == "1" ]] \
+    || die "SMOKE_DCP_PADDING_REGRESSION must be 0 or 1"
+if [[ "${smoke_dcp_padding_regression}" == "1" ]]; then
+    # TP8/Q4 can hide the bug with [4,4]; TP8/Q3 exposes [3,5] for one request.
+    [[ "${SMOKE_DECODE_PAGE_RR:-1}" == "1" && "${GEN_NUM_PER_CIRCLE:-2}" == "2" && "${SMOKE_SUITE:-all}" == "all" ]] \
+        || die "SMOKE_DCP_PADDING_REGRESSION requires SMOKE_DECODE_PAGE_RR=1, GEN_NUM_PER_CIRCLE=2 and SMOKE_SUITE=all"
+    export SMOKE_DECODE_PAGE_RR=1
+    export GEN_NUM_PER_CIRCLE=2
+    export SMOKE_SUITE=all
+fi
 
 smoke_page_rr="${SMOKE_PAGE_RR:-0}"
 [[ "${smoke_page_rr}" == "0" || "${smoke_page_rr}" == "1" ]] \

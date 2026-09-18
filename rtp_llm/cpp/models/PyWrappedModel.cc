@@ -129,7 +129,8 @@ buildTensorParallelPaddingPlan(const torch_ext::PyModelInputs& inputs, int64_t t
         plan.logical_requests,
         plan.logical_tokens);
 
-    plan.prefill = attention.is_prefill && !attention.is_target_verify;
+    // MTP draft updates use the same fixed query width as target verification.
+    plan.prefill = attention.is_prefill && !attention.is_target_verify && !attention.is_mtp_draft_update;
     if (plan.prefill) {
         plan.physical_tokens      = alignUp(plan.logical_tokens, tp_size);
         plan.padding_tokens       = plan.physical_tokens - plan.logical_tokens;
@@ -568,7 +569,7 @@ void PyWrappedModel::padTensorParallelInputs(torch_ext::PyModelInputs& inputs) {
         appendFilledRows(attention.input_lengths, plan.padding_requests, plan.dummy_request_tokens);
     attention.input_lengths_host =
         appendFilledRows(attention.input_lengths_host, plan.padding_requests, plan.dummy_request_tokens);
-    if (plan.prefill || attention.is_target_verify) {
+    if (plan.prefill || attention.is_target_verify || attention.is_mtp_draft_update) {
         attention.prefix_lengths      = appendFilledRows(attention.prefix_lengths, plan.padding_requests, 0);
         attention.prefix_lengths_host = appendFilledRows(attention.prefix_lengths_host, plan.padding_requests, 0);
     } else {

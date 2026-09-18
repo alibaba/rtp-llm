@@ -3,6 +3,7 @@
 
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 
 using namespace std;
@@ -108,6 +109,69 @@ TEST_F(ModelDataTest, testTensorHolderReleasesOnThirdRound) {
     holder.release();
     ASSERT_EQ(holder.clear_tensors.size(), 2);
     EXPECT_EQ(holder.clear_tensors.front().front().data_ptr(), t1.data_ptr());
+}
+
+TEST_F(ModelDataTest, MtpDraftUpdatePaddingPreservesQueryWidthAndPrefixMetadata) {
+    py::scoped_interpreter interpreter;
+    py::class_<torch_ext::PyModelInitResources>(py::module_::import("__main__"), "PyModelInitResources");
+    auto py_model = py::module_::import("types").attr("SimpleNamespace")();
+    py_model.attr("requires_sequence_parallel_padding") = true;
+    py_model.attr("initialize") = py::cpp_function([](py::object) { return true; });
+    GptModelInitParams params{};
+    params.parallelism_config.tp_size = 16;
+    params.hw_kernel_config.enable_cuda_graph = false;
+    PyWrappedModel model(params, py_model);
+    const auto cuda_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+
+    for (int64_t batch_size : {1, 2, 3, 4}) {
+        SCOPED_TRACE(batch_size);
+        torch_ext::PyModelInputs inputs;
+        inputs.input_ids = torch::arange(batch_size * 4, cuda_i32);
+        auto& attention = inputs.attention_inputs;
+        attention.is_prefill = true;
+        attention.is_mtp_draft_update = true;
+        attention.total_tokens = batch_size * 4;
+        attention.input_lengths = torch::full({batch_size}, 4, cuda_i32);
+        attention.input_lengths_host = attention.input_lengths.cpu();
+        attention.prefix_lengths = torch::arange(100, 100 + batch_size, cuda_i32);
+        attention.prefix_lengths_host = attention.prefix_lengths.cpu();
+        attention.sequence_lengths = torch::empty({0}, cuda_i32);
+        attention.sequence_lengths_host = torch::empty({0}, torch::kInt32);
+        attention.sequence_lengths_plus_1_d = attention.prefix_lengths + 1;
+        attention.kv_cache_kernel_block_id_device = torch::full({batch_size, 2}, 7, cuda_i32);
+        attention.kv_cache_kernel_block_id_device_by_group = {attention.kv_cache_kernel_block_id_device};
+
+        model.padTensorParallelInputs(inputs);
+
+        const auto expected_lengths = torch::tensor({4, 4, 4, 4}, torch::kInt32);
+        EXPECT_TRUE(torch::equal(attention.input_lengths.cpu(), expected_lengths));
+        EXPECT_TRUE(torch::equal(attention.input_lengths_host, expected_lengths));
+        ASSERT_EQ(attention.prefix_lengths.numel(), 4);
+        auto expected_prefix = torch::zeros({4}, torch::kInt32);
+        expected_prefix.narrow(0, 0, batch_size).copy_(torch::arange(100, 100 + batch_size, torch::kInt32));
+        EXPECT_TRUE(torch::equal(attention.prefix_lengths.cpu(), expected_prefix));
+        EXPECT_TRUE(torch::equal(attention.prefix_lengths_host, expected_prefix));
+        EXPECT_EQ(attention.sequence_lengths.numel(), 0);
+        EXPECT_EQ(attention.sequence_lengths_host.numel(), 0);
+        EXPECT_TRUE(torch::equal(attention.sequence_lengths_plus_1_d.cpu(), expected_prefix + 1));
+        EXPECT_EQ(attention.logical_request_count, batch_size);
+        EXPECT_EQ(attention.physical_request_count, 4);
+        EXPECT_EQ(attention.logical_token_count, batch_size * 4);
+        EXPECT_EQ(attention.physical_token_count, 16);
+        EXPECT_EQ(attention.total_tokens, 16);
+        EXPECT_EQ(inputs.input_ids.numel(), 16);
+        EXPECT_TRUE(torch::equal(inputs.input_ids.narrow(0, 0, batch_size * 4),
+                                 torch::arange(batch_size * 4, cuda_i32)));
+        auto expected_table = torch::zeros({4, 2}, torch::kInt32);
+        expected_table.narrow(0, 0, batch_size).fill_(7);
+        EXPECT_TRUE(torch::equal(attention.kv_cache_kernel_block_id_device.cpu(), expected_table));
+        EXPECT_TRUE(torch::equal(attention.kv_cache_kernel_block_id_device_by_group[0].cpu(), expected_table));
+        if (batch_size < 4) {
+            const auto expected_cu = torch::tensor({0, 4, 8, 12, 16}, torch::kInt32);
+            EXPECT_TRUE(torch::equal(attention.cu_seqlens.cpu(), expected_cu));
+            EXPECT_TRUE(torch::equal(attention.cu_seqlens_host, expected_cu));
+        }
+    }
 }
 
 }  // namespace rtp_llm

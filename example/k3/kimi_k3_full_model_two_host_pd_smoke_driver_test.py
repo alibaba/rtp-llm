@@ -54,6 +54,18 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
                 self.assertEqual(env["SP_MODEL_TYPE"], "kimi_k3_mtp")
                 self.assertNotIn("KIMI_K3_EAGLE3_AUX_LAYER_IDS", env)
 
+    def test_forwards_dcp_padding_regression_to_both_roles(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"SMOKE_DCP_PADDING_REGRESSION": "1"}, clear=True
+        ):
+            for role in ("prefill", "decode"):
+                self.assertEqual(
+                    driver.forwarded_optional_environment(role).get(
+                        "SMOKE_DCP_PADDING_REGRESSION"
+                    ),
+                    "1",
+                )
+
     def test_forwards_page_rr_profile_to_both_roles(self) -> None:
         with mock.patch.dict(os.environ, {"SMOKE_PAGE_RR": "1"}, clear=True):
             for role in ("prefill", "decode"):
@@ -207,6 +219,37 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertIn(expected, result.stderr)
+
+    def test_dcp_padding_regression_resolves_and_validates_profile(self):
+        source = pathlib.Path(driver.__file__).with_name(
+            "kimi_k3_full_model_two_host_pd_smoke.sh"
+        ).read_text()
+        # Execute real argument/profile handling, stopping before host access.
+        prefix = source.split('[[ "$(id -u)" != "0" ]]', 1)[0]
+        command = prefix + "\nprintf '%s %s %s' \"$smoke_decode_page_rr\" \"${GEN_NUM_PER_CIRCLE:-unset}\" \"${SMOKE_SUITE:-unset}\"\n"
+        for settings, expected in (
+            ({}, "0 unset unset"),
+            ({"SMOKE_DCP_PADDING_REGRESSION": "0"}, "0 unset unset"),
+            ({"SMOKE_DCP_PADDING_REGRESSION": "1"}, "1 2 all"),
+            ({"SMOKE_DECODE_PAGE_RR": "1", "GEN_NUM_PER_CIRCLE": "3"}, "1 3 unset"),
+            ({"SMOKE_DCP_PADDING_REGRESSION": "1", "GEN_NUM_PER_CIRCLE": "3"}, None),
+            ({"SMOKE_DCP_PADDING_REGRESSION": "1", "SMOKE_DECODE_PAGE_RR": "0"}, None),
+            ({"SMOKE_DCP_PADDING_REGRESSION": "1", "SMOKE_SUITE": "flow"}, None),
+            ({"SMOKE_DCP_PADDING_REGRESSION": "bad"}, None),
+        ):
+            for role in ("prefill", "decode"):
+                with self.subTest(settings=settings, role=role):
+                    result = subprocess.run(
+                        ["bash", "-c", command, "smoke-profile-test", role],
+                        env={"PATH": os.environ["PATH"], **settings},
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if expected is None:
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self.assertIn("SMOKE_DCP_PADDING_REGRESSION", result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stdout, expected)
 
     def test_role_script_rejects_deployment_profile_drift(self):
         script = pathlib.Path(driver.__file__).with_name(
