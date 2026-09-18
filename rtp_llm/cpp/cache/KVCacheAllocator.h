@@ -13,10 +13,15 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 
 class CPSlotMapper;
+class LoadAsyncContext;
 class BlockTreeCache;
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
 class KVCacheGroup;
@@ -44,26 +49,28 @@ struct KVCachePoolMetricsSnapshot {
     float       used_ratio                 = 0.0f;
 };
 
-class KVCacheAllocator {
+class KVCacheAllocator: public std::enable_shared_from_this<KVCacheAllocator> {
 public:
     KVCacheAllocator(const CacheConfig&                 config,
                      AllocationType                     allocation_type     = AllocationType::DEVICE,
                      const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
-                     int64_t                            reserve_block_ratio = 0):
+                     int64_t                            reserve_block_ratio = 0,
+                     RoleType                           role_type           = RoleType::PDFUSION):
         config_(config),
         allocation_type_(allocation_type),
         metrics_reporter_(metrics_reporter),
-        reserve_block_ratio_(reserve_block_ratio) {}
+        reserve_block_ratio_(reserve_block_ratio),
+        role_type_(role_type) {}
 
     virtual ~KVCacheAllocator() = default;
 
     bool                           init();
-    virtual void                   free(const FreeInfo& free_info)                                                = 0;
-    virtual void                   insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) = 0;
-    virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const                           = 0;
-    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const                         = 0;
+    virtual void                   free(const FreeInfo& free_info);
+    virtual void                   insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
+    virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
+    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int group_id, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
     virtual std::vector<BlockInfo>
@@ -72,18 +79,16 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBufferByTag(
         int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const;
-    virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                            const CacheKeysType&   cache_keys,
-                                                            bool                   is_connector = false)                           = 0;
-    virtual GroupedCacheLayerLayout          allLayerCacheBase() const                                           = 0;
-    virtual bool                             updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                                                           const std::vector<int>&         block_src_batch,
-                                                           bool                            copy_last_block,
-                                                           std::vector<TaggedBlockIdPair>& block_update_mapping) = 0;
-    virtual int                              seqSizePerBlock() const                                             = 0;
-    virtual int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                      int                            seq_len,
-                                      int                            reserve_step) const                                                    = 0;
+    virtual std::shared_ptr<KVCacheResource>
+    incrKVCacheRef(const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector = false);
+    virtual GroupedCacheLayerLayout allLayerCacheBase() const;
+    virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
+                                                  const std::vector<int>&         block_src_batch,
+                                                  bool                            copy_last_block,
+                                                  std::vector<TaggedBlockIdPair>& block_update_mapping);
+    virtual int                     seqSizePerBlock() const;
+    virtual int
+    singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
     // Common-prefix growth is charged once; non-common growth is charged once per target sequence.
     int estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                     int                            seq_len,
@@ -101,17 +106,12 @@ public:
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
     virtual void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
-    DeviceBlockPoolPtr getDeviceBlockPool() const {
-        return block_pool_;
-    }
-
     virtual const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const {
-        static const std::vector<DeviceBlockPoolPtr> empty;
-        return empty;
+        return group_block_pools_;
     }
 
     virtual std::vector<KVCacheGroupPtr> cacheGroups() const {
-        return {};
+        return kv_cache_groups_;
     }
 
     void attachBlockTreeCache(BlockTreeCachePtr block_tree_cache);
@@ -162,7 +162,7 @@ protected:
         TOTAL_AND_AVAILABLE,
     };
 
-    virtual bool   doInit() = 0;
+    virtual bool   doInit();
     virtual size_t reserveBlocksForPoolMetrics(size_t pool_index) const;
     virtual size_t reservableFreeBlocksNum() const;
     MallocResult   initMalloc(const MallocInfo& malloc_info);
@@ -172,9 +172,9 @@ protected:
     // instead of being errored out under cache pressure.
     virtual MallocStatus
     evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const;
-    virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
-    virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
-    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;
+    virtual MallocResult incrMalloc(const MallocInfo& malloc_info);
+    virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info);
+    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const;
     struct InitBlockDemand {
         // Added to the planner's result when checking the request's complete
         // footprint against pool total.
@@ -182,26 +182,25 @@ protected:
         // Compared with currently available capacity.
         size_t additional_blocks{0};
     };
-    // Count unique valid physical blocks already held by this request. A
-    // negative group_id counts all groups that share the allocator's pool.
-    static size_t heldRequestBlocks(const MallocInfo& malloc_info, int group_id = -1);
+    // Count unique valid physical blocks held by this request in one independent pool.
+    static size_t heldRequestBlocks(const MallocInfo& malloc_info, int group_id);
     // Reuse-aware interpretation of planner output: reuse planners report
     // additional demand; no-reuse planners report the full footprint.
-    static InitBlockDemand initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, int group_id = -1);
+    static InitBlockDemand initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, int group_id);
     // Estimate peak additional blocks for one sequence resource.
     virtual int   estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
                                          int                    seq_len,
                                          int                    remaining_tokens,
                                          int                    reserve_step,
-                                         bool                   enable_reuse_cache) const           = 0;
+                                         bool                   enable_reuse_cache) const;
     virtual int   estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                      int  common_seq_len,
                                                      int  remaining_tokens,
                                                      int  reserve_step,
                                                      bool enable_reuse_cache,
-                                                     int  target_batch_size) const = 0;
-    virtual void  checkCPShardedMallocResult(const MallocInfo&) const {}
-    virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource) = 0;
+                                                     int  target_batch_size) const;
+    virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
+    virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
     bool          cpShardThisGroupForCapacity(size_t gid) const;
     size_t        logicalSeqSizePerBlockForCapacity(size_t gid) const;
     int           cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const;
@@ -215,7 +214,6 @@ protected:
 
     CacheConfig                        config_;
     AllocationType                     allocation_type_;
-    DeviceBlockPoolPtr                 block_pool_;
     BlockTreeCachePtr                  block_tree_cache_;
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_             = nullptr;
@@ -230,6 +228,67 @@ protected:
     // init-malloc callers can all pass the same reserve check and collectively
     // consume the forward-progress reserve before any one of them allocates.
     std::mutex malloc_mutex_;
+
+    struct PreparedKVCache {
+        size_t                         matched_device_blocks = 0;
+        size_t                         total_logical_blocks  = 0;
+        std::vector<RequiredPositions> required_positions;
+        std::vector<BlockIndicesType>  referenced_blocks;
+        std::vector<size_t>            original_sizes;
+        MallocStatus                   materialize_status = MallocStatus::NONE;
+    };
+
+    std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&                 cache_keys,
+                                                     BatchKVCacheResource&                kv_resource,
+                                                     const std::shared_ptr<CPSlotMapper>& cp_mapper,
+                                                     PreparedKVCache&                     prepared);
+    bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
+                                                               PreparedKVCache&  prepared,
+                                                               LoadAsyncContext* context,
+                                                               size_t            matched_blocks);
+    bool                              finishDeferredMalloc(const MallocInfo& malloc_info,
+                                                           PreparedKVCache&  prepared,
+                                                           LoadAsyncContext& context,
+                                                           size_t            matched_blocks);
+
+    virtual MallocStatus evaluatePreparedInitCapacity(const MallocInfo&      malloc_info,
+                                                      size_t                 reserve_blocks,
+                                                      const PreparedKVCache& prepared,
+                                                      bool                   has_load_context) const;
+    virtual bool         hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
+    virtual void         logMallocFailure(const MallocInfo& malloc_info,
+                                          const char*       phase,
+                                          int               failed_batch,
+                                          int               failed_group,
+                                          bool              incremental,
+                                          int               failed_need_blocks) const;
+    size_t               loadTargetPosition(size_t                               path_index,
+                                            size_t                               group_id,
+                                            const std::shared_ptr<CPSlotMapper>& mapper,
+                                            int                                  cp_scale) const;
+    bool                 cpCompactSwaGroup(size_t group_id, const std::shared_ptr<CPSlotMapper>& mapper) const;
+    void                 rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size);
+    void                 rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
+                                            const std::vector<BlockIndicesType>& referenced_blocks,
+                                            const std::vector<size_t>&           original_sizes);
+    virtual void copyBlockMappingForGroup(int group_id, const std::vector<BlockIdPair>& block_update_mapping) const;
+    virtual MemoryType memoryTypeForGroup(int group_id) const;
+
+    std::vector<KVCacheGroupPtr>    kv_cache_groups_;
+    std::vector<int>                full_group_ids_;
+    std::vector<int>                linear_group_ids_;
+    std::vector<int>                swa_group_ids_;
+    MallocStatus                    evaluateInitCapacityImpl(const MallocInfo&                     malloc_info,
+                                                             size_t                                reserve_blocks,
+                                                             InitCapacityMode                      mode,
+                                                             const std::vector<RequiredPositions>* required_positions) const;
+    int                             validateGroupIdForLayer(int layer_id, int group_id) const;
+    int                             defaultGroupIdForLayer(int layer_id) const;
+    size_t                          minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
+    size_t                          totalReservableFreeBlocks() const;
+    size_t                          reserveBlocksForPool(size_t group_id) const;
+    std::vector<DeviceBlockPoolPtr> group_block_pools_;
+    RoleType                        role_type_{RoleType::PDFUSION};
 };
 
 using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;

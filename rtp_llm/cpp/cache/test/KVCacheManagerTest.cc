@@ -14,7 +14,7 @@
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -447,7 +447,8 @@ TEST_F(KVCacheManagerTest, AvailableBlocksUsesCanonicalPoolCount) {
     auto manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
-    const DeviceBlockPoolPtr pool = manager->allocator_->getDeviceBlockPool();
+    ASSERT_EQ(manager->allocator_->groupBlockPools().size(), 1u);
+    const DeviceBlockPoolPtr pool = manager->allocator_->groupBlockPools().front();
     ASSERT_NE(pool, nullptr);
     const size_t total_blocks = pool->totalBlocksNum();
     ASSERT_EQ(manager->availableBlocksNum(), total_blocks);
@@ -489,14 +490,16 @@ TEST_F(KVCacheManagerTest, WarmupPreservesExplicitChargedIndependentPoolPolicy) 
     EXPECT_GT(finalized.explicitly_sized_pool_reserve_bytes, 0u);
 }
 
-TEST_F(KVCacheManagerTest, InitRejectsSingleLinearGroup) {
+TEST_F(KVCacheManagerTest, InitAcceptsSingleIndependentLinearGroup) {
     auto cache_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
 
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
-    EXPECT_THROW(cache_manager->init(), std::runtime_error);
+    ASSERT_TRUE(cache_manager->init());
     ASSERT_NE(cache_manager->allocator_, nullptr);
-    EXPECT_EQ(cache_manager->allocator_->getDeviceBlockPool(), nullptr);
+    ASSERT_EQ(cache_manager->allocator_->groupBlockPools().size(), 1u);
+    ASSERT_EQ(cache_manager->allocator_->groupBlockPools().size(), 1u);
+    EXPECT_NE(cache_manager->allocator_->groupBlockPools().front(), nullptr);
 }
 
 TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
@@ -606,7 +609,7 @@ TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysi
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
 
     ASSERT_TRUE(cache_manager->init());
-    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
+    auto allocator = std::dynamic_pointer_cast<KVCacheAllocator>(cache_manager->allocator_);
     ASSERT_NE(allocator, nullptr);
     EXPECT_EQ(cache_config.groupTagsSnapshot(), std::vector<std::string>({"full", "linear"}));
     const int full_gid   = cache_config.groupIdForTag("full");
@@ -652,7 +655,7 @@ TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
                                                               pd_sep_config);
         ASSERT_TRUE(cache_manager->init());
 
-        auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
+        auto allocator = std::dynamic_pointer_cast<KVCacheAllocator>(cache_manager->allocator_);
         ASSERT_NE(allocator, nullptr);
         ASSERT_EQ(allocator->groupBlockPools().size(), static_cast<size_t>(config.groupNums()));
 
@@ -695,7 +698,8 @@ TEST_F(KVCacheManagerTest, AllocationWaitObservesReleaseGeneration) {
     ASSERT_TRUE(cache_manager->init());
 
     const auto release_capacity = [&] {
-        auto       pool  = cache_manager->allocator_->getDeviceBlockPool();
+        ASSERT_EQ(cache_manager->allocator_->groupBlockPools().size(), 1u);
+        auto       pool  = cache_manager->allocator_->groupBlockPools().front();
         const auto block = pool->malloc();
         ASSERT_TRUE(block.has_value());
         pool->incRef(*block);
@@ -2072,7 +2076,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
-    auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
+    auto hybrid_allocator = std::dynamic_pointer_cast<KVCacheAllocator>(kv_cache_manager->allocator_);
     ASSERT_NE(hybrid_allocator, nullptr);
 
     size_t      expected_total_tokens     = std::numeric_limits<size_t>::max();
@@ -2100,7 +2104,7 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
-    auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
+    auto hybrid_allocator = std::dynamic_pointer_cast<KVCacheAllocator>(kv_cache_manager->allocator_);
     ASSERT_NE(hybrid_allocator, nullptr);
 
     const size_t physical_capacity = hybrid_allocator->maxAvailableTokensNum();
@@ -2747,7 +2751,8 @@ TEST_F(KVCacheManagerTest, AllocationWaitBackoffBoundsRepeatedPrefixRollback) {
     auto config  = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     auto manager = std::make_shared<KVCacheManager>(config, false);
     ASSERT_TRUE(manager->init());
-    auto pool  = manager->allocator_->getDeviceBlockPool();
+    ASSERT_EQ(manager->allocator_->groupBlockPools().size(), 1u);
+    auto pool  = manager->allocator_->groupBlockPools().front();
     auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
     pool->incTreeRef(*block, BlockTreeRefType::CACHE);

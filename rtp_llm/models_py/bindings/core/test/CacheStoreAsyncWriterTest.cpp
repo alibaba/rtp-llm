@@ -13,7 +13,7 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
@@ -481,12 +481,13 @@ TEST_F(CacheStoreAsyncWriterTest, LatePublicationCallbackAfterTimeoutIsIgnored) 
 
 TEST_F(CacheStoreAsyncWriterTest, TimeoutRetainsAllocatorBlockUntilLatePublicationCompletes) {
     auto config    = makeWriterTestCacheConfig("default", /*kv_stride=*/16, /*block_num=*/2);
-    auto allocator = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
     const auto initial_free_blocks = allocator->freeBlocksNum();
     ASSERT_GT(initial_free_blocks, 0u);
 
-    auto pool      = allocator->getDeviceBlockPool();
+    ASSERT_EQ(allocator->groupBlockPools().size(), 1u);
+    auto pool      = allocator->groupBlockPools().front();
     auto allocated = pool->malloc(1);
     ASSERT_TRUE(allocated.has_value());
     const auto request_blocks = allocated.value();
@@ -520,7 +521,8 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     auto cache_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
     const auto initial_free_blocks = cache_manager->freeBlocksNum();
-    auto       pool                = cache_manager->allocator_->getDeviceBlockPool();
+    ASSERT_EQ(cache_manager->allocator_->groupBlockPools().size(), 1u);
+    auto       pool                = cache_manager->allocator_->groupBlockPools().front();
     auto       allocated           = pool->malloc(1);
     ASSERT_TRUE(allocated.has_value());
     const auto request_blocks = allocated.value();
@@ -574,7 +576,8 @@ TEST_P(CacheStoreAsyncWriterTpTest, PublicationPinsOnlyAllocatorOwner) {
     ASSERT_TRUE(cache_manager->init());
     ASSERT_TRUE(cache_manager->initialized());
     const auto initial_free_blocks = cache_manager->freeBlocksNum();
-    auto       pool                = cache_manager->allocator_->getDeviceBlockPool();
+    ASSERT_EQ(cache_manager->allocator_->groupBlockPools().size(), 1u);
+    auto       pool                = cache_manager->allocator_->groupBlockPools().front();
     int32_t    block_id            = 1;
     if (tp_rank == 0) {
         auto allocated = pool->malloc(1);

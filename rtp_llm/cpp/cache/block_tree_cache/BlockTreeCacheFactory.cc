@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
@@ -139,14 +140,19 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cac
             RTP_LLM_LOG_ERROR("allocator group/direct pool must be non-null");
             return {};
         }
-        const int group_id = group->group_id();
-        if (group_id < 0 || static_cast<size_t>(group_id) >= group_count) {
-            RTP_LLM_LOG_ERROR("allocator group_id=%d out of range [0, %zu)", group_id, group_count);
+        const auto& tag             = group->tag();
+        const auto& topology_groups = cache_config.topology().groups();
+        const auto  found           = std::find_if(topology_groups.begin(),
+                                        topology_groups.end(),
+                                        [&tag](const GroupBase& declared) { return declared.tag == tag; });
+        if (found == topology_groups.end()) {
+            RTP_LLM_LOG_ERROR("allocator has unknown group tag=%s", tag.c_str());
             return {};
         }
-        auto& aligned_group = aligned[static_cast<size_t>(group_id)];
+        const size_t group_id      = static_cast<size_t>(std::distance(topology_groups.begin(), found));
+        auto&        aligned_group = aligned[group_id];
         if (aligned_group != nullptr) {
-            RTP_LLM_LOG_ERROR("duplicate allocator group_id=%d", group_id);
+            RTP_LLM_LOG_ERROR("duplicate allocator group tag=%s", tag.c_str());
             return {};
         }
         aligned_group = group;
@@ -305,8 +311,7 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheTopology&               
     const auto  layer = std::find(group.layer_ids.begin(), group.layer_ids.end(), layer_id);
     RTP_LLM_CHECK_WITH_INFO(
         layer != group.layer_ids.end(), "layer_id=%d does not belong to storage group_id=%d", layer_id, group_id);
-    // Pools are laid out in group-local layer order, including shared hybrid
-    // pools. This is the same model-global -> pool-layer mapping used by
+    // Pools are laid out in group-local layer order. This is the same model-global -> pool-layer mapping used by
     // KVCacheGroup::convertIndexToBuffer; model layer IDs cannot be passed
     // directly to these physical pools.
     auto buffers = group_pools[static_cast<size_t>(group_id)]->convertIndexToBuffer(
@@ -379,16 +384,23 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     }
     std::vector<DeviceBlockPoolPtr> group_pools(static_cast<size_t>(group_count));
     const auto&                     independent_pools = allocator->groupBlockPools();
-    if (!independent_pools.empty() && independent_pools.size() != static_cast<size_t>(group_count)) {
+    if (independent_pools.size() != static_cast<size_t>(group_count)) {
         RTP_LLM_LOG_ERROR(
             "independent pool/topology count mismatch, pools=%zu topology=%d", independent_pools.size(), group_count);
         return nullptr;
     }
+    std::unordered_set<const DeviceBlockPool*> unique_pools;
+    for (const auto& pool : independent_pools) {
+        if (!pool || !unique_pools.insert(pool.get()).second) {
+            RTP_LLM_LOG_ERROR("each cache group must own a distinct non-null device pool");
+            return nullptr;
+        }
+    }
     for (int group_id = 0; group_id < group_count; ++group_id) {
-        auto pool = independent_pools.empty() ? allocator->getDeviceBlockPool() :
-                                                independent_pools[static_cast<size_t>(group_id)];
-        if (!pool || groups[static_cast<size_t>(group_id)]->blockPool() != pool) {
-            RTP_LLM_LOG_ERROR("allocator/group direct pool mismatch for group_id %d", group_id);
+        auto        pool = groups[static_cast<size_t>(group_id)]->blockPool();
+        const auto& tag  = cache_config.topology().groupById(static_cast<size_t>(group_id)).tag;
+        if (!pool || pool->poolName() != tag || unique_pools.erase(pool.get()) != 1) {
+            RTP_LLM_LOG_ERROR("allocator/group direct pool mismatch for tag=%s", tag.c_str());
             return nullptr;
         }
         group_pools[static_cast<size_t>(group_id)] = std::move(pool);

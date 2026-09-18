@@ -11,7 +11,7 @@
 #include <unistd.h>
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
@@ -36,7 +36,7 @@
 namespace rtp_llm {
 namespace test {
 
-using TestSingleTypeKVCacheAllocator = BlockTreeCacheTestAllocator<SingleTypeKVCacheAllocator>;
+using TestSingleTypeKVCacheAllocator = BlockTreeCacheTestAllocator<KVCacheAllocator>;
 
 class CountingSingleTypePerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
@@ -265,8 +265,16 @@ TEST(MallocResultTest, FailedResultDefaultsToInternalError) {
 // getNeedBlocks/initMallocForCommonLen are protected template-method hooks; EXPECT_CALL reaches
 // their gmock_* helpers because this target is built with -fno-access-control (test_copts).
 TEST(KVCacheAllocatorTest, ClassifiesInitFailureBeforeRollback) {
+    class CapacityMockAllocator: public MockKVCacheAllocator {
+    public:
+        using MockKVCacheAllocator::MockKVCacheAllocator;
+        MOCK_METHOD(MallocStatus,
+                    evaluateInitCapacity,
+                    (const MallocInfo&, size_t, InitCapacityMode),
+                    (const, override));
+    };
     auto config    = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/1);
-    auto allocator = std::make_shared<testing::StrictMock<MockKVCacheAllocator>>(config);
+    auto allocator = std::make_shared<testing::StrictMock<CapacityMockAllocator>>(config);
 
     auto batch_resource     = createBatchKVCacheResource(/*batch_size=*/1, config);
     auto complete_token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/1);
@@ -274,9 +282,8 @@ TEST(KVCacheAllocatorTest, ClassifiesInitFailureBeforeRollback) {
 
     testing::InSequence sequence;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_)).WillOnce(testing::Return(MallocResult{false, 0}));
-    EXPECT_CALL(*allocator, getNeedBlocks(testing::_)).WillOnce(testing::Return(4));
-    EXPECT_CALL(*allocator, totalBlocksNum()).WillOnce(testing::Return(9));
-    EXPECT_CALL(*allocator, availableBlocksNum()).WillOnce(testing::Return(3));
+    EXPECT_CALL(*allocator, evaluateInitCapacity(testing::_, testing::_, testing::_))
+        .WillOnce(testing::Return(MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED));
     EXPECT_CALL(*allocator, free(testing::_));
 
     const auto result = allocator->malloc(malloc_info);
@@ -354,13 +361,15 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConstructorAndInit) {
     EXPECT_EQ(snapshots[0].used_blocks, 0u);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, InitRejectsLinearGroupBeforeCreatingBlockPool) {
+TEST_F(SingleTypeKVCacheAllocatorTest, InitAcceptsIndependentLinearGroup) {
     auto config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
     allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
 
-    EXPECT_THROW(allocator_->init(), std::runtime_error);
-    EXPECT_EQ(allocator_->getDeviceBlockPool(), nullptr);
+    ASSERT_TRUE(allocator_->init());
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    EXPECT_NE(allocator_->groupBlockPools().front(), nullptr);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, InitWithDifferentLayerNum) {
@@ -494,7 +503,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, AvailableCapacityUsesFreePlusCacheOnlyBlo
     allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
-    const DeviceBlockPoolPtr pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    const DeviceBlockPoolPtr pool = allocator_->groupBlockPools().front();
     ASSERT_NE(pool, nullptr);
     const size_t total_blocks = pool->totalBlocksNum();
     ASSERT_EQ(allocator_->availableBlocksNum(), total_blocks);
@@ -809,7 +819,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCachePublishesOnlyBatchZero) {
     allocator_        = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
-    auto block_pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    auto block_pool = allocator_->groupBlockPools().front();
     ASSERT_NE(block_pool, nullptr);
     const auto blocks = block_pool->malloc(2).value();
     ASSERT_EQ(blocks.size(), 2u);
@@ -847,7 +858,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheStopsAtFirstNullBlock) {
     allocator_        = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
-    auto block_pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    auto block_pool = allocator_->groupBlockPools().front();
     ASSERT_NE(block_pool, nullptr);
     const auto blocks = block_pool->malloc(2).value();
     ASSERT_EQ(blocks.size(), 2u);
@@ -875,7 +887,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
     ASSERT_TRUE(allocator_->init());
     allocator_->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
 
-    auto block_pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    auto block_pool = allocator_->groupBlockPools().front();
     ASSERT_NE(block_pool, nullptr);
     const auto seed_blocks = block_pool->malloc(2).value();
     ASSERT_EQ(seed_blocks.size(), 2u);
@@ -1168,7 +1181,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, DeferredBackendMatchRetriesZeroReservePoo
     ASSERT_TRUE(allocator_->init());
     allocator_->setReserveBlocksNum(0);
 
-    const auto pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    const auto pool = allocator_->groupBlockPools().front();
     ASSERT_NE(pool, nullptr);
     auto pinned = pool->malloc(pool->freeBlocksNum());
     ASSERT_TRUE(pinned.has_value());
@@ -1484,7 +1498,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockCopySingle) {
     allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
-    const auto& pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    const auto& pool = allocator_->groupBlockPools().front();
     ASSERT_NE(pool, nullptr);
     const auto allocated = pool->malloc(2);
     ASSERT_TRUE(allocated.has_value());
@@ -1532,7 +1547,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyVector) {
     allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
-    const auto& pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    const auto& pool = allocator_->groupBlockPools().front();
     ASSERT_NE(pool, nullptr);
     const auto allocated = pool->malloc(6);
     ASSERT_TRUE(allocated.has_value());
@@ -1597,6 +1613,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexer
     parallelism_config.tp_size = 1;
     auto config                = SingleConfigCreator::createSingleConfig(model_config, parallelism_config);
     config.block_num           = 5;
+    config.setGroupBlockLayout({5}, {config.kv_block_stride_bytes}, {config.kv_scale_stride_bytes});
 
     ASSERT_TRUE(config.is_sparse);
     ASSERT_GT(config.kv_scale_stride_bytes, 0u);
@@ -1605,7 +1622,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexer
     allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
-    const auto& pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    const auto& pool = allocator_->groupBlockPools().front();
     ASSERT_NE(pool, nullptr);
     const auto allocated = pool->malloc(4);
     ASSERT_TRUE(allocated.has_value());
@@ -1663,7 +1681,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {
     allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
-    const auto& pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    const auto& pool = allocator_->groupBlockPools().front();
     ASSERT_NE(pool, nullptr);
     const auto allocated = pool->malloc(4);
     ASSERT_TRUE(allocated.has_value());
@@ -1710,7 +1729,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyBuffer) {
     allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
-    const auto& pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    const auto& pool = allocator_->groupBlockPools().front();
     ASSERT_NE(pool, nullptr);
     const auto allocated = pool->malloc(6);
     ASSERT_TRUE(allocated.has_value());
@@ -1770,7 +1790,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
 
-    auto block_pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    auto block_pool = allocator_->groupBlockPools().front();
     ASSERT_NE(block_pool, nullptr);
 
     const size_t total_free_before = allocator_->freeBlocksNum();
@@ -1805,7 +1826,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
 
-    auto block_pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    auto block_pool = allocator_->groupBlockPools().front();
     ASSERT_NE(block_pool, nullptr);
 
     const size_t total_free_before = allocator_->freeBlocksNum();
@@ -1838,7 +1860,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
 
-    auto block_pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    auto block_pool = allocator_->groupBlockPools().front();
     ASSERT_NE(block_pool, nullptr);
 
     const size_t total_free_before = allocator_->freeBlocksNum();
@@ -1924,7 +1947,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
 
     // System-prompt residency is represented by retained request ownership. Hold
     // four physical blocks so the failing allocation cannot reclaim them.
-    auto block_pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    auto block_pool = allocator_->groupBlockPools().front();
     ASSERT_NE(block_pool, nullptr);
     auto resident_request_holds = block_pool->malloc(4).value();
     ASSERT_EQ(resident_request_holds.size(), 4u);
@@ -2200,7 +2224,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, UpdateKVBlockReleasesSharedBlocksFromEach
     allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
-    auto block_pool = allocator_->getDeviceBlockPool();
+    ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
+    auto block_pool = allocator_->groupBlockPools().front();
     ASSERT_NE(block_pool, nullptr);
     const auto shared_blocks = block_pool->malloc(2);
     ASSERT_TRUE(shared_blocks.has_value());

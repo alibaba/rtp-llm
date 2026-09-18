@@ -241,11 +241,14 @@ protected:
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
                                         RoleType                role_type,
-                                        const KVCacheConfig&    kv_cache_config      = {},
-                                        size_t                  expected_free_blocks = 8) {
+                                        const KVCacheConfig&    kv_cache_config = {}) {
         cache_manager_ = std::make_shared<KVCacheManager>(
             cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
         ASSERT_TRUE(cache_manager_->init());
+        size_t expected_free_blocks = 0;
+        for (const auto& group : cache_manager_->cacheConfig().topology().groups()) {
+            expected_free_blocks += group.block_num - 1;
+        }
         ASSERT_EQ(cache_manager_->freeBlocksNum(), expected_free_blocks);
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;

@@ -20,7 +20,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
@@ -40,7 +40,7 @@ namespace rtp_llm {
 namespace test {
 using block_tree_cache_test::BlockTreeCacheTestPeer;
 
-using TestHybridPoolKVCacheAllocator = BlockTreeCacheTestAllocator<HybridPoolKVCacheAllocator>;
+using TestHybridPoolKVCacheAllocator = BlockTreeCacheTestAllocator<KVCacheAllocator>;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -559,7 +559,7 @@ struct PoolCounters {
     size_t total_blocks;
 };
 
-static std::vector<PoolCounters> snapshotPoolCounters(const HybridPoolKVCacheAllocatorPtr& allocator) {
+static std::vector<PoolCounters> snapshotPoolCounters(const KVCacheAllocatorPtr& allocator) {
     std::vector<PoolCounters> counters;
     counters.reserve(allocator->groupBlockPools().size());
     for (const auto& pool : allocator->groupBlockPools()) {
@@ -568,8 +568,7 @@ static std::vector<PoolCounters> snapshotPoolCounters(const HybridPoolKVCacheAll
     return counters;
 }
 
-static void expectPoolCountersEq(const HybridPoolKVCacheAllocatorPtr& allocator,
-                                 const std::vector<PoolCounters>&     expected) {
+static void expectPoolCountersEq(const KVCacheAllocatorPtr& allocator, const std::vector<PoolCounters>& expected) {
     ASSERT_EQ(allocator->groupBlockPools().size(), expected.size());
     for (size_t group_id = 0; group_id < expected.size(); ++group_id) {
         const auto& pool = allocator->groupBlockPools()[group_id];
@@ -761,13 +760,13 @@ TEST_F(HybridPoolKVCacheAllocatorTest, SwaDefaultRegionGroupPoolUsesGpuBacking) 
     EXPECT_EQ(allocator->groupBlockPools()[1]->where(), MemoryType::MEMORY_GPU);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, GetDeviceBlockPoolReturnsNullptrInHybridPoolMode) {
-    // HybridPoolKVCacheAllocator owns one DeviceBlockPool per group and does not
-    // expose a single canonical pool.
+TEST_F(HybridPoolKVCacheAllocatorTest, ExposesAllIndependentPools) {
+    // Every tag exposes its independent pool through the same API.
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
-    EXPECT_EQ(allocator->getDeviceBlockPool(), nullptr);
+    ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
+    EXPECT_NE(allocator->groupBlockPools()[0], allocator->groupBlockPools()[1]);
 }
 
 // ---------------------------------------------------------------------------
