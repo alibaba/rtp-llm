@@ -1,3 +1,4 @@
+import copy
 import unittest
 from types import SimpleNamespace
 
@@ -79,9 +80,13 @@ class VisionGraphTest(unittest.TestCase):
         )
         config.vit_attention_backend = "fa4"
         torch.manual_seed(12)
-        vision = (
-            Qwen3_5MoeVisionModel(config).eval().to(device="cuda", dtype=torch.bfloat16)
+        from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+            Qwen3_5MoeVisionModel as HFVisionModel,
         )
+
+        vision = Qwen3_5MoeVisionModel(config).eval()
+        vision.load_weights(HFVisionModel(copy.deepcopy(config)).state_dict().items())
+        vision = vision.to(device="cuda", dtype=torch.bfloat16)
         cache = VisionGraphCache(vision, max_entries=1)
         pixels = torch.randn(16, 3 * 2 * 16 * 16, device="cuda", dtype=torch.bfloat16)
         grid = torch.tensor([[1, 4, 4]])

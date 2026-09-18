@@ -1,0 +1,36 @@
+{
+  "vllm_commit": "bb233626caa31602728f7ee4625f3d2a4d1a3ad5",
+  "flash_attention_commit": "617264c1c7955c9e84817654ebeedff069f3c5f1",
+  "files": {
+    "model_executor/models/qwen3_vl.py": "e041cc630f3a68ad2e058291799da81cb9355ff31a542abad326d77494f1f4e4",
+    "model_executor/models/qwen2_5_vl.py": "bd17738b00328a59727940d87bb6b5c2453df5ce942350c055a8380ccadf5543",
+    "model_executor/layers/conv.py": "689095c48ea44e74cdd2d77eb976ff4ab47cf18427edd6a67c7e07f71f18dac8",
+    "model_executor/layers/rotary_embedding/base.py": "c81804498f08f072356a26b41967f211475df2694dabf5da9f488c074d1fdef5",
+    "model_executor/layers/utils.py": "2ef004bf7b04faecd471b701fb9a9911e729f135f5a459269e752e306f53a8a1",
+    "v1/attention/ops/vit_attn_wrappers.py": "a99d57b58269c7521fa5d7d47af06551f3bab2b5c7358ef78165a7f6e20a92a6",
+    "flash_attn/ops/triton/rotary.py": "d2037e623854c702fb075784fe4292d4a89d6b9ac1ae33cab3d6788f8f94f240",
+    "model_executor/layers/linear.py": "fc4e96ba5e36895513b801b99e746e2b07959d402e36d56aae7d8ad3f124cfe7",
+    "model_executor/parameter.py": "ff6054fbd19ec932c548d562c6f4cc4506383b71cbe411fcfd554c8b1d87b510",
+    "model_executor/custom_op.py": "967b74c14b8a8e69af8828300414fbd3a6954ec573a253ca0f67aa02b0ed473f",
+    "model_executor/utils.py": "f208310647a012797e0b0e9631d3498135c7f9aef831e35e42e96eceb7623f89",
+    "model_executor/layers/quantization/base_config.py": "8bb076e857bb07103cd79c5650b1576f3f7b84c2936294b5e6245ca6702a6ed8",
+    "distributed/utils.py": "792146b357139e705064a68d3b66858de8a0baaca4dc7db1232fa217d45db231"
+  },
+  "adaptations": [
+    "Source-port QKVParallelLinear, ColumnParallelLinear, RowParallelLinear, LinearBase, UnquantizedLinearMethod and their parameter/weight-loader classes. Each RTP ViT worker uses disable_tp=True (replicated full encoder).",
+    "Retain RTP/HF configuration, parameter names and BaseModelOutputWithPooling envelope.",
+    "Retain RTP attention backend loader and restore SM103 BF16 equal-length dense FA4 with native Q/K/V72 and scale72; keep varlen for other shapes.",
+    "Copy default rotary cache, positional interpolation, patch GEMM, encoder and merger compute.",
+    "Remove vLLM engine/distributed/torch.compile decorators; preserve RTP exact-grid CUDA graph interface.",
+    "No preprocessing, scheduler, video decode, resize or token assembly changes.",
+    "Use int64 position-output and rotary batch/row offsets for packed B32 tensors exceeding 2**31 elements.",
+    "Swap rotary sequence/head launch axes so B32 sequence tiles do not exceed CUDA grid.y=65535.",
+    "Retain RTP large-row LayerNorm guard: this host Torch 2.11 native LayerNorm returns incorrect tail rows at 7,383,552 x 1152. Each normalized row still uses native nn.LayerNorm.",
+    "Port PluggableLayer registry, QuantizeMethodBase, shard utilities and default CUDA F.linear GEMM; replace engine global TP state with the worker-local rank 0 / size 1, and reject unavailable collectives.",
+    "Omit TPU loader synchronization and CPU-specific weight packing. CPU uses PyTorch F.linear. VLLM_BATCH_INVARIANT=1 is explicitly rejected because its kernel is not ported.",
+    "Keep the quant_method factory dispatch and shard-aware loaders. This Qwen3.5 model currently accepts unquantized ViT weights only; quantized ViT kernels and engine QuantizationConfig implementations are not ported.",
+    "Bridge RTP visual-relative complete checkpoint dictionaries to each vLLM parameter weight_loader, followed by process_weights_after_loading and update_param_tp_status. Preserve the HF load_state_dict interface for ordinary state dict copies.",
+    "Read the strided Q/K view directly in rotary_kernel; remove pre-RoPE contiguous and preserve the native head dimension without zero padding.",
+    "Consolidate the active encoder into qwen3_5_moe_vit.py under the original Qwen3_5MoeVision* class names. Shared linear helpers use vision_* modules and the rotary kernel lives in vision_kernels.py; remove the previous duplicate encoder and rotary implementation."
+  ]
+}

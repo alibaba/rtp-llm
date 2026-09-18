@@ -1,11 +1,16 @@
-"""Deferred NVDEC video input; GPU work executes on the embedding scheduler."""
+"""Request-owned NVDEC inputs and bounded concurrent GPU preprocessing."""
 
+import copy
 import importlib
 import io
 import math
 import os
 import sys
 import threading
+import weakref
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -54,6 +59,36 @@ class GpuVideoInput:
             64 * self.height * self.width
             + 36 * self.resized_height * self.resized_width
         )
+
+
+@dataclass
+class PreparedGpuVideo:
+    """Request-owned patches; the embedding stream waits for their producer."""
+
+    source: GpuVideoInput
+    pixels: torch.Tensor
+    ready: torch.cuda.Event
+
+    @property
+    def shape(self):
+        return self.source.shape
+
+    @property
+    def frame_indices(self):
+        return self.source.frame_indices
+
+    @property
+    def resized_height(self):
+        return self.source.resized_height
+
+    @property
+    def resized_width(self):
+        return self.source.resized_width
+
+    def consume(self, stream):
+        stream.wait_event(self.ready)
+        self.pixels.record_stream(stream)
+        return self.pixels
 
 
 def prepare_gpu_video(encoded, configs, processor, factor, size=None):
@@ -168,7 +203,7 @@ def nv12_to_rgb(video, height, color_space):
     return rgb.clamp_(0, 255).to(torch.uint8)
 
 
-# One hardware session per scheduler thread. No media, frames, or outputs are
+# One hardware session per decoding thread. No media, frames, or outputs are
 # retained: every request creates a fresh demuxer and consumes through EOS.
 _decode_state = threading.local()
 
@@ -227,8 +262,18 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
         )
         _decode_state.key = key
     decoder = _decode_state.decoder
-    wanted = set(data.frame_indices)
-    selected = {}
+    positions = {}
+    for slot, index in enumerate(data.frame_indices):
+        positions.setdefault(index, []).append(slot)
+    wanted = set(positions)
+    selected = set()
+    # Copy sampled surfaces straight into their final ordered buffer. The
+    # decoder owns/recycles its surfaces, so the copy and lifetime wait remain.
+    sampled = torch.empty(
+        (len(data.frame_indices), data.height * 3 // 2, data.width),
+        device=device,
+        dtype=torch.uint8,
+    )
     count = 0
     try:
         # Include the demuxer's EOS packet: draining delayed/B-frames is
@@ -247,24 +292,21 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
                         raise ValueError(
                             "NVDEC returned an unexpected frame shape/device/dtype"
                         )
-                    selected[count] = tensor.clone()
+                    for slot in positions[count]:
+                        sampled[slot].copy_(tensor)
+                    selected.add(count)
                     copied = True
                 count += 1
             if copied:
                 # The next Decode may recycle its external surfaces.
                 stream.synchronize()
-        if count != data.total_frames or selected.keys() != wanted:
+        if count != data.total_frames or selected != wanted:
             raise ValueError("NVDEC and container frame counts disagree")
         # Explicit indexing also preserves duplicates in a sampling policy.
         consumer_stream.wait_stream(stream)
         with torch.cuda.stream(consumer_stream):
-            for tensor in selected.values():
-                tensor.record_stream(consumer_stream)
-            return nv12_to_rgb(
-                torch.stack([selected[index] for index in data.frame_indices]),
-                data.height,
-                data.color_space,
-            )
+            sampled.record_stream(consumer_stream)
+            return nv12_to_rgb(sampled, data.height, data.color_space)
     except Exception:
         # A failed/incompletely drained session must not reach the next request.
         _decode_state.decoder = None
@@ -272,25 +314,177 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
         raise
 
 
+class VideoDecodePool:
+    """Bounded worker pool for ordered decode and full GPU preprocessing."""
+
+    def __init__(self, max_workers: int):
+        if max_workers < 1:
+            raise ValueError("video decode workers must be positive")
+        self.max_workers = max_workers
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="qwen35-nvdec"
+        )
+        # The pool belongs to the vision module, without retaining the module.
+        self._finalizer = weakref.finalize(
+            self, self._executor.shutdown, wait=False, cancel_futures=True
+        )
+
+    def close(self):
+        self._executor.shutdown(wait=True, cancel_futures=True)
+        self._finalizer.detach()
+
+    @contextmanager
+    def decode(self, inputs, device):
+        device = torch.device(device)
+        if device.index is None:
+            device = torch.device("cuda", torch.cuda.current_device())
+        with self._map(_decode_video_ready, inputs, device) as results:
+
+            def recorded():
+                for video in results:
+                    video.record_stream(torch.cuda.current_stream(device))
+                    yield video
+
+            yield recorded()
+
+    @contextmanager
+    def preprocess(self, inputs, processor, device, dtype):
+        with self._map(
+            _preprocess_video_ready, inputs, processor, device, dtype
+        ) as results:
+            yield results
+
+    @contextmanager
+    def _map(self, function, inputs, *args):
+        inputs = iter(inputs)
+        pending = deque()
+
+        def submit_next():
+            data = next(inputs, None)
+            if data is not None:
+                pending.append(self._executor.submit(function, data, *args))
+
+        def results():
+            for _ in range(self.max_workers):
+                submit_next()
+            while pending:
+                future = pending.popleft()
+                video = future.result()
+                yield video
+                del video, future
+                submit_next()
+
+        iterator = results()
+        try:
+            yield iterator
+        finally:
+            iterator.close()
+            for future in pending:
+                future.cancel()
+            # Drain work on failure/early exit before accepting another batch.
+            wait(pending)
+            pending.clear()
+
+
 @torch.inference_mode()
-def preprocess_video_cuda(data: GpuVideoInput, processor, device):
-    video = decode_video_cuda(data, device)
+def _decode_video_ready(data, device):
+    with torch.cuda.device(device):
+        if getattr(_decode_state, "output_device", None) != device:
+            _decode_state.output_stream = torch.cuda.Stream(device=device)
+            _decode_state.output_device = device
+        stream = _decode_state.output_stream
+        with torch.cuda.stream(stream):
+            video = decode_video_cuda(data, device)
+            stream.synchronize()
+            return video
+
+
+@torch.inference_mode()
+def _preprocess_video_ready(data, processor, device, dtype):
+    device = torch.device(device)
+    with torch.cuda.device(device):
+        if getattr(_decode_state, "preprocess_device", None) != device:
+            _decode_state.preprocess_stream = torch.cuda.Stream(device=device)
+            _decode_state.preprocess_device = device
+        stream = _decode_state.preprocess_stream
+        if (
+            getattr(_decode_state, "processor_source", None) is not processor
+            or getattr(_decode_state, "processor_device", None) != device
+        ):
+            # Transformers caches CUDA mean/std tensors by processor instance.
+            # A thread-local copy keeps their initialization and reuse on this
+            # worker's stream rather than racing another producer stream.
+            _decode_state.preprocess_processor = copy.copy(processor)
+            _decode_state.processor_source = processor
+            _decode_state.processor_device = device
+        with torch.cuda.stream(stream), torch.profiler.record_function("video_prepare"):
+            pixels = preprocess_video_cuda(
+                data, _decode_state.preprocess_processor, device
+            ).to(dtype=dtype)
+            ready = torch.cuda.Event()
+            ready.record(stream)
+            return PreparedGpuVideo(data, pixels, ready)
+
+
+def process_video_pixels(video, processor):
+    """Qwen3-VL single-video patch order without singleton stack/cat copies."""
+    patches = processor.rescale_and_normalize(
+        video.unsqueeze(0),
+        processor.do_rescale,
+        processor.rescale_factor,
+        processor.do_normalize,
+        (
+            tuple(processor.image_mean)
+            if isinstance(processor.image_mean, list)
+            else processor.image_mean
+        ),
+        (
+            tuple(processor.image_std)
+            if isinstance(processor.image_std, list)
+            else processor.image_std
+        ),
+    )
+    temporal = processor.temporal_patch_size
+    patch = processor.patch_size
+    merge = processor.merge_size
+    frames = patches.shape[1]
+    if pad := -frames % temporal:
+        patches = torch.cat(
+            (patches, patches[:, -1:].expand(-1, pad, -1, -1, -1)), dim=1
+        )
+    batch, frames, channels, height, width = patches.shape
+    grid_t, grid_h, grid_w = frames // temporal, height // patch, width // patch
+    patches = patches.view(
+        batch,
+        grid_t,
+        temporal,
+        channels,
+        grid_h // merge,
+        merge,
+        patch,
+        grid_w // merge,
+        merge,
+        patch,
+    ).permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
+    return patches.reshape(
+        grid_t * grid_h * grid_w, channels * temporal * patch * patch
+    )
+
+
+@torch.inference_mode()
+def preprocess_video_cuda(data: GpuVideoInput, processor, device, *, video=None):
+    if video is None:
+        video = decode_video_cuda(data, device)
     with torch.profiler.record_function("video_resize"):
-        # vLLM resizes uint8 frames on CPU. CPU and CUDA bicubic kernels can
-        # round values near half-integers differently, changing ViT inputs.
-        # Keep NVDEC decoding, but use the reference resize device as well.
+        # Keep decoded frames on CUDA through resize and normalization.
+        # Preserve the processor's bicubic/antialias and uint8 conversion policy;
+        # CPU and CUDA backends can differ in arithmetic and uint8 rounding.
         if tuple(video.shape[-2:]) != (data.resized_height, data.resized_width):
             video = resize_video_to_shape(
-                video.cpu(), processor, data.resized_height, data.resized_width
-            ).to(device)
+                video, processor, data.resized_height, data.resized_width
+            )
     with torch.profiler.record_function("video_processor"):
-        result = processor(
-            video,
-            return_tensors="pt",
-            do_resize=False,
-            do_sample_frames=False,
-        )
-    pixels = result["pixel_values_videos"]
+        pixels = process_video_pixels(video, processor)
     if not pixels.is_cuda or tuple(pixels.shape) != data.shape:
         raise ValueError("video processor changed the device or expected patch shape")
     expected_grid = [
@@ -300,6 +494,7 @@ def preprocess_video_cuda(data: GpuVideoInput, processor, device):
             data.resized_width // data.patch_size,
         ]
     ]
-    if result["video_grid_thw"].tolist() != expected_grid:
+    expected_patches = math.prod(expected_grid[0])
+    if pixels.shape[0] != expected_patches:
         raise ValueError("video processor changed the expected grid")
     return pixels

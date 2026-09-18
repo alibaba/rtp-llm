@@ -1,11 +1,9 @@
+import itertools
 import unittest
 
 import torch
 
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.gpu_video import nv12_to_rgb
-from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_vit import (
-    apply_rotary_pos_emb_vision,
-)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
@@ -19,52 +17,186 @@ class VisionKernelsTest(unittest.TestCase):
                 actual = nv12_to_rgb(video.cuda(), h, color_space)
                 torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
 
-    def test_rope_matches_fp32_reference_with_strided_qkv_and_positions(self):
-        torch.manual_seed(28)
-        for dtype in (torch.bfloat16, torch.float16, torch.float32):
-            for n, heads, dim in [(257, 16, 72), (3, 2, 8), (0, 2, 8), (1, 1, 2)]:
-                qkv = torch.randn(n, 3, heads, dim, device="cuda", dtype=dtype)
-                q, k, _ = qkv.unbind(1)
-                angles = torch.randn(n, dim * 2, device="cuda")
-                cosine, sine = angles.cos()[:, ::2], angles.sin()[:, ::2]
-                expected = []
-                for value in (q, k):
-                    value = value.float()
-                    rotated = torch.cat(
-                        (-value[..., dim // 2 :], value[..., : dim // 2]), -1
-                    )
-                    expected.append(
-                        (value * cosine[:, None] + rotated * sine[:, None]).to(dtype)
-                    )
-                actual = apply_rotary_pos_emb_vision(q, k, cosine, sine)
-                for got, ref in zip(actual, expected):
-                    torch.testing.assert_close(got, ref, atol=0, rtol=0)
 
-    def test_rope_materializes_fp32_rounding_before_bf16_conversion(self):
-        # A real activation whose FP32 sum is exactly halfway between two
-        # BF16 values. Keep the 72-wide strided QKV layout that exposed it.
-        qkv = torch.empty(513, 3, 16, 72, device="cuda", dtype=torch.bfloat16)
-        q, k, _ = qkv.unbind(1)
-        q[..., :36] = 3.03125
-        q[..., 36:] = -2.875
-        k.copy_(q)
-        cos = torch.full((513, 72), 0.9988769292831421, device="cuda")
-        sin = torch.full((513, 72), 0.047379810363054276, device="cuda")
-        expected = torch.empty_like(q)
-        expected[..., :36] = 3.15625
-        expected[..., 36:] = -2.734375
-        actual = apply_rotary_pos_emb_vision(q, k, cos, sin)
-        for result in actual:
-            torch.testing.assert_close(result, expected, atol=0, rtol=0)
+@unittest.skipUnless(
+    torch.cuda.is_available() and torch.cuda.get_device_capability() == (10, 3),
+    "requires SM103",
+)
+class VisionDenseAttentionTest(unittest.TestCase):
+    def _inputs(self, lengths, dtype=torch.bfloat16, dim=72):
+        torch.manual_seed(917)
+        packed = torch.randn(sum(lengths), 3, 16, dim, device="cuda", dtype=dtype)
+        q, k, v = packed.unbind(1)
+        # RoPE materializes Q/K; V retains the interleaved QKV storage.
+        q, k = q.contiguous(), k.contiguous()
+        cu = torch.tensor(
+            [0] + list(itertools.accumulate(lengths)),
+            device="cuda",
+            dtype=torch.int32,
+        )
+        return q, k, v, cu
 
-    def test_rope_retains_autograd_fallback(self):
-        q = torch.randn(5, 2, 8, device="cuda", requires_grad=True)
-        k = torch.randn_like(q, requires_grad=True)
-        cos, sin = torch.ones(5, 8, device="cuda"), torch.zeros(5, 8, device="cuda")
-        oq, ok = apply_rotary_pos_emb_vision(q, k, cos, sin)
-        (oq.sum() + ok.sum()).backward()
-        torch.testing.assert_close(q.grad, torch.ones_like(q))
-        torch.testing.assert_close(k.grad, torch.ones_like(k))
+    def test_dense_dispatch_preserves_segments_strides_and_reference(self):
+        from unittest.mock import patch
+
+        from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe import (
+            qwen3_5_moe_vit as vm,
+        )
+
+        lengths = [1025, 1025]
+        q, k, v, cu = self._inputs(lengths)
+        fa4, _ = vm._flash_attention_backends()
+        dense = vm._dense_flash_attention_backend()
+        with torch.inference_mode(), patch.object(
+            vm, "_dense_flash_attention_backend", return_value=dense
+        ) as selected:
+            actual = vm._fa4_vision_attention(q, k, v, cu, lengths, 72**-0.5)
+            expected = fa4(
+                q,
+                k,
+                v,
+                cu_seqlens_q=cu,
+                cu_seqlens_k=cu,
+                max_seqlen_q=1025,
+                max_seqlen_k=1025,
+                causal=False,
+                softmax_scale=72**-0.5,
+            )
+            if isinstance(expected, tuple):
+                expected = expected[0]
+            self.assertEqual(selected.call_count, 1)
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+            self.assertEqual(v.view(2, 1025, 16, 72).data_ptr(), v.data_ptr())
+            self.assertEqual(v.stride(0), 3 * 16 * 72)
+            before = actual.clone()
+            v[1025:].add_(1)
+            changed = vm._fa4_vision_attention(q, k, v, cu, lengths, 72**-0.5)
+            torch.testing.assert_close(changed[:1025], before[:1025], atol=0, rtol=0)
+            self.assertFalse(torch.equal(changed[1025:], before[1025:]))
+
+    def test_mixed_short_and_other_shapes_retain_varlen(self):
+        from unittest.mock import patch
+
+        from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe import (
+            qwen3_5_moe_vit as vm,
+        )
+
+        cases = [
+            ([1025, 129], torch.bfloat16, 72),
+            ([129, 129], torch.bfloat16, 72),
+            ([1025, 1025], torch.float16, 72),
+            ([1025, 1025], torch.bfloat16, 64),
+        ]
+        fa4, _ = vm._flash_attention_backends()
+        for lengths, dtype, dim in cases:
+            with self.subTest(lengths=lengths, dtype=dtype, dim=dim):
+                q, k, v, cu = self._inputs(lengths, dtype, dim)
+                with torch.inference_mode(), patch.object(
+                    vm,
+                    "_dense_flash_attention_backend",
+                    side_effect=AssertionError("unexpected dense dispatch"),
+                ):
+                    actual = vm._fa4_vision_attention(q, k, v, cu, lengths, dim**-0.5)
+                    expected = fa4(
+                        q,
+                        k,
+                        v,
+                        cu_seqlens_q=cu,
+                        cu_seqlens_k=cu,
+                        max_seqlen_q=max(lengths),
+                        max_seqlen_k=max(lengths),
+                        causal=False,
+                        softmax_scale=dim**-0.5,
+                    )
+                    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    def test_attention_preserves_native_head_size_full_output_and_graph(self):
+        from unittest.mock import patch
+
+        from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe import (
+            qwen3_5_moe_vit as vm,
+        )
+
+        torch.manual_seed(918)
+        lengths = [1025, 1025]
+        module = vm.Qwen3_5MoeVisionAttention(vm.Qwen3_5MoeVisionConfig()).cuda()
+        module = module.to(torch.bfloat16).eval()
+        with torch.no_grad():
+            for parameter in module.parameters():
+                parameter.normal_(mean=0.0, std=0.02)
+        module.attn.backend = "fa4"
+        hidden = torch.randn(2050, 1, 1152, device="cuda", dtype=torch.bfloat16)
+        angles = torch.randn(2050, 36, device="cuda", dtype=torch.bfloat16)
+        cu = torch.tensor([0, 1025, 2050], device="cuda", dtype=torch.int32)
+        kwargs = dict(
+            cu_seqlens=cu,
+            rotary_pos_emb_cos=angles.cos(),
+            rotary_pos_emb_sin=angles.sin(),
+            sequence_lengths=tuple(lengths),
+            max_seqlen=torch.tensor(max(lengths), dtype=torch.int32),
+        )
+        dense = vm._dense_flash_attention_backend()
+        calls = []
+
+        def checked_dense(q, k, v, **attention_kwargs):
+            calls.append((tuple(q.shape), tuple(k.shape), tuple(v.shape)))
+            self.assertEqual(attention_kwargs["softmax_scale"], 72**-0.5)
+            return dense(q, k, v, **attention_kwargs)
+
+        with torch.inference_mode():
+            with patch.object(vm, "_use_dense_fa4", return_value=False):
+                expected = module(hidden, **kwargs)
+            with patch.object(
+                vm, "_dense_flash_attention_backend", return_value=checked_dense
+            ):
+                actual = module(hidden, **kwargs)
+            self.assertEqual(
+                calls, [((2, 1025, 16, 72), (2, 1025, 16, 72), (2, 1025, 16, 72))]
+            )
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    module(hidden, **kwargs)
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = module(hidden, **kwargs)
+            graph.replay()
+            first = captured.clone()
+            hidden[1025:].mul_(0.5)
+            graph.replay()
+            with patch.object(vm, "_use_dense_fa4", return_value=False):
+                expected = module(hidden, **kwargs)
+            torch.testing.assert_close(captured, expected, atol=0, rtol=0)
+            torch.testing.assert_close(captured[:1025], first[:1025], atol=0, rtol=0)
+            self.assertFalse(torch.equal(captured[1025:], first[1025:]))
+
+    def test_dense_cuda_graph_replay_uses_updated_input(self):
+        from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe import (
+            qwen3_5_moe_vit as vm,
+        )
+
+        lengths = [1025, 1025]
+        q, k, v, cu = self._inputs(lengths)
+        with torch.inference_mode():
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    vm._fa4_vision_attention(q, k, v, cu, lengths, 72**-0.5)
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = vm._fa4_vision_attention(q, k, v, cu, lengths, 72**-0.5)
+            graph.replay()
+            first = captured.clone()
+            v.mul_(0.5)
+            graph.replay()
+            expected = vm._fa4_vision_attention(q, k, v, cu, lengths, 72**-0.5)
+            torch.testing.assert_close(captured, expected, atol=0, rtol=0)
+            self.assertFalse(torch.equal(first, captured))
 
 
 if __name__ == "__main__":

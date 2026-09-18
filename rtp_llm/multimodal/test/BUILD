@@ -159,3 +159,9 @@ py_test(
     srcs = ["mm_feature_hash_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "qwen35_vit_test",
+    srcs = ["qwen35_vit_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

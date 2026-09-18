@@ -258,8 +258,18 @@ py_library(
         "multimodal/*.py",
         "multimodal/**/*.py",
     ]),
+    data = [
+        "multimodal/multimodal_mixins/qwen3_5_moe/FLASH_ATTENTION_LICENSE",
+        "multimodal/multimodal_mixins/qwen3_5_moe/vision_sources.json",
+    ],
     deps = [
         ":utils",
+        ":einops",
+        ":numpy",
+        ":torch",
+        ":transformers",
+        ":triton",
+        ":typing-extensions",
         ":Pillow",
         ":pillow-heif",
         ":pillow-avif-plugin",

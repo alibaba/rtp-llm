@@ -1,6 +1,8 @@
 import io
 import pickle
 import sys
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -25,6 +27,225 @@ from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class GpuVideoTest(unittest.TestCase):
+
+    def test_selected_surfaces_copy_to_ordered_buffer_before_decoder_reuse(self):
+        from contextlib import nullcontext
+
+        device = torch.device("cpu")
+        surface = torch.full((48, 32), 128, dtype=torch.uint8)
+        decoder = mock.Mock()
+
+        def decode(packet):
+            surface[:32].fill_(30 + packet)
+            return [surface]
+
+        decoder.Decode.side_effect = decode
+        demuxer = mock.MagicMock()
+        demuxer.GetNvCodecId.return_value = 99
+        demuxer.__iter__.return_value = iter([0, 1, 2])
+        codec = mock.Mock()
+        codec.CreateDemuxer.return_value = demuxer
+        codec.CreateDecoder.return_value = decoder
+        producer, consumer = mock.Mock(), mock.Mock()
+        data = GpuVideoInput(b"test", 3, (2, 0, 2), 32, 32, 32, 32, 16, 2)
+        gpu_video._decode_state.key = None
+        with mock.patch(
+            "torch.cuda.stream", side_effect=lambda stream: nullcontext()
+        ), mock.patch.object(torch.Tensor, "record_stream"), mock.patch(
+            "torch.stack", side_effect=AssertionError("sample stack")
+        ), mock.patch.object(
+            torch.Tensor, "clone", side_effect=AssertionError("sample clone")
+        ), mock.patch.object(
+            gpu_video, "nv12_to_rgb", side_effect=lambda x, *args: x
+        ):
+            result = gpu_video._decode_on_stream(
+                data, device, codec, producer, consumer
+            )
+        self.assertEqual(result.shape, (3, 48, 32))
+        self.assertEqual(result[:, 0, 0].tolist(), [32, 30, 32])
+        self.assertEqual(producer.synchronize.call_count, 2)
+        consumer.wait_stream.assert_called_once_with(producer)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_parallel_gpu_pixels_match_reference_across_consumer_streams(self):
+        processor = self.processor()
+        data = [
+            GpuVideoInput(bytes([value]), 5, tuple(range(5)), 32, 64, 32, 64, 16, 2)
+            for value in (27, 219, 63, 173)
+        ]
+        expected = [
+            processor(
+                torch.full((5, 3, 32, 64), x.encoded[0], dtype=torch.uint8),
+                do_resize=False,
+                do_sample_frames=False,
+                return_tensors="pt",
+            )["pixel_values_videos"].bfloat16()
+            for x in data
+        ]
+
+        def decode(item, device):
+            return torch.full(
+                (5, 3, 32, 64), item.encoded[0], dtype=torch.uint8, device=device
+            )
+
+        pool = gpu_video.VideoDecodePool(2)
+        try:
+            with mock.patch.object(gpu_video, "decode_video_cuda", side_effect=decode):
+                with pool.preprocess(
+                    data, processor, "cuda:0", torch.bfloat16
+                ) as values:
+                    prepared = list(values)
+            consumer = torch.cuda.Stream()
+            with torch.cuda.stream(consumer):
+                actual = [x.consume(consumer).clone() for x in prepared]
+            consumer.synchronize()
+            for a, b in zip(actual, expected):
+                torch.testing.assert_close(a.cpu(), b, atol=0, rtol=0)
+        finally:
+            pool.close()
+
+    def test_single_video_pixels_match_processor_without_singleton_copies(self):
+        generator = torch.Generator().manual_seed(841)
+        for count in (4, 5):
+            for normalize in (False, True):
+                with self.subTest(frames=count, normalize=normalize):
+                    processor = self.processor()
+                    processor.do_normalize = normalize
+                    frames = torch.randint(
+                        256,
+                        (count, 3, 32, 64),
+                        dtype=torch.uint8,
+                        generator=generator,
+                    )
+                    before = frames.clone()
+                    expected = processor(
+                        frames,
+                        do_resize=False,
+                        do_sample_frames=False,
+                        return_tensors="pt",
+                    )["pixel_values_videos"]
+                    # An even frame count needs neither stack nor cat; odd
+                    # counts still concatenate the required repeated last frame.
+                    with mock.patch("torch.stack", side_effect=AssertionError("stack")):
+                        if count % 2 == 0:
+                            with mock.patch(
+                                "torch.cat", side_effect=AssertionError("cat")
+                            ):
+                                actual = gpu_video.process_video_pixels(
+                                    frames, processor
+                                )
+                        else:
+                            actual = gpu_video.process_video_pixels(frames, processor)
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                    torch.testing.assert_close(frames, before, rtol=0, atol=0)
+
+    def test_video_preparation_pool_runs_whole_tasks_concurrently_in_order(self):
+        barrier = threading.Barrier(2)
+
+        def prepare(value, processor, device, dtype):
+            barrier.wait(timeout=5)
+            return value + 10
+
+        with mock.patch.object(
+            gpu_video, "_preprocess_video_ready", side_effect=prepare
+        ):
+            pool = gpu_video.VideoDecodePool(2)
+            try:
+                with pool.preprocess(
+                    range(4), None, "cuda:0", torch.bfloat16
+                ) as values:
+                    self.assertEqual(list(values), [10, 11, 12, 13])
+            finally:
+                pool.close()
+
+    def test_prepared_video_waits_and_records_consumer_stream(self):
+        source = GpuVideoInput(b"", 2, (0, 1), 32, 32, 32, 32, 16, 2)
+        pixels = mock.Mock()
+        stream = mock.Mock()
+        ready = mock.sentinel.ready
+        prepared = gpu_video.PreparedGpuVideo(source, pixels, ready)
+        self.assertIs(prepared.consume(stream), pixels)
+        stream.wait_event.assert_called_once_with(ready)
+        pixels.record_stream.assert_called_once_with(stream)
+        self.assertEqual(prepared.shape, source.shape)
+
+    def test_parallel_decode_preserves_order_and_bounds_prefetch(self):
+        second_done = threading.Event()
+        started = []
+        finished = []
+        lock = threading.Lock()
+
+        def decode(index, device):
+            with lock:
+                started.append(index)
+            if index == 0:
+                self.assertTrue(second_done.wait(5))
+            result = SimpleNamespace(index=index, record_stream=mock.Mock())
+            with lock:
+                finished.append(index)
+            if index == 1:
+                second_done.set()
+            return result
+
+        with mock.patch.object(
+            gpu_video, "_decode_video_ready", side_effect=decode
+        ), mock.patch("torch.cuda.current_stream", return_value=mock.sentinel.stream):
+            pool = gpu_video.VideoDecodePool(2)
+            try:
+                with pool.decode(range(6), "cuda:0") as results:
+                    first = next(results)
+                    self.assertEqual(first.index, 0)
+                    self.assertEqual(set(started), {0, 1})
+                    self.assertEqual(finished[:2], [1, 0])
+                    rest = list(results)
+                self.assertEqual(
+                    [first.index, *[r.index for r in rest]], list(range(6))
+                )
+                for item in [first, *rest]:
+                    item.record_stream.assert_called_once_with(mock.sentinel.stream)
+            finally:
+                pool.close()
+
+    def test_parallel_decode_drains_errors_and_can_recover(self):
+        second_started = threading.Event()
+        drained = threading.Event()
+
+        def decode(index, device):
+            if index == 0:
+                self.assertTrue(second_started.wait(5))
+                raise ValueError("broken video")
+            second_started.set()
+            time.sleep(0.05)
+            drained.set()
+            return SimpleNamespace(record_stream=mock.Mock())
+
+        with mock.patch.object(
+            gpu_video, "_decode_video_ready", side_effect=decode
+        ), mock.patch("torch.cuda.current_stream", return_value=mock.sentinel.stream):
+            pool = gpu_video.VideoDecodePool(2)
+            try:
+                with self.assertRaisesRegex(ValueError, "broken video"):
+                    with pool.decode(range(8), "cuda:0") as results:
+                        next(results)
+                self.assertTrue(drained.is_set())
+                with pool.decode([1, 2], "cuda:0") as results:
+                    self.assertEqual(len(list(results)), 2)
+            finally:
+                pool.close()
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_prefetched_frames_skip_decode_and_keep_processor_output(self):
+        processor = self.processor()
+        data = GpuVideoInput(b"", 5, tuple(range(5)), 64, 96, 32, 64, 16, 2)
+        frames = torch.randint(256, (5, 3, 64, 96), dtype=torch.uint8, device="cuda")
+        with mock.patch.object(gpu_video, "decode_video_cuda", return_value=frames):
+            expected = preprocess_video_cuda(data, processor, "cuda:0")
+        with mock.patch.object(
+            gpu_video, "decode_video_cuda", side_effect=AssertionError("decoded twice")
+        ):
+            actual = preprocess_video_cuda(data, processor, "cuda:0", video=frames)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
     def processor(self):
         return Qwen3VLVideoProcessor(
             patch_size=16,
@@ -269,24 +490,38 @@ class GpuVideoTest(unittest.TestCase):
             torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
-    def test_resized_nvdec_input_matches_cpu_uint8_rounding(self):
+    def test_resized_nvdec_input_stays_on_cuda(self):
         processor = self.processor()
         generator = torch.Generator().manual_seed(37)
         frames = torch.randint(
             256, (5, 3, 64, 96), dtype=torch.uint8, generator=generator
-        )
-        data = GpuVideoInput(b"", 5, tuple(range(5)), 64, 96, 32, 64, 16, 2)
-        resized = gpu_video.resize_video_to_shape(frames, processor, 32, 64)
-        expected = processor(
-            resized, return_tensors="pt", do_resize=False, do_sample_frames=False
-        )["pixel_values_videos"]
-        with mock.patch.object(
-            gpu_video, "decode_video_cuda", return_value=frames.cuda()
-        ):
-            actual = preprocess_video_cuda(data, processor, "cuda:0")
-        torch.testing.assert_close(
-            actual.cpu().to(torch.bfloat16), expected.to(torch.bfloat16), atol=0, rtol=0
-        )
+        ).cuda()
+        for height, width in ((32, 64), (96, 160)):
+            with self.subTest(height=height, width=width):
+                data = GpuVideoInput(
+                    b"", 5, tuple(range(5)), 64, 96, height, width, 16, 2
+                )
+                resized = gpu_video.resize_video_to_shape(
+                    frames, processor, height, width
+                )
+                self.assertTrue(resized.is_cuda)
+                self.assertEqual(resized.dtype, torch.uint8)
+                expected = processor(
+                    resized,
+                    return_tensors="pt",
+                    do_resize=False,
+                    do_sample_frames=False,
+                )["pixel_values_videos"]
+                with mock.patch.object(
+                    gpu_video, "decode_video_cuda", return_value=frames
+                ), mock.patch.object(
+                    torch.Tensor,
+                    "cpu",
+                    side_effect=AssertionError("GPU video left CUDA"),
+                ):
+                    actual = preprocess_video_cuda(data, processor, "cuda:0")
+                self.assertTrue(actual.is_cuda)
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_session_drains_reuses_and_discards_failure_without_frame_cache(self):

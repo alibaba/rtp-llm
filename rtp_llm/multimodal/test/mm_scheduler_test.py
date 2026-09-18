@@ -188,6 +188,160 @@ def _submit_concurrently(
 
 
 class MMSchedulerTest(TestCase):
+
+    def test_preparation_overlaps_previous_forward(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        gate, prepared_second = threading.Event(), threading.Event()
+        part = _FakeMMPart(block_until=gate)
+
+        def prepare(data, types):
+            if part.forward_entered.is_set():
+                prepared_second.set()
+            return data
+
+        part.prepare_embedding_inputs = prepare
+        scheduler = MMScheduler(part, batch_wait_ms=0, max_batch_size=1)
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                self.assertTrue(part.forward_entered.wait(5))
+                second = pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                try:
+                    self.assertTrue(prepared_second.wait(5))
+                    self.assertFalse(first.done())
+                    self.assertFalse(second.done())
+                finally:
+                    gate.set()
+                first.result(timeout=5)
+                second.result(timeout=5)
+            self.assertEqual(part.calls, [1, 1])
+        finally:
+            gate.set()
+            scheduler.close()
+
+    def test_preparation_is_parallel_and_preserves_items(self):
+        barrier = threading.Barrier(2)
+        part = _FakeMMPart()
+
+        def prepare(data, types):
+            barrier.wait(timeout=5)
+            return [value + 10 for value in data]
+
+        part.prepare_embedding_inputs = prepare
+        scheduler = MMScheduler(part, batch_wait_ms=10, max_queue_size=2)
+        requests = [
+            [_FakeWorkItem(preprocess_result=torch.tensor([i]))] for i in (1, 2)
+        ]
+        try:
+            self.assertEqual(_submit_concurrently(scheduler, requests), [None, None])
+            self.assertEqual(
+                [x[0].preprocess_result.item() for x in requests], [11, 12]
+            )
+        finally:
+            scheduler.close()
+
+    def test_preparation_counts_toward_queue_limit_and_close_rejects_it(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        entered, release = threading.Event(), threading.Event()
+        part = _FakeMMPart()
+
+        def prepare(data, types):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test preparation blocked")
+            return data
+
+        part.prepare_embedding_inputs = prepare
+        scheduler = MMScheduler(part, max_queue_size=1)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                first = pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                self.assertTrue(entered.wait(5))
+                try:
+                    with self.assertRaises(MMSchedulerOverloadError):
+                        scheduler.submit_and_wait([_FakeWorkItem()])
+                    self.assertTrue(scheduler.close())
+                finally:
+                    release.set()
+                with self.assertRaisesRegex(RuntimeError, "closed during preparation"):
+                    first.result(timeout=5)
+            self.assertEqual(scheduler._preparing, 0)
+            self.assertEqual(part.calls, [])
+        finally:
+            release.set()
+            scheduler.close()
+
+    def test_preparation_failure_releases_admission_and_budget_checks_precede_it(self):
+        part = _FakeMMPart()
+        prepare = mock.Mock(side_effect=ValueError("bad input"))
+        part.prepare_embedding_inputs = prepare
+        scheduler = MMScheduler(part, max_batch_images=1, max_queue_size=1)
+        try:
+            with self.assertRaises(ValueError):
+                scheduler.submit_and_wait([_FakeWorkItem(images=2)])
+            prepare.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "bad input"):
+                scheduler.submit_and_wait([_FakeWorkItem()])
+            self.assertEqual(scheduler._preparing, 0)
+            prepare.side_effect = lambda data, types: data
+            scheduler.submit_and_wait([_FakeWorkItem()])
+            self.assertEqual(part.calls, [1])
+        finally:
+            scheduler.close()
+
+    def test_failed_forward_does_not_retain_prepared_pixels(self):
+        part = _FakeMMPart()
+        references = []
+
+        def prepare(data, types):
+            value = torch.tensor([-1.0])
+            references.append(weakref.ref(value))
+            return [value]
+
+        part.prepare_embedding_inputs = prepare
+        scheduler = MMScheduler(part, max_queue_size=1)
+        retained_errors = []
+        try:
+
+            def submit():
+                try:
+                    scheduler.submit_and_wait([_FakeWorkItem()])
+                except MMSchedulerExecutionError as error:
+                    retained_errors.append(error)
+
+            submit()
+            # Stop the worker to remove its final batch frame as well.
+            self.assertTrue(scheduler.close())
+            gc.collect()
+            self.assertEqual(len(retained_errors), 1)
+            self.assertEqual(len(references), 1)
+            self.assertIsNone(references[0]())
+        finally:
+            scheduler.close()
+
+    def test_preparation_timeout_does_not_enqueue_forward(self):
+        from rtp_llm.multimodal.mm_scheduler import MMSchedulerTimeoutError
+
+        part = _FakeMMPart()
+
+        def prepare(data, types):
+            time.sleep(0.02)
+            return data
+
+        part.prepare_embedding_inputs = prepare
+        scheduler = MMScheduler(part, max_queue_size=1)
+        try:
+            with self.assertRaisesRegex(
+                MMSchedulerTimeoutError, "during input preparation"
+            ):
+                scheduler.submit_and_wait([_FakeWorkItem(timeout_ms=1)])
+            self.assertEqual(part.calls, [])
+            self.assertEqual(scheduler._preparing, 0)
+        finally:
+            scheduler.close()
+
     def test_zero_wait_batches_already_queued_requests(self):
         from concurrent.futures import ThreadPoolExecutor
 
