@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from rtp_llm.distribute.distributed_server import BackendStopConsensusError
+from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_manager import BackendManager
 
 
@@ -293,11 +294,79 @@ class BackendManagerStopTest(unittest.TestCase):
         self.assertTrue(nfs_manager.unmounted)
 
 
+class BackendManagerServiceDrainingWatcherTest(unittest.TestCase):
+    def _config(self):
+        return SimpleNamespace(
+            profiling_debug_logging_config=SimpleNamespace(log_file_backup_count=1),
+            server_config=SimpleNamespace(rank_id=0, frontend_server_id=0),
+            parallelism_config=SimpleNamespace(world_rank=1),
+        )
+
+    def test_scr_startup_defers_watcher_construction(self):
+        event = threading.Event()
+        with patch(
+            "rtp_llm.server.backend_manager.AccessLogger"
+        ), patch(
+            "rtp_llm.server.backend_manager.DistributedServer"
+        ), patch(
+            "rtp_llm.server.backend_manager.get_global_controller"
+        ), patch(
+            "rtp_llm.server.backend_manager.get_log_path", return_value="/tmp"
+        ), patch(
+            "rtp_llm.server.backend_manager.kmonitor.bind_service_draining"
+        ), patch.object(
+            BackendManager, "start_service_draining_watcher"
+        ) as start_watcher:
+            manager = BackendManager(
+                self._config(),
+                event,
+                defer_service_draining_watcher=True,
+            )
+
+        start_watcher.assert_not_called()
+        self.assertIsNone(manager._service_draining_thread)
+
+    def test_watcher_starts_once_after_barrier(self):
+        event = threading.Event()
+        manager = BackendManager.__new__(BackendManager)
+        manager._service_draining = event
+        manager._service_draining_thread = None
+        manager.thread_lock_ = threading.Lock()
+        watcher = Mock()
+
+        with patch(
+            "rtp_llm.server.backend_manager.threading.Thread",
+            return_value=watcher,
+        ) as thread:
+            manager.start_service_draining_watcher()
+            manager.start_service_draining_watcher()
+
+        thread.assert_called_once_with(
+            target=manager._wait_for_service_draining,
+            name="service_draining",
+            daemon=True,
+        )
+        watcher.start.assert_called_once_with()
+        self.assertIs(manager._service_draining_thread, watcher)
+
+    def test_watcher_is_inert_without_shared_event(self):
+        manager = BackendManager.__new__(BackendManager)
+        manager._service_draining = None
+        manager._service_draining_thread = None
+        manager.thread_lock_ = threading.Lock()
+
+        with patch("rtp_llm.server.backend_manager.threading.Thread") as thread:
+            manager.start_service_draining_watcher()
+
+        thread.assert_not_called()
+
+
 class BackendManagerServiceStartTest(unittest.TestCase):
     """The SCR gate must be an opt-in flag, not a new default startup path."""
 
     def _manager_and_config(self):
         manager = BackendManager.__new__(BackendManager)
+        manager._service_draining = None
         manager._distributed_server = Mock()
         manager._distributed_server.get_nccl_comm_config.return_value = None
 
@@ -323,7 +392,7 @@ class BackendManagerServiceStartTest(unittest.TestCase):
             kv_cache_config=object(),
             profiling_debug_logging_config=profiling,
             moe_config=SimpleNamespace(
-                use_deepep_moe=False, use_all_gather=False
+                moe_strategy="", use_deepep_moe=False, use_all_gather=False
             ),
             sp_config=object(),
         )
