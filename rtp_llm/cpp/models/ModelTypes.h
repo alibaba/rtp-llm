@@ -121,6 +121,7 @@ enum GptModelInputIndex : size_t {
     // [group, batch, blocks].
     kvCacheKernelBlockIdRank,
     kvCacheBlockIdRank,
+    requestDeadlineMsLength,
     gptModelInputLength,
 };
 
@@ -148,6 +149,7 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitComboPositionIds    = 1u << 12,
     kDeviceBitTextTokensMask      = 1u << 13,
     kDeviceBitMmFeaturesLocs      = 1u << 14,
+    kDeviceBitRequestDeadlineMs   = 1u << 15,
 };
 
 enum GptModelInputControlFlag : uint32_t {

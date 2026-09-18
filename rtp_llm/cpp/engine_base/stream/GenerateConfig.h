@@ -77,6 +77,7 @@ public:
     int                           calculate_loss           = 0;
     int                           hidden_states_cut_dim    = 0;
     bool                          return_logits            = false;
+    std::optional<int>            logits_index;
     bool                          return_prompt_logits     = false;
     int                           prompt_logits_top_k      = 64;
     int                           prompt_logits_start      = -1;
@@ -272,6 +273,7 @@ public:
         JSONIZE(select_tokens_str);
         JSONIZE(calculate_loss);
         JSONIZE(return_logits);
+        JSONIZE_OPTIONAL(logits_index);
         JSONIZE(return_prompt_logits);
         JSONIZE(prompt_logits_top_k);
         JSONIZE(prompt_logits_start);

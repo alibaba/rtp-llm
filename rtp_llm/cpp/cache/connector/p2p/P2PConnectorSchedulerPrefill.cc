@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
 
-#include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
@@ -15,42 +16,162 @@ P2PConnectorSchedulerPrefill::P2PConnectorSchedulerPrefill(
     const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client):
     config_(std::move(config)), metrics_reporter_(metrics_reporter), tp_broadcast_client_(tp_broadcast_client) {}
 
+std::shared_ptr<const PlanResult> P2PConnectorSchedulerPrefill::planFor(int                decode_tp_size,
+                                                                        const std::string& unique_key) {
+    const auto offset = KVCacheTransferPlanner::sourceReplicaOffset(unique_key, config_.parallelism_config.tp_size);
+    const auto key    = std::make_pair(decode_tp_size, offset);
+    {
+        std::lock_guard<std::mutex> lock(plan_cache_mutex_);
+        auto                        it = plan_cache_.find(key);
+        if (it != plan_cache_.end()) {
+            return it->second;
+        }
+    }
+    // 与 decode 侧同一个 planner 函数、镜像的参数。decode 的 cp_size 由部署级同配开关推导。
+    const auto src_layout = ShardLayoutFactory::fromTopology(
+        *config_.topology, config_.parallelism_config, RoleType::PREFILL);
+    const auto dst_layout = ShardLayoutFactory::peerOf(src_layout,
+                                                      decode_tp_size,
+                                                      config_.parallelism_config.prefill_cp_config.kv_cache_sharded,
+                                                      RoleType::DECODE);
+    const auto tags   = ShardLayoutFactory::tagsOf(*config_.topology);
+    auto       result =
+        std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(src_layout, dst_layout, tags, offset));
+
+    std::lock_guard<std::mutex> lock(plan_cache_mutex_);
+    auto [it, inserted] = plan_cache_.emplace(key, result);
+    (void)inserted;
+    return it->second;
+}
+
+ErrorInfo P2PConnectorSchedulerPrefill::checkPlanDigest(int                decode_tp_size,
+                                                        uint64_t           decode_plan_digest,
+                                                        const std::string& unique_key) {
+    if (!config_.topology) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         "StartLoad plan digest check: cache topology is null");
+    }
+    if (decode_tp_size <= 0) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         "StartLoad plan digest check: decode worker list is empty");
+    }
+    auto plan = planFor(decode_tp_size, unique_key);
+    if (!plan->ok()) {
+        return ErrorInfo(plan->error.code(), "StartLoad plan digest check: " + plan->error.ToString());
+    }
+    const uint64_t prefill_plan_digest = plan->plan.digest();
+    if (decode_plan_digest != prefill_plan_digest) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         "StartLoad plan digest mismatch: decode=" + std::to_string(decode_plan_digest)
+                             + " prefill=" + std::to_string(prefill_plan_digest)
+                             + " decode_tp_size=" + std::to_string(decode_tp_size));
+    }
+    return ErrorInfo::OkStatus();
+}
+
+P2PBroadcastClient::RankRoutes
+P2PConnectorSchedulerPrefill::buildPrefillRankRoutes(const TransferPlan&  plan,
+                                                     size_t               worker_num,
+                                                     const std::set<int>& active_route_ids) const {
+    P2PBroadcastClient::RankRoutes rank_routes(worker_num);
+    for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
+        for (const auto* route : plan.forPrefillRank(static_cast<int>(worker_rank))) {
+            if (!active_route_ids.empty() && active_route_ids.count(route->route_id) == 0) {
+                continue;
+            }
+            TransferRoutePB pb;
+            // peer_index 是 decode_transfer_servers 的下标，与 route->dst_rank 同一命名空间。
+            RouteCodec::encodeForPrefill(*route, route->dst_rank, &pb);
+            rank_routes[worker_rank].push_back(std::move(pb));
+        }
+    }
+    return rank_routes;
+}
+
 ErrorInfo
-P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&                            resource,
-                                          const std::string&                                   unique_key,
+P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                                   unique_key,
                                           int64_t                                              request_id,
                                           const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
                                           int64_t                                              deadline_ms,
-                                          std::function<bool()>                                is_cancelled) {
+                                          std::function<bool()>                                is_cancelled,
+                                          bool                                                 no_transfer,
+                                          int64_t                                              request_deadline_ms,
+                                          const std::set<int>&                                 active_route_ids) {
     RTP_LLM_LOG_DEBUG("sendKVCache start, request_id: %ld, unique_key: %s, decode_transfer_servers_size: %zu",
                       request_id,
                       unique_key.c_str(),
                       decode_transfer_servers.size());
 
     int64_t start_time_us      = currentTimeUs();
-    auto    collector          = std::make_shared<PrefillSchedulerMetricsCollector>();
+    auto    collector          = std::make_shared<P2PConnectorMetricsCollector>();
     auto    report_metric_func = [start_time_us, collector, metrics_reporter = metrics_reporter_](bool success) {
-        collector->total_cost_time_us = currentTimeUs() - start_time_us;
-        collector->success            = success;
+        collector->prefill_scheduler_total_cost_time_us = currentTimeUs() - start_time_us;
+        collector->prefill_scheduler_success            = success;
         if (metrics_reporter) {
-            metrics_reporter->report<P2PConnectorMetrics, PrefillSchedulerMetricsCollector>(nullptr, collector.get());
+            metrics_reporter->report<P2PConnectorMetrics, P2PConnectorMetricsCollector>(nullptr, collector.get());
         }
     };
 
-    auto layer_cache_buffers = LayerCacheBufferUtil::convert(*resource, 0);
-    if (layer_cache_buffers.empty()) {
-        std::string error_msg = "sendKVCache: layer_cache_buffers is empty, request_id: " + std::to_string(request_id);
-        RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
+    if (!no_transfer && !config_.topology) {
         report_metric_func(false);
-        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, error_msg);
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         "sendKVCache: cache topology is null");
+    }
+    const auto broadcast_type = no_transfer ? P2PConnectorBroadcastType::HANDLE_READ_NO_TRANSFER :
+                                              P2PConnectorBroadcastType::HANDLE_READ;
+
+    // 编排层：与 decode 侧用同一个 planner 算镜像 plan，逐 prefill worker 下发它自己的 route。
+    const size_t                   worker_num = config_.worker_grpc_addrs.size();
+    P2PBroadcastClient::RankRoutes rank_routes;
+    uint64_t                       plan_digest = 0;
+    if (!no_transfer) {
+        if (worker_num == 0) {
+            report_metric_func(false);
+            return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "worker list is empty");
+        }
+        const auto plan_start_us     = currentTimeUs();
+        auto plan = planFor(static_cast<int>(decode_transfer_servers.size()), unique_key);
+        collector->prefill_scheduler_plan_cost_time_us = currentTimeUs() - plan_start_us;
+        if (!plan->ok()) {
+            RTP_LLM_LOG_WARNING("sendKVCache: transfer plan failed, unique_key=%s, error=%s",
+                                unique_key.c_str(),
+                                plan->error.ToString().c_str());
+            report_metric_func(false);
+            return plan->error;
+        }
+        plan_digest = plan->plan.digest();
+        if (!active_route_ids.empty()) {
+            std::set<int> planned_route_ids;
+            for (const auto& route : plan->plan.routes) {
+                planned_route_ids.insert(route.route_id);
+            }
+            for (int route_id : active_route_ids) {
+                if (planned_route_ids.count(route_id) == 0) {
+                    report_metric_func(false);
+                    return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                                     "sendKVCache: active route id " + std::to_string(route_id)
+                                         + " is absent from transfer plan");
+                }
+            }
+        }
+        rank_routes = buildPrefillRankRoutes(plan->plan, worker_num, active_route_ids);
+        collector->prefill_scheduler_plan_cost_time_us = currentTimeUs() - plan_start_us;
     }
 
-    auto result = tp_broadcast_client_->broadcast(request_id,
-                                                  layer_cache_buffers,
-                                                  decode_transfer_servers,
-                                                  unique_key,
-                                                  deadline_ms,
-                                                  P2PConnectorBroadcastType::HANDLE_READ);
+    P2PBroadcastClient::BroadcastParams params;
+    params.request_id          = request_id;
+    params.unique_key          = unique_key;
+    params.deadline_ms         = deadline_ms;
+    params.request_deadline_ms = request_deadline_ms;
+    params.type                = broadcast_type;
+    params.peer_workers        = decode_transfer_servers;
+    // no_transfer 时 rank_routes 为空 ⇒ 所有 worker 收到同一份不带传输计划的请求。
+    params.routes      = std::move(rank_routes);
+    params.plan_digest = plan_digest;
+
+    const auto broadcast_start_us       = currentTimeUs();
+    auto result = tp_broadcast_client_->broadcast(std::move(params));
+    collector->prefill_scheduler_broadcast_submit_time_us = currentTimeUs() - broadcast_start_us;
     if (!result) {
         std::string error_msg = "sendKVCache: broadcast failed, request_id: " + std::to_string(request_id);
         RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
@@ -59,8 +180,15 @@ P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&             
     }
 
     bool deadline_exceeded = false;
-    auto cancel_result     = waitForBroadcastCompletion(
-        result, unique_key, request_id, deadline_ms, std::move(is_cancelled), &deadline_exceeded);
+    const auto wait_start_us          = currentTimeUs();
+    auto cancel_result = waitForBroadcastCompletion(result,
+                                                    unique_key,
+                                                    request_id,
+                                                    deadline_ms,
+                                                    request_deadline_ms,
+                                                    std::move(is_cancelled),
+                                                    &deadline_exceeded);
+    collector->prefill_scheduler_broadcast_wait_time_us = currentTimeUs() - wait_start_us;
     report_metric_func(!cancel_result && !deadline_exceeded && result->success());
 
     if (deadline_exceeded) {
@@ -93,8 +221,9 @@ P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P
                                                          const std::string&                                 unique_key,
                                                          int64_t                                            request_id,
                                                          int64_t                                            deadline_ms,
-                                                         std::function<bool()> is_cancelled,
-                                                         bool*                 deadline_exceeded_out) {
+                                                         int64_t                                            request_deadline_ms,
+                                                         std::function<bool()>                              is_cancelled,
+                                                         bool*                                              deadline_exceeded_out) {
 
     std::shared_ptr<P2PBroadcastClient::Result> cancel_result = nullptr;
     int                                         sleep_ms      = 1;
@@ -105,7 +234,17 @@ P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P
             RTP_LLM_LOG_WARNING("sendKVCache: request cancelled by client, request_id: %ld, unique_key: %s",
                                 request_id,
                                 unique_key.c_str());
-            cancel_result = tp_broadcast_client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_HANDLE_READ);
+            cancel_result = tp_broadcast_client_->cancel(unique_key,
+                                                         P2PConnectorBroadcastType::CANCEL_HANDLE_READ,
+                                                         request_deadline_ms,
+                                                         request_id,
+                                                         deadline_ms);
+            if (!cancel_result) {
+                // Cancellation is already terminal for this StartLoad. Do not
+                // keep waiting for the original HANDLE_READ merely because the
+                // best-effort cancel RPC could not be created.
+                cancel_result = std::make_shared<P2PBroadcastClient::Result>(unique_key);
+            }
         }
         if (!cancel_result && currentTimeMs() >= deadline_ms) {
             RTP_LLM_LOG_WARNING(
@@ -113,20 +252,52 @@ P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P
                 deadline_ms,
                 request_id,
                 unique_key.c_str());
-            cancel_result = tp_broadcast_client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_HANDLE_READ);
+            cancel_result = tp_broadcast_client_->cancel(unique_key,
+                                                         P2PConnectorBroadcastType::CANCEL_HANDLE_READ,
+                                                         request_deadline_ms,
+                                                         request_id,
+                                                         deadline_ms);
             if (deadline_exceeded_out) {
                 *deadline_exceeded_out = true;
             }
+            if (!cancel_result) {
+                // The transfer deadline remains authoritative even when the
+                // cancel broadcast itself cannot be started.
+                cancel_result = std::make_shared<P2PBroadcastClient::Result>(unique_key);
+            }
         }
-        if (cancel_result && !cancel_result->done()) {
-            cancel_result->checkDone();
+        // Cancellation is safety cleanup; do not add its RPC budget to load waiting.
+        if (cancel_result) {
+            break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
         sleep_ms = std::min(sleep_ms * 2, kBackoffCapMs);
     }
-    // The shared BroadcastManager advances done() asynchronously. Consume the
-    // completed result once more to preserve the legacy timeout exception.
-    result->checkDone();
+
+    // The HANDLE_READ RPC and the transfer share the same deadline. gRPC may
+    // therefore publish DEADLINE_EXCEEDED immediately before this polling
+    // loop observes the clock crossing deadline_ms. In that ordering the
+    // loop exits through result->done() and would otherwise skip the
+    // best-effort CANCEL_HANDLE_READ cleanup entirely.
+    if (!cancel_result && !result->success() && currentTimeMs() >= deadline_ms) {
+        RTP_LLM_LOG_WARNING(
+            "sendKVCache: broadcast completed unsuccessfully at deadline_ms=%ld, cancelling, request_id: %ld, "
+            "unique_key: %s",
+            deadline_ms,
+            request_id,
+            unique_key.c_str());
+        cancel_result = tp_broadcast_client_->cancel(unique_key,
+                                                     P2PConnectorBroadcastType::CANCEL_HANDLE_READ,
+                                                     request_deadline_ms,
+                                                     request_id,
+                                                     deadline_ms);
+        if (deadline_exceeded_out) {
+            *deadline_exceeded_out = true;
+        }
+        if (!cancel_result) {
+            cancel_result = std::make_shared<P2PBroadcastClient::Result>(unique_key);
+        }
+    }
     return cancel_result;
 }
 

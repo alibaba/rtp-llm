@@ -8,6 +8,7 @@
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 #if USING_CUDA
 #include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <c10/cuda/CUDAGuard.h>
 #endif
 #include <gtest/gtest.h>
 #include <algorithm>
@@ -305,6 +306,21 @@ TEST_F(ExecOpsTest, testGetEnableCommOverlap) {
 TEST_F(ExecOpsTest, testRuntimeSyncAndCheck) {
     ASSERT_NO_THROW(runtimeSyncAndCheck());
 }
+
+#if USING_CUDA
+TEST_F(ExecOpsTest, testCurrentStreamSyncCompletesHostCopy) {
+    auto stream = c10::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    auto host = torch::empty({1024}, torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true));
+    auto device = torch::full({1024}, 7.0f, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    host.copy_(device, /*non_blocking=*/true);
+    cudaCurrentStreamSyncAndCheck();
+    EXPECT_TRUE(stream.query());
+    for (int i = 0; i < host.numel(); ++i) {
+        EXPECT_FLOAT_EQ(host.data_ptr<float>()[i], 7.0f);
+    }
+}
+#endif
 
 TEST_F(ExecOpsTest, testRuntimeCreateEvent) {
     auto event = runtimeCreateEvent();
@@ -750,6 +766,252 @@ TEST_F(ExecOpsTest, testWriteCacheStoreMhaKernelViewKeepsExplicitKvAndScaleStrid
             EXPECT_EQ(it->second.len, len);
         }
     }
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreDispatchesCpProjectedP2PLayerWithoutCacheStore) {
+    auto inputs = makePyCacheStoreInputs(256, 4);
+    inputs.cache_keys                         = torch::tensor({{int64_t(100), int64_t(101), int64_t(102), int64_t(103)}}, torch::kInt64);
+    inputs.request_deadline_ms                = torch::tensor({int64_t(123456)}, torch::kInt64);
+
+    int                  call_count = 0;
+    std::vector<int64_t> captured_keys;
+    std::vector<int32_t> captured_blocks;
+    inputs.p2p_layer_write = [&](size_t,
+                                 int,
+                                 const std::string&          tag,
+                                 const std::vector<int64_t>& keys,
+                                 const std::vector<int32_t>& blocks,
+                                 int64_t                     request_id,
+                                 const std::shared_ptr<torch::Event>&,
+                                 int64_t deadline_ms) {
+        ++call_count;
+        EXPECT_EQ(tag, "full");
+        EXPECT_EQ(request_id, 42);
+        EXPECT_EQ(deadline_ms, 123456);
+        captured_keys   = keys;
+        captured_blocks = blocks;
+        return true;
+    };
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({16, 64}, torch::kUInt8);
+    layer_cache.seq_size_per_block = 128;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "full";
+
+    auto input_lengths  = torch::tensor({512}, torch::kInt32);
+    auto prefix_lengths = torch::tensor({0}, torch::kInt32);
+    auto block_ids      = torch::tensor({{11, 13}}, torch::kInt32);
+    inputs.input_lengths_host = input_lengths;
+    inputs.prefix_lengths_host = prefix_lengths;
+    inputs.host_kv_cache_offset = block_ids;
+    auto config = makeCacheConfig(128, 64, 0, 16, layer_cache.tag);
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 1, 2, nullptr));
+
+    EXPECT_EQ(call_count, 1);
+    EXPECT_EQ(captured_keys, (std::vector<int64_t>{101, 103}));
+    EXPECT_EQ(captured_blocks, (std::vector<int32_t>{11, 13}));
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStorePreservesRequestDeadlinesWithSameRequestId) {
+    auto inputs                  = makePyCacheStoreInputs(4, 1);
+    inputs.request_id            = torch::tensor({int64_t(42), int64_t(42)}, torch::kInt64);
+    inputs.request_deadline_ms   = torch::tensor({int64_t(123456), int64_t(123457)}, torch::kInt64);
+    inputs.request_pd_separation = torch::tensor({true, true}, torch::kBool);
+    inputs.cache_keys            = torch::tensor({{int64_t(100)}, {int64_t(200)}}, torch::kInt64);
+    std::vector<std::pair<int64_t, int64_t>> published_keys;
+    std::vector<std::vector<int32_t>> published_blocks;
+    inputs.p2p_layer_write = [&](size_t,
+                                 int,
+                                 const std::string&,
+                                 const std::vector<int64_t>&,
+                                 const std::vector<int32_t>& blocks,
+                                 int64_t                     request_id,
+                                 const std::shared_ptr<torch::Event>&,
+                                 int64_t deadline_ms) {
+        published_keys.emplace_back(request_id, deadline_ms);
+        published_blocks.push_back(blocks);
+        return true;
+    };
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({3, 64}, torch::kUInt8);
+    layer_cache.seq_size_per_block = 4;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "default";
+    auto input_lengths             = torch::tensor({4, 4}, torch::kInt32);
+    auto prefix_lengths            = torch::tensor({0, 0}, torch::kInt32);
+    auto block_ids                 = torch::tensor({{1}, {2}}, torch::kInt32);
+    inputs.input_lengths_host = input_lengths;
+    inputs.prefix_lengths_host = prefix_lengths;
+    inputs.host_kv_cache_offset = block_ids;
+    auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr));
+    EXPECT_EQ(published_keys, (std::vector<std::pair<int64_t, int64_t>>{{42, 123456}, {42, 123457}}));
+    EXPECT_EQ(published_blocks, (std::vector<std::vector<int32_t>>{{1}, {2}}));
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStorePublishesCpReadyEmptyProjection) {
+    auto inputs = makePyCacheStoreInputs(4, 1);
+    inputs.cache_keys              = torch::tensor({{int64_t(100), int64_t(101), int64_t(102), int64_t(103)}}, torch::kInt64);
+
+    int call_count = 0;
+    inputs.p2p_layer_write = [&](size_t,
+                                 int,
+                                 const std::string&          tag,
+                                 const std::vector<int64_t>& keys,
+                                 const std::vector<int32_t>& blocks,
+                                 int64_t,
+                                 const std::shared_ptr<torch::Event>&,
+                                 int64_t) {
+        ++call_count;
+        EXPECT_EQ(tag, "full");
+        EXPECT_TRUE(keys.empty());
+        EXPECT_TRUE(blocks.empty());
+        return true;
+    };
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({1, 64}, torch::kUInt8);
+    layer_cache.seq_size_per_block = 1;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "full";
+
+    auto input_lengths  = torch::tensor({1}, torch::kInt32);
+    auto prefix_lengths = torch::tensor({0}, torch::kInt32);
+    auto block_ids      = torch::tensor({{0}}, torch::kInt32);
+    inputs.input_lengths_host = input_lengths;
+    inputs.prefix_lengths_host = prefix_lengths;
+    inputs.host_kv_cache_offset = block_ids;
+    auto config = makeCacheConfig(1, 64, 0, 16, layer_cache.tag);
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 3, 4, nullptr));
+    EXPECT_EQ(call_count, 1);
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStorePropagatesP2PLayerDispatchFailure) {
+
+    auto inputs = makePyCacheStoreInputs(4, 2);
+    inputs.cache_keys               = torch::tensor({{int64_t(100), int64_t(101)}}, torch::kInt64);
+    inputs.request_deadline_ms      = torch::tensor({int64_t(123456)}, torch::kInt64);
+    inputs.p2p_layer_write          = [](size_t,
+                                int,
+                                const std::string&,
+                                const std::vector<int64_t>&,
+                                const std::vector<int32_t>&,
+                                int64_t,
+                                const std::shared_ptr<torch::Event>&,
+                                int64_t) { return false; };
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({2, 64}, torch::kUInt8);
+    layer_cache.seq_size_per_block = 4;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "default";
+
+    auto input_lengths  = torch::tensor({8}, torch::kInt32);
+    auto prefix_lengths = torch::tensor({0}, torch::kInt32);
+    auto block_ids      = torch::tensor({{0, 1}}, torch::kInt32);
+
+    inputs.input_lengths_host = input_lengths;
+    inputs.prefix_lengths_host = prefix_lengths;
+    inputs.host_kv_cache_offset = block_ids;
+    auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
+    try {
+        runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr);
+        FAIL() << "Expected P2P layer dispatch failure to propagate";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("P2P layer publication failed"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("42"), std::string::npos);
+    }
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreRejectsEmptyNonCpP2PLayer) {
+    auto inputs = makePyCacheStoreInputs(4, 2);
+    inputs.cache_keys      = torch::tensor({{int64_t(100), int64_t(101)}}, torch::kInt64);
+    inputs.p2p_layer_write = [](size_t,
+                                int,
+                                const std::string&,
+                                const std::vector<int64_t>&,
+                                const std::vector<int32_t>&,
+                                int64_t,
+                                const std::shared_ptr<torch::Event>&,
+                                int64_t) { return true; };
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({2, 64}, torch::kUInt8);
+    layer_cache.seq_size_per_block = 4;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "default";
+
+    auto input_lengths  = torch::tensor({8}, torch::kInt32);
+    auto prefix_lengths = torch::tensor({0}, torch::kInt32);
+    auto block_ids      = torch::tensor({{-1, -1}}, torch::kInt32);
+
+    inputs.input_lengths_host = input_lengths;
+    inputs.prefix_lengths_host = prefix_lengths;
+    inputs.host_kv_cache_offset = block_ids;
+    auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
+    EXPECT_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr),
+                 std::runtime_error);
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreRejectsNonIntegerP2PCacheKeyTensor) {
+    auto inputs = makePyCacheStoreInputs(4, 2);
+    inputs.cache_keys      = torch::tensor({{100.f, 101.f}}, torch::kFloat32);
+    inputs.p2p_layer_write = [](size_t,
+                                int,
+                                const std::string&,
+                                const std::vector<int64_t>&,
+                                const std::vector<int32_t>&,
+                                int64_t,
+                                const std::shared_ptr<torch::Event>&,
+                                int64_t) { return true; };
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({2, 64}, torch::kUInt8);
+    layer_cache.seq_size_per_block = 4;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "default";
+
+    auto input_lengths  = torch::tensor({8}, torch::kInt32);
+    auto prefix_lengths = torch::tensor({0}, torch::kInt32);
+    auto block_ids      = torch::tensor({{0, 1}}, torch::kInt32);
+
+    inputs.input_lengths_host = input_lengths;
+    inputs.prefix_lengths_host = prefix_lengths;
+    inputs.host_kv_cache_offset = block_ids;
+    auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
+    EXPECT_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr),
+                 std::runtime_error);
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreRejectsMissingP2PCacheKeys) {
+    auto inputs = makePyCacheStoreInputs(4, 2);
+    inputs.cache_keys = torch::empty({1, 0}, torch::kInt64);
+    inputs.p2p_layer_write = [](size_t,
+                                int,
+                                const std::string&,
+                                const std::vector<int64_t>&,
+                                const std::vector<int32_t>&,
+                                int64_t,
+                                const std::shared_ptr<torch::Event>&,
+                                int64_t) { return true; };
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({2, 64}, torch::kUInt8);
+    layer_cache.seq_size_per_block = 4;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "default";
+
+    auto input_lengths  = torch::tensor({8}, torch::kInt32);
+    auto prefix_lengths = torch::tensor({0}, torch::kInt32);
+    auto block_ids      = torch::tensor({{0, 1}}, torch::kInt32);
+
+    inputs.input_lengths_host = input_lengths;
+    inputs.prefix_lengths_host = prefix_lengths;
+    inputs.host_kv_cache_offset = block_ids;
+    auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
+    EXPECT_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr),
+                 std::runtime_error);
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreSharedPoolUsesPhysicalBlockStrideInsteadOfLayerViewStride) {

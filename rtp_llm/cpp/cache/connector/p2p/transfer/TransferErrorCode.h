@@ -6,7 +6,7 @@ namespace rtp_llm {
 namespace transfer {
 
 /// @brief Transfer-layer error codes, scoped to the transport abstraction.
-/// Callers outside the transfer layer (e.g. P2PConnectorWorker) convert to
+/// Callers outside the transfer layer (e.g. a role-specific connector worker) convert to
 /// rtp_llm::ErrorCode via toErrorCode().
 enum class TransferErrorCode {
     OK = 0,
@@ -34,7 +34,7 @@ enum class TransferErrorCode {
 
 /// @brief Convert a transfer-layer error code to the global rtp_llm::ErrorCode.
 /// This function is the single authoritative mapping and must only be called
-/// at the p2p-connector layer boundary (e.g. P2PConnectorWorker).
+/// at the p2p-connector layer boundary.
 inline ErrorCode toErrorCode(TransferErrorCode ec) {
     switch (ec) {
         case TransferErrorCode::OK:

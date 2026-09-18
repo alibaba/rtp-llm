@@ -31,7 +31,8 @@ TransferBackendPair createTcpBackend(const TransferBackendConfig&        config,
                         config.messager_worker_thread_count,
                         static_cast<uint32_t>(config.cache_store_tcp_anet_rpc_thread_num),
                         static_cast<uint32_t>(config.cache_store_tcp_anet_rpc_queue_num),
-                        config.transfer_wait_check_interval_us)) {
+                        config.transfer_wait_check_interval_us,
+                        static_cast<uint32_t>(config.cache_store_tcp_worker_queue_size))) {
         RTP_LLM_LOG_ERROR("createTcpBackend: TcpKVCacheReceiver init failed");
         return {};
     }

@@ -99,6 +99,13 @@ uint32_t DeviceBlockPool::refCount(BlockIdxType block) const {
     return refcounts_[block];
 }
 
+uint32_t DeviceBlockPool::refCountNoCheck(BlockIdxType block) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    RTP_LLM_CHECK(block < refcounts_.size());
+    return refcounts_[block];
+}
+
 size_t DeviceBlockPool::referencedBlocksNum() const {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();

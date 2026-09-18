@@ -136,6 +136,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_device(inputs.cache_keys, GptModelInputDeviceBit::kDeviceBitCacheKeys);
     encode_device(inputs.kv_cache_update_mapping, GptModelInputDeviceBit::kDeviceBitCacheUpdateMapping);
     encode_device(inputs.request_id, GptModelInputDeviceBit::kDeviceBitRequestId);
+    encode_device(inputs.request_deadline_ms, GptModelInputDeviceBit::kDeviceBitRequestDeadlineMs);
     encode_device(inputs.request_pd_separation, GptModelInputDeviceBit::kDeviceBitRequestPdSeparation);
     encode_device(inputs.lm_output_indexes, GptModelInputDeviceBit::kDeviceBitLmOutputIndexes);
     encode_device(inputs.combo_position_ids, GptModelInputDeviceBit::kDeviceBitComboPositionIds);
@@ -144,6 +145,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::tensorDeviceMap]          = static_cast<int64_t>(device_bits);
     shape_hints[GptModelInputIndex::kvCacheKernelBlockIdRank] = kernel_block_table.rank;
     shape_hints[GptModelInputIndex::kvCacheBlockIdRank]       = block_table.rank;
+    shape_hints[GptModelInputIndex::requestDeadlineMsLength] =
+        inputs.request_deadline_ms.defined() ? inputs.request_deadline_ms.numel() : 0;
     return shape_hints;
 }
 
@@ -380,6 +383,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                             {checkedHint(GptModelInputIndex::lmOutputIndexes, "lmOutputIndexes")},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
+        const auto deadline_length = checkedHint(GptModelInputIndex::requestDeadlineMsLength, "requestDeadlineMsLength");
+        inputs.request_deadline_ms = deadline_length ?
+            allocBuf(rtp_llm::DataType::TYPE_INT64, {deadline_length},
+                     pickAlloc(GptModelInputDeviceBit::kDeviceBitRequestDeadlineMs)) : torch::Tensor();
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                  {combo_position_ids_size},
@@ -462,6 +469,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
+    collect(inputs.request_deadline_ms);
     collect(inputs.lm_output_indexes);
     if (combo_position_ids_size) {
         collect(inputs.combo_position_ids);

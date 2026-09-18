@@ -386,6 +386,10 @@ cc_library(
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/utils:time_util",
+        "//rtp_llm/cpp/cache/connector:connector_context",
+        "//rtp_llm/cpp/cache/connector/p2p:components",
+        "//rtp_llm/cpp/cache/connector/p2p:connector",
+        "//rtp_llm/cpp/cache/connector/p2p:layer_block_converter",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps() + select({

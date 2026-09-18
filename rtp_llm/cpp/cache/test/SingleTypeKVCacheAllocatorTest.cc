@@ -1833,6 +1833,51 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, ConnectorRefPreservesCpKeysAndLocalBlockSnapshot) {
+    for (int cp_rank : {0, 1}) {
+        for (size_t key_count : {4u, 5u}) {
+            SCOPED_TRACE(::testing::Message() << "cp_rank=" << cp_rank << " key_count=" << key_count);
+            auto config = createSingleTypeTestConfig(4, 10, 8);
+            allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+            ASSERT_TRUE(allocator_->init());
+            allocator_->setCPSlotMapper(std::make_shared<CPSlotMapper>(cp_rank, 2, 8));
+            auto block_pool = allocator_->getDeviceBlockPool();
+            const auto free_before = allocator_->freeBlocksNum();
+            auto blocks = block_pool->malloc((key_count + 1) / 2).value();
+            block_pool->incRef(blocks);
+
+            KVCacheResource resource;
+            resource.initGroups(config.topologyPtr());
+            for (size_t i = 0; i < key_count; ++i) {
+                resource.cacheKeys().push_back(100 + i);
+            }
+            resource.rebuildLinearBlockDependencies();
+            resource.setLastBlockAligned(key_count == 4);
+            resource.setDeviceReuseBlockNum(1);
+            resource.mutableBlockIds(0).assign(blocks);
+
+            auto ref = allocator_->incrKVCacheRef(resource, resource.cacheKeys(), true);
+            ASSERT_NE(ref, nullptr);
+            EXPECT_EQ(ref->cacheKeys(), resource.cacheKeys());
+            EXPECT_EQ(ref->blocks(0), blocks);
+            EXPECT_EQ(ref->lastBlockAligned(), resource.lastBlockAligned());
+            EXPECT_EQ(ref->reuseBlockNum(), resource.reuseBlockNum());
+            EXPECT_EQ(ref->blockDependencies().size(), resource.blockDependencies().size());
+            for (auto block : blocks) {
+                EXPECT_EQ(block_pool->refCount(block), 2u);
+            }
+
+            // Mutating the stream table must not change the connector's release set.
+            resource.mutableBlockIds(0).resize(0);
+            EXPECT_EQ(ref->blocks(0), blocks);
+            block_pool->decRef(blocks);
+            EXPECT_EQ(allocator_->freeBlocksNum(), free_before - blocks.size());
+            ref.reset();
+            EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
+        }
+    }
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config, AllocationType::HOST);

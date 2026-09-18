@@ -3,8 +3,9 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
-#include <iostream>
+#include <functional>
 #include <memory>
+#include <iostream>
 #include <mutex>
 #include <string>
 #include <unordered_set>
@@ -122,10 +123,18 @@ protected:
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
     grpc::Status
     serializeErrorMsg(const std::string& request_key, const RequestInfo& request_info, ErrorInfo error_info);
-    grpc::Status pollStreamOutput(grpc::ServerContext*             context,
-                                  const std::string&               request_key,
-                                  WriterInterface*                 writer,
-                                  std::shared_ptr<GenerateStream>& stream);
+    grpc::Status pollStreamOutput(grpc::ServerContext*                              context,
+                                  const std::string&                                request_key,
+                                  WriterInterface*                                  writer,
+                                  std::shared_ptr<GenerateStream>&                  stream,
+                                  const std::function<FirstError::Snapshot(bool&)>& check_remote = {});
+    // Poll all items fairly. check_remote sets done once the optional prefill RPC
+    // completes and propagates remote errors even while local streams have no output.
+    grpc::Status pollBatchStreamOutput(grpc::ServerContext*                                context,
+                                       const std::vector<std::shared_ptr<GenerateStream>>& streams,
+                                       BatchGenerateOutputsPB*                             response,
+                                       const std::function<FirstError::Snapshot(bool&)>&   check_remote = {});
+    virtual void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {}
 
     // Shared helpers for single and batch paths
     ErrorInfo prepareInput(const GenerateInputPB&                                              input_pb,

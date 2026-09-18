@@ -147,6 +147,7 @@ TEST_F(TcpSenderOnlyTest, F1_EmptyBlockInfo_ImmediateBuildFailed) {
     req.unique_key  = "k_f1";
     req.block_info  = {};  // empty
     req.deadline_ms = currentTimeMs() + 5000;
+    req.timeout_ms = 5000;
 
     auto code = syncSend(*sender_, req);
     EXPECT_EQ(code, TransferErrorCode::BUILD_REQUEST_FAILED);
@@ -168,7 +169,8 @@ TEST_F(TcpSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
     req.port        = unused_port_;
     req.unique_key  = "k_d1";
     req.block_info  = makeBlocks(1, gpu_buf.data_ptr(), 64);
-    req.deadline_ms = currentTimeMs() + 1000;  // 1s deadline to keep the test fast
+    req.deadline_ms = currentTimeMs() + 1000;
+    req.timeout_ms = 1000;  // 1s deadline to keep the test fast
 
     auto code = syncSend(*sender_, req, std::chrono::seconds(5));
     // anet always returns a channel object; connect failure surfaces as RPC_FAILED
@@ -192,7 +194,8 @@ TEST_F(TcpSenderReceiverTest, B1_SenderTimeout_ReceiverHasNoMatchingTask) {
     req.port        = test_port_;
     req.unique_key  = "k_b1_integ";
     req.block_info  = makeBlocks(1, gpu_buf.data_ptr(), 64);
-    req.deadline_ms = currentTimeMs() + 500;  // short deadline
+    req.deadline_ms = currentTimeMs() + 500;
+    req.timeout_ms = 500;  // short deadline
 
     auto code = syncSend(*sender_, req, std::chrono::seconds(5));
     EXPECT_EQ(code, TransferErrorCode::TIMEOUT);
@@ -226,6 +229,7 @@ TEST_F(TcpSenderReceiverTest, C1_RecvCancelledBeforeRpcArrives_Integration) {
     send_req.unique_key  = "k_c1_integ";
     send_req.block_info  = makeBlocks(1, gpu_buf_send.data_ptr(), 64);
     send_req.deadline_ms = currentTimeMs() + 5000;
+    send_req.timeout_ms = 5000;
 
     auto code = syncSend(*sender_, send_req, std::chrono::seconds(5));
     EXPECT_EQ(code, TransferErrorCode::CANCELLED);
@@ -269,6 +273,7 @@ TEST_F(TcpSenderReceiverTest, A1_NormalTransfer_EndToEnd_Success) {
     send_req.unique_key  = "k_a1_integ";
     send_req.block_info  = makeBlocks(1, gpu_src.data_ptr(), size);
     send_req.deadline_ms = currentTimeMs() + 5000;
+    send_req.timeout_ms = 5000;
 
     auto code = syncSend(*sender_, send_req, std::chrono::seconds(10));
     EXPECT_EQ(code, TransferErrorCode::OK);
@@ -323,6 +328,7 @@ TEST_F(TcpSenderReceiverTest, G2_MultipleSenders_ConcurrentKeys) {
         send_req.unique_key  = "k_g2_" + std::to_string(i);
         send_req.block_info  = makeBlocks(1, src_bufs[i].data_ptr(), size);
         send_req.deadline_ms = currentTimeMs() + 5000;
+    send_req.timeout_ms = 5000;
 
         auto code = syncSend(*sender_, send_req, std::chrono::seconds(10));
         EXPECT_EQ(code, TransferErrorCode::OK) << "key index " << i;

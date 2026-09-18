@@ -68,6 +68,7 @@ class BackendManager(object):
             engine_config.runtime_config,
             engine_config.parallelism_config,
             world_info,
+            decode_entrance=engine_config.pd_sep_config.decode_entrance,
         )
         # Build main model_config
         model_config = ModelFactory.create_model_config(
