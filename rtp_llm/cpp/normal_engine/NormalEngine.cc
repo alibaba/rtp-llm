@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/PPTransport.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -188,14 +189,16 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
 void NormalEngine::initExecutor(const EngineInitParams& params) {
     if (parallelism_config.pp_size > 1) {
-        executor_.reset(new PPExecutor(
+        auto* pp_executor = new PPExecutor(
             params,
             resource_context_.cache_manager,
             false,
             mla_ops_type_,
             [this]() { step_profiler_.startStep(); },
             [this]() { step_profiler_.finishStep(); },
-            propose_params_.get()));
+            propose_params_.get());
+        pp_executor->setCommWatchdogArmedFn([this]() { return !running_.load(); });
+        executor_.reset(pp_executor);
     } else if (sp_config.type != SP_TYPE_NONE) {
         executor_.reset(new MtpExecutor(
             params, propose_params_, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
@@ -572,7 +575,13 @@ void NormalEngine::loop() {
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
     while (running_) {
-        auto status = parallelism_config.pp_size > 1 ? pp_step() : step();
+        absl::Status status;
+        try {
+            status = parallelism_config.pp_size > 1 ? pp_step() : step();
+        } catch (const PPCommWatchdogTimeout& e) {
+            RTP_LLM_LOG_ERROR("PP comm watchdog fired, exiting engine loop: %s", e.what());
+            break;
+        }
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());

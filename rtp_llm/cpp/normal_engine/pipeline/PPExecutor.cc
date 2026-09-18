@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/normal_engine/pipeline/PPSerialization.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -97,11 +98,11 @@ void PPExecutor::sendObject(const torch::Tensor& object, PPTickets& tickets) {
 torch::Tensor PPExecutor::receiveObject() {
     auto object_size  = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt64));
     auto size_receive = transport_->asyncReceive(object_size);
-    size_receive->wait();
+    waitTicket(*size_receive, "object size from previous stage");
 
     auto object         = torch::empty({object_size.item<int64_t>()}, torch::TensorOptions().dtype(torch::kUInt8));
     auto object_receive = transport_->asyncReceive(object);
-    object_receive->wait();
+    waitTicket(*object_receive, "object payload from previous stage");
     return object;
 }
 
@@ -136,9 +137,42 @@ PPIntermediateTensors PPExecutor::receiveTensors(PPTickets& tickets) {
     return tensors;
 }
 
-void PPExecutor::waitAll(PPTickets& tickets) {
+void PPExecutor::waitTicket(PPCommTicket& ticket, const char* what) {
+    if (!comm_watchdog_armed_fn_) {
+        ticket.wait();
+        return;
+    }
+    /** Poll in slices so the watchdog notices the shutdown window promptly without
+     *  bounding the transfer itself. */
+    constexpr auto                                       kPollSlice = std::chrono::milliseconds(1000);
+    std::optional<std::chrono::steady_clock::time_point> armed_since;
+    while (true) {
+        const auto now   = std::chrono::steady_clock::now();
+        const bool armed = comm_watchdog_armed_fn_();
+        if (!armed) {
+            armed_since.reset();
+        } else if (!armed_since) {
+            armed_since = now;
+        }
+        if (armed_since) {
+            const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - *armed_since).count();
+            if (waited_ms >= comm_watchdog_timeout_ms_) {
+                RTP_LLM_LOG_ERROR("PP comm watchdog: waited %ld ms for %s after shutdown started, peer is not "
+                                  "responding; aborting wait",
+                                  static_cast<long>(waited_ms),
+                                  what);
+                throw PPCommWatchdogTimeout(std::string("timed out waiting for ") + what);
+            }
+        }
+        if (ticket.wait(kPollSlice)) {
+            return;
+        }
+    }
+}
+
+void PPExecutor::waitAll(PPTickets& tickets, const char* what) {
     for (auto& ticket : tickets) {
-        ticket->wait();
+        waitTicket(*ticket, what);
     }
     tickets.clear();
 }
@@ -203,6 +237,10 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     const char* device_input = std::getenv("RTP_LLM_DEVICE_INPUT");
     RTP_LLM_CHECK_WITH_INFO(device_input == nullptr || std::strcmp(device_input, "1") != 0,
                             "pipeline parallelism does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
+
+    if (const char* watchdog_timeout_env = std::getenv("RTP_LLM_PP_COMM_WATCHDOG_TIMEOUT_MS")) {
+        comm_watchdog_timeout_ms_ = std::max<int64_t>(1, std::strtoll(watchdog_timeout_env, nullptr, 10));
+    }
 
     RTP_LLM_CHECK_WITH_INFO(!sp_enabled_ || params.sp_config.gen_num_per_cycle > 0,
                             "PP speculative decoding requires a positive gen_num_per_cycle, got %ld",
@@ -376,16 +414,19 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
 
 PPExecutor::~PPExecutor() {
     for (auto& slot : slots_) {
-        waitAll(slot.plan_sends);
-        waitAll(slot.activation_sends);
-        waitAll(slot.execution_result_sends);
+        waitAll(slot.plan_sends, "plan send completion");
+        waitAll(slot.activation_sends, "activation send completion");
+        waitAll(slot.execution_result_sends, "execution result send completion");
     }
     cudaProfilerEnd();
 }
 
 void PPExecutor::releaseAllModelBuffers() {
     buffer_holder_.release();
-    model_->releaseBuffers();
+    // model_ is unset in test mode (py_model is None); nothing to release then.
+    if (model_) {
+        model_->releaseBuffers();
+    }
     if (draft_model_) {
         draft_model_->releaseBuffers();
     }
@@ -894,16 +935,16 @@ void PPExecutor::runDraftStep(const PPExecutionPlan& plan,
                                             && execution_result.accept_len.scalar_type() == torch::kInt32
                                             && execution_result.accept_len.numel() == batch_size,
                                         "PP DSpARK decode requires one int32 accept length per batch row");
-                const auto min_accept       = accepted_lengths.min().item<int32_t>();
-                const auto max_accept       = accepted_lengths.max().item<int32_t>();
+                const auto min_accept = accepted_lengths.min().item<int32_t>();
+                const auto max_accept = accepted_lengths.max().item<int32_t>();
                 RTP_LLM_CHECK_WITH_INFO(min_accept > 0 && max_accept <= execution_result.new_token_ids.size(1),
                                         "PP DSpARK accept lengths must be in [1, %ld], got min=%d max=%d",
                                         execution_result.new_token_ids.size(1),
                                         min_accept,
                                         max_accept);
-                auto last_indexes    = (accepted_lengths.to(torch::kLong) - 1).unsqueeze(1);
-                anchors              = accepted_tokens.gather(1, last_indexes).reshape({batch_size});
-                committed_ends       = prefix_lengths + accepted_lengths;
+                auto last_indexes = (accepted_lengths.to(torch::kLong) - 1).unsqueeze(1);
+                anchors           = accepted_tokens.gather(1, last_indexes).reshape({batch_size});
+                committed_ends    = prefix_lengths + accepted_lengths;
             } else {
                 RTP_LLM_CHECK_WITH_INFO(execution_result.new_token_ids.size(1) == 1,
                                         "PP DSpARK prefill expects one sampled token per batch row");
@@ -985,9 +1026,9 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     /** 3. Wait on this slot's previous sends before resetting it. CUDA waits order subsequent operations on the current
      * stream after communication. */
     auto& inflight = slots_[current_slot_];
-    waitAll(inflight.plan_sends);
-    waitAll(inflight.activation_sends);
-    waitAll(inflight.execution_result_sends);
+    waitAll(inflight.plan_sends, "plan send completion");
+    waitAll(inflight.activation_sends, "activation send completion");
+    waitAll(inflight.execution_result_sends, "execution result send completion");
     inflight.reset();
     inflight.skip_run = plan.model_input.skip_run;
     if (isFirstStage() && isStageRoot()) {
@@ -1008,7 +1049,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
 
         if (!isFirstStage()) {
             input_tensors = receiveTensors(tensor_receives);
-            waitAll(tensor_receives);
+            waitAll(tensor_receives, "intermediate tensors from previous stage");
         }
 
         if (profile_step_start_) {

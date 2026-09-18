@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 #include <string>
 #include <utility>
 #if USING_CUDA
@@ -30,6 +31,7 @@
 #elif USING_ROCM
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 #endif
+#include <pybind11/chrono.h>
 #include <pybind11/functional.h>
 
 #if USING_CUDA
@@ -681,6 +683,16 @@ public:
         /** PyTorch's CUDA caching allocator delays memory reuse until NCCL communication completes. */
         const bool wait_succeeded = work_.attr("wait")().cast<bool>();
         RTP_LLM_CHECK_WITH_INFO(wait_succeeded, "P2P work wait failed");
+    }
+
+    bool wait(std::chrono::milliseconds timeout) override {
+        py::gil_scoped_acquire gil;
+        if (!work_) {
+            return true;
+        }
+        /* torch Work.wait(timeout) returns False once the timeout expires; the work
+         * stays alive for a later retry. */
+        return work_.attr("wait")(py::cast(timeout)).cast<bool>();
     }
 
 private:

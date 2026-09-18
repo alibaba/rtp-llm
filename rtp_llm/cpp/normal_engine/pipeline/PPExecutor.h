@@ -3,6 +3,7 @@
 #include <functional>
 #include <list>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include <torch/torch.h>
@@ -74,6 +75,14 @@ public:
         model_ = std::move(model);
     }
 
+    /**
+     * Arms the PP comm watchdog: the probe is polled while waiting for peer data and must
+     * return true once the engine has started stopping. An empty probe keeps unbounded waits.
+     */
+    void setCommWatchdogArmedFn(std::function<bool()> fn) {
+        comm_watchdog_armed_fn_ = std::move(fn);
+    }
+
     using ModelFactory = std::function<std::unique_ptr<ModelBase>(const GptModelInitParams&)>;
     static ModelFactory test_model_factory;
 
@@ -121,9 +130,8 @@ private:
 
     void runDSparkCommit(const GptModelInputs& target_input, const GptModelOutputs& target_output);
 
-    void runDraftStep(const PPExecutionPlan& plan,
-                      const GptModelOutputs& model_output,
-                      PPExecutionResult&     execution_result);
+    void
+    runDraftStep(const PPExecutionPlan& plan, const GptModelOutputs& model_output, PPExecutionResult& execution_result);
 
     torch::Tensor proposeDraftTokens(GptModelInputs draft_input, size_t num_draft_tokens);
 
@@ -141,7 +149,9 @@ private:
 
     torch::Tensor receiveObject();
 
-    static void waitAll(PPTickets& tickets);
+    void waitAll(PPTickets& tickets, const char* what);
+
+    void waitTicket(PPCommTicket& ticket, const char* what);
 
     bool isFirstStage() const {
         return pp_layout_.hasEmbedding();
@@ -164,8 +174,12 @@ private:
     std::unique_ptr<PPBatchStreamProcessor> batch_stream_processor_;
     std::shared_ptr<ExpertBalancer>         expert_balancer_;
     // Holds executor-owned CPU sources for copies to the device; models and PPCommTicket own their buffers.
-    TensorHolder                            buffer_holder_;
-    SamplingStates                          sampling_states_;
+    TensorHolder   buffer_holder_;
+    SamplingStates sampling_states_;
+
+    /** PP comm watchdog: bounded waits once the armed probe reports shutdown started. */
+    std::function<bool()> comm_watchdog_armed_fn_;
+    int64_t               comm_watchdog_timeout_ms_ = 30000;
 
     bool                                             sp_enabled_             = false;
     bool                                             is_dspark_              = false;

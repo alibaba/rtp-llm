@@ -20,6 +20,16 @@ void PPCommTicket::wait() {
     }
 }
 
+bool PPCommTicket::wait(std::chrono::milliseconds timeout) {
+    if (work_) {
+        if (!work_->wait(timeout)) {
+            return false;
+        }
+        work_.reset();
+    }
+    return true;
+}
+
 TorchDistributedPPTransport::TorchDistributedPPTransport(int64_t previous_rank, int64_t next_rank):
     previous_rank_(previous_rank), next_rank_(next_rank) {
 #if !USING_CUDA

@@ -62,9 +62,8 @@ public:
 
 class RecordingDraftModel: public ModelBase {
 public:
-    GptModelOutputs forwardPP(const GptModelInputs& input,
-                              const PPIntermediateTensors*,
-                              PPIntermediateTensors*) override {
+    GptModelOutputs
+    forwardPP(const GptModelInputs& input, const PPIntermediateTensors*, PPIntermediateTensors*) override {
         return forward(input);
     }
 
@@ -74,8 +73,8 @@ public:
             recorded_input.last_hidden_states = input.last_hidden_states.clone();
         }
         inputs.push_back(std::move(recorded_input));
-        const auto step = static_cast<int64_t>(inputs.size() - 1);
-        const auto rows = input.combo_tokens.numel();
+        const auto step    = static_cast<int64_t>(inputs.size() - 1);
+        const auto rows    = input.combo_tokens.numel();
         const auto options = torch::TensorOptions(torch::kFloat32).device(torch::kCUDA);
         if (!hidden_buffer.defined() || hidden_buffer.size(0) < rows) {
             hidden_buffer = torch::empty({rows, 4}, options);
@@ -87,7 +86,7 @@ public:
         GptModelOutputs output;
         output.all_hidden_states = hidden_buffer.narrow(0, 0, rows).narrow(1, 0, 2);
         const int64_t logit_rows = next_tokens.empty() ? input.input_lengths.numel() : next_tokens.size();
-        output.logits = torch::zeros({logit_rows, 64}, options);
+        output.logits            = torch::zeros({logit_rows, 64}, options);
         for (int64_t row = 0; row < logit_rows; ++row) {
             output.logits[row][next_tokens.empty() ? 10 + step * 2 + row : next_tokens[row]] = 100;
         }
@@ -104,8 +103,8 @@ public:
     std::vector<GptModelInputs> inputs;
     /** Script target logits while keeping real sampling, verification and dispatch in the test. */
     std::vector<int32_t> next_tokens;
-    torch::Tensor hidden_buffer;
-    bool invalid_logits = false;
+    torch::Tensor        hidden_buffer;
+    bool                 invalid_logits = false;
 };
 
 class RecordingDSparkModel: public ModelBase {
@@ -180,14 +179,14 @@ public:
         return update_error;
     }
 
-    std::vector<torch::Tensor> committed_tokens;
+    std::vector<torch::Tensor>             committed_tokens;
     std::vector<std::pair<size_t, size_t>> process_intervals;
-    int verify_calls = 0;
-    std::function<void()> on_update;
-    bool mtp_supported = true;
-    std::optional<ErrorInfo> process_error;
-    std::optional<ErrorInfo> verify_error;
-    std::optional<ErrorInfo> update_error;
+    int                                    verify_calls = 0;
+    std::function<void()>                  on_update;
+    bool                                   mtp_supported = true;
+    std::optional<ErrorInfo>               process_error;
+    std::optional<ErrorInfo>               verify_error;
+    std::optional<ErrorInfo>               update_error;
 };
 
 class InMemoryP2PWork final: public P2PWork {
@@ -215,7 +214,7 @@ public:
 
     std::vector<torch::Tensor> received_tensors;
     std::vector<torch::Tensor> sent_tensors;
-    size_t receive_index = 0;
+    size_t                     receive_index = 0;
 };
 
 }  // namespace
@@ -234,8 +233,8 @@ protected:
     /** Individual stage tests initialize the fields normally owned by sampleTokens(). */
     static PPExecutionResult makeInitializedResult(const PPSamplingPlan& plan) {
         PPExecutionResult result;
-        const auto stream_count = plan.request_ids.size(0);
-        result.request_ids = plan.request_ids.to(torch::kCPU).contiguous();
+        const auto        stream_count = plan.request_ids.size(0);
+        result.request_ids             = plan.request_ids.to(torch::kCPU).contiguous();
         result.request_errors.assign(stream_count, ErrorInfo::OkStatus());
         result.prompt_logits.resize(stream_count);
         return result;
@@ -243,30 +242,30 @@ protected:
 
     static EngineInitParams makeMtpParams(size_t num_draft_tokens) {
         EngineInitParams params;
-        params.model_id = 0;
-        params.model_config_ = makeModelConfig();
-        params.model_config_.num_layers = 2;
-        params.parallelism_config.pp_size = 2;
-        params.parallelism_config.world_size = 2;
+        params.model_id                                 = 0;
+        params.model_config_                            = makeModelConfig();
+        params.model_config_.num_layers                 = 2;
+        params.parallelism_config.pp_size               = 2;
+        params.parallelism_config.world_size            = 2;
         params.parallelism_config.pp_stage_layer_counts = {1, 1};
-        params.sp_config.type = SP_TYPE_MTP;
-        params.sp_config.gen_num_per_cycle = num_draft_tokens;
-        params.py_model = py::none();
-        params.py_sp_model = py::none();
+        params.sp_config.type                           = SP_TYPE_MTP;
+        params.sp_config.gen_num_per_cycle              = num_draft_tokens;
+        params.py_model                                 = py::none();
+        params.py_sp_model                              = py::none();
         return params;
     }
 
     static std::unique_ptr<ProposeModelEngineInitParams> makeMtpProposeParams(const EngineInitParams& params,
-                                                                              size_t model_count = 1) {
+                                                                              size_t                  model_count = 1) {
         auto mtp_params = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
         for (size_t i = 0; i < model_count; ++i) {
-            auto draft                  = std::make_unique<EngineInitParams>();
-            draft->model_id             = i + 1;
-            draft->model_config_        = makeModelConfig();
-            draft->parallelism_config   = params.parallelism_config;
-            draft->sp_config            = params.sp_config;
-            draft->py_model             = py::none();
-            draft->py_sp_model          = py::none();
+            auto draft                = std::make_unique<EngineInitParams>();
+            draft->model_id           = i + 1;
+            draft->model_config_      = makeModelConfig();
+            draft->parallelism_config = params.parallelism_config;
+            draft->sp_config          = params.sp_config;
+            draft->py_model           = py::none();
+            draft->py_sp_model        = py::none();
             mtp_params->emplace_back(std::move(draft));
         }
         return std::make_unique<ProposeModelEngineInitParams>(
@@ -297,7 +296,7 @@ TEST_F(PPBatchStreamProcessorTest, StageWithProposeParamsBuildsOnlyFirstConfigur
     params.parallelism_config.pp_rank      = 1;
     params.parallelism_config.world_rank   = 1;
     params.parallelism_config.world_size   = 2;
-    auto propose_params                    = makeMtpProposeParams(params, 2);
+    auto                propose_params     = makeMtpProposeParams(params, 2);
     std::vector<size_t> constructed_models = {};
     struct FactoryReset {
         ~FactoryReset() {
@@ -341,24 +340,24 @@ TEST_F(PPBatchStreamProcessorTest, NonOwnerStageKeepsSpEnabledWithoutBuildingDra
 TEST_F(PPBatchStreamProcessorTest, ProposeDraftTokensRunsAllForwardsAndPreservesMtpHiddenStates) {
     for (int64_t count : {1, 3, 4}) {
         SCOPED_TRACE(count);
-        auto params = makeMtpParams(count);
+        auto       params = makeMtpParams(count);
         PPExecutor executor(params, nullptr, true);
         executor.position_id_len_factor_ = 2;
-        auto model = std::make_unique<RecordingDraftModel>();
-        auto* recorded_model = model.get();
-        executor.draft_model_ = std::move(model);
-        executor.fast_topk_sampler_ = std::make_unique<speculative::FastTopKSampler>();
+        auto  model                      = std::make_unique<RecordingDraftModel>();
+        auto* recorded_model             = model.get();
+        executor.draft_model_            = std::move(model);
+        executor.fast_topk_sampler_      = std::make_unique<speculative::FastTopKSampler>();
 
         GptModelInputs initial_input;
-        initial_input.combo_tokens = intTensor({1, 2, 3, 4, 5});
-        initial_input.input_lengths = intTensor({2, 3});
-        initial_input.prefix_lengths = intTensor({3, 5});
-        initial_input.sequence_lengths = intTensor({});
-        initial_input.lm_output_indexes = intTensor({1, 4});
-        initial_input.combo_position_ids = intTensor({3, 13, 4, 14, 5, 15, 6, 16, 7, 17});
-        initial_input.request_id = torch::tensor({101, 202}, torch::kInt64);
+        initial_input.combo_tokens          = intTensor({1, 2, 3, 4, 5});
+        initial_input.input_lengths         = intTensor({2, 3});
+        initial_input.prefix_lengths        = intTensor({3, 5});
+        initial_input.sequence_lengths      = intTensor({});
+        initial_input.lm_output_indexes     = intTensor({1, 4});
+        initial_input.combo_position_ids    = intTensor({3, 13, 4, 14, 5, 15, 6, 16, 7, 17});
+        initial_input.request_id            = torch::tensor({101, 202}, torch::kInt64);
         initial_input.request_pd_separation = torch::ones({2}, torch::kBool);
-        initial_input.cache_keys = torch::ones({2, 3}, torch::kInt64);
+        initial_input.cache_keys            = torch::ones({2, 3}, torch::kInt64);
 
         auto proposed = executor.proposeDraftTokens(initial_input, count);
         ASSERT_EQ(proposed.sizes().vec(), (std::vector<int64_t>{2, count}));
@@ -386,7 +385,7 @@ TEST_F(PPBatchStreamProcessorTest, ProposeDraftTokensRunsAllForwardsAndPreserves
             EXPECT_EQ(tensorToVector<int32_t>(input.input_lengths), (std::vector<int32_t>{1, 1}));
             EXPECT_TRUE(torch::equal(input.combo_position_ids.cpu(), intTensor({5, 15, 8, 18}) + step - 1));
             auto expected_hidden = step == 1 ? torch::tensor({{4.f, 5.f, 6.f, 7.f}, {16.f, 17.f, 18.f, 19.f}}) :
-                                              torch::arange(8, torch::kFloat32).reshape({2, 4}) + (step - 1) * 100;
+                                               torch::arange(8, torch::kFloat32).reshape({2, 4}) + (step - 1) * 100;
             EXPECT_TRUE(torch::equal(input.last_hidden_states.cpu(), expected_hidden));
         }
         EXPECT_EQ(tensorToVector<int32_t>(initial_input.input_lengths), (std::vector<int32_t>{2, 3}));
@@ -413,16 +412,16 @@ TEST_F(PPBatchStreamProcessorTest, DSparkDecodeCommitsThenProposesFromAcceptedRo
     executor.draft_model_ = std::move(draft_model);
 
     PPExecutionPlan plan;
-    plan.is_decode                            = true;
-    plan.model_input.combo_tokens             = intTensor({1, 2, 3, 4, 5, 6, 7, 8});
-    plan.model_input.input_lengths            = intTensor({4, 4});
-    plan.model_input.prefix_lengths           = intTensor({5, 9});
-    plan.model_input.sequence_lengths         = intTensor({});
-    plan.model_input.lm_output_indexes        = torch::arange(8, torch::kInt32);
-    plan.model_input.is_target_verify         = true;
-    plan.model_input.request_id               = torch::tensor({101, 202}, torch::kInt64);
-    plan.model_input.request_pd_separation    = torch::ones({2}, torch::kBool);
-    plan.model_input.cache_keys               = torch::tensor({11, 12, 21, 22}, torch::kInt64).reshape({2, 2});
+    plan.is_decode                         = true;
+    plan.model_input.combo_tokens          = intTensor({1, 2, 3, 4, 5, 6, 7, 8});
+    plan.model_input.input_lengths         = intTensor({4, 4});
+    plan.model_input.prefix_lengths        = intTensor({5, 9});
+    plan.model_input.sequence_lengths      = intTensor({});
+    plan.model_input.lm_output_indexes     = torch::arange(8, torch::kInt32);
+    plan.model_input.is_target_verify      = true;
+    plan.model_input.request_id            = torch::tensor({101, 202}, torch::kInt64);
+    plan.model_input.request_pd_separation = torch::ones({2}, torch::kBool);
+    plan.model_input.cache_keys            = torch::tensor({11, 12, 21, 22}, torch::kInt64).reshape({2, 2});
 
     GptModelOutputs   target_output;
     PPExecutionResult result;
@@ -483,14 +482,14 @@ TEST_F(PPBatchStreamProcessorTest, DSparkFusionPrefillCommitsThenProposesFromSam
     executor.draft_model_ = std::move(draft_model);
 
     PPExecutionPlan plan;
-    plan.model_input.combo_tokens             = intTensor({1, 2, 3, 4, 5});
-    plan.model_input.input_lengths            = intTensor({2, 3});
-    plan.model_input.prefix_lengths           = intTensor({4, 7});
-    plan.model_input.sequence_lengths         = intTensor({});
-    plan.model_input.lm_output_indexes        = intTensor({1, 4});
-    plan.model_input.request_id               = torch::tensor({101, 202}, torch::kInt64);
-    plan.model_input.request_pd_separation    = torch::ones({2}, torch::kBool);
-    plan.model_input.cache_keys               = torch::tensor({11, 12, 21, 22}, torch::kInt64).reshape({2, 2});
+    plan.model_input.combo_tokens          = intTensor({1, 2, 3, 4, 5});
+    plan.model_input.input_lengths         = intTensor({2, 3});
+    plan.model_input.prefix_lengths        = intTensor({4, 7});
+    plan.model_input.sequence_lengths      = intTensor({});
+    plan.model_input.lm_output_indexes     = intTensor({1, 4});
+    plan.model_input.request_id            = torch::tensor({101, 202}, torch::kInt64);
+    plan.model_input.request_pd_separation = torch::ones({2}, torch::kBool);
+    plan.model_input.cache_keys            = torch::tensor({11, 12, 21, 22}, torch::kInt64).reshape({2, 2});
 
     GptModelOutputs   target_output;
     PPExecutionResult result;
@@ -516,10 +515,10 @@ TEST_F(PPBatchStreamProcessorTest, DSparkFusionPrefillCommitsThenProposesFromSam
 TEST_F(PPBatchStreamProcessorTest, RequestErrorsStillDraftAndExecutionExceptionsPropagate) {
     for (const std::string error_stage : {"initialize", "process", "update", "execute"}) {
         SCOPED_TRACE(error_stage);
-        auto params = makeMtpParams(3);
-        PPExecutor first_stage(params, nullptr, true);
-        ResourceContext resource_context;
-        auto stream = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
+        auto                         params = makeMtpParams(3);
+        PPExecutor                   first_stage(params, nullptr, true);
+        ResourceContext              resource_context;
+        auto                         stream = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
         std::list<GenerateStreamPtr> streams_to_prepare{stream};
         first_stage.prepareStreams(streams_to_prepare);
         auto plan = first_stage.buildPlan(StreamGroups({stream}), {});
@@ -529,32 +528,32 @@ TEST_F(PPBatchStreamProcessorTest, RequestErrorsStillDraftAndExecutionExceptions
             plan->sampling_plan.logits_processor_configs[0].grammar_type = "invalid";
         }
 
-        params.pd_sep_config.role_type = RoleType::DECODE;
-        params.parallelism_config.pp_rank = 1;
+        params.pd_sep_config.role_type       = RoleType::DECODE;
+        params.parallelism_config.pp_rank    = 1;
         params.parallelism_config.world_rank = 1;
         params.parallelism_config.world_size = 2;
-        auto propose_params = makeMtpProposeParams(params);
+        auto       propose_params            = makeMtpProposeParams(params);
         PPExecutor last_stage(params, nullptr, false, MlaOpsType::AUTO, nullptr, nullptr, propose_params.get());
-        auto target_model = std::make_unique<RecordingDraftModel>();
-        auto* recorded_target = target_model.get();
+        auto       target_model         = std::make_unique<RecordingDraftModel>();
+        auto*      recorded_target      = target_model.get();
         recorded_target->invalid_logits = error_stage == "execute";
         last_stage.setModel(std::move(target_model));
-        auto draft_model = std::make_unique<RecordingDraftModel>();
-        auto* recorded_draft = draft_model.get();
+        auto  draft_model       = std::make_unique<RecordingDraftModel>();
+        auto* recorded_draft    = draft_model.get();
         last_stage.draft_model_ = std::move(draft_model);
-        auto processor = std::make_shared<RecordingLogitsProcessor>();
+        auto processor          = std::make_shared<RecordingLogitsProcessor>();
         if (error_stage == "process" || error_stage == "update") {
             if (error_stage == "update") {
-                processor->on_update = [recorded_draft]() { EXPECT_EQ(recorded_draft->inputs.size(), 3); };
+                processor->on_update    = [recorded_draft]() { EXPECT_EQ(recorded_draft->inputs.size(), 3); };
                 processor->update_error = ErrorInfo(ErrorCode::UNKNOWN_ERROR, "injected processor update failure");
             } else {
                 processor->process_error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected processor failure");
             }
-            auto& state = last_stage.sampling_states_[101];
+            auto& state             = last_stage.sampling_states_[101];
             state.logits_processors = {processor};
-            state.cum_log_probs = torch::zeros({1}, torch::kFloat32);
+            state.cum_log_probs     = torch::zeros({1}, torch::kFloat32);
         }
-        auto transport = std::make_unique<InMemoryPPTransport>();
+        auto  transport          = std::make_unique<InMemoryPPTransport>();
         auto* recorded_transport = transport.get();
         for (const auto& object : {pp_serialization::serializePlan(plan.value(), false),
                                    pp_serialization::serializeTensorsMetadata(PPIntermediateTensors{})}) {
@@ -582,12 +581,12 @@ TEST_F(PPBatchStreamProcessorTest, RequestErrorsStillDraftAndExecutionExceptions
         ASSERT_TRUE(error.hasError());
         EXPECT_EQ(error.code(),
                   error_stage == "initialize" ? ErrorCode::INVALID_PARAMS :
-                  error_stage == "process" ? ErrorCode::EXECUTION_EXCEPTION : ErrorCode::UNKNOWN_ERROR);
+                  error_stage == "process"    ? ErrorCode::EXECUTION_EXCEPTION :
+                                                ErrorCode::UNKNOWN_ERROR);
         EXPECT_EQ(result.accept_len[0].item<int32_t>(), 1);
         if (error_stage == "initialize" || error_stage == "process") {
             EXPECT_TRUE(torch::equal(result.new_token_ids, torch::zeros_like(result.new_token_ids)));
-            EXPECT_EQ(tensorToVector<int32_t>(recorded_draft->inputs[0].combo_tokens),
-                      (std::vector<int32_t>{2, 0}));
+            EXPECT_EQ(tensorToVector<int32_t>(recorded_draft->inputs[0].combo_tokens), (std::vector<int32_t>{2, 0}));
         }
         ASSERT_TRUE(result.propose_token_ids.defined());
         EXPECT_EQ(result.propose_token_ids.sizes().vec(), (std::vector<int64_t>{1, 3}));
@@ -603,7 +602,7 @@ TEST_F(PPBatchStreamProcessorTest, RequestErrorsStillDraftAndExecutionExceptions
         PPExecutionPlan cleanup;
         cleanup.finished_request_ids = {101};
         cleanup.model_input.skip_run = true;
-        const auto cleanup_payload = pp_serialization::serializePlan(cleanup, false);
+        const auto cleanup_payload   = pp_serialization::serializePlan(cleanup, false);
         recorded_transport->received_tensors.push_back(torch::tensor({cleanup_payload.numel()}, torch::kInt64));
         recorded_transport->received_tensors.push_back(cleanup_payload);
         ASSERT_TRUE(last_stage.process(ScheduleOutput{}).ok());
@@ -615,20 +614,20 @@ TEST_F(PPBatchStreamProcessorTest, RequestErrorsStillDraftAndExecutionExceptions
 TEST_F(PPBatchStreamProcessorTest, SamplingAndDraftProposalLeaveHistoryForExplicitCommit) {
     for (bool mtp_enabled : {false, true}) {
         SCOPED_TRACE(mtp_enabled);
-        auto params = makeMtpParams(3);
+        auto params           = makeMtpParams(3);
         params.sp_config.type = mtp_enabled ? SP_TYPE_MTP : SP_TYPE_NONE;
         PPExecutor executor(params, nullptr, true);
         executor.sampler_ = std::make_unique<Sampler>(SamplerInitParams{2, false});
         ResourceContext resource_context;
-        const int64_t batch_size = mtp_enabled ? 1 : 2;
-        auto stream = makeStream(resource_context, params.model_config_, 101, {1, 2}, batch_size);
+        const int64_t   batch_size = mtp_enabled ? 1 : 2;
+        auto            stream     = makeStream(resource_context, params.model_config_, 101, {1, 2}, batch_size);
         stream->generateConfig()->do_sample = false;
-        auto plan = executor.buildPlan(StreamGroups({stream}), {});
+        auto plan                           = executor.buildPlan(StreamGroups({stream}), {});
         ASSERT_TRUE(plan.ok()) << plan.status().ToString();
         plan->output_config.return_cum_log_probs = true;
 
-        auto processor = std::make_shared<RecordingLogitsProcessor>();
-        auto& state = executor.sampling_states_[101];
+        auto  processor = std::make_shared<RecordingLogitsProcessor>();
+        auto& state     = executor.sampling_states_[101];
         state.logits_processors.push_back(processor);
         state.cum_log_probs = torch::zeros({batch_size}, torch::kFloat32);
         GptModelOutputs output;
@@ -645,12 +644,12 @@ TEST_F(PPBatchStreamProcessorTest, SamplingAndDraftProposalLeaveHistoryForExplic
         EXPECT_TRUE(processor->committed_tokens.empty());
         if (mtp_enabled) {
             EXPECT_EQ(tensorToVector<int32_t>(result.accept_len), (std::vector<int32_t>{1}));
-            auto target_model = std::make_unique<RecordingDraftModel>();
+            auto target_model           = std::make_unique<RecordingDraftModel>();
             target_model->hidden_buffer = torch::arange(8, output.logits.options()).reshape({2, 4});
             executor.setModel(std::move(target_model));
-            auto draft_model = std::make_unique<RecordingDraftModel>();
-            auto* recorded_draft = draft_model.get();
-            executor.draft_model_ = std::move(draft_model);
+            auto  draft_model           = std::make_unique<RecordingDraftModel>();
+            auto* recorded_draft        = draft_model.get();
+            executor.draft_model_       = std::move(draft_model);
             executor.fast_topk_sampler_ = std::make_unique<speculative::FastTopKSampler>();
             executor.runDraftStep(plan.value(), output, result);
             EXPECT_EQ(tensorToVector<int32_t>(result.propose_token_ids), (std::vector<int32_t>{10, 12, 14}));
@@ -672,24 +671,24 @@ TEST_F(PPBatchStreamProcessorTest, PrefillPublishesDraftStateForItsRoleAndAlgori
             for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
                 SCOPED_TRACE("K=" + std::to_string(count) + ", type=" + std::to_string(type)
                              + ", role=" + std::to_string(role));
-                auto params = makeMtpParams(count);
-                params.sp_config.type = type;
+                auto params                              = makeMtpParams(count);
+                params.sp_config.type                    = type;
                 params.sp_config.sp_dspark_mask_token_id = 63;
-                params.pd_sep_config.role_type = role;
-                auto cache_config = test::makeSimpleMhaCacheConfig(1, 16, 4, DataType::TYPE_FP16);
+                params.pd_sep_config.role_type           = role;
+                auto       cache_config = test::makeSimpleMhaCacheConfig(1, 16, 4, DataType::TYPE_FP16);
                 const auto draft_config = cache_config;
                 cache_config.block_size_bytes += draft_config.block_size_bytes;
                 cache_config.mtp_sub_configs.push_back(cache_config.mergeMTPModule(draft_config, 0, 1));
                 cache_config.finalizeBlockNums(16, RuntimeConfig{});
                 auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
                 ASSERT_TRUE(cache_manager->init());
-                PPExecutor executor(params, cache_manager, true);
+                PPExecutor      executor(params, cache_manager, true);
                 ResourceContext resource_context;
                 resource_context.cache_manager = cache_manager;
-                resource_context.role_type = role;
-                auto stream = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
+                resource_context.role_type     = role;
+                auto stream                    = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
                 stream->generateConfig()->max_new_tokens = 20;
-                stream->generateConfig()->pd_separation = role == RoleType::PREFILL;
+                stream->generateConfig()->pd_separation  = role == RoleType::PREFILL;
                 stream->fakeInitKVBlock(4);
                 std::list<GenerateStreamPtr> streams{stream};
                 executor.prepareStreams(streams);
@@ -704,15 +703,15 @@ TEST_F(PPBatchStreamProcessorTest, PrefillPublishesDraftStateForItsRoleAndAlgori
                 target_model->hidden_buffer =
                     torch::arange(8, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA)).reshape({2, 4});
                 executor.setModel(std::move(target_model));
-                RecordingDraftModel* recorded_mtp = nullptr;
+                RecordingDraftModel*  recorded_mtp    = nullptr;
                 RecordingDSparkModel* recorded_dspark = nullptr;
                 if (type == SP_TYPE_DSPARK) {
-                    auto draft = std::make_unique<RecordingDSparkModel>(count, 10);
-                    recorded_dspark = draft.get();
+                    auto draft            = std::make_unique<RecordingDSparkModel>(count, 10);
+                    recorded_dspark       = draft.get();
                     executor.draft_model_ = std::move(draft);
                 } else {
-                    auto draft = std::make_unique<RecordingDraftModel>();
-                    recorded_mtp = draft.get();
+                    auto draft            = std::make_unique<RecordingDraftModel>();
+                    recorded_mtp          = draft.get();
                     executor.draft_model_ = std::move(draft);
                 }
                 const int32_t vocab_offset = type == SP_TYPE_EAGLE ? 17 : 0;
@@ -723,12 +722,12 @@ TEST_F(PPBatchStreamProcessorTest, PrefillPublishesDraftStateForItsRoleAndAlgori
                             .remainder(64);
                 }
                 executor.fast_topk_sampler_ = std::make_unique<speculative::FastTopKSampler>(d2t_map);
-                auto result = makeInitializedResult(plan.sampling_plan);
-                result.new_token_ids = intTensor({20}).reshape({1, 1});
-                result.accept_len = intTensor({1});
+                auto result                 = makeInitializedResult(plan.sampling_plan);
+                result.new_token_ids        = intTensor({20}).reshape({1, 1});
+                result.accept_len           = intTensor({1});
                 executor.runDraftStep(plan, GptModelOutputs{}, result);
 
-                const bool commit_only = type == SP_TYPE_DSPARK && role == RoleType::PREFILL;
+                const bool    commit_only = type == SP_TYPE_DSPARK && role == RoleType::PREFILL;
                 const int64_t draft_count = role == RoleType::PREFILL ? (commit_only ? 0 : 1) : count;
                 if (recorded_dspark) {
                     ASSERT_EQ(recorded_dspark->inputs.size(), commit_only ? 1u : 2u);
@@ -773,27 +772,27 @@ TEST_F(PPBatchStreamProcessorTest, PrefillPublishesDraftStateForItsRoleAndAlgori
 }
 
 TEST_F(PPBatchStreamProcessorTest, DecodeSamplingCommitsOnlyAcceptedTokensAndSkipsFailedRequests) {
-    auto params = makeMtpParams(3);
+    auto       params = makeMtpParams(3);
     PPExecutor executor(params, nullptr, true);
-    executor.sampler_ = std::make_unique<Sampler>(SamplerInitParams{8, false});
+    executor.sampler_             = std::make_unique<Sampler>(SamplerInitParams{8, false});
     executor.speculative_sampler_ = std::make_unique<speculative::SpeculativeSampler>(torch::Tensor(), 3);
     ResourceContext resource_context;
-    auto first = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
-    auto second = makeStream(resource_context, params.model_config_, 202, {3, 4}, 0);
+    auto            first  = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
+    auto            second = makeStream(resource_context, params.model_config_, 202, {3, 4}, 0);
     for (const auto& stream : {first, second}) {
         stream->generateConfig()->do_sample = true;
-        stream->generateConfig()->top_k = 2;
-        stream->generateConfig()->top_p = 1.0f;
+        stream->generateConfig()->top_k     = 2;
+        stream->generateConfig()->top_p     = 1.0f;
     }
     PPExecutionPlan plan;
-    plan.is_decode = true;
+    plan.is_decode     = true;
     plan.sampling_plan = executor.batch_stream_processor_->gatherSamplingPlan(StreamGroups({first, second}));
     plan.sampling_plan.spec_do_sample.fill_(false);
     plan.model_input.combo_tokens = intTensor({2, 11, 12, 13, 4, 21, 22, 23});
     GptModelOutputs output;
     // Use probability sampling; the all-top-k=1 path always reports success.
-    output.logits = torch::full({8, 64}, -std::numeric_limits<float>::infinity(),
-                               torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    output.logits = torch::full(
+        {8, 64}, -std::numeric_limits<float>::infinity(), torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
     const std::vector<int64_t> target_tokens{11, 12, 13, 14, 29, 22, 23, 24};
     for (int64_t row = 0; row < 8; ++row) {
         output.logits[row][target_tokens[row]] = 100;
@@ -808,8 +807,8 @@ TEST_F(PPBatchStreamProcessorTest, DecodeSamplingCommitsOnlyAcceptedTokensAndSki
     EXPECT_TRUE(result.request_errors[1].ok());
     EXPECT_FALSE(result.propose_token_ids.defined());
 
-    auto first_processor = std::make_shared<RecordingLogitsProcessor>();
-    auto second_processor = std::make_shared<RecordingLogitsProcessor>();
+    auto first_processor                                = std::make_shared<RecordingLogitsProcessor>();
+    auto second_processor                               = std::make_shared<RecordingLogitsProcessor>();
     executor.sampling_states_.at(101).logits_processors = {first_processor};
     executor.sampling_states_.at(202).logits_processors = {second_processor};
     executor.advanceSamplingStates(plan.sampling_plan, result);
@@ -828,24 +827,25 @@ TEST_F(PPBatchStreamProcessorTest, DecodeSamplingCommitsOnlyAcceptedTokensAndSki
 TEST_F(PPBatchStreamProcessorTest, DecodeSamplingFailureBeyondLengthCapDoesNotFailRequest) {
     for (int32_t max_new_tokens : {3, 4}) {
         SCOPED_TRACE(max_new_tokens);
-        auto params = makeMtpParams(3);
+        auto       params = makeMtpParams(3);
         PPExecutor executor(params, nullptr, true);
-        executor.sampler_ = std::make_unique<Sampler>(SamplerInitParams{4, false});
-        executor.speculative_sampler_ = std::make_unique<speculative::SpeculativeSampler>(torch::Tensor(), 3);
-        auto stream = makeStream(ResourceContext{}, params.model_config_, 101, {1, 2}, 0);
+        executor.sampler_                   = std::make_unique<Sampler>(SamplerInitParams{4, false});
+        executor.speculative_sampler_       = std::make_unique<speculative::SpeculativeSampler>(torch::Tensor(), 3);
+        auto stream                         = makeStream(ResourceContext{}, params.model_config_, 101, {1, 2}, 0);
         stream->generateConfig()->do_sample = true;
-        stream->generateConfig()->top_k = 2;
-        stream->generateConfig()->top_p = 1.0f;
+        stream->generateConfig()->top_k     = 2;
+        stream->generateConfig()->top_p     = 1.0f;
         stream->generateConfig()->max_new_tokens = max_new_tokens;
         PPExecutionPlan plan;
-        plan.is_decode = true;
+        plan.is_decode     = true;
         plan.sampling_plan = executor.batch_stream_processor_->gatherSamplingPlan(StreamGroups({stream}));
         plan.sampling_plan.spec_do_sample.fill_(false);
         plan.model_input.combo_tokens = intTensor({2, 11, 12, 13});
         GptModelOutputs output;
         // One valid token per prefix row keeps probability sampling deterministic.
-        output.logits = torch::full({4, 64}, -std::numeric_limits<float>::infinity(),
-                                   torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+        output.logits = torch::full({4, 64},
+                                    -std::numeric_limits<float>::infinity(),
+                                    torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
         for (int64_t row = 0; row < 3; ++row) {
             output.logits[row][11 + row] = 100;
         }
@@ -863,16 +863,16 @@ TEST_F(PPBatchStreamProcessorTest, DecodeSamplingFailureBeyondLengthCapDoesNotFa
 }
 
 TEST_F(PPBatchStreamProcessorTest, DecodeRequestErrorsKeepInitializationAndVerifyFailuresBeforeSamplerFailure) {
-    auto params = makeMtpParams(3);
+    auto       params = makeMtpParams(3);
     PPExecutor executor(params, nullptr, true);
-    executor.sampler_ = std::make_unique<Sampler>(SamplerInitParams{12, false});
-    executor.speculative_sampler_ = std::make_unique<speculative::SpeculativeSampler>(torch::Tensor(), 3);
+    executor.sampler_                   = std::make_unique<Sampler>(SamplerInitParams{12, false});
+    executor.speculative_sampler_       = std::make_unique<speculative::SpeculativeSampler>(torch::Tensor(), 3);
     executor.spec_logits_verify_runner_ = std::make_unique<SpecLogitsVerifyRunner>();
-    auto first = makeStream(ResourceContext{}, params.model_config_, 101, {1, 2}, 0);
-    auto second = makeStream(ResourceContext{}, params.model_config_, 202, {3, 4}, 0);
-    auto third = makeStream(ResourceContext{}, params.model_config_, 303, {5, 6}, 0);
+    auto            first               = makeStream(ResourceContext{}, params.model_config_, 101, {1, 2}, 0);
+    auto            second              = makeStream(ResourceContext{}, params.model_config_, 202, {3, 4}, 0);
+    auto            third               = makeStream(ResourceContext{}, params.model_config_, 303, {5, 6}, 0);
     PPExecutionPlan plan;
-    plan.is_decode = true;
+    plan.is_decode     = true;
     plan.sampling_plan = executor.batch_stream_processor_->gatherSamplingPlan(StreamGroups({first, second, third}));
     plan.sampling_plan.do_sample.fill_(true);
     plan.sampling_plan.top_k.fill_(2);
@@ -880,15 +880,15 @@ TEST_F(PPBatchStreamProcessorTest, DecodeRequestErrorsKeepInitializationAndVerif
     plan.sampling_plan.spec_do_sample.fill_(false);
     plan.sampling_plan.logits_processor_configs[0].grammar_type = "invalid";
     plan.model_input.combo_tokens = intTensor({2, 11, 12, 13, 4, 21, 22, 23, 6, 31, 32, 33});
-    auto processor = std::make_shared<RecordingLogitsProcessor>();
+    auto            processor     = std::make_shared<RecordingLogitsProcessor>();
     const ErrorInfo verify_error(ErrorCode::GRAMMAR_VERIFY_EXCEPTION, "injected verify failure");
     processor->verify_error = verify_error;
-    auto& state = executor.sampling_states_[202];
+    auto& state             = executor.sampling_states_[202];
     state.logits_processors = {processor};
-    state.cum_log_probs = torch::zeros({1}, torch::kFloat32);
+    state.cum_log_probs     = torch::zeros({1}, torch::kFloat32);
     GptModelOutputs output;
-    output.logits = torch::full({12, 64}, -std::numeric_limits<float>::infinity(),
-                                torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    output.logits = torch::full(
+        {12, 64}, -std::numeric_limits<float>::infinity(), torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
     PPExecutionResult result;
     executor.sampleTokens(plan, output, result);
     ASSERT_EQ(result.request_errors.size(), 3);
@@ -905,42 +905,41 @@ TEST_F(PPBatchStreamProcessorTest, DecodeRequestErrorsKeepInitializationAndVerif
 TEST_F(PPBatchStreamProcessorTest, CompactDraftInputAdvancesAcrossTwoRounds) {
     for (int32_t count : {1, 3, 4}) {
         SCOPED_TRACE("K=" + std::to_string(count));
-        auto params = makeMtpParams(count);
+        auto       params = makeMtpParams(count);
         PPExecutor executor(params, nullptr, true);
         executor.position_id_len_factor_ = 2;
-        const int32_t width = count + 1;
-        auto target = std::make_unique<RecordingDraftModel>();
-        const auto options = torch::TensorOptions(torch::kFloat32).device(torch::kCUDA);
-        target->hidden_buffer = torch::arange(3 * width * 4, options).reshape({3 * width, 4});
-        auto target_hidden = target->hidden_buffer.clone();
+        const int32_t width              = count + 1;
+        auto          target             = std::make_unique<RecordingDraftModel>();
+        const auto    options            = torch::TensorOptions(torch::kFloat32).device(torch::kCUDA);
+        target->hidden_buffer            = torch::arange(3 * width * 4, options).reshape({3 * width, 4});
+        auto target_hidden               = target->hidden_buffer.clone();
         executor.setModel(std::move(target));
         executor.fast_topk_sampler_ = std::make_unique<speculative::FastTopKSampler>();
-        auto prefixes = intTensor({5, 9, 12});
+        auto prefixes               = intTensor({5, 9, 12});
         for (int round = 0; round < 2; ++round) {
-            const auto lengths = round == 0 ? intTensor({1, std::min(3, width), width}) :
-                                              intTensor({width, 1, 2});
-            auto draft = std::make_unique<RecordingDraftModel>();
-            auto* recorded = draft.get();
+            const auto lengths    = round == 0 ? intTensor({1, std::min(3, width), width}) : intTensor({width, 1, 2});
+            auto       draft      = std::make_unique<RecordingDraftModel>();
+            auto*      recorded   = draft.get();
             executor.draft_model_ = std::move(draft);
             GptModelInputs verify;
-            verify.is_target_verify = true;
-            verify.input_lengths = torch::full({3}, width, torch::kInt32);
-            verify.prefix_lengths = prefixes.clone();
-            verify.sequence_lengths = intTensor({});
-            verify.combo_tokens = torch::arange(3 * width, torch::kInt32);
-            verify.lm_output_indexes = torch::arange(3 * width, torch::kInt32);
-            auto positions = prefixes.unsqueeze(1) + torch::arange(width, torch::kInt32).unsqueeze(0);
+            verify.is_target_verify   = true;
+            verify.input_lengths      = torch::full({3}, width, torch::kInt32);
+            verify.prefix_lengths     = prefixes.clone();
+            verify.sequence_lengths   = intTensor({});
+            verify.combo_tokens       = torch::arange(3 * width, torch::kInt32);
+            verify.lm_output_indexes  = torch::arange(3 * width, torch::kInt32);
+            auto positions            = prefixes.unsqueeze(1) + torch::arange(width, torch::kInt32).unsqueeze(0);
             verify.combo_position_ids = torch::stack({positions, positions + 100}, -1).flatten();
-            auto accepted = (verify.combo_tokens + 20).reshape({3, width});
-            auto input = executor.prepareDraftInputForDecode(verify, GptModelOutputs{}, accepted, lengths);
+            auto       accepted       = (verify.combo_tokens + 20).reshape({3, width});
+            auto       input     = executor.prepareDraftInputForDecode(verify, GptModelOutputs{}, accepted, lengths);
             const auto last_rows = lengths.cumsum(0).to(torch::kInt32) - 1;
             EXPECT_TRUE(torch::equal(input.input_lengths.cpu(), lengths));
             EXPECT_TRUE(torch::equal(input.lm_output_indexes.cpu(), last_rows));
             auto expected_last_hidden = target_hidden.index_select(
                 0, (torch::arange(3, torch::kInt32) * width + lengths - 1).to(torch::kCUDA, torch::kLong));
-            EXPECT_TRUE(torch::equal(input.last_hidden_states.index_select(
-                                         0, last_rows.to(input.last_hidden_states.device(), torch::kLong)),
-                                     expected_last_hidden));
+            EXPECT_TRUE(torch::equal(
+                input.last_hidden_states.index_select(0, last_rows.to(input.last_hidden_states.device(), torch::kLong)),
+                expected_last_hidden));
             auto proposals = executor.proposeDraftTokens(input, count);
             ASSERT_EQ(recorded->inputs.size(), count);
             EXPECT_EQ(proposals.sizes().vec(), (std::vector<int64_t>{3, count}));
@@ -952,9 +951,9 @@ TEST_F(PPBatchStreamProcessorTest, CompactDraftInputAdvancesAcrossTwoRounds) {
                 const auto& next = recorded->inputs[step];
                 EXPECT_TRUE(torch::equal(next.sequence_lengths.cpu(), next_positions + step - 1));
                 EXPECT_EQ(tensorToVector<int32_t>(next.input_lengths), (std::vector<int32_t>{1, 1, 1}));
-                EXPECT_TRUE(torch::equal(next.combo_position_ids.cpu(),
-                                         torch::stack({next_positions, next_positions + 100}, -1).flatten()
-                                             + step - 1));
+                EXPECT_TRUE(
+                    torch::equal(next.combo_position_ids.cpu(),
+                                 torch::stack({next_positions, next_positions + 100}, -1).flatten() + step - 1));
                 EXPECT_EQ(next.prefix_lengths.numel(), 0);
             }
             EXPECT_TRUE(verify.is_target_verify);
@@ -966,22 +965,22 @@ TEST_F(PPBatchStreamProcessorTest, CompactDraftInputAdvancesAcrossTwoRounds) {
 }
 
 TEST_F(PPBatchStreamProcessorTest, VerifySamplingAppliesPenaltiesAndNgramsToEachCandidatePrefix) {
-    auto params = makeMtpParams(3);
-    PPExecutor executor(params, nullptr, true);
+    auto            params = makeMtpParams(3);
+    PPExecutor      executor(params, nullptr, true);
     ResourceContext context;
-    auto first = makeStream(context, params.model_config_, 101, {1, 2, 1}, 0);
-    auto second = makeStream(context, params.model_config_, 202, {7, 8}, 0);
-    first->generateConfig()->repetition_penalty = 1.7;
-    first->generateConfig()->presence_penalty = 0.4;
-    first->generateConfig()->frequency_penalty = 0.3;
+    auto            first                         = makeStream(context, params.model_config_, 101, {1, 2, 1}, 0);
+    auto            second                        = makeStream(context, params.model_config_, 202, {7, 8}, 0);
+    first->generateConfig()->repetition_penalty   = 1.7;
+    first->generateConfig()->presence_penalty     = 0.4;
+    first->generateConfig()->frequency_penalty    = 0.3;
     first->generateConfig()->no_repeat_ngram_size = 2;
     for (const auto& stream : {first, second}) {
         stream->generateConfig()->do_sample = true;
-        stream->generateConfig()->top_k = 1;
+        stream->generateConfig()->top_k     = 1;
     }
-    const auto plan = executor.batch_stream_processor_->gatherSamplingPlan(StreamGroups({first, second}));
-    const auto candidates = intTensor({1, 2, 9, 10, 8, 8, 11, 12});
-    auto init_result = makeInitializedResult(plan);
+    const auto plan        = executor.batch_stream_processor_->gatherSamplingPlan(StreamGroups({first, second}));
+    const auto candidates  = intTensor({1, 2, 9, 10, 8, 8, 11, 12});
+    auto       init_result = makeInitializedResult(plan);
     executor.batch_stream_processor_->initSamplingStates(plan, executor.sampling_states_, init_result);
     ASSERT_EQ(init_result.request_errors.size(), 2);
     EXPECT_FALSE(init_result.request_errors[0].hasError());
@@ -991,13 +990,17 @@ TEST_F(PPBatchStreamProcessorTest, VerifySamplingAppliesPenaltiesAndNgramsToEach
     logits.select(1, 9).fill_(9);
     logits.select(1, 10).fill_(8);
     logits[0][2] = 100;
-    auto inputs = executor.batch_stream_processor_->gatherSamplerInputs(
+    auto inputs  = executor.batch_stream_processor_->gatherSamplerInputs(
         plan, PPOutputConfig{}, logits, executor.sampling_states_, true, 3, candidates);
-    EXPECT_EQ(tensorToVector<int32_t>(inputs.sequence_lengths),
-              (std::vector<int32_t>{3, 4, 5, 6, 2, 3, 4, 5}));
-    const std::vector<std::vector<int32_t>> expected{
-        {1, 2, 1}, {1, 2, 1, 2}, {1, 2, 1, 2, 9}, {1, 2, 1, 2, 9, 10},
-        {7, 8}, {7, 8, 8}, {7, 8, 8, 11}, {7, 8, 8, 11, 12}};
+    EXPECT_EQ(tensorToVector<int32_t>(inputs.sequence_lengths), (std::vector<int32_t>{3, 4, 5, 6, 2, 3, 4, 5}));
+    const std::vector<std::vector<int32_t>> expected{{1, 2, 1},
+                                                     {1, 2, 1, 2},
+                                                     {1, 2, 1, 2, 9},
+                                                     {1, 2, 1, 2, 9, 10},
+                                                     {7, 8},
+                                                     {7, 8, 8},
+                                                     {7, 8, 8, 11},
+                                                     {7, 8, 8, 11, 12}};
     for (int64_t row = 0; row < 8; ++row) {
         EXPECT_EQ(tensorToVector<int32_t>(inputs.token_ids[row].narrow(0, 0, expected[row].size())), expected[row]);
         if (row < 4) {
@@ -1008,33 +1011,34 @@ TEST_F(PPBatchStreamProcessorTest, VerifySamplingAppliesPenaltiesAndNgramsToEach
         }
     }
     /** Row 0 bans the repeated bigram; later rows penalize only candidates already in their prefix. */
-    Sampler sampler(SamplerInitParams{8, false});
+    Sampler    sampler(SamplerInitParams{8, false});
     const auto sampled = sampler.forward(inputs);
     EXPECT_EQ(tensorToVector<int32_t>(sampled.token_ids.select(1, sampled.token_ids.size(1) - 1)),
               (std::vector<int32_t>{9, 9, 10, 2, 2, 2, 2, 2}));
 }
 
 TEST_F(PPBatchStreamProcessorTest, FirstTailProcessorReplaysPdAnchorOnlyOnce) {
-    auto params = makeMtpParams(3);
+    auto       params = makeMtpParams(3);
     PPExecutor executor(params, nullptr, true);
-    auto stream = makeStream(ResourceContext{}, params.model_config_, 101, {3}, 0);
+    auto       stream = makeStream(ResourceContext{}, params.model_config_, 101, {3}, 0);
     stream->update({intTensor({0}).reshape({1, 1}), 1, {}, {}, {}, {}, {}, {}, {}, {}});
     auto plan = executor.batch_stream_processor_->gatherSamplingPlan(StreamGroups({stream}));
-    plan.logits_processor_configs[0].grammar_type = "regex";
+    plan.logits_processor_configs[0].grammar_type  = "regex";
     plan.logits_processor_configs[0].grammar_value = "abc";
-    auto backend = XGrammarBackend::create(
-        xgrammar_impl::serializeTokenizerInfo({"a", "b", "c", "<eos>"},
-                                               R"({"vocab_size":4,"stop_token_ids":[3],"vocab_type":"RAW","add_prefix_space":false})"),
+    auto backend                                   = XGrammarBackend::create(
+        xgrammar_impl::serializeTokenizerInfo(
+            {"a", "b", "c", "<eos>"},
+            R"({"vocab_size":4,"stop_token_ids":[3],"vocab_type":"RAW","add_prefix_space":false})"),
         GrammarConfig{});
     ASSERT_NE(backend, nullptr);
-    auto previous_backend = LogitsProcessorFactory::grammarBackend();
+    auto previous_backend                    = LogitsProcessorFactory::grammarBackend();
     LogitsProcessorFactory::grammarBackend() = backend;
-    auto init_result = makeInitializedResult(plan);
+    auto init_result                         = makeInitializedResult(plan);
     executor.batch_stream_processor_->initSamplingStates(plan, executor.sampling_states_, init_result);
     executor.batch_stream_processor_->gatherSamplerInputs(
         plan, PPOutputConfig{}, torch::zeros({1, 4}), executor.sampling_states_);
     const auto first_processors = executor.sampling_states_.at(101).logits_processors;
-    auto repeated_result = makeInitializedResult(plan);
+    auto       repeated_result  = makeInitializedResult(plan);
     executor.batch_stream_processor_->initSamplingStates(plan, executor.sampling_states_, repeated_result);
     executor.batch_stream_processor_->gatherSamplerInputs(
         plan, PPOutputConfig{}, torch::zeros({1, 4}), executor.sampling_states_);
@@ -1050,39 +1054,40 @@ TEST_F(PPBatchStreamProcessorTest, FirstTailProcessorReplaysPdAnchorOnlyOnce) {
 }
 
 TEST_F(PPBatchStreamProcessorTest, RegistrationUsesSequenceOffsetAfterExistingMultiSequenceRequest) {
-    auto params = makeMtpParams(3);
-    params.sp_config.type = SP_TYPE_NONE;
+    auto params                                      = makeMtpParams(3);
+    params.sp_config.type                            = SP_TYPE_NONE;
     params.model_config_.special_tokens.eos_token_id = 3;
     PPExecutor executor(params, nullptr, true);
-    auto existing = makeStream(ResourceContext{}, params.model_config_, 101, {3, 3}, 2);
+    auto       existing = makeStream(ResourceContext{}, params.model_config_, 101, {3, 3}, 2);
     existing->setIsContextStream(false);
     existing->generateConfig()->random_seed = 123;
-    const auto existing_plan = executor.batch_stream_processor_->gatherSamplingPlan(StreamGroups({existing}));
-    auto existing_result = makeInitializedResult(existing_plan);
+    const auto existing_plan   = executor.batch_stream_processor_->gatherSamplingPlan(StreamGroups({existing}));
+    auto       existing_result = makeInitializedResult(existing_plan);
     executor.batch_stream_processor_->initSamplingStates(existing_plan, executor.sampling_states_, existing_result);
     ASSERT_EQ(existing_result.request_errors.size(), 1);
     ASSERT_FALSE(existing_result.request_errors[0].hasError());
-    auto& existing_state = executor.sampling_states_.at(101);
-    const auto generator = existing_state.generator;
-    auto processor = std::make_shared<RecordingLogitsProcessor>();
+    auto&      existing_state        = executor.sampling_states_.at(101);
+    const auto generator             = existing_state.generator;
+    auto       processor             = std::make_shared<RecordingLogitsProcessor>();
     existing_state.logits_processors = {processor};
     existing_state.cum_log_probs.fill_(-4.0);
 
     auto added = makeStream(ResourceContext{}, params.model_config_, 202, {3}, 0);
     added->update({intTensor({0}).reshape({1, 1}), 1, {}, {}, {}, {}, {}, {}, {}, {}});
     added->setIsContextStream(false);
-    auto plan = executor.batch_stream_processor_->gatherSamplingPlan(StreamGroups({existing, added}));
+    auto plan         = executor.batch_stream_processor_->gatherSamplingPlan(StreamGroups({existing, added}));
     plan.random_seeds = {999, 456};
-    plan.logits_processor_configs[1].grammar_type = "regex";
+    plan.logits_processor_configs[1].grammar_type  = "regex";
     plan.logits_processor_configs[1].grammar_value = "abc";
-    auto backend = XGrammarBackend::create(
-        xgrammar_impl::serializeTokenizerInfo({"a", "b", "c", "<eos>"},
-                                               R"({"vocab_size":4,"stop_token_ids":[3],"vocab_type":"RAW","add_prefix_space":false})"),
+    auto backend                                   = XGrammarBackend::create(
+        xgrammar_impl::serializeTokenizerInfo(
+            {"a", "b", "c", "<eos>"},
+            R"({"vocab_size":4,"stop_token_ids":[3],"vocab_type":"RAW","add_prefix_space":false})"),
         GrammarConfig{});
     ASSERT_NE(backend, nullptr);
-    auto previous_backend = LogitsProcessorFactory::grammarBackend();
+    auto previous_backend                    = LogitsProcessorFactory::grammarBackend();
     LogitsProcessorFactory::grammarBackend() = backend;
-    auto init_result = makeInitializedResult(plan);
+    auto init_result                         = makeInitializedResult(plan);
     executor.batch_stream_processor_->initSamplingStates(plan, executor.sampling_states_, init_result);
     LogitsProcessorFactory::grammarBackend() = previous_backend;
 
@@ -1102,7 +1107,7 @@ TEST_F(PPBatchStreamProcessorTest, RegistrationUsesSequenceOffsetAfterExistingMu
 
     PPOutputConfig output_config;
     output_config.return_cum_log_probs = true;
-    const auto inputs = executor.batch_stream_processor_->gatherSamplerInputs(
+    const auto inputs                  = executor.batch_stream_processor_->gatherSamplerInputs(
         plan, output_config, torch::zeros({3, 4}), executor.sampling_states_);
     EXPECT_EQ(inputs.generator[0], generator);
     EXPECT_EQ(inputs.generator[1], generator);
@@ -1111,32 +1116,32 @@ TEST_F(PPBatchStreamProcessorTest, RegistrationUsesSequenceOffsetAfterExistingMu
 }
 
 TEST_F(PPBatchStreamProcessorTest, MaxTokensCapsTailProcessorAndHeadCommitAcrossRounds) {
-    auto params = makeMtpParams(3);
-    PPExecutor executor(params, nullptr, true);
+    auto            params = makeMtpParams(3);
+    PPExecutor      executor(params, nullptr, true);
     ResourceContext context;
-    context.cache_manager = std::make_shared<KVCacheManager>(
-        test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+    context.cache_manager =
+        std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
     ASSERT_TRUE(context.cache_manager->init());
     auto stream = makeStream(context, params.model_config_, 101, {1, 2}, 0);
     stream->fakeInitKVBlock(4);
     std::list<GenerateStreamPtr> streams_to_prepare{stream};
     executor.prepareStreams(streams_to_prepare);
     stream->setIsContextStream(false);
-    stream->generateConfig()->max_new_tokens = 3;
-    auto processor = std::make_shared<RecordingLogitsProcessor>();
+    stream->generateConfig()->max_new_tokens         = 3;
+    auto processor                                   = std::make_shared<RecordingLogitsProcessor>();
     executor.sampling_states_[101].logits_processors = {processor};
     for (int32_t round = 0; round < 2; ++round) {
         SCOPED_TRACE(round);
         PPExecutionPlan plan;
         plan.sampling_plan = executor.batch_stream_processor_->gatherSamplingPlan(StreamGroups({stream}));
-        plan = pp_serialization::deserializePlan(pp_serialization::serializePlan(plan, false));
+        plan               = pp_serialization::deserializePlan(pp_serialization::serializePlan(plan, false));
         EXPECT_EQ(tensorToVector<int32_t>(plan.sampling_plan.max_tokens), (std::vector<int32_t>{5}));
         EXPECT_EQ(tensorToVector<int32_t>(plan.sampling_plan.sequence_lengths), (std::vector<int32_t>{2 + round}));
 
         PPExecutionResult result;
-        result.request_ids = plan.sampling_plan.request_ids;
-        result.new_token_ids = intTensor({10 + round, 11 + round, 12 + round, 13 + round}).reshape({1, 4});
-        result.accept_len = intTensor({round == 0 ? 1 : 4});
+        result.request_ids       = plan.sampling_plan.request_ids;
+        result.new_token_ids     = intTensor({10 + round, 11 + round, 12 + round, 13 + round}).reshape({1, 4});
+        result.accept_len        = intTensor({round == 0 ? 1 : 4});
         result.propose_token_ids = intTensor({20, 21, 22}).reshape({1, 3});
         result.request_errors.resize(1);
         result.prompt_logits.resize(1);
@@ -1156,29 +1161,30 @@ TEST_F(PPBatchStreamProcessorTest, MaxTokensCapsTailProcessorAndHeadCommitAcross
 }
 
 TEST_F(PPBatchStreamProcessorTest, TailReplayFailureClearsProcessorsAndPreservesSamplingState) {
-    auto params = makeMtpParams(3);
+    auto params                                      = makeMtpParams(3);
     params.model_config_.special_tokens.eos_token_id = 3;
     PPExecutor executor(params, nullptr, true);
-    auto stream = makeStream(ResourceContext{}, params.model_config_, 101, {3}, 0);
+    auto       stream = makeStream(ResourceContext{}, params.model_config_, 101, {3}, 0);
     stream->update({intTensor({1}).reshape({1, 1}), 1, {}, {}, {}, {}, {}, {}, {}, {}});
     auto plan = executor.batch_stream_processor_->gatherSamplingPlan(StreamGroups({stream}));
     // The head accepted this history; only the tail's reconstructed grammar rejects it.
-    plan.logits_processor_configs[0].grammar_type = "regex";
+    plan.logits_processor_configs[0].grammar_type  = "regex";
     plan.logits_processor_configs[0].grammar_value = "abc";
-    plan.random_seeds[0] = 123;
-    auto backend = XGrammarBackend::create(
-        xgrammar_impl::serializeTokenizerInfo({"a", "b", "c", "<eos>"},
-                                               R"({"vocab_size":4,"stop_token_ids":[3],"vocab_type":"RAW","add_prefix_space":false})"),
+    plan.random_seeds[0]                           = 123;
+    auto backend                                   = XGrammarBackend::create(
+        xgrammar_impl::serializeTokenizerInfo(
+            {"a", "b", "c", "<eos>"},
+            R"({"vocab_size":4,"stop_token_ids":[3],"vocab_type":"RAW","add_prefix_space":false})"),
         GrammarConfig{});
     ASSERT_NE(backend, nullptr);
-    auto previous_backend = LogitsProcessorFactory::grammarBackend();
+    auto previous_backend                    = LogitsProcessorFactory::grammarBackend();
     LogitsProcessorFactory::grammarBackend() = backend;
-    auto init_result = makeInitializedResult(plan);
+    auto init_result                         = makeInitializedResult(plan);
     executor.batch_stream_processor_->initSamplingStates(plan, executor.sampling_states_, init_result);
     auto inputs = executor.batch_stream_processor_->gatherSamplerInputs(
         plan, PPOutputConfig{}, torch::zeros({1, 4}), executor.sampling_states_);
     LogitsProcessorFactory::grammarBackend() = previous_backend;
-    auto& state = executor.sampling_states_.at(101);
+    auto& state                              = executor.sampling_states_.at(101);
     ASSERT_EQ(init_result.request_errors.size(), 1);
     ASSERT_TRUE(init_result.request_errors[0].hasError());
     EXPECT_EQ(init_result.request_errors[0].code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
@@ -1190,8 +1196,6 @@ TEST_F(PPBatchStreamProcessorTest, TailReplayFailureClearsProcessorsAndPreserves
     ASSERT_NE(inputs.logits_processor_states_ptr, nullptr);
     EXPECT_TRUE(inputs.logits_processor_states_ptr->invocations_.empty());
     EXPECT_FALSE(inputs.logits_processor_states_ptr->batchProcess(inputs)[0].has_value());
-
-
 }
 
 TEST_F(PPBatchStreamProcessorTest, TailInitializationFailurePreservesHealthyRequestsThroughDraftAndCommit) {
@@ -1199,7 +1203,7 @@ TEST_F(PPBatchStreamProcessorTest, TailInitializationFailurePreservesHealthyRequ
         for (int64_t failed_idx = 0; failed_idx < 3; ++failed_idx) {
             SCOPED_TRACE(mode);
             SCOPED_TRACE(failed_idx);
-            auto params = makeMtpParams(3);
+            auto params                                      = makeMtpParams(3);
             params.model_config_.special_tokens.eos_token_id = 63;
             if (mode == "normal") {
                 params.sp_config.type = SP_TYPE_NONE;
@@ -1207,19 +1211,17 @@ TEST_F(PPBatchStreamProcessorTest, TailInitializationFailurePreservesHealthyRequ
             PPExecutor executor(params, nullptr, true);
             PPExecutor reference(params, nullptr, true);
             for (auto* current : {&executor, &reference}) {
-                current->sampler_ = std::make_unique<Sampler>(SamplerInitParams{12, false});
-                current->speculative_sampler_ =
-                    std::make_unique<speculative::SpeculativeSampler>(torch::Tensor(), 3);
+                current->sampler_             = std::make_unique<Sampler>(SamplerInitParams{12, false});
+                current->speculative_sampler_ = std::make_unique<speculative::SpeculativeSampler>(torch::Tensor(), 3);
                 current->spec_logits_verify_runner_ = std::make_unique<SpecLogitsVerifyRunner>();
             }
             ResourceContext context;
-            context.cache_manager = std::make_shared<KVCacheManager>(
-                test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+            context.cache_manager =
+                std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
             ASSERT_TRUE(context.cache_manager->init());
-            std::vector<GenerateStreamPtr> streams{
-                makeStream(context, params.model_config_, 101, {1, 2}, 0),
-                makeStream(context, params.model_config_, 202, {3, 4}, 0),
-                makeStream(context, params.model_config_, 303, {5, 6}, 0)};
+            std::vector<GenerateStreamPtr> streams{makeStream(context, params.model_config_, 101, {1, 2}, 0),
+                                                   makeStream(context, params.model_config_, 202, {3, 4}, 0),
+                                                   makeStream(context, params.model_config_, 303, {5, 6}, 0)};
             for (const auto& stream : streams) {
                 stream->fakeInitKVBlock(4);
             }
@@ -1231,33 +1233,35 @@ TEST_F(PPBatchStreamProcessorTest, TailInitializationFailurePreservesHealthyRequ
                 }
             }
             const StreamGroups groups(streams_to_prepare);
-            PPExecutionPlan plan;
-            plan.is_decode = mode == "mtp_decode";
-            plan.sampling_plan = executor.batch_stream_processor_->gatherSamplingPlan(groups);
+            PPExecutionPlan    plan;
+            plan.is_decode                  = mode == "mtp_decode";
+            plan.sampling_plan              = executor.batch_stream_processor_->gatherSamplingPlan(groups);
             plan.sampling_plan.random_seeds = {123, 456, 789};
             plan.sampling_plan.top_k.fill_(4);
             plan.sampling_plan.do_sample.fill_(true);
             if (mode != "normal") {
                 plan.sampling_plan.spec_do_sample.fill_(true);
             }
-            plan.model_input.combo_tokens = plan.is_decode ? intTensor({2, 1, 2, 3, 4, 1, 2, 3, 6, 1, 2, 3}) :
-                                                             intTensor({1, 2, 3, 4, 5, 6});
-            plan.model_input.input_lengths = torch::full({3}, plan.is_decode ? 4 : 2, torch::kInt32);
-            plan.model_input.prefix_lengths = torch::full({3}, plan.is_decode ? 1 : 0, torch::kInt32);
+            plan.model_input.combo_tokens =
+                plan.is_decode ? intTensor({2, 1, 2, 3, 4, 1, 2, 3, 6, 1, 2, 3}) : intTensor({1, 2, 3, 4, 5, 6});
+            plan.model_input.input_lengths    = torch::full({3}, plan.is_decode ? 4 : 2, torch::kInt32);
+            plan.model_input.prefix_lengths   = torch::full({3}, plan.is_decode ? 1 : 0, torch::kInt32);
             plan.model_input.sequence_lengths = intTensor({});
-            plan.model_input.lm_output_indexes = plan.is_decode ? torch::arange(12, torch::kInt32) : intTensor({1, 3, 5});
-            plan.model_input.is_target_verify = plan.is_decode;
-            const auto reference_plan = plan;
+            plan.model_input.lm_output_indexes =
+                plan.is_decode ? torch::arange(12, torch::kInt32) : intTensor({1, 3, 5});
+            plan.model_input.is_target_verify                                    = plan.is_decode;
+            const auto reference_plan                                            = plan;
             plan.sampling_plan.logits_processor_configs[failed_idx].grammar_type = "invalid";
-            const auto sampling_rows = plan.is_decode ? 12 : 3;
+            const auto sampling_rows                                             = plan.is_decode ? 12 : 3;
             const auto logits = torch::arange(64, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA))
-                                    .mul_(-0.05).repeat({sampling_rows, 1});
+                                    .mul_(-0.05)
+                                    .repeat({sampling_rows, 1});
             auto reference_init_result = makeInitializedResult(reference_plan.sampling_plan);
             reference.batch_stream_processor_->initSamplingStates(
                 reference_plan.sampling_plan, reference.sampling_states_, reference_init_result);
             ASSERT_EQ(reference_init_result.request_errors.size(), 3);
-            std::vector<at::Generator> generators(3);
-            std::vector<torch::Tensor> initial_rng_states;
+            std::vector<at::Generator>                             generators(3);
+            std::vector<torch::Tensor>                             initial_rng_states;
             std::vector<std::shared_ptr<RecordingLogitsProcessor>> processors(3);
             for (int64_t idx = 0; idx < 3; ++idx) {
                 EXPECT_FALSE(reference_init_result.request_errors[idx].hasError());
@@ -1267,14 +1271,14 @@ TEST_F(PPBatchStreamProcessorTest, TailInitializationFailurePreservesHealthyRequ
                     auto existing_plan =
                         executor.batch_stream_processor_->gatherSamplingPlan(StreamGroups({streams[idx]}));
                     existing_plan.random_seeds[0] = plan.sampling_plan.random_seeds[idx];
-                    auto init_result = makeInitializedResult(existing_plan);
+                    auto init_result              = makeInitializedResult(existing_plan);
                     executor.batch_stream_processor_->initSamplingStates(
                         existing_plan, executor.sampling_states_, init_result);
                     ASSERT_EQ(init_result.request_errors.size(), 1);
                     ASSERT_FALSE(init_result.request_errors[0].hasError());
-                    auto& state = executor.sampling_states_.at(streams[idx]->streamId());
-                    generators[idx] = state.generator;
-                    processors[idx] = std::make_shared<RecordingLogitsProcessor>();
+                    auto& state             = executor.sampling_states_.at(streams[idx]->streamId());
+                    generators[idx]         = state.generator;
+                    processors[idx]         = std::make_shared<RecordingLogitsProcessor>();
                     state.logits_processors = {processors[idx]};
                 }
             }
@@ -1290,7 +1294,7 @@ TEST_F(PPBatchStreamProcessorTest, TailInitializationFailurePreservesHealthyRequ
             ASSERT_EQ(result.request_errors.size(), 3);
             ASSERT_TRUE(result.request_errors[failed_idx].hasError());
             EXPECT_EQ(result.request_errors[failed_idx].code(), ErrorCode::INVALID_PARAMS);
-            const auto init_error = result.request_errors[failed_idx];
+            const auto                 init_error = result.request_errors[failed_idx];
             std::vector<torch::Tensor> sampled_rng_states;
             for (int64_t idx = 0; idx < 3; ++idx) {
                 auto& state = executor.sampling_states_.at(streams[idx]->streamId());
@@ -1300,8 +1304,9 @@ TEST_F(PPBatchStreamProcessorTest, TailInitializationFailurePreservesHealthyRequ
                 sampled_rng_states.push_back(state.generator.get_state());
                 if (idx != failed_idx) {
                     EXPECT_FALSE(torch::equal(sampled_rng_states.back(), initial_rng_states[idx]));
-                    EXPECT_TRUE(torch::equal(sampled_rng_states.back(),
-                                             reference.sampling_states_.at(streams[idx]->streamId()).generator.get_state()));
+                    EXPECT_TRUE(
+                        torch::equal(sampled_rng_states.back(),
+                                     reference.sampling_states_.at(streams[idx]->streamId()).generator.get_state()));
                     EXPECT_EQ(processors[idx]->verify_calls, plan.is_decode ? 1 : 0);
                     EXPECT_EQ(processors[idx]->process_intervals.size(), plan.is_decode ? 0 : 1);
                     if (!plan.is_decode) {
@@ -1314,9 +1319,10 @@ TEST_F(PPBatchStreamProcessorTest, TailInitializationFailurePreservesHealthyRequ
             }
             if (mode != "normal") {
                 auto target_model = std::make_unique<RecordingDraftModel>();
-                target_model->hidden_buffer = torch::zeros({plan.model_input.combo_tokens.numel(), 4}, logits.options());
+                target_model->hidden_buffer =
+                    torch::zeros({plan.model_input.combo_tokens.numel(), 4}, logits.options());
                 executor.setModel(std::move(target_model));
-                executor.draft_model_ = std::make_unique<RecordingDraftModel>();
+                executor.draft_model_       = std::make_unique<RecordingDraftModel>();
                 executor.fast_topk_sampler_ = std::make_unique<speculative::FastTopKSampler>();
                 executor.runDraftStep(plan, output, result);
                 EXPECT_EQ(result.accept_len[failed_idx].item<int32_t>(), 1);
@@ -1333,9 +1339,13 @@ TEST_F(PPBatchStreamProcessorTest, TailInitializationFailurePreservesHealthyRequ
                     }
                 }
             }
-            auto inputs = executor.batch_stream_processor_->gatherSamplerInputs(
-                plan.sampling_plan, PPOutputConfig{}, logits, executor.sampling_states_,
-                plan.is_decode, plan.is_decode ? 3 : 0, plan.model_input.combo_tokens);
+            auto inputs = executor.batch_stream_processor_->gatherSamplerInputs(plan.sampling_plan,
+                                                                                PPOutputConfig{},
+                                                                                logits,
+                                                                                executor.sampling_states_,
+                                                                                plan.is_decode,
+                                                                                plan.is_decode ? 3 : 0,
+                                                                                plan.model_input.combo_tokens);
             for (int64_t idx = 0; idx < 3; ++idx) {
                 const auto& state = executor.sampling_states_.at(streams[idx]->streamId());
                 EXPECT_EQ(state.generator, generators[idx]);
@@ -1355,8 +1365,8 @@ TEST_F(PPBatchStreamProcessorTest, TailInitializationFailurePreservesHealthyRequ
                           idx == failed_idx ? 0.0f : -5.0f);
                 EXPECT_EQ(result.request_errors[idx].hasError(), idx == failed_idx);
             }
-            auto received = pp_serialization::deserializeExecutionResult(
-                pp_serialization::serializeExecutionResult(result));
+            auto received =
+                pp_serialization::deserializeExecutionResult(pp_serialization::serializeExecutionResult(result));
             for (const auto& stream : streams) {
                 stream->setPPInflight();
             }
@@ -1365,7 +1375,8 @@ TEST_F(PPBatchStreamProcessorTest, TailInitializationFailurePreservesHealthyRequ
                 EXPECT_FALSE(streams[idx]->isPPInflight());
                 EXPECT_EQ(streams[idx]->hasError(), idx == failed_idx);
                 const auto committed = idx == failed_idx ? 0 :
-                                       mode == "normal" ? 1 : result.accept_len[idx].item<int32_t>();
+                                       mode == "normal"  ? 1 :
+                                                           result.accept_len[idx].item<int32_t>();
                 EXPECT_EQ(streams[idx]->seqLength(), 2 + committed);
             }
             EXPECT_EQ(streams[failed_idx]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
@@ -1375,23 +1386,22 @@ TEST_F(PPBatchStreamProcessorTest, TailInitializationFailurePreservesHealthyRequ
 }
 
 TEST_F(PPBatchStreamProcessorTest, RequestErrorsPreserveStagePriorityAcrossSequencesAndStateUpdate) {
-    auto params = makeMtpParams(3);
+    auto params           = makeMtpParams(3);
     params.sp_config.type = SP_TYPE_NONE;
-    PPExecutor executor(params, nullptr, true);
-    const std::vector<GenerateStreamPtr> streams{
-        makeStream(ResourceContext{}, params.model_config_, 101, {1, 2}, 2),
-        makeStream(ResourceContext{}, params.model_config_, 202, {3, 4}, 2),
-        makeStream(ResourceContext{}, params.model_config_, 303, {5, 6}, 1),
-        makeStream(ResourceContext{}, params.model_config_, 404, {7, 8}, 1),
-        makeStream(ResourceContext{}, params.model_config_, 505, {9, 10}, 1)};
-    const StreamGroups groups(std::list<GenerateStreamPtr>(streams.begin(), streams.end()));
-    PPExecutionPlan plan;
-    plan.sampling_plan = executor.batch_stream_processor_->gatherSamplingPlan(groups);
+    PPExecutor                           executor(params, nullptr, true);
+    const std::vector<GenerateStreamPtr> streams{makeStream(ResourceContext{}, params.model_config_, 101, {1, 2}, 2),
+                                                 makeStream(ResourceContext{}, params.model_config_, 202, {3, 4}, 2),
+                                                 makeStream(ResourceContext{}, params.model_config_, 303, {5, 6}, 1),
+                                                 makeStream(ResourceContext{}, params.model_config_, 404, {7, 8}, 1),
+                                                 makeStream(ResourceContext{}, params.model_config_, 505, {9, 10}, 1)};
+    const StreamGroups                   groups(std::list<GenerateStreamPtr>(streams.begin(), streams.end()));
+    PPExecutionPlan                      plan;
+    plan.sampling_plan                      = executor.batch_stream_processor_->gatherSamplingPlan(groups);
     plan.output_config.return_cum_log_probs = true;
     const ErrorInfo init_error(ErrorCode::INVALID_PARAMS, "initialization failed");
     const ErrorInfo process_error(ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN, "second sequence processor failed");
     const ErrorInfo update_error(ErrorCode::GRAMMAR_NON_EOS_AFTER_TERMINAL, "state update failed");
-    auto result = makeInitializedResult(plan.sampling_plan);
+    auto            result   = makeInitializedResult(plan.sampling_plan);
     result.request_errors[0] = init_error;
     std::vector<std::shared_ptr<RecordingLogitsProcessor>> processors;
     for (size_t i = 0; i < streams.size(); ++i) {
@@ -1400,12 +1410,12 @@ TEST_F(PPBatchStreamProcessorTest, RequestErrorsPreserveStagePriorityAcrossSeque
             processor->update_error = update_error;
         }
         processors.push_back(processor);
-        auto& state = executor.sampling_states_[streams[i]->streamId()];
+        auto& state             = executor.sampling_states_[streams[i]->streamId()];
         state.logits_processors = {processor};
-        state.cum_log_probs = torch::zeros({streams[i]->currentBatchSize()}, torch::kFloat32);
+        state.cum_log_probs     = torch::zeros({streams[i]->currentBatchSize()}, torch::kFloat32);
     }
     SamplerOutput sampled;
-    sampled.token_ids = intTensor({11, 12, 13, 14, 15, 16, 17}).reshape({7, 1});
+    sampled.token_ids     = intTensor({11, 12, 13, 14, 15, 16, 17}).reshape({7, 1});
     sampled.cum_log_probs = torch::full({7}, -5.0, torch::kFloat32);
     // A processor error on the second sequence takes precedence over a sampler
     // failure on the first sequence of the same request.
@@ -1422,14 +1432,12 @@ TEST_F(PPBatchStreamProcessorTest, RequestErrorsPreserveStagePriorityAcrossSeque
     EXPECT_TRUE(result.request_errors[4].ok());
 
     executor.advanceSamplingStates(plan.sampling_plan, result);
-    const std::vector<ErrorInfo> expected{
-        init_error,
-        process_error,
-        ErrorInfo(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed"),
-        ErrorInfo::OkStatus(),
-        update_error};
-    auto received = pp_serialization::deserializeExecutionResult(
-        pp_serialization::serializeExecutionResult(result));
+    const std::vector<ErrorInfo> expected{init_error,
+                                          process_error,
+                                          ErrorInfo(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed"),
+                                          ErrorInfo::OkStatus(),
+                                          update_error};
+    auto received = pp_serialization::deserializeExecutionResult(pp_serialization::serializeExecutionResult(result));
     ASSERT_EQ(received.request_errors.size(), expected.size());
     for (size_t i = 0; i < streams.size(); ++i) {
         EXPECT_EQ(received.request_errors[i].code(), expected[i].code());
@@ -1445,7 +1453,7 @@ TEST_F(PPBatchStreamProcessorTest, OrdinaryPpErrorsUseRequestCoordinatesWithMult
         for (int64_t failed_idx : {0, 1}) {
             SCOPED_TRACE(stage);
             SCOPED_TRACE(failed_idx);
-            auto params = makeMtpParams(3);
+            auto params           = makeMtpParams(3);
             params.sp_config.type = SP_TYPE_NONE;
             PPExecutor executor(params, nullptr, true);
             executor.sampler_ = std::make_unique<Sampler>(SamplerInitParams{3, false});
@@ -1453,21 +1461,21 @@ TEST_F(PPBatchStreamProcessorTest, OrdinaryPpErrorsUseRequestCoordinatesWithMult
                 makeStream(ResourceContext{}, params.model_config_, 101, {1, 2}, 2),
                 makeStream(ResourceContext{}, params.model_config_, 202, {3, 4}, 1)};
             const StreamGroups groups(std::list<GenerateStreamPtr>{streams[0], streams[1]});
-            PPExecutionPlan plan;
+            PPExecutionPlan    plan;
             plan.sampling_plan = executor.batch_stream_processor_->gatherSamplingPlan(groups);
             plan.output_config = executor.batch_stream_processor_->gatherOutputConfig(groups);
             const ErrorInfo processor_error(ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN, "processor failed");
-            const auto healthy_idx = 1 - failed_idx;
-            auto healthy_processor = std::make_shared<RecordingLogitsProcessor>();
-            auto failed_processor = std::make_shared<RecordingLogitsProcessor>();
+            const auto      healthy_idx       = 1 - failed_idx;
+            auto            healthy_processor = std::make_shared<RecordingLogitsProcessor>();
+            auto            failed_processor  = std::make_shared<RecordingLogitsProcessor>();
             for (int64_t idx = 0; idx < 2; ++idx) {
                 if (stage == "initialize" && idx == failed_idx) {
                     plan.sampling_plan.logits_processor_configs[idx].grammar_type = "invalid";
                     continue;
                 }
-                auto& state = executor.sampling_states_[streams[idx]->streamId()];
+                auto& state             = executor.sampling_states_[streams[idx]->streamId()];
                 state.logits_processors = {idx == failed_idx ? failed_processor : healthy_processor};
-                state.cum_log_probs = torch::zeros({streams[idx]->currentBatchSize()}, torch::kFloat32);
+                state.cum_log_probs     = torch::zeros({streams[idx]->currentBatchSize()}, torch::kFloat32);
             }
             if (stage == "process") {
                 failed_processor->process_error = processor_error;
@@ -1488,8 +1496,8 @@ TEST_F(PPBatchStreamProcessorTest, OrdinaryPpErrorsUseRequestCoordinatesWithMult
             EXPECT_EQ(healthy_processor->committed_tokens.size(), 1);
             EXPECT_EQ(failed_processor->committed_tokens.size(), stage == "update" ? 1 : 0);
 
-            auto received = pp_serialization::deserializeExecutionResult(
-                pp_serialization::serializeExecutionResult(result));
+            auto received =
+                pp_serialization::deserializeExecutionResult(pp_serialization::serializeExecutionResult(result));
             for (const auto& stream : streams) {
                 stream->setPPInflight();
             }
@@ -1517,19 +1525,25 @@ TEST_F(PPBatchStreamProcessorTest, DecodeAdmissionSizesCandidatesOnlyWhenEnterin
         SCOPED_TRACE("type=" + std::to_string(type) + ", wire_count=" + std::to_string(wire_count));
         for (int64_t count : {1, 3, 4}) {
             SCOPED_TRACE(count);
-            auto params = makeMtpParams(count);
-            params.sp_config.type = type;
-            params.pd_sep_config.role_type = RoleType::DECODE;
+            auto params                                   = makeMtpParams(count);
+            params.sp_config.type                         = type;
+            params.sp_config.sp_dspark_mask_token_id      = 63;
+            params.pd_sep_config.role_type                = RoleType::DECODE;
             params.runtime_config.max_generate_batch_size = 1;
-            auto cache = std::make_shared<KVCacheManager>(
-                test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+            auto cache =
+                std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
             ASSERT_TRUE(cache->init());
-            PPScheduler scheduler(params.runtime_config, params.model_config_, params.pd_sep_config,
-                                  params.parallelism_config, params.model_specific_config, params.sp_config, cache);
-            PPExecutor executor(params, cache, true);
+            PPScheduler     scheduler(params.runtime_config,
+                                  params.model_config_,
+                                  params.pd_sep_config,
+                                  params.parallelism_config,
+                                  params.model_specific_config,
+                                  params.sp_config,
+                                  cache);
+            PPExecutor      executor(params, cache, true);
             ResourceContext resources;
             resources.cache_manager = cache;
-            resources.role_type = RoleType::DECODE;
+            resources.role_type     = RoleType::DECODE;
             std::vector<GenerateStreamPtr> streams;
             for (int row = 0; row < 2; ++row) {
                 auto stream = makeStream(resources, params.model_config_, 101 + row, {1, 2, 3}, 0);
@@ -1551,20 +1565,20 @@ TEST_F(PPBatchStreamProcessorTest, DecodeAdmissionSizesCandidatesOnlyWhenEnterin
                     }
                     stream->setProposeToken(wire_tokens);
                     stream->setContainProposeToken(true);
-                    auto buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+                    auto buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
                     buffer->propose_step = count;
-                    buffer->tokens = intTensor(wire_tokens).reshape({1, wire_count});
+                    buffer->tokens       = intTensor(wire_tokens).reshape({1, wire_count});
                     stream->setSPOutputBuffer(buffer);
                 }
                 streams.push_back(stream);
             }
-            const auto first = streams[0];
-            const auto waiting = streams[1];
-            const auto wire_tokens = waiting->getProposeToken();
-            const auto wire_buffer = waiting->getSPOutputBuffer();
-            auto load = std::make_shared<DeferredCacheLoad>();
+            const auto first                                     = streams[0];
+            const auto waiting                                   = streams[1];
+            const auto wire_tokens                               = waiting->getProposeToken();
+            const auto wire_buffer                               = waiting->getSPOutputBuffer();
+            auto       load                                      = std::make_shared<DeferredCacheLoad>();
             waiting->stream_cache_resource_->load_cache_context_ = load;
-            waiting->generate_status_->status = StreamState::LOADING_CACHE;
+            waiting->generate_status_->status                    = StreamState::LOADING_CACHE;
             scheduler.loading_cache_streams_.push_back(waiting);
             ASSERT_TRUE(scheduler.enqueue(first).ok());
 
@@ -1597,20 +1611,21 @@ TEST_F(PPBatchStreamProcessorTest, DecodeAdmissionSizesCandidatesOnlyWhenEnterin
 
             /** The last stage replaces initial candidates with real proposals. */
             PPExecutionResult result;
-            result.request_ids = torch::tensor({first->streamId()}, torch::kInt64);
-            result.accept_len = intTensor({1});
-            result.new_token_ids = torch::full({1, count + 1}, 31, torch::kInt32);
+            result.request_ids       = torch::tensor({first->streamId()}, torch::kInt64);
+            result.accept_len        = intTensor({1});
+            result.new_token_ids     = torch::full({1, count + 1}, 31, torch::kInt32);
             result.propose_token_ids = torch::arange(40, 40 + count, torch::kInt32).reshape({1, count});
             result.request_errors.resize(1);
             result.prompt_logits.resize(1);
-            ASSERT_TRUE(executor.batch_stream_processor_->dispatchExecutionResult(
-                StreamGroups(scheduled->streams), result).ok());
-            const auto real_proposals = first->getProposeToken();
+            ASSERT_TRUE(
+                executor.batch_stream_processor_->dispatchExecutionResult(StreamGroups(scheduled->streams), result)
+                    .ok());
+            const auto real_proposals    = first->getProposeToken();
             const auto real_token_buffer = first->getSPOutputBuffer()->tokens;
 
             /** Cache loading is done, but the batch is still full. */
             load->ready = true;
-            auto next = scheduler.schedule();
+            auto next   = scheduler.schedule();
             ASSERT_TRUE(next.ok());
             ASSERT_EQ(next->streams, (std::list<GenerateStreamPtr>{first}));
             EXPECT_EQ(waiting->getStatus(), StreamState::WAITING);
@@ -1622,7 +1637,7 @@ TEST_F(PPBatchStreamProcessorTest, DecodeAdmissionSizesCandidatesOnlyWhenEnterin
             /** Admit another handoff without overwriting the running request's proposals. */
             first->clearPPInflight();
             scheduler.max_generate_batch_size_ = 2;
-            auto mixed = scheduler.schedule();
+            auto mixed                         = scheduler.schedule();
             ASSERT_TRUE(mixed.ok());
             ASSERT_EQ(mixed->streams, (std::list<GenerateStreamPtr>{first, waiting}));
             padded[0] = 8;
@@ -1655,21 +1670,26 @@ TEST_F(PPBatchStreamProcessorTest, SpeculativeAdmissionPreservesPrefillAccountin
         SCOPED_TRACE(static_cast<int>(role));
         for (auto type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
             SCOPED_TRACE(type);
-            auto params = makeMtpParams(3);
-            params.sp_config.type = type;
-            params.pd_sep_config.role_type = role;
-            params.runtime_config.max_generate_batch_size = 8;
+            auto params                                                       = makeMtpParams(3);
+            params.sp_config.type                                             = type;
+            params.pd_sep_config.role_type                                    = role;
+            params.runtime_config.max_generate_batch_size                     = 8;
             params.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 32;
-            auto cache = std::make_shared<KVCacheManager>(
-                test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+            auto cache =
+                std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
             ASSERT_TRUE(cache->init());
-            PPScheduler scheduler(params.runtime_config, params.model_config_, params.pd_sep_config,
-                                  params.parallelism_config, params.model_specific_config, params.sp_config, cache);
+            PPScheduler     scheduler(params.runtime_config,
+                                  params.model_config_,
+                                  params.pd_sep_config,
+                                  params.parallelism_config,
+                                  params.model_specific_config,
+                                  params.sp_config,
+                                  cache);
             ResourceContext resources;
             resources.cache_manager = cache;
-            resources.role_type = role;
-            const auto first = makeStream(resources, params.model_config_, 101, {1, 2}, 0);
-            const auto second = makeStream(resources, params.model_config_, 102, {3, 4, 5}, 0);
+            resources.role_type     = role;
+            const auto first        = makeStream(resources, params.model_config_, 101, {1, 2}, 0);
+            const auto second       = makeStream(resources, params.model_config_, 102, {3, 4, 5}, 0);
             for (const auto& stream : {first, second}) {
                 stream->generate_status_->status = StreamState::WAITING;
                 ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -1694,23 +1714,28 @@ TEST_F(PPBatchStreamProcessorTest, SpeculativeAdmissionPreservesPrefillAccountin
 }
 
 TEST_F(PPBatchStreamProcessorTest, MtpAdmissionRejectsBeforePlanAndSchedulerReclaimsRequest) {
-    auto params = makeMtpParams(3);
-    params.pd_sep_config.role_type = RoleType::PDFUSION;
-    params.runtime_config.max_generate_batch_size = 8;
+    auto params                                                       = makeMtpParams(3);
+    params.pd_sep_config.role_type                                    = RoleType::PDFUSION;
+    params.runtime_config.max_generate_batch_size                     = 8;
     params.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 32;
-    auto cache_manager = std::make_shared<KVCacheManager>(
-        test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+    auto cache_manager =
+        std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
     ASSERT_TRUE(cache_manager->init());
-    const auto free_blocks = cache_manager->freeBlocksNum();
-    PPExecutor executor(params, cache_manager, false);
-    PPScheduler scheduler(params.runtime_config, params.model_config_, params.pd_sep_config,
-                          params.parallelism_config, params.model_specific_config, params.sp_config, cache_manager);
+    const auto      free_blocks = cache_manager->freeBlocksNum();
+    PPExecutor      executor(params, cache_manager, false);
+    PPScheduler     scheduler(params.runtime_config,
+                          params.model_config_,
+                          params.pd_sep_config,
+                          params.parallelism_config,
+                          params.model_specific_config,
+                          params.sp_config,
+                          cache_manager);
     ResourceContext context;
-    context.cache_manager = cache_manager;
-    auto stream = makeStream(context, params.model_config_, 101, {1, 2}, 0);
-    stream->generate_status_->status = StreamState::WAITING;
-    auto processor = std::make_shared<RecordingLogitsProcessor>();
-    processor->mtp_supported = false;
+    context.cache_manager                     = cache_manager;
+    auto stream                               = makeStream(context, params.model_config_, 101, {1, 2}, 0);
+    stream->generate_status_->status          = StreamState::WAITING;
+    auto processor                            = std::make_shared<RecordingLogitsProcessor>();
+    processor->mtp_supported                  = false;
     stream->sampling_state_.logits_processors = {processor};
     const auto expected_error = LogitsProcessorFactory::validateMtpCompatibility(stream->getAllLogitsProcessorPtr());
     ASSERT_TRUE(expected_error.has_value());
@@ -1721,9 +1746,9 @@ TEST_F(PPBatchStreamProcessorTest, MtpAdmissionRejectsBeforePlanAndSchedulerRecl
     ASSERT_TRUE(stream->isPPInflight());
     EXPECT_LT(cache_manager->freeBlocksNum(), free_blocks);
 
-    auto transport = std::make_unique<InMemoryPPTransport>();
+    auto  transport          = std::make_unique<InMemoryPPTransport>();
     auto* recorded_transport = transport.get();
-    executor.transport_ = std::move(transport);
+    executor.transport_      = std::move(transport);
     // All requests are rejected, so process must send an empty plan without invoking a model.
     ASSERT_TRUE(executor.process(scheduled.value()).ok());
     EXPECT_FALSE(stream->isPPInflight());
@@ -1749,9 +1774,9 @@ TEST_F(PPBatchStreamProcessorTest, RequestErrorsDoNotRequireSuccessfulTokenPaylo
         if (!mtp_enabled) {
             params.sp_config.type = SP_TYPE_NONE;
         }
-        PPExecutor executor(params, nullptr, true);
+        PPExecutor      executor(params, nullptr, true);
         const ErrorInfo error(ErrorCode::INVALID_PARAMS, "initialization failed");
-        auto stream = makeStream(ResourceContext{}, params.model_config_, 101, {1, 2}, 0);
+        auto            stream = makeStream(ResourceContext{}, params.model_config_, 101, {1, 2}, 0);
         stream->generateConfig()->return_hidden_states = true;
         PPExecutionResult result;
         result.request_ids = torch::tensor({101}, torch::kInt64);
@@ -1784,25 +1809,30 @@ TEST_F(PPBatchStreamProcessorTest, RequestErrorsAndCancellationReachSchedulerAnd
             if (!mtp_enabled) {
                 params.sp_config.type = SP_TYPE_NONE;
             }
-            params.pd_sep_config.role_type = RoleType::PDFUSION;
-            params.runtime_config.max_generate_batch_size = 8;
+            params.pd_sep_config.role_type                                    = RoleType::PDFUSION;
+            params.runtime_config.max_generate_batch_size                     = 8;
             params.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 32;
-            auto cache_manager = std::make_shared<KVCacheManager>(
-                test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+            auto cache_manager =
+                std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
             ASSERT_TRUE(cache_manager->init());
             const auto free_blocks = cache_manager->freeBlocksNum();
             PPExecutor head(params, cache_manager, true);
-            auto tail_params = params;
-            tail_params.parallelism_config.pp_rank = 1;
+            auto       tail_params                    = params;
+            tail_params.parallelism_config.pp_rank    = 1;
             tail_params.parallelism_config.world_rank = 1;
             tail_params.parallelism_config.world_size = 2;
-            PPExecutor tail(tail_params, cache_manager, false);
-            PPScheduler scheduler(params.runtime_config, params.model_config_, params.pd_sep_config,
-                                  params.parallelism_config, params.model_specific_config, params.sp_config, cache_manager);
+            PPExecutor      tail(tail_params, cache_manager, false);
+            PPScheduler     scheduler(params.runtime_config,
+                                  params.model_config_,
+                                  params.pd_sep_config,
+                                  params.parallelism_config,
+                                  params.model_specific_config,
+                                  params.sp_config,
+                                  cache_manager);
             ResourceContext context;
             context.cache_manager = cache_manager;
-            auto failed = makeStream(context, params.model_config_, 101, {1, 2}, 0);
-            auto healthy = makeStream(context, params.model_config_, 202, {3, 4}, 0);
+            auto failed           = makeStream(context, params.model_config_, 101, {1, 2}, 0);
+            auto healthy          = makeStream(context, params.model_config_, 202, {3, 4}, 0);
             for (const auto& stream : {failed, healthy}) {
                 stream->generate_status_->status = StreamState::WAITING;
                 ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -1816,10 +1846,10 @@ TEST_F(PPBatchStreamProcessorTest, RequestErrorsAndCancellationReachSchedulerAnd
             EXPECT_TRUE(healthy->isPPInflight());
 
             PPExecutionResult result;
-            result.request_ids = torch::tensor({101, 202}, torch::kInt64);
+            result.request_ids   = torch::tensor({101, 202}, torch::kInt64);
             result.new_token_ids = intTensor({10, 11}).reshape({2, 1});
             if (mtp_enabled) {
-                result.accept_len = intTensor({1, 1});
+                result.accept_len        = intTensor({1, 1});
                 result.propose_token_ids = intTensor({20, 21, 22, 30, 31, 32}).reshape({2, 3});
             }
             result.prompt_logits.resize(2);
@@ -1829,20 +1859,21 @@ TEST_F(PPBatchStreamProcessorTest, RequestErrorsAndCancellationReachSchedulerAnd
                 result.request_errors[0] = expected_error;
             } else {
                 expected_error = ErrorInfo(stage == "cancel" ? ErrorCode::CANCELLED : ErrorCode::GENERATE_TIMEOUT,
-                                          "request ended while in flight");
+                                           "request ended while in flight");
                 failed->reportError(expected_error.code(), expected_error.ToString());
                 result.request_errors[0] = ErrorInfo(ErrorCode::UNKNOWN_ERROR, "late processor error");
             }
             // A pending cancellation/timeout must not release KV before the result returns.
             const auto allocated_free_blocks = cache_manager->freeBlocksNum();
-            auto in_flight = scheduler.schedule();
+            auto       in_flight             = scheduler.schedule();
             ASSERT_TRUE(in_flight.ok());
             EXPECT_TRUE(in_flight->streams.empty());
             EXPECT_TRUE(in_flight->finished_request_ids.empty());
             EXPECT_EQ(cache_manager->freeBlocksNum(), allocated_free_blocks);
 
             result = pp_serialization::deserializeExecutionResult(pp_serialization::serializeExecutionResult(result));
-            ASSERT_TRUE(head.batch_stream_processor_->dispatchExecutionResult(StreamGroups(scheduled->streams), result).ok());
+            ASSERT_TRUE(
+                head.batch_stream_processor_->dispatchExecutionResult(StreamGroups(scheduled->streams), result).ok());
             EXPECT_FALSE(failed->isPPInflight());
             EXPECT_FALSE(healthy->isPPInflight());
             EXPECT_EQ(failed->statusInfo().code(), expected_error.code());
@@ -1864,12 +1895,12 @@ TEST_F(PPBatchStreamProcessorTest, RequestErrorsAndCancellationReachSchedulerAnd
 
             tail.sampling_states_[101] = SamplingState{};
             tail.sampling_states_[202] = SamplingState{};
-            auto cleanup = head.buildPlan(StreamGroups{}, retired->finished_request_ids);
+            auto cleanup               = head.buildPlan(StreamGroups{}, retired->finished_request_ids);
             ASSERT_TRUE(cleanup.ok());
-            const auto payload = pp_serialization::serializePlan(cleanup.value(), false);
-            auto transport = std::make_unique<InMemoryPPTransport>();
+            const auto payload          = pp_serialization::serializePlan(cleanup.value(), false);
+            auto       transport        = std::make_unique<InMemoryPPTransport>();
             transport->received_tensors = {torch::tensor({payload.numel()}, torch::kInt64), payload};
-            tail.transport_ = std::move(transport);
+            tail.transport_             = std::move(transport);
             ASSERT_TRUE(tail.process(ScheduleOutput{}).ok());
             EXPECT_EQ(tail.sampling_states_.count(101), 0);
             EXPECT_EQ(tail.sampling_states_.count(202), 1);
@@ -1885,30 +1916,30 @@ TEST_F(PPBatchStreamProcessorTest, RequestErrorsAndCancellationReachSchedulerAnd
 
 TEST_F(PPBatchStreamProcessorTest, EosAndStopKeepSharedStreamTerminationSemantics) {
     for (bool use_stop_words : {false, true}) {
-        auto params = makeMtpParams(3);
+        auto params                                      = makeMtpParams(3);
         params.model_config_.special_tokens.eos_token_id = 10;
-        PPExecutor executor(params, nullptr, true);
+        PPExecutor      executor(params, nullptr, true);
         ResourceContext context;
-        context.cache_manager = std::make_shared<KVCacheManager>(
-            test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+        context.cache_manager =
+            std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
         ASSERT_TRUE(context.cache_manager->init());
-        auto pp = makeStream(context, params.model_config_, 101, {1, 2}, 0);
-        auto reference = makeStream(context, params.model_config_, 202, {1, 2}, 0);
+        auto                         pp        = makeStream(context, params.model_config_, 101, {1, 2}, 0);
+        auto                         reference = makeStream(context, params.model_config_, 202, {1, 2}, 0);
         std::list<GenerateStreamPtr> streams_to_prepare{pp, reference};
         executor.prepareStreams(streams_to_prepare);
         for (const auto& stream : {pp, reference}) {
             stream->fakeInitKVBlock(4);
             stream->setIsContextStream(false);
             stream->generateConfig()->max_new_tokens = 16;
-            stream->generateConfig()->ignore_eos = use_stop_words;
+            stream->generateConfig()->ignore_eos     = use_stop_words;
             if (use_stop_words) {
                 stream->generateConfig()->stop_words_list = {{9, 10}};
             }
         }
         PPExecutionResult result;
-        result.request_ids = torch::tensor({101}, torch::kInt64);
-        result.new_token_ids = intTensor({9, 10, 11, 12}).reshape({1, 4});
-        result.accept_len = intTensor({4});
+        result.request_ids       = torch::tensor({101}, torch::kInt64);
+        result.new_token_ids     = intTensor({9, 10, 11, 12}).reshape({1, 4});
+        result.accept_len        = intTensor({4});
         result.propose_token_ids = intTensor({20, 21, 22}).reshape({1, 3});
         result.request_errors.resize(1);
         result.prompt_logits.resize(1);
@@ -2018,21 +2049,21 @@ TEST_F(PPBatchStreamProcessorTest, FakeExecutionResultIsReceivedBeforeDiscarding
 }
 
 TEST_F(PPBatchStreamProcessorTest, MtpPreparePreservesPreparedProposalsAndExpandsFakeTokens) {
-    auto params = makeMtpParams(3);
-    PPExecutor executor(params, nullptr, true);
+    auto            params = makeMtpParams(3);
+    PPExecutor      executor(params, nullptr, true);
     ResourceContext resource_context;
-    auto stream = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
+    auto            stream = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
     stream->setIsContextStream(false);
-    auto sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
-    sp_output_buffer->propose_step = 3;
-    sp_output_buffer->tokens = intTensor({10, 11, 12, 13}).reshape({1, 4});
+    auto sp_output_buffer           = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_output_buffer->propose_step  = 3;
+    sp_output_buffer->tokens        = intTensor({10, 11, 12, 13}).reshape({1, 4});
     sp_output_buffer->hidden_states = torch::ones({1, 2});
     stream->setSPOutputBuffer(sp_output_buffer);
 
     auto fake_stream = makeStream(resource_context, params.model_config_, 102, {1, 2}, 0);
     fake_stream->setIsContextStream(false);
     fake_stream->setIsFakeStream(true);
-    auto fake_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+    auto fake_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
     fake_output_buffer->tokens = torch::zeros({1, 2}, torch::kInt32);
     fake_stream->setSPOutputBuffer(fake_output_buffer);
 
@@ -2048,16 +2079,16 @@ TEST_F(PPBatchStreamProcessorTest, MtpPreparePreservesPreparedProposalsAndExpand
 }
 
 TEST_F(PPBatchStreamProcessorTest, MtpPrepareRejectsMissingOrIncompleteDecodeProposals) {
-    auto params = makeMtpParams(3);
-    PPExecutor executor(params, nullptr, true);
+    auto            params = makeMtpParams(3);
+    PPExecutor      executor(params, nullptr, true);
     ResourceContext resource_context;
-    auto stream = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
+    auto            stream = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
     stream->setIsContextStream(false);
     std::list<GenerateStreamPtr> streams_to_prepare{stream};
     EXPECT_THROW(executor.prepareStreams(streams_to_prepare), std::runtime_error);
     EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
 
-    auto sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+    auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
     sp_output_buffer->tokens = intTensor({10, 11}).reshape({1, 2});
     stream->setSPOutputBuffer(sp_output_buffer);
     EXPECT_THROW(executor.prepareStreams(streams_to_prepare), std::runtime_error);
@@ -2065,10 +2096,10 @@ TEST_F(PPBatchStreamProcessorTest, MtpPrepareRejectsMissingOrIncompleteDecodePro
 }
 
 TEST_F(PPBatchStreamProcessorTest, MtpPrefillFinishesAtReservedMaxLength) {
-    auto params = makeMtpParams(3);
-    PPExecutor executor(params, nullptr, true);
+    auto            params = makeMtpParams(3);
+    PPExecutor      executor(params, nullptr, true);
     ResourceContext resource_context;
-    const int input_length = params.model_config_.max_seq_len - 4;
+    const int       input_length = params.model_config_.max_seq_len - 4;
     auto stream = makeStream(resource_context, params.model_config_, 101, std::vector<int32_t>(input_length, 1), 0);
     stream->generateConfig()->max_new_tokens = 32;
     stream->setReserveStep(4);
@@ -2078,9 +2109,9 @@ TEST_F(PPBatchStreamProcessorTest, MtpPrefillFinishesAtReservedMaxLength) {
     EXPECT_EQ(stream->maxTokenNum(), input_length + 1);
 
     PPExecutionResult result;
-    result.request_ids = torch::tensor({101}, torch::kInt64);
-    result.new_token_ids = intTensor({10}).reshape({1, 1});
-    result.accept_len = intTensor({1});
+    result.request_ids       = torch::tensor({101}, torch::kInt64);
+    result.new_token_ids     = intTensor({10}).reshape({1, 1});
+    result.accept_len        = intTensor({1});
     result.propose_token_ids = intTensor({11, 12, 13}).reshape({1, 3});
     result.prompt_logits.resize(1);
     result.request_errors.resize(1);
@@ -2097,10 +2128,10 @@ TEST_F(PPBatchStreamProcessorTest, MtpPrefillFinishesAtReservedMaxLength) {
 TEST_F(PPBatchStreamProcessorTest, MtpCancelledOrFinishedUpdatePreservesProposalBuffer) {
     for (bool cancelled : {false, true}) {
         SCOPED_TRACE(cancelled);
-        auto params = makeMtpParams(3);
-        PPExecutor executor(params, nullptr, true);
-        ResourceContext resource_context;
-        auto stream = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
+        auto                         params = makeMtpParams(3);
+        PPExecutor                   executor(params, nullptr, true);
+        ResourceContext              resource_context;
+        auto                         stream = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
         std::list<GenerateStreamPtr> streams_to_prepare{stream};
         executor.prepareStreams(streams_to_prepare);
         const auto sp_output_buffer = stream->getSPOutputBuffer();
@@ -2108,9 +2139,9 @@ TEST_F(PPBatchStreamProcessorTest, MtpCancelledOrFinishedUpdatePreservesProposal
         stream->setProposeToken({10, 11, 12, 13});
 
         PPExecutionResult result;
-        result.request_ids = torch::tensor({101}, torch::kInt64);
-        result.new_token_ids = intTensor({20}).reshape({1, 1});
-        result.accept_len = intTensor({1});
+        result.request_ids       = torch::tensor({101}, torch::kInt64);
+        result.new_token_ids     = intTensor({20}).reshape({1, 1});
+        result.accept_len        = intTensor({1});
         result.propose_token_ids = intTensor({21, 22, 23}).reshape({1, 3});
         result.prompt_logits.resize(1);
         result.request_errors.resize(1);
@@ -2132,46 +2163,51 @@ TEST_F(PPBatchStreamProcessorTest, MtpCancelledOrFinishedUpdatePreservesProposal
 }
 
 TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
-    for (const auto& [count, type] : std::vector<std::pair<int32_t, SpeculativeType>>{
-             {1, SP_TYPE_MTP}, {3, SP_TYPE_MTP}, {4, SP_TYPE_MTP},
-             {1, SP_TYPE_EAGLE}, {3, SP_TYPE_EAGLE}, {4, SP_TYPE_EAGLE},
-             {1, SP_TYPE_DSPARK}, {3, SP_TYPE_DSPARK}, {4, SP_TYPE_DSPARK}}) {
-        for (const auto& [pd_bootstrap, first_accept_len] : std::vector<std::pair<bool, int32_t>>{
-                 {false, 1}, {true, 1}, {true, 2}}) {
+    for (const auto& [count, type] : std::vector<std::pair<int32_t, SpeculativeType>>{{1, SP_TYPE_MTP},
+                                                                                      {3, SP_TYPE_MTP},
+                                                                                      {4, SP_TYPE_MTP},
+                                                                                      {1, SP_TYPE_EAGLE},
+                                                                                      {3, SP_TYPE_EAGLE},
+                                                                                      {4, SP_TYPE_EAGLE},
+                                                                                      {1, SP_TYPE_DSPARK},
+                                                                                      {3, SP_TYPE_DSPARK},
+                                                                                      {4, SP_TYPE_DSPARK}}) {
+        for (const auto& [pd_bootstrap, first_accept_len] :
+             std::vector<std::pair<bool, int32_t>>{{false, 1}, {true, 1}, {true, 2}}) {
             /** DSpARK has no incoming d1 to accept. */
             if (type == SP_TYPE_DSPARK && first_accept_len == 2) {
                 continue;
             }
-            SCOPED_TRACE("K=" + std::to_string(count) + ", type=" + std::to_string(type)
-                         + ", PD=" + std::to_string(pd_bootstrap)
-                         + ", first_accept_len=" + std::to_string(first_accept_len));
-            auto params = makeMtpParams(count);
-            params.sp_config.type = type;
-            params.sp_config.sp_dspark_mask_token_id = 63;
+            SCOPED_TRACE("K=" + std::to_string(count) + ", type=" + std::to_string(type) + ", PD="
+                         + std::to_string(pd_bootstrap) + ", first_accept_len=" + std::to_string(first_accept_len));
+            auto params                                      = makeMtpParams(count);
+            params.sp_config.type                            = type;
+            params.sp_config.sp_dspark_mask_token_id         = 63;
             params.model_config_.special_tokens.eos_token_id = -1;
-            params.pd_sep_config.role_type = pd_bootstrap ? RoleType::DECODE : RoleType::PDFUSION;
-            auto cache = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+            params.pd_sep_config.role_type                   = pd_bootstrap ? RoleType::DECODE : RoleType::PDFUSION;
+            auto cache =
+                std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
             ASSERT_TRUE(cache->init());
             PPExecutor head(params, cache, true);
-            auto tail_params = params;
-            tail_params.parallelism_config.pp_rank = 1;
+            auto       tail_params                    = params;
+            tail_params.parallelism_config.pp_rank    = 1;
             tail_params.parallelism_config.world_rank = 1;
             tail_params.parallelism_config.world_size = 2;
-            auto propose_params = makeMtpProposeParams(tail_params);
+            auto       propose_params                 = makeMtpProposeParams(tail_params);
             PPExecutor tail(tail_params, nullptr, false, MlaOpsType::AUTO, nullptr, nullptr, propose_params.get());
-            auto target = std::make_unique<RecordingDraftModel>();
-            auto* target_model = target.get();
+            auto       target       = std::make_unique<RecordingDraftModel>();
+            auto*      target_model = target.get();
             tail.setModel(std::move(target));
             std::vector<GptModelInputs>* draft_inputs = nullptr;
-            RecordingDSparkModel* dspark_model = nullptr;
+            RecordingDSparkModel*        dspark_model = nullptr;
             if (type == SP_TYPE_DSPARK) {
-                auto draft = std::make_unique<RecordingDSparkModel>(count, 10);
-                dspark_model = draft.get();
-                draft_inputs = &draft->inputs;
+                auto draft        = std::make_unique<RecordingDSparkModel>(count, 10);
+                dspark_model      = draft.get();
+                draft_inputs      = &draft->inputs;
                 tail.draft_model_ = std::move(draft);
             } else {
-                auto draft = std::make_unique<RecordingDraftModel>();
-                draft_inputs = &draft->inputs;
+                auto draft        = std::make_unique<RecordingDraftModel>();
+                draft_inputs      = &draft->inputs;
                 tail.draft_model_ = std::move(draft);
             }
             const int32_t vocab_offset = type == SP_TYPE_EAGLE ? 17 : 0;
@@ -2179,20 +2215,20 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                 const auto d2t_map =
                     (torch::arange(64, torch::TensorOptions(torch::kLong).device(torch::kCUDA)) + vocab_offset)
                         .remainder(64);
-                tail.fast_topk_sampler_ = std::make_unique<speculative::FastTopKSampler>(d2t_map);
+                tail.fast_topk_sampler_   = std::make_unique<speculative::FastTopKSampler>(d2t_map);
                 tail.speculative_sampler_ = std::make_unique<speculative::SpeculativeSampler>(d2t_map, count);
             }
-            auto transport = std::make_unique<InMemoryPPTransport>();
-            auto* wire = transport.get();
+            auto  transport = std::make_unique<InMemoryPPTransport>();
+            auto* wire      = transport.get();
             tail.transport_ = std::move(transport);
             ResourceContext resources;
             resources.cache_manager = cache;
-            resources.role_type = params.pd_sep_config.role_type;
+            resources.role_type     = params.pd_sep_config.role_type;
             std::vector<std::vector<int32_t>> history{{1, 2}, {3, 4, 5}};
-            std::vector<GenerateStreamPtr> streams;
+            std::vector<GenerateStreamPtr>    streams;
             for (int row = 0; row < 2; ++row) {
                 auto stream = makeStream(resources, params.model_config_, 101 + row, history[row], 0);
-                stream->generateConfig()->do_sample = false;
+                stream->generateConfig()->do_sample      = false;
                 stream->generateConfig()->max_new_tokens = 20;
                 stream->fakeInitKVBlock(4);
                 streams.push_back(stream);
@@ -2225,7 +2261,7 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                     streams[row]->setContainProposeToken(true);
                 }
                 const auto steady_plan = head.batch_stream_processor_->gatherSamplingPlan(StreamGroups({streams[1]}));
-                auto init_result = makeInitializedResult(steady_plan);
+                auto       init_result = makeInitializedResult(steady_plan);
                 tail.batch_stream_processor_->initSamplingStates(steady_plan, tail.sampling_states_, init_result);
                 ASSERT_FALSE(init_result.request_errors[0].hasError());
                 EXPECT_EQ(tail.sampling_states_.count(101), 0);
@@ -2257,7 +2293,8 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                         target_model->next_tokens.push_back(committed[row][0]);
                     } else {
                         const auto previous = streams[row]->getProposeToken();
-                        const auto verify_tokens = plan.model_input.combo_tokens.narrow(0, row * (count + 1), count + 1);
+                        const auto verify_tokens =
+                            plan.model_input.combo_tokens.narrow(0, row * (count + 1), count + 1);
                         EXPECT_EQ(tensorToVector<int32_t>(verify_tokens), previous);
                         EXPECT_EQ(plan.model_input.prefix_lengths[row].item<int32_t>(), history[row].size() - 1);
                         EXPECT_EQ(plan.model_input.input_lengths[row].item<int32_t>(), count + 1);
@@ -2292,12 +2329,14 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                     EXPECT_TRUE(torch::equal(commit.combo_tokens, plan.model_input.combo_tokens));
                     EXPECT_TRUE(torch::equal(commit.input_lengths, plan.model_input.input_lengths));
                     EXPECT_TRUE(torch::equal(commit.prefix_lengths, plan.model_input.prefix_lengths));
-                    EXPECT_TRUE(torch::equal(commit.last_hidden_states,
-                                             target_model->getMtpTargetHiddenStates(plan.model_input.combo_tokens.numel())));
+                    EXPECT_TRUE(
+                        torch::equal(commit.last_hidden_states,
+                                     target_model->getMtpTargetHiddenStates(plan.model_input.combo_tokens.numel())));
                     const auto& propose = draft_inputs->at(draft_before + 1);
                     EXPECT_EQ(propose.dspark_call_phase, DSparkCallPhase::PROPOSE);
-                    const auto expected_prefix = plan.model_input.prefix_lengths.cpu()
-                                                 + (round == 0 ? plan.model_input.input_lengths.cpu() : intTensor(lengths));
+                    const auto expected_prefix =
+                        plan.model_input.prefix_lengths.cpu()
+                        + (round == 0 ? plan.model_input.input_lengths.cpu() : intTensor(lengths));
                     EXPECT_TRUE(torch::equal(propose.prefix_lengths.cpu(), expected_prefix));
                     auto expected_query = torch::full({2, count}, 63, torch::kInt32);
                     for (int row = 0; row < 2; ++row) {
@@ -2305,8 +2344,8 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                     }
                     EXPECT_TRUE(torch::equal(propose.combo_tokens.cpu(), expected_query.flatten()));
                 } else if (round != 0) {
-                    const auto& update = draft_inputs->at(draft_before);
-                    auto expected_tokens = committed[0];
+                    const auto& update          = draft_inputs->at(draft_before);
+                    auto        expected_tokens = committed[0];
                     expected_tokens.insert(expected_tokens.end(), committed[1].begin(), committed[1].end());
                     EXPECT_EQ(tensorToVector<int32_t>(update.combo_tokens), expected_tokens);
                     EXPECT_EQ(tensorToVector<int32_t>(update.input_lengths), lengths);
@@ -2316,18 +2355,19 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                             hidden_rows.push_back(row * (count + 1) + offset);
                         }
                     }
-                    const auto expected_hidden =
-                        target_model->hidden_buffer.index_select(0, intTensor(hidden_rows).to(torch::kCUDA, torch::kLong));
+                    const auto expected_hidden = target_model->hidden_buffer.index_select(
+                        0, intTensor(hidden_rows).to(torch::kCUDA, torch::kLong));
                     EXPECT_TRUE(torch::equal(update.last_hidden_states, expected_hidden));
                     for (int32_t step = 1; step < count; ++step) {
-                        EXPECT_TRUE(torch::equal(
-                            draft_inputs->at(draft_before + step).sequence_lengths.cpu(),
-                            plan.model_input.prefix_lengths.cpu() + intTensor(lengths) + step - 1));
+                        EXPECT_TRUE(
+                            torch::equal(draft_inputs->at(draft_before + step).sequence_lengths.cpu(),
+                                         plan.model_input.prefix_lengths.cpu() + intTensor(lengths) + step - 1));
                     }
                 }
                 for (int row = 0; row < 2; ++row) {
                     ASSERT_FALSE(result.request_errors[row].hasError()) << result.request_errors[row].ToString();
-                    EXPECT_EQ(tensorToVector<int32_t>(result.new_token_ids[row].narrow(0, 0, lengths[row])), committed[row]);
+                    EXPECT_EQ(tensorToVector<int32_t>(result.new_token_ids[row].narrow(0, 0, lengths[row])),
+                              committed[row]);
                     streams[row]->setPPInflight();
                 }
                 ASSERT_TRUE(head.batch_stream_processor_->dispatchExecutionResult(StreamGroups(batch), result).ok());
@@ -2337,8 +2377,9 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                     EXPECT_FALSE(streams[row]->isPPInflight());
                     std::vector<int32_t> expected_proposals{committed[row].back()};
                     for (int32_t step = 0; step < count; ++step) {
-                        expected_proposals.push_back(dspark_model ? dspark_model->first_token_ + row * count + step :
-                                                                    10 + 2 * (draft_before + step) + row + vocab_offset);
+                        expected_proposals.push_back(dspark_model ?
+                                                         dspark_model->first_token_ + row * count + step :
+                                                         10 + 2 * (draft_before + step) + row + vocab_offset);
                     }
                     EXPECT_EQ(streams[row]->getProposeToken(), expected_proposals);
                 }
@@ -2373,7 +2414,7 @@ TEST_F(PPBatchStreamProcessorTest, NonPositiveSpeculativeWidthIsRejectedAtStartu
 }
 
 TEST_F(PPBatchStreamProcessorTest, MtpPlanAcceptsDefaultSingleSequenceAndRejectsBeamSearch) {
-    ResourceContext resource_context;
+    ResourceContext  resource_context;
     EngineInitParams params;
     params.model_id                                 = 0;
     params.model_config_                            = makeModelConfig();
@@ -2400,7 +2441,7 @@ TEST_F(PPBatchStreamProcessorTest, MtpPlanAcceptsDefaultSingleSequenceAndRejects
         EXPECT_EQ(plan->sampling_plan.token_ids.size(0), 1);
     }
 
-    auto beam_stream = makeStream(resource_context, params.model_config_, 103, {1, 2}, 0);
+    auto beam_stream                         = makeStream(resource_context, params.model_config_, 103, {1, 2}, 0);
     beam_stream->generateConfig()->num_beams = 2;
     EXPECT_THROW((void)executor.buildPlan(StreamGroups({beam_stream}), {}), std::runtime_error);
 }
@@ -2415,7 +2456,7 @@ TEST_F(PPBatchStreamProcessorTest, DecodePhaseDoesNotDependOnSpeculativeMode) {
 
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
-    auto stream = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
+    auto stream                    = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
     stream->fakeInitKVBlock(4);
     stream->setIsContextStream(false);
 
@@ -2431,17 +2472,16 @@ TEST_F(PPBatchStreamProcessorTest, PlanSerializationPreservesCacheBlocksToZero) 
 
     const auto round_trip = pp_serialization::deserializePlan(pp_serialization::serializePlan(plan, false));
 
-    EXPECT_TRUE(torch::equal(round_trip.model_input.kv_cache_blocks_to_zero,
-                             plan.model_input.kv_cache_blocks_to_zero));
+    EXPECT_TRUE(torch::equal(round_trip.model_input.kv_cache_blocks_to_zero, plan.model_input.kv_cache_blocks_to_zero));
 }
 
 TEST_F(PPBatchStreamProcessorTest, MtpDispatchCommitsAcceptedLinearState) {
     struct Case {
-        int input_len;
-        int accept_len;
-        int max_new_tokens;
+        int                  input_len;
+        int                  accept_len;
+        int                  max_new_tokens;
         std::vector<int32_t> expected_linear_blocks;
-        int draft_count = 1;
+        int                  draft_count = 1;
     };
     const std::vector<Case> cases = {
         {2, 2, 8, {2, 1, 3, 4}},
@@ -2455,16 +2495,16 @@ TEST_F(PPBatchStreamProcessorTest, MtpDispatchCommitsAcceptedLinearState) {
     };
     for (const auto& c : cases) {
         SCOPED_TRACE(::testing::Message() << "input_len=" << c.input_len << " accept_len=" << c.accept_len
-                                         << " max_new_tokens=" << c.max_new_tokens);
-        auto cache_config = test::makeSimpleHybridMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16, 1);
+                                          << " max_new_tokens=" << c.max_new_tokens);
+        auto            cache_config = test::makeSimpleHybridMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16, 1);
         ResourceContext resource_context;
         resource_context.cache_manager = std::make_shared<KVCacheManager>(cache_config);
-        const auto model_config = makeModelConfig();
-        auto stream = makeStream(resource_context, model_config, 101, std::vector<int32_t>(c.input_len, 1), 0);
+        const auto model_config        = makeModelConfig();
+        auto       stream = makeStream(resource_context, model_config, 101, std::vector<int32_t>(c.input_len, 1), 0);
         stream->generateConfig()->max_new_tokens = c.max_new_tokens;
-        auto sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
-        sp_output_buffer->propose_step = c.draft_count;
-        sp_output_buffer->tokens = torch::zeros({1, c.draft_count + 1}, torch::kInt32);
+        auto sp_output_buffer                    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_output_buffer->propose_step           = c.draft_count;
+        sp_output_buffer->tokens                 = torch::zeros({1, c.draft_count + 1}, torch::kInt32);
         stream->setSPOutputBuffer(sp_output_buffer);
         stream->setIsContextStream(false);
         stream->fakeInitKVBlock(4);
@@ -2475,9 +2515,9 @@ TEST_F(PPBatchStreamProcessorTest, MtpDispatchCommitsAcceptedLinearState) {
         PPBatchStreamProcessor processor(
             model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, true, SP_TYPE_MTP);
         PPExecutionResult result;
-        result.request_ids    = torch::tensor({101}, torch::kInt64);
-        result.new_token_ids  = torch::arange(10, 11 + c.draft_count, torch::kInt32).reshape({1, c.draft_count + 1});
-        result.accept_len     = intTensor({c.accept_len});
+        result.request_ids       = torch::tensor({101}, torch::kInt64);
+        result.new_token_ids     = torch::arange(10, 11 + c.draft_count, torch::kInt32).reshape({1, c.draft_count + 1});
+        result.accept_len        = intTensor({c.accept_len});
         result.propose_token_ids = torch::arange(20, 20 + c.draft_count, torch::kInt32).reshape({1, c.draft_count});
         result.prompt_logits.resize(1);
         result.request_errors.resize(1);
@@ -2549,7 +2589,7 @@ TEST_F(PPBatchStreamProcessorTest, MixedReturnSequencesPlanRoundTripAndDispatch)
     SamplerOutput   sampler_output;
     sampler_output.token_ids = torch::tensor({10, 11, 12}, torch::kInt32).reshape({3, 1});
     sampler_output.success   = torch::tensor({true, true, true}, torch::kBool);
-    auto result = makeInitializedResult(plan.sampling_plan);
+    auto result              = makeInitializedResult(plan.sampling_plan);
     processor.fillExecutionResult(plan, model_output, sampler_output, result);
     EXPECT_EQ(result.request_errors.size(), 2);
 
@@ -2613,7 +2653,7 @@ TEST_F(PPBatchStreamProcessorTest, PromptLogitsPlanResultRoundTripAndDispatch) {
     SamplerOutput sampler_output;
     sampler_output.token_ids = torch::tensor({10, 11}, torch::kInt32).reshape({2, 1});
     sampler_output.success   = torch::tensor({true, true}, torch::kBool);
-    auto result = makeInitializedResult(round_trip_plan.sampling_plan);
+    auto result              = makeInitializedResult(round_trip_plan.sampling_plan);
     processor.fillExecutionResult(round_trip_plan, model_output, sampler_output, result);
 
     auto round_trip_result =

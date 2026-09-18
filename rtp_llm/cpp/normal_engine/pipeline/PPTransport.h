@@ -1,13 +1,22 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
+#include <string>
 
 #include <torch/torch.h>
 
 namespace rtp_llm {
 
 class P2PWork;
+
+/** Thrown by the PP communication watchdog when a peer stops delivering data after shutdown began. */
+class PPCommWatchdogTimeout: public std::runtime_error {
+public:
+    explicit PPCommWatchdogTimeout(const std::string& message): std::runtime_error(message) {}
+};
 
 class PPCommTicket {
 public:
@@ -22,6 +31,12 @@ public:
      * P2PWork is released after wait() returns; subsequent calls are no-ops.
      */
     void wait();
+
+    /**
+     * Bounded wait; returns false if the timeout expires before completion. The work is
+     * kept for a later retry and only released once it completes.
+     */
+    bool wait(std::chrono::milliseconds timeout);
 
 private:
     std::unique_ptr<P2PWork> work_;
