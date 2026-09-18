@@ -191,6 +191,12 @@ public final class RouteAdmission implements AutoCloseable {
     private long decodePlacementVersion() { return selection.decodePlacementVersion(); }
     public DecodeBinding decodeBinding() { return decodeBinding; }
 
+    /** Attach client-executed Decode cancellation instructions before publication. */
+    public void setDecodePreemptRequestIds(List<String> requestIds) {
+        requireProvisional();
+        decodeStatus().setPreemptRequestIds(List.copyOf(requestIds));
+    }
+
     boolean reserveDecode() {
         requireProvisional();
         if (decodeEndpoint() == null || decodeBinding.reservation() != null) { return true; }

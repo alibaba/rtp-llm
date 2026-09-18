@@ -314,6 +314,29 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    /** Atomically reserve an instruction-bearing route without issuing Cancel RPCs. */
+    public PreemptionBeginResult beginReturnedPreemption(
+            long attemptToken,
+            List<ReservationHandle> victims,
+            long incomingRequestId,
+            long hardKv,
+            long expectedKv,
+            int priority,
+            AdmissionCapacity capacity) {
+        if (attemptToken <= 0 || victims == null || victims.isEmpty()) {
+            throw new IllegalArgumentException("attempt token and victims are required");
+        }
+        GenerationPin pin = tryPinGeneration();
+        if (pin == null) {
+            return PreemptionBeginResult.ENDPOINT_RETIRED;
+        }
+        try (pin) {
+            return state.beginReturnedPreemption(
+                    attemptToken, victims, incomingRequestId,
+                    hardKv, expectedKv, priority, capacity);
+        }
+    }
+
     public boolean updatePreemption(long attemptToken, PreemptionUpdate update) {
         boolean changed = state.updatePreemption(attemptToken, update);
         if (changed && update.releasesCapacity()) { publishCapacityRelease(); }

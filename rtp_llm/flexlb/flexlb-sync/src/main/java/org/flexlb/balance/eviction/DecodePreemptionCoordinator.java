@@ -45,7 +45,7 @@ public final class DecodePreemptionCoordinator {
 
     record PreemptionCommand(
             DecodeEndpoint endpoint,
-            String incomingRequestId,
+            long incomingRequestId,
             long incomingKvTokens,
             long incomingExpectedKvTokens,
             int incomingPriority,
@@ -60,19 +60,18 @@ public final class DecodePreemptionCoordinator {
                 throw new IllegalArgumentException("endpoint and victims are required");
             }
             victims = List.copyOf(victims);
-            if (incomingRequestId == null || incomingRequestId.isBlank()) {
+            if (incomingRequestId <= 0L) {
                 throw new IllegalArgumentException(
-                        "incoming request id must not be blank");
+                        "incoming request id must be positive");
             }
             if (capacity == null) {
                 throw new IllegalArgumentException("capacity policy is required");
             }
             Set<String> victimIds = new LinkedHashSet<>();
             for (DecodeRequestView victim : victims) {
-                if (victim.requestId() == null || victim.requestId().isBlank()
-                        || victim.reservationToken() <= 0L) {
+                if (victim.requestId() <= 0L || victim.reservationToken() <= 0L) {
                     throw new IllegalArgumentException(
-                            "victim requestId must not be blank and reservation token must be positive");
+                            "victim requestId and reservation token must be positive");
                 }
                 if (victim.phase() == null
                         || !victim.phase().requiresEngineCancel()) {
@@ -100,6 +99,29 @@ public final class DecodePreemptionCoordinator {
         this.cancelChannel = Objects.requireNonNull(
                 cancelChannel, "cancelChannel");
         this.requests = Objects.requireNonNull(requests, "requests");
+    }
+
+    CompletableFuture<PreemptionResult> prepareReturnedPreemption(
+            PreemptionCommand command) {
+        long token = nextToken();
+        long generation = command.endpoint().getStatus().getGenerationId();
+        List<DecodeEndpoint.ReservationHandle> victims = command.victims().stream()
+                .map(victim -> new DecodeEndpoint.ReservationHandle(
+                        generation, victim.requestId(), victim.reservationToken()))
+                .toList();
+        DecodeEndpoint.PreemptionBeginResult begin = command.endpoint()
+                .beginReturnedPreemption(
+                        token,
+                        victims,
+                        command.incomingRequestId(),
+                        command.incomingKvTokens(),
+                        command.incomingExpectedKvTokens(),
+                        command.incomingPriority(),
+                        command.capacity());
+        return CompletableFuture.completedFuture(new PreemptionResult(
+                begin == DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                begin == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED,
+                "return_" + begin.name().toLowerCase()));
     }
 
     CompletableFuture<PreemptionResult> preempt(
