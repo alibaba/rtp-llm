@@ -102,12 +102,90 @@ def _test_config():
 
 
 class Glm53FlashConfigTest(unittest.TestCase):
-    def test_fp4_moe_is_rejected_for_fp8_checkpoint(self):
-        loader = object.__new__(Glm53FlashWeight)
-        for strategy in ("mega_moe", "mega_moe_se", "mega_moe_fused"):
-            with mock.patch.dict(os.environ, MOE_STRATEGY=strategy):
-                with self.assertRaisesRegex(ValueError, "publishes FP8 experts"):
-                    loader._get_weight_info()
+    def test_explicit_fp4_moe_selects_online_or_offline_loader(self):
+        from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+        from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig
+        from rtp_llm.model_loader.model_weight_info import (
+            ModelWeightInfo,
+            _apply_mega_moe_fp4_wrappers,
+        )
+        from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
+            OfflineMegaMoeFp4MoeWeight,
+        )
+        from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+            OnlineMegaMoeFp4FromFp8Weight,
+        )
+        from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
+        from rtp_llm.utils.model_weight import stack_
+
+        for strategy in ("mega_moe", "mega_moe_se", "mega_moe_fused", "mega_moe_fp8"):
+            for offline in (False, True):
+                if offline and strategy == "mega_moe_fp8":
+                    continue
+                with self.subTest(strategy=strategy, offline=offline):
+                    raw = MoeAtomicWeight(
+                        W.moe_w2,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.mlp.experts.{expert_id}.down_proj.weight",
+                                identity,
+                            )
+                        ],
+                        stack_,
+                        config=MoeConfig(expert_num=2),
+                    )
+                    quant = Fp8BlockWiseQuantConfig(is_quanted=True)
+                    wrapped = raw.create(raw, quant)
+                    self.assertIsInstance(wrapped, PerBlockFp8Weight)
+                    info = ModelWeightInfo([], [[wrapped]])
+                    with tempfile.TemporaryDirectory() as path:
+                        with open(os.path.join(path, "config.json"), "w") as out:
+                            json.dump(
+                                {
+                                    "quantization_config": {
+                                        "expert_dtype": "fp4" if offline else "fp8",
+                                    }
+                                },
+                                out,
+                            )
+                        database = SimpleNamespace(
+                            path=path, get_pretrain_tensor_names=lambda: []
+                        )
+                        loader = object.__new__(Glm53FlashWeight)
+                        with (
+                            mock.patch.dict(os.environ, MOE_STRATEGY=strategy),
+                            mock.patch.object(
+                                DeepSeekV2Weight, "_get_weight_info", return_value=info
+                            ),
+                        ):
+                            info = loader._get_weight_info()
+                            info = _apply_mega_moe_fp4_wrappers(info, database, quant)
+                    weight = info.layer_weights[0][0]
+                    expected = (
+                        PerBlockFp8Weight
+                        if strategy == "mega_moe_fp8"
+                        else (
+                            OfflineMegaMoeFp4MoeWeight
+                            if offline
+                            else OnlineMegaMoeFp4FromFp8Weight
+                        )
+                    )
+                    self.assertIsInstance(weight, expected)
+                    self.assertEqual(
+                        weight.kernel.weights[0].name,
+                        "model.language_model.layers.{i}.mlp.experts.{expert_id}.down_proj.weight",
+                    )
+                    if offline:
+                        self.assertEqual(weight.kernel.data_type, torch.int8)
+                        self.assertTrue(
+                            weight.scale.weights[0].name.endswith(".weight_scale")
+                        )
+                    elif strategy != "mega_moe_fp8":
+                        self.assertTrue(
+                            weight.fp8_scale.weights[0].name.endswith(
+                                ".weight_scale_inv"
+                            )
+                        )
 
     def test_hybrid_block_map_selects_host_and_device_group_together(self):
         kernel_device = [torch.tensor([10]), torch.tensor([20])]

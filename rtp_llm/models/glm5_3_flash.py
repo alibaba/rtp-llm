@@ -543,16 +543,9 @@ class Glm53FlashWeight(DeepSeekV2Weight):
                 Glm53FlashWeight._prefix_checkpoint_names(sub_weight)
 
     def _get_weight_info(self) -> ModelWeightInfo:
-        if os.environ.get("MOE_STRATEGY") in (
-            "mega_moe",
-            "mega_moe_se",
-            "mega_moe_fused",
-        ):
-            raise ValueError(
-                "GLM-5.3-Flash publishes FP8 experts; FP4 MegaMoE strategies "
-                "requantize those weights. Use MOE_STRATEGY=mega_moe_fp8 and "
-                "--moe_strategy mega_moe_fp8."
-            )
+        # An explicit FP4 MegaMoE strategy is supported by the common loader:
+        # FP8 checkpoints are quantized at load time, while offline FP4
+        # checkpoints are detected and loaded without requantization.
         weight_info = super()._get_weight_info()
         for weight in weight_info.weights:
             self._prefix_checkpoint_names(weight)
