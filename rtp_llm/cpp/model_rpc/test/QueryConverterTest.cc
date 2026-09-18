@@ -3,6 +3,8 @@
 #include <optional>
 
 #define private public
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
@@ -256,6 +258,81 @@ TEST_F(QueryConverterTest, TimeoutErrorCodeMapsToGrpcDeadline) {
     EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::DEADLINE_EXCEEDED), grpc::StatusCode::DEADLINE_EXCEEDED);
     EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::WAIT_TO_RUN_TIMEOUT), grpc::StatusCode::DEADLINE_EXCEEDED);
     EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::KEEP_ALIVE_TIMEOUT), grpc::StatusCode::DEADLINE_EXCEEDED);
+}
+
+namespace {
+
+GenerateInputPB v41ImageRequest() {
+    GenerateInputPB request;
+    request.mutable_generate_config()->set_max_new_tokens(256);
+    auto* prepared = request.mutable_v41_inputs();
+    prepared->set_schema_version(1);
+    for (int32_t token : {7, 8, 9, 129264, 129264, 129264, 129264, 10, 11, 12, 13}) {
+        request.add_token_ids(token);
+    }
+    for (int32_t kind : {-1, -1, -1, 0, 1, 2, 3, -1, -1, -1, -1}) {
+        prepared->add_token_types(kind);
+        prepared->add_image_mask(kind != -1);
+    }
+    auto* image = prepared->add_images();
+    image->set_start(3);
+    image->set_n_vit_h(1);
+    image->set_n_vit_w(1);
+    image->set_content_sha256(std::string(64, 'a'));
+    image->set_processor_identity(std::string(64, 'b'));
+    for (int32_t kind : {0, 1, 2, 3}) {
+        image->add_types(kind);
+    }
+    QueryConverter::transTensorPB(image->mutable_patches(), torch::ones({1, 3, 14, 14}, torch::kBFloat16));
+    return request;
+}
+
+}  // namespace
+
+TEST_F(QueryConverterTest, CacheImageIdentityIsSeparateFromCanonicalModelTokens) {
+    auto first_wire  = v41ImageRequest();
+    auto second_wire = first_wire;
+    second_wire.mutable_v41_inputs()->mutable_images(0)->set_content_sha256(std::string(64, 'c'));
+    CompleteTokenIds first(1, 1, 64, 4), second(1, 1, 64, 4);
+    first.init(QueryConverter::transQuery(&first_wire));
+    second.init(QueryConverter::transQuery(&second_wire));
+    EXPECT_TRUE(torch::equal(first.completeTokenIds(), second.completeTokenIds()));
+    EXPECT_TRUE(first.imageCacheIdentity(0, 3).empty());
+    EXPECT_TRUE(first.imageCacheIdentity(7, 4).empty());
+    EXPECT_NE(first.imageCacheIdentity(0, 4), second.imageCacheIdentity(0, 4));
+    EXPECT_NE(first.imageCacheIdentity(4, 4), second.imageCacheIdentity(4, 4));
+    second_wire = first_wire;
+    second_wire.mutable_v41_inputs()->mutable_images(0)->set_processor_identity(std::string(64, 'd'));
+    second.init(QueryConverter::transQuery(&second_wire));
+    EXPECT_NE(first.imageCacheIdentity(3, 4), second.imageCacheIdentity(3, 4));
+}
+
+TEST_F(QueryConverterTest, FullAndIncrementalCacheKeysAgreeAcrossImagePartialBlock) {
+    auto wire   = v41ImageRequest();
+    auto tokens = std::make_shared<CompleteTokenIds>(1, 1, 64, 4);
+    tokens->init(QueryConverter::transQuery(&wire));
+    auto incremental = std::make_shared<BatchKVCacheResource>();
+    incremental->resetBatchSize(1);
+    tokens->setSeqLength(5);
+    initCacheKeys(incremental, tokens, 4);
+    tokens->setSeqLength(8);
+    updateCacheKeys(incremental, tokens, 4);
+    auto complete = std::make_shared<BatchKVCacheResource>();
+    complete->resetBatchSize(1);
+    initCacheKeys(complete, tokens, 4);
+    ASSERT_EQ(complete->cacheKeys().size(), 2);
+    EXPECT_EQ(incremental->cacheKeys(), complete->cacheKeys());
+
+    wire.mutable_v41_inputs()->mutable_images(0)->set_content_sha256(std::string(64, 'c'));
+    auto different_tokens = std::make_shared<CompleteTokenIds>(1, 1, 64, 4);
+    different_tokens->init(QueryConverter::transQuery(&wire));
+    different_tokens->setSeqLength(8);
+    auto different = std::make_shared<BatchKVCacheResource>();
+    different->resetBatchSize(1);
+    initCacheKeys(different, different_tokens, 4);
+    EXPECT_TRUE(torch::equal(tokens->completeTokenIds(), different_tokens->completeTokenIds()));
+    EXPECT_NE(complete->cacheKeys()[0], different->cacheKeys()[0]);
+    EXPECT_NE(complete->cacheKeys()[1], different->cacheKeys()[1]);
 }
 
 }  // namespace rtp_llm
