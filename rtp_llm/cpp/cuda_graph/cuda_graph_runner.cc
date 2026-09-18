@@ -282,6 +282,19 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     int   token_num        = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
 
     optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, token_num * sizeof(int));
+    if (engram_window_size_ > 0) {
+        const auto& history  = inputs.engram_token_windows;
+        auto&       captured = py_model_inputs_.engram_token_windows;
+        RTP_LLM_CHECK_WITH_INFO(history.defined() && history.is_cuda() && history.dim() == 2
+                                    && history.size(0) == token_num && history.size(1) == engram_window_size_
+                                    && history.scalar_type() == torch::kInt32 && history.is_contiguous(),
+                                "CUDA graph Engram history must be contiguous CUDA int32 [tokens, 4]");
+        RTP_LLM_CHECK_WITH_INFO(history.size(0) <= captured.size(0), "Engram history exceeds captured token capacity");
+        // Graph buckets may contain inactive request rows from an earlier
+        // replay. Dead-token padding must be reset before copying live rows.
+        captured.fill_(-1);
+        optimizedCopyAsync(history, captured, history.nbytes());
+    }
 
     // check size and dtype
     if (inputs.input_hiddens.defined() && inputs.input_hiddens.numel() > 0) {
@@ -939,6 +952,9 @@ void CudaGraphRunner::initCapture() {
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
+        if (engram_window_size_ > 0) {
+            inputs.engram_token_windows = torch::full({max_num_token_, engram_window_size_}, -1, options_cuda_int32_);
+        }
         RTP_LLM_CHECK_WITH_INFO(
             input_hidden_size_ > 0, "CUDA graph input_hidden_size must be positive, got %zu", input_hidden_size_);
         inputs.input_hiddens =
@@ -1127,6 +1143,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     const int  token_slice_len          = draft_prefill_graph_mode ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
     inputs.input_ids                    = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
     inputs.input_hiddens                = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
+    if (engram_window_size_ > 0) {
+        inputs.engram_token_windows =
+            capture_mem_hold_.py_model_inputs_.engram_token_windows.slice(0, 0, token_slice_len);
+    }
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset =

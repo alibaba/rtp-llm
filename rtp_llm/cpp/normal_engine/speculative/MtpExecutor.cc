@@ -944,6 +944,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
+        if (is_dspark_) {
+            // Engram belongs to the target. Its history was CP-split by the
+            // target forward, while draft commit restores full token inputs
+            // and then performs its own CP split of target feature rows.
+            model_input.engram_token_windows = torch::Tensor();
+        }
         // CP and DSpARK target hidden states are rank-local. Do not broadcast
         // rank 0's copy; after syncing the remaining inputs, every rank binds
         // the normalized output produced by its own target forward.
@@ -1510,6 +1516,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    // sync last forward event to ensure that the last forward is completed before releasing model buffers
+    if (last_forward_event_) {
+        last_forward_event_->synchronize();
+    }
+    last_forward_event_ = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    last_forward_event_->record(cuda_graph::graphGetCurrentStream());
+
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         releaseAllModelBuffers();
         return absl::OkStatus();
@@ -1792,16 +1805,16 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
     std::ostringstream summary;
     summary << "[debug-target-verify] batch=" << batch << " sbp=" << sbp << " group_dim=" << group_dim
             << " batch_dim=" << batch_dim << " max_blocks=" << max_blocks;
+    auto stream_it = all_streams.begin();
     for (int b = 0; b < batch && b < batch_dim; ++b) {
         const int seq_len   = sl[b];
         const int read_off  = (seq_len - 2) / sbp;
         int64_t   stream_id = -1;
-        if (b < static_cast<int>(all_streams.size())) {
-            auto it = all_streams.begin();
-            std::advance(it, b);
-            if (*it) {
-                stream_id = (*it)->streamId();
+        if (stream_it != all_streams.end()) {
+            if (*stream_it) {
+                stream_id = (*stream_it)->streamId();
             }
+            ++stream_it;
         }
         for (int64_t g = 0; g < group_dim; ++g) {
             std::string row_dump;
@@ -2061,7 +2074,7 @@ void MtpExecutor::drainAsyncRunners() {
     // forward: retire every runner here before weights/KV can be released. A CPU
     // exception need not poison CUDA, so a successful device sync cannot replace
     // propagating that exception to the engine's fail-closed quiesce acknowledgement.
-    const auto stream = cuda_graph::graphGetCurrentStream();
+    const auto         stream = cuda_graph::graphGetCurrentStream();
     std::exception_ptr failure;
     auto               drain = [&](auto& runner) {
         try {
@@ -2102,7 +2115,9 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     // bookkeeping round. DROP_BROAD_SYNC lets draft/verify consume the state
     // already published on GPU and waits only at later host consumers such as
     // spec-logits processing and target sampling.
-    if (useStreamAsync() && !useDropBroadSync()) {
+    // Engram's previous-token window still reads committed host history and
+    // must be current before prepareStreams and model-input gathering.
+    if (useStreamAsync() && (!useDropBroadSync() || batch_stream_processor_->hasEngram())) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.wait_prev_bookkeeping(stream_count=%zu)", streams.size());
         spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
     }

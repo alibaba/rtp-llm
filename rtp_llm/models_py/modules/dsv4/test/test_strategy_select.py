@@ -12,6 +12,7 @@ import sys
 import types
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from unittest import mock
 
 # Importing strategies populates the registry via ``register_strategy``.
@@ -146,6 +147,15 @@ class StrategySelectTest(unittest.TestCase):
             MegaMoEStrategy, "can_handle", return_value=True
         ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategySE)
+
+    def test_v41_shared_mxfp8_keeps_routed_mega_separate(self):
+        cfg = replace(_cfg(ep_size=4), shared_fp8_block_size=32)
+        with _env(DSV4_USE_MEGA_MOE_SE=None), mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=True
+        ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
+            self.assertIs(select_strategy(cfg), MegaMoEStrategy)
+            with self.assertRaisesRegex(ValueError, "block-128"):
+                select_strategy(cfg, forced="mega_se")
 
     def test_ep_gt1_explicit_se_zero_picks_non_fused_mega(self):
         with _env(DSV4_USE_MEGA_MOE_SE="0"), mock.patch.object(

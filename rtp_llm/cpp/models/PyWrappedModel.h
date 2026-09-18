@@ -289,9 +289,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                                                                       "forward";
     py_forward_method_             = py_model_.attr(forward_method);
     const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
-    const bool is_deepseek_v4_python_model = py_model_class_name == "DeepSeekV4Model"
-                                             || py_model_class_name == "DeepSeekV4MtpModel"
-                                             || py_model_class_name == "DeepSeekV4DSparkModel";
+    const bool is_deepseek_v4_python_model =
+        py_model_class_name == "DeepSeekV4Model" || py_model_class_name == "DeepSeekV4MtpModel"
+        || py_model_class_name == "DeepSeekV4DSparkModel" || py_model_class_name == "DeepSeekV41Model"
+        || py_model_class_name == "DeepSeekV41DSparkModel";
     if (enable_cuda_graph_ && is_deepseek_v4_python_model && !params.kv_cache_layer_layout.has_value()) {
         RTP_LLM_LOG_WARNING(
             "Disable CUDA graph for DeepSeekV4 warmup without kv_cache_layer_layout; real executor can capture after "

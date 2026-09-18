@@ -3,6 +3,15 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "engram_token_history_test",
+    srcs = ["EngramTokenHistoryTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/normal_engine:engram_token_history",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 test_copts = [
     "-fno-access-control",
 ] + copts()

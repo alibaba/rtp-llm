@@ -4,6 +4,50 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_mega_api_compat",
+    srcs = ["test_mega_api_compat.py"],
+    deps = _DSV4_TEST_DEPS,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_mega_v41_compat",
+    srcs = ["test_mega_v41_compat.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_engram",
+    srcs = ["test_engram.py"],
+    deps = _DSV4_TEST_DEPS,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_engram_cuda",
+    srcs = ["test_engram_cuda.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_v41_delayed_hc",
+    srcs = ["test_v41_delayed_hc.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_v41_delayed_hc_cuda_graph",
+    srcs = ["test_v41_delayed_hc_cuda_graph.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
     name = "mega_moe_static_buf_test",
     srcs = ["mega_moe_static_buf_test.py"],
     deps = _DSV4_TEST_DEPS,

@@ -100,7 +100,9 @@ def _get_shared_expert_stream(
 
 
 def _find_module_cuda_device(module: nn.Module) -> torch.device | None:
-    for tensor in list(module.parameters(recurse=True)) + list(module.buffers(recurse=True)):
+    for tensor in list(module.parameters(recurse=True)) + list(
+        module.buffers(recurse=True)
+    ):
         if tensor.is_cuda:
             return tensor.device
 
@@ -306,7 +308,9 @@ class FusedSharedExpertFastPath:
         if self.dim is None:
             self.dim = D
         if D != self.dim:
-            raise RuntimeError(f"shared expert dim mismatch: got {D}, expected {self.dim}")
+            raise RuntimeError(
+                f"shared expert dim mismatch: got {D}, expected {self.dim}"
+            )
         inter: int = self.inter_dim  # type: ignore[assignment]
         capacity = max(T, self.max_tokens_per_rank or 0, 1)
         workspace = self._workspace
@@ -404,9 +408,7 @@ class FusedSharedExpertFastPath:
             )
         return self._run_prepared(shared_experts, x)
 
-    def _run_prepared(
-        self, shared_experts: nn.Module, x: torch.Tensor
-    ) -> torch.Tensor:
+    def _run_prepared(self, shared_experts: nn.Module, x: torch.Tensor) -> torch.Tensor:
         if self._prepared_shared_experts is not shared_experts:
             self.prepare(shared_experts)
         w13_parts: tuple[torch.Tensor, torch.Tensor] = (
@@ -499,6 +501,24 @@ class SequentialSharedExpertExecutor(SharedExpertExecutor):
         return out
 
 
+class MXFP8SharedExpertExecutor(SequentialSharedExpertExecutor):
+    """Native group-32 GEMMs through W13SharedExpert's MXFP8 linears.
+
+    This is a distinct supported quantization recipe. It does not relax the
+    strict-fused policy on the routed FP4 experts or select the block-128
+    shared-expert workspace.
+    """
+
+    name = "mxfp8"
+
+    def start(self, shared_experts: nn.Module, x: torch.Tensor) -> None:
+        if x.shape[0] == 0:
+            self._out = torch.empty_like(x, dtype=torch.float32)
+            return
+        with record_function_range("dsv41.moe.shared_expert"):
+            self._out = shared_experts(x).float()
+
+
 class OverlapSharedExpertExecutor(SharedExpertExecutor):
     """Run shared expert on an aux stream while routed MoE runs on current stream."""
 
@@ -584,7 +604,10 @@ def get_shared_expert_executor(
     dim: int | None = None,
     inter_dim: int | None = None,
     swiglu_limit: float = 0.0,
+    native_mxfp8: bool = False,
 ) -> SharedExpertExecutor:
+    if native_mxfp8:
+        return MXFP8SharedExpertExecutor()
     mode = _mode()
     fast_path = FusedSharedExpertExecutor(
         max_tokens_per_rank=max_tokens_per_rank,

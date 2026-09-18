@@ -99,6 +99,12 @@ public:
                                                  TensorHolder&       host_holder);
 
     // Convert the proposal-stage input into dense target-verify rows.
+    // Both inputs stay on their existing device. History columns are
+    // [anchor, previous, previous-2, previous-3]; verify rows replace anchor
+    // and candidates without reading sampled CUDA tokens back to the host.
+    static torch::Tensor makeEngramVerifyWindows(const torch::Tensor& anchor_windows,
+                                                 const torch::Tensor& verify_tokens);
+
     void updateDSparkTargetVerifyModelInput(const DSparkRoundHead& round_head,
                                             GptModelInputs&        model_input,
                                             const torch::Tensor&   proposals,

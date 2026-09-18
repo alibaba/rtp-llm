@@ -181,7 +181,7 @@ torch::Tensor BlockPool::allocatePausableDeviceBacking(size_t size_bytes) {
         //
         // The pool is created and never released: the arena lives for the whole process, and there
         // is exactly one per KV cache, so a permanent private-pool refcount is intentional.
-        const auto device  = c10::cuda::current_device();
+        const auto device = c10::cuda::current_device();
 #if __has_include(<ATen/cuda/MemPool.h>)
         const auto pool_id = at::cuda::MemPool::graph_pool_handle(/*is_user_created=*/true);
 #else
@@ -234,8 +234,13 @@ void BlockPool::validateConfig() const {
                                 layout_idx,
                                 layout_cfg.block_num,
                                 config_.block_num);
-        RTP_LLM_CHECK_WITH_INFO(
-            layout_cfg.layer_num > 0, "MemoryLayoutConfig.layer_num must be > 0 (layout=%zu)", layout_idx);
+        if (layout_cfg.layer_num == 0) {
+            RTP_LLM_CHECK_WITH_INFO(layout_cfg.kv_block_pool_size_bytes == 0 && layout_cfg.kv_scale_pool_size_bytes == 0
+                                        && layout_cfg.total_size_bytes == 0,
+                                    "empty MemoryLayoutConfig must have zero bytes (layout=%zu)",
+                                    layout_idx);
+            continue;
+        }
         RTP_LLM_CHECK_WITH_INFO(layout_cfg.kv_block_pool_size_bytes > 0,
                                 "MemoryLayoutConfig.kv_block_pool_size_bytes must be > 0 (layout=%zu)",
                                 layout_idx);
@@ -243,6 +248,18 @@ void BlockPool::validateConfig() const {
 }
 
 void BlockPool::initializeCacheBuffer() {
+    if (config_.total_size_bytes == 0) {
+        // Unused typed regions still participate in block-table bookkeeping,
+        // but own no KV storage and must not call cudaMalloc with size zero.
+        for (const auto& layout : config_.memory_layouts) {
+            RTP_LLM_CHECK_WITH_INFO(layout.layer_num == 0, "nonempty block pool must have nonzero total_size_bytes");
+        }
+        const auto device =
+            allocation_type_ == AllocationType::HOST || use_pinned_cpu_backing_ ? torch::kCPU : torch::kCUDA;
+        cache_aligned_buffer_ = torch::empty({0}, torch::TensorOptions().dtype(torch::kUInt8).device(device));
+        cache_base_ptr_       = nullptr;
+        return;
+    }
     if (external_device_backing_.defined()) {
         RTP_LLM_CHECK_WITH_INFO(external_device_backing_.is_cuda() && external_device_backing_.is_contiguous(),
                                 "external backing must be a contiguous CUDA tensor, pool_name=%s",
@@ -292,8 +309,8 @@ void BlockPool::initializeCacheBuffer() {
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
-    const bool is_cuda   = cache_aligned_buffer_.is_cuda();
-    const bool is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
+    const bool              is_cuda     = cache_aligned_buffer_.is_cuda();
+    const bool              is_pinned   = !is_cuda && cache_aligned_buffer_.is_pinned();
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("BlockPool backing selected: pool_name=%s allocation_type=%s requested_backing=%s "
                      "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
@@ -314,7 +331,7 @@ void BlockPool::initializeCacheBuffer() {
 void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
     RTP_LLM_LOG_WARNING(
         "%s, pool_name=%s, total_size=%zu bytes", log_context, config_.pool_name.c_str(), config_.total_size_bytes);
-    auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+    auto       cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                    torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
     const auto pin_start  = std::chrono::steady_clock::now();
     try {
@@ -396,6 +413,9 @@ void BlockPool::initializeLayoutStrategies() {
 
     size_t global_layer_begin = 0;
     for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
+        if (config_.memory_layouts[layout_idx].layer_num == 0) {
+            continue;
+        }
         processMemoryLayout(layout_idx, full_tensor, global_layer_begin);
         global_layer_begin += static_cast<size_t>(config_.memory_layouts[layout_idx].layer_num);
     }
@@ -777,6 +797,9 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
+            if (layout_cfg.layer_num == 0) {
+                continue;
+            }
 
             // Register KV buffer
             if (!registerUserMrForBuffer(memory_util,
@@ -826,6 +849,9 @@ void BlockPool::deregUserMr() {
         bool all_ok = true;
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
+            if (layout_cfg.layer_num == 0) {
+                continue;
+            }
 
             // Deregister KV buffer
             all_ok &= deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, gpu, "kv");

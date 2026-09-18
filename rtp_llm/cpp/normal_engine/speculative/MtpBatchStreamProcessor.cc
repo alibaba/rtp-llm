@@ -840,6 +840,13 @@ void MtpBatchStreamProcessor::buildDSparkProposeInput(GptModelInputs&      model
     model_input.input_lengths      = dsparkDraftInputLengths(batch_size);
     model_input.sequence_lengths   = emptyInt32OnCuda({0});
     model_input.lm_output_indexes  = dsparkDraftLmIndexes(batch_size);
+    if (model_input.engram_token_windows.defined()) {
+        auto history = model_input.engram_token_windows;
+        if (!history.is_cuda() && !history.is_pinned()) {
+            history = history.pin_memory();
+        }
+        model_input.engram_token_windows = toCudaInt32(history, host_holder);
+    }
 }
 
 MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::buildDSparkRoundHead(
@@ -864,6 +871,21 @@ MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::prepareDSparkD
     return round_head;
 }
 
+torch::Tensor MtpBatchStreamProcessor::makeEngramVerifyWindows(const torch::Tensor& anchor_windows,
+                                                               const torch::Tensor& verify_tokens) {
+    RTP_LLM_CHECK_WITH_INFO(anchor_windows.dim() == 2 && anchor_windows.size(1) == 4 && verify_tokens.dim() == 2
+                                && verify_tokens.size(0) == anchor_windows.size(0) && verify_tokens.size(1) > 0
+                                && anchor_windows.scalar_type() == torch::kInt32
+                                && verify_tokens.scalar_type() == torch::kInt32
+                                && anchor_windows.device() == verify_tokens.device(),
+                            "Engram verify expects int32 history [batch,4] and tokens [batch,width] on one device");
+    // Chronological prefix [previous-3, previous-2, previous] followed by
+    // [anchor, candidates...]. The unfold/flip restores current-first rows.
+    auto history_tail = anchor_windows.narrow(1, 1, 3).flip({1});
+    auto tokens       = torch::cat({history_tail, verify_tokens}, 1);
+    return tokens.unfold(1, 4, 1).flip({2}).contiguous().reshape({verify_tokens.numel(), 4});
+}
+
 void MtpBatchStreamProcessor::updateDSparkTargetVerifyModelInput(const DSparkRoundHead& round_head,
                                                                  GptModelInputs&        model_input,
                                                                  const torch::Tensor&   proposals,
@@ -879,8 +901,21 @@ void MtpBatchStreamProcessor::updateDSparkTargetVerifyModelInput(const DSparkRou
                             batch_size,
                             propose_step_);
 
-    auto anchor_col            = round_head.anchors.reshape({batch_size, 1});
-    auto verify                = torch::cat({anchor_col, proposals.to(torch::kInt32)}, 1).reshape({-1});
+    auto anchor_col = round_head.anchors.reshape({batch_size, 1});
+    auto verify     = torch::cat({anchor_col, proposals.to(torch::kInt32)}, 1).reshape({-1});
+    if (model_input.engram_token_windows.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(model_input.engram_token_windows.size(0) == batch_size,
+                                "DSpark Engram history must contain one anchor row per request");
+        auto anchor_windows = model_input.engram_token_windows;
+        if (!anchor_windows.is_cuda() && !anchor_windows.is_pinned()) {
+            anchor_windows = anchor_windows.pin_memory();
+        }
+        // Gathered history is pinned CPU memory; keep it alive until its
+        // nonblocking H2D completes. Candidate tokens never leave CUDA.
+        auto anchor_windows_cuda = toCudaInt32(anchor_windows, host_holder);
+        model_input.engram_token_windows =
+            makeEngramVerifyWindows(anchor_windows_cuda, verify.reshape({batch_size, propose_step_ + 1}));
+    }
     model_input.prefix_lengths = round_head.committed_ends;
     setVerifyPairInputs(model_input, std::move(verify), batch_size, propose_step_ + 1, host_holder);
 }

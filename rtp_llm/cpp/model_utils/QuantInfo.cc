@@ -56,7 +56,8 @@ void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int6
     if (weight_bits_ != 4 && weight_bits_ != 8) {
         throw std::invalid_argument("invalid weight_bits: " + std::to_string(weight_bits_));
     }
-    if (group_size_ != 0 && kValidGroupSizes.count(group_size_) == 0) {
+    const bool is_mxfp8_group = quant_method_ == FP8Quant && group_size_ == 32;
+    if (group_size_ != 0 && kValidGroupSizes.count(group_size_) == 0 && !is_mxfp8_group) {
         throw std::invalid_argument("invalid group_size: " + std::to_string(group_size_));
     }
 }

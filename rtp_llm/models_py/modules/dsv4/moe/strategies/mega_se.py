@@ -22,6 +22,7 @@ from rtp_llm.model_loader.weight_memory_saver import (
 
 from ..._profiler import record_function_range
 from ...quant_layouts import FP4_BLOCK
+from ..mega_jit_warmup import resolve_mega_num_sms
 from ..mega_se_buf import (
     _get_or_create_mega_se_buf,
     _get_or_create_mega_se_output,
@@ -295,7 +296,9 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         import torch.distributed as dist
 
         cfg = self.cfg
-        num_sms = int(deep_gemm.get_num_sms())
+        num_sms = resolve_mega_num_sms(
+            deep_gemm, getattr(self, "_mega_runtime_device", None)
+        )
         token_counts = self._resolve_jit_warmup_token_counts(num_sms)
         if not token_counts:
             return

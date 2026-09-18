@@ -10,8 +10,8 @@ import triton.language as tl
 from torch import dtype as _dtype
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.ops.compute_ops import (
     per_token_group_quant_fp8,
     per_token_group_quant_int8,
@@ -347,6 +347,39 @@ class PerTokenGroupQuantTest(TestCase):
                 scale_tma_aligned=params[5],
             ):
                 self._run_quant_test(*params)
+
+    def test_ue8m0_packed_scales_follow_group_size(self):
+        """Group-32 MXFP8 needs four times as many scales as group-128."""
+        if _is_hip:
+            self.skipTest("packed UE8M0 path is CUDA-only")
+        for group_size in (32, 64, 128):
+            with self.subTest(group_size=group_size):
+                groups = 512 // group_size
+                values = torch.pow(2.0, torch.arange(groups, device="cuda") % 7)
+                x = (
+                    values.repeat_interleave(group_size)
+                    .expand(3, -1)
+                    .to(torch.bfloat16)
+                    .contiguous()
+                )
+                quantized, packed = sgl_per_token_group_quant_fp8(
+                    x,
+                    group_size=group_size,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=True,
+                )
+                self.assertEqual(packed.shape, (3, (groups + 3) // 4))
+                shifts = torch.arange(4, device="cuda") * 8
+                exponent = ((packed.long().unsqueeze(-1) >> shifts) & 255).flatten(1)[
+                    :, :groups
+                ]
+                scales = torch.pow(2.0, exponent.float() - 127)
+                restored = (
+                    quantized.float().reshape(3, groups, group_size)
+                    * scales.unsqueeze(-1)
+                ).reshape_as(x)
+                torch.testing.assert_close(restored, x.float(), rtol=0, atol=0)
 
     def test_v2_input_offset_above_int32_elements(self):
         if _is_hip:

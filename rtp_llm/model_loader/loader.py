@@ -445,6 +445,11 @@ class ModelLoader:
             allocation_context=weights_region if in_weights_region else None,
             force_nogds=force_nogds,
             local_copyout_filter=tensor_to_weight_map.__contains__,
+            **(
+                {"source_tensor_filter": lambda name: ".engram." not in name}
+                if getattr(self.model_config, "is_deepseek_v41", False)
+                else {}
+            ),
         )
 
         for key, loaded_tensor in all_tensors:

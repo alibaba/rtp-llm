@@ -704,6 +704,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 sched_meta=sched_meta,
                 topk_length=topk_length,
             )
+            if hasattr(attn, "_project_output"):
+                # V4.1 uses block-32 MXFP8 grouped wo_a weights.
+                projected = attn._project_output(output, qkv.freqs_cis)
+                attn._prefill_output_all_reduce(projected)
+                return projected.reshape(batch_size, gamma, -1)
             return decode_output_proj(attn, output, qkv.freqs_cis, batch_size, gamma)
 
     def _forward_layers(

@@ -190,6 +190,18 @@ class MoE(nn.Module):
 
         from rtp_llm.utils.model_weight import W
 
+        shared_weight = resolved_layer_weights[W.v4_shared_w13_w]
+        shared_scale = resolved_layer_weights[W.v4_shared_w13_s]
+        shared_fp8_block_size = (
+            32
+            if tuple(shared_scale.shape)
+            == (
+                (shared_weight.shape[0] + 31) // 32,
+                (shared_weight.shape[1] + 31) // 32,
+            )
+            else 128
+        )
+
         self.gate = Gate(
             layer_id,
             dim,
@@ -216,6 +228,7 @@ class MoE(nn.Module):
             local_expert_start=self.local_expert_start,
             local_expert_end=self.local_expert_end,
             max_tokens_per_rank=max_tokens_per_rank,
+            shared_fp8_block_size=shared_fp8_block_size,
         )
         forced, strict = _resolve_forced(strategy)
         strategy_cls = select_strategy(cfg, forced=forced, strict=strict)
@@ -255,6 +268,7 @@ class MoE(nn.Module):
                 dim=dim,
                 inter_dim=moe_inter_dim,
                 swiglu_limit=swiglu_limit,
+                native_mxfp8=shared_fp8_block_size == 32,
             )
             self._shared_executor.prepare(self.shared_experts)
         self._final_out: torch.Tensor | None = None

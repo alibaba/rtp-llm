@@ -269,6 +269,7 @@ class CkptDatabase(BaseDatabase):
         allocation_context: Optional[Callable[[], ContextManager[Any]]] = None,
         force_nogds: bool = False,
         local_copyout_filter: Optional[Callable[[str], bool]] = None,
+        source_tensor_filter: Optional[Callable[[str], bool]] = None,
     ):
         from fastsafetensors import AutoLoader, SingleGroup
 
@@ -278,8 +279,14 @@ class CkptDatabase(BaseDatabase):
             else:
                 pg = SingleGroup()
 
+            # A local copyout filter is applied after a shard has been staged
+            # and communicated. Host-only weights must be excluded before I/O
+            # and allocation, including when they share a shard with GPU weights.
             hf_weights_files = sorted(
-                [file.file_name for file in self.pretrain_file_list]
+                file.file_name
+                for file in self.pretrain_file_list
+                if source_tensor_filter is None
+                or any(source_tensor_filter(name) for name in file.get_tensor_names())
             )
             if device == "cuda":
                 device = f"cuda:{pg.rank()}"
@@ -301,6 +308,11 @@ class CkptDatabase(BaseDatabase):
                 device=device,
                 local_copyout_filter=local_copyout_filter,
                 stacked_moe_tensors=stacked_key_config,
+                **(
+                    {"tensor_filter": source_tensor_filter}
+                    if source_tensor_filter is not None
+                    else {}
+                ),
             )
             try:
                 context = (

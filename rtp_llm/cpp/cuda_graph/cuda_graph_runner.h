@@ -57,8 +57,14 @@ public:
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
-        options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
-        options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        if (py::hasattr(py_instance_, "cuda_graph_engram_window_size")) {
+            engram_window_size_ = py_instance_.attr("cuda_graph_engram_window_size")().cast<int>();
+            RTP_LLM_CHECK_WITH_INFO(engram_window_size_ == 0 || engram_window_size_ == 4,
+                                    "Unsupported CUDA graph Engram history width %d",
+                                    engram_window_size_);
+        }
+        options_cuda_int32_ = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        options_cpu_int32_  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
@@ -142,6 +148,7 @@ private:
     int                     seq_size_per_block_{0};
     int                     kernel_seq_size_per_block_{0};
     int                     hidden_size_{0};
+    int                     engram_window_size_{0};
     size_t                  input_hidden_size_{0};
     int                     sp_steps_{0};
     std::vector<int>        capture_range_;

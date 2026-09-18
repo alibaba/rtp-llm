@@ -35,11 +35,12 @@ struct GptModelInputs {
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
-    mutable torch::Tensor combo_tokens;             // [cumulated_seq_len]
-    torch::Tensor         input_lengths;            // [batch_size]
-    torch::Tensor         sequence_lengths;         // [decoder_batch_size]
-    torch::Tensor         lm_output_indexes;        // selected output rows
-    torch::Tensor         prefix_lengths;           // [context_batch_size]
+    mutable torch::Tensor combo_tokens;          // [cumulated_seq_len]
+    torch::Tensor         engram_token_windows;  // [tokens,4], host at gather/CP; CUDA for DSpark/graph, newest first
+    torch::Tensor         input_lengths;         // [batch_size]
+    torch::Tensor         sequence_lengths;      // [decoder_batch_size]
+    torch::Tensor         lm_output_indexes;     // selected output rows
+    torch::Tensor         prefix_lengths;        // [context_batch_size]
     torch::Tensor         sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
     torch::Tensor         combo_tokens_host_for_log;
     torch::Tensor         input_lengths_host_for_log;

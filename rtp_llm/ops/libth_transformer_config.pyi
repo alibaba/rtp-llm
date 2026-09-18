@@ -103,6 +103,8 @@ class ArpcConfig:
 
 
 class AttentionConfigs:
+    layer_compress_ratios: list[int]
+    v41_kv_source_layer_ids: list[int]
     dtype: torch.dtype
     fuse_qkv_add_bias: bool
     head_num: int

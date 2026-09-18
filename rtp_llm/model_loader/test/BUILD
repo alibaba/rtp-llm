@@ -3,6 +3,13 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "test_host_weight_filter",
+    srcs = ["test_host_weight_filter.py"],
+    deps = py_test_deps,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_fastsafetensors_memory",
     srcs = ["test_fastsafetensors_memory.py"],
     deps = py_test_deps,

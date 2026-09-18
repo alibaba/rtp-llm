@@ -338,6 +338,11 @@ class PyModelInputs:
 
     @input_ids.setter
     def input_ids(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def engram_token_windows(self) -> torch.Tensor:
+        """CPU token history, [tokens, 4], current token first."""
+    @engram_token_windows.setter
+    def engram_token_windows(self, arg0: torch.Tensor) -> None: ...
 
 class PyModelOutputs:
     @typing.overload

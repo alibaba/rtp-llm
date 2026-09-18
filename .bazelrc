@@ -103,6 +103,20 @@ build:cuda12_9 --define=using_cuda12_9_x86=true
 # NCCL 2.30 +cuda13.2).  The USING_CUDA12_9 macro stays defined so call sites still
 # pick up the 12.9-and-newer code paths (CUDA 13 is a strict superset).
 build:cuda13_base --config=cuda12
+# Compiler selection happens during repository configuration, before action_env.
+build:cuda13_base --repo_env=GCC_HOST_COMPILER_PATH=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
+build:cuda13_base --repo_env=CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
+build:cuda13_base --action_env PATH="/opt/rh/gcc-toolset-13/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+build:cuda13_base --host_action_env PATH="/opt/rh/gcc-toolset-13/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+# The GCC 13 linker also needs its matching libctf/binutils libraries.
+build:cuda13_base --action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-13/root/usr/lib64:/lib64:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:/usr/local/cuda/extras/CUPTI/lib64/"
+build:cuda13_base --host_action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-13/root/usr/lib64:/lib64:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:/usr/local/cuda/extras/CUPTI/lib64/"
+# GCC 13 adds overloaded-virtual to -Wall; attention parameter helpers
+# intentionally overload the base fillParams signature.
+build:cuda13_base --cxxopt=-Wno-overloaded-virtual
+# PyTorch's CUDAEvent pool intentionally uses the compiler's cache-line
+# alignment; GCC 13 otherwise promotes its ABI advisory to a build error.
+build:cuda13_base --cxxopt=-Wno-interference-size
 build:cuda13_base --copt="-DUSING_CUDA12_9=1"
 build:cuda13_base --action_env TF_CUDA_VERSION="13.2"
 build:cuda13_base --host_action_env TF_CUDA_VERSION="13.2"
@@ -187,29 +201,29 @@ test:cuda13_arm --test_env=LD_PRELOAD=/usr/lib64/librt.so.1
 # The fp8_fp4_mega_moe kernel uses a C++20 floating-point non-type template
 # parameter (`float kActivationClamp`). nvcc 13.2 + gcc 10.2.1 (the system
 # /usr/bin/g++) rejects this even with -std=c++20 — the FP-NTTP feature needs
-# gcc 12+ as host. Container ships /opt/rh/gcc-toolset-12/root/usr/bin/g++
-# (gcc 12.3.0), so point the JIT at that. gcc-toolset-12 lives outside PATH
-# by default, hence the explicit PATH / LD_LIBRARY_PATH overrides.
+# gcc 12+ as host. DeepGEMM 2.8 uses GCC 13 in the CUDA13 images,
+# so pin the JIT to gcc-toolset-13 with explicit compiler, PATH and
+# LD_LIBRARY_PATH overrides.
 #
 # These were previously hard-coded into smoke defs.bzl pointing at user-
 # private conda envs (/home/tanboyu.tby/..., /home/serina.wzq/...) which
 # only worked on those specific dev boxes. Centralize here so every cu13
 # test sees the same toolchain.
 test:cuda13_arm --test_env=DG_JIT_CPP_STANDARD=20
-test:cuda13_arm --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
-test:cuda13_arm --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13_arm --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13_arm --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13_arm --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
-test:cuda13_arm --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64
+test:cuda13_arm --test_env=CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
+test:cuda13_arm --test_env=CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+test:cuda13_arm --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+test:cuda13_arm --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+test:cuda13_arm --test_env=PATH=/opt/rh/gcc-toolset-13/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+test:cuda13_arm --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-13/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64
 test:cuda13_arm --test_env=TRITON_PTXAS_PATH=/usr/local/bin/triton_ptxas_cuda_wrapper.sh
 test:cuda13 --test_env=DG_JIT_CPP_STANDARD=20
-test:cuda13 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
-test:cuda13 --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13 --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13 --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
-test:cuda13 --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64
+test:cuda13 --test_env=CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
+test:cuda13 --test_env=CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+test:cuda13 --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+test:cuda13 --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-13/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+test:cuda13 --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-13/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64
 
 build:cpu --copt="-DENABLE_BF16=1"
 build:cpu --define=using_cuda=false --define=using_cuda_nvcc=false --define=using_cpu=true

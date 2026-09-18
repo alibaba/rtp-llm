@@ -60,7 +60,12 @@ def decode_compute_qkv(
     q = attn._lin(attn.wq_b, qr).unflatten(
         -1, (attn.n_heads, attn.head_dim)
     )  # [B, S, H, D]
-    q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=attn.eps)
+    if getattr(attn, "skip_post_q_norm", False):
+        from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
+
+        apply_rotary_emb(q[..., -rd:], freqs_cis)
+    else:
+        q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=attn.eps)
 
     # KV path (single MQA head) — per-token RoPE using the same table lookup.
     kv = fused_rmsnorm_rope(

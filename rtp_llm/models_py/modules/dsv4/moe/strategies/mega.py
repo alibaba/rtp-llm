@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import lru_cache
 from typing import Dict, Optional
 
 import torch
@@ -32,6 +33,7 @@ from ..mega_buf import (
     _get_or_create_mega_output,
     _mega_moe_enabled,
     _register_mega_strategy,
+    estimate_mega_moe_symm_buffer_bytes,
 )
 from ..mega_jit_warmup import (
     clamp_token_counts,
@@ -39,6 +41,7 @@ from ..mega_jit_warmup import (
     generate_mega_moe_jit_token_counts,
     mega_moe_jit_warmup_enabled,
     parse_mega_moe_jit_warmup_tokens_override,
+    resolve_mega_num_sms,
 )
 from ..shared_expert import strict_fused_moe_enabled
 from ..warmup_sync import sync_cuda_graph_warmup_ranks
@@ -95,6 +98,41 @@ def _mega_output_capacity(buf, requested_capacity: int) -> int:
     if aligned_capacity is not None:
         capacity = max(capacity, int(aligned_capacity))
     return capacity
+
+
+@lru_cache(maxsize=None)
+def _native_mega_intermediate_supported(
+    group_size: int,
+    num_experts: int,
+    num_topk: int,
+    hidden: int,
+    intermediate: int,
+) -> bool:
+    # This host-only layout query validates the installed kernel's capability
+    # without allocating symmetric memory or relying on a version string.
+    return (
+        estimate_mega_moe_symm_buffer_bytes(
+            group_size, num_experts, 384, num_topk, hidden, intermediate
+        )
+        is not None
+    )
+
+
+def _mega_intermediate_size(cfg: MoeCfg) -> int:
+    intermediate = int(cfg.moe_inter_dim)
+    alignment = 16 * FP4_BLOCK
+    if intermediate % alignment == 0 or _native_mega_intermediate_supported(
+        cfg.ep_size,
+        cfg.n_routed_experts,
+        cfg.n_activated_experts,
+        cfg.dim,
+        intermediate,
+    ):
+        return intermediate
+    # Older DeepGEMM requires 16-byte alignment for intermediate FP8 scale
+    # rows. Zero-pad the routed MLP's kernel view only (2304 -> 2560 for V4.1).
+    # Newer kernels allow the native 72-byte row, avoiding this extra work.
+    return (intermediate + alignment - 1) // alignment * alignment
 
 
 def _mega_moe_rank_nvcc_tmpdir(rank: int) -> str:
@@ -241,7 +279,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
 
         cfg = self.cfg
         D = cfg.dim
-        inter = cfg.moe_inter_dim
+        inter = _mega_intermediate_size(cfg)
         device = self._mega_runtime_device
 
         # (4) Allocate the symmetric-memory buffer.  Uses
@@ -321,7 +359,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         cfg = self.cfg
         E = cfg.n_local_experts
         D = cfg.dim
-        inter = cfg.moe_inter_dim
+        source_inter = cfg.moe_inter_dim
+        inter = _mega_intermediate_size(cfg)
+        padded = inter != source_inter
 
         # Pop L1 (w1/w3) stacks from layer_weights so the framework's
         # ModelWeights drops its references.
@@ -338,10 +378,15 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             dtype=torch.float8_e8m0fnu,
             device=device,
         )
-        w13[:, :inter].copy_(st_w1_w)
-        s13_raw[:, :inter].copy_(st_w1_s)
-        w13[:, inter:].copy_(st_w3_w)
-        s13_raw[:, inter:].copy_(st_w3_s)
+        if padded:
+            # FP4 byte zero encodes two exact zeros; UE8M0 byte 127 is 1.
+            # Pad gate and up independently before the Mega interleave.
+            w13.zero_()
+            s13_raw.view(torch.uint8).fill_(127)
+        w13[:, :source_inter].copy_(st_w1_w)
+        s13_raw[:, :source_inter].copy_(st_w1_s)
+        w13[:, inter : inter + source_inter].copy_(st_w3_w)
+        s13_raw[:, inter : inter + source_inter].copy_(st_w3_s)
         del st_w1_w, st_w1_s, st_w3_w, st_w3_s
         s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
         del s13_raw
@@ -384,8 +429,11 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 dtype=torch.float8_e8m0fnu,
                 device=device,
             )
-            w2.copy_(st_w2_w)
-            s2_raw.copy_(st_w2_s)
+            if padded:
+                w2.zero_()
+                s2_raw.view(torch.uint8).fill_(127)
+            w2[:, :, : source_inter // 2].copy_(st_w2_w)
+            s2_raw[:, :, : source_inter // FP4_BLOCK].copy_(st_w2_s)
             del st_w2_w, st_w2_s
             s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
             del s2_raw
@@ -484,7 +532,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             num_experts=cfg.n_routed_experts,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
-            intermediate_hidden=cfg.moe_inter_dim,
+            intermediate_hidden=_mega_intermediate_size(cfg),
             num_sms=num_sms,
             max_tokens_per_rank=max_tokens_per_rank,
         )
@@ -501,7 +549,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         import torch.distributed as dist
 
         cfg = self.cfg
-        num_sms = int(deep_gemm.get_num_sms())
+        num_sms = resolve_mega_num_sms(
+            deep_gemm, getattr(self, "_mega_runtime_device", None)
+        )
         token_counts = self._resolve_jit_warmup_token_counts(num_sms)
         if not token_counts:
             return
@@ -849,9 +899,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         rank = dist.get_rank(group)
         world_size = dist.get_world_size(group)
         device = self._mega_l1_w.device
-        _log_pre_kernel_barrier(
-            "enter", cfg.layer_id, rank, world_size, tokens, device
-        )
+        _log_pre_kernel_barrier("enter", cfg.layer_id, rank, world_size, tokens, device)
 
         if device.type == "cuda":
             with torch.cuda.device(device):
@@ -866,6 +914,4 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         else:
             dist.barrier(group=group)
 
-        _log_pre_kernel_barrier(
-            "leave", cfg.layer_id, rank, world_size, tokens, device
-        )
+        _log_pre_kernel_barrier("leave", cfg.layer_id, rank, world_size, tokens, device)

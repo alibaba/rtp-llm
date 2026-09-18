@@ -49,6 +49,7 @@ from rtp_llm.models_py.modules.dsv4.chunk_env import (
 )
 from rtp_llm.models_py.modules.dsv4.decode.forward import (
     build_paged_pool_specs,
+    decode_metadata_compress_ratios,
     forward_decode,
 )
 from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
@@ -794,7 +795,11 @@ class DeepSeekV4Model(GptModelBase):
         # subsequent calls inside CUDA graph capture hit the cache and skip
         # JIT — which would otherwise abort via __unexpected (noexcept violation).
         model_warm_up = model_warm_up_enabled()
-        if device_str.startswith("cuda") and model_warm_up:
+        if (
+            device_str.startswith("cuda")
+            and model_warm_up
+            and self._v4_args.v41_config is None
+        ):
             from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
 
             first_attn = self.v4.layers[0].attn
@@ -1268,9 +1273,7 @@ class DeepSeekV4Model(GptModelBase):
             window_size=int(self._v4_args.window_size),
             head_dim=int(self._v4_args.head_dim),
             max_seq_len=int(self._v4_args.max_seq_len),
-            compress_ratios=list(self._v4_args.compress_ratios)[
-                : self._v4_args.n_layers
-            ],
+            compress_ratios=decode_metadata_compress_ratios(self._v4_args),
             index_topk=int(self._v4_args.index_topk),
             paged_pool_specs=paged_pool_specs,
             group_region_names=group_region_names_snapshot,
