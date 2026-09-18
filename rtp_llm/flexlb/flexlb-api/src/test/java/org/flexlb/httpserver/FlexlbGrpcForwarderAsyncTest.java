@@ -86,11 +86,32 @@ class FlexlbGrpcForwarderAsyncTest {
 
             assertTrue(result.masterFound());
             assertEquals("UNAVAILABLE", result.failure());
+            assertEquals(Status.Code.UNAVAILABLE, Status.fromThrowable(result.cause()).getCode());
             assertFalse(fixture.channel.isShutdown());
             assertTrue(channels(forwarder).containsKey(MASTER_CHANNEL_KEY));
             verify(reporter, times(1))
                     .reportForwardToMasterResult("10.0.0.2", "GRPC_FAILED");
             forwarder.shutdown();
+        }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void resolutionFailureRetainsUnknownHostCause() throws Exception {
+        ManagedChannel channel = NettyChannelBuilder.forAddress("flexlb-unresolvable.invalid.", 7003)
+                .usePlaintext().disableRetry().build();
+        FlexlbGrpcForwarder forwarder = forwarder(channel, mock(EngineHealthReporter.class));
+        try {
+            var result = await(forwarder.forwardScheduleToMaster(request(107L)));
+            assertEquals(Status.Code.UNAVAILABLE, Status.fromThrowable(result.cause()).getCode());
+            Throwable cause = result.cause();
+            while (cause != null && !(cause instanceof java.net.UnknownHostException)) {
+                cause = cause.getCause();
+            }
+            assertNotNull(cause, "the local resolution cause must survive the forwarding callback");
+        } finally {
+            forwarder.shutdown();
+            channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
         }
     }
 
