@@ -54,6 +54,21 @@ class WorkerAddressServiceTest {
     }
 
     @Test
+    void emptyDiscoveryReturnsNoWorkers() {
+        String modelName = "TestModel";
+        String address = "TestAddress";
+        when(modelMetaConfig.endpointsWithGroup(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(Pair.of("group1", endpoint(address))));
+        when(serviceDiscovery.getHosts(address)).thenReturn(List.of());
+
+        List<WorkerHost> actualHosts = workerAddressService.getEngineWorkerList(
+                modelName, RoleType.PREFILL);
+
+        Assertions.assertTrue(actualHosts.isEmpty());
+        Mockito.verify(serviceDiscovery).getHosts(address);
+    }
+
+    @Test
     void discoveryFailureReturnsNoWorkers() {
         String modelName = "TestModel";
         String address = "TestAddress";
