@@ -8,38 +8,27 @@ import java.util.List;
 import java.util.function.LongSupplier;
 
 /**
- * Sharded wrapper around RecentCacheKeyWindow to reduce lock contention.
- * Distributes records across N independent windows by requestId hash.
- * Hit rate statistics become approximate but with negligible bias under uniform distribution.
+ * Wrapper around a single RecentCacheKeyWindow.
+ * All requests in this master share the same window, regardless of request ID.
+ * The legacy class name and record signature are retained for caller compatibility.
  */
 @Component
 public class ShardedRecentCacheKeyWindow {
-    private static final int DEFAULT_SHARD_COUNT = 32;
-
-    private final RecentCacheKeyWindow[] shards;
-    private final int shardCount;
+    private final RecentCacheKeyWindow window;
 
     @Autowired
     public ShardedRecentCacheKeyWindow(ConfigService configService) {
-        this(DEFAULT_SHARD_COUNT,
-                RecentCacheKeyWindow.resolveTimeWindowMs(configService),
+        this(RecentCacheKeyWindow.resolveTimeWindowMs(configService),
                 RecentCacheKeyWindow.resolveMaxCacheKeys(configService),
                 System::currentTimeMillis);
     }
 
-    private ShardedRecentCacheKeyWindow(int shardCount, long timeWindowMs, long maxCacheKeys,
-                                        LongSupplier nowSupplier) {
-        this.shardCount = shardCount;
-        this.shards = new RecentCacheKeyWindow[shardCount];
-        int perShardMaxKeys = Math.max(1, (int) (maxCacheKeys / shardCount));
-        for (int i = 0; i < shardCount; i++) {
-            shards[i] = new RecentCacheKeyWindow(timeWindowMs, perShardMaxKeys, nowSupplier);
-        }
+    ShardedRecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
+        this.window = new RecentCacheKeyWindow(timeWindowMs, maxCacheKeys, nowSupplier);
     }
 
     public RecentCacheKeyWindow.Snapshot record(long requestId, List<Long> cacheKeys) {
-        int idx = (int) ((requestId & Long.MAX_VALUE) % shardCount);
-        return shards[idx].record(cacheKeys);
+        return window.record(cacheKeys);
     }
 
 }
