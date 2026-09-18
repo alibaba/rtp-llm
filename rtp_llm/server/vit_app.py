@@ -238,7 +238,9 @@ class VitEndpointServer:
         if self.mm_process_engine is None:
             return
 
-        self.rpc_server.add_insecure_port(f"0.0.0.0:{grpc_port}")
+        address = f"0.0.0.0:{grpc_port}"
+        if self.rpc_server.add_insecure_port(address) == 0:
+            raise RuntimeError(f"Failed to bind VIT worker gRPC server: {address}")
         self.rpc_server.start()
         logging.info(f"Vit Server started on grpc port {grpc_port} (bind=0.0.0.0)")
 

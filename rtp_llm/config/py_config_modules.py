@@ -357,6 +357,7 @@ class VitConfig:
         self.disable_access_log: bool = False
         self.use_local_preprocess: bool = False
         self.vit_proxy_load_balance_strategy: str = "round_robin"
+        self.vit_proxy_min_healthy_workers: int = 0
         self.output_transport = MMTransportConfig()
         # Cross-request GPU batching is inferred from gpu_max_batch_size alone:
         # == 1 -> serial (one request per forward, no wait window); > 1 -> merge
@@ -433,6 +434,7 @@ class VitConfig:
             f"disable_access_log: {self.disable_access_log}\n"
             f"use_local_preprocess: {self.use_local_preprocess}\n"
             f"vit_proxy_load_balance_strategy: {self.vit_proxy_load_balance_strategy}\n"
+            f"vit_proxy_min_healthy_workers: {self.vit_proxy_min_healthy_workers}\n"
             f"mm_transport_mode: {transport.mode}\n"
             f"mm_rdma_bind_ip: {rdma.bind_ip}\n"
             f"mm_rdma_port: {rdma.port}\n"
