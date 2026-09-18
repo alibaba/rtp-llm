@@ -586,7 +586,11 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--profile", default="batch-window", help="passed through to the runner"
+        "--profile", default=None, help="existing full profile name (default batch-window)"
+    )
+    parser.add_argument(
+        "--master-mode", choices=("sb", "sn", "wb", "wn"),
+        help="select the master settings table; compatible with --profile",
     )
     parser.add_argument(
         "--grade",
@@ -603,6 +607,10 @@ def main() -> int:
         "--out-dir",
         default=None,
         help="lane artifacts dir (default /tmp/flexlb_ft_parallel_<ts>)",
+    )
+    parser.add_argument(
+        "--archive", default=None,
+        help="optional single experiment ZIP; includes run plan, results and bounded evidence",
     )
     parser.add_argument(
         "--categories",
@@ -671,6 +679,15 @@ def main() -> int:
         help="select functional contracts, sustained workloads, or both",
     )
     args = parser.parse_args()
+    if args.master_mode:
+        from mode_profiles import resolve_mode
+
+        selected = resolve_mode("scenario", args.master_mode)["master_profile"]
+        if args.profile and args.profile != selected:
+            parser.error("--profile disagrees with --master-mode")
+        args.profile = selected
+    else:
+        args.profile = args.profile or "batch-window"
     if args.case_dir is None:
         args.case_dir = str(Path(__file__).resolve().parent / "scenarios")
     elif not args.case_dir:

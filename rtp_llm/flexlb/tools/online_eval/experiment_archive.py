@@ -19,7 +19,17 @@ SCHEMA_VERSION = 1
 STRUCTURED = {".json", ".yaml", ".yml", ".html", ".csv"}
 RAW_LIMIT = 2 * 1024 * 1024
 HEAD_TAIL = 256 * 1024
-SECRET_WORDS = ("token", "secret", "credential", "password", "private_key")
+SECRET_WORDS = ("api_token", "auth_token", "access_token", "refresh_token",
+                "api_key", "access_key", "secret", "credential", "password",
+                "private_key")
+
+
+def _secret_like(path: Path) -> bool:
+    name = path.name.lower()
+    return name in {"token", "token.txt", "token.json", "token.yaml",
+                    "token.yml", ".env"} or any(
+        word in name for word in SECRET_WORDS
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -30,11 +40,15 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def create_archive(output: Path, sources: dict[str, Path], *, kind: str) -> dict:
+def create_archive(output: Path, sources: dict[str, Path], *, kind: str,
+                   status: str = "complete", metadata: dict | None = None) -> dict:
     """Archive named run directories/files; never follow symlinks or include output."""
     output = Path(output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    manifest = {"schema_version": SCHEMA_VERSION, "kind": kind, "files": [], "omitted": []}
+    if status not in {"complete", "incomplete"}:
+        raise ValueError("status must be complete or incomplete")
+    manifest = {"schema_version": SCHEMA_VERSION, "kind": kind, "status": status,
+                "metadata": metadata or {}, "files": [], "omitted": []}
     fd, temp_name = tempfile.mkstemp(prefix=".experiment-", suffix=".zip", dir=output.parent)
     os.close(fd)
     try:
@@ -48,11 +62,12 @@ def create_archive(output: Path, sources: dict[str, Path], *, kind: str) -> dict
                     raise FileNotFoundError(root)
                 files = sorted(root.rglob("*")) if root.is_dir() else [root]
                 for path in files:
-                    if path.is_symlink() or not path.is_file() or path.resolve() == output:
+                    if (path.is_symlink() or not path.is_file()
+                            or path.resolve() in {output, Path(temp_name).resolve()}):
                         continue
                     relative = path.relative_to(root) if root.is_dir() else Path(path.name)
                     name = f"{label}/{relative.as_posix()}"
-                    if any(word in relative.name.lower() for word in SECRET_WORDS):
+                    if _secret_like(relative):
                         manifest["omitted"].append({"path": name, "reason": "secret-like filename"})
                         continue
                     size = path.stat().st_size
@@ -87,6 +102,8 @@ def main(argv=None):
     create.add_argument("--kind", choices=("case", "scenario", "stress", "ab"), required=True)
     create.add_argument("--source", action="append", required=True,
                         help="label=directory or label=file; repeat as needed")
+    create.add_argument("--status", choices=("complete", "incomplete"), default="complete")
+    create.add_argument("--metadata-json", default="{}", help="small provenance/verdict object")
     inspect = sub.add_parser("inspect")
     inspect.add_argument("archive", type=Path)
     args = parser.parse_args(argv)
@@ -97,7 +114,11 @@ def main(argv=None):
             if not sep or label in sources:
                 parser.error("--source needs a distinct label=path")
             sources[label] = Path(path)
-        manifest = create_archive(args.out, sources, kind=args.kind)
+        metadata = json.loads(args.metadata_json)
+        if not isinstance(metadata, dict):
+            parser.error("--metadata-json must be an object")
+        manifest = create_archive(args.out, sources, kind=args.kind,
+                                  status=args.status, metadata=metadata)
     else:
         with zipfile.ZipFile(args.archive) as archive:
             manifest = json.loads(archive.read("manifest.json"))

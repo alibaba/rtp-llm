@@ -14,6 +14,10 @@ Python 定义步骤和断言，YAML 传入 P/D 规模等数据。
 | [flexlb_cfg.py](flexlb_cfg.py)、[框架公共模块](flexlb_test_framework/README.md) | 配置、进程、RPC 和上下文能力 |
 | [tests/](tests/) | 框架及压测工具的回归测试 |
 | [stress/](stress/README.md) | 性能压测、指标采集、A/B 对比和报告工具 |
+| [mode_profiles.yaml](mode_profiles.yaml) | 功能/场景/压测/Whale 运行模式与 sb/sn/wb/wn 两层模式表 |
+| [experiment_archive.py](experiment_archive.py) | 本地实验单文件压缩归档 |
+| [remote_compare.py](remote_compare.py) | real/mock KMonitor 导出数据的保守对比 |
+| [compare_case_runs.py](compare_case_runs.py) | 功能/场景两次跑批的实例、断言与耗时对比 |
 | [data/](data/) | 性能预设和流量输入数据，属于有效输入 |
 
 ## 运行新版 case
@@ -37,6 +41,7 @@ python3 parallel_runner.py \
 ## 文档
 
 - [框架设计、术语与分层图](docs/framework-design.md)
+- [统一 Mock 框架模式、扩展工具与归档](docs/unified-mock-framework-design.md)
 - [添加配置与 Python case](docs/adding-cases.md)
 - [功能与持续负载套件分类](docs/test-suites.md)
 - [本轮框架验证与 A/B 结果](docs/framework-validation-20260911.md)

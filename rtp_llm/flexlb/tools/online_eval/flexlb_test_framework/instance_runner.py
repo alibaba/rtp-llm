@@ -482,10 +482,13 @@ def run_structured(args: argparse.Namespace, ports) -> int:
                 raise ResourcePlanError(
                     "resource planner and child environment disagree"
                 )
+        from mode_profiles import master_mode_for_profile, resolve_mode
+        runtime_plan = resolve_mode("scenario", master_mode_for_profile(args.profile))
         manifest = {
             "schema_version": 1,
             "source": args.source,
             "profile": args.profile,
+            "runtime_plan": runtime_plan,
             "grade": args.grade,
             "port_provenance": args.port_provenance,
             "instances": [instance.metadata for instance in instances],
@@ -526,11 +529,26 @@ def run_structured(args: argparse.Namespace, ports) -> int:
     finally:
         pool.shutdown(wait=True)
     payload = _aggregate(results, instances, args, time.monotonic() - started)
+    payload["runtime_plan"] = runtime_plan
     if interrupted:
         payload["summary"]["exit_code"] = 130
         payload["summary"]["interrupted"] = True
     target = Path(args.json).resolve() if args.json else out / "aggregate.json"
     _write_json(target, payload)
+    if getattr(args, "archive", None):
+        from experiment_archive import create_archive
+
+        sources = {"run": out}
+        if target.parent != out:
+            sources["aggregate"] = target
+        create_archive(
+            Path(args.archive), sources, kind="case",
+            status="incomplete" if interrupted else "complete",
+            metadata={"profile": args.profile, "grade": args.grade,
+                      "exit_code": payload["summary"]["exit_code"],
+                      "instance_count": payload["summary"]["total"]},
+        )
+        print(f"experiment archive: {args.archive}")
     try:
         _write_timings(payload["instances"])
     except OSError as exc:

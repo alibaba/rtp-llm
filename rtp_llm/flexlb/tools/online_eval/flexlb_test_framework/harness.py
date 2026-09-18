@@ -811,6 +811,7 @@ class EnvSpec:
     """Declarative description of a full mock + master environment."""
 
     label: str = "env"
+    runtime_mode: str = "functional"
     n_prefill: int = 2
     n_decode: int = 4
     mock_heap: str = DEFAULT_MOCK_HEAP
@@ -880,6 +881,7 @@ class EnvSpec:
         return json.dumps(
             {
                 "n_prefill": self.n_prefill,
+                "runtime_mode": self.runtime_mode,
                 "n_decode": self.n_decode,
                 "perf": self.perf,
                 "master_profile": self.master_profile,
@@ -1161,7 +1163,7 @@ class EnvManager:
             # so the unique-IP advertisement (127.1.0.x) is unreachable there.
             "--unique-engine-ips",
             str(resolve_address_plan(
-                "functional", unique_loopback_supported=sys.platform != "darwin"
+                spec.runtime_mode, unique_loopback_supported=sys.platform != "darwin"
             )["unique_engine_ips"]).lower(),
             "--event-loop-threads",
             str(spec.event_loop_threads),

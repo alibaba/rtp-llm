@@ -5,7 +5,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from mode_profiles import load_mode_tables, resolve_address_plan, resolve_mode
+from mode_profiles import (load_mode_tables, master_mode_for_profile,
+                           resolve_address_plan, resolve_mode)
+from flexlb_cfg import render_env
 
 
 class ModeProfilesTest(unittest.TestCase):
@@ -22,6 +24,11 @@ class ModeProfilesTest(unittest.TestCase):
                              (decision, dispatcher))
         self.assertEqual(resolve_mode("scenario", "sn")["observation"]["jsonl"], "bounded")
         self.assertEqual(resolve_mode("scenario", "sn")["features"]["orchestration"], "scenario")
+        self.assertEqual(resolve_mode("stress", "wb")["master_profile"], "stress-na130")
+        self.assertEqual(render_env(resolve_mode("stress", "wb")["master_profile"]),
+                         render_env("stress-na130"))
+        self.assertEqual(resolve_mode("stress", "sn")["master_profile"], "single-nonbatch")
+        self.assertEqual(master_mode_for_profile("stress-na130"), "wb")
         self.assertFalse(resolve_mode("whale_embedded", "sb", pod_ip="10.0.0.1")
                          ["observation"]["jsonl"])
 

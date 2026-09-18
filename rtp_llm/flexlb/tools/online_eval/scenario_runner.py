@@ -91,6 +91,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, help="scenario file or directory")
     parser.add_argument("--profile")
+    parser.add_argument("--master-mode", choices=("sb", "sn", "wb", "wn"))
     parser.add_argument(
         "--suite", choices=("functional", "workload", "all"), default="all"
     )
@@ -102,6 +103,13 @@ def main(argv=None):
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--lease-json", type=Path)
     args = parser.parse_args(argv)
+    if args.master_mode:
+        from mode_profiles import resolve_mode
+
+        selected = resolve_mode("scenario", args.master_mode)["master_profile"]
+        if args.profile and args.profile != selected:
+            parser.error("--profile disagrees with --master-mode")
+        args.profile = selected
     try:
         registry = handlers()
         plans = select(

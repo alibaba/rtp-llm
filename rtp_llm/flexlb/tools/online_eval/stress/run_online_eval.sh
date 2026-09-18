@@ -42,6 +42,8 @@ PERFORMANCE_FILE="${PERFORMANCE_FILE:-${ONLINE_EVAL_DIR}/data/performance/dsv4_f
 RUN_ROOT="${RUN_ROOT:-${ONLINE_EVAL_DIR}/run}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="${RUN_DIR:-${RUN_ROOT}/${RUN_ID}}"
+# Optional portable archive. Keep disabled for the default fast path.
+EXPERIMENT_ARCHIVE_PATH="${EXPERIMENT_ARCHIVE_PATH:-}"
 FLEXLB_LOG_PATH="${FLEXLB_LOG_PATH:-${RUN_DIR}/flexlb_logs}"
 # FLEXLB_CONFIG SSOT knobs: tools/online_eval/flexlb_cfg.py renders BOTH
 # the master env string and the --master-config envelope (single render,
@@ -53,7 +55,21 @@ FLEXLB_LOG_PATH="${FLEXLB_LOG_PATH:-${RUN_DIR}/flexlb_logs}"
 # envelope (master -Xms/-Xmx via the heap extraction below).  An
 # explicitly exported FLEXLB_CONFIG still wins for the master env
 # (escape hatch — see the generator block above START_MOCK).
-FLEXLB_PROFILE="${FLEXLB_PROFILE:-stress-na130}"
+FLEXLB_MASTER_MODE_EXPLICIT="${FLEXLB_MASTER_MODE+x}"
+FLEXLB_PROFILE_EXPLICIT="${FLEXLB_PROFILE+x}"
+if [[ -z "${FLEXLB_MASTER_MODE_EXPLICIT}" && -n "${FLEXLB_PROFILE:-}" ]]; then
+  FLEXLB_MASTER_MODE="$(python3 "${ONLINE_EVAL_DIR}/mode_profiles.py" \
+    --runtime stress --profile-to-master "${FLEXLB_PROFILE}")"
+fi
+FLEXLB_MASTER_MODE="${FLEXLB_MASTER_MODE:-wb}"
+MODE_PROFILE="$(python3 "${ONLINE_EVAL_DIR}/mode_profiles.py" \
+  --runtime stress --master "${FLEXLB_MASTER_MODE}" --field master_profile)"
+if [[ -n "${FLEXLB_MASTER_MODE_EXPLICIT:-}" && -n "${FLEXLB_PROFILE:-}" \
+      && "${FLEXLB_PROFILE}" != "${MODE_PROFILE}" ]]; then
+  echo "ERROR: FLEXLB_PROFILE disagrees with explicit FLEXLB_MASTER_MODE" >&2
+  exit 2
+fi
+FLEXLB_PROFILE="${FLEXLB_PROFILE:-${MODE_PROFILE}}"
 FLEXLB_CONFIG_OVERRIDE="${FLEXLB_CONFIG_OVERRIDE:-}"
 FLEXLB_JVM_HEAP_SIZE="${FLEXLB_JVM_HEAP_SIZE:-32g}"
 PROCESS_CONFIG_FILE="${PROCESS_CONFIG_FILE:-${RUN_DIR}/master_config.json}"
@@ -274,6 +290,7 @@ if [[ -n "${JAVA21_HOME_DETECTED}" ]]; then
 fi
 
 cleanup() {
+  local run_exit_status=$?
   # One stop covers all collector threads (G1/G3/G5) of the single
   # secondary collector process.
   stop_secondary_pollers
@@ -292,6 +309,18 @@ cleanup() {
       kill -9 "${pid}" >/dev/null 2>&1 || true
     fi
   done
+  if [[ -n "${EXPERIMENT_ARCHIVE_PATH}" && -d "${RUN_DIR}" ]]; then
+    local archive_status=incomplete
+    [[ "${run_exit_status}" -eq 0 && -s "${RUN_DIR}/aggregate.json" ]] && archive_status=complete
+    if python3 "${ONLINE_EVAL_DIR}/experiment_archive.py" create \
+      --kind stress --status "${archive_status}" \
+      --source "run=${RUN_DIR}" --out "${EXPERIMENT_ARCHIVE_PATH}" \
+      >/dev/null; then
+      echo "experiment_archive=${EXPERIMENT_ARCHIVE_PATH} status=${archive_status} run_exit=${run_exit_status}"
+    else
+      echo "WARNING: experiment archive creation failed: ${EXPERIMENT_ARCHIVE_PATH}" >&2
+    fi
+  fi
 }
 trap cleanup EXIT
 
@@ -406,6 +435,7 @@ consolidate_run_outputs_now() {
     --param "flexlb_pv_log=${FLEXLB_PV_LOG}" \
     --param "flexlb_config=${FLEXLB_CONFIG}" \
     --param "flexlb_profile=${FLEXLB_PROFILE}" \
+    --param "flexlb_master_mode=${FLEXLB_MASTER_MODE}" \
     --param "flexlb_config_override=${FLEXLB_CONFIG_OVERRIDE}" \
     || echo "WARNING: run output consolidation failed (original files kept as-is)" >&2
 }
@@ -784,6 +814,19 @@ assert_mock_engine_healthy() {
 }
 
 mkdir -p "${RUN_DIR}"
+python3 - "${ONLINE_EVAL_DIR}" "${FLEXLB_MASTER_MODE}" "${FLEXLB_PROFILE}" \
+  "${FLEXLB_PROFILE_EXPLICIT}" "${RUN_DIR}/mode_plan.json" <<'PY'
+import json
+import sys
+sys.path.insert(0, sys.argv[1])
+from mode_profiles import resolve_mode
+plan = resolve_mode("stress", sys.argv[2])
+plan["master_profile"] = sys.argv[3]
+plan["profile_source"] = "explicit" if sys.argv[4] else "runtime_default"
+with open(sys.argv[5], "w", encoding="utf-8") as stream:
+    json.dump(plan, stream, ensure_ascii=False, indent=2)
+    stream.write("\n")
+PY
 mkdir -p "${FLEXLB_LOG_PATH}"
 echo "run_dir=${RUN_DIR}"
 echo "load client: JavaLoadClient (trace priority passthrough via lib_load_client.sh)"

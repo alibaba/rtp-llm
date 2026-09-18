@@ -1,5 +1,11 @@
 #!/bin/sh
 set -eu
+. "$(dirname "$0")/mode_defaults.sh"
+
+[ "${MOCK_RUNTIME_MODE:-$MOCK_MODE_RUNTIME}" = "$MOCK_MODE_RUNTIME" ] || {
+    echo "This entry point only supports $MOCK_MODE_RUNTIME" >&2
+    exit 2
+}
 
 [ "${FLEXLB_MOCK_WHALE:-0}" = "1" ] || {
     echo "This entry point requires FLEXLB_MOCK_WHALE=1" >&2
@@ -37,6 +43,11 @@ case "${FETCH_OUTPUT_STREAM:-1}" in
     0) automatic=true;;
     *) echo "FETCH_OUTPUT_STREAM must be 0 or 1" >&2; exit 2;;
 esac
+case "${MOCK_EVENT_LOG_ENABLED:-$MOCK_MODE_JSONL_DEFAULT}" in
+    1) set -- --events-file "$run_dir/engine_events.jsonl" "$@";;
+    0) ;;
+    *) echo "MOCK_EVENT_LOG_ENABLED must be 0 or 1" >&2; exit 2;;
+esac
 if ! command -v java >/dev/null 2>&1 && [ -x /opt/taobao/java/bin/java ]; then
     PATH="/opt/taobao/java/bin:$PATH"
     export PATH
@@ -45,8 +56,9 @@ fi
 exec java -jar "${MOCK_ENGINE_JAR:-/opt/flexlb/mock-engine.jar}" \
     --whale true --n-prefill "$prefill" --n-decode "$decode" \
     --host "$POD_IP" --bind-host "${MOCK_BIND_HOST:-0.0.0.0}" \
+    --unique-engine-ips false \
     --base-grpc-port "$((START_PORT + 1))" --auto-fetch "$automatic" \
-    --kmonitor "${MOCK_KMONITOR_ENABLED:-true}" \
+    --kmonitor "${MOCK_KMONITOR_ENABLED:-$MOCK_MODE_KMONITOR_DEFAULT}" \
     --performance "$MOCK_PERFORMANCE_CONFIG" --master-config "$MOCK_MASTER_CONFIG" \
-    --endpoint-file "$run_dir/unused-endpoint.json" --events-file "$run_dir/engine_events.jsonl" \
+    --endpoint-file "$run_dir/unused-endpoint.json" \
     "$@"

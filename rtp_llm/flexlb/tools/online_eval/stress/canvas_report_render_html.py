@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """FlexLB 压测报告 — spec → self-contained Chart.js HTML 渲染器。
 
-外部依赖：仅 Chart.js 4.4.7（jsDelivr UMD）。
+图表依赖：仓库固定的 Chart.js 4.4.7 UMD，内嵌后离线可打开。
 观感：浅色主题 / 白卡 / 6 列 KPI / 2 列 chart grid / .box 高 280px，对齐既有
 `outputs/flexlb-run-*-chartjs.html` 的样式。
 交互：legend 单击切换单条 / tooltip 随鼠标 index 联动；无 zoom 插件。
@@ -161,16 +161,18 @@ def render(spec):
     }
 
     page_title = html.escape(title)
-    interaction = Path(__file__).with_name("legend_interaction.js").read_text(encoding="utf-8")
+    chartjs = (Path(__file__).parent / "stress" / "vendor" / "chart.umd.min.js").read_text(encoding="utf-8")
+    interaction = (Path(__file__).parent / "stress" / "legend_interaction.js").read_text(encoding="utf-8")
     return (_TEMPLATE.replace("__PAGE_TITLE__", page_title)
             .replace("__SPEC_JSON__", json.dumps(payload, ensure_ascii=False))
+            .replace("__CHARTJS_JS__", chartjs)
             .replace("__LEGEND_INTERACTION_JS__", interaction))
 
 
 _TEMPLATE = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"/>
 <title>__PAGE_TITLE__</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script>__CHARTJS_JS__</script>
 <script>__LEGEND_INTERACTION_JS__</script>
 <style>
 :root{

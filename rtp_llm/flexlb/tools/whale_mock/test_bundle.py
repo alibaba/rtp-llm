@@ -37,6 +37,11 @@ class BundleConfigurationTest(unittest.TestCase):
         self.assertEqual(command[command.index("--block-size") + 1], "1024")
         self.assertEqual(command[command.index("--auto-fetch") + 1], "true")
         self.assertEqual(command[command.index("--unique-engine-ips") + 1], "true")
+        self.assertNotIn("--events-file", command)
+
+    def test_event_log_is_explicit(self):
+        command, _ = self.launch_to_process_boundary({"MOCK_EVENT_LOG_ENABLED": "1"})
+        self.assertIn("--events-file", command)
 
     def test_frontend_fetch_controls_engine_continuation(self):
         command, _ = self.launch_to_process_boundary({"FETCH_OUTPUT_STREAM": "1"})

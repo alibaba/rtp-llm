@@ -22,6 +22,8 @@ class AbCurvesTest(unittest.TestCase):
         page = render(spec)
         self.assertIn("FlexLegend.controller", page)
         self.assertIn("A/B 时序对比", page)
+        self.assertNotIn("cdn.jsdelivr.net", page)
+        self.assertIn("Chart.js v4.4.7", page)
 
 
 if __name__ == "__main__":

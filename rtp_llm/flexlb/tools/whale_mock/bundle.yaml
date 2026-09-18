@@ -9,7 +9,6 @@ master_heap: 8g
 mock_heap: 16g
 startup_timeout_s: 180
 shutdown_timeout_s: 30
-kmonitor: true
 event_loop_threads: 32
 completion_threads: 32
 performance: performance.json

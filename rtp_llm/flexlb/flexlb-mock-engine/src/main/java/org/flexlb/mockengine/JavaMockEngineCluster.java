@@ -5923,12 +5923,12 @@ public final class JavaMockEngineCluster {
         Map<String, String> whaleMetricTags() {
             Map<String, String> tags = WhaleMockMonitor.engineTags(
                     System.getenv(), whaleBundle ? whalePodIp : host, roleType.name());
-            if (whaleBundle) {
-                // One physical Pod, distinct logical engines. Preserve the real
-                // container address; monitoring aliases do not represent separate Pods.
-                tags.put("engine_port", Integer.toString(grpcPort));
-                tags.put("engine_ip", host);
-            }
+            // The reachable engine address and the monitoring identity are
+            // separate in both Whale layouts. Bundle engines share one Pod IP;
+            // standalone engines have distinct Pod IPs. Never overwrite the
+            // physical host_ip/container_ip tags with a virtual loopback.
+            tags.put("engine_port", Integer.toString(grpcPort));
+            tags.put("engine_ip", host);
             tags.putAll(Map.of("engine", engineName, "role", roleType.name(),
                     "generation", processGeneration, "backend", "mock"));
             return tags;

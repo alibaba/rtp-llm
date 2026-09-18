@@ -13,8 +13,10 @@ runtime_modes:
     observation: {jsonl: bounded, kmonitor: false, report: true}
   stress:
     address: loopback_per_engine
+    default_master_mode: wb
+    default_profile: stress-na130
     features: {workload: replay_or_synthetic, orchestration: stress, collector: local, assertion: aggregate}
-    observation: {jsonl: sampled, kmonitor: false, report: true}
+    observation: {jsonl: run_local, kmonitor: false, report: true}
   whale_embedded:
     address: pod_when_external
     features: {workload: external, orchestration: whale, collector: kmonitor, assertion: none}

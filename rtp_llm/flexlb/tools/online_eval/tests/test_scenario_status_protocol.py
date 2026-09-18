@@ -441,6 +441,7 @@ class StatusProtocolTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         old = EnvSpec(
             label="fault_ttl_batch_window",
+            runtime_mode="scenario",
             n_prefill=2,
             n_decode=2,
             perf=fault_env_perf(),

@@ -485,6 +485,7 @@ def make_env_spec(plan, profile, lease):
     }
     spec = EnvSpec(
         label="scenario",
+        runtime_mode="scenario",
         n_prefill=plan["n_prefill"],
         n_decode=plan["n_decode"],
         master_profile=profile,

@@ -58,7 +58,7 @@ import sys
 
 from canvas_report_render_html import render as render_charts
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from experiment_archive import create_archive
 
 # ---------------------------------------------------------------------------
@@ -1026,26 +1026,47 @@ def render_html(payload, chart_link=None):
 def build_curve_spec(run_a, run_b, lo, hi):
     """Pair matching samples on a shared relative-time axis; gaps stay null."""
     sources = (
-        ("per_second", "success", "成功 QPS", "req/s"),
-        ("per_second", "sched_p95", "调度耗时 P95", "ms"),
-        ("per_second", "ttft_p95", "首 token 耗时 P95", "ms"),
-        ("mock_tps_ts", "context_tps", "Prefill 计算 TPS", "tokens/s"),
-        ("mock_tps_ts", "generate_tps", "Decode 生成 TPS", "tokens/s"),
-        ("cache_hit_ts", "engine_token", "引擎 token 命中比例", "ratio"),
+        ("per_second", None, "arrivals", "发射 QPS", "req/s", False),
+        ("per_second", None, "success", "成功 QPS", "req/s", False),
+        ("per_second", None, "errors", "错误 QPS", "req/s", False),
+        ("per_second", None, "sched_p95", "调度耗时 P95", "ms", False),
+        ("per_second", None, "ttft_p95", "首 token 耗时 P95", "ms", False),
+        ("inflight_ts", None, "prefill_requests", "Prefill 在飞", "requests", False),
+        ("inflight_ts", None, "decode_reserved", "Decode 预留", "requests", False),
+        ("mock_tps_ts", None, "context_tps", "Prefill 计算 TPS", "tokens/s", False),
+        ("mock_tps_ts", None, "context_tps_with_cache", "Prefill 含缓存 TPS", "tokens/s", False),
+        ("mock_tps_ts", None, "generate_tps", "Decode 生成 TPS", "tokens/s", False),
+        ("cache_hit_ts", None, "engine_token", "引擎 token 命中比例", "ratio", False),
+        ("cache_hit_ts", None, "master_routing", "Master 路由命中比例", "ratio", False),
+        ("kv_blocks_ts_by_role", "prefill", "available_blocks", "P 可用 KV 块", "blocks", False),
+        ("kv_blocks_ts_by_role", "decode", "available_blocks", "D 可用 KV 块", "blocks", False),
+        ("kv_blocks_ts_by_role", "prefill", "cache_evictions", "P KV 驱逐速率", "blocks/s", True),
+        ("kv_blocks_ts_by_role", "decode", "cache_evictions", "D KV 驱逐速率", "blocks/s", True),
     )
     panels = []
-    for source, key, title, unit in sources:
-        rows = [run_a["aggregate"].get(source) or [], run_b["aggregate"].get(source) or []]
-        series_maps = [
-            {float(r["t"]): r[key] for r in side if key in r and r.get("t") is not None}
-            for side in rows
-        ]
+    for source, role, key, title, unit, counter_rate in sources:
+        rows = []
+        for run in (run_a, run_b):
+            data = run["aggregate"].get(source) or {}
+            rows.append(data.get(role) or [] if role else data or [])
+        series_maps = []
+        for side in rows:
+            points = sorted((float(r["t"]), r[key]) for r in side
+                            if isinstance(r.get("t"), (int, float))
+                            and isinstance(r.get(key), (int, float)))
+            if counter_rate:
+                points = [(t, (v - previous_v) / (t - previous_t))
+                          for (previous_t, previous_v), (t, v) in zip(points, points[1:])
+                          if t > previous_t and v >= previous_v]
+            series_maps.append(dict(points))
         axis = sorted(set(series_maps[0]) | set(series_maps[1]))
         if not axis:
             continue
+        panel_id = f"ab_{source}_{role + '_' if role else ''}{key}"
         panels.append({
-            "id": f"ab_{source}_{key}", "title": title,
-            "caption": f"同一相对时间轴；稳态窗 {lo:g}–{hi:g}s；空窗保留为空值",
+            "id": panel_id, "title": title,
+            "caption": (f"同一相对时间轴；稳态窗 {lo:g}–{hi:g}s；空窗保留为空值"
+                        + ("；累计计数相邻有效样本差分，重置处留空" if counter_rate else "")),
             "type": "line", "timeX": True, "x": [str(t) for t in axis],
             "xNums": axis, "unit": unit,
             "series": [
@@ -1056,6 +1077,18 @@ def build_curve_spec(run_a, run_b, lo, hi):
                 )
             ],
         })
+        if key in {"success", "sched_p95", "engine_token"}:
+            panels.append({
+                "id": panel_id + "_delta", "title": title + " · B−A",
+                "caption": "仅共同采样时刻相减；缺失采样不补零",
+                "type": "line", "timeX": True, "x": [str(t) for t in axis],
+                "xNums": axis, "unit": unit,
+                "series": [{"name": "B−A", "color": "#722ed1", "data": [
+                    (series_maps[1][t] - series_maps[0][t]
+                     if t in series_maps[0] and t in series_maps[1] else None)
+                    for t in axis
+                ]}],
+            })
     return {
         "run_id": "ab", "title": "A/B 时序对比",
         "subtitle": f"A: {run_a['label']} · B: {run_b['label']}",
@@ -1207,7 +1240,8 @@ def main(argv=None):
         with open(args.out, "w", encoding="utf-8") as fh:
             json.dump(metrics_to_json(payload), fh, indent=2, ensure_ascii=False)
         print(f"\nJSON summary -> {args.out}")
-    if args.html:
+    write_html = args.html or bool(args.archive)
+    if write_html:
         html_path = (
             "ab_compare.html"
             if args.out == "-"
@@ -1230,10 +1264,14 @@ def main(argv=None):
             "run_b": os.path.dirname(run_b["aggregate_path"]),
             "comparison": args.out,
         }
-        if args.html:
+        if write_html:
             sources["curves"] = curve_path
             sources["report"] = html_path
-        create_archive(args.archive, sources, kind="ab")
+        create_archive(args.archive, sources, kind="ab", metadata={
+            "gate_exit_code": payload["gate"]["exit_code"],
+            "steady_window": payload["steady_window"],
+            "trace_file_sha256": run_a["meta"].get("trace_file_sha256"),
+        })
         print(f"Experiment ZIP -> {args.archive}")
 
     return payload["gate"]["exit_code"]

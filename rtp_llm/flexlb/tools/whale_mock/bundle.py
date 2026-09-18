@@ -17,7 +17,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent / "online_eval"))
 from flexlb_cfg import render_env, render_process_config
-from mode_profiles import resolve_address_plan, resolve_mode
+from mode_profiles import load_mode_tables, resolve_address_plan, resolve_mode
 
 
 def run():
@@ -47,13 +47,21 @@ def run():
         ):
             raise ValueError(f"{role} must be a positive integer")
     cfg.update(overrides)
-    profile = (resolve_mode("whale_embedded", cfg["master_mode"])["master_profile"]
-               if "master_mode" in cfg else cfg["profile"])
+    mode = resolve_mode("whale_embedded", cfg["master_mode"]) if "master_mode" in cfg else None
+    profile = mode["master_profile"] if mode else cfg["profile"]
+    observation = (mode["observation"] if mode else
+                   load_mode_tables()["runtime_modes"]["whale_embedded"]["observation"])
+    cfg.setdefault("kmonitor", observation["kmonitor"])
     if "profile" in cfg and cfg["profile"] != profile:
         raise ValueError("master_mode and profile disagree")
     fetch_output_stream = os.environ.get("FETCH_OUTPUT_STREAM", "0")
     if fetch_output_stream not in {"0", "1"}:
         raise ValueError("FETCH_OUTPUT_STREAM must be 0 or 1")
+    event_log_enabled = os.environ.get(
+        "MOCK_EVENT_LOG_ENABLED", "1" if observation["jsonl"] else "0"
+    )
+    if event_log_enabled not in {"0", "1"}:
+        raise ValueError("MOCK_EVENT_LOG_ENABLED must be 0 or 1")
     http_port = int(os.environ.get("START_PORT", "7001"))
     mock_port = http_port + cfg["mock_port_offset"]
     runtime = Path(os.environ.get("MOCK_BUNDLE_RUN_DIR", "/home/admin/ai-whale/mock"))
@@ -191,8 +199,8 @@ def run():
                 str(cfg["prefill_kv_pool_blocks"]),
                 "--decode-kv-pool-blocks",
                 str(cfg["decode_kv_pool_blocks"]),
-                "--events-file",
-                str(runtime / "engine-events.jsonl"),
+                *(["--events-file", str(runtime / "engine-events.jsonl")]
+                  if event_log_enabled == "1" else []),
             ],
             env,
         )

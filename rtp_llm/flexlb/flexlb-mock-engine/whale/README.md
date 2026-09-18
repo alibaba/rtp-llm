@@ -16,6 +16,14 @@ bash mvnw -P'opensource,!internal' -pl flexlb-mock-engine -am package
 
 `--kmonitor true` 只允许与 `--whale true` 同时启用。启用后若私有适配缺失或退化为 NoOp，启动失败，避免把未上报指标误当成上线成功。开源网络联调显式设置 `MOCK_KMONITOR_ENABLED=false`。
 
+`mode_defaults.sh` 由共享的 `tools/online_eval/mode_profiles.yaml` 生成，镜像只需这个小型 shell 投影，不依赖 Python/YAML 运行时。修改模式表后执行：
+
+```sh
+python3 rtp_llm/flexlb/tools/online_eval/mode_profiles.py \
+  --runtime whale_independent --render-shell \
+  > rtp_llm/flexlb/flexlb-mock-engine/whale/mode_defaults.sh
+```
+
 ## Whale 角色配置
 
 为 P、D 分别配置 CPU 资源模板、独立 VIP 域和各自 Pod 数；两者使用同一 mock 镜像。master 与 frontend 使用原有独立角色镜像。不要把 mock 镜像放入 master 角色，不要将 P/D 行数设为零后借用 master Pod。
@@ -33,7 +41,8 @@ bash mvnw -P'opensource,!internal' -pl flexlb-mock-engine -am package
 | `MOCK_PERFORMANCE_CONFIG_JSON`、`MOCK_MASTER_CONFIG_JSON` | 无挂载时传入完整 JSON；由启动脚本写入运行目录，与对应路径变量互斥 |
 | `FETCH_OUTPUT_STREAM` | 默认 1；0 时 P 计算完成直接接续 D，不等 Fetch 或超时 |
 | `MOCK_KMONITOR_ENABLED` | Whale 包装默认 true；开源联调设 false |
-| `MOCK_RUN_DIR` | 事件日志目录，默认 `/tmp/flexlb-mock` |
+| `MOCK_EVENT_LOG_ENABLED` | 默认 0，不创建请求级 JSONL；诊断时设 1 |
+| `MOCK_RUN_DIR` | 配置文件及可选事件日志目录，默认 `/tmp/flexlb-mock` |
 | `FLEXLB_MONITOR_SERVICE_NAME`、`FLEXLB_MONITOR_TENANT_NAME` | 复用 master 内部监控适配的环境配置 |
 
 平台启动命令使用 `sh /opt/flexlb/start.sh`，不要把带引号的 `sh -c` 脚本放进 `cmd`：Whale 会按空格拆分该字段。配置 JSON 通过上述环境变量传递，内容不会作为 shell 命令求值。
@@ -46,17 +55,7 @@ Whale 健康探测使用 `START_PORT` 的 `/health`；停止/排空状态返回 
 
 ## 监控和验证边界
 
-同 Pod 寄生多个 P/D engine 时，监控标签自动从平台身份派生，无需填写业务名或监控别名环境变量：
-
-- `hippo_app` 原样使用平台传入的 `HIPPO_APP`。
-- 若 `HIPPO_ROLE` 以 `.master_part` 结尾，只将这个末尾角色段替换为 `.prefill_part0` 或 `.decode_part0`。
-- 业务名、部署名、`gNN` 分组号保留。例如 `example_deployment_g07.master_part` 派生为
-  `example_deployment_g07.prefill_part0` / `example_deployment_g07.decode_part0`，不猜测其他角色的分组号。
-- 独立 P/D Pod 的角色名和不符合上述格式的名称保持不变。
-
-该规则作用于所有 mock KMonitor 指标，包括周期采样、执行事件和缓存驱逐寿命。
-只改变上报标签，不修改进程环境变量、服务发现、Pod 地址或 master/frontend 指标。
-更新镜像并重启后生效；历史曲线留在旧角色下。若 URL 固定了角色列表，需选择自动派生的新角色值。
+`hippo_app`、`hippo_role` 默认沿用平台环境。需要把寄生 P/D 指标分开时，可显式设置 `MOCK_PREFILL_HIPPO_ROLE` 和 `MOCK_DECODE_HIPPO_ROLE`；独立 Pod 通常直接使用自身角色。别名只影响 mock 指标，不改服务发现或真实 Pod 地址。所有 mock 指标还带 `engine`、`engine_port`、`engine_ip`、`role`、`generation`、`backend`，供同 Pod 引擎拆分；`host_ip` 仍是物理机，`container_ip` 仍是真实 Pod IP。
 
 Whale KMonitor 上报累计 context/generate token、KV tokens、waiting/running requests、completed/cancelled 数，以及按实际时间差计算的 TPS。所有指标带 engine、role、进程 generation、backend=mock 标签。累计 token 读数不被 HTTP 抓取消耗。
 

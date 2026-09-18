@@ -232,6 +232,8 @@ class WhaleModeConfigurationTest {
             reporter.set(d, (java.util.function.Consumer<java.util.Map<String, Number>>) decodeEvents::add);
             assertEquals("0", p.whaleMetricTags().get("dp_rank"));
             assertEquals("0", d.whaleMetricTags().get("dp_rank"));
+            assertEquals(Integer.toString(port), p.whaleMetricTags().get("engine_port"));
+            assertEquals(p.getHost(), p.whaleMetricTags().get("engine_ip"));
             assertNotEquals(p.whaleMetricTags().get("engine_port"), d.whaleMetricTags().get("engine_port"));
             channel = io.grpc.ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();
             var input = org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
