@@ -121,8 +121,8 @@ public class BatchHandler {
         }
 
         TrafficPolicyConfig policy = loadBalanceConfig.getRouter().getGroupSelector();
-        boolean atomicBatchAllowed = policy == null || (policy.getRules().isEmpty() && policy.getDefaultTargets().isEmpty());
-        BatchChunkAssembler batch = new BatchChunkAssembler(body, spec, cfg.getSubBatchSpec(), atomicBatchAllowed);
+        boolean preAssignmentAllowed = policy == null || (policy.getRules().isEmpty() && policy.getDefaultTargets().isEmpty());
+        BatchChunkAssembler batch = new BatchChunkAssembler(body, spec, cfg.getSubBatchSpec());
         int chunkCount = batch.chunkCount();
 
         if (chunkCount > loadBalanceConfig.getRouter().getBatchScheduleMaxCount()) {
@@ -139,7 +139,7 @@ public class BatchHandler {
             return preview("split", batch.chunks(List.of()));
         }
 
-        boolean assignBe = cfg.isPreAssignBe() && spec.isPreAssignable() && atomicBatchAllowed;
+        boolean assignBe = cfg.isPreAssignBe() && spec.isPreAssignable() && preAssignmentAllowed;
         boolean assignFe = cfg.getFeAllocation() == FeAllocation.MASTER;
         return resolveTargets(chunkCount, assignBe, assignFe)
                 .publishOn(cpuScheduler)
@@ -155,7 +155,7 @@ public class BatchHandler {
                     List<String> preAssignedFeUrls = assignFe
                             ? targets.stream().map(BatchScheduleTarget::getFeUrl).toList() : localFeUrls(chunkCount);
                     return fanoutService.dispatchChunks(
-                                    spec.getPath(), chunkBodies,
+                                    spec == BatchEndpointSpec.ROOT ? BatchEndpointSpec.BATCH_INFER.getPath() : spec.getPath(), chunkBodies,
                                     preAssignedFeUrls, spec,
                                     request.headers().asHttpHeaders(),
                                     request.uri().getRawQuery())

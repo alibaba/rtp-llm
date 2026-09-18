@@ -10,7 +10,7 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
-/** A batch's normalized envelope, shared by size projection and chunk materialization. */
+/** A batch's envelope, shared by size projection and chunk materialization. */
 public final class BatchChunkAssembler {
     private final JSONObject template;
     private final JSONArray items;
@@ -20,30 +20,15 @@ public final class BatchChunkAssembler {
     private final String configKey;
 
     public BatchChunkAssembler(JSONObject body, BatchEndpointSpec endpoint,
-                                SubBatchSpec split, boolean atomicBatchAllowed) {
+                                SubBatchSpec split) {
         this.items = body.getJSONArray(endpoint.getRequestArrayField());
         this.endpoint = endpoint;
         this.split = split;
         this.count = chunkCount(items.size(), split);
         template = new JSONObject(body);
         template.put(endpoint.getRequestArrayField(), new JSONArray());
-        String key = body.containsKey("generate_config") ? "generate_config" : "generation_config";
-        JSONObject originalConfig = body.getJSONObject(key);
-        if (originalConfig != null || endpoint.isPreAssignable()) {
-            JSONObject config = originalConfig == null ? new JSONObject() : new JSONObject(originalConfig);
-            if (endpoint.isPreAssignable()) {
-                template.remove("generation_config");
-                if (!atomicBatchAllowed) {
-                    template.remove("force_batch");
-                    config.put("force_batch", false);
-                } else if (!config.containsKey("force_batch")) {
-                    config.put("force_batch", true);
-                }
-                key = "generate_config";
-            }
-            template.put(key, config);
-        }
-        configKey = template.get(key) instanceof JSONObject ? key : null;
+        configKey = body.containsKey("generate_config") || !body.containsKey("generation_config")
+                ? "generate_config" : "generation_config";
         endpoint.prepareChunkBody(template);
     }
 
@@ -84,11 +69,11 @@ public final class BatchChunkAssembler {
             int size = chunkSize(i);
             JSONObject chunk = new JSONObject(template);
             chunk.put(endpoint.getRequestArrayField(), new JSONArray(items.subList(offset, offset + size)));
-            if (configKey != null) {
+            if (template.containsKey(configKey)) {
                 chunk.put(configKey, new JSONObject(template.getJSONObject(configKey)));
             }
             if (i < targets.size() && targets.get(i).getGrpcPort() != null) {
-                JSONObject config = chunk.getJSONObject("generate_config");
+                JSONObject config = (JSONObject) chunk.computeIfAbsent(configKey, key -> new JSONObject());
                 config.put("role_addrs", roleAddrs(targets.get(i)));
             }
             chunks.add(chunk);

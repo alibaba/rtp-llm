@@ -26,7 +26,6 @@ from rtp_llm.distribute.distributed_server import (
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.ops import ParallelismConfig, RoleType, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
-from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
 from rtp_llm.utils.base_model_datatypes import GenerateResponse
 from rtp_llm.utils.complete_response_async_generator import (
@@ -141,68 +140,45 @@ class FrontendWorker:
         tokens = [self.pipeline.decode(id) for id in token_ids]
         return token_ids, tokens
 
-    async def batch_infer(
-        self,
-        prompts: List[str],
-        request_id: int,
-        generate_config: dict,
-        headers: Optional[Dict[str, Any]] = None,
-    ) -> BatchPipelineResponse:
-        if not prompts:
-            return BatchPipelineResponse(response_batch=[])
-
-        # Route /batch_infer through the same topology-aware path as prompt_batch.
-        effective_config = dict(generate_config)
-        effective_config.setdefault("force_batch", True)
-        effective_config["is_streaming"] = False
-        response = self.inference(
-            prompt_batch=prompts,
-            generate_config=effective_config,
-            headers=headers,
-            **{request_id_field_name: request_id},
-        )
-        async for _ in response:
-            pass
-        result = await response.gen_complete_response_once()
-        if not isinstance(result, BatchPipelineResponse):
+    def inference(
+        self, batch: bool = False, /, **kwargs: Any
+    ) -> CompleteResponseAsyncGenerator:
+        # The HTTP route selects batch mode; JSON fields cannot override it.
+        streaming = batch and self.is_streaming(kwargs)
+        if batch:
+            kwargs.setdefault("prompt_batch", [])
+        request, kwargs = RequestExtractor(GenerateConfig()).extract_request(kwargs)
+        if batch and (streaming or request.is_streaming):
             raise FtRuntimeException(
-                ExceptionType.EXECUTION_EXCEPTION,
-                "batch inference returned an unexpected response type",
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "batch_infer only supports non-streaming requests",
             )
-        return result
-
-    def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
-        default_generate_config = GenerateConfig()
-        request_extractor = RequestExtractor(default_generate_config)
-        request, kwargs = request_extractor.extract_request(kwargs)
-
-        if request.is_streaming is False and request.incremental:
+        if request.input_texts and not request.is_streaming and request.incremental:
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "request is non_stream but use incremental decoder",
             )
-
-        response_generator = self._inference(request, **kwargs)
-
-        complete_response_collect_func = partial(
-            FrontendWorker.collect_complete_response,
-            incremental=request.incremental,
-            batch_infer=request.batch_infer,
-            num_return_sequences=request.num_return_sequences,
+        if batch and not request.input_texts:
+            response = CompleteResponseAsyncGenerator.generate_from_list(
+                [BatchPipelineResponse(response_batch=[])]
+            )
+        elif batch and self._can_use_batch_rpc(request):
+            response = self._yield_batch_generate(request, **kwargs)
+        else:
+            response = self._inference(request, **kwargs)
+        collect = (
+            CompleteResponseAsyncGenerator.get_last_value
+            if batch
+            else partial(
+                FrontendWorker.collect_complete_response,
+                incremental=request.incremental,
+                batch_infer=request.batch_infer,
+                num_return_sequences=request.num_return_sequences,
+            )
         )
-        return CompleteResponseAsyncGenerator(
-            response_generator, complete_response_collect_func
-        )
+        return CompleteResponseAsyncGenerator(response, collect)
 
     def _inference(self, request: Request, **kwargs: Any):
-        if request.batch_infer and request.generate_configs[0].force_batch:
-            if request.is_streaming:
-                raise FtRuntimeException(
-                    ExceptionType.UNSUPPORTED_OPERATION,
-                    "force_batch only supports non-streaming prompt_batch requests",
-                )
-            if self._can_use_atomic_batch_rpc(request):
-                return self._yield_batch_generate(request, **kwargs)
         if (
             len(request.input_texts) > 1
             or request.batch_infer
@@ -242,7 +218,7 @@ class FrontendWorker:
                 **kwargs,
             )
 
-    def _can_use_atomic_batch_rpc(self, request: Request) -> bool:
+    def _can_use_batch_rpc(self, request: Request) -> bool:
         """Use BatchGenerateCall only when every item targets single-stage PDFUSION."""
         visitor = self.backend_rpc_server_visitor
         if visitor.pd_sep_config.role_type not in (
@@ -250,21 +226,10 @@ class FrontendWorker:
             RoleType.FRONTEND,
         ):
             return False
-        item_role_addrs = [config.role_addrs for config in request.generate_configs]
-        if any(item_role_addrs):
-            return (
-                all(
-                    len(role_addrs) == 1 and role_addrs[0].role == RoleType.PDFUSION
-                    for role_addrs in item_role_addrs
-                )
-                and len(
-                    {
-                        (role_addrs[0].ip, role_addrs[0].grpc_port)
-                        for role_addrs in item_role_addrs
-                    }
-                )
-                == 1
-            )
+        # RequestExtractor clones the same routing config for every prompt.
+        role_addrs = request.generate_configs[0].role_addrs
+        if role_addrs:
+            return len(role_addrs) == 1 and role_addrs[0].role == RoleType.PDFUSION
         return (
             visitor.pd_sep_config.role_type == RoleType.PDFUSION
             and not visitor.host_service.service_available

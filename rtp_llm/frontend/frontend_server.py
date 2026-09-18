@@ -180,16 +180,13 @@ class FrontendServer(object):
     def _validate_dispatcher_routing_context(
         self, req: Dict[Any, Any], raw_request: RawRequest
     ) -> None:
-        if not self._contains_preassigned_role_addrs(req):
+        # Configuring the token opts this FE into trusted dispatcher routing.
+        expected = self._dispatcher_routing_token
+        if not expected or not self._contains_preassigned_role_addrs(req):
             return
         headers = getattr(raw_request, "headers", None)
         provided = headers.get(DISPATCHER_ROUTING_HEADER, "") if headers else ""
-        expected = self._dispatcher_routing_token
-        if (
-            not expected
-            or not provided
-            or not hmac.compare_digest(expected, str(provided))
-        ):
+        if not provided or not hmac.compare_digest(expected, str(provided)):
             raise FtRuntimeException(
                 ExceptionType.INVALID_PARAMS,
                 "role_addrs is reserved for authenticated dispatcher routing",
@@ -395,7 +392,13 @@ class FrontendServer(object):
                 trace_state.finish()
             self._global_controller.decrement()
 
-    async def inference(self, req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
+    async def inference(
+        self,
+        req: Union[str, Dict[Any, Any]],
+        raw_request: RawRequest,
+        *,
+        batch: bool = False,
+    ):
         request_headers: Dict[str, str] = {}
         try:
             if isinstance(req, str):
@@ -418,8 +421,10 @@ class FrontendServer(object):
             self._validate_dispatcher_routing_context(req, raw_request)
             assert self._frontend_worker is not None
             if request_headers:
-                return self._frontend_worker.inference(**req, headers=request_headers)
-            return self._frontend_worker.inference(**req)
+                return self._frontend_worker.inference(
+                    batch, **req, headers=request_headers
+                )
+            return self._frontend_worker.inference(batch, **req)
 
         try:
             rep = await self._infer_wrap(req, raw_request, generate_call)
@@ -559,36 +564,6 @@ class FrontendServer(object):
                     responses=[r.model_dump(exclude_none=True) for r in responses]
                 ).model_dump()
             )
-        finally:
-            self._global_controller.decrement()
-
-    async def batch_infer(self, req: dict, raw_request: Request):
-        # Preserve the FE's existing one-slot-per-HTTP-batch concurrency accounting.
-        sequence = self._global_controller.increment() % 4096
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
-        try:
-            req[request_id_field_name] = request_id
-            self._validate_dispatcher_routing_context(req, raw_request)
-            assert self._frontend_worker is not None
-            prompts = req.get("prompt_batch", [])
-            generate_config = req.get("generate_config", {})
-            request_headers = extract_request_headers(
-                getattr(raw_request, "headers", None)
-            )
-            result = await self._frontend_worker.batch_infer(
-                prompts=prompts,
-                request_id=request_id,
-                generate_config=generate_config,
-                headers=request_headers,
-            )
-            return ORJSONResponse(content=result.model_dump(exclude_none=True))
-        except Exception as e:
-            return self._handle_exception(req, e)
         finally:
             self._global_controller.decrement()
 

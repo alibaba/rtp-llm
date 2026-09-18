@@ -17,12 +17,12 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 )
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.frontend_worker import BatchPipelineResponse, FrontendWorker
+from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, FinisheReason
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import RoleType
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_constants import request_id_field_name
-from rtp_llm.structure.request_extractor import Request, RequestExtractor
 from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
@@ -55,12 +55,14 @@ class FakeFrontendWorker(object):
     async def close(self):
         self.close_called = True
 
-    async def batch_infer(self, **kwargs: Any):
-        self.batch_calls.append(kwargs)
-        return FakeBatchResponse()
-
-    def inference(self, prompt: str, *args: Any, **kwargs: Any):
-        response_generator = self._inference(prompt, *args, **kwargs)
+    def inference(self, batch=False, /, **kwargs: Any):
+        if batch:
+            self.batch_calls.append(kwargs)
+            response_generator = CompleteResponseAsyncGenerator.generate_from_list(
+                [FakeBatchResponse()]
+            )
+        else:
+            response_generator = self._inference(**kwargs)
         return CompleteResponseAsyncGenerator(
             response_generator, CompleteResponseAsyncGenerator.get_last_value
         )
@@ -75,7 +77,7 @@ class FakeFrontendWorker(object):
         return False
 
 
-class ForceBatchFrontendWorkerTest(TestCase):
+class BatchFrontendWorkerTest(TestCase):
     def test_chat_batch_preserves_master_scheduling_and_static_batch_rpc(self):
         for mode in ("static", "master", "failure"):
             with self.subTest(mode=mode):
@@ -129,89 +131,114 @@ class ForceBatchFrontendWorkerTest(TestCase):
                     1 if mode == "static" else 0, visitor.batch_enqueue.await_count
                 )
 
-    def test_batch_endpoint_preserves_config_identity_and_headers(self):
-        for force in (True, False, None):
-            with self.subTest(force=force):
-                worker = FrontendWorker.__new__(FrontendWorker)
-                expected = BatchPipelineResponse(response_batch=[])
-
-                async def generate():
-                    yield expected
-
-                worker._inference = MagicMock(return_value=generate())
-                result = asyncio.run(
-                    worker.batch_infer(
-                        ["first", "second"],
-                        700,
-                        {"force_batch": force},
-                        headers={"x-request-id": "trace"},
-                    )
-                )
-                self.assertIs(expected, result)
-                request = worker._inference.call_args.args[0]
-                self.assertEqual(700, request.request_id)
-                self.assertEqual(
-                    [force, force], [gc.force_batch for gc in request.generate_configs]
-                )
-                self.assertFalse(request.is_streaming)
-                self.assertEqual(
-                    {"x-request-id": "trace"},
-                    worker._inference.call_args.kwargs["headers"],
-                )
-
-    def test_topology_and_force_flag_select_the_native_execution_path(self):
+    def test_batch_endpoint_preserves_request_and_selects_execution_by_topology(self):
         cases = [
-            (RoleType.PDFUSION, False, True, [], True),
-            (RoleType.PDFUSION, True, True, [], False),
-            (RoleType.FRONTEND, True, True, [], False),
-            (RoleType.FRONTEND, True, True, [RoleType.PDFUSION], True),
-            (RoleType.FRONTEND, True, True, [RoleType.PREFILL, RoleType.DECODE], False),
-            (RoleType.PREFILL, True, True, [], False),
-            (RoleType.PDFUSION, False, False, [], False),
-            (RoleType.PDFUSION, False, None, [], False),
+            (RoleType.PDFUSION, False, [], True),
+            (RoleType.PDFUSION, True, [], False),
+            (RoleType.FRONTEND, True, [], False),
+            (RoleType.FRONTEND, True, [RoleType.PDFUSION], True),
+            (RoleType.FRONTEND, True, [RoleType.PREFILL, RoleType.DECODE], False),
+            (RoleType.PREFILL, True, [], False),
         ]
-        for role, scheduling, force, assignments, atomic in cases:
-            with self.subTest(
-                role=role, scheduling=scheduling, force=force, assignments=assignments
-            ):
-                request, _ = RequestExtractor(GenerateConfig()).extract_request(
-                    {
-                        request_id_field_name: 700,
-                        "prompt_batch": ["first", "second"],
-                        "generate_config": {"force_batch": force},
-                    }
-                )
-                for config in request.generate_configs:
-                    config.role_addrs = [
-                        RoleAddr(role=r, ip="be", http_port=80, grpc_port=81)
-                        for r in assignments
-                    ]
-                worker = FrontendWorker.__new__(FrontendWorker)
-                worker.backend_rpc_server_visitor = MagicMock()
-                worker.backend_rpc_server_visitor.pd_sep_config.role_type = role
-                worker.backend_rpc_server_visitor.host_service.service_available = (
-                    scheduling
-                )
-                worker._yield_batch_generate = MagicMock(return_value="atomic")
-                worker._yield_generate = MagicMock()
-                worker._parallel_batch_async_generators = MagicMock(
-                    return_value="per-item"
-                )
-                self.assertEqual(
-                    "atomic" if atomic else "per-item", worker._inference(request)
-                )
-                self.assertEqual(
-                    1 if atomic else 0, worker._yield_batch_generate.call_count
-                )
-                self.assertEqual(0 if atomic else 2, worker._yield_generate.call_count)
-                request = request._replace(is_streaming=True)
-                if force:
-                    with self.assertRaises(FtRuntimeException) as raised:
-                        worker._inference(request)
-                    self.assertEqual(
-                        ExceptionType.UNSUPPORTED_OPERATION,
-                        raised.exception.exception_type,
+        for role, scheduling, assignments, atomic in cases:
+            for key in ("generate_config", "generation_config"):
+                with self.subTest(
+                    role=role, scheduling=scheduling, assignments=assignments, key=key
+                ):
+                    expected = BatchPipelineResponse(response_batch=[])
+
+                    async def generate(*args, **kwargs):
+                        yield expected
+
+                    worker = FrontendWorker.__new__(FrontendWorker)
+                    visitor = worker.backend_rpc_server_visitor = MagicMock()
+                    visitor.pd_sep_config.role_type = role
+                    visitor.host_service.service_available = scheduling
+                    worker._yield_batch_generate = MagicMock(side_effect=generate)
+                    worker._inference = MagicMock(side_effect=generate)
+                    response = worker.inference(
+                        True,
+                        batch=False,
+                        prompt_batch=["first", "second"],
+                        max_new_tokens=37,
+                        headers={"x-request-id": "trace"},
+                        **{
+                            request_id_field_name: 700,
+                            key: {
+                                "max_new_tokens": 8,
+                                "temperature": 0.5,
+                                "role_addrs": [
+                                    RoleAddr(
+                                        role=r, ip="be", http_port=80, grpc_port=81
+                                    )
+                                    for r in assignments
+                                ],
+                            },
+                        },
                     )
+                    self.assertIs(
+                        expected,
+                        asyncio.run(
+                            CompleteResponseAsyncGenerator.get_last_value(response)
+                        ),
+                    )
+                    self.assertIs(
+                        expected, asyncio.run(response.gen_complete_response_once())
+                    )
+                    self.assertEqual(
+                        int(atomic), worker._yield_batch_generate.call_count
+                    )
+                    self.assertEqual(int(not atomic), worker._inference.call_count)
+                    call = (
+                        worker._yield_batch_generate if atomic else worker._inference
+                    ).call_args
+                    request = call.args[0]
+                    configs = request.generate_configs
+                    self.assertEqual(700, request.request_id)
+                    self.assertFalse(request.is_streaming)
+                    self.assertEqual([37, 37], [gc.max_new_tokens for gc in configs])
+                    self.assertEqual([0.5, 0.5], [gc.temperature for gc in configs])
+                    self.assertIsNot(configs[0], configs[1])
+                    self.assertEqual({"x-request-id": "trace"}, call.kwargs["headers"])
+
+    def test_batch_endpoint_rejects_streaming_and_root_preserves_it(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+        worker._yield_generate = MagicMock()
+        worker._yield_batch_generate = MagicMock()
+        worker._parallel_batch_async_generators = MagicMock(return_value="per-item")
+        for items in ([], ["first", "second"]):
+            for flags in (
+                {"stream": True},
+                {"yield_generator": True},
+                {"is_streaming": True},
+                {"generate_config": {"is_streaming": True}},
+                {"generation_config": {"yield_generator": True}},
+            ):
+                args = {request_id_field_name: 700, "prompt_batch": items, **flags}
+                with self.subTest(items=items, flags=flags), self.assertRaises(
+                    FtRuntimeException
+                ) as raised:
+                    worker.inference(True, **args)
+                self.assertEqual(
+                    ExceptionType.UNSUPPORTED_OPERATION, raised.exception.exception_type
+                )
+        worker.inference(batch=True, **args)
+        worker._yield_batch_generate.assert_not_called()
+
+    def test_root_inference_preserves_generate_config_alias_precedence(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+        worker._inference = MagicMock()
+        for ignored in (None, 17, {"yield_generator": True}):
+            with self.subTest(ignored=ignored):
+                worker.inference(
+                    prompt="hello",
+                    generate_config={"max_new_tokens": 37},
+                    generation_config=ignored,
+                    **{request_id_field_name: 700},
+                )
+                request = worker._inference.call_args.args[0]
+                self.assertFalse(request.is_streaming)
+                self.assertEqual(37, request.generate_configs[0].max_new_tokens)
 
     def test_prepared_batch_invokes_backend_once_with_group_identity(self):
         pipeline = Pipeline.__new__(Pipeline)
@@ -283,68 +310,122 @@ class FrontendServerTest(TestCase):
         res = await self.frontend_server.inference(*args, **kwargs)
         return res
 
-    def test_simple(self):
-        loop = asyncio.new_event_loop()
-        res = loop.run_until_complete(
-            self._async_run(req={"prompt": "hello"}, raw_request=FakeRawRequest())
-        )
-        self.assertEqual(
-            res.body.decode("utf-8"), '{"res":"hello"}', res.body.decode("utf-8")
-        )
-        res = loop.run_until_complete(
-            self._async_run(req='{"prompt": "hello"}', raw_request=FakeRawRequest())
-        )
-        self.assertEqual(
-            res.body.decode("utf-8"), '{"res":"hello"}', res.body.decode("utf-8")
-        )
-
-    def test_batch_and_root_routing_credentials_are_checked_before_inference(self):
-        self.frontend_server._dispatcher_routing_token = "trusted-secret"
-        for endpoint, key, token in [
-            ("batch_infer", "generate_config", ""),
-            ("inference", "generation_config", ""),
-            ("batch_infer", "generate_config", "wrong"),
-            ("batch_infer", "generate_config", "trusted-secret"),
+    def test_root_and_batch_share_access_logs_metrics_and_concurrency(self):
+        server = self.frontend_server
+        for batch, body, expected in [
+            (False, {"prompt": "hello"}, b'{"res":"hello"}'),
+            (True, {"prompt_batch": []}, b'{"response_batch":[]}'),
         ]:
-            with self.subTest(endpoint=endpoint, token=token):
-                self.frontend_server._frontend_worker.batch_calls.clear()
-                config = {
-                    "role_addrs": [
-                        {
-                            "role": "PDFUSION",
-                            "ip": "be",
-                            "http_port": 80,
-                            "grpc_port": 81,
-                        }
-                    ]
-                }
-                request = {"prompt_batch": ["hello"], "prompt": "hello", key: config}
-                headers = {
-                    "x-rtp-llm-dispatcher-routing-token": token,
-                    "X-Request-ID": "trace",
-                    "ignored": "secret",
-                }
+            for req in (body, json.dumps(body)):
+                with self.subTest(batch=batch, req=req), patch.object(
+                    server, "_access_logger"
+                ) as logger, patch(
+                    "rtp_llm.frontend.frontend_server.kmonitor.report"
+                ) as report:
+                    response = asyncio.run(
+                        server.inference(req, FakeRawRequest(), batch=batch)
+                    )
+                    self.assertEqual(expected, response.body)
+                    self.assertEqual(
+                        0, server._global_controller.current_concurrency.value
+                    )
+                    logger.log_query_access.assert_called_once()
+                    logger.log_success_access.assert_called_once()
+                    metrics = [call.args[0] for call in report.call_args_list]
+                    for metric in (
+                        AccMetrics.QPS_METRIC,
+                        AccMetrics.SUCCESS_QPS_METRIC,
+                        GaugeMetrics.LANTENCY_METRIC,
+                    ):
+                        self.assertEqual(1, metrics.count(metric))
+
+    def test_batch_checks_disconnect_before_and_after_execution(self):
+        server = self.frontend_server
+        for states in ([True], [False, True]):
+            with self.subTest(states=states), patch.object(
+                server, "_access_logger"
+            ) as logger:
+                server._frontend_worker.batch_calls.clear()
+                raw = FakeRawRequest()
+                raw.is_disconnected = AsyncMock(side_effect=states)
                 response = asyncio.run(
-                    getattr(self.frontend_server, endpoint)(
-                        request, FakeRawRequest(headers)
-                    )
+                    server.inference({"prompt_batch": ["hello"]}, raw, batch=True)
                 )
-                if token == "trusted-secret":
-                    self.assertEqual(b'{"response_batch":[]}', response.body)
-                    call = self.frontend_server._frontend_worker.batch_calls[-1]
-                    self.assertEqual(config, call["generate_config"])
-                    self.assertEqual({"x-request-id": "trace"}, call["headers"])
-                else:
-                    self.assertEqual(
-                        ExceptionType.INVALID_PARAMS.value,
-                        json.loads(response.body)["error_code"],
-                    )
-                    self.assertEqual(
-                        [], self.frontend_server._frontend_worker.batch_calls
-                    )
+                self.assertEqual(500, response.status_code)
                 self.assertEqual(
-                    0, self.frontend_server._global_controller.current_concurrency.value
+                    len(states) - 1, len(server._frontend_worker.batch_calls)
                 )
+                self.assertEqual(0, server._global_controller.current_concurrency.value)
+                logger.log_exception_access.assert_called_once()
+                logger.log_success_access.assert_not_called()
+
+    def test_routing_credentials_are_required_only_on_configured_frontends(self):
+        server = self.frontend_server
+        for batch in (False, True):
+            for key in ("generate_config", "generation_config"):
+                for expected, provided in (
+                    ("", ""),
+                    ("trusted-secret", ""),
+                    ("trusted-secret", "wrong"),
+                    ("trusted-secret", "trusted-secret"),
+                ):
+                    with self.subTest(
+                        batch=batch, key=key, expected=expected, provided=provided
+                    ):
+                        server._dispatcher_routing_token = expected
+                        config = {
+                            "role_addrs": [
+                                {
+                                    "role": "PDFUSION",
+                                    "ip": "be",
+                                    "http_port": 80,
+                                    "grpc_port": 81,
+                                }
+                            ]
+                        }
+                        request = {
+                            key: config,
+                            **(
+                                {"prompt_batch": ["hello"]}
+                                if batch
+                                else {"prompt": "hello"}
+                            ),
+                        }
+                        headers = {
+                            "x-rtp-llm-dispatcher-routing-token": provided,
+                            "X-Request-ID": "trace",
+                            "ignored": "secret",
+                        }
+                        with patch.object(
+                            server._frontend_worker,
+                            "inference",
+                            wraps=server._frontend_worker.inference,
+                        ) as infer:
+                            response = asyncio.run(
+                                server.inference(
+                                    request, FakeRawRequest(headers), batch=batch
+                                )
+                            )
+                            if not expected or provided == expected:
+                                self.assertEqual(
+                                    200, response.status_code, response.body
+                                )
+                                infer.assert_called_once()
+                                self.assertEqual(batch, infer.call_args.args[0])
+                                self.assertEqual(config, infer.call_args.kwargs[key])
+                                self.assertEqual(
+                                    {"x-request-id": "trace"},
+                                    infer.call_args.kwargs["headers"],
+                                )
+                            else:
+                                infer.assert_not_called()
+                                self.assertEqual(
+                                    ExceptionType.INVALID_PARAMS.value,
+                                    json.loads(response.body)["error_code"],
+                                )
+                            self.assertEqual(
+                                0, server._global_controller.current_concurrency.value
+                            )
 
     def test_response_chunk_event_is_streaming_only(self):
         try:

@@ -912,11 +912,9 @@ class FrontendApp(object):
         @app.post("/batch_infer")
         async def batch_infer(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
             async def call():
-                if isinstance(req, str):
-                    parsed_req = json.loads(req)
-                else:
-                    parsed_req = req
-                return await self.frontend_server.batch_infer(parsed_req, raw_request)
+                return await self.frontend_server.inference(
+                    req, raw_request, batch=True
+                )
 
             return await track_business_request(call)
 

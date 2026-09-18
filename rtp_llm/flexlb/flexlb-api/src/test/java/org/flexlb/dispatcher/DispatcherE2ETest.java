@@ -87,21 +87,21 @@ class DispatcherE2ETest {
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '~', textBlock = """
-            / | {"prompt_batch":["a","b"]} | {"response_batch":[1]} | {"response_batch":[2]} | 200 | 200 | 200 | {"response_batch":[1,2]}
-            /batch_infer | {"prompt_batch":["a","b"]} | {"response_batch":[]} | {"response_batch":[2]} | 200 | 200 | 200 | {"response_batch":[null,2],"_partial_failure":{"failed_count":1,"total_count":2,"failed_indices":[0]}}
-            /v1/batch/chat/completions | {"requests":[{},{}]} | {"responses":[{"id":"a"}]} | boom | 200 | 500 | 200 | {"responses":[{"id":"a"},{"index":1,"error":{"code":"dispatcher_sub_batch_failed","message":"fe_server_error"}}],"_partial_failure":{"failed_count":1,"total_count":2,"failed_indices":[1]}}
-            /v1/embeddings | {"input":["a","b"]} | {"data":[{"index":0,"embedding":[1.0]}],"usage":{"prompt_tokens":4,"total_tokens":4}} | boom | 200 | 500 | 200 | {"data":[{"index":0,"embedding":[1.0]},{"index":1,"embedding":null,"error":"fe_server_error"}],"object":"list","model":"","usage":{"prompt_tokens":4,"total_tokens":4},"_partial_failure":{"failed_count":1,"total_count":2,"failed_indices":[1]}}
-            /batch_infer | {"prompt_batch":["a","b"]} | bad | bad | 400 | 400 | 400 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error"]}
-            /batch_infer | {"prompt_batch":["a","b"]} | bad | bad | 400 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error","fe_server_error"]}
-            /batch_infer | {"prompt_batch":["a","b"]} | bad | bad | 400 | 404 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error"]}
-            /batch_infer | {"prompt_batch":["a","b"]} | disconnected | bad | 0 | 400 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_unavailable","fe_client_error"]}
-            /batch_infer | {"prompt_batch":["a","b"]} | bad | disconnected | 404 | 0 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error","fe_unavailable"]}
-            /batch_infer | {"prompt_batch":["a","b"]} | [] | bad | 200 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["malformed_sub_batch","fe_server_error"]}
-            /batch_infer | {"prompt_batch":["a","b"]} | {} | bad | 200 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["malformed_sub_batch","fe_server_error"]}
-            /v1/reranker | {"query":"cape pants","documents":["文档🧥0","文档🧥1","文档🧥2","文档🧥3"],"top_k":2} | {"results":[{"index":0,"document":"文档🧥0","relevance_score":0.2},{"index":1,"document":"文档🧥1","relevance_score":0.9}],"total_tokens":11} | {"results":[{"index":0,"document":"文档🧥2","relevance_score":0.9},{"index":1,"document":"文档🧥3","relevance_score":0.4}],"total_tokens":17} | 200 | 200 | 200 | {"results":[{"index":1,"document":"文档🧥1","relevance_score":0.9},{"index":2,"document":"文档🧥2","relevance_score":0.9}],"total_tokens":28}
-            /v1/reranker | {"query":"cape pants","documents":["文档🧥0","文档🧥1","文档🧥2","文档🧥3"],"top_k":2} | {"results":[{"index":0,"document":"文档🧥0","relevance_score":0.2},{"index":1,"document":"文档🧥1","relevance_score":0.9}],"total_tokens":11} | {"results":[{"index":0,"document":"文档🧥2","relevance_score":0.9},{"index":1,"document":"文档🧥3","relevance_score":0.4}],"total_tokens":17} | 200 | 500 | 500 | {"error":"sub_batch_failed","failed_count":2,"total_count":4,"total_chunks":2,"failed_reasons":["fe_server_error"]}
+            / | /batch_infer | {"prompt_batch":["a","b"],"max_new_tokens":37,"generate_config":{"max_new_tokens":8}} | {"response_batch":[1]} | {"response_batch":[2]} | 200 | 200 | 200 | {"response_batch":[1,2]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | {"response_batch":[]} | {"response_batch":[2]} | 200 | 200 | 200 | {"response_batch":[null,2],"_partial_failure":{"failed_count":1,"total_count":2,"failed_indices":[0]}}
+            /v1/batch/chat/completions | /v1/batch/chat/completions | {"requests":[{},{}]} | {"responses":[{"id":"a"}]} | boom | 200 | 500 | 200 | {"responses":[{"id":"a"},{"index":1,"error":{"code":"dispatcher_sub_batch_failed","message":"fe_server_error"}}],"_partial_failure":{"failed_count":1,"total_count":2,"failed_indices":[1]}}
+            /v1/embeddings | /v1/embeddings | {"input":["a","b"]} | {"data":[{"index":0,"embedding":[1.0]}],"usage":{"prompt_tokens":4,"total_tokens":4}} | boom | 200 | 500 | 200 | {"data":[{"index":0,"embedding":[1.0]},{"index":1,"embedding":null,"error":"fe_server_error"}],"object":"list","model":"","usage":{"prompt_tokens":4,"total_tokens":4},"_partial_failure":{"failed_count":1,"total_count":2,"failed_indices":[1]}}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | bad | bad | 400 | 400 | 400 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error"]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | bad | bad | 400 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error","fe_server_error"]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | bad | bad | 400 | 404 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error"]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | disconnected | bad | 0 | 400 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_unavailable","fe_client_error"]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | bad | disconnected | 404 | 0 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error","fe_unavailable"]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | [] | bad | 200 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["malformed_sub_batch","fe_server_error"]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | {} | bad | 200 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["malformed_sub_batch","fe_server_error"]}
+            /v1/reranker | /v1/reranker | {"query":"cape pants","documents":["文档🧥0","文档🧥1","文档🧥2","文档🧥3"],"top_k":2} | {"results":[{"index":0,"document":"文档🧥0","relevance_score":0.2},{"index":1,"document":"文档🧥1","relevance_score":0.9}],"total_tokens":11} | {"results":[{"index":0,"document":"文档🧥2","relevance_score":0.9},{"index":1,"document":"文档🧥3","relevance_score":0.4}],"total_tokens":17} | 200 | 200 | 200 | {"results":[{"index":1,"document":"文档🧥1","relevance_score":0.9},{"index":2,"document":"文档🧥2","relevance_score":0.9}],"total_tokens":28}
+            /v1/reranker | /v1/reranker | {"query":"cape pants","documents":["文档🧥0","文档🧥1","文档🧥2","文档🧥3"],"top_k":2} | {"results":[{"index":0,"document":"文档🧥0","relevance_score":0.2},{"index":1,"document":"文档🧥1","relevance_score":0.9}],"total_tokens":11} | {"results":[{"index":0,"document":"文档🧥2","relevance_score":0.9},{"index":1,"document":"文档🧥3","relevance_score":0.4}],"total_tokens":17} | 200 | 500 | 500 | {"error":"sub_batch_failed","failed_count":2,"total_count":4,"total_chunks":2,"failed_reasons":["fe_server_error"]}
             """)
-    void realHttpFanoutPreservesWireSchemas(String path, String input, String first, String second,
+    void realHttpFanoutPreservesWireSchemas(String path, String fePath, String input, String first, String second,
                                            int firstStatus, int secondStatus, int status, String expected) throws Exception {
         reply(0, firstStatus, first);
         reply(1, secondStatus, second);
@@ -112,7 +112,7 @@ class DispatcherE2ETest {
         JSONArray preview = preview(path, input, "split", 2);
         assertEquals(JSON.parseObject(expected), post(path, input, status));
         for (int i = 0; i < 2; i++) {
-            JSONObject chunk = takeChunk(i, path, spec.getRequestArrayField(), chunkSize);
+            JSONObject chunk = takeChunk(i, fePath, spec.getRequestArrayField(), chunkSize);
             assertEquals(items.subList(i * chunkSize, (i + 1) * chunkSize), chunk.getJSONArray(spec.getRequestArrayField()));
             if (spec == BatchEndpointSpec.RERANKER) {
                 assertFalse(chunk.getBoolean("sorted"));
@@ -171,14 +171,20 @@ class DispatcherE2ETest {
         startDispatcher(1);
         JSONArray preview = preview("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", "split", 2);
         assertFalse(preview.toJSONString().contains("role_addrs"));
-        post("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\",\"c\"]}", 200);
+        String configKey = mode == FeAllocation.MASTER ? "generate_config" : "generation_config";
+        JSONObject body = JSONObject.of("prompt_batch", JSONArray.of("a", "b", "c"));
+        if (mode == FeAllocation.LOCAL) {
+            body.put(configKey, JSONObject.of("temperature", 0.5));
+        }
+        post("/batch_infer", body.toJSONString(), 200);
         for (int i = 0; i < 3; i++) {
             JSONObject chunk = takeChunk(i, "/batch_infer", "prompt_batch", 1);
             assertEquals(String.valueOf((char) ('a' + i)), chunk.getJSONArray("prompt_batch").getString(0));
             assertFalse(chunk.containsKey("pre_assigned_be"));
             Object expected = preassign && !policy ? JSONArray.of(JSONObject.of("role", "PDFUSION", "ip", "10.0.0." + (i + 1),
                     "http_port", 23840, "grpc_port", 23841)) : null;
-            assertEquals(expected, chunk.getJSONObject("generate_config").get("role_addrs"));
+            JSONObject config = chunk.getJSONObject(configKey);
+            assertEquals(expected, config == null ? null : config.get("role_addrs"));
         }
         if (mode == FeAllocation.MASTER || preassign && !policy) {
             verify(coordinator).schedule(argThat(r -> r.isAssignBe() == (preassign && !policy)
@@ -205,7 +211,7 @@ class DispatcherE2ETest {
     }
 
     @ParameterizedTest
-    @CsvSource({"request,1,413", "response,1,413", "count,1,413", "request,122,200", "request,121,413"})
+    @CsvSource({"request,1,413", "response,1,413", "count,1,413", "request,44,200", "request,43,413"})
     void requestAndResponseBudgetsEnforceTheWireBoundary(String limit, long bytes, int status) {
         boolean responseLimit = limit.equals("response");
         if (limit.equals("count")) {
@@ -315,9 +321,6 @@ class DispatcherE2ETest {
         assertEquals(path, received.getPath());
         JSONObject body = JSON.parseObject(received.getBody().readUtf8());
         assertEquals(size, body.getJSONArray(field).size());
-        if (field.equals("prompt_batch")) {
-            assertEquals(!policy, body.getJSONObject("generate_config").getBoolean("force_batch"));
-        }
         return body;
     }
 
