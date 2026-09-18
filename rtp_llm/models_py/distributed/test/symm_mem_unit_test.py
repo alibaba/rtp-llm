@@ -63,8 +63,9 @@ class SymmMemConfigurationTest(unittest.TestCase):
         communicator_module = MagicMock()
         config = SimpleNamespace(world_rank=0, world_size=2, tp_size=2, dp_size=1)
 
+        group_namespace = SimpleNamespace(WORLD=world_group)
         with patch.object(
-            collective.torch.distributed.group, "WORLD", world_group
+            collective.torch.distributed, "group", group_namespace
         ), patch.object(collective, "_get_symm_mem", return_value=communicator_module):
             collective._create_process_groups(
                 config,
