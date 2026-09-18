@@ -481,6 +481,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.request.headers = {
             "X-DashScope-Uid": "uid-cold-submit",
             "X-DashScope-Service": "service-cold",
+            "X-Rtp-Model-Name": "minimax-m3",
             "Authorization": "must-not-forward",
         }
         reject = False
@@ -534,6 +535,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(payloads[1].inputs.multimodal_inputs), 1)
             self.assertEqual(seen_headers[1]["x-dashscope-uid"], "uid-cold-submit")
             self.assertEqual(seen_headers[1]["x-dashscope-service"], "service-cold")
+            self.assertEqual(seen_headers[1]["x-rtp-model-name"], "minimax-m3")
             self.assertNotIn("authorization", seen_headers[1])
             route = client.get_backend_role_addrs.call_args.kwargs
             self.assertEqual(route["seq_len"], 4)
@@ -602,6 +604,7 @@ class MMCacheApiTest(unittest.TestCase):
                 headers={
                     "x-DashScope-uID": "uid-http",
                     "X-DashScope-Service": "service-http",
+                    "X-Rtp-Model-Name": "minimax-m3",
                 },
             )
             self.assertEqual(response.status_code, 200, response.text)
@@ -621,6 +624,7 @@ class MMCacheApiTest(unittest.TestCase):
                     "hashes_only": True,
                     "user_id": "uid-http",
                     "service_name": "service-http",
+                    "model_name": "minimax-m3",
                 },
             )
 

@@ -538,12 +538,24 @@ def _make_generate_input(
     invocation_metadata: Optional[Any],
     request_headers: Optional[dict[str, str]] = None,
     mm_inputs: Optional[list] = None,
+    model_name: str = "",
+    skip_input_inspection: bool = False,
 ) -> GenerateInput:
     headers = dict(request_headers or {})
     headers.update(_headers_from_invocation_metadata(invocation_metadata))
+    # The GreenNet body must use the request's business model name. Keep it in
+    # an RTP-internal header so the value survives FlexLB and ViT proxy/worker
+    # hops without confusing it with the independent DashScope service name.
+    # Always replace a caller-supplied value with the protobuf request field.
+    headers.pop("x-rtp-model-name", None)
+    normalized_model_name = str(model_name or "").strip()
+    if normalized_model_name:
+        headers["x-rtp-model-name"] = normalized_model_name
     trace_id = str(
         getattr(generate_config, "trace_id", "") or extract_trace_id(headers) or ""
     )
+    for mm_input in mm_inputs or []:
+        mm_input.skip_input_inspection = skip_input_inspection
     return GenerateInput(
         request_id=request_id,
         token_ids=torch.tensor(input_ids_list, dtype=torch.int),
@@ -810,6 +822,8 @@ async def iter_real_model_stream_infer(
             invocation_metadata=invocation_metadata,
             request_headers=other.request_headers,
             mm_inputs=mm_inputs,
+            model_name=request.model_name,
+            skip_input_inspection=other.skip_input_inspection,
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
@@ -1109,6 +1123,8 @@ async def iter_real_model_stream_infer(
                 invocation_metadata=invocation_metadata,
                 request_headers=other.request_headers,
                 mm_inputs=mm_inputs,
+                model_name=request.model_name,
+                skip_input_inspection=other.skip_input_inspection,
             )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",

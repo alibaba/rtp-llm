@@ -4,6 +4,7 @@ REQUEST_HEADER_NAMES = (
     "user_id",
     "x-dashscope-uid",
     "x-dashscope-service",
+    "x-rtp-model-name",
     "x-dashscope-apikeyid",
     "x-dashscope-request-id",
     "x-request-id",
@@ -84,10 +85,14 @@ def extract_trace_id(headers: Optional[Mapping[str, Any]]) -> str:
 
 
 def dashscope_greennet_metadata(headers: Optional[Mapping[str, Any]]) -> tuple:
-    """Carry request UID and service identity to downstream ViT / LLM RPCs."""
+    """Carry request identity to downstream ViT / LLM RPCs."""
     normalized = extract_request_headers(headers)
     return tuple(
         (name, normalized[name])
-        for name in ("x-dashscope-uid", "x-dashscope-service")
+        for name in (
+            "x-dashscope-uid",
+            "x-dashscope-service",
+            "x-rtp-model-name",
+        )
         if name in normalized
     )

@@ -14,6 +14,7 @@ import logging
 import struct
 import unittest
 from io import BytesIO
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -41,6 +42,7 @@ from rtp_llm.dash_sc.codec import (
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     _dash_error_spec_for_ft_exception,
+    _make_generate_input,
     build_think_runtime,
     iter_real_model_stream_infer,
 )
@@ -128,6 +130,20 @@ class _MultiStreamVisitor:
         self.last_generate_input = generate_input
         self.generate_inputs.append(generate_input)
         return self._streams[self.enqueue_called - 1]
+
+
+class GenerateInputInspectionPolicyTest(unittest.TestCase):
+    def test_opt_out_is_attached_to_multimodal_input(self) -> None:
+        mm_input = SimpleNamespace(skip_input_inspection=False)
+        generated = _make_generate_input(
+            request_id=1,
+            input_ids_list=[1],
+            generate_config=SimpleNamespace(trace_id=""),
+            invocation_metadata=(),
+            mm_inputs=[mm_input],
+            skip_input_inspection=True,
+        )
+        self.assertTrue(generated.mm_inputs[0].skip_input_inspection)
 
 
 class DashErrorSpecForFtExceptionTest(unittest.TestCase):
@@ -2881,6 +2897,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             ("User_ID", "u2"),
             ("X-DashScope-Uid", "uid-metadata"),
             ("X-DashScope-Service", "service-metadata"),
+            ("X-Rtp-Model-Name", "metadata-must-not-override-request"),
             ("x-dashscope-apikeyid", "ak2"),
             ("authorization", "secret"),
         )
@@ -2890,6 +2907,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             {
                 "x-dashscope-uid": "uid-attributes",
                 "x-dashscope-service": "service-attributes",
+                "x-rtp-model-name": "attributes-must-not-override-request",
             }
         )
         await _drain(servicer.ModelStreamInfer(_areq_iter([request]), context))
@@ -2902,6 +2920,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 "x-dashscope-apikeyid": "ak2",
                 "x-dashscope-uid": "uid-metadata",
                 "x-dashscope-service": "service-metadata",
+                "x-rtp-model-name": "default",
             },
         )
 
@@ -2936,7 +2955,11 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generate_config.traffic_reject_priority, 10)
         self.assertEqual(
             visitor.last_generate_input.headers,
-            {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
+            {
+                "user_id": "u1",
+                "x-dashscope-apikeyid": "ak1",
+                "x-rtp-model-name": "default",
+            },
         )
 
 

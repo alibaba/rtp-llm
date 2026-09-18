@@ -896,6 +896,39 @@ class DashScGrpcRequestTest(TestCase):
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
 
+    def test_parse_other_params_input_inspection_disable(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "X-DashScope-Inner-Gateway-DataInspection": json.dumps(
+                    {"input": "disable", "output": "disable"}
+                )
+            }
+        )
+        self.assertTrue(parse_other_params(req).skip_input_inspection)
+
+        req.parameters["qwenchat_datainspection"].bool_param = True
+        self.assertFalse(parse_other_params(req).skip_input_inspection)
+
+        req.parameters["qwenchat_datainspection"].bool_param = False
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"X-DashScope-Inner-Gateway-DataInspection": '{"input":"high"}'}
+        )
+        self.assertFalse(parse_other_params(req).skip_input_inspection)
+
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "X-DashScope-Inner-Gateway-DataInspection":
+                    '{"input":"high","output":"disable"}'
+            }
+        )
+        self.assertFalse(parse_other_params(req).skip_input_inspection)
+
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"X-DashScope-Inner-Gateway-DataInspection": "not-json"}
+        )
+        self.assertFalse(parse_other_params(req).skip_input_inspection)
+
     def test_parse_other_params_reasoning_effort_max_alias(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["reasoning_effort"].string_param = "max"

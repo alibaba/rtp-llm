@@ -203,6 +203,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                     timeout_ms,
                     user_id=headers.get("x-dashscope-uid", ""),
                     service_name=headers.get("x-dashscope-service", ""),
+                    model_name=headers.get("x-rtp-model-name", ""),
                     cancellation_event=cancellation,
                     binary_hashes=True,
                 )
@@ -238,15 +239,13 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
+            headers = extract_request_headers(dict(context.invocation_metadata() or ()))
             self.engine.async_submit(
                 converted_inputs,
                 multimodal_inputs.request_id,
-                user_id=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-uid", ""),
-                service_name=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-service", ""),
+                user_id=headers.get("x-dashscope-uid", ""),
+                service_name=headers.get("x-dashscope-service", ""),
+                model_name=headers.get("x-rtp-model-name", ""),
             )
             return EmptyPB()
         except FtRuntimeException as error:
@@ -266,17 +265,15 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
             cancellation_event = self._register_rpc_completion(context)
+            headers = extract_request_headers(dict(context.invocation_metadata() or ()))
             verdict = self.engine.wait_greennet_verdict(
                 converted_inputs,
                 timeout_ms=_rpc_timeout_ms(context, 60000),
                 request_id=multimodal_inputs.request_id,
                 cancellation_event=cancellation_event,
-                user_id=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-uid", ""),
-                service_name=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-service", ""),
+                user_id=headers.get("x-dashscope-uid", ""),
+                service_name=headers.get("x-dashscope-service", ""),
+                model_name=headers.get("x-rtp-model-name", ""),
             )
             if verdict is None:
                 raise RuntimeError("ViT GreenNet returned no verdict")
@@ -334,17 +331,15 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
             cancellation_event = self._register_rpc_completion(context)
+            headers = extract_request_headers(dict(context.invocation_metadata() or ()))
             results = self.engine.get_embedding_result(
                 converted_inputs,
                 timeout_ms=_rpc_timeout_ms(context, 120000),
                 request_id=multimodal_inputs.request_id,
                 cancellation_event=cancellation_event,
-                user_id=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-uid", ""),
-                service_name=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-service", ""),
+                user_id=headers.get("x-dashscope-uid", ""),
+                service_name=headers.get("x-dashscope-service", ""),
+                model_name=headers.get("x-rtp-model-name", ""),
             )
             merged = merge_embedding_results(results)
             logging.debug(

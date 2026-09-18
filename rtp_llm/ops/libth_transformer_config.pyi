@@ -1026,6 +1026,7 @@ class MoeConfig:
 class MultimodalInput:
     mm_preprocess_config: ...
     mm_type: int
+    skip_input_inspection: bool
     tensor: torch.Tensor
     url: str
     def __getstate__(self) -> tuple:

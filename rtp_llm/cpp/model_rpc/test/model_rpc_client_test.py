@@ -449,6 +449,19 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(list(tensor_pb.shape), [4])
         self.assertEqual(tensor_pb.uint8_data, tensor.numpy().tobytes())
 
+    def test_trans_input_preserves_inspection_opt_out(self):
+        mm_input = self._make_multimodal_input(torch.empty(0, dtype=torch.uint8))
+        mm_input.skip_input_inspection = True
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(),
+                request_id=123,
+                mm_inputs=[mm_input],
+            )
+        )
+        self.assertTrue(input_pb.multimodal_inputs[0].skip_input_inspection)
+
     def test_trans_input_omits_default_multimodal_tensor(self):
         input_pb = trans_input(
             GenerateInput(
