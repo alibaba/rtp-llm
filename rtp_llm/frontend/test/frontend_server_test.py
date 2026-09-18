@@ -162,6 +162,25 @@ class FrontendServerTest(TestCase):
 
                     asyncio.run(run())
 
+    def test_openai_stream_emits_done_sentinel(self):
+        async def generate():
+            yield FakePipelinResponse(res="hello")
+
+        response = CompleteResponseAsyncGenerator(
+            generate(), CompleteResponseAsyncGenerator.get_last_value
+        )
+
+        async def run():
+            chunks = [
+                chunk
+                async for chunk in self.frontend_server.stream_response(
+                    {"stream": True, request_id_field_name: 1}, response
+                )
+            ]
+            self.assertEqual(chunks[-1], "data: [DONE]\r\n\r\n")
+
+        asyncio.run(run())
+
     def test_other_errors_keep_existing_http_status(self):
         for error in (
             RuntimeError("internal failure"),
