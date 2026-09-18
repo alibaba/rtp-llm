@@ -26,7 +26,7 @@ MultiNodeResource makeTwoNodeDeviceResource(BlockIdxType first, BlockIdxType sec
     return MultiNodeResource{0, Tier::DEVICE, {{nullptr, {first}}, {nullptr, {second}}}};
 }
 
-TEST(GroupSetTest, StoresOrderedTopologyMembershipAndLogicalPayload) {
+TEST(GroupSetTest, StoresOrderedTagMembershipAndLogicalPayload) {
     const auto topology = makeTestTopology({makeGroupBase({0, 1}), makeGroupBase({0})});
     const auto pool_a   = makeTestDevicePool({{80, 16}, {96, 24}}, 4, "group_set_a");
     const auto pool_b   = makeTestDevicePool({{128, 32}}, 4, "group_set_b");
@@ -34,9 +34,10 @@ TEST(GroupSetTest, StoresOrderedTopologyMembershipAndLogicalPayload) {
     const auto group_set = makeTestGroupSet(3, topology, {1, 0}, {pool_b, pool_a});
 
     EXPECT_EQ(group_set->groupSetId(), 3u);
-    EXPECT_EQ(group_set->groupIds(), (std::vector<size_t>{1, 0}));
-    EXPECT_EQ(&group_set->groupAt(0), &topology->groupById(1));
-    EXPECT_EQ(&group_set->groupAt(1), &topology->groupById(0));
+    EXPECT_EQ(group_set->groupTags(),
+              (std::vector<std::string>{topology->groupById(1).tag, topology->groupById(0).tag}));
+    EXPECT_EQ(&group_set->group(topology->groupById(1).tag), &topology->groupById(1));
+    EXPECT_EQ(&group_set->group(topology->groupById(0).tag), &topology->groupById(0));
     EXPECT_EQ(group_set->devicePools(), (std::vector<DeviceBlockPoolPtr>{pool_b, pool_a}));
     EXPECT_EQ(group_set->payloadBytes(), 3u * (64u + 16u));
     EXPECT_EQ(group_set->groupType(), CacheGroupType::FULL);
@@ -52,14 +53,14 @@ TEST(GroupSetTest, KeepsTopologyAliveAfterCallerReleasesOwnership) {
     topology.reset();
 
     EXPECT_FALSE(weak_topology.expired());
-    EXPECT_EQ(&group->groupAt(0), expected_group);
+    EXPECT_EQ(&group->group(expected_group->tag), expected_group);
 }
 
 TEST(GroupSetTest, ForwardsTreeReferencesToDevicePools) {
-    const auto topology = makeTestTopology({makeGroupBase({0})});
+    const auto topology = makeTestTopology({makeGroupBase({0}), makeGroupBase({1})});
     const auto pool_a   = makeTestDevicePool({{64, 16}}, 4, "group_set_tree_ref_a");
     const auto pool_b   = makeTestDevicePool({{64, 16}}, 4, "group_set_tree_ref_b");
-    const auto group    = makeTestGroupSet(0, topology, {0}, {pool_a, pool_b});
+    const auto group    = makeTestGroupSet(0, topology, {0, 1}, {pool_a, pool_b});
     const auto block_a  = pool_a->malloc();
     const auto block_b  = pool_b->malloc();
     ASSERT_TRUE(block_a.has_value());
@@ -78,6 +79,19 @@ TEST(GroupSetTest, ForwardsTreeReferencesToDevicePools) {
     group->unreferenceBlocks(resource, BlockTreeRefType::LOAD);
     EXPECT_FALSE(pool_a->isAllocated(*block_a));
     EXPECT_FALSE(pool_b->isAllocated(*block_b));
+}
+
+TEST(GroupSetTest, RejectsUnknownDuplicateAndMisalignedTagsBeforeInitialization) {
+    const auto topology = makeTestTopology({makeGroupBase({0}), makeGroupBase({1})});
+    const auto pool_a   = makeTestDevicePool({{64, 16}}, 4, "group_set_validate_a");
+    const auto pool_b   = makeTestDevicePool({{64, 16}}, 4, "group_set_validate_b");
+
+    EXPECT_ANY_THROW(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_a}, nullptr, nullptr)
+                         ->initialize(0, topology, {"missing"}));
+    EXPECT_ANY_THROW(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_a, pool_b}, nullptr, nullptr)
+                         ->initialize(0, topology, {topology->groupById(0).tag, topology->groupById(0).tag}));
+    EXPECT_ANY_THROW(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_a}, nullptr, nullptr)
+                         ->initialize(0, topology, topology->groupTagsSnapshot()));
 }
 
 TEST(GroupSetTest, ReleasesLowerTierTreeReferencesInBatch) {

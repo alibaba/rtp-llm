@@ -67,11 +67,11 @@ DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     
         const std::vector<BlockIdxType>& device_blocks = descriptor.blocksAt(Tier::DEVICE);
         const auto&                      device_pools  = group_set.devicePools();
         size_t                           host_offset   = 0;
-        for (size_t member_group_id = 0; member_group_id < group_set.groupIds().size(); ++member_group_id) {
-            const auto&  group_base  = group_set.groupAt(member_group_id);
-            const size_t group_id    = group_set.groupIds()[member_group_id];
-            const auto   layer_ids   = group_set.topologyPtr()->layerIdsForGroup(group_id);
-            auto&        device_pool = *device_pools[member_group_id];
+        for (size_t member_group_id = 0; member_group_id < group_set.groupTags().size(); ++member_group_id) {
+            const auto& group_tag   = group_set.groupTags()[member_group_id];
+            const auto& group_base  = group_set.group(group_tag);
+            const auto  layer_ids   = group_set.topologyPtr()->layerIdsForGroup(group_tag);
+            auto&       device_pool = *device_pools[member_group_id];
             for (size_t local_layer_index = 0; local_layer_index < layer_ids.size(); ++local_layer_index) {
                 auto*      layer_host_addr = static_cast<uint8_t*>(host.base) + host_offset;
                 const auto buffers         = device_pool.convertIndexToBuffer(static_cast<int>(local_layer_index),

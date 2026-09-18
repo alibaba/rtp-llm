@@ -153,8 +153,13 @@ GroupSetPtr BenchmarkFixture::createFullGroupSet(std::vector<DeviceBlockPoolPtr>
                                                  size_t                               group_set_id,
                                                  std::shared_ptr<const CacheTopology> topology,
                                                  const std::vector<size_t>&           group_ids) {
-    auto group_set = std::make_shared<FullGroupSet>(device_pools, host_pool, disk_pool);
-    group_set->initialize(group_set_id, std::move(topology), group_ids);
+    auto                     group_set = std::make_shared<FullGroupSet>(device_pools, host_pool, disk_pool);
+    std::vector<std::string> group_tags;
+    group_tags.reserve(group_ids.size());
+    for (size_t group_id : group_ids) {
+        group_tags.push_back(topology->groupById(group_id).tag);
+    }
+    group_set->initialize(group_set_id, std::move(topology), std::move(group_tags));
     return group_set;
 }
 
@@ -168,7 +173,12 @@ GroupSetPtr BenchmarkFixture::createSWAGroupSet(std::vector<DeviceBlockPoolPtr> 
                                                 size_t                               tokens_per_block) {
     auto group_set =
         std::make_shared<SWAGroupSet>(sliding_window_size, tokens_per_block, device_pools, host_pool, disk_pool);
-    group_set->initialize(group_set_id, std::move(topology), group_ids);
+    std::vector<std::string> group_tags;
+    group_tags.reserve(group_ids.size());
+    for (size_t group_id : group_ids) {
+        group_tags.push_back(topology->groupById(group_id).tag);
+    }
+    group_set->initialize(group_set_id, std::move(topology), std::move(group_tags));
     return group_set;
 }
 

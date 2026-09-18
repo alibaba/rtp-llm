@@ -837,10 +837,14 @@ void KVCacheManager::initCacheEventPublisher() {
         publisher_context.spec_name         = "rtp_llm_hbm_" + std::to_string(config_.seq_size_per_block);
         publisher_context.location_uri      = "rtp-llm://" + publisher_context.host_ip_port + "/hbm";
         publisher_context.block_size_tokens = static_cast<int32_t>(config_.seq_size_per_block);
-        std::vector<int64_t> group_block_size_bytes;
+        std::vector<int64_t>     group_block_size_bytes;
+        std::vector<std::string> reuse_group_tags;
         group_block_size_bytes.reserve(reuse_group_ids.size());
+        reuse_group_tags.reserve(reuse_group_ids.size());
         for (const auto group_id : reuse_group_ids) {
-            group_block_size_bytes.push_back(static_cast<int64_t>(config_.blockSizeBytesForGroup(group_id)));
+            const auto& tag = config_.topology().groupById(static_cast<size_t>(group_id)).tag;
+            reuse_group_tags.push_back(tag);
+            group_block_size_bytes.push_back(static_cast<int64_t>(config_.blockSizeBytesForGroup(tag)));
         }
         // Pipeline parallelism is rejected above because a unique PP owner is
         // not represented in ParallelismConfig yet.
@@ -863,7 +867,7 @@ void KVCacheManager::initCacheEventPublisher() {
 
         cache_event_publisher_ =
             std::make_shared<KVCMPublisher>(publisher_config, publisher_context, std::move(snapshot_provider));
-        block_tree_cache_->setEventPublisher(cache_event_publisher_, reuse_group_ids);
+        block_tree_cache_->setEventPublisher(cache_event_publisher_, reuse_group_tags);
         if (!cache_event_publisher_->start()) {
             RTP_LLM_LOG_WARNING("KV cache event publisher failed to start, type=%s; inference remains enabled",
                                 publisher_type.c_str());

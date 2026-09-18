@@ -189,8 +189,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
                 EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 2u);
                 load_targets[group_set_id] = groupSetRequestBlocksAt(group_set, load_resource, 0, path_index);
                 ASSERT_EQ(group_set->devicePools().size(), load_targets[group_set_id].size());
-                for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
-                    const int          group_id = static_cast<int>(group_set->groupIds()[member_index]);
+                for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
+                    const int          group_id = static_cast<int>(topologyGroupId(group_set, member_index));
                     const BlockIdxType block    = load_targets[group_set_id][member_index];
                     ASSERT_FALSE(isNullBlockIdx(block));
                     EXPECT_EQ(group_set->devicePools()[member_index]->refCount(block), 2u);
@@ -468,8 +468,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_block), 2u);
         load_targets[group_set_id] = groupSetRequestBlocksAt(group_set, load_resource, 0, /*path_index=*/0);
         ASSERT_EQ(group_set->devicePools().size(), load_targets[group_set_id].size());
-        for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
-            const int          group_id = static_cast<int>(group_set->groupIds()[member_index]);
+        for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
+            const int          group_id = static_cast<int>(topologyGroupId(group_set, member_index));
             const BlockIdxType block    = load_targets[group_set_id][member_index];
             ASSERT_FALSE(isNullBlockIdx(block));
             EXPECT_EQ(group_set->devicePools()[member_index]->refCount(block), 2u);

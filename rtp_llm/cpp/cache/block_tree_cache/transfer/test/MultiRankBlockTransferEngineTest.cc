@@ -133,7 +133,7 @@ static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<
         std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, makeHostPool(256, 8), nullptr);
     auto topology = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
-    full->initialize(0, topology, {0});
+    full->initialize(0, topology, {topology->groupById(0).tag});
     std::vector<GroupSetPtr> groups = {full};
     return makeBlockTreeCacheForTest(std::move(groups),
                                      BlockTreeCacheConfig{},
@@ -154,7 +154,7 @@ static BlockIdxType prepareDeviceTarget(const std::shared_ptr<FullGroupSet>& gro
     const DeviceBlockPoolPtr& device_pool = group->devicePools().front();
     auto                      topology    = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
-    group->initialize(0, topology, {0});
+    group->initialize(0, topology, {topology->groupById(0).tag});
     const auto block = device_pool->malloc();
     if (!block.has_value()) {
         return NULL_BLOCK_IDX;
@@ -173,7 +173,7 @@ static void initializeBroadcastGroups(const std::vector<std::shared_ptr<FullGrou
     }
     auto topology = block_transfer_engine_test::makeTestTopology(std::move(group_bases));
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
-        groups[group_id]->initialize(group_id, topology, {group_id});
+        groups[group_id]->initialize(group_id, topology, {topology->groupById(group_id).tag});
     }
 }
 
@@ -182,12 +182,12 @@ static std::vector<TransferDescriptor> makeBroadcastDescriptors() {
 }
 
 static void expectSingleGroupBlock(const MemoryOperationRequestPB::CopyItem& item,
-                                   size_t                                    group_set_id,
-                                   int                                       group_id,
+                                   const std::string&                        group_tag,
                                    BlockIdxType                              block) {
-    EXPECT_EQ(item.group_set_id(), group_set_id);
+    ASSERT_EQ(item.group_tags_size(), 1);
+    EXPECT_EQ(item.group_tags(0), group_tag);
     ASSERT_EQ(item.group_blocks_size(), 1);
-    EXPECT_EQ(item.group_blocks(0).group_id(), group_id);
+    EXPECT_EQ(item.group_blocks(0).tag(), group_tag);
     EXPECT_EQ(item.group_blocks(0).block_id(), block);
 }
 
@@ -549,7 +549,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
         ASSERT_EQ(worker_request.copy_items_size(), 1);
         EXPECT_EQ(worker_request.copy_direction(), MemoryOperationRequestPB::H2D);
         EXPECT_EQ(worker_request.copy_items(0).mem_block(), host_block);
-        expectSingleGroupBlock(worker_request.copy_items(0), 0, 0, device_block);
+        expectSingleGroupBlock(worker_request.copy_items(0), "group0", device_block);
     }
 }
 
@@ -610,7 +610,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
         ASSERT_EQ(worker_request.copy_items_size(), 1);
         EXPECT_EQ(worker_request.copy_direction(), MemoryOperationRequestPB::H2D);
         EXPECT_EQ(worker_request.copy_items(0).mem_block(), host_block);
-        expectSingleGroupBlock(worker_request.copy_items(0), 0, 0, device_block);
+        expectSingleGroupBlock(worker_request.copy_items(0), "group0", device_block);
     }
     group->devicePools().front()->decRef(device_block);
 }
@@ -677,7 +677,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
         ASSERT_EQ(worker_request.copy_items_size(), 1);
         const MemoryOperationRequestPB::CopyItem& request_item = worker_request.copy_items(0);
         EXPECT_EQ(request_item.disk_block(), disk_block);
-        expectSingleGroupBlock(request_item, 0, 0, device_block);
+        expectSingleGroupBlock(request_item, "group0", device_block);
     }
 }
 
@@ -739,7 +739,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsTask) {
         EXPECT_EQ(worker_request.copy_items_size(), 1);
         EXPECT_EQ(worker_request.copy_items(0).mem_block(), host_block);
         EXPECT_EQ(worker_request.copy_items(0).disk_block(), disk_block);
-        EXPECT_EQ(worker_request.copy_items(0).group_set_id(), 0u);
+        EXPECT_EQ(worker_request.copy_items(0).group_tags(0), "group0");
     }
 }
 
@@ -885,7 +885,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
         EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::D2DISK);
         ASSERT_EQ(request.copy_items_size(), 1);
         EXPECT_EQ(request.copy_items(0).disk_block(), resource.disk_block);
-        expectSingleGroupBlock(request.copy_items(0), 0, 0, device_block);
+        expectSingleGroupBlock(request.copy_items(0), "group0", device_block);
     }
 }
 
@@ -1044,10 +1044,10 @@ TEST_F(MultiRankBlockTransferEngineTest, EncodeTransferRequestIncludesMultipleDe
     EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2DISK);
     EXPECT_EQ(request.copy_items(0).mem_block(), 3);
     EXPECT_EQ(request.copy_items(0).disk_block(), 4);
-    EXPECT_EQ(request.copy_items(0).group_set_id(), 0u);
+    EXPECT_EQ(request.copy_items(0).group_tags(0), "group0");
     EXPECT_EQ(request.copy_items(1).mem_block(), 5);
     EXPECT_EQ(request.copy_items(1).disk_block(), 6);
-    EXPECT_EQ(request.copy_items(1).group_set_id(), 1u);
+    EXPECT_EQ(request.copy_items(1).group_tags(0), "group1");
 }
 
 }  // namespace

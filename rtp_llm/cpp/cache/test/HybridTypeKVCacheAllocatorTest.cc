@@ -1148,10 +1148,11 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndL
             if (desc.path_index != path_index) {
                 continue;
             }
-            const auto& group_ids = cache->groupSets()[desc.group_set_id]->groupIds();
-            const auto  group_it  = std::find(group_ids.begin(), group_ids.end(), static_cast<size_t>(group_id));
-            if (group_it != group_ids.end()) {
-                return desc.target_blocks[static_cast<size_t>(group_it - group_ids.begin())];
+            const auto& group_tags = cache->groupSets()[desc.group_set_id]->groupTags();
+            const auto& tag        = config.tagForGroup(static_cast<size_t>(group_id));
+            const auto  group_it   = std::find(group_tags.begin(), group_tags.end(), tag);
+            if (group_it != group_tags.end()) {
+                return desc.target_blocks[static_cast<size_t>(group_it - group_tags.begin())];
             }
         }
         return NULL_BLOCK_IDX;
@@ -1806,12 +1807,14 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101, 102});
     EXPECT_EQ(match.matched_device_blocks, 3u);
-    EXPECT_EQ(
-        allocator->blockTreeCacheOwner()->matchedBlocksForGroup(full_group_id, match.matched_device_resources).size(),
-        3u);
-    EXPECT_EQ(
-        allocator->blockTreeCacheOwner()->matchedBlocksForGroup(linear_group_id, match.matched_device_resources).size(),
-        1u);
+    EXPECT_EQ(allocator->blockTreeCacheOwner()
+                  ->matchedBlocksForGroup(config.tagForGroup(full_group_id), match.matched_device_resources)
+                  .size(),
+              3u);
+    EXPECT_EQ(allocator->blockTreeCacheOwner()
+                  ->matchedBlocksForGroup(config.tagForGroup(linear_group_id), match.matched_device_resources)
+                  .size(),
+              1u);
     block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
 }
 
@@ -1846,8 +1849,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCachePreservesLinearHoleAndPubl
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101, 102});
     EXPECT_EQ(match.matched_device_blocks, 3u);
-    EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(/*group_id=*/0, match.matched_device_resources),
-              (BlockIndicesType{blocks[1]}));
+    EXPECT_EQ(
+        allocator->blockTreeCacheOwner()->matchedBlocksForGroup(config.tagForGroup(0), match.matched_device_resources),
+        (BlockIndicesType{blocks[1]}));
     block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
 
     linear_pool->decRef(linear_blocks);
@@ -1905,7 +1909,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsIns
     auto seed_match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101, 102});
     EXPECT_EQ(seed_match.matched_device_blocks, 3u);
     EXPECT_EQ(allocator->blockTreeCacheOwner()
-                  ->matchedBlocksForGroup(/*group_id=*/0, seed_match.matched_device_resources)
+                  ->matchedBlocksForGroup(config.tagForGroup(0), seed_match.matched_device_resources)
                   .size(),
               1u);
     block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(),

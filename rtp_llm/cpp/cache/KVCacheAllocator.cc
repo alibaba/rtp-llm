@@ -257,9 +257,9 @@ void KVCacheAllocator::attachBlockTreeCache(BlockTreeCachePtr block_tree_cache) 
 
     block_tree_cache_ = std::move(block_tree_cache);
     for (const auto& group : cacheGroups()) {
-        const size_t group_id = config_.topology().groupIdForTag(group->tag());
-        group->setEvictCallback([cache = block_tree_cache_, group_id](size_t need_blocks) {
-            const int reclaimed = cache->evictForGroup(group_id, need_blocks);
+        const std::string tag = group->tag();
+        group->setEvictCallback([cache = block_tree_cache_, tag](size_t need_blocks) {
+            const int reclaimed = cache->evictForGroup(tag, need_blocks);
             return reclaimed > 0 ? static_cast<size_t>(reclaimed) : 0;
         });
     }
@@ -430,7 +430,8 @@ std::shared_ptr<LoadAsyncContext> KVCacheAllocator::prepareKVCache(const CacheKe
     const auto& group_sets = block_tree_cache_->groupSets();
     if (prepared.total_logical_blocks > 0) {
         for (const auto& group_set : group_sets) {
-            for (const size_t group_id : group_set->groupIds()) {
+            for (const auto& tag : group_set->groupTags()) {
+                const size_t group_id = config_.topology().groupIdForTag(tag);
                 const size_t reuse_size =
                     loadTargetPosition(prepared.total_logical_blocks - 1, group_id, cp_mapper, cp_scale) + 1;
                 kv_resource.mutableBlockIds(0, static_cast<int>(group_id))
@@ -440,9 +441,9 @@ std::shared_ptr<LoadAsyncContext> KVCacheAllocator::prepareKVCache(const CacheKe
     }
 
     const auto set_group_set_blocks = [&](size_t group_set_id, size_t path_index, const BlockIndicesType& blocks) {
-        const auto& group_ids = group_sets[group_set_id]->groupIds();
-        for (size_t member_group_id = 0; member_group_id < group_ids.size(); ++member_group_id) {
-            const size_t group_id        = group_ids[member_group_id];
+        const auto& group_tags = group_sets[group_set_id]->groupTags();
+        for (size_t member_group_id = 0; member_group_id < group_tags.size(); ++member_group_id) {
+            const size_t group_id        = config_.topology().groupIdForTag(group_tags[member_group_id]);
             const size_t target_position = loadTargetPosition(path_index, group_id, cp_mapper, cp_scale);
             kv_resource.mutableBlockIds(0, static_cast<int>(group_id)).setAt(target_position, blocks[member_group_id]);
             prepared.referenced_blocks[group_id].push_back(blocks[member_group_id]);
@@ -554,7 +555,8 @@ bool KVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_info,
 
     if (matched_blocks > 0) {
         for (const GroupSetPtr& group_set : block_tree_cache_->groupSets()) {
-            for (size_t group_id : group_set->groupIds()) {
+            for (const auto& tag : group_set->groupTags()) {
+                const size_t group_id = config_.topology().groupIdForTag(tag);
                 kv_resource.mutableBlockIds(0, static_cast<int>(group_id))
                     .resize(loadTargetPosition(matched_blocks - 1, group_id, cp_mapper, cp_scale) + 1);
             }
@@ -567,7 +569,8 @@ bool KVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_info,
         for (size_t i = 0; i < context->loadDescs().size(); ++i) {
             const auto& desc = context->loadDescs()[i];
             if (desc.source_tier != Tier::DEVICE && !context->joinedLoads()[i]) {
-                for (size_t group_id : block_tree_cache_->groupSets()[desc.group_set_id]->groupIds()) {
+                for (const auto& tag : block_tree_cache_->groupSets()[desc.group_set_id]->groupTags()) {
+                    const size_t group_id = config_.topology().groupIdForTag(tag);
                     add_target(desc.path_index, group_id);
                 }
             }
@@ -607,7 +610,8 @@ bool KVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_info,
 
     auto target_blocks = [&](size_t path, size_t group_set_id) {
         BlockIndicesType blocks;
-        for (size_t group_id : block_tree_cache_->groupSets()[group_set_id]->groupIds()) {
+        for (const auto& tag : block_tree_cache_->groupSets()[group_set_id]->groupTags()) {
+            const size_t group_id = config_.topology().groupIdForTag(tag);
             blocks.push_back(kv_resource.blocks(
                 0, static_cast<int>(group_id))[loadTargetPosition(path, group_id, cp_mapper, cp_scale)]);
         }
@@ -796,16 +800,17 @@ void KVCacheAllocator::insertIntoCache(const InsertInfo& insert_info, size_t& re
         bool                                       mapping_valid = true;
         for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
             const auto& group_set = group_sets[group_set_id];
-            if (!group_set || group_set->groupSetId() != group_set_id || group_set->groupIds().empty()
-                || group_set->groupIds().size() != group_set->devicePools().size()) {
+            if (!group_set || group_set->groupSetId() != group_set_id || group_set->groupTags().empty()
+                || group_set->groupTags().size() != group_set->devicePools().size()) {
                 mapping_valid = false;
                 break;
             }
             for (auto& per_key_resources : resources) {
                 per_key_resources[group_set_id].device_blocks.assign(group_set->devicePools().size(), NULL_BLOCK_IDX);
             }
-            for (size_t member_group_id = 0; member_group_id < group_set->groupIds().size(); ++member_group_id) {
-                const int group_id = static_cast<int>(group_set->groupIds()[member_group_id]);
+            for (size_t member_group_id = 0; member_group_id < group_set->groupTags().size(); ++member_group_id) {
+                const int group_id =
+                    static_cast<int>(config_.topology().groupIdForTag(group_set->groupTags()[member_group_id]));
                 if (!kv_cache_groups_[static_cast<size_t>(group_id)]->prefixReuseEnabled()) {
                     mapping_valid = false;
                     break;

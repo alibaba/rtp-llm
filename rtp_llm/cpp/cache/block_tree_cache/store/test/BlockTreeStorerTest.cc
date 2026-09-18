@@ -342,7 +342,9 @@ protected:
         }
         BlockTreeMatchResult match = env_->cache->match(keys_);
         EXPECT_EQ(match.matched_device_blocks, keys_.size());
-        EXPECT_EQ(env_->cache->matchedBlocksForGroup(0, match.matched_device_resources), expected_blocks);
+        EXPECT_EQ(env_->cache->matchedBlocksForGroup(env_->groups.front()->groupTags().front(),
+                                                     match.matched_device_resources),
+                  expected_blocks);
         releaseRequestRefsForTest(*env_->cache, match.matched_device_resources);
         EXPECT_EQ(candidateCountForTier(*env_->cache, Tier::DEVICE), 0u);
     }
@@ -855,7 +857,7 @@ TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
     auto pool_z    = makeDevicePool({{16, 0}}, kStoreDeviceBlocks, "storage_tag_z");
     auto pool_a    = makeDevicePool({{16, 0}}, kStoreDeviceBlocks, "storage_tag_a");
     auto group_set = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_z, pool_a}, nullptr, nullptr);
-    group_set->initialize(0, topology, {0, 1});
+    group_set->initialize(0, topology, {"z_group", "a_group"});
 
     auto                 backend = std::make_shared<PendingWriteBackend>();
     BlockTreeCacheConfig config;

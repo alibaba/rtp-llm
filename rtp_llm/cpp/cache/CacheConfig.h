@@ -7,6 +7,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -140,6 +141,10 @@ public:
         return topology().layerIdsForGroup(gid);
     }
 
+    std::vector<int> layerIdsForGroup(std::string_view group_tag) const {
+        return topology().layerIdsForGroup(group_tag);
+    }
+
     std::vector<CacheGroupType> groupTypesSnapshot() const {
         return topology().groupTypesSnapshot();
     }
@@ -240,6 +245,26 @@ public:
         size_t      total = 0;
         const auto& tag   = tagForGroup(gid);
         for (int layer_id : layerIdsForGroup(gid)) {
+            const auto&  physical_group = physicalGroupForLayer(layer_id, tag);
+            const size_t kv_bytes       = physical_group.kvBlockStrideBytes();
+            const size_t scale_bytes    = physical_group.kvScaleStrideBytes();
+            RTP_LLM_CHECK_WITH_INFO(scale_bytes <= std::numeric_limits<size_t>::max() - kv_bytes,
+                                    "CacheConfig tag=%s layer=%d stride overflow",
+                                    tag.c_str(),
+                                    layer_id);
+            const size_t layer_bytes = kv_bytes + scale_bytes;
+            RTP_LLM_CHECK_WITH_INFO(layer_bytes <= std::numeric_limits<size_t>::max() - total,
+                                    "CacheConfig tag=%s block size overflow",
+                                    tag.c_str());
+            total += layer_bytes;
+        }
+        return total;
+    }
+
+    size_t blockSizeBytesForGroup(std::string_view group_tag) const {
+        size_t      total = 0;
+        const auto& tag   = topology().group(group_tag).tag;
+        for (int layer_id : layerIdsForGroup(group_tag)) {
             const auto&  physical_group = physicalGroupForLayer(layer_id, tag);
             const size_t kv_bytes       = physical_group.kvBlockStrideBytes();
             const size_t scale_bytes    = physical_group.kvScaleStrideBytes();

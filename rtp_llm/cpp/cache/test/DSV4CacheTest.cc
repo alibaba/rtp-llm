@@ -47,10 +47,10 @@ const std::vector<std::string> kDsv4FlashFirstSeenTags     = {
 const std::vector<std::string> kDsv4ProFirstSeenTags = {
     "hca_kv", "hca_state", "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state"};
 
-bool containsReusableGroup(const BlockTreeCache& cache, size_t group_id) {
-    return std::any_of(cache.groupSets().begin(), cache.groupSets().end(), [group_id](const GroupSetPtr& group_set) {
-        return std::find(group_set->groupIds().begin(), group_set->groupIds().end(), group_id)
-               != group_set->groupIds().end();
+bool containsReusableGroup(const BlockTreeCache& cache, std::string_view tag) {
+    return std::any_of(cache.groupSets().begin(), cache.groupSets().end(), [tag](const GroupSetPtr& group_set) {
+        return std::find(group_set->groupTags().begin(), group_set->groupTags().end(), tag)
+               != group_set->groupTags().end();
     });
 }
 
@@ -453,6 +453,28 @@ static GroupBase makeTestGroup(const KVCacheSpecPtr& spec, CacheGroupType type, 
     group.spec   = spec;
     group.policy = defaultCacheGroupPolicy(type);
     return group;
+}
+
+TEST(CacheConfigTest, GroupIdentityQueriesPreserveGeometryAcrossTopologyOrders) {
+    auto                         full_spec = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 4, 16, "full");
+    auto                         swa_spec  = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 8, 8, "swa");
+    auto                         full      = makeTestGroup(full_spec, CacheGroupType::FULL, {1, 2});
+    auto                         swa       = makeTestGroup(swa_spec, CacheGroupType::SWA, {0, 1});
+    const std::vector<LayerBase> layers{{0, {"swa"}}, {1, {"full", "swa"}}, {2, {"full"}}};
+
+    for (const auto& groups : {std::vector<GroupBase>{full, swa}, std::vector<GroupBase>{swa, full}}) {
+        CacheConfig config;
+        config.layer_num = 3;
+        config.setTopology(groups, layers);
+        EXPECT_EQ(config.layerIdsForGroup("full"), (std::vector<int>{1, 2}));
+        EXPECT_EQ(config.layerIdsForGroup("swa"), (std::vector<int>{0, 1}));
+        EXPECT_EQ(config.blockSizeBytesForGroup("full"),
+                  config.blockSizeBytesForGroup(static_cast<size_t>(config.groupIdForTag("full"))));
+        EXPECT_EQ(config.blockSizeBytesForGroup("swa"),
+                  config.blockSizeBytesForGroup(static_cast<size_t>(config.groupIdForTag("swa"))));
+        EXPECT_ANY_THROW(config.layerIdsForGroup("missing"));
+        EXPECT_ANY_THROW(config.blockSizeBytesForGroup("missing"));
+    }
 }
 
 TEST(CacheConfigTest, SetTopologyInstallsTagAndGroupTopology) {
@@ -2925,10 +2947,10 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     for (int gid = 0; gid < 7; gid++) {
         const auto& tag = config.tagForGroup(gid);
         if (tag == "hca_state") {
-            EXPECT_FALSE(containsReusableGroup(*allocator->blockTreeCacheOwner(), static_cast<size_t>(gid)));
+            EXPECT_FALSE(containsReusableGroup(*allocator->blockTreeCacheOwner(), config.tagForGroup(gid)));
             continue;
         }
-        EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(gid, match.matched_device_resources).size(),
+        EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(tag, match.matched_device_resources).size(),
                   config.typeForGroup(gid) == CacheGroupType::FULL ? 3u : 1u)
             << tag;
     }
@@ -2986,10 +3008,10 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     for (int gid = 0; gid < 7; gid++) {
         const auto& tag = config.tagForGroup(gid);
         if (tag == "hca_state") {
-            EXPECT_FALSE(containsReusableGroup(*allocator->blockTreeCacheOwner(), static_cast<size_t>(gid)));
+            EXPECT_FALSE(containsReusableGroup(*allocator->blockTreeCacheOwner(), config.tagForGroup(gid)));
             continue;
         }
-        EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(gid, match.matched_device_resources).size(),
+        EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(tag, match.matched_device_resources).size(),
                   config.typeForGroup(gid) == CacheGroupType::FULL ? 3u : 1u)
             << tag;
     }
@@ -3072,9 +3094,9 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
         if (group_set->groupType() == CacheGroupType::FULL) {
             continue;
         }
-        ASSERT_FALSE(group_set->groupIds().empty());
+        ASSERT_FALSE(group_set->groupTags().empty());
         for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
-            ASSERT_GT(allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupIds().front(), 1), 0)
+            ASSERT_GT(allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupTags().front(), 1), 0)
                 << "path_index=" << path_index;
         }
     }
@@ -3156,9 +3178,9 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
         if (group_set->groupType() == CacheGroupType::FULL) {
             continue;
         }
-        ASSERT_FALSE(group_set->groupIds().empty());
+        ASSERT_FALSE(group_set->groupTags().empty());
         for (size_t path_index = 1; path_index < cached_keys.size(); ++path_index) {
-            ASSERT_GT(allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupIds().front(), 1), 0)
+            ASSERT_GT(allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupTags().front(), 1), 0)
                 << "path_index=" << path_index;
         }
     }

@@ -688,14 +688,14 @@ TEST_F(KVCacheManagerTest, InitPublishesSameSharedBlockTreeCacheToAllocator) {
     for (size_t group_id = 0; group_id < target_groups.size(); ++group_id) {
         const auto& target_group = target_groups[group_id];
         ASSERT_NE(target_group, nullptr);
-        bool found = false;
+        const auto& target_tag = target_group->tag();
+        bool        found      = false;
         for (const GroupSetPtr& group_set : cache_manager->blockTreeCache()->groupSets()) {
-            const auto group_id_it = std::find(group_set->groupIds().begin(), group_set->groupIds().end(), group_id);
-            if (group_id_it == group_set->groupIds().end()) {
+            const auto tag_it = std::find(group_set->groupTags().begin(), group_set->groupTags().end(), target_tag);
+            if (tag_it == group_set->groupTags().end()) {
                 continue;
             }
-            const size_t local_group_index =
-                static_cast<size_t>(std::distance(group_set->groupIds().begin(), group_id_it));
+            const size_t local_group_index = static_cast<size_t>(std::distance(group_set->groupTags().begin(), tag_it));
             EXPECT_EQ(group_set->devicePools()[local_group_index].get(), target_group->blockPool().get());
             found = true;
             break;
@@ -784,9 +784,9 @@ TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysi
 
     size_t linear_group_set_memberships = 0;
     for (const GroupSetPtr& group_set : cache_manager->blockTreeCache()->groupSets()) {
-        ASSERT_EQ(group_set->groupIds().size(), group_set->devicePools().size());
-        for (size_t member = 0; member < group_set->groupIds().size(); ++member) {
-            if (group_set->groupIds()[member] != static_cast<size_t>(linear_gid)) {
+        ASSERT_EQ(group_set->groupTags().size(), group_set->devicePools().size());
+        for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
+            if (group_set->groupTags()[member] != "linear") {
                 continue;
             }
             ++linear_group_set_memberships;
@@ -1967,7 +1967,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialAndOut
         appendValidGroupedTransfer(tiered_manager, request);
         auto* mixed = request.mutable_mem_request()->add_copy_items();
         mixed->CopyFrom(request.mem_request().copy_items(0));
-        mixed->set_group_set_id(tiered_manager->blockTreeCache()->groupSets().size());
+        mixed->set_group_tags(0, "missing");
         FunctionResponsePB response;
         EXPECT_TRUE(tiered_manager->executeFunction(request, response));
         EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
@@ -1987,9 +1987,9 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialAndOut
         const BlockIdxType usable = static_cast<BlockIdxType>(
             tiered_manager->blockTreeCache()->groupSets().front()->devicePools().front()->totalBlocksNum());
         ASSERT_EQ(item->group_blocks_size(), 1);
-        const int group_id = item->group_blocks(0).group_id();
+        const std::string tag = item->group_blocks(0).tag();
         item->mutable_group_blocks(0)->set_block_id(usable + 1);
-        EXPECT_EQ(item->group_blocks(0).group_id(), group_id);
+        EXPECT_EQ(item->group_blocks(0).tag(), tag);
         const auto         backing             = tiered_manager->allocator_->cacheGroups().front()->blockPool();
         const size_t       free_before         = backing->freeBlocksNum();
         const size_t       used_before         = backing->usedBlocksNum();

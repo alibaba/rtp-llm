@@ -90,7 +90,12 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
                              BlockTreeDiskBlockPoolPtr            disk_pool) {
     RTP_LLM_CHECK(topology != nullptr);
     RTP_LLM_CHECK(!group_ids.empty());
-    const auto& first = topology->groupById(group_ids.front());
+    const auto&              first = topology->groupById(group_ids.front());
+    std::vector<std::string> group_tags;
+    group_tags.reserve(group_ids.size());
+    for (size_t group_id : group_ids) {
+        group_tags.push_back(topology->groupById(group_id).tag);
+    }
 
     GroupSetPtr group_set;
     switch (first.policy.group_type) {
@@ -109,7 +114,7 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
             break;
     }
     RTP_LLM_CHECK(group_set != nullptr);
-    group_set->initialize(group_set_id, std::move(topology), std::move(group_ids));
+    group_set->initialize(group_set_id, std::move(topology), std::move(group_tags));
     return group_set;
 }
 

@@ -100,7 +100,10 @@ TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
 
 TEST(CacheTopologyTest, DerivesReverseMembershipFromLayers) {
     auto topology = CacheTopology::create({makeGroup("full")}, {{0, {"full"}}, {1, {"full"}}});
-    EXPECT_EQ(topology->layerIdsForGroup(0), (std::vector<int>{0, 1}));
+    EXPECT_EQ(topology->layerIdsForGroup("full"), (std::vector<int>{0, 1}));
+    EXPECT_EQ(topology->blockSizeBytesForGroup("full"), topology->blockSizeBytesForGroup(0));
+    EXPECT_ANY_THROW(topology->layerIdsForGroup("missing"));
+    EXPECT_ANY_THROW(topology->blockSizeBytesForGroup("missing"));
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full")}, {{0, {"missing"}}}));
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full")}, {{0, {"full", "full"}}}));
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full"), makeGroup("full")}, {{0, {"full"}}}));

@@ -69,7 +69,9 @@ public:
     // totalGroupBlockSizeBytes} instead.
     size_t           totalGroupBlockSizeBytes() const;
     size_t           blockSizeBytesForGroup(size_t group_id) const;
+    size_t           blockSizeBytesForGroup(std::string_view group_tag) const;
     std::vector<int> layerIdsForGroup(size_t group_id) const;
+    std::vector<int> layerIdsForGroup(std::string_view group_tag) const;
     std::vector<int> groupIdsForLayer(int layer_id) const;
 
     size_t maxKernelBlocksPerKvBlock() const {

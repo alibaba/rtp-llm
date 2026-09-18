@@ -173,22 +173,22 @@ TEST(BlockTreeTest, OwnsReusableGroupLocations) {
 
     EXPECT_EQ(tree.reusableGroupCount(), 3u);
 
-    const auto* group_0 = tree.reusableGroupLocation(0);
+    const auto* group_0 = tree.reusableGroupLocation("group0");
     ASSERT_NE(group_0, nullptr);
     EXPECT_EQ(group_0->group_set_id, 0u);
     EXPECT_EQ(group_0->member_group_id, 0u);
 
-    const auto* group_2 = tree.reusableGroupLocation(2);
+    const auto* group_2 = tree.reusableGroupLocation("group2");
     ASSERT_NE(group_2, nullptr);
     EXPECT_EQ(group_2->group_set_id, 0u);
     EXPECT_EQ(group_2->member_group_id, 1u);
 
-    const auto* group_1 = tree.reusableGroupLocation(1);
+    const auto* group_1 = tree.reusableGroupLocation("group1");
     ASSERT_NE(group_1, nullptr);
     EXPECT_EQ(group_1->group_set_id, 1u);
     EXPECT_EQ(group_1->member_group_id, 0u);
 
-    EXPECT_EQ(tree.reusableGroupLocation(3), nullptr);
+    EXPECT_EQ(tree.reusableGroupLocation("missing"), nullptr);
 }
 
 TEST(BlockTreeTest, InsertSinglePath) {
@@ -500,8 +500,8 @@ TEST(BlockTreeTest, InsertAggregatesAdoptedGroupSetsPerNode) {
     TreeNode* node               = insertAndGetNode(tree, {100}, original);
 
     std::vector<std::vector<GroupSetResource>> replacement(1, std::vector<GroupSetResource>(2));
-    replacement[0][0].device_blocks    = {20};
-    replacement[0][1].device_blocks    = {30};
+    replacement[0][0].device_blocks = {20};
+    replacement[0][1].device_blocks = {30};
     const BlockTreeInsertResult result =
         tree.insertNode({100}, replacement, /*collect_path=*/false, /*is_resident=*/false);
 
@@ -537,10 +537,10 @@ TEST(BlockTreeTest, InsertHardStopsAtBusyFullGroup) {
     node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
 
     std::vector<std::vector<GroupSetResource>> replacement(2, std::vector<GroupSetResource>(2));
-    replacement[0][0].device_blocks    = {20};
-    replacement[0][1].device_blocks    = {30};
-    replacement[1][0].device_blocks    = {21};
-    replacement[1][1].device_blocks    = {31};
+    replacement[0][0].device_blocks = {20};
+    replacement[0][1].device_blocks = {30};
+    replacement[1][0].device_blocks = {21};
+    replacement[1][1].device_blocks = {31};
     const BlockTreeInsertResult result =
         tree.insertNode({100, 200}, replacement, /*collect_path=*/false, /*is_resident=*/false);
 
@@ -626,7 +626,7 @@ TEST(BlockTreeTest, LowerTierInsertDoesNotUseDeviceHardStop) {
     GroupSetResource incoming_parent;
     incoming_parent.host_block = 8;
     GroupSetResource incoming_child;
-    incoming_child.host_block = 9;
+    incoming_child.host_block          = 9;
     const BlockTreeInsertResult result = tree.insertNode(
         {100, 200}, {{incoming_parent}, {incoming_child}}, /*collect_path=*/false, /*is_resident=*/false);
 

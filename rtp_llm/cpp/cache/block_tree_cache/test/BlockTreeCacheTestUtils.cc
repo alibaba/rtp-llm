@@ -308,10 +308,10 @@ void releaseRequestRefsForTest(BlockTreeCache& cache, const std::vector<MultiNod
     for (const MultiNodeResource& resource : resources) {
         RTP_LLM_CHECK(resource.tier == Tier::DEVICE);
         RTP_LLM_CHECK(resource.group_set_id < group_sets.size());
-        const GroupSetPtr& group_set = group_sets[resource.group_set_id];
-        const auto&        group_ids = group_set->groupIds();
-        const auto&        pools     = group_set->devicePools();
-        RTP_LLM_CHECK(group_ids.size() == pools.size());
+        const GroupSetPtr& group_set  = group_sets[resource.group_set_id];
+        const auto&        group_tags = group_set->groupTags();
+        const auto&        pools      = group_set->devicePools();
+        RTP_LLM_CHECK(group_tags.size() == pools.size());
         for (const auto& [_, blocks] : resource.node_blocks) {
             RTP_LLM_CHECK(blocks.size() == pools.size());
             for (size_t member_group_id = 0; member_group_id < blocks.size(); ++member_group_id) {
@@ -373,7 +373,7 @@ namespace {
 
 void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
     const bool has_uninitialized = std::any_of(group_sets.begin(), group_sets.end(), [](const GroupSetPtr& group_set) {
-        return group_set != nullptr && group_set->groupIds().empty();
+        return group_set != nullptr && group_set->groupTags().empty();
     });
     if (!has_uninitialized) {
         return;
@@ -383,7 +383,7 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
     groups.reserve(group_sets.size());
     for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
         const GroupSetPtr& group_set = group_sets[group_set_id];
-        RTP_LLM_CHECK(group_set != nullptr && group_set->groupIds().empty());
+        RTP_LLM_CHECK(group_set != nullptr && group_set->groupTags().empty());
 
         CacheGroupType type               = CacheGroupType::FULL;
         size_t         seq_size_per_block = 1;
@@ -410,7 +410,7 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
 
     auto topology = block_transfer_engine_test::makeTestTopology(std::move(groups));
     for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
-        group_sets[group_set_id]->initialize(group_set_id, topology, {group_set_id});
+        group_sets[group_set_id]->initialize(group_set_id, topology, {topology->groupById(group_set_id).tag});
     }
 }
 
@@ -436,8 +436,9 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         storage_topology = group_sets.front()->topologyPtr();
         std::vector<DeviceBlockPoolPtr> device_pools(storage_topology->groups().size());
         for (const auto& group_set : group_sets) {
-            for (size_t member = 0; member < group_set->groupIds().size(); ++member) {
-                device_pools[group_set->groupIds()[member]] = group_set->devicePools()[member];
+            for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
+                const size_t group_id  = storage_topology->groupIdForTag(group_set->groupTags()[member]);
+                device_pools[group_id] = group_set->devicePools()[member];
             }
         }
         storage_device_pools    = device_pools;

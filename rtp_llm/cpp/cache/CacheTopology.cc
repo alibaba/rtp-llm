@@ -83,6 +83,10 @@ size_t CacheTopology::blockSizeBytesForGroup(size_t group_id) const {
     return layer_count * stride;
 }
 
+size_t CacheTopology::blockSizeBytesForGroup(std::string_view group_tag) const {
+    return blockSizeBytesForGroup(groupIdForTag(group_tag));
+}
+
 std::shared_ptr<const CacheTopology> CacheTopology::create(std::vector<GroupBase> groups,
                                                            std::vector<LayerBase> layers) {
     return std::shared_ptr<const CacheTopology>(new CacheTopology(std::move(groups), std::move(layers)));
@@ -252,6 +256,10 @@ std::vector<int> CacheTopology::layerIdsForGroup(size_t group_id) const {
         }
     }
     return ids;
+}
+
+std::vector<int> CacheTopology::layerIdsForGroup(std::string_view group_tag) const {
+    return layerIdsForGroup(groupIdForTag(group_tag));
 }
 
 std::vector<std::vector<int>> CacheTopology::layerGroupIdsSnapshot() const {
