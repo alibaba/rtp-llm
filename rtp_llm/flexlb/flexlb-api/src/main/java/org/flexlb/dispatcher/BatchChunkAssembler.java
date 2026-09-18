@@ -50,14 +50,17 @@ public final class BatchChunkAssembler {
                 ? 1 + (total - 1) / split.value() : Math.min(total, split.value());
     }
 
-    /** Wire bytes before BE assignment; outbound accounting also includes the stamped routing fields. */
+    /**
+     * Exact bytes before BE assignment. Routing fields are only known after placement;
+     * FanoutService charges the actual bytes, including these fields, before sending each chunk.
+     */
     public long projectedBytes() {
         if (count == 0) {
             return 0;
         }
         long templateBytes = BatchBodyParser.serialize(template).length;
         long arrayBytes = JSON.writeTo(OutputStream.nullOutputStream(), items, JSONWriter.Feature.WriteNulls);
-        // The product of two positive int lengths plus their framing fits in a signed long.
+        // templateBytes is long before multiplication; repeated envelopes can exceed 2 GiB.
         return (templateBytes - 2) * count + arrayBytes + count - 1L;
     }
 

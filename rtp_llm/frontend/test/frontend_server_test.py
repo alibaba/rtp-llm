@@ -222,6 +222,8 @@ class BatchFrontendWorkerTest(TestCase):
                 self.assertEqual(
                     ExceptionType.UNSUPPORTED_OPERATION, raised.exception.exception_type
                 )
+        # Keyword batch=True is body data; the positional mode stays False,
+        # so root inference must still accept this streaming request.
         worker.inference(batch=True, **args)
         worker._yield_batch_generate.assert_not_called()
 

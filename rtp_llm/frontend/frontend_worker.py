@@ -143,7 +143,8 @@ class FrontendWorker:
     def inference(
         self, batch: bool = False, /, **kwargs: Any
     ) -> CompleteResponseAsyncGenerator:
-        # The HTTP route selects batch mode; JSON fields cannot override it.
+        # The HTTP route selects the positional-only batch mode. A JSON "batch"
+        # key goes into **kwargs, so it cannot override the mode or conflict with it.
         streaming = batch and self.is_streaming(kwargs)
         if batch:
             kwargs.setdefault("prompt_batch", [])
@@ -239,6 +240,7 @@ class FrontendWorker:
         self, request: Request, **kwargs: Any
     ) -> AsyncGenerator[BatchPipelineResponse, None]:
         headers = kwargs.pop("headers", None)
+        # RequestExtractor has already applied aliases and top-level config overrides.
         generate_configs = [
             self.pipeline.create_generate_config(
                 generate_config,
@@ -250,6 +252,7 @@ class FrontendWorker:
             )
             for generate_config in request.generate_configs
         ]
+        # Match _inference's member IDs across native batch and per-item execution.
         request_ids = [
             request.request_id + index * 10000
             for index in range(len(request.input_texts))
