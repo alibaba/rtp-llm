@@ -47,6 +47,15 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
 
     auto cp_split_input_tokens =
         torch::empty({(int64_t)(num_decode_stream + prefill_cp_split_tokens_size)}, pinned_i32);
+    const bool    has_engram = model_input.engram_token_windows.defined();
+    torch::Tensor cp_engram_windows;
+    if (has_engram) {
+        RTP_LLM_CHECK_WITH_INFO(!model_input.engram_token_windows.is_cuda()
+                                    && model_input.engram_token_windows.size(0) == total_input_tokens.numel()
+                                    && model_input.engram_token_windows.size(1) == 4,
+                                "Engram history must be CPU [total_tokens, 4] before CP");
+        cp_engram_windows = torch::full({cp_split_input_tokens.numel(), 4}, -1, pinned_i32);
+    }
     auto prefill_shuffle_indices = torch::empty({(int64_t)prefill_cp_split_tokens_size}, pinned_i32);
 
     const bool has_hidden_states          = total_hidden_states.defined() && total_hidden_states.numel() > 0;
@@ -81,6 +90,11 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         std::memcpy(input_token_ptr,
                     total_input_tokens.data_ptr<int32_t>() + total_input_token_idx,
                     num_decode_stream * sizeof(int));
+        if (has_engram) {
+            std::memcpy(cp_engram_windows.data_ptr<int32_t>(),
+                        model_input.engram_token_windows.data_ptr<int32_t>(),
+                        num_decode_stream * 4 * sizeof(int32_t));
+        }
         if (should_split_hidden_states) {
             for (size_t i = 0; i < num_decode_stream; ++i) {
                 hidden_select_indices.push_back(static_cast<int64_t>(i));
@@ -115,6 +129,16 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         std::memcpy(prefill_shuffle_indices_ptr + input_token_idx - num_decode_stream,
                     shuffle_index.data(),
                     input_chunk_length * sizeof(int));
+        if (has_engram) {
+            for (int i = 0; i < input_chunk_length; ++i) {
+                const int source = shuffle_index[i];
+                if (source >= 0 && source < input_length) {
+                    std::memcpy(cp_engram_windows.data_ptr<int32_t>() + (input_token_idx + i) * 4,
+                                model_input.engram_token_windows.data_ptr<int32_t>() + (hidden_src_offset + source) * 4,
+                                4 * sizeof(int32_t));
+                }
+            }
+        }
         if (should_split_hidden_states) {
             for (int i = 0; i < input_chunk_length; ++i) {
                 const int src_idx = shuffle_index[i];
@@ -151,7 +175,10 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         model_input.last_hidden_states = split_hidden;
     }
 
-    model_input.combo_tokens  = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);
+    model_input.combo_tokens = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);
+    if (has_engram) {
+        model_input.engram_token_windows = std::move(cp_engram_windows);
+    }
     model_input.input_lengths = input_lengths.to(torch::kCUDA, /*non_blocking=*/true);
     model_input.sequence_lengths =
         sequence_lengths.is_cuda() ? sequence_lengths : sequence_lengths.to(torch::kCUDA, /*non_blocking=*/true);

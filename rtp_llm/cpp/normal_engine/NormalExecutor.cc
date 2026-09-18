@@ -530,6 +530,11 @@ void NormalExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, c
 }
 
 bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) const {
+    // Engram gathers the committed token tail from host bookkeeping, even
+    // when the newest sampled token and sequence length are already on CUDA.
+    if (batch_stream_processor_->hasEngram()) {
+        return false;
+    }
     // Decode-only batch is the only shape the device-state path supports.
     if (stream_groups.totalContextBatchSize() != 0 || stream_groups.totalDecodeBatchSize() == 0) {
         return false;

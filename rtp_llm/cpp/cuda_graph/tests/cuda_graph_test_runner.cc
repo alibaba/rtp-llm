@@ -45,7 +45,8 @@ public:
                      int64_t          max_seq_len,
                      int64_t          tokens_per_block,
                      int64_t          kernel_tokens_per_block,
-                     std::vector<int> decode_capture_batch_sizes) {
+                     std::vector<int> decode_capture_batch_sizes,
+                     int64_t          num_tokens_per_bs = 1) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -53,7 +54,8 @@ public:
         params.max_seq_len                  = static_cast<int>(max_seq_len);
         params.tokens_per_block             = static_cast<int>(tokens_per_block);
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
-        params.num_tokens_per_bs            = 1;
+        params.num_tokens_per_bs            = static_cast<int>(num_tokens_per_bs);
+        params.is_target_verify             = num_tokens_per_bs > 1;
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.input_hidden_size            = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::Half;
@@ -115,7 +117,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("max_seq_len"),
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
-             py::arg("decode_capture_batch_sizes"))
+             py::arg("decode_capture_batch_sizes"),
+             py::arg("num_tokens_per_bs") = 1)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);

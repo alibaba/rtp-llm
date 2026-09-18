@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
+#include "rtp_llm/cpp/normal_engine/EngramTokenHistory.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 
@@ -240,7 +241,10 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     static const auto cuda_i32    = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
 
     GptModelInputs model_input;
-    model_input.combo_tokens          = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
+    model_input.combo_tokens = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
+    if (config_.has_engram) {
+        model_input.engram_token_windows = torch::full({(int64_t)current_tokens_size, 4}, -1, pinned_i32);
+    }
     model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
     model_input.sequence_lengths      = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
     model_input.prefix_lengths        = torch::empty({(int64_t)total_context_batch_size}, cuda_i32);
@@ -312,7 +316,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
 
-    bool use_normal_device_state = stream_groups.totalContextBatchSize() == 0
+    bool use_normal_device_state = !config_.has_engram && stream_groups.totalContextBatchSize() == 0
                                    && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id;
     if (use_normal_device_state) {
         for (const auto& stream : stream_groups.decodeStreams()) {
@@ -371,6 +375,12 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 ctx.merged_tokens[ctx.batch_idx]    = currentTokens[0];
                 ctx.input_lengths[ctx.batch_idx]    = stream->inputLength();
                 ctx.sequence_lengths[ctx.batch_idx] = stream->seqLength() - 1;
+                if (config_.has_engram) {
+                    fillEngramTokenWindows(stream->completeTokenIdsVec(i),
+                                           stream->seqLength() - 1,
+                                           1,
+                                           model_input.engram_token_windows.data_ptr<int32_t>() + ctx.batch_idx * 4);
+                }
                 if (ctx.need_cal_position_id) {
                     stream->generateNextPositionId(ctx.combo_position_ids
                                                    + ctx.batch_idx * config_.position_id_len_factor);
@@ -423,6 +433,12 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             auto input_tokens = stream->currentExecuteTokens(i);
             auto input_masks  = stream->textTokensMask();
             memcpy(ctx.merged_tokens + ctx.token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
+            if (config_.has_engram) {
+                fillEngramTokenWindows(stream->completeTokenIdsVec(i),
+                                       stream->prefixLength(),
+                                       input_tokens.size(),
+                                       model_input.engram_token_windows.data_ptr<int32_t>() + ctx.token_idx * 4);
+            }
 
             for (int index = 0; index < (int)input_tokens.size(); ++index) {
                 if (input_tokens[index] >= ctx.input_vocab_size
@@ -479,7 +495,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     // Keep the CPU source alongside the CUDA publication. CP Python metadata
     // consumes these scalar prefixes without synchronizing a device tensor.
     model_input.prefix_lengths_host_for_log = prefix_lengths_host;
-    model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host, host_holder);
+    model_input.prefix_lengths              = publishInt32ToCuda(prefix_lengths_host, host_holder);
     return absl::OkStatus();
 }
 

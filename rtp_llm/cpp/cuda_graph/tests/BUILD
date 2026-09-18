@@ -97,6 +97,22 @@ cc_test(
 )
 
 py_test(
+    name = "cuda_graph_engram_history",
+    srcs = ["cuda_graph_engram_history.py"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [":cuda_graph_test_utils"],
+    env = {
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
     name = "cuda_graph_decode_padding",
     srcs = [
         "cuda_graph_decode_padding.py",

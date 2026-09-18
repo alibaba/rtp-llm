@@ -2,6 +2,12 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "engram_token_history",
+    hdrs = ["EngramTokenHistory.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "normal_engine",
     hdrs = glob([
         "*.h",

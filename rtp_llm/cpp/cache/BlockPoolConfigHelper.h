@@ -108,7 +108,11 @@ public:
                          cache_config.block_num);
 
         const uint32_t layer_num = static_cast<uint32_t>(cache_config.global_layer_ids[group_id].size());
-        RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "group %zu has no layers", group_id);
+        // Typed regions retain stable group IDs across main/draft models and
+        // PD peers, including unused V4.1 state regions and SWA-only drafts.
+        RTP_LLM_CHECK_WITH_INFO(layer_num > 0 || (cache_config.use_typed_cache_regions && spec->layer_num == 0),
+                                "group %zu has no layers",
+                                group_id);
 
         const size_t kv_stride    = (group_id < cache_config.group_kv_block_stride_bytes.size()
                                   && cache_config.group_kv_block_stride_bytes[group_id] > 0) ?

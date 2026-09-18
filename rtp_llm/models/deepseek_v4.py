@@ -545,13 +545,14 @@ class DeepSeekV4(DeepSeekV2):
         )
 
     @staticmethod
-    def _from_hf(config: ModelConfig, ckpt_path: str):  # noqa: C901  (acceptably long)
+    def _from_hf(config: ModelConfig, ckpt_path: str, config_json=None):  # noqa: C901
         config_path = os.path.join(ckpt_path, "config.json")
-        if not os.path.exists(config_path):
+        if config_json is None and not os.path.exists(config_path):
             return
 
-        with open(config_path) as reader:
-            config_json = json.loads(reader.read())
+        if config_json is None:
+            with open(config_path) as reader:
+                config_json = json.loads(reader.read())
 
         # ---- basic geometry ----
         config.num_layers = config_json["num_hidden_layers"]

@@ -102,6 +102,8 @@ class V4Args:
     # the default reflects that; the BF16 path remains supported for
     # debugging by callers that pass ``fp8_kv_cache=False`` explicitly.
     fp8_kv_cache: bool = True
+    # V4.1 uses delayed mHC readout and a distinct compressed attention layout.
+    v41_config: Optional[Dict] = None
 
 
 def _block_kwargs(
@@ -167,9 +169,12 @@ def _build_block(
     args: V4Args,
     layer_weights: Optional[Dict[str, torch.Tensor]] = None,
     commit_only: bool = False,
+    shared_attention: Optional[Dict] = None,
 ) -> Block:
     return Block(
-        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only)
+        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
+        v41_config=args.v41_config,
+        shared_attention=shared_attention,
     )
 
 
@@ -195,6 +200,7 @@ class V4Transformer(nn.Module):
         from rtp_llm.utils.model_weight import W
 
         gw = mw.global_weights
+        shared_attention = {}
         self.layers = nn.ModuleList(
             [
                 _build_block(
@@ -202,10 +208,18 @@ class V4Transformer(nn.Module):
                     args,
                     layer_weights=mw.weights[i],
                     commit_only=self.commit_only,
+                    shared_attention=shared_attention,
                 )
                 for i in range(args.n_layers)
             ]
         )
+        if args.v41_config is not None and not self.commit_only:
+            # Each sublayer reads the pre-mix computed by its predecessor.
+            previous = None
+            for layer in self.layers:
+                layer.attn_hc.set_previous(previous)
+                layer.ffn_hc.set_previous(layer.attn_hc)
+                previous = layer.ffn_hc
 
         if self.commit_only:
             # A commit worker never embeds tokens, reduces mHC lanes, or
@@ -236,15 +250,20 @@ class V4Transformer(nn.Module):
                 raise TypeError(
                     f"DSV4 lm_head must be FP32 or BF16, got {self.head_weight.dtype}"
                 )
-            self.head_hc = build_hc_head(
-                gw[W.v4_hc_head_fn],
-                gw[W.v4_hc_head_base],
-                gw[W.v4_hc_head_scale],
-                dim=args.dim,
-                hc_mult=args.hc_mult,
-                norm_eps=args.norm_eps,
-                hc_eps=args.hc_eps,
-            )
+            if args.v41_config is not None:
+                from rtp_llm.models_py.modules.dsv4.hc.delayed import DelayedHCHead
+
+                self.head_hc = DelayedHCHead(self.layers[-1].ffn_hc)
+            else:
+                self.head_hc = build_hc_head(
+                    gw[W.v4_hc_head_fn],
+                    gw[W.v4_hc_head_base],
+                    gw[W.v4_hc_head_scale],
+                    dim=args.dim,
+                    hc_mult=args.hc_mult,
+                    norm_eps=args.norm_eps,
+                    hc_eps=args.hc_eps,
+                )
 
         self._dbg_step = 0
         self.register_buffer("_mtp_hidden_buffer", None, persistent=False)

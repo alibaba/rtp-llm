@@ -66,6 +66,16 @@ def _dsv4_pool_tokens_per_block(kv_cache: Any, attn_type: int) -> int:
     return require_pool_tokens_per_block(kv_cache, region=int(attn_type))
 
 
+def decode_metadata_compress_ratios(v4_args: Any) -> list[int]:
+    # V4.1 owns global/index/state slot mappings in AttentionV41FP8. The
+    # shared legacy planner only supplies SWA metadata; its fused kernels
+    # support V4's ratios 4/128, not V4.1's 1/2. Keep all typed pool specs
+    # separately so V4.1 still receives graph-stable owner block tables.
+    if getattr(v4_args, "v41_config", None):
+        return [0]
+    return list(v4_args.compress_ratios)[: v4_args.n_layers]
+
+
 def build_paged_pool_specs(
     kv_cache: Optional[Any],
     v4: Any,
@@ -242,7 +252,7 @@ def build_metadata_eager(
             window_size=int(v4_args.window_size),
             head_dim=int(v4_args.head_dim),
             max_seq_len=max_s,
-            compress_ratios=list(v4_args.compress_ratios)[: v4_args.n_layers],
+            compress_ratios=decode_metadata_compress_ratios(v4_args),
             index_topk=int(v4_args.index_topk),
             device=device,
             paged_block_tables=paged_block_tables or None,

@@ -70,6 +70,7 @@ from typing import Any, Iterator, Optional
 ENV_SWITCH: str = "ENABLE_SLEEP_MODE"
 ENV_LEVEL: str = "SLEEP_MODE_LEVEL"
 ENV_COLLECTIVE_RELEASE: str = "SLEEP_RELEASE_COLLECTIVE_MEMORY"
+ENV_LIMIT_INIT_SEGMENT_SPLITTING: str = "RTP_LLM_LIMIT_INIT_SEGMENT_SPLITTING"
 LEGACY_ENV_SWITCH: str = "RTP_LLM_WEIGHT_MEMORY_SAVER"
 WEIGHTS_TAG: str = "weights"
 
@@ -127,6 +128,10 @@ _SPLIT_CAP_KEY: str = "max_split_size_mb"
 # enough to strand hundreds of MiB when a resident weight splits one.
 _INIT_SPLIT_CAP_MB: int = 256
 _split_cap_live: bool = False
+# Non-sleep opt-in must restore the complete user config without entering the
+# sleep-only expandable-segments deferral state. None identifies the sleep path;
+# an empty string is a valid non-sleep snapshot (the allocator defaults).
+_init_split_cap_restore_conf: Optional[str] = None
 # A user-specified large segment size belongs to runtime allocations, not the
 # non-expandable weight-loading phase. Explicitly restore the native default
 # there: unlike max_split_size_mb, torch keeps large_segment_size_mb across
@@ -360,12 +365,10 @@ def _capture_base_alloc_conf() -> None:
     )
 
 
-def _compose_live_alloc_conf(expandable: bool, split_cap: bool) -> str:
-    """Compose the allocation phase without overwriting the user's runtime config."""
-    _capture_base_alloc_conf()
-    loading = split_cap or (_expandable_requested and not expandable)
+def _compose_segment_settings(conf: str, split_cap: bool, loading: bool) -> str:
+    """Override only the segment settings needed during model initialization."""
     parts = []
-    for part in _expandable_base_conf.split(","):
+    for part in conf.split(","):
         part = part.strip()
         if not part:
             continue
@@ -380,10 +383,29 @@ def _compose_live_alloc_conf(expandable: bool, split_cap: bool) -> str:
             # a requested size below the native default instead of increasing it.
             part = f"{key}:{min(int(value), _INIT_LARGE_SEGMENT_MB)}"
         parts.append(part)
-    parts.append(f"{_EXPANDABLE_KEY}:{'True' if expandable else 'False'}")
     if split_cap:
         parts.append(f"{_SPLIT_CAP_KEY}:{_INIT_SPLIT_CAP_MB}")
     return ",".join(parts)
+
+
+def _compose_live_alloc_conf(expandable: bool, split_cap: bool) -> str:
+    """Compose the allocation phase without overwriting the user's runtime config."""
+    _capture_base_alloc_conf()
+    loading = split_cap or (_expandable_requested and not expandable)
+    conf = (
+        f"{_expandable_base_conf},{_EXPANDABLE_KEY}:{'True' if expandable else 'False'}"
+    )
+    return _compose_segment_settings(conf, split_cap, loading)
+
+
+def _apply_allocator_settings(conf: str) -> None:
+    import torch
+
+    setter = getattr(torch._C, "_accelerator_setAllocatorSettings", None)
+    if setter is not None:
+        setter(conf)
+    else:
+        torch.cuda.memory._set_allocator_settings(conf)
 
 
 def _apply_live_alloc_conf(expandable: bool, split_cap: bool) -> None:
@@ -398,14 +420,7 @@ def _apply_live_alloc_conf(expandable: bool, split_cap: bool) -> None:
     nature. Prefers the current ``torch._C._accelerator_setAllocatorSettings`` and
     falls back to the deprecated ``torch.cuda.memory._set_allocator_settings``.
     """
-    import torch
-
-    full = _compose_live_alloc_conf(expandable, split_cap)
-    setter = getattr(torch._C, "_accelerator_setAllocatorSettings", None)
-    if setter is not None:
-        setter(full)
-    else:
-        torch.cuda.memory._set_allocator_settings(full)
+    _apply_allocator_settings(_compose_live_alloc_conf(expandable, split_cap))
 
 
 def _set_expandable_segments(enabled: bool) -> None:
@@ -566,26 +581,42 @@ def limit_init_segment_splitting() -> None:
     :func:`release_init_segment_splitting` once the engine is ready, so per-forward
     and KV allocations keep torch's default splitting behaviour -- which is why this
     is scoped rather than set through the env var: as a process-global setting it
-    would trade permanent serving-time fragmentation for a sleep-only gain.
+    would trade serving-time fragmentation for a benefit needed only at startup.
 
-    Call before any weight allocation. No-op unless sleep mode is on (the gain only
-    exists at sleep, and the non-sleep load path stays byte-for-byte unchanged).
+    Call before any weight allocation. Enabled for sleep mode, or explicitly for
+    ordinary startup with ``RTP_LLM_LIMIT_INIT_SEGMENT_SPLITTING=1``. The latter
+    preserves the user's expandable-segments setting and does not enable sleep.
+    The split cap does not affect expandable segments or cudaMallocAsync.
     """
-    global _split_cap_live
-    if not is_enabled() or _split_cap_live:
+    global _split_cap_live, _init_split_cap_restore_conf
+    if _split_cap_live:
         return
+    sleep_enabled = is_enabled()
+    if not sleep_enabled and os.environ.get(ENV_LIMIT_INIT_SEGMENT_SPLITTING) != "1":
+        return
+    restore_conf = None
+    if not sleep_enabled:
+        restore_conf = os.environ.get(
+            "PYTORCH_ALLOC_CONF", os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+        )
     try:
-        _apply_live_alloc_conf(_expandable_live, True)
+        if restore_conf is None:
+            _apply_live_alloc_conf(_expandable_live, True)
+        else:
+            _apply_allocator_settings(
+                _compose_segment_settings(restore_conf, split_cap=True, loading=True)
+            )
     except Exception:
         # Setter unavailable: keep torch's default splitting. Costs the sleeping
         # residual gain, breaks nothing.
         logging.warning(
             "WeightMemorySaver: could not cap max_split_size_mb for init; "
-            "sleeping residual will keep the stranded load-time segments",
+            "continuing with the existing allocator settings",
             exc_info=True,
         )
         return
     _split_cap_live = True
+    _init_split_cap_restore_conf = restore_conf
     logging.info(
         "WeightMemorySaver: capped max_split_size_mb=%d for the init phase so "
         "load-time staging segments are not split by resident weights",
@@ -602,11 +633,14 @@ def release_init_segment_splitting() -> None:
     unsplit shape while runtime allocations recover the requested segment size
     and max_split_size_mb (or torch's default when no user cap was specified).
     """
-    global _split_cap_live
+    global _split_cap_live, _init_split_cap_restore_conf
     if not _split_cap_live:
         return
     try:
-        _apply_live_alloc_conf(_expandable_live, False)
+        if _init_split_cap_restore_conf is None:
+            _apply_live_alloc_conf(_expandable_live, False)
+        else:
+            _apply_allocator_settings(_init_split_cap_restore_conf)
     except Exception:
         # Leave the cap live rather than a half-applied config: it is a
         # fragmentation trade-off at worst, not a correctness problem.
@@ -617,6 +651,7 @@ def release_init_segment_splitting() -> None:
         )
         return
     _split_cap_live = False
+    _init_split_cap_restore_conf = None
     logging.info(
         "WeightMemorySaver: restored requested segment settings for runtime "
         "allocations (engine ready)"
@@ -859,7 +894,7 @@ def _reset_for_testing() -> None:
     global _level_override, _collective_release_override
     global _expandable_prepared, _expandable_requested, _expandable_active
     global _expandable_base_conf, _expandable_live
-    global _base_conf_captured, _split_cap_live
+    global _base_conf_captured, _split_cap_live, _init_split_cap_restore_conf
     global _scratch_pools, _scratch_pool_owners, _model_scope_global
     with _lock:
         _scratch_pools = threading.local()
@@ -879,6 +914,7 @@ def _reset_for_testing() -> None:
         _expandable_base_conf = ""
         _base_conf_captured = False
         _split_cap_live = False
+        _init_split_cap_restore_conf = None
     _region_depth.value = 0
     _region_suppressed.value = False
     _model_scope.value = None

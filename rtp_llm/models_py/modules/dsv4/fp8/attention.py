@@ -421,8 +421,9 @@ def _prepare_wo_a_stacked(
     ``deep_gemm.fp8_einsum(..., recipe=(1, 1, 128))`` expectations."""
     with feature_weights_region():
         w_stk = weight_fp8.view(G, R, K).contiguous()
-        scale_fp32 = scale_raw.float().view(G, R // 128, K // 128)
-        idx = torch.arange(R, device=scale_raw.device) // 128
+        scale_block = K // scale_raw.shape[-1]
+        scale_fp32 = scale_raw.float().view(G, R // scale_block, K // scale_block)
+        idx = torch.arange(R, device=scale_raw.device) // scale_block
         scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
         s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
     return w_stk, s_stk
@@ -957,13 +958,17 @@ class AttentionFP8(nn.Module):
                 if scale_is_packed_int32:
                     s = s[row_slice]
                 else:
-                    s = s[row_slice.start // 128 : row_slice.stop // 128]
+                    scale_rows = raw_w.shape[0] // raw_s.shape[0]
+                    s = s[row_slice.start // scale_rows : row_slice.stop // scale_rows]
             if col_slice is not None:
                 w = w[:, col_slice]
                 if scale_is_packed_int32:
                     s = s[:, col_slice.start // 512 : col_slice.stop // 512]
                 else:
-                    s = s[:, col_slice.start // 128 : col_slice.stop // 128]
+                    scale_cols = raw_w.shape[1] // raw_s.shape[1]
+                    s = s[
+                        :, col_slice.start // scale_cols : col_slice.stop // scale_cols
+                    ]
             if row_slice is not None or col_slice is not None:
                 w = w.contiguous()
                 s = s.contiguous()
@@ -1003,8 +1008,11 @@ class AttentionFP8(nn.Module):
                 # framework path: scale is already (N, K//128//4) int32
                 wo_a_s = wo_a_s[wo_a_row_slice].contiguous()
             else:
+                scale_rows = wo_a_raw_w.shape[0] // wo_a_raw_s.shape[0]
                 wo_a_s = wo_a_s[
-                    wo_a_row_slice.start // 128 : wo_a_row_slice.stop // 128
+                    wo_a_row_slice.start
+                    // scale_rows : wo_a_row_slice.stop
+                    // scale_rows
                 ].contiguous()
         self.wo_a_w = wo_a_w
         self.wo_a_s = wo_a_s
@@ -5440,7 +5448,7 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
         with record_function_range("dsv4.fp8.attn.out.tp_all_reduce"):
-            all_reduce(out, Group.TP)
+            all_reduce(out, Group.TP, inplace=True)
 
     def _prefill_output_proj(
         self,

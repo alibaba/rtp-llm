@@ -98,6 +98,7 @@ enum GptModelInputIndex : size_t {
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
+    engramTokenWindowRows,
     gptModelInputLength,
 };
 
@@ -111,6 +112,7 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitSequenceLengths = 1u << 2,
     kDeviceBitPrefixLengths   = 1u << 3,
     kDeviceBitLmOutputIndexes = 1u << 4,
+    kDeviceBitEngramWindows   = 1u << 5,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);

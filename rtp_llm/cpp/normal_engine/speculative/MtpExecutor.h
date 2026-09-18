@@ -271,6 +271,8 @@ private:
     int64_t                       metrics_accept_len_stream_num_        = 0;
     int64_t                       metrics_accept_len_propose_token_num_ = 0;
 
+    std::shared_ptr<torch::Event> last_forward_event_;
+
     AsyncRunner target_verify_prepare_runner_;
     AsyncRunner draft_prefill_prepare_runner_;
     // Declare the worker after its target so destruction joins the worker first.

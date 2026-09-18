@@ -12,12 +12,20 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #undef private
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/normal_engine/EngramTokenHistory.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+
+#if USING_CUDA
+#include <ATen/cuda/CUDAGraph.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_runtime.h>
+#endif
 
 using namespace std;
 
@@ -987,6 +995,108 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(model_input.prefix_lengths));
     EXPECT_EQ((std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6, 7}), toVec<int32_t>(model_input.lm_output_indexes));
 }
+
+// The scalar CPU implementation is independent of the tensor unfold/flip path.
+static torch::Tensor engramVerifyOracle(const torch::Tensor& history, const torch::Tensor& tokens) {
+    auto       history_cpu = history.cpu().contiguous();
+    auto       tokens_cpu  = tokens.cpu().contiguous();
+    auto       expected    = torch::empty({tokens.numel(), 4}, torch::kInt32);
+    const auto width       = tokens.size(1);
+    for (int64_t batch = 0; batch < tokens.size(0); ++batch) {
+        extendEngramVerifyWindows(history_cpu.data_ptr<int32_t>() + batch * 4,
+                                  tokens_cpu.data_ptr<int32_t>() + batch * width,
+                                  width,
+                                  expected.data_ptr<int32_t>() + batch * width * 4);
+    }
+    return expected;
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testEngramVerifyWindowsCPUAndCUDA) {
+    for (const int64_t batch : {2, 4}) {
+        for (const int64_t width : {1, 6}) {
+            auto history = torch::arange(batch * 4, torch::kInt32).reshape({batch, 4});
+            history.index_put_({0, 0}, 999);  // Verify anchor must override this value.
+            history.index_put_({0, 2}, -1);   // Missing prefix remains a dead token.
+            history.index_put_({1, 1}, 2);    // Literal pad token is valid history.
+            history.index_put_({1, 2}, 129264);
+            auto tokens = torch::arange(100, 100 + batch * width, torch::kInt32).reshape({batch, width});
+            for (const auto device : {torch::kCPU, torch::kCUDA}) {
+                auto actual = MtpBatchStreamProcessor::makeEngramVerifyWindows(history.to(device), tokens.to(device));
+                EXPECT_EQ(actual.device().type(), device);
+                EXPECT_TRUE(actual.is_contiguous());
+                EXPECT_TRUE(torch::equal(actual.cpu(), engramVerifyOracle(history, tokens)));
+            }
+        }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkVerifyEngramHistoryStaysOnCUDAAndAdvancesTail) {
+    constexpr int64_t           gamma = 5;
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig logging_config;
+    CacheConfig                 cache_config;
+    SpeculativeExecutionConfig  sp_config;
+    cache_config.group_types    = {CacheGroupType::FULL};
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = gamma;
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
+    TensorHolder            host_holder;
+    GptModelInputs          input;
+    auto                    history   = torch::tensor({{50, 40, 30, 20}, {7, 6, -1, -1}}, torch::kInt32);
+    auto                    proposals = torch::tensor({{60, 70, 80, 90, 100}, {8, 9, 10, 11, 12}}, torch::kInt32);
+    for (int round = 0; round < 2; ++round) {
+        MtpBatchStreamProcessor::DSparkRoundHead head{
+            history.select(1, 0).to(torch::kCUDA),
+            torch::tensor({50 + round, 7 + round}, torch::kInt32).to(torch::kCUDA)};
+        input.engram_token_windows = round == 0 ? history.pin_memory() : history.to(torch::kCUDA);
+        processor.updateDSparkTargetVerifyModelInput(head, input, proposals.to(torch::kCUDA), host_holder);
+        auto verify   = torch::cat({history.narrow(1, 0, 1), proposals}, 1);
+        auto expected = engramVerifyOracle(history, verify);
+        ASSERT_TRUE(input.engram_token_windows.is_cuda());
+        ASSERT_TRUE(input.engram_token_windows.is_contiguous());
+        EXPECT_TRUE(torch::equal(input.engram_token_windows.cpu(), expected));
+        EXPECT_EQ(toVec<int32_t>(input.input_lengths), (std::vector<int32_t>{6, 6}));
+        const auto hints = makeModelInputShapeHintsTensor(input);
+        EXPECT_NE(hints.data_ptr<int64_t>()[GptModelInputIndex::tensorDeviceMap]
+                      & GptModelInputDeviceBit::kDeviceBitEngramWindows,
+                  0);
+        // Different accepted prefixes: next history must use the committed
+        // tail, not unaccepted candidates from the previous dense block.
+        history = torch::stack({expected.select(0, 1), expected.select(0, 6 + 4)}, 0);
+        history.select(1, 0).add_(1000);  // Replacement token selected by target.
+        proposals.add_(2000);
+    }
+    EXPECT_FALSE(host_holder.tensors.empty());  // First round's async H2D stays alive.
+}
+
+#if USING_CUDA
+TEST_F(MtpBatchStreamProcessorTest, testEngramVerifyWindowsGraphReplayUsesChangedHistoryAndCandidates) {
+    auto history_cpu = torch::tensor({{50, 40, 30, 20}, {7, 6, -1, -1}}, torch::kInt32);
+    auto tokens_cpu  = torch::tensor({{50, 60, 70, 80, 90, 100}, {7, 8, 9, 10, 11, 12}}, torch::kInt32);
+    auto history     = history_cpu.to(torch::kCUDA);
+    auto tokens      = tokens_cpu.to(torch::kCUDA);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    c10::cuda::CUDAStreamGuard stream_guard(c10::cuda::getStreamFromPool());
+    auto                       output = MtpBatchStreamProcessor::makeEngramVerifyWindows(history, tokens);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    at::cuda::CUDAGraph graph;
+    graph.capture_begin();
+    output = MtpBatchStreamProcessor::makeEngramVerifyWindows(history, tokens);
+    graph.capture_end();
+    for (int round = 0; round < 3; ++round) {
+        history.copy_(history_cpu);
+        tokens.copy_(tokens_cpu);
+        graph.replay();
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        auto expected = engramVerifyOracle(history_cpu, tokens_cpu);
+        EXPECT_TRUE(torch::equal(output.cpu(), expected));
+        history_cpu = torch::stack({expected.select(0, 1), expected.select(0, 6 + 4)}, 0);
+        tokens_cpu.add_(1000);
+        tokens_cpu.select(1, 0).copy_(history_cpu.select(1, 0));
+    }
+}
+#endif
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGeometry) {
     constexpr int32_t gamma = 3;

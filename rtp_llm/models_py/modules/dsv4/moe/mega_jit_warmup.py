@@ -13,6 +13,8 @@ import math
 import os
 from typing import Iterable, Sequence
 
+import torch
+
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     dsv4_chunk_tokens_from_env,
     dsv4_global_chunk_tokens_configured,
@@ -22,6 +24,14 @@ from rtp_llm.utils.warmup import model_warm_up_enabled
 
 def mega_moe_jit_warmup_enabled() -> bool:
     return model_warm_up_enabled()
+
+
+def resolve_mega_num_sms(deep_gemm, device=None) -> int:
+    """New DeepGEMM uses zero to request all available device SMs."""
+    num_sms = int(deep_gemm.get_num_sms())
+    if num_sms <= 0:
+        num_sms = int(torch.cuda.get_device_properties(device).multi_processor_count)
+    return num_sms
 
 
 def _ceil_div(a: int, b: int) -> int:

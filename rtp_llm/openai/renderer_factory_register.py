@@ -108,6 +108,9 @@ def _register_builtin_lazy_renderers() -> None:
     register_lazy_renderer(
         ["deepseek_v4"], "rtp_llm.openai.renderers.deepseekv4_renderer"
     )
+    register_lazy_renderer(
+        ["deepseek_v41"], "rtp_llm.openai.renderers.deepseekv41_renderer"
+    )
     register_lazy_renderer(["internvl"], "rtp_llm.openai.renderers.internvl_renderer")
     register_lazy_renderer(["kimi_k2"], "rtp_llm.openai.renderers.kimik2_renderer")
     register_lazy_renderer(["llava"], "rtp_llm.openai.renderers.llava_renderer")

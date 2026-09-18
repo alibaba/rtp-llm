@@ -904,6 +904,112 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_fixed_reserve);
 }
 
+static ModelConfig makeV41ModelConfig() {
+    auto mc                                 = makeFlashModelConfig();
+    mc.num_layers                           = 40;
+    mc.attn_config.layer_compress_ratios    = std::vector<int>(40, 1);
+    mc.attn_config.layer_compress_ratios[0] = 0;
+    mc.attn_config.layer_compress_ratios[1] = 0;
+    for (int layer = 2; layer < 20; ++layer) {
+        mc.attn_config.layer_compress_ratios[layer] = 2;
+    }
+    mc.attn_config.v41_kv_source_layer_ids = {2, 8, 14, 20};
+    mc.attn_config.kv_cache_dtype          = KvCacheDataType::FP8;
+    return mc;
+}
+
+TEST(HybridPoolConfigCreatorTest, V41AllocatesGlobalPoolsOnlyOnSources) {
+    auto              mc = makeV41ModelConfig();
+    ParallelismConfig pc;
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 3);
+    EXPECT_EQ(config.global_layer_ids[0], std::vector<int>({2, 8, 14}));
+    EXPECT_EQ(config.global_layer_ids[1], std::vector<int>({20}));
+    EXPECT_EQ(config.global_layer_ids[2], std::vector<int>({2, 8, 14, 20}));
+    EXPECT_TRUE(config.global_layer_ids[3].empty());
+    EXPECT_EQ(config.global_layer_ids[4], std::vector<int>({2, 8, 14}));
+    EXPECT_TRUE(config.global_layer_ids[5].empty());
+    EXPECT_EQ(config.global_layer_ids[6].size(), 40u);
+    auto* ratio2 = dynamic_cast<DSV4KVSpec*>(config.cache_specs[0].get());
+    auto* ratio1 = dynamic_cast<DSV4KVSpec*>(config.cache_specs[1].get());
+    auto* index  = dynamic_cast<DSV4KVSpec*>(config.cache_specs[2].get());
+    auto* state  = dynamic_cast<DSV4StateSpec*>(config.cache_specs[4].get());
+    ASSERT_NE(ratio2, nullptr);
+    ASSERT_NE(ratio1, nullptr);
+    ASSERT_NE(index, nullptr);
+    ASSERT_NE(state, nullptr);
+    EXPECT_EQ(ratio2->entries_per_block, 64u);
+    EXPECT_EQ(ratio1->entries_per_block, 128u);
+    EXPECT_EQ(index->entries_per_block, 128u);
+    EXPECT_EQ(state->state_dim, 1024u);
+    EXPECT_EQ(state->entries_per_block, 6u);
+}
+
+TEST(HybridPoolConfigCreatorTest, V41DSparkEmptyRegionsInitializeWithoutBacking) {
+    auto target                             = makeV41ModelConfig();
+    auto draft                              = target;
+    draft.num_layers                        = 3;
+    draft.attn_config.layer_compress_ratios = {0, 0, 0};
+    draft.attn_config.v41_kv_source_layer_ids.clear();
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size                      = 2;
+    runtime.fifo_scheduler_config.max_context_batch_size = 1;
+    auto kv_config                                       = makeDsv4KvCacheConfig(/*fixed_pool_blocks=*/8);
+    kv_config.seq_size_per_block                         = 256;
+    kv_config.kernel_seq_size_per_block                  = 256;
+    kv_config.test_block_num                             = 8;
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_DSPARK;
+    sp.gen_num_per_cycle = 5;
+
+    for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        SCOPED_TRACE(static_cast<int>(role));
+        ParallelismConfig pc;
+        pc.role_type                          = role;
+        pc.tp_size                            = role == RoleType::PREFILL ? 4 : 1;
+        pc.dp_size                            = role == RoleType::DECODE ? 4 : 1;
+        pc.ep_size                            = 4;
+        pc.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+        pc.prefill_cp_config.kv_cache_sharded = true;
+        pc.prefill_cp_config.prefill_cp_size  = 4;
+        auto config =
+            CacheConfigCreator::createSpConfig(target, draft, pc, runtime, kv_config, sp, std::nullopt, true, false);
+        ASSERT_EQ(config.groupNums(), 7);
+        ASSERT_EQ(config.layer_all_num, 43u);
+        ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+        EXPECT_EQ(config.global_layer_ids[6].size(), 43u);
+        EXPECT_EQ(config.mtp_sub_configs[0]->global_layer_ids[6], std::vector<int>({40, 41, 42}));
+
+        // Exercise exactly the group helper used by allocator startup, for
+        // both the merged main/draft layout and its SWA-only draft descriptor.
+        for (const auto* model_config : {&config, config.mtp_sub_configs[0].get()}) {
+            for (size_t gid = 0; gid < 7; ++gid) {
+                const auto pool = BlockPoolConfigHelper::createConfigForGroup(*model_config, gid);
+                ASSERT_EQ(pool.memory_layouts.size(), 1u);
+                EXPECT_EQ(pool.memory_layouts[0].layer_num, model_config->global_layer_ids[gid].size());
+                EXPECT_EQ(pool.total_size_bytes == 0, model_config->global_layer_ids[gid].empty());
+            }
+        }
+
+        auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+        ASSERT_TRUE(allocator->init());
+        const auto pools = allocator->getBlockPools();
+        ASSERT_EQ(pools.size(), 7u);
+        EXPECT_TRUE(pools[3]->allLayerCacheBase().empty());
+        EXPECT_TRUE(pools[5]->allLayerCacheBase().empty());
+        EXPECT_EQ(pools[6]->allLayerCacheBase().size(), 43u);
+        // Metadata-only pools preserve allocation/refcount behavior without
+        // inventing an accessible layer or changing typed group indices.
+        for (size_t gid : {3u, 5u}) {
+            EXPECT_EQ(pools[gid]->getTotalSizeBytes(), 0u);
+            EXPECT_EQ(pools[gid]->getBaseAddress(), nullptr);
+            auto blocks = pools[gid]->malloc(1);
+            ASSERT_EQ(blocks.size(), 1u);
+            pools[gid]->requestFree(blocks);
+            EXPECT_TRUE(pools[gid]->allLayerCacheBase().empty());
+        }
+    }
+}
+
 TEST(HybridPoolConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
     // gen_num_per_cycle=2 -> CSA/INDEXER R=10, HCA R=130, SWA R=130.
     // Formula: R = ceil_even((1 + overlap) * ratio + gen_num_per_cycle).
@@ -1130,7 +1236,7 @@ static CacheConfig makeDSV4CpAllocatorConfig(uint32_t cp_size) {
     pc.role_type                          = RoleType::PREFILL;
     pc.tp_size                            = cp_size;
     pc.prefill_cp_config.kv_cache_sharded = true;
-    auto config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config      = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
     config.block_num = 200;
     config.group_block_nums.assign(config.groupNums(), config.block_num);
     return config;
@@ -1150,7 +1256,7 @@ protected:
 
 TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
     auto config    = makeDSV4AllocatorConfig();
-    auto               allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     // 7 groups → HybridTypeKVCacheAllocator path
@@ -1161,9 +1267,9 @@ TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
 }
 
 TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
-    constexpr uint32_t cp_size = 4;
-    auto               config  = makeDSV4CpAllocatorConfig(cp_size);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    constexpr uint32_t cp_size   = 4;
+    auto               config    = makeDSV4CpAllocatorConfig(cp_size);
+    auto               allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     const int spb     = allocator->seqSizePerBlock();

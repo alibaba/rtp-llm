@@ -16,6 +16,7 @@ import gc
 import logging
 import os
 import weakref
+from inspect import signature
 
 import torch
 
@@ -185,18 +186,32 @@ def estimate_mega_moe_symm_buffer_bytes(
     try:
         import deep_gemm
 
-        return int(
-            deep_gemm._C.get_symm_buffer_size_for_mega_moe(
-                group_size,
-                num_experts,
-                num_max_tokens_per_rank,
-                num_topk,
-                hidden,
-                intermediate_hidden,
-                use_fp8_dispatch,
-                activation,
-            )[0]
+        get_size = deep_gemm._C.get_symm_buffer_size_for_mega_moe
+        get_alignment = getattr(deep_gemm._C, "get_token_alignment_for_mega_moe", None)
+        if get_alignment is not None:
+            alignment = int(get_alignment())
+            num_max_tokens_per_rank = (
+                (num_max_tokens_per_rank + alignment - 1) // alignment * alignment
+            )
+        shape_args = (
+            group_size,
+            num_experts,
+            num_max_tokens_per_rank,
+            num_topk,
+            hidden,
+            intermediate_hidden,
         )
+        try:
+            result = get_size(
+                *shape_args,
+                "fp8xfp4" if use_fp8_dispatch else "bf16xbf16",
+                activation,
+                0,  # Routed-only buffer: no fused shared experts.
+            )
+        except TypeError:
+            # Older DeepGEMM exposes the original bool/8-argument binding.
+            result = get_size(*shape_args, use_fp8_dispatch, activation)
+        return int(result[0])
     except Exception:
         return None
 
@@ -243,15 +258,20 @@ def _get_or_create_mega_buf(
             if group_size > 0
             else None
         )
-        buf = deep_gemm.get_symm_buffer_for_mega_moe(
+        make_buffer = deep_gemm.get_symm_buffer_for_mega_moe
+        if "mma_type" in signature(make_buffer).parameters:
+            dispatch = {"mma_type": "fp8xfp4" if use_fp8_dispatch else "bf16xbf16"}
+        else:
+            dispatch = {"use_fp8_dispatch": use_fp8_dispatch}
+        buf = make_buffer(
             group=group,
             num_experts=num_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             num_topk=num_topk,
             hidden=hidden,
             intermediate_hidden=intermediate_hidden,
-            use_fp8_dispatch=use_fp8_dispatch,
             activation=activation,
+            **dispatch,
         )
         actual_bytes = None
         try:

@@ -264,6 +264,9 @@ class WeightMemorySaverTestBase(unittest.TestCase):
             wms.LEGACY_ENV_SWITCH: os.environ.get(wms.LEGACY_ENV_SWITCH),
             wms.ENV_LEVEL: os.environ.get(wms.ENV_LEVEL),
             wms.ENV_COLLECTIVE_RELEASE: os.environ.get(wms.ENV_COLLECTIVE_RELEASE),
+            wms.ENV_LIMIT_INIT_SEGMENT_SPLITTING: os.environ.get(
+                wms.ENV_LIMIT_INIT_SEGMENT_SPLITTING
+            ),
         }
         self._saved_module = sys.modules.get(_TMS_MODULE)
         self._had_module = _TMS_MODULE in sys.modules
@@ -645,6 +648,8 @@ class InitSegmentSplitCapTest(WeightMemorySaverTestBase):
         super().setUp()
         os.environ[wms.ENV_SWITCH] = "1"
         self._saved_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
+        self._saved_modern_conf = os.environ.pop("PYTORCH_ALLOC_CONF", None)
+        os.environ.pop(wms.ENV_LIMIT_INIT_SEGMENT_SPLITTING, None)
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = self._CONF
         self._inject_fake_tms()
         # Capture the composed config instead of calling the CUDA driver.
@@ -661,6 +666,10 @@ class InitSegmentSplitCapTest(WeightMemorySaverTestBase):
 
     def tearDown(self) -> None:
         self._torch_patch.stop()
+        if self._saved_modern_conf is None:
+            os.environ.pop("PYTORCH_ALLOC_CONF", None)
+        else:
+            os.environ["PYTORCH_ALLOC_CONF"] = self._saved_modern_conf
         if self._saved_conf is None:
             os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
         else:
@@ -687,13 +696,89 @@ class InitSegmentSplitCapTest(WeightMemorySaverTestBase):
         self.assertEqual(self.applied, [])
 
     def test_inert_without_sleep_mode(self) -> None:
-        # The gain only exists at sleep, so the non-sleep load path must be
-        # byte-for-byte unchanged -- no allocator write at all.
+        # Ordinary startup without the explicit opt-in remains unchanged.
         os.environ.pop(wms.ENV_SWITCH, None)
         os.environ.pop(wms.LEGACY_ENV_SWITCH, None)
         wms.limit_init_segment_splitting()
         self.assertFalse(wms._split_cap_live)
         self.assertEqual(self.applied, [])
+
+    def test_non_sleep_opt_in_restores_default_and_is_idempotent(self) -> None:
+        os.environ[wms.ENV_SWITCH] = "0"
+        os.environ[wms.ENV_LIMIT_INIT_SEGMENT_SPLITTING] = "1"
+        os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+        wms.limit_init_segment_splitting()
+        wms.limit_init_segment_splitting()
+        self.assertEqual(self.applied, [self._CAP])
+        self.assertFalse(wms.is_enabled())
+        self.assertFalse(wms._expandable_requested)
+        self.assertFalse(wms._base_conf_captured)
+        wms.release_init_segment_splitting()
+        wms.release_init_segment_splitting()
+        self.assertEqual(self.applied, [self._CAP, ""])
+        self.assertFalse(wms._split_cap_live)
+
+    def test_non_sleep_opt_in_preserves_and_restores_user_config(self) -> None:
+        os.environ[wms.ENV_SWITCH] = "0"
+        os.environ[wms.ENV_LIMIT_INIT_SEGMENT_SPLITTING] = "1"
+        for expandable in ("False", "True", "True,expandable_segments:False"):
+            with self.subTest(expandable=expandable):
+                conf = (
+                    f"expandable_segments:{expandable},"
+                    "large_segment_size_mb:1024,max_split_size_mb:2048,"
+                    "roundup_power2_divisions:[256:1,512:2,>:4]"
+                )
+                os.environ["PYTORCH_CUDA_ALLOC_CONF"] = conf
+                wms.limit_init_segment_splitting()
+                self.assertIn(f"expandable_segments:{expandable}", self.applied[-1])
+                self.assertIn("large_segment_size_mb:20", self.applied[-1])
+                self.assertIn(self._CAP, self.applied[-1])
+                self.assertNotIn("max_split_size_mb:2048", self.applied[-1])
+                self.assertIn(
+                    "roundup_power2_divisions:[256:1,512:2,>:4]", self.applied[-1]
+                )
+                self.assertEqual(os.environ["PYTORCH_CUDA_ALLOC_CONF"], conf)
+                wms.enable_runtime_expandable()
+                wms.release_init_segment_splitting()
+                self.assertEqual(self.applied[-1], conf)
+                self.assertFalse(wms._expandable_active)
+
+    def test_non_sleep_opt_in_prefers_modern_allocator_env(self) -> None:
+        os.environ[wms.ENV_SWITCH] = "0"
+        os.environ[wms.ENV_LIMIT_INIT_SEGMENT_SPLITTING] = "1"
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+        modern = "expandable_segments:True,max_split_size_mb:1024"
+        os.environ["PYTORCH_ALLOC_CONF"] = modern
+        wms.limit_init_segment_splitting()
+        self.assertEqual(self.applied[-1], f"expandable_segments:True,{self._CAP}")
+        wms.release_init_segment_splitting()
+        self.assertEqual(self.applied[-1], modern)
+        self.assertEqual(os.environ["PYTORCH_ALLOC_CONF"], modern)
+        self.assertEqual(os.environ["PYTORCH_CUDA_ALLOC_CONF"], "max_split_size_mb:512")
+
+    def test_non_sleep_explicit_disable_is_inert(self) -> None:
+        os.environ[wms.ENV_SWITCH] = "0"
+        os.environ[wms.ENV_LIMIT_INIT_SEGMENT_SPLITTING] = "0"
+        wms.limit_init_segment_splitting()
+        wms.release_init_segment_splitting()
+        self.assertEqual(self.applied, [])
+
+    def test_non_sleep_restore_failure_retries_original_snapshot(self) -> None:
+        os.environ[wms.ENV_SWITCH] = "0"
+        os.environ[wms.ENV_LIMIT_INIT_SEGMENT_SPLITTING] = "1"
+        original = "max_split_size_mb:1024"
+        os.environ["PYTORCH_ALLOC_CONF"] = original
+        wms.limit_init_segment_splitting()
+        with mock.patch.object(
+            wms, "_apply_allocator_settings", side_effect=RuntimeError("setter failed")
+        ):
+            with self.assertLogs(level="WARNING"):
+                wms.release_init_segment_splitting()
+        self.assertTrue(wms._split_cap_live)
+        os.environ["PYTORCH_ALLOC_CONF"] = "max_split_size_mb:512"
+        wms.release_init_segment_splitting()
+        self.assertFalse(wms._split_cap_live)
+        self.assertEqual(self.applied[-1], original)
 
     def test_env_base_conf_is_replayed(self) -> None:
         # The live setter REPLACES the whole config, so the user's other env keys

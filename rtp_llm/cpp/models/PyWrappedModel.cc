@@ -523,6 +523,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
         input_list.emplace_back(PyModelInputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs});
+        if (micro_inputs.engram_token_windows.defined()) {
+            input_list.back().engram_token_windows = tensorHoldHostAndToCuda(micro_inputs.engram_token_windows);
+        }
     }
 
     if (!inputs.warmup && inputs.pd_separation) {
@@ -705,6 +708,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         PyContextParallelParams cp_params;
         if (enable_prefill_cp_) {
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
+            buffer_holder_.hold_host(inputs.engram_token_windows);
         }
 
         // Direct async H2D for combo_tokens (the only tensorHoldHostAndToCuda call site that
@@ -737,6 +741,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // the current stream and will be ordered correctly with the kernels below.
 
         auto py_model_inputs = PyModelInputs(token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs);
+        py_model_inputs.engram_token_windows = inputs.engram_token_windows;
+        if (py_model_inputs.engram_token_windows.defined() && !py_model_inputs.engram_token_windows.is_cuda()) {
+            // Host history exists only at request gathering / prefill CP
+            // boundaries. Python execution and graph staging consume CUDA
+            // history; holdInputsHostBuffers keeps the source alive for H2D.
+            py_model_inputs.engram_token_windows =
+                inputs.engram_token_windows.to(token_ids.device(), /*non_blocking=*/true);
+        }
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -1125,9 +1137,12 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
         GptModelInputs fake_inputs;
         fake_inputs.kv_cache_block_id = torch::Tensor();
         fake_inputs.combo_tokens      = inputs.combo_tokens.narrow(0, 0, 1);
-        fake_inputs.input_lengths     = torch::ones({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-        fake_inputs.sequence_lengths  = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-        fake_inputs.prefix_lengths    = torch::zeros({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        if (inputs.engram_token_windows.defined()) {
+            fake_inputs.engram_token_windows = inputs.engram_token_windows.narrow(0, 0, 1);
+        }
+        fake_inputs.input_lengths    = torch::ones({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        fake_inputs.sequence_lengths = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        fake_inputs.prefix_lengths   = torch::zeros({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         micro_batch_inputs.push_back(fake_inputs);
     } else {
         for (size_t i = 0; i < micro_batch_plan.batch_infos.size(); ++i) {
@@ -1165,9 +1180,13 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_lm_output_index, slice_lm_output_num);
                 micro_model_inputs.combo_tokens = inputs.combo_tokens.narrow(0, sliced_token_idx, slice_token_num);
-                micro_model_inputs.request_id   = inputs.request_id.defined() ?
-                                                      inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
-                                                      torch::Tensor();
+                if (inputs.engram_token_windows.defined()) {
+                    micro_model_inputs.engram_token_windows =
+                        inputs.engram_token_windows.narrow(0, sliced_token_idx, slice_token_num);
+                }
+                micro_model_inputs.request_id = inputs.request_id.defined() ?
+                                                    inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                                                    torch::Tensor();
                 micro_model_inputs.request_pd_separation =
                     inputs.request_pd_separation.defined() ?
                         inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :
@@ -1195,7 +1214,11 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
             } else if (d_micro_batch_size) {
                 GptModelInputs micro_model_inputs = inputs;
                 RTP_LLM_LOG_DEBUG("d slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx);
-                micro_model_inputs.combo_tokens  = inputs.combo_tokens.narrow(0, sliced_token_idx, d_micro_batch_size);
+                micro_model_inputs.combo_tokens = inputs.combo_tokens.narrow(0, sliced_token_idx, d_micro_batch_size);
+                if (inputs.engram_token_windows.defined()) {
+                    micro_model_inputs.engram_token_windows =
+                        inputs.engram_token_windows.narrow(0, sliced_token_idx, d_micro_batch_size);
+                }
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, d_micro_batch_size);
                 micro_model_inputs.sequence_lengths =
                     inputs.sequence_lengths.narrow(0, decode_batch_idx, d_micro_batch_size);
@@ -1246,9 +1269,13 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_lm_output_index, slice_lm_output_num);
                 micro_model_inputs.combo_tokens = inputs.combo_tokens.narrow(0, sliced_token_idx, slice_token_num);
-                micro_model_inputs.request_id   = inputs.request_id.defined() ?
-                                                      inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
-                                                      torch::Tensor();
+                if (inputs.engram_token_windows.defined()) {
+                    micro_model_inputs.engram_token_windows =
+                        inputs.engram_token_windows.narrow(0, sliced_token_idx, slice_token_num);
+                }
+                micro_model_inputs.request_id = inputs.request_id.defined() ?
+                                                    inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                                                    torch::Tensor();
                 micro_model_inputs.request_pd_separation =
                     inputs.request_pd_separation.defined() ?
                         inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :
@@ -1276,6 +1303,7 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
 
 void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.combo_tokens);
+    buffer_holder_.hold_host(inputs.engram_token_windows);
     buffer_holder_.hold_host(inputs.input_lengths);
     buffer_holder_.hold_host(inputs.sequence_lengths);
     buffer_holder_.hold_host(inputs.lm_output_indexes);

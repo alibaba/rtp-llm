@@ -24,6 +24,10 @@ public:
                                const CacheConfig&                 cache_config,
                                bool                               warm_up);
 
+    bool hasEngram() const {
+        return model_input_gatherer_config_.has_engram;
+    }
+
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,
                                                             TensorHolder&       host_holder) const;

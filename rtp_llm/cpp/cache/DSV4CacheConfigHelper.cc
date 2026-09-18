@@ -33,6 +33,8 @@ struct DSV4LayerSets {
     std::vector<int> hca_layers;
     std::vector<int> swa_only_layers;
     std::vector<int> all_layers;
+    std::vector<int> indexer_layers;
+    std::vector<int> empty_layers;
 };
 
 struct DSV4PoolDesc {
@@ -168,9 +170,9 @@ DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
         const int layer_id = static_cast<int>(i);
         const int ratio    = compress_ratios[i];
         sets.all_layers.push_back(layer_id);
-        if (ratio == 4) {
+        if (ratio == 4 || ratio == 2) {
             sets.csa_layers.push_back(layer_id);
-        } else if (ratio == 128) {
+        } else if (ratio == 128 || ratio == 1) {
             sets.hca_layers.push_back(layer_id);
         } else if (ratio == 0) {
             sets.swa_only_layers.push_back(layer_id);
@@ -221,14 +223,13 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
     // SWA_KV ring = window + MTP draft slack, sized like the HCA state ring.
     // Without the +gen_num_per_cycle slack, a decode step's later draft writes
     // wrap onto ring slots still inside earlier tokens' SWA window -> MTP garble.
-    const uint32_t swa_kv_eb = maybeAdjustSwaEntriesForCpSharding(
-        computeStateRing(/*compress_ratio=*/static_cast<int>(kDsv4SwaWindowEntries),
-                         /*overlap=*/0,
-                         gen_num_per_cycle),
-        parallelism_config);
-    const size_t swa_kv_block_size_bytes_override =
-        maybeSwaPrefillCpByteSliceBytes(swa_kv_eb, parallelism_config);
-    const uint32_t fixed_cp_size = fixedRegionCpSize(parallelism_config);
+    const uint32_t swa_kv_eb =
+        maybeAdjustSwaEntriesForCpSharding(computeStateRing(/*compress_ratio=*/static_cast<int>(kDsv4SwaWindowEntries),
+                                                            /*overlap=*/0,
+                                                            gen_num_per_cycle),
+                                           parallelism_config);
+    const size_t   swa_kv_block_size_bytes_override = maybeSwaPrefillCpByteSliceBytes(swa_kv_eb, parallelism_config);
+    const uint32_t fixed_cp_size                    = fixedRegionCpSize(parallelism_config);
     const uint32_t fixed_tokens_per_block =
         fixed_cp_size > 1 ? physical_tokens_per_block * fixed_cp_size : physical_tokens_per_block;
     return {
@@ -283,6 +284,32 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
          false,
          swa_kv_block_size_bytes_override},
     };
+}
+
+// V4.1 shares global KV and index keys across layers. Keep the region order
+// stable for cache transfer while allocating global regions on owners only.
+std::vector<DSV4PoolDesc> buildDSV41PoolDescs(const DSV4LayerSets&     sets,
+                                              const ModelConfig&       model_config,
+                                              uint32_t                 kernel_tokens_per_block,
+                                              uint32_t                 physical_tokens_per_block,
+                                              const ParallelismConfig& parallelism_config,
+                                              int                      gen_num_per_cycle) {
+    RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8,
+                            "DeepSeek V4.1 requires FP8 typed KV pools");
+    auto pools = buildDSV4PoolDescs(
+        sets, model_config, kernel_tokens_per_block, physical_tokens_per_block, parallelism_config, gen_num_per_cycle);
+    pools[0].entries_per_block = kernel_tokens_per_block / 2;
+    pools[1].entries_per_block = kernel_tokens_per_block;
+    // One uniform indexer layout allows region-keyed block tables for both
+    // ratios. Ratio 2 uses the first half of each raw-token block.
+    pools[2].layer_ids         = &sets.indexer_layers;
+    pools[2].entries_per_block = kernel_tokens_per_block;
+    pools[3].layer_ids         = &sets.empty_layers;
+    pools[4].entry_elems       = 2 * model_config.attn_config.size_per_head;
+    pools[4].entries_per_block = maybeAdjustFixedEntriesForCpSharding(
+        computeStateRing(2, 0, gen_num_per_cycle), parallelism_config, KVCacheRegionName::CSA_STATE);
+    pools[5].layer_ids = &sets.empty_layers;
+    return pools;
 }
 
 KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool) {
@@ -343,9 +370,33 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
                      parallelism_config.prefill_cp_config.kv_cache_sharded,
                      parallelism_config.tp_size);
 
-    const auto sets = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
-    const auto pools = buildDSV4PoolDescs(
-        sets, model_config, kernel_tokens_per_block, physical_tokens_per_block, parallelism_config, gen_num_per_cycle);
+    auto       sets   = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
+    const bool is_v41 = !model_config.attn_config.v41_kv_source_layer_ids.empty();
+    if (is_v41) {
+        sets.csa_layers.clear();
+        sets.hca_layers.clear();
+        for (int layer : model_config.attn_config.v41_kv_source_layer_ids) {
+            RTP_LLM_CHECK_WITH_INFO(layer >= 0 && static_cast<size_t>(layer) < sets.all_layers.size(),
+                                    "V4.1 KV source layer %d is out of range",
+                                    layer);
+            const auto ratio = model_config.attn_config.layer_compress_ratios[layer];
+            RTP_LLM_CHECK_WITH_INFO(ratio == 1 || ratio == 2, "Invalid V4.1 source ratio %d", ratio);
+            (ratio == 2 ? sets.csa_layers : sets.hca_layers).push_back(layer);
+            sets.indexer_layers.push_back(layer);
+        }
+    }
+    const auto pools = is_v41 ? buildDSV41PoolDescs(sets,
+                                                    model_config,
+                                                    kernel_tokens_per_block,
+                                                    physical_tokens_per_block,
+                                                    parallelism_config,
+                                                    gen_num_per_cycle) :
+                                buildDSV4PoolDescs(sets,
+                                                   model_config,
+                                                   kernel_tokens_per_block,
+                                                   physical_tokens_per_block,
+                                                   parallelism_config,
+                                                   gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(pools.size() == kDsv4PoolNum, "DSV4 must produce %zu pools", kDsv4PoolNum);
 
     config.layer_num                                = static_cast<uint32_t>(sets.all_layers.size());

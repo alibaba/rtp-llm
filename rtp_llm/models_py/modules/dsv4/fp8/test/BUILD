@@ -13,6 +13,7 @@ _DSV4_FP8_TEST_DEPS = [
 ]
 
 _DSV4_FP8_TESTS = [
+    "test_attention_v41_cuda_graph",
     "test_bf16_gemm_fp32",
     "test_compressor_disable_raw_path",
     "test_cp_pool_reader_owned_lens",
@@ -55,6 +56,8 @@ _DSV4_FP8_TESTS = [
 ]
 
 _DSV4_FP8_CPU_TESTS = [
+    "test_attention_v41",
+    "test_v41_prefill_indexer",
     "test_attention_cp_prefill_paths",
     "test_attention_csa_overlap",
     "test_attention_hca_overlap",
@@ -63,6 +66,17 @@ _DSV4_FP8_CPU_TESTS = [
     "test_indexer_forward_with_pending_nested",
     "test_prefill_mixed_layer_cache_store",
 ]
+
+py_test(
+    name = "test_v41_prefill_indexer_cuda",
+    srcs = ["test_v41_prefill_indexer.py"],
+    main = "test_v41_prefill_indexer.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {"DSV41_TEST_FUSED_INDEXER_GPU": "1"},
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+    timeout = "moderate",
+)
 
 py_test(
     name = "test_decode_attn_metadata_start_pos",

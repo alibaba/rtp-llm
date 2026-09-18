@@ -56,6 +56,7 @@ class MoeCfg:
     local_expert_start: int
     local_expert_end: int
     max_tokens_per_rank: int
+    shared_fp8_block_size: int = 128
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -259,9 +260,19 @@ def select_strategy(
     explicit_env = os.environ.get("DSV4_MOE_STRATEGY", "").strip()
     explicit_env = bool(explicit_env and explicit_env != "auto")
 
+    # The fused shared-expert Mega kernels hardcode a 128-wide activation
+    # recipe. V4.1 stores MXFP8 shared experts in 32x32 blocks and runs them
+    # separately, while retaining the same native FP4 routed Mega kernel.
+    separate_shared = cfg.shared_fp8_block_size == 32
+    if separate_shared and forced in ("mega_se", "mega_fused"):
+        raise ValueError(
+            "V4.1 MXFP8 shared experts require DSV4_MOE_STRATEGY=mega; "
+            "mega_se/mega_fused use an incompatible block-128 recipe"
+        )
+
     # The current DeepGEMM shared-expert API and the older experimental fused
     # API use incompatible buffers. Never allow both variants to race.
-    if cfg.ep_size > 1 and not explicit_env:
+    if cfg.ep_size > 1 and not explicit_env and not separate_shared:
         from rtp_llm.models_py.modules.dsv4.moe.mega_fused_buf import (
             mega_moe_fused_requested,
         )
@@ -288,7 +299,12 @@ def select_strategy(
     # non-fused Mega would (ep_size > 1) and replaces an unspecified/"mega"
     # selection. Strict so an unavailable fused kernel fails loudly rather
     # than silently downgrading to non-fused (which would invalidate tests).
-    if cfg.ep_size > 1 and forced in (None, "mega") and not explicit_env:
+    if (
+        cfg.ep_size > 1
+        and forced in (None, "mega")
+        and not explicit_env
+        and not separate_shared
+    ):
         from rtp_llm.models_py.modules.dsv4.moe.mega_fused_buf import (
             mega_moe_fused_requested,
         )
