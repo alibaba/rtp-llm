@@ -223,6 +223,7 @@ class ModelDeployWeightInfo:
 
         self._configure_legacy_fp8_ptpc(model_config, hw_kernel_config)
         self._use_swizzleA = hw_kernel_config.use_swizzleA
+        self._force_legacy_fp8_ptpc = hw_kernel_config.force_legacy_fp8_ptpc
         self._use_qk_norm = model_config.qk_norm
         self._hidden_size = model_config.hidden_size
         # inter_size is now accessed from model config when needed, not stored
@@ -823,6 +824,7 @@ class ModelDeployWeightInfo:
             phy2log=phy2log,  # phy2log should be set before create_load_config is called
             exported_device=exported_device,
             use_swizzleA=self._use_swizzleA,
+            force_legacy_fp8_ptpc=self._force_legacy_fp8_ptpc,
             force_cpu_load_weights=force_cpu_load_weights,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
         )

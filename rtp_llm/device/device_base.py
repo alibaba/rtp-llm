@@ -93,6 +93,7 @@ class DeviceBase:
         key: str,
         weight: torch.Tensor,
         use_swizzle_a: Optional[bool] = None,
+        force_legacy_fp8_ptpc: bool = False,
     ) -> torch.Tensor:
         return weight
 

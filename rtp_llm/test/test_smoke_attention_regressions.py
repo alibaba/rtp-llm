@@ -125,7 +125,7 @@ def test_tbstars_fp8_ptpc_keeps_raw_weights_and_selects_reference_linear():
         node
         for node in ast.walk(device_tree)
         if isinstance(node, ast.If)
-        and ast.unparse(node.test) == "not hw_kernel_config.force_legacy_fp8_ptpc"
+        and ast.unparse(node.test) == "not force_legacy_fp8_ptpc"
     ]
     assert len(force_branches) == 1
     branch_source = ast.unparse(force_branches[0])

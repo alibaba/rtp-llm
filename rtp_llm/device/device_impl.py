@@ -57,6 +57,7 @@ class ArmCpuImpl(CpuImpl):
         key: str,
         weight: torch.Tensor,
         use_swizzle_a: Optional[bool] = None,
+        force_legacy_fp8_ptpc: bool = False,
     ) -> torch.Tensor:
         return preprocess_gemm_weight_by_key(
             key, weight, self.py_env_configs.py_hw_kernel_config.arm_gemm_use_kai
@@ -934,6 +935,7 @@ class RocmImpl(GpuImpl):
         key: str,
         weight: torch.Tensor,
         use_swizzle_a: Optional[bool] = None,
+        force_legacy_fp8_ptpc: bool = False,
     ) -> torch.Tensor:
         is_gfx950 = self._is_gfx950()
         if key == "weight":
@@ -961,8 +963,10 @@ class RocmImpl(GpuImpl):
             W.linear_attn_out_w,
         ]:
             hw_kernel_config = self.py_env_configs.py_hw_kernel_config
-            # The legacy PTPC path applies its own weight layout.
-            if not hw_kernel_config.force_legacy_fp8_ptpc:
+            # Like use_swizzle_a, this must come from the model's LoadConfig.
+            # The shared device owns a separate configuration object; reading
+            # its flag would pre-swizzle TBStars weights for the wrong kernel.
+            if not force_legacy_fp8_ptpc:
                 should_swizzle = (
                     hw_kernel_config.use_swizzleA
                     if use_swizzle_a is None
