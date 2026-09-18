@@ -118,6 +118,6 @@ public class DispatcherConfiguration {
 
     @Bean
     SmartInitializingSingleton dispatcherBootLog(DispatchConfig cfg) {
-        return () -> Logger.warn("dispatcher enabled: {}", JsonUtils.toString(cfg));
+        return () -> Logger.info("dispatcher enabled: {}", JsonUtils.toString(cfg));
     }
 }
