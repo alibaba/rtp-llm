@@ -87,6 +87,28 @@ cc_test(
 )
 
 cc_test(
+    name = "rpc_error_message_test",
+    srcs = ["RpcErrorMessageTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:rpc_error_message",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "rpc_error_message_regression_test",
+    srcs = ["RpcErrorMessageRegressionTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/model_rpc:rpc_error_message",
+    ],
+    env = {},
+)
+
+cc_test(
     name = "prefill_generate_context_test",
     srcs = [
         "PrefillGenerateContextTest.cc",

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorMessage.h"
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
@@ -106,7 +107,7 @@ grpc::Status statusFromErrorInfo(const ErrorInfo& error_info) {
     if (!error_info.hasError()) {
         return grpc::Status::OK;
     }
-    const auto     error_msg       = error_info.ToString();
+    const auto     error_msg       = safeRpcErrorMessage(error_info.ToString());
     auto           grpc_error_code = transErrorCodeToGrpc(error_info.code());
     ErrorDetailsPB error_details;
     error_details.set_error_code(static_cast<int>(error_info.code()));
@@ -132,7 +133,7 @@ void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, int64_t
     error->set_request_id(request_id);
     auto* error_info = error->mutable_error_info();
     error_info->set_error_code(code);
-    error_info->set_error_message(msg);
+    setSafeRpcErrorMessage(error_info, msg);
 }
 
 int64_t batchErrorCode(const grpc::Status& status) {

@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorMessage.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
@@ -579,7 +580,8 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
                 error_msg += "rank=" + std::to_string(rank) + ", worker=" + worker_addr + ", peer=" + peer_addr
                              + ", cq=" + std::to_string(i) + ", grpc_code="
                              + std::to_string(static_cast<int>(status.error_code())) + ", grpc_message="
-                             + status.error_message() + ", grpc_details=" + status.error_details() + "; ";
+                             + status.error_message() + ", grpc_details_hex="
+                             + rpcErrorDetailsHex(status.error_details()) + "; ";
             } else if (pb_error_code != ErrorCodePB::NONE_ERROR) {
                 all_success = false;
                 error_code  = transRPCErrorCode(pb_error_code);
@@ -1153,7 +1155,7 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  server_context,
                                  std::max(1, request->prefill_cp_size())});
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
-    response->mutable_error_info()->set_error_message(error_info.ToString());
+    setSafeRpcErrorMessage(response->mutable_error_info(), error_info.ToString());
     response->set_done_time_us(currentTimeUs());
     RTP_LLM_LOG_DEBUG("request: %s, remote load cache grpc done", request->request_key().c_str());
     return grpc::Status::OK;

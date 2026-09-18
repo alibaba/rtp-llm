@@ -27,6 +27,7 @@
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorMessage.h"
 #include "rtp_llm/cpp/model_rpc/SleepMemoryUtils.h"
 #include "rtp_llm/cpp/model_rpc/SleepRpcUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
@@ -597,7 +598,7 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
 
 grpc::Status
 LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& request_info, ErrorInfo error_info) {
-    const auto& error_msg       = error_info.ToString();
+    const auto  error_msg       = safeRpcErrorMessage(error_info.ToString());
     const auto  request_log_tag = formatRequestLogTag(request_key, request_info);
     RTP_LLM_LOG_WARNING("%s, error code [%s], error message [%s]",
                         request_log_tag.c_str(),
@@ -786,7 +787,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
             static_cast<PriorityPreemptionProgressPB>(task.priority_preemption_progress));
         if (task.error_code != 0) {
             task_info->mutable_error_info()->set_error_code(task.error_code);
-            task_info->mutable_error_info()->set_error_message(task.error_message);
+            setSafeRpcErrorMessage(task_info->mutable_error_info(), task.error_message);
         }
     }
 
@@ -807,7 +808,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
             static_cast<PriorityPreemptionProgressPB>(task.priority_preemption_progress));
         if (task.error_code != 0) {
             task_info->mutable_error_info()->set_error_code(task.error_code);
-            task_info->mutable_error_info()->set_error_message(task.error_message);
+            setSafeRpcErrorMessage(task_info->mutable_error_info(), task.error_message);
         }
     }
 
