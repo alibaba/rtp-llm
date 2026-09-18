@@ -33,9 +33,35 @@ class LeakCanaryLongRunE2ETest {
     private static final int[] PRIORITIES = {30, 50, 70};
 
     @Test
+    @Timeout(15)
+    void prefillRejectionRetainsDecodeUntilInactivityExpiry() throws Exception {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "5", 1.0, true)) {
+            h.config.getRequestLifecycle().getRequest().setTimeoutMs(2_000L);
+            h.fixedWindowDecision().setMaxRequests(1);
+            h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
+                    .failOnEnqueue(true).enqueueErrorMessage("reject before admission").build());
+            h.startAutoPump(10);
+            Response rejected = h.scheduler.submit(h.context(99_999L, 50)).get(5, TimeUnit.SECONDS);
+            assertEquals(8510, rejected.getCode());
+            assertEquals(1, h.decodeEndpoint(0).getInflightCount(),
+                    "Prefill rejection alone cannot prove that Decode is safe to release");
+            assertTrue(h.decodeEndpoint(0).routingView().inflightHardKv() > 0);
+            AutoTpmE2EHarness.await(() -> h.decodeEndpoint(0).getInflightCount() == 0,
+                    7_000, "an unobserved rejected request must expire without a Decode terminal report");
+            assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv());
+            assertEquals(0, h.prefillEndpoint(0).queuedRequestCount());
+            assertEquals(0, h.decodeEngines.get(0).getAcceptedCount(),
+                    "this scenario must not manufacture a Decode completion to reclaim ownership");
+        }
+    }
+
+    @Test
     @Timeout(115)
     void d_long_run_mixed_traffic_with_transient_faults_leaks_nothing() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, true)) {
+            // Prefill rejection is not Decode terminal evidence. Requests that
+            // never reach Decode must settle through bounded inactivity cleanup.
+            h.config.getRequestLifecycle().getRequest().setTimeoutMs(5_000L);
             // Priority ordering and exact terminal cleanup remain active without preemption.
             // 小批次与快速派发维持持续流量。
             h.fixedWindowDecision().setMaxRequests(4);
@@ -105,8 +131,9 @@ class LeakCanaryLongRunE2ETest {
                         "LEAK on engine " + svc.getGrpcPort());
             }
 
-            // 调度器账目必须由 finished 上报正常收敛，不依赖 TTL 清扫
-            // 掩盖完成游标丢记录。
+            // Successful engine work settles through finished reports. Rejected
+            // work has no Decode terminal and expires after its observation window;
+            // the final rejection burst ended over 19 seconds before this check.
             assertEquals(0, h.decodeEndpoint(0).getInflightCount(),
                     "decode shadow inflight must settle to zero");
             assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv(),
