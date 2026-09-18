@@ -793,7 +793,7 @@ if role == "prefill":
     })
     expected["PREFILL_CP_KV_CACHE_SHARDED"] = "1"
     absent.extend(["PREFILL_CP_SIZE", "DECODE_CP_KV_CACHE_SHARDED"])
-    absent.extend(["DECODE_CAPTURE_CONFIG", "MOE_STRATEGY"])
+    absent.extend(["DECODE_CAPTURE_CONFIG", "MOE_STRATEGY", "NCCL_GRAPH_REGISTER"])
 else:
     expected.update({
         "CONCURRENCY_LIMIT": "8",
@@ -805,12 +805,12 @@ else:
         "RESERVER_RUNTIME_MEM_MB": "8000",
         "MEGA_MOE_MAX_TOKENS_PER_RANK": "16",
         "NCCL_MAX_CTAS": "8",
+        "NCCL_GRAPH_REGISTER": "0",
         "ENABLE_CUDA_GRAPH": "1",
         "DECODE_CAPTURE_CONFIG": "1,2,4,8",
         "KIMI_K3_DECODE_TOPOLOGY": decode_topology,
         "DECODE_CP_KV_CACHE_SHARDED": "1",
         "DECODE_CP_Q_REPLICATED": decode_q_replicated,
-        "NCCL_GRAPH_REGISTER": "0",
         "RTP_MLA_DECODE_KERNEL": "tokenspeed_mla",
         "MOE_STRATEGY": "mega_moe_se",
         "RTP_LLM_DEVICE_INPUT": "1",
@@ -940,6 +940,7 @@ apply_validated_prefill_profile() {
     export KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD="${smoke_shared_expert_shard}"
     export KIMI_K3_PREFILL_CHUNK_TOKENS="${smoke_chunk_tokens}"
     export ENABLE_CUDA_GRAPH=0
+    unset NCCL_GRAPH_REGISTER
     export ENABLE_MEMORY_CACHE=1
     export MEMORY_CACHE_SIZE_MB=65536
     export PREFILL_CP_KV_CACHE_SHARDED=1
@@ -955,6 +956,9 @@ apply_validated_decode_profile() {
     export KV_CACHE_MEM_MB="${smoke_decode_kv_cache_mem_mb}"
     # Bound NCCL connection buffers to preserve runtime headroom.
     export NCCL_MAX_CTAS=8
+    # Projection-KTP collectives participate in Decode CUDA Graph capture.
+    # Disable graph registration to avoid a collective launch hang on SM103.
+    export NCCL_GRAPH_REGISTER=0
     export REUSE_CACHE=0
     export KIMI_K3_KDA_POOL_BLOCKS="${smoke_decode_kda_pool_blocks}"
     export RESERVER_RUNTIME_MEM_MB=8000
@@ -967,7 +971,6 @@ apply_validated_decode_profile() {
     export KIMI_K3_DECODE_TOPOLOGY="${smoke_decode_topology}"
     export DECODE_CP_KV_CACHE_SHARDED=1
     export DECODE_CP_Q_REPLICATED="${smoke_decode_q_replicated}"
-    export NCCL_GRAPH_REGISTER="${NCCL_GRAPH_REGISTER:-0}"
     export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
