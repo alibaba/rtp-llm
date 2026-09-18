@@ -196,8 +196,8 @@ protected:
         backend_ = std::make_shared<KVCMStorageBackend>(
             config_, options, RuntimeConfig{}, parallel, SpeculativeExecutionConfig{}, nullptr, wrapper_);
         if (fail_second || rank != 0) {
-            return backend_->init(config_.topologyPtr(), pools_, [&](int layer, int group, int block) {
-                return allocator_->convertIndexToBuffer(layer, config_.tagForGroup(group), block);
+            return backend_->init(config_.topologyPtr(), pools_, [&](int layer, const std::string& tag, int block) {
+                return allocator_->convertIndexToBuffer(layer, tag, block);
             });
         }
         cache_ = createBlockTreeCache(config_, options, allocator_, parallel, backend_);
@@ -207,7 +207,9 @@ protected:
     StorageRequest request() const {
         StorageRequest result;
         result.keys    = std::make_shared<CacheKeysType>(CacheKeysType{101});
-        result.handles = {{{2, blocks_[2]}, {1, blocks_[1]}, {0, blocks_[0]}}};
+        result.handles = {{{config_.tagForGroup(2), blocks_[2]},
+                           {config_.tagForGroup(1), blocks_[1]},
+                           {config_.tagForGroup(0), blocks_[0]}}};
         return result;
     }
 

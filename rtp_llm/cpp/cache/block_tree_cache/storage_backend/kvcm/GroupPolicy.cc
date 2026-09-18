@@ -23,23 +23,6 @@ std::string genLocationSpecName(int tp_rank, const std::string& group_name) {
     return "tp" + std::to_string(tp_rank) + "_" + group_name;
 }
 
-bool GroupPolicy::genBlockBuffersByTag(const std::vector<std::string>& tags,
-                                       const std::vector<int32_t>&     block_ids,
-                                       kv_cache_manager::BlockBuffers& block_buffers) const {
-    RTP_LLM_CHECK_WITH_INFO(tags.size() == block_ids.size(),
-                            "remote cache tag/block count mismatch: tags=%zu blocks=%zu",
-                            tags.size(),
-                            block_ids.size());
-    std::vector<int32_t> group_ids;
-    group_ids.reserve(tags.size());
-    for (const auto& tag : tags) {
-        const auto group_it = tag_to_group_id_.find(tag);
-        RTP_LLM_CHECK_WITH_INFO(group_it != tag_to_group_id_.end(), "remote cache policy missing tag=%s", tag.c_str());
-        group_ids.push_back(group_it->second);
-    }
-    return genBlockBuffers(group_ids, block_ids, block_buffers);
-}
-
 bool GroupPolicy::buildLocationSpecGroups(int tp_size, LocationSpecGroups& location_spec_groups) {
     if (tp_size <= 0 || groups_.empty()) {
         RTP_LLM_LOG_ERROR("cannot build KVCM location groups: tp_size=%d groups=%zu", tp_size, groups_.size());
@@ -291,12 +274,12 @@ bool DefaultLayerGroupPolicy::getNeedWriteGroups(const StorageRequest&     reque
             if (isNullBlockIdx(handle.block)) {
                 continue;
             }
-            const auto group = groups_.find(static_cast<int32_t>(handle.group_id));
-            if (group == groups_.end()) {
-                RTP_LLM_LOG_WARNING("remote write references unknown group_id [%zu]", handle.group_id);
+            const auto group_id = tag_to_group_id_.find(handle.tag);
+            if (group_id == tag_to_group_id_.end()) {
+                RTP_LLM_LOG_WARNING("remote write references unknown tag [%s]", handle.tag.c_str());
                 return false;
             }
-            groups_name_bithash |= group->second.group_name_bithash;
+            groups_name_bithash |= groups_.at(group_id->second).group_name_bithash;
         }
         const auto group_name = location_spec_group_map_.find(groups_name_bithash);
         if (group_name == location_spec_group_map_.end()) {
@@ -317,33 +300,42 @@ bool DefaultLayerGroupPolicy::getNeedWriteGroups(const StorageRequest&     reque
         }                                                                                                              \
     } while (0)
 
-bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     group_ids,
+bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<std::string>& group_tags,
                                               const std::vector<int32_t>&     block_ids,
                                               kv_cache_manager::BlockBuffers& block_buffers) const {
     static auto push_iov = [](std::vector<kv_cache_manager::Iov>& iovs, const BlockInfo& block_info) {
         iovs.push_back({kv_cache_manager::MemoryType::GPU, block_info.addr, block_info.size_bytes, false});
     };
-    RTP_LLM_CHECK_WITH_INFO(group_ids.size() == block_ids.size(),
+    RTP_LLM_CHECK_WITH_INFO(group_tags.size() == block_ids.size(),
                             "remote cache group/block count mismatch: groups=%zu blocks=%zu",
-                            group_ids.size(),
+                            group_tags.size(),
                             block_ids.size());
+    for (size_t i = 0; i < group_tags.size(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(
+            tag_to_group_id_.count(group_tags[i]) != 0, "remote cache policy missing tag=%s", group_tags[i].c_str());
+        RTP_LLM_CHECK_WITH_INFO(
+            !isNullBlockIdx(block_ids[i]), "remote cache request has null block for tag=%s", group_tags[i].c_str());
+    }
     kv_cache_manager::BlockBuffers pending_buffers;
     pending_buffers.reserve(block_ids.size());
     for (size_t i = 0; i < block_ids.size(); ++i) {
-        RTP_LLM_CHECK_WITH_INFO(group_ids[i] >= 0, "invalid remote cache group id=%d", group_ids[i]);
+        const auto group_id_it = tag_to_group_id_.find(group_tags[i]);
+        RTP_LLM_CHECK_WITH_INFO(
+            group_id_it != tag_to_group_id_.end(), "remote cache policy missing tag=%s", group_tags[i].c_str());
+        const auto group_id = group_id_it->second;
         pending_buffers.push_back({});
-        const auto& layer_ids          = group_to_layer_ids_.at(group_ids[i]);
-        const auto& tag                = groups_.at(group_ids[i]).tag;
+        const auto& layer_ids          = group_to_layer_ids_.at(group_id);
+        const auto& tag                = groups_.at(group_id).tag;
         auto&       iovs               = pending_buffers.back().iovs;
         size_t      actual_block_bytes = 0;
         iovs.reserve(layer_ids.size() * 2);
         for (size_t j = 0; j < layer_ids.size(); ++j) {
             // if support scale, block_infos: {kv_info, scale_info}
-            const auto block_infos = buffer_resolver_(layer_ids[j], group_ids[i], block_ids[i]);
+            const auto block_infos = buffer_resolver_(layer_ids[j], tag, block_ids[i]);
             if (block_infos.empty()) {
                 RTP_LLM_LOG_WARNING("convertIndexToBuffer returned empty for layer_id [%d] group_id [%d] block_id[%d]",
                                     layer_ids[j],
-                                    group_ids[i],
+                                    group_id,
                                     block_ids[i]);
             }
             for (size_t idx = 0; idx < block_infos.size(); ++idx) {
@@ -351,18 +343,18 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
                     block_infos[idx],
                     "convertIndexToBuffer failed layer_id [%d] group_id [%d] block_id[%d], block_info.addr or block_info.size_bytes is invalid",
                     layer_ids[j],
-                    group_ids[i],
+                    group_id,
                     block_ids[i]);
                 actual_block_bytes += block_infos[idx].size_bytes;
                 push_iov(iovs, block_infos[idx]);
             }
         }
-        const size_t expected_block_bytes = groups_.at(group_ids[i]).block_size_bytes;
+        const size_t expected_block_bytes = groups_.at(group_id).block_size_bytes;
         if (actual_block_bytes != expected_block_bytes) {
             RTP_LLM_LOG_WARNING(
                 "remote cache block size mismatch tag [%s] group_id [%d] block_id [%d], expected [%zu] actual [%zu]",
                 tag.c_str(),
-                group_ids[i],
+                group_id,
                 block_ids[i],
                 expected_block_bytes,
                 actual_block_bytes);
@@ -476,12 +468,12 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const StorageRequest&     request,
             if (isNullBlockIdx(handle.block)) {
                 continue;
             }
-            const auto group = groups_.find(static_cast<int32_t>(handle.group_id));
-            if (group == groups_.end()) {
-                RTP_LLM_LOG_WARNING("hybrid remote write references unknown group_id [%zu]", handle.group_id);
+            const auto group_id = tag_to_group_id_.find(handle.tag);
+            if (group_id == tag_to_group_id_.end()) {
+                RTP_LLM_LOG_WARNING("hybrid remote write references unknown tag [%s]", handle.tag.c_str());
                 return false;
             }
-            groups_name_bithash |= group->second.group_name_bithash;
+            groups_name_bithash |= groups_.at(group_id->second).group_name_bithash;
         }
         if (groups_name_bithash != valid_full_bithash_ && groups_name_bithash != valid_full_other_bithash_) {
             RTP_LLM_LOG_WARNING("invalid hybrid remote group mask [%lu]", groups_name_bithash);

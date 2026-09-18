@@ -254,7 +254,7 @@ StorageRequest BlockTreeLoader::makeStorageRequest(const CacheKeysType& cache_ke
     for (auto& key_handles : request.handles) {
         for (const auto& group_set : tree_->groupSets()) {
             for (const auto& tag : group_set->groupTags()) {
-                key_handles.push_back({group_set->topologyPtr()->groupIdForTag(tag), NULL_BLOCK_IDX});
+                key_handles.push_back({tag, NULL_BLOCK_IDX});
             }
         }
     }

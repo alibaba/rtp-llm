@@ -522,7 +522,7 @@ public:
         resolved_count_(std::move(resolved_count)) {}
 
     ~ShutdownCountingStorageBackend() override {
-        const auto buffers = convertIndexToBuffer(/*layer_id=*/0, /*group_id=*/0, /*block_id=*/0);
+        const auto buffers = convertIndexToBuffer(/*layer_id=*/0, /*tag=*/"default", /*block_id=*/0);
         if (!buffers.empty() && buffers.front().addr != nullptr) {
             ++*resolved_count_;
         }
@@ -551,8 +551,8 @@ public:
     ~CountingStorageBackend() override {
         shutdown();
     }
-    std::vector<BlockInfo> resolve(int layer, int group, int block) const {
-        return convertIndexToBuffer(layer, group, block);
+    std::vector<BlockInfo> resolve(int layer, const std::string& tag, int block) const {
+        return convertIndexToBuffer(layer, tag, block);
     }
     size_t matchCalls() const {
         return match_calls_;
@@ -658,7 +658,7 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteResolverMatchesAllocatorForNonContiguous
             pool->incRef(*blocks);
             for (int layer_id : config.layerIdsForGroup(group_id)) {
                 const auto expected = allocator->convertIndexToBuffer(layer_id, group.tag, blocks->front());
-                const auto actual   = backend->resolve(layer_id, group_id, blocks->front());
+                const auto actual   = backend->resolve(layer_id, config.tagForGroup(group_id), blocks->front());
                 ASSERT_FALSE(expected.empty());
                 ASSERT_FALSE(actual.empty());
                 EXPECT_EQ(actual.front().addr, expected.front().addr) << layer_id;
@@ -717,7 +717,7 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
     EXPECT_EQ(group_set->hostPool()->payloadBytes(), 160u);
 
     for (int layer = 0; layer < 3; ++layer) {
-        const auto resolved = backend->resolve(layer, /*group=*/0, src);
+        const auto resolved = backend->resolve(layer, "default", src);
         ASSERT_EQ(resolved.size(), 1u);
         EXPECT_EQ(resolved.front().addr, allocator->convertIndexToAddr(layer, "default", src).kv_addr);
         EXPECT_EQ(resolved.front().size_bytes, bytes[static_cast<size_t>(layer)]);
@@ -1145,8 +1145,8 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
     ASSERT_NE(context, nullptr);
     ASSERT_EQ(context->backendHandles().size(), 1u);
     ASSERT_EQ(context->backendHandles()[0].size(), 2u);
-    EXPECT_EQ(context->backendHandles()[0][0].group_id, 0u);
-    EXPECT_EQ(context->backendHandles()[0][1].group_id, 1u);
+    EXPECT_EQ(context->backendHandles()[0][0].tag, "default");
+    EXPECT_EQ(context->backendHandles()[0][1].tag, "indexer_kv");
 
     const GroupSetPtr& group_set = cache->groupSets()[0];
     ASSERT_NE(group_set->hostPool(), nullptr);

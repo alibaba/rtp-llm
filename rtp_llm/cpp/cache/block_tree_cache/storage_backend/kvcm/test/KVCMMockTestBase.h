@@ -353,7 +353,7 @@ T await(std::future<T>& future) {
     RTP_LLM_CHECK(block_ids.empty() || block_ids.size() == request.keys->size());
     for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
         const auto block_id = block_ids.empty() ? environment.block_id : block_ids[key_index];
-        request.handles[key_index].push_back({/*group_id=*/0, block_id});
+        request.handles[key_index].push_back({environment.cache_config.tagForGroup(0), block_id});
     }
     request.local_matched_blocks_num = local_matched_blocks;
     return request;
@@ -380,7 +380,8 @@ T await(std::future<T>& future) {
     for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
         for (const size_t group_id : groups_by_key[key_index]) {
             RTP_LLM_CHECK(group_id < environment.cache_config.topology().groups().size());
-            request.handles[key_index].push_back({group_id, block_ids[key_index]});
+            request.handles[key_index].push_back(
+                {environment.cache_config.tagForGroup(group_id), block_ids[key_index]});
         }
     }
     request.local_matched_blocks_num = local_matched_blocks;
@@ -424,9 +425,10 @@ read(KVCMStorageBackend& backend, StorageRequest request, std::shared_ptr<Storag
 
 [[maybe_unused]] bool initSingleRank(KVCMStorageBackend& backend, const BackendEnvironment& environment) {
     std::vector<DeviceBlockPoolPtr> pools(environment.cache_config.topology().groups().size(), environment.device_pool);
-    return backend.init(environment.cache_config.topologyPtr(), std::move(pools), [&](int layer_id, int, int block_id) {
-        return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-    });
+    return backend.init(
+        environment.cache_config.topologyPtr(), std::move(pools), [&](int layer_id, const std::string&, int block_id) {
+            return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
+        });
 }
 
 }  // namespace

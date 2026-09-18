@@ -214,7 +214,8 @@ TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers)
 
     StorageRequest request;
     request.keys    = std::make_shared<const CacheKeysType>(CacheKeysType{101});
-    request.handles = {{{/*group_id=*/0, environment.block_id}, {/*group_id=*/1, environment.block_id}}};
+    request.handles = {{{environment.cache_config.tagForGroup(0), environment.block_id},
+                        {environment.cache_config.tagForGroup(1), environment.block_id}}};
     backend->write(backend->prepareWrite(std::move(request)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);

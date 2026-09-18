@@ -203,8 +203,9 @@ protected:
                 for (size_t key_index = request.local_matched_blocks_num; found && key_index < candidate; ++key_index) {
                     const auto stored = state_->groups_by_key.find((*request.keys)[key_index]);
                     for (const auto& handle : request.handles[key_index]) {
-                        if (isHandleRequired(key_index, candidate, handle.group_id)
-                            && (stored == state_->groups_by_key.end() || !stored->second.count(handle.group_id))) {
+                        const auto group_id = topology().groupIdForTag(handle.tag);
+                        if (isHandleRequired(key_index, candidate, handle.tag)
+                            && (stored == state_->groups_by_key.end() || !stored->second.count(group_id))) {
                             found = false;
                             break;
                         }
@@ -227,7 +228,7 @@ protected:
         for (const auto& handles : request.handles) {
             group_ids.emplace_back();
             for (const auto& handle : handles) {
-                group_ids.back().push_back(handle.group_id);
+                group_ids.back().push_back(topology().groupIdForTag(handle.tag));
             }
         }
         {
@@ -243,8 +244,9 @@ protected:
             for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
                 auto& stored = state_->groups_by_key[(*request.keys)[key_index]];
                 for (const auto& handle : request.handles[key_index]) {
-                    stored.insert(handle.group_id);
-                    group_ids[key_index].push_back(handle.group_id);
+                    const auto group_id = topology().groupIdForTag(handle.tag);
+                    stored.insert(group_id);
+                    group_ids[key_index].push_back(group_id);
                 }
             }
         }

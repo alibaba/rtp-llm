@@ -78,12 +78,9 @@ public:
                                     size_t                    valid_keys_size,
                                     std::vector<std::string>& location_spec_group_names) const = 0;
 
-    virtual bool genBlockBuffers(const std::vector<int32_t>&     group_ids,
+    virtual bool genBlockBuffers(const std::vector<std::string>& group_tags,
                                  const std::vector<int32_t>&     block_ids,
                                  kv_cache_manager::BlockBuffers& block_buffers) const = 0;
-    bool         genBlockBuffersByTag(const std::vector<std::string>& tags,
-                                      const std::vector<int32_t>&     block_ids,
-                                      kv_cache_manager::BlockBuffers& block_buffers) const;
 
     const GroupIdMap& groups() const {
         return groups_;
@@ -153,7 +150,7 @@ public:
                             size_t                    valid_keys_size,
                             std::vector<std::string>& location_spec_group_names) const override;
 
-    bool genBlockBuffers(const std::vector<int32_t>&     group_ids,
+    bool genBlockBuffers(const std::vector<std::string>& group_tags,
                          const std::vector<int32_t>&     block_ids,
                          kv_cache_manager::BlockBuffers& block_buffers) const override;
 

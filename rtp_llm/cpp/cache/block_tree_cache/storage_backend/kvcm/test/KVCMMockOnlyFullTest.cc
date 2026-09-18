@@ -40,8 +40,8 @@ TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {
     auto backend = makeBackend(environment, parallelism_config, client_wrapper);
     ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
                               {environment.device_pool},
-                              [&](int layer_id, int group_id, int block_id) {
-                                  EXPECT_EQ(group_id, 0);
+                              [&](int layer_id, const std::string& tag, int block_id) {
+                                  EXPECT_EQ(tag, "default");
                                   return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
                               }));
 
@@ -89,10 +89,11 @@ TEST(KVCMMockOnlyFullTest, TP2CoordinatorRejectsMissingBroadcastManager) {
 
     EXPECT_CALL(*client_wrapper, init(_, _)).Times(0);
     auto backend = makeBackend(environment, parallelism_config, client_wrapper);
-    EXPECT_FALSE(backend->init(
-        environment.cache_config.topologyPtr(), {environment.device_pool}, [&](int layer_id, int, int block_id) {
-            return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-        }));
+    EXPECT_FALSE(backend->init(environment.cache_config.topologyPtr(),
+                               {environment.device_pool},
+                               [&](int layer_id, const std::string&, int block_id) {
+                                   return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
+                               }));
 }
 
 TEST(KVCMMockOnlyFullTest, TP2CoordinatorBroadcastsRankOrderedReadAndWritePayloads) {
@@ -120,10 +121,11 @@ TEST(KVCMMockOnlyFullTest, TP2CoordinatorBroadcastsRankOrderedReadAndWritePayloa
     EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, parallelism_config, client_wrapper, broadcast_manager);
-    ASSERT_TRUE(backend->init(
-        environment.cache_config.topologyPtr(), {environment.device_pool}, [&](int layer_id, int, int block_id) {
-            return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-        }));
+    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
+                              {environment.device_pool},
+                              [&](int layer_id, const std::string&, int block_id) {
+                                  return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
+                              }));
 
     const kv_cache_manager::Locations read_locations{kv_cache_manager::Location{
         kv_cache_manager::LocationSpecUnit{"tp1_Fdefault", "read_rank_1"},
@@ -214,10 +216,11 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSession) {
     EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, parallelism_config, client_wrapper, broadcast_manager);
-    ASSERT_TRUE(backend->init(
-        environment.cache_config.topologyPtr(), {environment.device_pool}, [&](int layer_id, int, int block_id) {
-            return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-        }));
+    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
+                              {environment.device_pool},
+                              [&](int layer_id, const std::string&, int block_id) {
+                                  return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
+                              }));
 
     kv_cache_manager::WriteLocation write_location;
     write_location.write_session_id = "tp2_failed_broadcast_write";
@@ -270,10 +273,11 @@ TEST(KVCMMockOnlyFullTest, RejectsMismatchedTransferVectorsBeforeClientIO) {
     EXPECT_CALL(*client_wrapper, saveKvCaches(_, _, _)).Times(0);
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, parallelism_config, client_wrapper);
-    ASSERT_TRUE(backend->init(
-        environment.cache_config.topologyPtr(), {environment.device_pool}, [&](int layer_id, int, int block_id) {
-            return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-        }));
+    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
+                              {environment.device_pool},
+                              [&](int layer_id, const std::string&, int block_id) {
+                                  return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
+                              }));
 
     RemoteOperationRequestPB request;
     request.set_op(REMOTE_OPERATION_READ);

@@ -4,6 +4,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
@@ -15,7 +17,7 @@
 namespace rtp_llm {
 
 struct StorageBlockHandle {
-    size_t       group_id{0};
+    std::string  tag;
     BlockIdxType block{NULL_BLOCK_IDX};
 };
 
@@ -52,11 +54,11 @@ struct StorageTaskState;
 
 class StorageWriteTask {
 public:
-    StorageWriteTask()                                       = default;
-    StorageWriteTask(StorageWriteTask&&) noexcept            = default;
+    StorageWriteTask()                            = default;
+    StorageWriteTask(StorageWriteTask&&) noexcept = default;
     StorageWriteTask& operator=(StorageWriteTask&&) noexcept = default;
 
-    StorageWriteTask(const StorageWriteTask&)            = delete;
+    StorageWriteTask(const StorageWriteTask&) = delete;
     StorageWriteTask& operator=(const StorageWriteTask&) = delete;
 
     explicit operator bool() const {
@@ -76,7 +78,7 @@ public:
     using MatchDone      = std::function<void(
         size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
     using Done           = std::function<void(bool success)>;
-    using BufferResolver = std::function<std::vector<BlockInfo>(int layer_id, int group_id, int block_id)>;
+    using BufferResolver = std::function<std::vector<BlockInfo>(int layer_id, const std::string& tag, int block_id)>;
 
     // An injected executor may be observed by its owner but belongs to only
     // one backend; init rejects binding the same instance a second time.
@@ -100,11 +102,11 @@ public:
 protected:
     const CacheTopology&                   topology() const;
     const std::vector<DeviceBlockPoolPtr>& devicePools() const;
-    std::vector<BlockInfo>                 convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const;
     // Match queries contain every possible group handle. Derived matchers use
     // this predicate for each candidate prefix; the core applies the same rule
     // before allocating read targets.
-    bool isHandleRequired(size_t key_index, size_t matched_key_count, size_t group_id) const;
+    bool isHandleRequired(size_t key_index, size_t matched_key_count, std::string_view tag) const;
 
     virtual bool               initImpl()                                                           = 0;
     virtual StorageMatchResult matchImpl(const StorageRequest& request)                             = 0;
@@ -124,14 +126,15 @@ private:
     using Operation = std::function<void(Lifecycle outcome)>;
 
     std::shared_ptr<storage_backend_detail::StorageTaskState> prepare(StorageRequest request);
-    bool                                                      dispatch(Operation operation);
-    void                                                      taskFinished();
-    std::shared_ptr<const CacheTopology>                      topology_;
-    std::vector<DeviceBlockPoolPtr>                           device_pools_;
-    BufferResolver                                            buffer_resolver_;
-    std::shared_ptr<StorageBackendExecutor>                   executor_;
-    bool                                                      init_attempted_{false};
-    bool                                                      initialized_{false};
+    void                                 validateRequest(const StorageRequest& request, bool allow_null_blocks) const;
+    bool                                 dispatch(Operation operation);
+    void                                 taskFinished();
+    std::shared_ptr<const CacheTopology> topology_;
+    std::vector<DeviceBlockPoolPtr>      device_pools_;
+    BufferResolver                       buffer_resolver_;
+    std::shared_ptr<StorageBackendExecutor> executor_;
+    bool                                    init_attempted_{false};
+    bool                                    initialized_{false};
 
     std::mutex              lifecycle_mutex_;
     std::condition_variable lifecycle_cv_;

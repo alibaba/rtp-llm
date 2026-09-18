@@ -299,21 +299,21 @@ size_t computeGroupSetPayloadBytes(const CacheConfig& cache_config, const std::v
 std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                     cache_config,
                                              const std::vector<DeviceBlockPoolPtr>& group_pools,
                                              int                                    layer_id,
-                                             int                                    group_id,
+                                             const std::string&                     tag,
                                              int                                    block_id) {
-    RTP_LLM_CHECK_WITH_INFO(
-        group_id >= 0 && static_cast<size_t>(group_id) < group_pools.size(), "invalid storage group_id=%d", group_id);
-    const auto& topology  = cache_config.topology();
-    const auto  layer_ids = topology.layerIdsForGroup(static_cast<size_t>(group_id));
-    const auto  layer     = std::find(layer_ids.begin(), layer_ids.end(), layer_id);
+    const auto& topology = cache_config.topology();
+    const auto  group_id = topology.groupIdForTag(tag);
+    RTP_LLM_CHECK_WITH_INFO(group_id < group_pools.size(), "invalid storage tag=%.*s", (int)tag.size(), tag.data());
+    const auto layer_ids = topology.layerIdsForGroup(group_id);
+    const auto layer     = std::find(layer_ids.begin(), layer_ids.end(), layer_id);
     RTP_LLM_CHECK_WITH_INFO(
         layer != layer_ids.end(), "layer_id=%d does not belong to storage group_id=%d", layer_id, group_id);
     // Pools are laid out in group-local layer order. This is the same model-global -> pool-layer mapping used by
     // KVCacheGroup::convertIndexToBuffer; model layer IDs cannot be passed
     // directly to these physical pools.
-    auto buffers = group_pools[static_cast<size_t>(group_id)]->convertIndexToBuffer(
+    auto buffers = group_pools[group_id]->convertIndexToBuffer(
         static_cast<int>(std::distance(layer_ids.begin(), layer)), block_id);
-    const auto& physical_group = cache_config.physicalGroupForLayer(layer_id, cache_config.tagForGroup(group_id));
+    const auto& physical_group = cache_config.physicalGroupForLayer(layer_id, tag);
     RTP_LLM_CHECK_WITH_INFO(!buffers.empty(), "storage group_id=%d returned no block buffers", group_id);
     RTP_LLM_CHECK_WITH_INFO(buffers[0].size_bytes >= physical_group.kvBlockStrideBytes(),
                             "storage group_id=%d physical kv block is smaller than logical block",
@@ -652,12 +652,12 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         const CacheConfig                          storage_config   = cache_config;
         const std::vector<DeviceBlockPoolPtr>      resolver_pools   = group_pools;
         RTP_LLM_CHECK_WITH_INFO(
-            result->storageBackend()->init(storage_topology,
-                                           group_pools,
-                                           [storage_config, resolver_pools](int layer_id, int group_id, int block_id) {
-                                               return resolveStorageBuffers(
-                                                   storage_config, resolver_pools, layer_id, group_id, block_id);
-                                           }),
+            result->storageBackend()->init(
+                storage_topology,
+                group_pools,
+                [storage_config, resolver_pools](int layer_id, const std::string& tag, int block_id) {
+                    return resolveStorageBuffers(storage_config, resolver_pools, layer_id, tag, block_id);
+                }),
             "StorageBackend init failed");
     }
     if (!result->init()) {

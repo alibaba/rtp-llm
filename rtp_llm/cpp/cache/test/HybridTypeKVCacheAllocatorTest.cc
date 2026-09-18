@@ -1736,6 +1736,75 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     ref.reset();
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
+
+TEST_F(HybridTypeKVCacheAllocatorTest, ReferenceAndReleaseReorderedResourceByTag) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    auto         linear_pool   = poolForTag(*allocator, "linear");
+    auto         full_pool     = poolForTag(*allocator, "full1");
+    const size_t free_before   = allocator->freeBlocksNum();
+    const auto   linear_blocks = allocateReferencedBlocks(linear_pool, 2);
+    const auto   full_blocks   = allocateReferencedBlocks(full_pool, 2);
+
+    auto reordered_groups = config.topology().groups();
+    std::reverse(reordered_groups.begin(), reordered_groups.end());
+    KVCacheResource resource;
+    resource.initGroups(CacheTopology::create(std::move(reordered_groups), config.topology().layers()));
+    resource.setCacheKeys({100, 101});
+    resource.mutableBlockIds("linear").assign(linear_blocks);
+    resource.mutableBlockIds("full1").assign(full_blocks);
+
+    auto selected = allocator->incrKVCacheRef(resource, {101});
+    ASSERT_NE(selected, nullptr);
+    EXPECT_EQ(selected->blocks("linear"), (BlockIndicesType{linear_blocks[1]}));
+    EXPECT_EQ(selected->blocks("full1"), (BlockIndicesType{full_blocks[1]}));
+
+    linear_pool->decRef(linear_blocks);
+    full_pool->decRef(full_blocks);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2);
+    selected.reset();
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, ReferenceIdentityMismatchDoesNotMutatePools) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    auto         linear_pool   = poolForTag(*allocator, "linear");
+    auto         full_pool     = poolForTag(*allocator, "full1");
+    const auto   linear_blocks = allocateReferencedBlocks(linear_pool, 1);
+    const auto   full_blocks   = allocateReferencedBlocks(full_pool, 1);
+    const size_t linear_ref    = linear_pool->refCount(linear_blocks.front());
+    const size_t full_ref      = full_pool->refCount(full_blocks.front());
+
+    auto       groups     = config.topology().groups();
+    const auto old_tag    = groups[1].tag;
+    groups[1].tag         = "unexpected";
+    auto replacement_spec = groups[1].spec->clone();
+    replacement_spec->tag = groups[1].tag;
+    groups[1].spec        = std::move(replacement_spec);
+    auto layers           = config.topology().layers();
+    for (auto& layer : layers) {
+        std::replace(layer.group_tags.begin(), layer.group_tags.end(), old_tag, std::string("unexpected"));
+    }
+    KVCacheResource resource;
+    resource.initGroups(CacheTopology::create(std::move(groups), std::move(layers)));
+    resource.setCacheKeys({100});
+    resource.mutableBlockIds("linear").assign(linear_blocks);
+    resource.mutableBlockIds("unexpected").assign(full_blocks);
+
+    EXPECT_ANY_THROW(allocator->incrKVCacheRef(resource, {100}));
+    EXPECT_ANY_THROW(allocator->decrKVCacheRef(resource));
+    EXPECT_EQ(linear_pool->refCount(linear_blocks.front()), linear_ref);
+    EXPECT_EQ(full_pool->refCount(full_blocks.front()), full_ref);
+
+    linear_pool->decRef(linear_blocks);
+    full_pool->decRef(full_blocks);
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, ConnectorRefPreservesDummyTailAcrossGroupsAndReleasesValidBlocks) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);

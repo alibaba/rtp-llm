@@ -578,7 +578,7 @@ bool KVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_info,
         const auto& backend_handles = context->backendHandles();
         for (size_t key_index = 0; key_index < backend_handles.size(); ++key_index) {
             for (const StorageBlockHandle& handle : backend_handles[key_index]) {
-                add_target(key_index, handle.group_id);
+                add_target(key_index, config_.topology().groupIdForTag(handle.tag));
             }
         }
     }
@@ -627,14 +627,13 @@ bool KVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_info,
         const auto& backend_handles = context->backendHandles();
         for (size_t key_index = 0; key_index < backend_handles.size(); ++key_index) {
             for (size_t handle_index = 0; handle_index < backend_handles[key_index].size(); ++handle_index) {
-                const auto& handle = backend_handles[key_index][handle_index];
+                const auto& handle   = backend_handles[key_index][handle_index];
+                const auto  group_id = config_.topology().groupIdForTag(handle.tag);
                 context->setBackendTargetBlock(
                     key_index,
                     handle_index,
                     kv_resource.blocks(
-                        0,
-                        static_cast<int>(
-                            handle.group_id))[loadTargetPosition(key_index, handle.group_id, cp_mapper, cp_scale)]);
+                        0, static_cast<int>(group_id))[loadTargetPosition(key_index, group_id, cp_mapper, cp_scale)]);
             }
         }
     }
@@ -888,6 +887,14 @@ std::shared_ptr<KVCacheResource> KVCacheAllocator::incrKVCacheRef(const KVCacheR
         return nullptr;
     }
 
+    const auto& groups = config_.topology().groups();
+    RTP_LLM_CHECK_WITH_INFO(kvcache_resource.groupNums() == config_.groupNums(),
+                            "cache resource and allocator group counts differ");
+    std::vector<const BlockIndicesType*> source_blocks_by_group;
+    source_blocks_by_group.reserve(groups.size());
+    for (const auto& group : groups) {
+        source_blocks_by_group.push_back(&kvcache_resource.blocks(group.tag));
+    }
     std::unordered_map<CacheKeyType, size_t> key_to_pos;
     const auto&                              resource_keys = kvcache_resource.cacheKeys();
     for (size_t i = 0; i < resource_keys.size(); ++i) {
@@ -918,7 +925,7 @@ std::shared_ptr<KVCacheResource> KVCacheAllocator::incrKVCacheRef(const KVCacheR
         bool                      any_valid_block = false;
         std::vector<BlockIdxType> blocks_for_key(static_cast<size_t>(kvcache_resource.groupNums()), NULL_BLOCK_IDX);
         for (int group_id = 0; group_id < kvcache_resource.groupNums(); ++group_id) {
-            const auto& src_blocks                        = kvcache_resource.blocks(group_id);
+            const auto& src_blocks                        = *source_blocks_by_group[static_cast<size_t>(group_id)];
             const auto  block                             = pos < src_blocks.size() ? src_blocks[pos] : NULL_BLOCK_IDX;
             blocks_for_key[static_cast<size_t>(group_id)] = block;
             any_valid_block                               = any_valid_block || (!isNullBlockIdx(block) && block > 0);
@@ -952,14 +959,23 @@ std::shared_ptr<KVCacheResource> KVCacheAllocator::incrKVCacheRef(const KVCacheR
             }
         }
         kv_cache_groups_[static_cast<size_t>(group_id)]->reference(valid);
-        selected_resource->mutableBlockIds(group_id).assign(std::move(selected_blocks[static_cast<size_t>(group_id)]));
+        selected_resource->mutableBlockIds(groups[static_cast<size_t>(group_id)].tag)
+            .assign(std::move(selected_blocks[static_cast<size_t>(group_id)]));
     }
     return selected_resource;
 }
 
 void KVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource) {
-    for (int group_id = 0; group_id < kvcache_resource.groupNums(); ++group_id) {
-        kv_cache_groups_[static_cast<size_t>(group_id)]->unreference(kvcache_resource.blocks(group_id));
+    const auto& groups = config_.topology().groups();
+    RTP_LLM_CHECK_WITH_INFO(kvcache_resource.groupNums() == config_.groupNums(),
+                            "cache resource and allocator group counts differ");
+    std::vector<const BlockIndicesType*> blocks_by_group;
+    blocks_by_group.reserve(groups.size());
+    for (const auto& group : groups) {
+        blocks_by_group.push_back(&kvcache_resource.blocks(group.tag));
+    }
+    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+        kv_cache_groups_[group_id]->unreference(*blocks_by_group[group_id]);
     }
 }
 

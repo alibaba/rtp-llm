@@ -36,9 +36,9 @@ struct KVCMMatchMeta final: StorageBackendMatchMeta {
     kv_cache_manager::Locations locations;
 };
 
-const StorageBlockHandle* findHandle(const std::vector<StorageBlockHandle>& handles, size_t group_id) {
-    const auto it = std::find_if(handles.begin(), handles.end(), [group_id](const StorageBlockHandle& handle) {
-        return handle.group_id == group_id && !isNullBlockIdx(handle.block);
+const StorageBlockHandle* findHandle(const std::vector<StorageBlockHandle>& handles, std::string_view tag) {
+    const auto it = std::find_if(handles.begin(), handles.end(), [tag](const StorageBlockHandle& handle) {
+        return handle.tag == tag && !isNullBlockIdx(handle.block);
     });
     return it == handles.end() ? nullptr : &*it;
 }
@@ -207,11 +207,11 @@ public:
                 const auto        info = spec_info.find(location_spec.spec_name);
                 const std::string spec_name(location_spec.spec_name);
                 RTP_LLM_CHECK_WITH_INFO(info != spec_info.end(), "KVCM read has unknown spec [%s]", spec_name.c_str());
-                const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.group_id);
+                const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.tag);
                 RTP_LLM_CHECK_WITH_INFO(handle != nullptr,
-                                        "KVCM read has no destination handle for key=%zu group=%d",
+                                        "KVCM read has no destination handle for key=%zu tag=%s",
                                         key_idx,
-                                        info->second.group_id);
+                                        info->second.tag.c_str());
                 auto* remote = requests.at(static_cast<size_t>(info->second.tp_rank)).mutable_remote_request();
                 remote->add_group_tags(info->second.tag);
                 remote->add_block_ids(handle->block);
@@ -260,11 +260,11 @@ public:
                     const auto info = spec_info.find(location_spec.spec_name);
                     RTP_LLM_CHECK_WITH_INFO(
                         info != spec_info.end(), "KVCM write has unknown spec [%s]", location_spec.spec_name.c_str());
-                    const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.group_id);
+                    const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.tag);
                     RTP_LLM_CHECK_WITH_INFO(handle != nullptr,
-                                            "KVCM write has no source handle for key=%zu group=%d",
+                                            "KVCM write has no source handle for key=%zu tag=%s",
                                             key_idx,
-                                            info->second.group_id);
+                                            info->second.tag.c_str());
                     const size_t rank   = static_cast<size_t>(info->second.tp_rank);
                     auto*        remote = requests.at(rank).mutable_remote_request();
                     remote->add_group_tags(info->second.tag);
@@ -327,7 +327,7 @@ public:
         }
         setCudaDevice();
         kv_cache_manager::BlockBuffers buffers;
-        if (!group_policy_->genBlockBuffersByTag(tags, blocks, buffers)) {
+        if (!group_policy_->genBlockBuffers(tags, blocks, buffers)) {
             return false;
         }
         if (transfer_pool_count_ > 1) {
@@ -648,7 +648,9 @@ KVCMStorageBackend::~KVCMStorageBackend() = default;
 bool KVCMStorageBackend::initImpl() {
     return impl_->init(
         topology(),
-        [this](int layer_id, int group_id, int block_id) { return convertIndexToBuffer(layer_id, group_id, block_id); },
+        [this](int layer_id, const std::string& tag, int block_id) {
+            return convertIndexToBuffer(layer_id, tag, block_id);
+        },
         devicePools());
 }
 
