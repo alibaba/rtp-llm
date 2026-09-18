@@ -68,3 +68,34 @@ py_test(
         'gpu': 'MI308X-ROCM7',
     },
 )
+
+py_test(
+    name = "test_fastsafetensors_memory",
+    srcs = ["test_fastsafetensors_memory.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "test_fastsafetensors_reserve_wiring",
+    srcs = ["test_fastsafetensors_reserve_wiring.py"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model", "//rtp_llm:sdk"],
+)
+
+py_test(
+    name = "test_fastsafetensors_copyout",
+    srcs = ["test_fastsafetensors_copyout.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "fastsafetensors_copyout_gpu_test",
+    srcs = ["fastsafetensors_copyout_gpu_test.py"],
+    deps = py_test_deps + ["//rtp_llm:fastsafetensors", "//rtp_llm:fast-safetensors"],
+    env = {"GPU_COUNT": "2"},
+    tags = ["multi_device"],
+    target_compatible_with = select({
+        "//:using_cuda13_x86": [],
+        "//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)

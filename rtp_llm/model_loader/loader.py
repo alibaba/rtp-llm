@@ -46,6 +46,7 @@ class ModelLoader:
         database: BaseDatabase,
         load_method: LoadMethod = LoadMethod.AUTO,
         force_cpu_load_weights: bool = False,
+        fastsafetensors_reserve_mb: int = 2048,
         moe_pure_tp_preshard: bool = False,
     ):
         self.model_config = model_config
@@ -78,6 +79,7 @@ class ModelLoader:
             phy2log=self._phy2log,
             exported_device=get_current_device(),
             force_cpu_load_weights=force_cpu_load_weights,
+            fastsafetensors_reserve_mb=fastsafetensors_reserve_mb,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
         )
 
@@ -332,12 +334,41 @@ class ModelLoader:
                 f"doubling model_mem estimate for fastsafetensor memory check"
             )
         max_file_mem = max_file_size / (1024.0**2)
+        reserve_mem = self._load_config.fastsafetensors_reserve_mb
+        transient_mem = self._fastsafetensors_transient_budget_bytes(max_file_size) / (
+            1024.0**2
+        )
         logging.info(
             f"fastsafetensor memory check: free_mem={free_mem:.0f}MB, "
             f"model_mem={model_mem:.0f}MB, max_file_mem={max_file_mem:.0f}MB, "
-            f"enough={(free_mem - model_mem) > (3 * max_file_mem)}"
+            f"transient_mem={transient_mem:.0f}MB, reserve_mem={reserve_mem}MB, "
+            f"enough={(free_mem - model_mem) > transient_mem + reserve_mem}"
         )
-        return (free_mem - model_mem) > (3 * max_file_mem)
+        return (free_mem - model_mem) > transient_mem + reserve_mem
+
+    @staticmethod
+    def _fastsafetensors_transient_budget_bytes(max_file_size: int) -> int:
+        """Return the configured bounded-loader peak or the legacy estimate.
+
+        New fastsafetensors versions expose queue/producer-aware batch-buffer
+        accounting. Keep the historical three-shard estimate when loading an
+        older wheel or when ``max_batch_bytes`` is unset.
+        """
+        legacy_budget = 3 * max_file_size
+        if os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1":
+            return legacy_budget
+        try:
+            from fastsafetensors import load_config
+
+            config = load_config()
+            estimate = getattr(config, "estimated_peak_device_bytes", None)
+            return legacy_budget if estimate is None else estimate
+        except (ImportError, ModuleNotFoundError, AttributeError, ValueError) as error:
+            logging.warning(
+                "failed to read bounded fastsafetensors memory config; "
+                f"use legacy estimate: {error}"
+            )
+            return legacy_budget
 
     @staticmethod
     def _build_stacked_key_config(weight_info_list) -> dict:
@@ -415,6 +446,7 @@ class ModelLoader:
             device,
             True,
             stacked_key_config=stacked_key_config,
+            local_copyout_filter=tensor_to_weight_map.__contains__,
         )
 
         _inline_count = 0
@@ -856,6 +888,7 @@ def get_model_loader(
     database: BaseDatabase,
     load_method: LoadMethod = LoadMethod.AUTO,
     force_cpu_load_weights: bool = False,
+    fastsafetensors_reserve_mb: int = 2048,
     moe_pure_tp_preshard: bool = False,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
@@ -870,5 +903,6 @@ def get_model_loader(
         database,
         load_method=load_method,
         force_cpu_load_weights=force_cpu_load_weights,
+        fastsafetensors_reserve_mb=fastsafetensors_reserve_mb,
         moe_pure_tp_preshard=moe_pure_tp_preshard,
     )

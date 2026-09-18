@@ -106,6 +106,7 @@ class ModelFactory:
             merge_lora=merge_lora,
             device_resource_config=engine_config.device_resource_config,
             force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
+            fastsafetensors_reserve_mb=engine_config.load_config.fastsafetensors_reserve_mb,
             loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
             moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
         )
@@ -212,6 +213,7 @@ class ModelFactory:
                 device_resource_config=engine_config.device_resource_config,
                 vit_config=None,  # Propose model doesn't need vit_config
                 merge_lora=False,  # Propose model doesn't need merge_lora
+                fastsafetensors_reserve_mb=engine_config.load_config.fastsafetensors_reserve_mb,
                 loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
                 moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
                 weight_alias_owner=target_model if alias_names else None,

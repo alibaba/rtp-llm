@@ -242,6 +242,38 @@ class CacheConfigArgumentsTest(TestCase):
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
+
+    def test_fastsafetensors_reserve_env_cli_and_validation(self):
+        from rtp_llm.server.server_args import server_args
+
+        for value in (0, 137, 4096):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {"RTP_FASTSAFETENSORS_RESERVE_MB": str(value)}, clear=True
+            ):
+                config = server_args.setup_args([])
+                self.assertEqual(config.load_config.fastsafetensors_reserve_mb, value)
+                override = server_args.setup_args(
+                    ["--fastsafetensors_reserve_mb", "23"]
+                )
+                self.assertEqual(override.load_config.fastsafetensors_reserve_mb, 23)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                server_args.setup_args([]).load_config.fastsafetensors_reserve_mb, 2048
+            )
+        for invalid in ("-1", "1.5", "true", "bad"):
+            for from_env in (False, True):
+                with self.subTest(invalid=invalid, from_env=from_env), patch.dict(
+                    os.environ,
+                    {"RTP_FASTSAFETENSORS_RESERVE_MB": invalid} if from_env else {},
+                    clear=True,
+                ), patch("sys.stderr", new_callable=io.StringIO):
+                    with self.assertRaises(SystemExit):
+                        server_args.setup_args(
+                            []
+                            if from_env
+                            else ["--fastsafetensors_reserve_mb", invalid]
+                        )
+
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
 
     def test_dsv4_mega_moe_public_choices(self):

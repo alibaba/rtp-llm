@@ -88,6 +88,7 @@ class BaseModel(object):
         merge_lora: bool,
         device_resource_config: Optional[DeviceResourceConfig],
         force_cpu_load_weights: bool = False,
+        fastsafetensors_reserve_mb: int = 2048,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
     ) -> None:
@@ -116,6 +117,7 @@ class BaseModel(object):
         self.merge_lora = merge_lora
         self.device_resource_config = device_resource_config
         self.force_cpu_load_weights = force_cpu_load_weights
+        self.fastsafetensors_reserve_mb = fastsafetensors_reserve_mb
         self.loader_recycle_handles = loader_recycle_handles
         self.moe_pure_tp_preshard = moe_pure_tp_preshard
         self.weight = None
@@ -306,6 +308,7 @@ class BaseModel(object):
         merge_lora: bool,
         device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
+        fastsafetensors_reserve_mb: int = 2048,
         skip_python_model: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
@@ -339,6 +342,7 @@ class BaseModel(object):
             merge_lora=merge_lora,
             device_resource_config=device_resource_config,
             force_cpu_load_weights=force_cpu_load_weights,
+            fastsafetensors_reserve_mb=fastsafetensors_reserve_mb,
             loader_recycle_handles=loader_recycle_handles,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
         )
@@ -510,5 +514,6 @@ class BaseModel(object):
             database,
             load_method=self.load_method,
             force_cpu_load_weights=self.force_cpu_load_weights,
+            fastsafetensors_reserve_mb=self.fastsafetensors_reserve_mb,
             moe_pure_tp_preshard=self.moe_pure_tp_preshard,
         )
