@@ -104,6 +104,12 @@ cc_test(
 cc_test_wrapper(
     name = "cache_store_async_writer_test",
     srcs = ["CacheStoreAsyncWriterTest.cpp"],
+    # AsyncExecutionWithDeviceId asserts a non-default GPU, so reserve both devices.
+    env = select({
+        "@//:using_cuda": {"GPU_COUNT": "2"},
+        "@//:using_rocm": {"GPU_COUNT": "2"},
+        "//conditions:default": {},
+    }),
     # Own dep list rather than exec_ops_test_deps: that one is unconditionally
     # CUDA-only. cache_store_async_writer is deliberately under-linked, so each
     # platform has to supply the provider for its runtime* symbols.
@@ -131,8 +137,8 @@ cc_test_wrapper(
     # dies with "libnvidia-ml.so.1: cannot open shared object file" (exit 127),
     # as it did in run 69714248.
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "A10"},
-        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "@//:using_cuda": {"gpu": "A10", "gpu_count": "2"},
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7", "gpu_count": "2"},
         "//conditions:default": {},
     }),
 )
