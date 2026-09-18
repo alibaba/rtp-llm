@@ -10,13 +10,17 @@ from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 # Overridable for MLA checkpoints (deepseek2); CP mode A and MLA mode B need one.
 MODEL_TYPE = os.environ.get("PD_MODEL_TYPE", "qwen_3")
-# Every server here uses small KV blocks so the 32/64-token cases span several
-# blocks; the BUILD-level 2048 would keep each case inside one block and leave
-# block-level routing (peer assembly, CP page-level round robin) unexercised.
-SEQ_SIZE_PER_BLOCK = 16
+# Draft model registry name for the MTP variants, overridable per checkpoint family.
+SP_MODEL_TYPE = os.environ.get("PD_SP_MODEL_TYPE", "qwen35_dense_mtp")
+# Small blocks keep the 32/64-token cases spanning several blocks (exercises
+# block-level routing); hybrid linear+full checkpoints need a larger block
+# because their linear group block must not exceed the full group block.
+SEQ_SIZE_PER_BLOCK = int(os.environ.get("PD_SEQ_SIZE_PER_BLOCK", "16"))
 
 # Variant table: each side's (pp, tp) width. decode_gpus = decode_pp*decode_tp.
 #   sym:              prefill pp2tp1 / decode pp2tp1 - symmetric PP stage routing
+#   sym_mtp1..4: sym layout + MTP, proposal width 1..4. P hands off s0+d1
+#                     only; width>2 pads on D, so sp>=2 exercises that path.
 #   asym:             prefill pp2tp1 / decode pp2tp2 - decode TP finer, sub-slice read
 #   conv:             prefill pp2tp2 / decode pp2tp1 - prefill TP finer, peer assembly
 #   pp2_tp2:          prefill pp2tp2 / decode pp2tp2 - TP>1 both sides, no CP (control)
@@ -41,6 +45,34 @@ SEQ_SIZE_PER_BLOCK = 16
 # stays plain - whole-block MLA KV makes the two layouts byte-identical.
 VARIANTS = {
     "sym": {"prefill_pp": 2, "prefill_tp": 1, "decode_pp": 2, "decode_tp": 1},
+    "sym_mtp1": {
+        "prefill_pp": 2,
+        "prefill_tp": 1,
+        "decode_pp": 2,
+        "decode_tp": 1,
+        "sp": 1,
+    },
+    "sym_mtp2": {
+        "prefill_pp": 2,
+        "prefill_tp": 1,
+        "decode_pp": 2,
+        "decode_tp": 1,
+        "sp": 2,
+    },
+    "sym_mtp3": {
+        "prefill_pp": 2,
+        "prefill_tp": 1,
+        "decode_pp": 2,
+        "decode_tp": 1,
+        "sp": 3,
+    },
+    "sym_mtp4": {
+        "prefill_pp": 2,
+        "prefill_tp": 1,
+        "decode_pp": 2,
+        "decode_tp": 1,
+        "sp": 4,
+    },
     "asym": {"prefill_pp": 2, "prefill_tp": 1, "decode_pp": 2, "decode_tp": 2},
     "conv": {"prefill_pp": 2, "prefill_tp": 2, "decode_pp": 2, "decode_tp": 1},
     "pp2_tp2": {"prefill_pp": 2, "prefill_tp": 2, "decode_pp": 2, "decode_tp": 2},
@@ -203,6 +235,7 @@ class PdPPTest(unittest.TestCase):
         prefill_cp=1,
         kv_cache_sharded=False,
         decode_prefill_cp=False,
+        sp=0,
     ):
         prefill_port = MagaServerManager.get_free_port()
         decode_port = MagaServerManager.get_free_port()
@@ -237,6 +270,22 @@ class PdPPTest(unittest.TestCase):
         declares the peer as CP (PREFILL_CP) and mirrors the CP shape config
         (prefill_cp_size / kv_cache_sharded) from its own settings.
         """
+        # Both sides need the draft model: P seeds (writes MTP KV rows 0..L-1,
+        # emits d1), D verifies + commits + chains; sp_act_type must match BF16.
+        sp_args = []
+        if sp:
+            sp_args = [
+                "--sp_type",
+                "mtp",
+                "--sp_model_type",
+                SP_MODEL_TYPE,
+                "--sp_checkpoint_path",
+                checkpoint,
+                "--sp_act_type",
+                "BF16",
+                "--gen_num_per_cycle",
+                str(sp),
+            ]
         prefill_args = f"--pp_size {prefill_pp} --tp_size {prefill_tp} --world_size {prefill_ws} {common_pd}"
         if prefill_cp > 1:
             prefill_args += (
@@ -265,6 +314,7 @@ class PdPPTest(unittest.TestCase):
             smoke_args_str=shlex.join(
                 base_smoke_args()
                 + shlex.split(prefill_args)
+                + sp_args
                 + ["--role_type", "PREFILL"]
             ),
         )
@@ -280,7 +330,10 @@ class PdPPTest(unittest.TestCase):
             port=decode_port,
             role_name=f"decode_pp{decode_pp}",
             smoke_args_str=shlex.join(
-                base_smoke_args() + shlex.split(decode_args) + ["--role_type", "DECODE"]
+                base_smoke_args()
+                + shlex.split(decode_args)
+                + sp_args
+                + ["--role_type", "DECODE"]
             ),
         )
         try:
@@ -331,6 +384,7 @@ class PdPPTest(unittest.TestCase):
         prefill_cp = variant.get("prefill_cp", 1)
         kv_cache_sharded = variant.get("kv_cache_sharded", False)
         decode_prefill_cp = variant.get("decode_prefill_cp", False)
+        sp = variant.get("sp", 0)
         if decode_prefill_cp:
             # MLA-only: with MHA the slice plan assumes a rotating prefill.
             self.assertNotEqual(
@@ -359,6 +413,7 @@ class PdPPTest(unittest.TestCase):
             prefill_cp=prefill_cp,
             kv_cache_sharded=kv_cache_sharded,
             decode_prefill_cp=decode_prefill_cp,
+            sp=sp,
         )
         for (prompt, _), base, got in zip(self.cases(), baseline, actual):
             if (prefill_tp != 1 and prefill_tp != decode_tp) or prefill_cp > 1:
@@ -384,6 +439,17 @@ class PdPPTest(unittest.TestCase):
                     base["output_ids"],
                     f"PD diverges from PDFUSION baseline on: {prompt[:40]}",
                 )
+        if sp:
+            # Speculative decoding must actually engage: some multi-token case
+            # has to accept at least one draft (iter_count < emitted tokens).
+            self.assertTrue(
+                any(
+                    got["aux_info"]["iter_count"] < len(got["output_ids"][0])
+                    for (prompt, tokens), got in zip(self.cases(), actual)
+                    if tokens > 1
+                ),
+                f"MTP sp={sp} accepted no draft token on any multi-token case",
+            )
 
 
 if __name__ == "__main__":
