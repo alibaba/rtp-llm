@@ -111,7 +111,7 @@ class DefaultBatchDispatcherTest {
         }
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(inv -> {
                     sent.add(inv.getArgument(2));
                     return CompletableFuture.completedFuture(ackResponse(92L, List.of(501L, 502L)));
@@ -300,7 +300,7 @@ class DefaultBatchDispatcherTest {
         when(secondSpan.storeInContext(any(io.opentelemetry.context.Context.class))).thenCallRealMethod();
         first.ctx().setTraceContext(io.opentelemetry.context.Context.root().with(firstSpan));
         second.ctx().setTraceContext(io.opentelemetry.context.Context.root().with(secondSpan));
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(93L, List.of(601L, 602L))));
         CompletableFuture<Void> verified = new CompletableFuture<>();
         AtomicInteger remaining = new AtomicInteger(2);
@@ -329,7 +329,7 @@ class DefaultBatchDispatcherTest {
         var span = mock(io.opentelemetry.api.trace.Span.class);
         when(span.storeInContext(any(io.opentelemetry.context.Context.class))).thenCallRealMethod();
         item.ctx().setTraceContext(io.opentelemetry.context.Context.root().with(span));
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(94L, List.of(999L))));
         submit(List.of(item), 94L, 100, "malformed", callback);
         assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS));
