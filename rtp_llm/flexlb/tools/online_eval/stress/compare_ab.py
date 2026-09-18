@@ -56,6 +56,11 @@ import json
 import os
 import sys
 
+from canvas_report_render_html import render as render_charts
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from experiment_archive import create_archive
+
 # ---------------------------------------------------------------------------
 # Significance thresholds per metric category.
 #
@@ -963,7 +968,7 @@ h2.t4 {{ color: #666; border-bottom: 2px solid #999; }}
 """
 
 
-def render_html(payload):
+def render_html(payload, chart_link=None):
     tier_titles = {1: TIER1_TITLE, 2: TIER2_TITLE, 3: TIER3_TITLE, 4: TIER4_TITLE}
     sections = []
     for tier in (1, 2, 3, 4):
@@ -1007,7 +1012,7 @@ def render_html(payload):
         hi=payload["steady_window"]["hi_s"],
         src=payload["steady_window"]["source"],
         floor=payload["noise_floor"],
-        warnings=warn_html,
+        warnings=warn_html + (f'<p><a href="{chart_link}">查看 A/B 时序曲线</a></p>' if chart_link else ""),
         sections="\n".join(sections),
         gate_cls="gate-pass" if passed else "gate-trip",
         gate_text=(
@@ -1016,6 +1021,48 @@ def render_html(payload):
             else "TRIPPED — 显著且关键区非空，必须人工审"
         ),
     )
+
+
+def build_curve_spec(run_a, run_b, lo, hi):
+    """Pair matching samples on a shared relative-time axis; gaps stay null."""
+    sources = (
+        ("per_second", "success", "成功 QPS", "req/s"),
+        ("per_second", "sched_p95", "调度耗时 P95", "ms"),
+        ("per_second", "ttft_p95", "首 token 耗时 P95", "ms"),
+        ("mock_tps_ts", "context_tps", "Prefill 计算 TPS", "tokens/s"),
+        ("mock_tps_ts", "generate_tps", "Decode 生成 TPS", "tokens/s"),
+        ("cache_hit_ts", "engine_token", "引擎 token 命中比例", "ratio"),
+    )
+    panels = []
+    for source, key, title, unit in sources:
+        rows = [run_a["aggregate"].get(source) or [], run_b["aggregate"].get(source) or []]
+        series_maps = [
+            {float(r["t"]): r[key] for r in side if key in r and r.get("t") is not None}
+            for side in rows
+        ]
+        axis = sorted(set(series_maps[0]) | set(series_maps[1]))
+        if not axis:
+            continue
+        panels.append({
+            "id": f"ab_{source}_{key}", "title": title,
+            "caption": f"同一相对时间轴；稳态窗 {lo:g}–{hi:g}s；空窗保留为空值",
+            "type": "line", "timeX": True, "x": [str(t) for t in axis],
+            "xNums": axis, "unit": unit,
+            "series": [
+                {"name": name, "data": [values.get(t) for t in axis], "color": color}
+                for name, values, color in (
+                    ("A · baseline", series_maps[0], "#1677ff"),
+                    ("B · candidate", series_maps[1], "#f5222d"),
+                )
+            ],
+        })
+    return {
+        "run_id": "ab", "title": "A/B 时序对比",
+        "subtitle": f"A: {run_a['label']} · B: {run_b['label']}",
+        "timeAxis": {"min": 0, "max": max((max(p["xNums"]) for p in panels), default=hi)},
+        "meta": {"sampling": "两次运行按相对秒对齐；缺采样不补零"},
+        "panels": panels,
+    }
 
 
 def build_payload(
@@ -1111,6 +1158,8 @@ def parse_args(argv=None):
         action="store_true",
         help="also emit a self-contained ab_compare.html table",
     )
+    ap.add_argument("--archive", default=None,
+                    help="also save both runs and comparison outputs in one compressed ZIP")
     ap.add_argument(
         "--noise-floor",
         type=float,
@@ -1123,6 +1172,9 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.archive and args.out == "-":
+        print("ERROR: --archive requires a file --out", file=sys.stderr)
+        return 2
     try:
         run_a = resolve_run(args.run_a)
         run_b = resolve_run(args.run_b)
@@ -1164,9 +1216,25 @@ def main(argv=None):
             )
         )
         os.makedirs(os.path.dirname(os.path.abspath(html_path)), exist_ok=True)
+        curve_path = os.path.join(os.path.dirname(os.path.abspath(html_path)), "ab_curves.html")
+        with open(curve_path, "w", encoding="utf-8") as fh:
+            fh.write(render_charts(build_curve_spec(run_a, run_b, lo, hi)))
         with open(html_path, "w", encoding="utf-8") as fh:
-            fh.write(render_html(payload))
+            fh.write(render_html(payload, chart_link="ab_curves.html"))
         print(f"HTML report  -> {html_path}")
+        print(f"A/B curves   -> {curve_path}")
+
+    if args.archive:
+        sources = {
+            "run_a": os.path.dirname(run_a["aggregate_path"]),
+            "run_b": os.path.dirname(run_b["aggregate_path"]),
+            "comparison": args.out,
+        }
+        if args.html:
+            sources["curves"] = curve_path
+            sources["report"] = html_path
+        create_archive(args.archive, sources, kind="ab")
+        print(f"Experiment ZIP -> {args.archive}")
 
     return payload["gate"]["exit_code"]
 

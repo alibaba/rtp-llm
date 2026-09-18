@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import html
 import json
+from pathlib import Path
 
 # tone → 数值色（KPI 卡）
 KPI_TONE_COLOR = {
@@ -160,15 +161,17 @@ def render(spec):
     }
 
     page_title = html.escape(title)
-    return _TEMPLATE.replace("__PAGE_TITLE__", page_title).replace(
-        "__SPEC_JSON__", json.dumps(payload, ensure_ascii=False)
-    )
+    interaction = Path(__file__).with_name("legend_interaction.js").read_text(encoding="utf-8")
+    return (_TEMPLATE.replace("__PAGE_TITLE__", page_title)
+            .replace("__SPEC_JSON__", json.dumps(payload, ensure_ascii=False))
+            .replace("__LEGEND_INTERACTION_JS__", interaction))
 
 
 _TEMPLATE = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"/>
 <title>__PAGE_TITLE__</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script>__LEGEND_INTERACTION_JS__</script>
 <style>
 :root{
   --bg:#f5f6fa; --card:#fff; --fg:rgba(0,0,0,0.85); --sub:rgba(0,0,0,0.55);
@@ -240,7 +243,7 @@ h1{margin:0 0 6px;font-size:22px;overflow-wrap:anywhere}
   <div class="detail-body" id="detail-body"></div>
 </details>
 <div class="grid" id="grid"></div>
-<div class="hint" id="hint">Chart.js 4.4.7 · legend 单击 = 切换单条 ｜ 双击 = 隔离该条（再双击恢复全显）｜ tooltip 随鼠标移动 ｜ 隐藏后 y 轴自适应。</div>
+<div class="hint" id="hint">图例单击切换曲线；双击隔离曲线，只剩一条时双击恢复全显。每张图也有“全选”按钮。</div>
 <script>
 const SPEC = __SPEC_JSON__;
 document.getElementById('title').textContent = SPEC.summary.title;
@@ -370,11 +373,7 @@ if (SPEC.summary.kpis.length)
 })();
 // y 轴自适应：只按 legend 可见系列重算 max（beginAtZero），legend/双击后 update()。
 // 时间轴面板数据点为 {x, y}（linear x 轴），此处兼容两种形态。
-// 双击隔离：单击 = toggle 单条；双击 = 隔离该条（只留这条）；再双击同一条 = 恢复全显。
-// 实现：单击时先保存"是否处于隔离态"快照（$snap.wasIso）再 toggle；
-// 双击第二击读快照（而非当前状态，因为第一击的 toggle 已改变状态）判断该恢复还是该隔离。
-// 死开关：SHOW_SELECT_ALL 控制是否显示面板右上角"⟲ 全选"按钮（默认关）。
-const SHOW_SELECT_ALL = false;
+// 图例手势由 legend_interaction.js 统一处理；本层只负责曲线和 y 轴。
 function visibleMax(chart){
   let m = 0; const ds = chart.data.datasets;
   chart.data.datasets.forEach((d,i)=>{
@@ -411,6 +410,7 @@ SPEC.panels.forEach(p=>{
   // 负值段被轴裁剪，数据保留）；tooltip 按 x 最近点联动。非时间轴面板
   // 保持类目轴 + index 联动。
   const isTime = !!(p.timeX && TIME_AXIS && p.xNums && p.xNums.length);
+  let legendController;
   const chart = new Chart(ctx,{
     type: p.type==='bar'?'bar':'line',
     data:{
@@ -430,30 +430,7 @@ SPEC.panels.forEach(p=>{
       plugins:{
         legend:{
           position:'bottom', labels:{boxWidth:10,font:{size:11}},
-          onClick:(e,item,legend)=>{
-            const ch=legend.chart; const idx=item.datasetIndex;
-            const now=Date.now();
-            const lastIdx = ch.$lc ? ch.$lc.idx : -1;
-            const lastTime = ch.$lc ? ch.$lc.time : 0;
-            const isDbl = (lastIdx===idx) && (now-lastTime<400);
-            ch.$lc = {idx, time: now};
-            if(isDbl && ch.$snap){
-              const wasIso = ch.$snap.wasIso;
-              ch.$snap = null;
-              if(wasIso){
-                ch.data.datasets.forEach((_,i)=>{ch.getDatasetMeta(i).hidden=false;});
-              }else{
-                ch.data.datasets.forEach((_,i)=>{ch.getDatasetMeta(i).hidden=(i!==idx);});
-              }
-            }else{
-              const others = ch.data.datasets.map((_,i)=>i).filter(i=>i!==idx);
-              const wasIso = !ch.getDatasetMeta(idx).hidden && others.every(i=>ch.getDatasetMeta(i).hidden);
-              ch.$snap = {wasIso};
-              const meta = ch.getDatasetMeta(idx);
-              meta.hidden = meta.hidden===null ? !ch.data.datasets[idx].hidden : !meta.hidden;
-            }
-            rescaleY(ch);
-          }
+          onClick:(e,item)=>legendController.click(item.datasetIndex)
         },
         tooltip:{callbacks:{
           title: isTime ? (items=>items.length ? ('t='+items[0].parsed.x+' s') : '') : undefined,
@@ -470,19 +447,17 @@ SPEC.panels.forEach(p=>{
       }
     }
   });
+  legendController = FlexLegend.controller(chart, rescaleY);
   // 初次 render 后按当前可见系列锁一次 max
   rescaleY(chart);
-  if (SHOW_SELECT_ALL){
+  {
     const btn=document.createElement('span');
     btn.textContent='⟲ 全选';
     btn.title='一键恢复该面板全部序列';
     btn.style.cssText='position:absolute;top:34px;right:10px;font-size:10px;color:#888;cursor:pointer;padding:2px 6px;border:1px solid #ddd;border-radius:10px;background:rgba(255,255,255,.9);z-index:5;user-select:none;transition:all .15s';
     btn.onmouseenter=()=>{btn.style.color='#333';btn.style.borderColor='#999';};
     btn.onmouseleave=()=>{btn.style.color='#888';btn.style.borderColor='#ddd';};
-    btn.onclick=()=>{
-      chart.data.datasets.forEach((_,i)=>{chart.getDatasetMeta(i).hidden=false;});
-      rescaleY(chart);
-    };
+    btn.onclick=()=>legendController.all();
     wrap.style.position='relative';
     wrap.appendChild(btn);
   }

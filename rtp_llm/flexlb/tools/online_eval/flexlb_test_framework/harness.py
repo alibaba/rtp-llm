@@ -80,6 +80,7 @@ from flexlb_cfg import (  # noqa: E402
     render_env,
     render_process_config,
 )
+from mode_profiles import resolve_address_plan  # noqa: E402
 
 MAVEN_PROFILES = "opensource,!internal"
 JAVA_MODULE_OPTS = [
@@ -1159,7 +1160,9 @@ class EnvManager:
             # macOS lo0 only has 127.0.0.1 (no whole 127/8 routing like Linux),
             # so the unique-IP advertisement (127.1.0.x) is unreachable there.
             "--unique-engine-ips",
-            "false" if sys.platform == "darwin" else "true",
+            str(resolve_address_plan(
+                "functional", unique_loopback_supported=sys.platform != "darwin"
+            )["unique_engine_ips"]).lower(),
             "--event-loop-threads",
             str(spec.event_loop_threads),
             "--completion-threads",

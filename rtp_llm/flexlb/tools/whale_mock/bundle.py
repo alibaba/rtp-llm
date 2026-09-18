@@ -17,6 +17,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent / "online_eval"))
 from flexlb_cfg import render_env, render_process_config
+from mode_profiles import resolve_address_plan, resolve_mode
 
 
 def run():
@@ -46,6 +47,10 @@ def run():
         ):
             raise ValueError(f"{role} must be a positive integer")
     cfg.update(overrides)
+    profile = (resolve_mode("whale_embedded", cfg["master_mode"])["master_profile"]
+               if "master_mode" in cfg else cfg["profile"])
+    if "profile" in cfg and cfg["profile"] != profile:
+        raise ValueError("master_mode and profile disagree")
     fetch_output_stream = os.environ.get("FETCH_OUTPUT_STREAM", "0")
     if fetch_output_stream not in {"0", "1"}:
         raise ValueError("FETCH_OUTPUT_STREAM must be 0 or 1")
@@ -54,7 +59,7 @@ def run():
     runtime = Path(os.environ.get("MOCK_BUNDLE_RUN_DIR", "/home/admin/ai-whale/mock"))
     runtime.mkdir(parents=True, exist_ok=False)
     jars = Path(os.environ.get("MOCK_BUNDLE_JAR_DIR", ROOT / "jars"))
-    raw = os.environ.get("FLEXLB_CONFIG") or render_env(cfg["profile"])
+    raw = os.environ.get("FLEXLB_CONFIG") or render_env(profile)
     legacy = os.environ.get("MOCK_BUNDLE_LEGACY_MASTER") == "1"
     mock_raw = mock_formula_config(raw, legacy,
                                    os.environ.get("MOCK_PREFILL_EXECUTION_FORMULA"))
@@ -62,7 +67,7 @@ def run():
     dispatcher = json.loads(raw).get("dispatcher", {}).get("type", "BATCH")
     (runtime / "master-config.json").write_text(
         render_process_config(
-            cfg["profile"], jvm_heap=cfg["master_heap"], raw_config=mock_raw
+            profile, jvm_heap=cfg["master_heap"], raw_config=mock_raw
         )
     )
     performance_path = (cfg_path.parent / cfg["performance"]).resolve()
@@ -122,6 +127,11 @@ def run():
         pod_ip = os.environ.get("POD_IP") or socket.gethostbyname(socket.gethostname())
         if pod_ip.startswith("127.") or pod_ip == "0.0.0.0":
             raise ValueError("bundle requires an advertised Pod IP")
+        address_plan = resolve_address_plan(
+            "whale_embedded",
+            external_engine_clients=(dispatcher == "NON_BATCH" or fetch_output_stream == "1"),
+            pod_ip=pod_ip,
+        )
         # With output fetching enabled the frontend owns continuation and completion.
         mock = start(
             "mock",
@@ -154,7 +164,7 @@ def run():
                 "--host",
                 pod_ip,
                 "--unique-engine-ips",
-                str(dispatcher != "NON_BATCH" and fetch_output_stream == "0").lower(),
+                str(address_plan["unique_engine_ips"]).lower(),
                 "--auto-fetch",
                 str(fetch_output_stream == "0").lower(),
                 "--endpoint-file",

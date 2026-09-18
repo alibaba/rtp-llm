@@ -1,0 +1,31 @@
+schema_version: 1
+
+# Runtime selects only transport, resource ownership, and observation defaults.
+# Master mode selects the existing, fully validated FlexLB config profile.
+runtime_modes:
+  functional:
+    address: loopback_per_engine
+    features: {workload: case, orchestration: case, collector: local, assertion: case}
+    observation: {jsonl: bounded, kmonitor: false, report: true}
+  scenario:
+    address: loopback_per_engine
+    features: {workload: template, orchestration: scenario, collector: local, assertion: scenario}
+    observation: {jsonl: bounded, kmonitor: false, report: true}
+  stress:
+    address: loopback_per_engine
+    features: {workload: replay_or_synthetic, orchestration: stress, collector: local, assertion: aggregate}
+    observation: {jsonl: sampled, kmonitor: false, report: true}
+  whale_embedded:
+    address: pod_when_external
+    features: {workload: external, orchestration: whale, collector: kmonitor, assertion: none}
+    observation: {jsonl: false, kmonitor: true, report: false}
+  whale_independent:
+    address: pod_per_engine
+    features: {workload: external, orchestration: whale, collector: kmonitor, assertion: none}
+    observation: {jsonl: false, kmonitor: true, report: false}
+
+master_modes:
+  sb: {profile: single-batch, decision: SINGLE, dispatcher: BATCH}
+  sn: {profile: single-nonbatch, decision: SINGLE, dispatcher: NON_BATCH}
+  wb: {profile: batch-window, decision: FIXED_WINDOW, dispatcher: BATCH}
+  wn: {profile: window-nonbatch, decision: FIXED_WINDOW, dispatcher: NON_BATCH}

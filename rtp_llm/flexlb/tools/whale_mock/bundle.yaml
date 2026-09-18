@@ -1,6 +1,6 @@
 # Opt-in Whale deployment only. One master and one mock JVM share a CPU Pod.
 # All logical engines retain independent cache, queue and lifecycle state.
-profile: single-batch
+master_mode: sb
 prefill: 48
 decode: 192
 decode_max_concurrency: 128
