@@ -1512,6 +1512,36 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
     return common_blocks_total + batch_size * extra_blocks_total;
 }
 
+std::vector<int> CoordinatorCacheManager::estimateSingleSequencePeakNeedBlocksByPool(
+    const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+    int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, bool enable_reuse_cache) const {
+    // This admission API deliberately excludes batch fan-out and CP sharding.
+    // Those paths retain the existing separated scheduler behavior.
+    if (!batch_kv_cache_resource || batch_kv_cache_resource->batchSize() != 1
+        || (cp_slot_mapper_ && cp_slot_mapper_->isSharded())) {
+        return {};
+    }
+    const bool fresh = batch_kv_cache_resource->curBlocksNum() == 0;
+    if (!fresh && batch_kv_cache_resource->groupNums() != static_cast<int>(kv_cache_groups_.size())) {
+        return {};
+    }
+    common_seq_len = std::clamp(common_seq_len, 0, seq_len);
+    remaining_tokens = std::max(remaining_tokens, 0);
+    std::vector<int> needs;
+    needs.reserve(kv_cache_groups_.size());
+    for (size_t gid = 0; gid < kv_cache_groups_.size(); ++gid) {
+        const auto& group = kv_cache_groups_[gid];
+        const int need = fresh ?
+            group->estimateInitialBatchPeakNeedBlocks(
+                seq_len, common_seq_len, remaining_tokens, reserve_step, enable_reuse_cache, 1) :
+            group->estimatePeakNeedBlocks(seq_len,
+                                         batch_kv_cache_resource->cacheResource(0).blocks(group->tag()),
+                                         remaining_tokens, reserve_step, enable_reuse_cache);
+        needs.push_back(std::max(need, 0));
+    }
+    return needs;
+}
+
 int CoordinatorCacheManager::estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
                                                     int                    seq_len,
                                                     int                    remaining_tokens,

@@ -73,6 +73,10 @@ public:
     virtual int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
     // Common-prefix growth is charged once; non-common growth is charged once per target sequence.
+    std::vector<int> estimateSingleSequencePeakNeedBlocksByPool(
+    const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+    int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, bool enable_reuse_cache) const;
+
     int estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                     int                            seq_len,
                                     int                            common_seq_len,

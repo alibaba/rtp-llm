@@ -89,6 +89,8 @@ private:
                                   size_t                   admitted_sequence_count,
                                   const GenerateStreamPtr& candidate,
                                   size_t                   running_token_reserve) const;
+    bool   fitsMixedKVCapacity(const GenerateStreamPtr&            candidate,
+                               const std::list<GenerateStreamPtr>* additionally_admitted = nullptr) const;
     size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
     size_t prefillSeqLenWithCache(const GenerateStreamPtr& stream) const;
     size_t prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
@@ -145,6 +147,10 @@ private:
     // Context-parallel prefill can opt into single-request admission until
     // the model-side path supports per-request layouts.
     const bool cp_force_single_prefill_ = false;
+    // Opt-in mixed prefill+decode admission for the Qwen3.5-VL MoE model in
+    // the unified PDFUSION role. It is disabled for context parallel because
+    // that model path still requires pure-prefill batches.
+    const bool enable_mixed_continuous_batching_ = false;
     // Soft per-forward prefill quota, excluding reused prefixes and pending
     // cache loads/waiters. CP padding is included. 0 disables it.
     const size_t max_batch_tokens_without_cache_ = 0;
