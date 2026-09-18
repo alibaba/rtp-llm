@@ -510,6 +510,43 @@ TEST_F(KVCacheManagerTest, RankAgreementUsesMinimumAndFfnBaseline) {
     EXPECT_ANY_THROW(KVCacheManager::selectConfirmedBlockNum(nullptr, 0, false));
 }
 
+TEST_F(KVCacheManagerTest, FfnServiceBaselineOneCreatesSentinelOnlyPool) {
+    auto              config = makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                           /*block_num=*/1,
+                                           /*tokens_per_block=*/4,
+                                           DataType::TYPE_FP16,
+                                           /*local_head_num_kv=*/1,
+                                           /*size_per_head=*/2);
+    ParallelismConfig parallelism;
+    parallelism.ffn_disaggregate_config.enable_ffn_disaggregate = true;
+    parallelism.ffn_disaggregate_config.is_ffn_rank             = true;
+
+    auto manager = std::make_shared<KVCacheManager>(config,
+                                                    /*warmup=*/false,
+                                                    /*metrics_reporter=*/nullptr,
+                                                    KVCacheConfig{},
+                                                    parallelism);
+    ASSERT_TRUE(manager->init());
+    ASSERT_EQ(manager->allocator_->groupBlockPools().size(), 1u);
+    const auto& pool = manager->allocator_->groupBlockPools().front();
+    EXPECT_EQ(manager->cacheConfig().block_num, 1u);
+    EXPECT_EQ(pool->totalBlocksNum(), 0u);
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    EXPECT_NE(pool->getBaseAddress(), nullptr);
+    EXPECT_NE(pool->convertIndexToAddr(/*global_layer_id=*/0, /*block=*/0).kv_addr, nullptr);
+}
+
+TEST_F(KVCacheManagerTest, OrdinaryBaselineOneStillRejectsSentinelOnlyPool) {
+    auto config  = makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                           /*block_num=*/1,
+                                           /*tokens_per_block=*/4,
+                                           DataType::TYPE_FP16,
+                                           /*local_head_num_kv=*/1,
+                                           /*size_per_head=*/2);
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    EXPECT_ANY_THROW(manager->init());
+}
+
 TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudget) {
     ModelConfig target;
     target.num_layers                   = 1;

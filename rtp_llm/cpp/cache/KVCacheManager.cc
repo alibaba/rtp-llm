@@ -281,12 +281,13 @@ bool KVCacheManager::init() {
         return false;
     }
 
-    allocator_ = std::make_shared<KVCacheAllocator>(config_,
-                                                    AllocationType::DEVICE,
-                                                    metrics_reporter_,
-                                                    kv_cache_config_.reserve_block_ratio,
-                                                    pd_sep_config_.role_type,
-                                                    warmup_);
+    allocator_ =
+        std::make_shared<KVCacheAllocator>(config_,
+                                           AllocationType::DEVICE,
+                                           metrics_reporter_,
+                                           kv_cache_config_.reserve_block_ratio,
+                                           pd_sep_config_.role_type,
+                                           warmup_ || parallelism_config_.ffn_disaggregate_config.is_ffn_service());
 
     if (use_device_malloc_block_pool_) {
         RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use raw device malloc KV cache block-pool backing");

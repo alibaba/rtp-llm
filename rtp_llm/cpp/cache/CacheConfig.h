@@ -237,20 +237,49 @@ public:
     }
 
     size_t blockSizeBytesForGroup(size_t gid) const {
-        return topology().blockSizeBytesForGroup(gid);
+        size_t      total = 0;
+        const auto& tag   = tagForGroup(gid);
+        for (int layer_id : layerIdsForGroup(gid)) {
+            const auto&  physical_group = physicalGroupForLayer(layer_id, tag);
+            const size_t kv_bytes       = physical_group.kvBlockStrideBytes();
+            const size_t scale_bytes    = physical_group.kvScaleStrideBytes();
+            RTP_LLM_CHECK_WITH_INFO(scale_bytes <= std::numeric_limits<size_t>::max() - kv_bytes,
+                                    "CacheConfig tag=%s layer=%d stride overflow",
+                                    tag.c_str(),
+                                    layer_id);
+            const size_t layer_bytes = kv_bytes + scale_bytes;
+            RTP_LLM_CHECK_WITH_INFO(layer_bytes <= std::numeric_limits<size_t>::max() - total,
+                                    "CacheConfig tag=%s block size overflow",
+                                    tag.c_str());
+            total += layer_bytes;
+        }
+        return total;
     }
 
     size_t totalGroupBlockSizeBytes() const {
-        return topology().totalGroupBlockSizeBytes();
+        size_t total = 0;
+        for (size_t gid = 0; gid < static_cast<size_t>(groupNums()); ++gid) {
+            const size_t group_bytes = blockSizeBytesForGroup(gid);
+            RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - total,
+                                    "CacheConfig total block size overflow");
+            total += group_bytes;
+        }
+        return total;
     }
 
     size_t layerBlockStrideBytes(size_t layer_id) const {
         size_t total = 0;
         for (const auto& group : groupsForLayer(static_cast<int>(layer_id))) {
-            total += group.get().kvBlockStrideBytes() + group.get().kvScaleStrideBytes();
+            const auto& physical_group = physicalGroupForLayer(static_cast<int>(layer_id), group.get().tag);
+            total += physical_group.kvBlockStrideBytes() + physical_group.kvScaleStrideBytes();
         }
         return total;
     }
+
+    // The merged topology owns logical tag membership, while each MTP child
+    // remains the authority for its physical byte layout. Resolve that owner
+    // on demand instead of copying a second geometry table into the topology.
+    const GroupBase& physicalGroupForLayer(int layer_id, const std::string& tag) const;
 
     uint32_t localKvHeadNumForGroup(size_t gid) const {
         return topology().groupById(gid).localKvHeadNum();

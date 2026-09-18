@@ -73,13 +73,10 @@ DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     
             const auto   layer_ids   = group_set.topologyPtr()->layerIdsForGroup(group_id);
             auto&        device_pool = *device_pools[member_group_id];
             for (size_t local_layer_index = 0; local_layer_index < layer_ids.size(); ++local_layer_index) {
-                const size_t kv_bytes        = group_base.kvBlockStrideBytes();
-                const size_t scale_bytes     = group_base.kvScaleStrideBytes();
-                const size_t layer_bytes     = kv_bytes + scale_bytes;
-                auto*        layer_host_addr = static_cast<uint8_t*>(host.base) + host_offset;
-                const auto   buffers         = device_pool.convertIndexToBuffer(static_cast<int>(local_layer_index),
+                auto*      layer_host_addr = static_cast<uint8_t*>(host.base) + host_offset;
+                const auto buffers         = device_pool.convertIndexToBuffer(static_cast<int>(local_layer_index),
                                                                       device_blocks[member_group_id]);
-                const auto   append_tile     = [&](size_t buffer_index, size_t logical_bytes, size_t layer_offset) {
+                const auto append_tile     = [&](size_t buffer_index, size_t logical_bytes, size_t layer_offset) {
                     if (logical_bytes == 0) {
                         return;
                     }
@@ -97,11 +94,26 @@ DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     
                                                                  member_group_id,
                                                                  local_layer_index});
                 };
-                append_tile(0, kv_bytes, 0);
-                append_tile(1, scale_bytes, kv_bytes);
-                host_offset += layer_bytes;
+                size_t layer_offset = 0;
+                if (group_set.usesPhysicalPayloadGeometry()) {
+                    for (size_t buffer_index = 0; buffer_index < buffers.size(); ++buffer_index) {
+                        append_tile(buffer_index, buffers[buffer_index].size_bytes, layer_offset);
+                        layer_offset += buffers[buffer_index].size_bytes;
+                    }
+                } else {
+                    const size_t kv_bytes    = group_base.kvBlockStrideBytes();
+                    const size_t scale_bytes = group_base.kvScaleStrideBytes();
+                    append_tile(0, kv_bytes, 0);
+                    append_tile(1, scale_bytes, kv_bytes);
+                    layer_offset = kv_bytes + scale_bytes;
+                }
+                host_offset += layer_offset;
             }
         }
+        RTP_LLM_CHECK_WITH_INFO(host_offset == required_host_bytes,
+                                "device-host payload geometry mismatch: planned=%zu required=%zu",
+                                host_offset,
+                                required_host_bytes);
     }
 
     if (plans_by_device.empty()) {

@@ -562,6 +562,37 @@ TEST(KVCMInternalTest, PreservesHeterogeneousBlockSizesAndScalesLocationSpecsLin
     EXPECT_EQ(location_groups.size(), static_cast<size_t>(group_count + 1));
 }
 
+TEST(KVCMInternalTest, UsesExactMtpPhysicalSizeForRemoteBufferValidation) {
+    auto topology = CacheTopology::create({makeGroup("default", 0, CacheGroupType::FULL, /*stride=*/32)},
+                                          {{0, {"default"}}, {1, {"default"}}, {2, {"default"}}});
+    const std::array<size_t, 3>    layer_bytes{32, 64, 64};
+    std::array<uint8_t, 3>         storage{};
+    StorageBackend::BufferResolver resolver = [&layer_bytes, &storage](int layer_id, int group_id, int block_id) {
+        EXPECT_EQ(group_id, 0);
+        EXPECT_EQ(block_id, 7);
+        BlockInfo info;
+        info.is_cuda    = true;
+        info.addr       = &storage.at(static_cast<size_t>(layer_id));
+        info.size_bytes = layer_bytes.at(static_cast<size_t>(layer_id));
+        return std::vector<BlockInfo>{info};
+    };
+    FullLayerGroupPolicy policy(*topology,
+                                std::move(resolver),
+                                /*full_group_ids=*/{0},
+                                /*other_group_ids=*/{},
+                                /*exact physical group sizes=*/{160});
+    ASSERT_TRUE(policy.init());
+    EXPECT_EQ(policy.groups().at(0).block_size_bytes, 160u);
+
+    kv_cache_manager::BlockBuffers buffers;
+    ASSERT_TRUE(policy.genBlockBuffers(/*group_ids=*/{0}, /*block_ids=*/{7}, buffers));
+    ASSERT_EQ(buffers.size(), 1u);
+    ASSERT_EQ(buffers.front().iovs.size(), 3u);
+    EXPECT_EQ(buffers.front().iovs[0].size, 32u);
+    EXPECT_EQ(buffers.front().iovs[1].size, 64u);
+    EXPECT_EQ(buffers.front().iovs[2].size, 64u);
+}
+
 TEST(KVCMInternalTest, FullLinearLocationSpecsScaleLinearlyWithManyLinearGroups) {
     constexpr int          linear_group_count = 19;
     constexpr int          group_count        = linear_group_count + 1;

@@ -295,14 +295,14 @@ size_t computeGroupSetPayloadBytes(const CacheConfig& cache_config, const std::v
     return payload_bytes;
 }
 
-std::vector<BlockInfo> resolveStorageBuffers(const CacheTopology&                   topology,
+std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                     cache_config,
                                              const std::vector<DeviceBlockPoolPtr>& group_pools,
                                              int                                    layer_id,
                                              int                                    group_id,
                                              int                                    block_id) {
     RTP_LLM_CHECK_WITH_INFO(
         group_id >= 0 && static_cast<size_t>(group_id) < group_pools.size(), "invalid storage group_id=%d", group_id);
-    const auto& group     = topology.groupById(static_cast<size_t>(group_id));
+    const auto& topology  = cache_config.topology();
     const auto  layer_ids = topology.layerIdsForGroup(static_cast<size_t>(group_id));
     const auto  layer     = std::find(layer_ids.begin(), layer_ids.end(), layer_id);
     RTP_LLM_CHECK_WITH_INFO(
@@ -312,19 +312,20 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheTopology&               
     // directly to these physical pools.
     auto buffers = group_pools[static_cast<size_t>(group_id)]->convertIndexToBuffer(
         static_cast<int>(std::distance(layer_ids.begin(), layer)), block_id);
+    const auto& physical_group = cache_config.physicalGroupForLayer(layer_id, cache_config.tagForGroup(group_id));
     RTP_LLM_CHECK_WITH_INFO(!buffers.empty(), "storage group_id=%d returned no block buffers", group_id);
-    RTP_LLM_CHECK_WITH_INFO(buffers[0].size_bytes >= group.kvBlockStrideBytes(),
+    RTP_LLM_CHECK_WITH_INFO(buffers[0].size_bytes >= physical_group.kvBlockStrideBytes(),
                             "storage group_id=%d physical kv block is smaller than logical block",
                             group_id);
-    buffers[0].size_bytes = group.kvBlockStrideBytes();
-    if (group.kvScaleStrideBytes() == 0) {
+    buffers[0].size_bytes = physical_group.kvBlockStrideBytes();
+    if (physical_group.kvScaleStrideBytes() == 0) {
         buffers.resize(1);
         return buffers;
     }
-    RTP_LLM_CHECK_WITH_INFO(buffers.size() >= 2 && buffers[1].size_bytes >= group.kvScaleStrideBytes(),
+    RTP_LLM_CHECK_WITH_INFO(buffers.size() >= 2 && buffers[1].size_bytes >= physical_group.kvScaleStrideBytes(),
                             "storage group_id=%d has an invalid scale block buffer",
                             group_id);
-    buffers[1].size_bytes = group.kvScaleStrideBytes();
+    buffers[1].size_bytes = physical_group.kvScaleStrideBytes();
     buffers.resize(2);
     return buffers;
 }
@@ -528,7 +529,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                         std::move(device_pools),
                                         std::move(host_pools[group_set_id]),
                                         std::move(disk_pools[group_set_id]));
-        group_set->initialize(group_set_id, cache_topology, std::move(group_ids));
+        group_set->initialize(
+            group_set_id, cache_topology, std::move(group_ids), group_set_payload_bytes[group_set_id]);
         RTP_LLM_LOG_INFO(
             "group_set[%zu] membership sealed: payload_bytes=%zu", group_set_id, group_set->payloadBytes());
         group_sets.push_back(std::move(group_set));
@@ -648,15 +650,16 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                    std::move(cache_metrics_reporter));
     if (result->isRemoteCacheEnabled()) {
         const std::shared_ptr<const CacheTopology> storage_topology = cache_topology;
+        const CacheConfig                          storage_config   = cache_config;
         const std::vector<DeviceBlockPoolPtr>      resolver_pools   = group_pools;
-        RTP_LLM_CHECK_WITH_INFO(result->storageBackend()->init(
-                                    storage_topology,
-                                    group_pools,
-                                    [storage_topology, resolver_pools](int layer_id, int group_id, int block_id) {
-                                        return resolveStorageBuffers(
-                                            *storage_topology, resolver_pools, layer_id, group_id, block_id);
-                                    }),
-                                "StorageBackend init failed");
+        RTP_LLM_CHECK_WITH_INFO(
+            result->storageBackend()->init(storage_topology,
+                                           group_pools,
+                                           [storage_config, resolver_pools](int layer_id, int group_id, int block_id) {
+                                               return resolveStorageBuffers(
+                                                   storage_config, resolver_pools, layer_id, group_id, block_id);
+                                           }),
+            "StorageBackend init failed");
     }
     if (!result->init()) {
         RTP_LLM_LOG_ERROR("BlockTreeCache init failed");

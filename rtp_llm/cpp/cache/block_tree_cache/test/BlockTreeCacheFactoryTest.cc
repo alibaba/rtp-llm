@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <future>
 #include <limits>
@@ -49,6 +50,24 @@ CacheConfig makeSingleConfig() {
                                           DataType::TYPE_FP16,
                                           /*local_head_num_kv=*/1,
                                           /*size_per_head=*/8);
+}
+
+CacheConfig makeHeterogeneousMtpConfig() {
+    auto target = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                 /*block_num=*/8,
+                                                 /*tokens_per_block=*/4,
+                                                 DataType::TYPE_FP16,
+                                                 /*local_head_num_kv=*/1,
+                                                 /*size_per_head=*/2);
+    auto draft  = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                /*block_num=*/8,
+                                                /*tokens_per_block=*/4,
+                                                DataType::TYPE_FP16,
+                                                /*local_head_num_kv=*/1,
+                                                /*size_per_head=*/4);
+    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, /*module_index=*/0, target.layer_num));
+    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, /*module_index=*/1, target.layer_num));
+    return target;
 }
 
 CacheConfig makeSwaConfig(int block_size = 4) {
@@ -641,6 +660,81 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteResolverMatchesAllocatorForNonContiguous
             pool->decRef(*blocks);
         }
     }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCopyHostAndRemoteResolver) {
+    const auto config = makeHeterogeneousMtpConfig();
+    ASSERT_EQ(config.layerIdsForGroup(0), (std::vector<int>{0, 1, 2}));
+    EXPECT_EQ(config.physicalGroupForLayer(0, "default").kvBlockStrideBytes(), 32u);
+    EXPECT_EQ(config.physicalGroupForLayer(1, "default").kvBlockStrideBytes(), 64u);
+    EXPECT_EQ(config.physicalGroupForLayer(2, "default").kvBlockStrideBytes(), 64u);
+    EXPECT_EQ(config.blockSizeBytesForGroup(0), 160u);
+    EXPECT_EQ(config.totalGroupBlockSizeBytes(), 160u);
+
+    auto        allocator = initAllocator<KVCacheAllocator>(config);
+    const auto& pool      = allocator->groupBlockPools().front();
+    const auto  blocks    = pool->malloc(2);
+    ASSERT_TRUE(blocks.has_value());
+    pool->incRef(*blocks);
+    const BlockIdxType           src = blocks->at(0);
+    const BlockIdxType           dst = blocks->at(1);
+    const std::array<uint8_t, 3> patterns{0x21, 0x43, 0x65};
+    const std::array<size_t, 3>  bytes{32, 64, 64};
+    for (int layer = 0; layer < 3; ++layer) {
+        writeDevicePattern(allocator->convertIndexToAddrByTag(layer, "default", src).kv_addr,
+                           bytes[static_cast<size_t>(layer)],
+                           patterns[static_cast<size_t>(layer)]);
+        writeDevicePattern(
+            allocator->convertIndexToAddrByTag(layer, "default", dst).kv_addr, bytes[static_cast<size_t>(layer)], 0);
+    }
+    allocator->blockBatchCopyByTag({{"default", src, dst}});
+    runtimeSyncAndCheck();
+    for (int layer = 0; layer < 3; ++layer) {
+        expectDevicePattern(allocator->convertIndexToAddrByTag(layer, "default", dst).kv_addr,
+                            bytes[static_cast<size_t>(layer)],
+                            patterns[static_cast<size_t>(layer)]);
+    }
+
+    auto          backend = std::make_shared<CountingStorageBackend>();
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_remote_cache  = true;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend);
+    ASSERT_NE(cache, nullptr);
+    ASSERT_EQ(cache->groupSets().size(), 1u);
+    const auto& group_set = cache->groupSets().front();
+    ASSERT_NE(group_set->hostPool(), nullptr);
+    EXPECT_TRUE(group_set->usesPhysicalPayloadGeometry());
+    EXPECT_EQ(group_set->payloadBytes(), 160u);
+    EXPECT_EQ(group_set->hostPool()->payloadBytes(), 160u);
+
+    for (int layer = 0; layer < 3; ++layer) {
+        const auto resolved = backend->resolve(layer, /*group=*/0, src);
+        ASSERT_EQ(resolved.size(), 1u);
+        EXPECT_EQ(resolved.front().addr, allocator->convertIndexToAddrByTag(layer, "default", src).kv_addr);
+        EXPECT_EQ(resolved.front().size_bytes, bytes[static_cast<size_t>(layer)]);
+    }
+
+    const auto host_block = group_set->hostPool()->malloc();
+    ASSERT_TRUE(host_block.has_value());
+    group_set->hostPool()->incTreeRef(*host_block, BlockTreeRefType::STORE);
+    EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
+        {TransferDescriptor::deviceToHost(group_set->groupSetId(), {src}, *host_block)})));
+    for (int layer = 0; layer < 3; ++layer) {
+        writeDevicePattern(
+            allocator->convertIndexToAddrByTag(layer, "default", src).kv_addr, bytes[static_cast<size_t>(layer)], 0);
+    }
+    EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
+        {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, {src})})));
+    for (int layer = 0; layer < 3; ++layer) {
+        expectDevicePattern(allocator->convertIndexToAddrByTag(layer, "default", src).kv_addr,
+                            bytes[static_cast<size_t>(layer)],
+                            patterns[static_cast<size_t>(layer)]);
+    }
+
+    group_set->hostPool()->decTreeRef(*host_block, BlockTreeRefType::STORE);
+    pool->decRef(*blocks);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteBackendResolverDoesNotKeepAttachedCacheAndAllocatorAlive) {

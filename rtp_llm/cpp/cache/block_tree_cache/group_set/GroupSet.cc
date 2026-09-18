@@ -53,20 +53,24 @@ GroupSet::GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
 
 void GroupSet::initialize(size_t                               group_set_id,
                           std::shared_ptr<const CacheTopology> topology,
-                          std::vector<size_t>                  group_ids) {
-    size_t payload_bytes = 0;
-    for (size_t group_id : group_ids) {
-        const size_t group_bytes = topology->blockSizeBytesForGroup(group_id);
-        RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - payload_bytes,
-                                "GroupSet payload size overflow at group_id=%zu",
-                                group_id);
-        payload_bytes += group_bytes;
+                          std::vector<size_t>                  group_ids,
+                          size_t                               physical_payload_bytes) {
+    uses_physical_payload_geometry_ = physical_payload_bytes > 0;
+    if (physical_payload_bytes == 0) {
+        for (size_t group_id : group_ids) {
+            const size_t group_bytes = topology->blockSizeBytesForGroup(group_id);
+            RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - physical_payload_bytes,
+                                    "GroupSet payload size overflow at group_id=%zu",
+                                    group_id);
+            physical_payload_bytes += group_bytes;
+        }
     }
+    RTP_LLM_CHECK_WITH_INFO(physical_payload_bytes > 0, "GroupSet physical payload must be positive");
 
     group_set_id_  = group_set_id;
     topology_      = std::move(topology);
     group_ids_     = std::move(group_ids);
-    payload_bytes_ = payload_bytes;
+    payload_bytes_ = physical_payload_bytes;
 }
 
 bool GroupSet::hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks) const {

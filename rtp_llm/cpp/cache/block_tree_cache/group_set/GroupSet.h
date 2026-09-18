@@ -37,7 +37,10 @@ public:
 
     virtual ~GroupSet() = default;
 
-    void initialize(size_t group_set_id, std::shared_ptr<const CacheTopology> topology, std::vector<size_t> group_ids);
+    void initialize(size_t                               group_set_id,
+                    std::shared_ptr<const CacheTopology> topology,
+                    std::vector<size_t>                  group_ids,
+                    size_t                               physical_payload_bytes = 0);
 
     size_t groupSetId() const {
         return group_set_id_;
@@ -53,6 +56,9 @@ public:
     }
     size_t payloadBytes() const {
         return payload_bytes_;
+    }
+    bool usesPhysicalPayloadGeometry() const {
+        return uses_physical_payload_geometry_;
     }
     CacheGroupType groupType() const {
         return groupAt(0).policy.group_type;
@@ -91,6 +97,7 @@ private:
     std::shared_ptr<const CacheTopology>    topology_;
     std::vector<size_t>                     group_ids_;
     size_t                                  payload_bytes_{0};
+    bool                                    uses_physical_payload_geometry_{false};
 };
 
 using GroupSetPtr = std::shared_ptr<GroupSet>;

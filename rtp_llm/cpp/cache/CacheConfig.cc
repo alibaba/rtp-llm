@@ -358,6 +358,28 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     return sub_cfg;
 }
 
+const GroupBase& CacheConfig::physicalGroupForLayer(int layer_id, const std::string& tag) const {
+    const auto& logical_group = topology().groupForLayer(layer_id, tag);
+    if (layer_id < static_cast<int>(layer_num)) {
+        return logical_group;
+    }
+
+    for (size_t module_index = 0; module_index < mtp_sub_configs.size(); ++module_index) {
+        const auto& sub_config = mtp_sub_configs[module_index];
+        RTP_LLM_CHECK_WITH_INFO(
+            sub_config != nullptr, "CacheConfig has null MTP configuration at module=%zu", module_index);
+        for (uint32_t local_layer_id = 0; local_layer_id < sub_config->layer_num; ++local_layer_id) {
+            const auto global_layer_id = mtpGlobalLayerId(
+                layer_num, static_cast<int>(module_index), sub_config->layer_num, static_cast<int>(local_layer_id));
+            if (global_layer_id == static_cast<uint32_t>(layer_id)) {
+                return sub_config->topology().groupForLayer(static_cast<int>(local_layer_id), tag);
+            }
+        }
+    }
+
+    RTP_LLM_FAIL("CacheConfig cannot resolve physical owner for layer=%d tag=%s", layer_id, tag.c_str());
+}
+
 void CacheConfig::fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
                                    const std::vector<std::vector<int>>& layers_by_group,
                                    const std::vector<CacheGroupType>&   types,
