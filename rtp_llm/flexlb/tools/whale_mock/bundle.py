@@ -4,6 +4,7 @@ import json
 
 from master_compat import mock_formula_config, legacy_discovery
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -130,6 +131,13 @@ def run():
 
     try:
         env = os.environ.copy()
+        java_home = env.get("JAVA_HOME")
+        java = (
+            shutil.which("java", path=env.get("PATH"))
+            or (str(Path(java_home) / "bin" / "java") if java_home and
+                (Path(java_home) / "bin" / "java").is_file() else None)
+            or ("/opt/taobao/java/bin/java" if
+                Path("/opt/taobao/java/bin/java").is_file() else "java")
         # FetchResponse originates in a different Pod, so its advertised engine
         # address must be reachable from the frontend. Ports identify engines.
         pod_ip = os.environ.get("POD_IP") or socket.gethostbyname(socket.gethostname())
@@ -144,7 +152,7 @@ def run():
         mock = start(
             "mock",
             [
-                "java",
+                java,
                 "-Xmx" + cfg["mock_heap"],
                 "-jar",
                 str(jars / "mock.jar"),
@@ -215,7 +223,7 @@ def run():
         master = start(
             "master",
             [
-                "java",
+                java,
                 "-Xmx" + cfg["master_heap"],
                 "-Dreactor.schedulers.defaultBoundedElasticSize=64",
                 "-jar",

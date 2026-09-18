@@ -39,6 +39,16 @@ class BundleConfigurationTest(unittest.TestCase):
         self.assertEqual(command[command.index("--unique-engine-ips") + 1], "true")
         self.assertNotIn("--events-file", command)
 
+    def test_java_home_works_when_runtime_path_has_no_java(self):
+        with tempfile.TemporaryDirectory() as directory:
+            java = Path(directory) / "bin" / "java"
+            java.parent.mkdir()
+            java.write_text("mock java")
+            command, _ = self.launch_to_process_boundary(
+                {"JAVA_HOME": directory, "PATH": ""}
+            )
+            self.assertEqual(command[0], str(java))
+
     def test_event_log_is_explicit(self):
         command, _ = self.launch_to_process_boundary({"MOCK_EVENT_LOG_ENABLED": "1"})
         self.assertIn("--events-file", command)
