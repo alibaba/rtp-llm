@@ -737,6 +737,19 @@ _CUDA129_TEST_BAZEL_STAGED_OUTPUTS = [
     ),
 ]
 
+_CUDA_PY_WRAPPER_TEST_BAZEL_STAGED_OUTPUTS = [
+    (
+        _STAGED_OUTPUT_TEST,
+        "//rtp_llm/cpp/models/context_parallel/test:th_context_parallel_py_wrapper_test",
+        (("libth_context_parallel_py_wrapper_test.so", "test/libth_context_parallel_py_wrapper_test.so"),),
+    ),
+    (
+        _STAGED_OUTPUT_TEST,
+        "//rtp_llm/cpp/models/eplb/test:th_eplb_py_wrapper_test",
+        (("libth_eplb_py_wrapper_test.so", "test/libth_eplb_py_wrapper_test.so"),),
+    ),
+]
+
 _CUDA13_RUNTIME_BAZEL_STAGED_OUTPUTS = [
     (_STAGED_OUTPUT_RUNTIME, f"@flashinfer_cpp_cu13//:{name}", (f"lib{name}.so",))
     for name in (
@@ -863,6 +876,8 @@ def _selected_bazel_staged_outputs(build_config: str, bazel_args: list = None) -
         # bindings below libs/test/ so remote-session archives them, while
         # wheel package-data (libs/*.so) does not publish test-only modules.
         staged_outputs.extend(_CUDA129_TEST_BAZEL_STAGED_OUTPUTS)
+    if "cuda12_9" in _bazel_config_names(bazel_args):
+        staged_outputs.extend(_CUDA_PY_WRAPPER_TEST_BAZEL_STAGED_OUTPUTS)
     if {"cuda13", "cuda13_arm"} & _bazel_config_names(bazel_args):
         staged_outputs.extend(_CUDA13_RUNTIME_BAZEL_STAGED_OUTPUTS)
     include_remote_kvcm = _include_remote_kvcm_runtime_outputs(bazel_args)

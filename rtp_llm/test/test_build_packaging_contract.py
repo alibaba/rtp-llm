@@ -685,6 +685,74 @@ class BuildPackagingContractTest(TestCase):
             )
             self.assertFalse(any("@flashinfer_cpp_cu13//:" in entry[1] for entry in entries))
 
+    def test_mainline_python_and_sm120_methods_have_native_routes(self):
+        with open(PROJECT_ROOT / "pyproject.toml", "rb") as stream:
+            config = tomllib.load(stream)
+        profiles = config["tool"]["rtp_llm"]["pytest_ci"]["profiles"]
+        restored = {
+            'rtp_llm/model_loader/test/test_stacked_moe_weight.py',
+            'rtp_llm/model_loader/test/test_pure_tp_preshard.py',
+            'rtp_llm/model_loader/test/test_compressed_w4a8_int4_per_channel.py',
+            'rtp_llm/model_loader/test/test_per_channel_fp8_helpers.py',
+            'rtp_llm/model_loader/test/test_compressed_w8a8_int8_per_channel.py',
+            'rtp_llm/model_loader/test/test_swizzle_load_config.py',
+            'rtp_llm/model_loader/test/test_model_weight_info.py',
+            'rtp_llm/models/qwen3_next/test/qwen3_next_mtp_test.py',
+            'rtp_llm/models/test/dsv4_kv_cache_test.py',
+            'rtp_llm/models/test/deepseek_v4_dspark_commit_only_test.py',
+            'rtp_llm/models/test/moe_config_propagation_test.py',
+            'rtp_llm/tools/convert/weights_convert_test.py',
+            'rtp_llm/cpp/models/context_parallel/test/context_parallel_py_wrapper_test.py',
+            'rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py',
+        }
+        for name in ("py_ut_sm8x", "py_ut_oss_sm8x"):
+            profile = profiles[name]
+            self.assertTrue(restored <= set(profile["isolated_paths"]))
+            for path in restored:
+                self.assertTrue((PROJECT_ROOT / path).is_file())
+                self.assertTrue(any(path == root or path.startswith(root.rstrip("/") + "/")
+                                    for root in profile["paths"]))
+                self.assertFalse(any(path.startswith(arg.split("=", 1)[1])
+                                     for arg in config["tool"]["pytest"]["ini_options"]["addopts"]
+                                     if arg.startswith("--ignore=")))
+        sm120 = profiles["py_ut_sm120"]
+        self.assertEqual(sm120["gpu_type"], "RTX_5000_PRO")
+        self.assertEqual(len(sm120["paths"]), 7)
+        self.assertTrue(sm120["isolate_all_paths"])
+        self.assertTrue(sm120["require_isolated_tests"])
+        for path in sm120["paths"]:
+            self.assertTrue((PROJECT_ROOT / path.split("::")[0]).is_file())
+        trt = [path for path in sm120["paths"] if "trtllm_fmha_v2" in path]
+        self.assertEqual(len(trt), 2)
+        self.assertTrue(all(path.endswith("BF16") for path in trt))
+
+    def test_cuda_wrapper_bindings_are_required_staged_test_inputs(self):
+        setup_module = _load_setup_module()
+        expected = {
+            f"//rtp_llm/cpp/models/{name}/test:th_{name}_py_wrapper_test":
+            f"libth_{name}_py_wrapper_test.so"
+            for name in ("context_parallel", "eplb")
+        }
+        entries = setup_module._selected_bazel_staged_outputs("cuda12_9", ["--config=cuda12_9"])
+        selected = [entry for entry in entries if entry[1] in expected]
+        self.assertEqual({entry[1] for entry in selected}, set(expected))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for target, library in expected.items():
+                directory = root / "bazel-bin" / target[2:].split(":")[0]
+                directory.mkdir(parents=True)
+                (directory / library).write_bytes(library.encode())
+            setup_module.stage_bazel_outputs(root, selected)
+            for library in expected.values():
+                self.assertEqual((root / "rtp_llm/libs/test" / library).read_bytes(), library.encode())
+            target, library = next(iter(expected.items()))
+            (root / "bazel-bin" / target[2:].split(":")[0] / library).unlink()
+            with self.assertRaisesRegex(RuntimeError, library):
+                setup_module.stage_bazel_outputs(root, selected)
+        for config in ("rocm", "cuda13", "cuda13_arm", "cuda13_ppu"):
+            entries = setup_module._selected_bazel_staged_outputs(config, [f"--config={config}"])
+            self.assertFalse(any(entry[1] in expected for entry in entries))
+
     def test_dynamic_version_uses_release_version(self):
         setup_module = _load_setup_module()
         release_text = (PROJECT_ROOT / "rtp_llm" / "release_version.py").read_text(
@@ -868,10 +936,11 @@ class BuildPackagingContractTest(TestCase):
         self.assertIn("not SM100_ARM", profiles["py_ut_sm100"]["markexpr"])
 
         for name, expected_count in {
-            "py_ut_sm8x": 2730,
-            "py_ut_oss_sm8x": 2730,
+            "py_ut_sm8x": 2932,
+            "py_ut_oss_sm8x": 2932,
             "py_ut_sm9x": 491,
             "py_ut_sm100": 20,
+            "py_ut_sm120": 108,
             "py_ut_sm100_arm": 104,
             "py_ut_amd": 405,
             "py_ut_frontend": 71,
@@ -1524,6 +1593,7 @@ class BuildPackagingContractTest(TestCase):
             "smoke_sm100_eval_oss": 1,
             "smoke_sm120_oss": 8,
             "smoke_rocm_oss": 26,
+            "smoke_amd_internal": 3,
             "smoke_rocm_qwen35_mtp_manual": 1,
             "smoke_remote_cache_oss": 11,
         }

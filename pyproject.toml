@@ -308,9 +308,6 @@ addopts = [
     "--tb=short",
     "--strict-markers",
     "-ra",
-    # C++ wrapper tests (bazel-compiled test .so, run via cpp-ut-* jobs)
-    "--ignore=rtp_llm/cpp/models/context_parallel/test",
-    "--ignore=rtp_llm/cpp/models/eplb/test",
 ]
 
 # 异步测试模式
@@ -537,15 +534,58 @@ paths = [
 description = "Python UT on SM8x class GPUs (py-ut-sm8x)"
 gpu_type = "A10"
 minimum_count = 1
-# Mainline sync expanded this inventory: runs 73135846 and 73119418 both
-# executed the same 2724 distinct case IDs, with no failures or skips.
-# Two additional regressions cover ROCm device enumeration and allocation.
-# Four regressions retain the upstream prompt-scoring comparison contract.
-expected_count = 2730
+# Preserve the 2730 previously executed cases, restore 200 mainline methods,
+# and add two coverage/staging regressions. Every case must execute.
+expected_count = 2932
 forbid_skips = true
+paths = [
+    "rtp_llm/access_logger/test",
+    "rtp_llm/cpp/config",
+    "rtp_llm/test",
+    "rtp_llm/utils/test",
+    "rtp_llm/config/test",
+    "rtp_llm/dash_sc/test",
+    "rtp_llm/distribute/test",
+    "rtp_llm/server",
+    "rtp_llm/frontend/test",
+    "rtp_llm/multimodal/test",
+    "rtp_llm/models_py",
+    "rtp_llm/cpp/models",
+    "rtp_llm/cpp/pybind",
+    "rtp_llm/cpp/model_rpc/test",
+    "rtp_llm/cpp/cuda_graph/tests",
+    "rtp_llm/telemetry/test",
+    "rtp_llm/aios",
+    "rtp_llm/model_loader/test/test_stacked_moe_weight.py",
+    "rtp_llm/model_loader/test/test_pure_tp_preshard.py",
+    "rtp_llm/model_loader/test/test_compressed_w4a8_int4_per_channel.py",
+    "rtp_llm/model_loader/test/test_per_channel_fp8_helpers.py",
+    "rtp_llm/model_loader/test/test_compressed_w8a8_int8_per_channel.py",
+    "rtp_llm/model_loader/test/test_swizzle_load_config.py",
+    "rtp_llm/model_loader/test/test_model_weight_info.py",
+    "rtp_llm/models/qwen3_next/test/qwen3_next_mtp_test.py",
+    "rtp_llm/models/test/dsv4_kv_cache_test.py",
+    "rtp_llm/models/test/deepseek_v4_dspark_commit_only_test.py",
+    "rtp_llm/models/test/moe_config_propagation_test.py",
+    "rtp_llm/tools/convert/weights_convert_test.py",
+]
 ignore_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4"]
 isolated_paths = [
     "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_hybrid_mha_prefill.py",
+    "rtp_llm/model_loader/test/test_stacked_moe_weight.py",
+    "rtp_llm/model_loader/test/test_pure_tp_preshard.py",
+    "rtp_llm/model_loader/test/test_compressed_w4a8_int4_per_channel.py",
+    "rtp_llm/model_loader/test/test_per_channel_fp8_helpers.py",
+    "rtp_llm/model_loader/test/test_compressed_w8a8_int8_per_channel.py",
+    "rtp_llm/model_loader/test/test_swizzle_load_config.py",
+    "rtp_llm/model_loader/test/test_model_weight_info.py",
+    "rtp_llm/models/qwen3_next/test/qwen3_next_mtp_test.py",
+    "rtp_llm/models/test/dsv4_kv_cache_test.py",
+    "rtp_llm/models/test/deepseek_v4_dspark_commit_only_test.py",
+    "rtp_llm/models/test/moe_config_propagation_test.py",
+    "rtp_llm/tools/convert/weights_convert_test.py",
+    "rtp_llm/cpp/models/context_parallel/test/context_parallel_py_wrapper_test.py",
+    "rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py",
 ]
 markexpr = "not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke and not perf and not manual"
 
@@ -553,11 +593,56 @@ markexpr = "not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke
 description = "Open-source-only Python UT on SM8x after internal_source is stripped"
 gpu_type = "A10"
 minimum_count = 1
-expected_count = 2730
+expected_count = 2932
 forbid_skips = true
+paths = [
+    "rtp_llm/access_logger/test",
+    "rtp_llm/cpp/config",
+    "rtp_llm/test",
+    "rtp_llm/utils/test",
+    "rtp_llm/config/test",
+    "rtp_llm/dash_sc/test",
+    "rtp_llm/distribute/test",
+    "rtp_llm/server",
+    "rtp_llm/frontend/test",
+    "rtp_llm/multimodal/test",
+    "rtp_llm/models_py",
+    "rtp_llm/cpp/models",
+    "rtp_llm/cpp/pybind",
+    "rtp_llm/cpp/model_rpc/test",
+    "rtp_llm/cpp/cuda_graph/tests",
+    "rtp_llm/telemetry/test",
+    "rtp_llm/aios",
+    "rtp_llm/model_loader/test/test_stacked_moe_weight.py",
+    "rtp_llm/model_loader/test/test_pure_tp_preshard.py",
+    "rtp_llm/model_loader/test/test_compressed_w4a8_int4_per_channel.py",
+    "rtp_llm/model_loader/test/test_per_channel_fp8_helpers.py",
+    "rtp_llm/model_loader/test/test_compressed_w8a8_int8_per_channel.py",
+    "rtp_llm/model_loader/test/test_swizzle_load_config.py",
+    "rtp_llm/model_loader/test/test_model_weight_info.py",
+    "rtp_llm/models/qwen3_next/test/qwen3_next_mtp_test.py",
+    "rtp_llm/models/test/dsv4_kv_cache_test.py",
+    "rtp_llm/models/test/deepseek_v4_dspark_commit_only_test.py",
+    "rtp_llm/models/test/moe_config_propagation_test.py",
+    "rtp_llm/tools/convert/weights_convert_test.py",
+]
 ignore_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4"]
 isolated_paths = [
     "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_hybrid_mha_prefill.py",
+    "rtp_llm/model_loader/test/test_stacked_moe_weight.py",
+    "rtp_llm/model_loader/test/test_pure_tp_preshard.py",
+    "rtp_llm/model_loader/test/test_compressed_w4a8_int4_per_channel.py",
+    "rtp_llm/model_loader/test/test_per_channel_fp8_helpers.py",
+    "rtp_llm/model_loader/test/test_compressed_w8a8_int8_per_channel.py",
+    "rtp_llm/model_loader/test/test_swizzle_load_config.py",
+    "rtp_llm/model_loader/test/test_model_weight_info.py",
+    "rtp_llm/models/qwen3_next/test/qwen3_next_mtp_test.py",
+    "rtp_llm/models/test/dsv4_kv_cache_test.py",
+    "rtp_llm/models/test/deepseek_v4_dspark_commit_only_test.py",
+    "rtp_llm/models/test/moe_config_propagation_test.py",
+    "rtp_llm/tools/convert/weights_convert_test.py",
+    "rtp_llm/cpp/models/context_parallel/test/context_parallel_py_wrapper_test.py",
+    "rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py",
 ]
 markexpr = "not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke and not perf and not manual and not open_skip and not frontend"
 
@@ -589,6 +674,26 @@ minimum_count = 1
 expected_count = 104
 forbid_skips = true
 markexpr = "SM100_ARM and not smoke and not perf and not manual"
+
+[tool.rtp_llm.pytest_ci.profiles.py_ut_sm120]
+description = "Original SM120 UT on RTX 5000 Pro (ut-sm12x)"
+gpu_type = "RTX_5000_PRO"
+minimum_count = 1
+# Mainline: 97 hardware methods + 11 CPU methods; FP8 is unsupported on SM120.
+expected_count = 108
+forbid_skips = true
+isolate_all_paths = true
+require_isolated_tests = true
+paths = [
+    "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_hybrid_mha_prefill.py",
+    "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_py_flashinfer_mha_decode.py",
+    "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_paged_mha_prefill.py",
+    "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_ragged_mha_prefill.py",
+    "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_trtllm_fmha_v2_paged_prefill.py::TestTRTLLMFMHAv2PagedPrefillOpBF16",
+    "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_trtllm_fmha_v2_prefill.py::TestTRTLLMFMHAv2PrefillOpBF16",
+    "rtp_llm/models_py/utils/test/arch_test.py",
+]
+markexpr = "not manual and not smoke and not perf"
 
 [tool.rtp_llm.pytest_ci.profiles.py_ut_sm100]
 description = "Python UT on SM100 x86 (py-ut-sm100)"
@@ -752,7 +857,7 @@ paths = ["../internal_source/rtp_llm/test/smoke/suites/"]
 # `gpu=MI308X-ROCM7` (hyphen) — see internal_source/.cicd_bazelrc:31. The two
 # forms must NOT be confused: underscore here for pytest, hyphen for gpu_type/REAPI.
 markexpr = "manual and smoke and MI308X_ROCM7"
-expected_count = 2
+expected_count = 3
 forbid_skips = true
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_sm120_internal]
