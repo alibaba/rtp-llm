@@ -519,6 +519,10 @@ class PythonCompatControlApiTest {
         assertTrue(body.contains("mock_engine_completed_total{role=\"decode\"} 2"),
                 "aggregated decode completed should be 2");
         assertTrue(body.contains("mock_engine_rpc_total{role=\"prefill\",rpc_method=\"enqueue_batch\"} 1"));
+        assertFalse(body.contains("rtp_llm_context_tps{role=\"decode\"}"));
+        assertFalse(body.contains("rtp_llm_generate_tps{role=\"prefill\"}"));
+        assertFalse(body.contains("mock_engine_prefill_ms_avg{role=\"decode\"}"));
+        assertFalse(body.contains("mock_engine_decode_ms_avg{role=\"prefill\"}"));
     }
 
     @Test
@@ -540,6 +544,12 @@ class PythonCompatControlApiTest {
         assertTrue(body.contains("mock_engine_completed_total{engine_name=\"decode-0\","
                 + "role=\"decode\",grpc_port=\"" + decodeServices.get(0).getGrpcPort()
                 + "\",engine_ip=\"127.0.0.1\"} 1"));
+        assertFalse(body.contains("rtp_llm_generate_tps{" + expectedLabels + "}"));
+        assertFalse(body.contains("mock_engine_decode_ms_avg{" + expectedLabels + "}"));
+        String decodeLabels = "engine_name=\"decode-0\",role=\"decode\",grpc_port=\""
+                + decodeServices.get(0).getGrpcPort() + "\",engine_ip=\"127.0.0.1\"";
+        assertFalse(body.contains("rtp_llm_context_tps{" + decodeLabels + "}"));
+        assertFalse(body.contains("mock_engine_prefill_ms_avg{" + decodeLabels + "}"));
     }
 
     // ════════════════════════════════════════════════════════════════

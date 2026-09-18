@@ -25,6 +25,25 @@ final class WhaleMockMonitor implements AutoCloseable {
     private final java.util.Set<String> registered = new java.util.HashSet<>();
     private static final java.util.Set<String> STEP_METRICS = java.util.Set.of(
             "rtp_llm_running_stream_size", "rtp_llm_context_batch_size", "rtp_llm_generate_batch_size");
+    private static final java.util.Set<String> PREFILL_METRICS = java.util.Set.of(
+            "mock_context_compute_tokens_total", "mock_context_tokens_total",
+            "mock_context_compute_ms_total", "mock_context_with_cache_ms_total",
+            "mock_prefill_waiting_requests", "mock_prefill_running_requests",
+            "mock_cache_key_hits_total", "mock_cache_keys_requested_total",
+            "rtp_llm_context_batch_size", "rtp_llm_context_tps",
+            "rtp_llm_context_tps_with_cache", "rtp_llm_context_wall_tps",
+            "rtp_llm_context_wall_tps_with_cache", "rtp_llm_first_token_latency_us");
+    private static final java.util.Set<String> DECODE_METRICS = java.util.Set.of(
+            "mock_generate_tokens_total", "mock_decode_step_tokens_total",
+            "mock_decode_waiting_requests", "mock_decode_reserved_requests",
+            "mock_decode_running_requests", "rtp_llm_generate_batch_size",
+            "rtp_llm_generate_tps", "rtp_llm_latency_us");
+
+    private static boolean belongsToRole(String name, Map<String, String> labels) {
+        String role = labels.get("role");
+        return !(PREFILL_METRICS.contains(name) && "ROLE_TYPE_DECODE".equals(role))
+                && !(DECODE_METRICS.contains(name) && "ROLE_TYPE_PREFILL".equals(role));
+    }
 
     static WhaleMockMonitor create() {
         try {
@@ -56,13 +75,27 @@ final class WhaleMockMonitor implements AutoCloseable {
     }
 
     synchronized void reportEvent(Map<String, Number> metrics, Map<String, String> labels) {
+        reportEvent(metrics, labels, false);
+    }
+
+    synchronized void reportEvent(Map<String, Number> metrics, Map<String, String> labels,
+                                  boolean noFetch) {
         FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
         metrics.forEach((name, value) -> {
+            if (!belongsToRole(name, labels)) return;
             if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
             monitor.report(name, tags, value.doubleValue());
             if (name.equals("rtp_llm_first_token_latency_us")
                     && "ROLE_TYPE_PREFILL".equals(labels.get("role"))) {
                 String alias = "py_rtp_response_first_token_rt";
+                if (registered.add(alias)) monitor.register(alias, FlexMetricType.GAUGE);
+                monitor.report(alias, dashboardTags(labels), value.doubleValue() / 1000.0);
+            }
+            if (noFetch && name.equals("rtp_llm_latency_us")
+                    && "ROLE_TYPE_DECODE".equals(labels.get("role"))) {
+                // Schedule-only has no frontend response terminal. This alias
+                // is D arrival -> D completion, not frontend request -> response.
+                String alias = "py_rtp_framework_rt";
                 if (registered.add(alias)) monitor.register(alias, FlexMetricType.GAUGE);
                 monitor.report(alias, dashboardTags(labels), value.doubleValue() / 1000.0);
             }
@@ -87,6 +120,7 @@ final class WhaleMockMonitor implements AutoCloseable {
         for (var entry : metrics.entrySet()) {
             if (!STEP_METRICS.contains(entry.getKey()))
                 throw new IllegalArgumentException("Not a scheduler metric: " + entry.getKey());
+            if (!belongsToRole(entry.getKey(), labels)) continue;
             if (registered.add(entry.getKey())) monitor.register(entry.getKey(), FlexMetricType.GAUGE);
             monitor.report(entry.getKey(), tags, entry.getValue().doubleValue());
         }
@@ -130,6 +164,7 @@ final class WhaleMockMonitor implements AutoCloseable {
             }
         }
         metrics.forEach((name, value) -> {
+            if (!belongsToRole(name, labels)) return;
             // Preserve execution-round samples. A periodic zero between two
             // short P batches must not dilute them. With no rounds this period,
             // retain the instantaneous gauge so idle engines return to zero.

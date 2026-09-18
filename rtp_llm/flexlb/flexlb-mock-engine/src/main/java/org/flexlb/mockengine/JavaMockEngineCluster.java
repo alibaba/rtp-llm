@@ -273,7 +273,7 @@ public final class JavaMockEngineCluster {
         if (whaleMonitor != null) service.schedulerMetricReporter =
                 values -> whaleMonitor.reportScheduler(values, service.whaleMetricTags());
         if (whaleMonitor != null) service.eventMetricReporter =
-                values -> whaleMonitor.reportEvent(values, service.whaleMetricTags());
+                values -> whaleMonitor.reportEvent(values, service.whaleMetricTags(), service.autoFetchEnabled());
         if (whaleMonitor != null) service.cacheEvictionReporter = (scope, ms) -> {
             var tags = new HashMap<>(service.whaleMetricTags());
             tags.put("scope", scope);
@@ -4746,6 +4746,14 @@ public final class JavaMockEngineCluster {
             MockPerformanceModel.RequestShape shape = stream.shape;
             long requestId = shape.input().getRequestId();
             long executionMs = Math.round(stream.accumulatedExecMs);
+            boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
+            Long arrivedMs = eventArrivalMs.get(requestId);
+            if (!alreadyCancelled && arrivedMs != null) {
+                // D engine residence includes reservation/queueing and all decode
+                // steps. Emit at the terminal, independent of client Fetch.
+                reportMetricEvent(Map.of("rtp_llm_latency_us",
+                        Math.max(0L, System.currentTimeMillis() - arrivedMs) * 1000L));
+            }
             // The status terminal was published by claimDecodeTerminalLocked.
             // Feed the per-sample decode completion window (java_mock_stats
             // decode_done / decode_exec_*): Σ actual step durations.
@@ -4761,7 +4769,6 @@ public final class JavaMockEngineCluster {
                     cancelledRequests.containsKey(requestId));
             // Per-engine decode busy: one executionMs per completed request.
             busyMs.addAndGet(executionMs);
-            boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
             recordLifecycleEnd(requestId, alreadyCancelled);
             if (!alreadyCancelled) {
                 completedCount.incrementAndGet();

@@ -74,6 +74,47 @@ class WhaleModeConfigurationTest {
     }
 
     @Test
+    void roleSpecificSamplesAndNoFetchDecodeLatencyStayOnTheirOwners() {
+        var reports = new ArrayList<String>();
+        var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("report"))
+                        reports.add(args[0] + "=" + args[2]);
+                    return null;
+                });
+        var monitor = new WhaleMockMonitor(sink);
+        var p = java.util.Map.of("role", "ROLE_TYPE_PREFILL");
+        var d = java.util.Map.of("role", "ROLE_TYPE_DECODE");
+        long now = System.nanoTime();
+        var counters = java.util.Map.<String, Number>of(
+                "mock_context_compute_tokens_total", 100L,
+                "mock_context_tokens_total", 100L,
+                "mock_decode_step_tokens_total", 10L,
+                "rtp_llm_context_batch_size", 1,
+                "rtp_llm_generate_batch_size", 1);
+        monitor.sample(counters, p, now);
+        assertTrue(reports.stream().anyMatch(s -> s.startsWith("mock_context_tokens_total=")));
+        assertFalse(reports.stream().anyMatch(s -> s.startsWith("rtp_llm_generate_tps=")));
+        assertFalse(reports.stream().anyMatch(s -> s.startsWith("mock_decode_step_tokens_total=")));
+        reports.clear();
+        monitor.sample(counters, d, now);
+        assertTrue(reports.stream().anyMatch(s -> s.startsWith("mock_decode_step_tokens_total=")));
+        assertFalse(reports.stream().anyMatch(s -> s.startsWith("rtp_llm_context_tps=")));
+        assertFalse(reports.stream().anyMatch(s -> s.startsWith("mock_context_tokens_total=")));
+        reports.clear();
+        monitor.reportEvent(java.util.Map.of("rtp_llm_latency_us", 425_000), d, true);
+        assertTrue(reports.contains("rtp_llm_latency_us=425000.0"));
+        assertTrue(reports.contains("py_rtp_framework_rt=425.0"));
+        reports.clear();
+        monitor.reportEvent(java.util.Map.of("rtp_llm_latency_us", 425_000), d, false);
+        assertFalse(reports.stream().anyMatch(s -> s.startsWith("py_rtp_framework_rt=")));
+        reports.clear();
+        monitor.reportEvent(java.util.Map.of("rtp_llm_latency_us", 425_000), p, true);
+        assertTrue(reports.isEmpty());
+    }
+
+    @Test
     void contextBatchSizeDoesNotMixIdlePollSamples() {
         var values = new ArrayList<Double>();
         var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
@@ -287,6 +328,8 @@ class WhaleModeConfigurationTest {
             assertEquals(8, ((Number) d.getSnapshot().get("cache_keys")).intValue(),
                     "D must cache its eight 64-token blocks, not one P 512-token key");
             assertEquals(1, eventMetrics.stream().filter(m -> m.containsKey("rtp_llm_first_token_latency_us")).count());
+            assertEquals(1, decodeEvents.stream().filter(m -> m.containsKey("rtp_llm_latency_us")).count(),
+                    "D terminal reports inference residence without Fetch");
             var pForwards = eventMetrics.stream().filter(m -> m.containsKey("rtp_llm_model_forward_us"))
                     .map(m -> m.get("rtp_llm_model_forward_us").doubleValue()).toList();
             var dForwards = decodeEvents.stream().filter(m -> m.containsKey("rtp_llm_model_forward_us"))

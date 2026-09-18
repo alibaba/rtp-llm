@@ -190,8 +190,8 @@ completions feed generate; cancelled completions are excluded — only tokens
 actually accepted and generated count, matching production semantics) and
 every scrape settles the window first, so the window = scrape interval (the
 eval G1 poller is 1s → the value is tokens/s by construction). PD split:
-prefill engines carry the context pair, decode engines the generate series
-(off-role series stay 0). Caliber note: the mock's execution time is itself a
+prefill engines carry the context pair, decode engines the generate series;
+off-role series are absent from both Prometheus and Whale KMonitor. Caliber note: the mock's execution time is itself a
 formula product, so unlike production there is no execute/wall dual
 denominator — the fixed 1s window is the whole denominator. These are
 **accounting-style simulation readings that measure scheduling organization
@@ -215,6 +215,16 @@ compensation cannot close reliably; per-request correctness verification
 is already covered by the client_events × engine_events rid join — the
 same join full_e2e / engine_exec uses — making the aggregate assertion
 redundant).
+
+**Whale no-Fetch latency**: with `FETCH_OUTPUT_STREAM=0`, P reports
+`rtp_llm_first_token_latency_us` at successful prefill completion and the
+dashboard alias `py_rtp_response_first_token_rt` in milliseconds. D reports
+`rtp_llm_latency_us` at successful decode completion; in no-Fetch mode it also
+reports `py_rtp_framework_rt` in milliseconds. Both aliases retain engine
+`hippo_role` tags. Their clock starts at arrival at the respective engine:
+they exclude frontend/master routing and transport, so they are engine-side
+proxies, not frontend end-to-end TTFT or response time. The D alias is not
+emitted when Fetch is enabled; the frontend then owns response timing.
 
 **Block-pool observability series (`mock_engine_*`, 20260902)**: `/metrics`
 reports the KV v2 block-pool state as time series in BOTH emission modes

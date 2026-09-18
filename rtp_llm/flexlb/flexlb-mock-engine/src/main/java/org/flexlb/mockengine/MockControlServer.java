@@ -1088,21 +1088,22 @@ final class MockControlServer {
                 sb.append(String.format("mock_engine_rpc_total{%s,rpc_method=\"%s\"} %s%n",
                         labels, escapeLabel(entry.getKey()), entry.getValue()));
             }
-            sb.append(String.format("mock_engine_prefill_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("prefill_ms_avg"))));
-            sb.append(String.format("mock_engine_prefill_ms_p99{%s} %.1f%n", labels, asDouble(snap.get("prefill_ms_p99"))));
-            sb.append(String.format("mock_engine_prefill_ms_count{%s} %s%n", labels, snap.get("prefill_ms_count")));
-            sb.append(String.format("mock_engine_decode_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_avg"))));
-            sb.append(String.format("mock_engine_decode_ms_p99{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_p99"))));
-            sb.append(String.format("mock_engine_decode_ms_count{%s} %s%n", labels, snap.get("decode_ms_count")));
-            // Production-caliber TPS (PD-split roles: prefill engines carry
-            // the context series, decode engines the generate series; the
-            // off-role series stay 0 so every engine reports the full set).
-            for (String name : List.of("context_compute_tokens_total", "context_tokens_total", "generate_tokens_total")) {
-                sb.append(String.format("mock_%s{%s} %s%n", name, labels, snap.get(name)));
+            if ("prefill".equalsIgnoreCase(service.getRoleName())) {
+                sb.append(String.format("mock_engine_prefill_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("prefill_ms_avg"))));
+                sb.append(String.format("mock_engine_prefill_ms_p99{%s} %.1f%n", labels, asDouble(snap.get("prefill_ms_p99"))));
+                sb.append(String.format("mock_engine_prefill_ms_count{%s} %s%n", labels, snap.get("prefill_ms_count")));
+                for (String name : List.of("context_compute_tokens_total", "context_tokens_total")) {
+                    sb.append(String.format("mock_%s{%s} %s%n", name, labels, snap.get(name)));
+                }
+                sb.append(String.format("rtp_llm_context_tps{%s} %s%n", labels, snap.get("context_tps")));
+                sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %s%n", labels, snap.get("context_tps_with_cache")));
+            } else if ("decode".equalsIgnoreCase(service.getRoleName())) {
+                sb.append(String.format("mock_engine_decode_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_avg"))));
+                sb.append(String.format("mock_engine_decode_ms_p99{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_p99"))));
+                sb.append(String.format("mock_engine_decode_ms_count{%s} %s%n", labels, snap.get("decode_ms_count")));
+                sb.append(String.format("mock_generate_tokens_total{%s} %s%n", labels, snap.get("generate_tokens_total")));
+                sb.append(String.format("rtp_llm_generate_tps{%s} %s%n", labels, snap.get("generate_tps")));
             }
-            sb.append(String.format("rtp_llm_context_tps{%s} %s%n", labels, snap.get("context_tps")));
-            sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %s%n", labels, snap.get("context_tps_with_cache")));
-            sb.append(String.format("rtp_llm_generate_tps{%s} %s%n", labels, snap.get("generate_tps")));
             // Block-pool observability (KV v2): gauges + cumulative counters,
             // same snapshot fields the /snapshot endpoint exposes.
             sb.append(String.format("mock_engine_cache_blocks{%s} %s%n", labels, snap.get("cache_blocks")));
@@ -1111,9 +1112,12 @@ final class MockControlServer {
             sb.append(String.format("mock_engine_referenced_blocks{%s} %s%n", labels, snap.get("referenced_blocks")));
             sb.append(String.format("mock_engine_kv_admission_fails_total{%s} %s%n", labels, snap.get("kv_admission_fails")));
             sb.append(String.format("mock_engine_lack_mem_rejects_total{%s} %s%n", labels, snap.get("lack_mem_rejects")));
-            sb.append(String.format("mock_engine_decode_reuse_blocks_total{%s} %s%n", labels, snap.get("decode_reuse_blocks")));
-            sb.append(String.format("mock_engine_cache_key_hits_total{%s} %s%n", labels, snap.get("cache_key_hits")));
-            sb.append(String.format("mock_engine_cache_keys_requested_total{%s} %s%n", labels, snap.get("cache_keys_requested")));
+            if ("prefill".equalsIgnoreCase(service.getRoleName())) {
+                sb.append(String.format("mock_engine_cache_key_hits_total{%s} %s%n", labels, snap.get("cache_key_hits")));
+                sb.append(String.format("mock_engine_cache_keys_requested_total{%s} %s%n", labels, snap.get("cache_keys_requested")));
+            } else if ("decode".equalsIgnoreCase(service.getRoleName())) {
+                sb.append(String.format("mock_engine_decode_reuse_blocks_total{%s} %s%n", labels, snap.get("decode_reuse_blocks")));
+            }
         }
     }
 
@@ -1151,16 +1155,16 @@ final class MockControlServer {
             sb.append(String.format("mock_engine_cache_evictions_total{%s} %d%n", label, sumLong(group, "cache_evictions")));
             sb.append(String.format("mock_engine_active_kv_tokens{%s} %d%n", label, sumLong(group, "active_kv_tokens")));
             sb.append(String.format("mock_engine_available_kv_tokens{%s} %d%n", label, sumLong(group, "available_kv_tokens")));
-            // Production-caliber TPS, role-summed (rate series add across
-            // engines; each engine's off-role series are 0 by design, so the
-            // prefill bucket carries the context pair and the decode bucket
-            // the generate series).
-            for (String name : List.of("context_compute_tokens_total", "context_tokens_total", "generate_tokens_total")) {
-                sb.append(String.format("mock_%s{%s} %d%n", name, label, sumLong(group, name)));
+            if ("prefill".equals(bucket.getKey())) {
+                for (String name : List.of("context_compute_tokens_total", "context_tokens_total")) {
+                    sb.append(String.format("mock_%s{%s} %d%n", name, label, sumLong(group, name)));
+                }
+                sb.append(String.format("rtp_llm_context_tps{%s} %d%n", label, sumLong(group, "context_tps")));
+                sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %d%n", label, sumLong(group, "context_tps_with_cache")));
+            } else {
+                sb.append(String.format("mock_generate_tokens_total{%s} %d%n", label, sumLong(group, "generate_tokens_total")));
+                sb.append(String.format("rtp_llm_generate_tps{%s} %d%n", label, sumLong(group, "generate_tps")));
             }
-            sb.append(String.format("rtp_llm_context_tps{%s} %d%n", label, sumLong(group, "context_tps")));
-            sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %d%n", label, sumLong(group, "context_tps_with_cache")));
-            sb.append(String.format("rtp_llm_generate_tps{%s} %d%n", label, sumLong(group, "generate_tps")));
             // Block-pool observability (KV v2): blocks and cumulative counters
             // sum across engines (role-level pool totals; the report layer
             // derives per-engine averages via its engine-count chain).
@@ -1170,9 +1174,12 @@ final class MockControlServer {
             sb.append(String.format("mock_engine_referenced_blocks{%s} %d%n", label, sumLong(group, "referenced_blocks")));
             sb.append(String.format("mock_engine_kv_admission_fails_total{%s} %d%n", label, sumLong(group, "kv_admission_fails")));
             sb.append(String.format("mock_engine_lack_mem_rejects_total{%s} %d%n", label, sumLong(group, "lack_mem_rejects")));
-            sb.append(String.format("mock_engine_decode_reuse_blocks_total{%s} %d%n", label, sumLong(group, "decode_reuse_blocks")));
-            sb.append(String.format("mock_engine_cache_key_hits_total{%s} %d%n", label, sumLong(group, "cache_key_hits")));
-            sb.append(String.format("mock_engine_cache_keys_requested_total{%s} %d%n", label, sumLong(group, "cache_keys_requested")));
+            if ("prefill".equals(bucket.getKey())) {
+                sb.append(String.format("mock_engine_cache_key_hits_total{%s} %d%n", label, sumLong(group, "cache_key_hits")));
+                sb.append(String.format("mock_engine_cache_keys_requested_total{%s} %d%n", label, sumLong(group, "cache_keys_requested")));
+            } else {
+                sb.append(String.format("mock_engine_decode_reuse_blocks_total{%s} %d%n", label, sumLong(group, "decode_reuse_blocks")));
+            }
 
             Map<String, Long> rpcTotals = new TreeMap<>();
             for (Map<String, Object> e : group) {
@@ -1189,8 +1196,7 @@ final class MockControlServer {
                         bucket.getKey(), escapeLabel(entry.getKey()), entry.getValue()));
             }
 
-            appendLatencyAggregates(sb, label, group, "prefill");
-            appendLatencyAggregates(sb, label, group, "decode");
+            appendLatencyAggregates(sb, label, group, bucket.getKey());
         }
     }
 
