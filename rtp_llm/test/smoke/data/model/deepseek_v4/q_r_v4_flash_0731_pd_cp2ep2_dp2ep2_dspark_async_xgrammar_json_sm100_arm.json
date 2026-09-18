@@ -1,0 +1,1813 @@
+{
+    "model_type": "deepseek_v4",
+    "model_path": "/mnt/nas1/hf/DeepSeek-V4-Flash-DSpark",
+    "query_result": [
+        {
+            "endpoint": "/__dash_sc_grpc__",
+            "case_name": "dash_sc_json_object_entity_extract_incremental_debug",
+            "query": {
+                "prompt": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}",
+                "generate_config": {
+                    "max_new_tokens": 128,
+                    "num_return_sequences": 0,
+                    "top_p": 1.0,
+                    "top_k": 1,
+                    "temperature": 0.0,
+                    "min_new_tokens": 0,
+                    "random_seed": null,
+                    "repetition_penalty": 1.0,
+                    "frequency_penalty": 0.0,
+                    "presence_penalty": 0.0,
+                    "stop_words_list": [],
+                    "response_format": {
+                        "type": "json_object"
+                    }
+                },
+                "enable_thinking": false,
+                "grpc_timeout_seconds": 1800,
+                "stop_when_requirements_met": false,
+                "yield_generator": true,
+                "parameter_ints": {
+                    "incremental_output": 1
+                },
+                "ds_header_attributes": {
+                    "debug": true,
+                    "result_format": "message"
+                }
+            },
+            "result": {
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "min_generated_ids": 2,
+                "finish_reason": 0
+            }
+        },
+        {
+            "endpoint": "/__dash_sc_grpc__",
+            "case_name": "dash_sc_guided_json_strict_false_thinking_stream",
+            "query": {
+                "prompt": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}",
+                "generate_config": {
+                    "max_new_tokens": 128,
+                    "num_return_sequences": 0,
+                    "top_p": 1.0,
+                    "top_k": 1,
+                    "temperature": 0.0,
+                    "min_new_tokens": 0,
+                    "random_seed": null,
+                    "repetition_penalty": 1.0,
+                    "frequency_penalty": 0.0,
+                    "presence_penalty": 0.0,
+                    "stop_words_list": []
+                },
+                "enable_thinking": true,
+                "max_new_think_tokens": 10,
+                "grpc_timeout_seconds": 1800,
+                "stop_when_requirements_met": false,
+                "yield_generator": true,
+                "parameter_ints": {
+                    "incremental_output": 1
+                },
+                "parameter_strings": {
+                    "guided_json": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ],
+                            "additionalProperties": false
+                        }
+                    ]
+                },
+                "ds_header_attributes": {
+                    "debug": true,
+                    "result_format": "message",
+                    "x-ds-llm-response-format": "json_schema",
+                    "x-ds-llm-thinking": "true"
+                }
+            },
+            "result": {
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "content_not_contains": [
+                    "```"
+                ],
+                "min_generated_ids": 2,
+                "finish_reason": 0
+            }
+        },
+        {
+            "endpoint": "/__dash_sc_grpc__",
+            "case_name": "dash_sc_max_completion_tokens_zero_returns_400",
+            "query": {
+                "prompt": "写一篇春天 1000字作文 ",
+                "generate_config": {
+                    "max_new_tokens": 32000,
+                    "num_return_sequences": 0,
+                    "top_p": 1.0,
+                    "top_k": 1,
+                    "temperature": 0.0,
+                    "min_new_tokens": 0,
+                    "random_seed": null,
+                    "repetition_penalty": 1.0,
+                    "frequency_penalty": 0.0,
+                    "presence_penalty": 0.0,
+                    "stop_words_list": []
+                },
+                "enable_thinking": false,
+                "grpc_timeout_seconds": 1800,
+                "stop_when_requirements_met": false,
+                "yield_generator": true,
+                "parameter_ints": {
+                    "incremental_output": 1,
+                    "max_completion_tokens": 0
+                },
+                "ds_header_attributes": {
+                    "result_format": "message",
+                    "x-ds-llm-thinking": "false"
+                }
+            },
+            "result": {
+                "expected_error_message_contains": "invalid max_completion_tokens: 0; must be greater than 0",
+                "expected_status_code": 400
+            }
+        },
+        {
+            "endpoint": "/__dash_sc_grpc__",
+            "case_name": "dash_sc_max_completion_tokens_negative_returns_400",
+            "query": {
+                "prompt": "写一篇春天 1000字作文 ",
+                "generate_config": {
+                    "max_new_tokens": 32000,
+                    "num_return_sequences": 0,
+                    "top_p": 1.0,
+                    "top_k": 1,
+                    "temperature": 0.0,
+                    "min_new_tokens": 0,
+                    "random_seed": null,
+                    "repetition_penalty": 1.0,
+                    "frequency_penalty": 0.0,
+                    "presence_penalty": 0.0,
+                    "stop_words_list": []
+                },
+                "enable_thinking": false,
+                "grpc_timeout_seconds": 1800,
+                "stop_when_requirements_met": false,
+                "yield_generator": true,
+                "parameter_ints": {
+                    "incremental_output": 1,
+                    "max_completion_tokens": -1
+                },
+                "ds_header_attributes": {
+                    "result_format": "message",
+                    "x-ds-llm-thinking": "false"
+                }
+            },
+            "result": {
+                "expected_error_message_contains": "invalid max_completion_tokens: -1; must be greater than 0",
+                "expected_status_code": 400
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Return only a JSON object with key answer and value ok."
+                    }
+                ],
+                "max_tokens": 64,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "json_format": true
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\"answer\": \"ok\"}"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 16,
+                    "total_tokens": 23,
+                    "completion_tokens": 7
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "answer"
+                ],
+                "expected_json": {
+                    "answer": "ok"
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Return only a JSON object with key city and value Hangzhou."
+                    }
+                ],
+                "max_tokens": 64,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "response_format": {
+                    "type": "json_object"
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\"city\": \"Hangzhou\"}"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 17,
+                    "total_tokens": 26,
+                    "completion_tokens": 9
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "city"
+                ],
+                "expected_json": {
+                    "city": "Hangzhou"
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Return only a JSON object for a weather report in Hangzhou."
+                    }
+                ],
+                "max_tokens": 256,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "weather_report",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "city": {
+                                    "type": "string"
+                                },
+                                "condition": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "city",
+                                "condition"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\n  \"city\": \"Hangzhou\",\n  \"condition\": \"Partly Cloudy with occasional showers expected in the afternoon, followed by clear skies in the evening. Light breeze from the east at 10 km/h. Humidity 78%. Temperature range: 24°C to 31°C. UV index moderate. Air quality: Good (AQI 45). Sunrise at 5:12 AM, sunset at 6:48 PM. No severe weather warnings"
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 17,
+                    "total_tokens": 113,
+                    "completion_tokens": 96
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "city",
+                    "condition"
+                ]
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "stream": true,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_object"
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"我国\", \"社会主义事业\", \"两个文明建设\"]}",
+                            "reasoning_content": "我们根据句子内容抽取实体。句子中提到了"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 63,
+                    "total_tokens": 104,
+                    "completion_tokens": 41
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "stream": true,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "entity_extract_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"我国\", \"社会主义事业\", \"两个文明建设\"]}",
+                            "reasoning_content": "我们根据句子内容抽取实体。句子中提到了"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 63,
+                    "total_tokens": 104,
+                    "completion_tokens": 41
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "你好"
+                    }
+                ],
+                "max_tokens": 32,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "text"
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "你好！很高兴见到你，有什么我可以帮忙的吗？无论是问题、聊天还是需要建议，我都在",
+                            "reasoning_content": "好的，用户发来一个简单的问候“你好"
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 5,
+                    "total_tokens": 37,
+                    "completion_tokens": 32
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Reply with plain text only: ok."
+                    }
+                ],
+                "max_tokens": 16,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "response_format": {
+                    "type": "text"
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "ok."
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "total_tokens": 15,
+                    "completion_tokens": 3
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你需要提取出name（名字，为string类型）、age（年龄，为string类型）与email（邮箱，为string类型），请输出JSON 字符串，不要输出其它无关内容。\n示例：\nQ：我叫张三，今年25岁，邮箱是zhangsan@example.com\nA：{\"name\":\"张三\",\"age\":\"25岁\",\"email\":\"zhangsan@example.com\"}\nQ：我叫李四，今年30岁，我的邮箱是lisi@example.com\nA：{\"name\":\"李四\",\"age\":\"30岁\",\"email\":\"lisi@example.com\"}\nQ：我叫王五，我的邮箱是wangwu@example.com，今年40岁\nA：{\"name\":\"王五\",\"age\":\"40岁\",\"email\":\"wangwu@example.com\"}"
+                    },
+                    {
+                        "role": "user",
+                        "content": "大家好，我叫刘五，今年34岁，邮箱是liuwu@example.com"
+                    }
+                ],
+                "max_tokens": 64,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "response_format": {
+                    "type": "json_object"
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\"name\":\"刘五\",\"age\":\"34岁\",\"email\":\"liuwu@example.com\"}"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 183,
+                    "total_tokens": 204,
+                    "completion_tokens": 21
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "name",
+                    "age",
+                    "email"
+                ],
+                "expected_json": {
+                    "name": "刘五",
+                    "age": "34岁",
+                    "email": "liuwu@example.com"
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "stream": true,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "math_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "enum": [
+                                            "我国",
+                                            "社会主义事业",
+                                            "两个文明建设"
+                                        ]
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ]
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "{\"地点\": [\"我国\"], \"人物\": [], \"组织\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}",
+                            "reasoning_content": "我们根据句子内容抽取实体。句子中提到了"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 63,
+                    "total_tokens": 103,
+                    "completion_tokens": 40
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "地点": [
+                        "我国"
+                    ],
+                    "人物": [],
+                    "组织": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_object"
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"我国\", \"社会主义事业\", \"两个文明建设\"]}",
+                            "reasoning_content": "我们根据句子内容抽取实体。句子中提到了"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 63,
+                    "total_tokens": 104,
+                    "completion_tokens": 41
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "entity_extract_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"我国\", \"社会主义事业\", \"两个文明建设\"]}",
+                            "reasoning_content": "我们根据句子内容抽取实体。句子中提到了"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 63,
+                    "total_tokens": 104,
+                    "completion_tokens": 41
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "entity_extract_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": false
+                    }
+                },
+                "stream": true
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"我国\", \"社会主义事业\", \"两个文明建设\"]}",
+                            "reasoning_content": "我们根据句子内容抽取实体。句子中提到了"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 63,
+                    "total_tokens": 104,
+                    "completion_tokens": 41
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "entity_extract_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": false
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"我国\", \"社会主义事业\", \"两个文明建设\"]}",
+                            "reasoning_content": "我们根据句子内容抽取实体。句子中提到了"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 63,
+                    "total_tokens": 104,
+                    "completion_tokens": 41
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "查询下北京的天气，json格式返回"
+                    }
+                ],
+                "max_tokens": 160,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "incremental_output": true,
+                "enable_search": true,
+                "response_format": {
+                    "type": "json_object"
+                },
+                "result_format": "message",
+                "search_options": {
+                    "citation_format": "[ref_<number>]",
+                    "enable_citation": true,
+                    "enable_search_extension": true,
+                    "enable_source": true,
+                    "forced_search": true,
+                    "search_strategy": "turbo"
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\n  \"location\": \"北京\",\n  \"weather\": {\n    \"temperature\": \"25°C\",\n    \"condition\": \"晴\",\n    \"humidity\": \"40%\",\n    \"wind\": \"西北风3级\",\n    \"air_quality\": \"良\",\n    \"updated_at\": \"2025-04-11 10:00:00\"\n  }\n}"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "total_tokens": 98,
+                    "completion_tokens": 80
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "expected_json": {
+                    "city": "北京",
+                    "weather": "晴",
+                    "temperature": "15°C",
+                    "humidity": "30%",
+                    "wind": "北风3级",
+                    "update_time": "2025-04-05 14:00"
+                },
+                "required_json_keys": [
+                    "city",
+                    "weather",
+                    "temperature",
+                    "humidity",
+                    "wind",
+                    "update_time"
+                ]
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "查询下北京的天气，查询结果以json格式返回"
+                    }
+                ],
+                "max_tokens": 160,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "incremental_output": true,
+                "enable_search": true,
+                "response_format": {
+                    "type": "json_object"
+                },
+                "result_format": "message",
+                "search_options": {
+                    "citation_format": "[ref_<number>]",
+                    "enable_citation": true,
+                    "enable_search_extension": true,
+                    "enable_source": true,
+                    "forced_search": true,
+                    "search_strategy": "max"
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\n  \"location\": \"北京\",\n  \"weather\": {\n    \"temperature\": \"25°C\",\n    \"condition\": \"晴\",\n    \"humidity\": \"40%\",\n    \"wind\": \"西北风3级\",\n    \"air_quality\": \"良\",\n    \"updated_at\": \"2025-04-08 14:00\"\n  }\n}"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 21,
+                    "total_tokens": 99,
+                    "completion_tokens": 78
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "expected_json": {
+                    "location": "北京",
+                    "weather": {
+                        "temperature": "15°C",
+                        "condition": "多云",
+                        "humidity": "45%",
+                        "wind": "北风 3级",
+                        "update_time": "2025-04-05 14:00"
+                    }
+                },
+                "required_json_keys": [
+                    "location",
+                    "weather"
+                ]
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "查询下北京的天气，查询结果以json格式返回"
+                    }
+                ],
+                "max_tokens": 160,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "incremental_output": true,
+                "enable_search": true,
+                "response_format": {
+                    "type": "json_object"
+                },
+                "result_format": "message",
+                "search_options": {
+                    "citation_format": "[ref_<number>]",
+                    "enable_citation": true,
+                    "enable_search_extension": true,
+                    "enable_source": true,
+                    "forced_search": true,
+                    "search_strategy": "max"
+                },
+                "thinking_budget": 10,
+                "stream": true
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "{\n  \"city\": \"北京\",\n  \"weather\": \"晴\",\n  \"temperature\": 25,\n  \"humidity\": 40,\n  \"wind\": \"西北风3级\",\n  \"updated\": \"2025-04-01 10:00\"\n}",
+                            "reasoning_content": "我们根据用户要求，查询北京天气并以JSON"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 21,
+                    "total_tokens": 90,
+                    "completion_tokens": 69
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "expected_json": {
+                    "location": "北京",
+                    "weather": {
+                        "temperature": "15°C",
+                        "condition": "多云",
+                        "humidity": "45%",
+                        "wind": "北风 3级"
+                    },
+                    "note": "此为模拟数据，实际天气请查询官方气象服务"
+                },
+                "required_json_keys": [
+                    "location",
+                    "weather",
+                    "note"
+                ]
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "查询下北京的天气，json格式返回"
+                    }
+                ],
+                "max_tokens": 160,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "incremental_output": true,
+                "enable_search": true,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "get_weather",
+                        "schema": {
+                            "additionalProperties": false,
+                            "properties": {
+                                "advice": {
+                                    "description": "建议",
+                                    "type": "string"
+                                },
+                                "city": {
+                                    "description": "城市名称",
+                                    "type": "string"
+                                },
+                                "date": {
+                                    "description": "日期",
+                                    "type": "string"
+                                },
+                                "weather": {
+                                    "description": "天气",
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "city",
+                                "date",
+                                "advice",
+                                "weather"
+                            ],
+                            "type": "object"
+                        },
+                        "strict": true
+                    }
+                },
+                "result_format": "message",
+                "search_options": {
+                    "citation_format": "[ref_<number>]",
+                    "enable_citation": true,
+                    "enable_search_extension": true,
+                    "enable_source": true,
+                    "forced_search": true,
+                    "search_strategy": "turbo"
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\n  \"advice\": \"今天天气晴朗，适合户外活动，但紫外线较强，建议涂抹防晒霜。\",\n  \"city\": \"北京\",\n  \"date\": \"2025-04-11\",\n  \"weather\": \"晴转多云，午后有短时阵雨，气温18~28℃，西南风3-4级，空气质量良。\"\n}"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "total_tokens": 97,
+                    "completion_tokens": 79
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "advice",
+                    "city",
+                    "date",
+                    "weather"
+                ],
+                "expected_json": {
+                    "advice": "天气寒冷，建议穿羽绒服、毛衣、保暖裤等厚实衣物，注意防寒保暖。",
+                    "city": "北京",
+                    "date": "2025-04-09",
+                    "weather": "晴转多云，气温-2℃~10℃，北风3-4级，空气质量良。"
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "查询下北京的天气，查询结果以json格式返回"
+                    }
+                ],
+                "max_tokens": 160,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "incremental_output": true,
+                "enable_search": true,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "get_weather",
+                        "schema": {
+                            "additionalProperties": false,
+                            "properties": {
+                                "advice": {
+                                    "description": "建议",
+                                    "type": "string"
+                                },
+                                "city": {
+                                    "description": "城市名称",
+                                    "type": "string"
+                                },
+                                "date": {
+                                    "description": "日期",
+                                    "type": "string"
+                                },
+                                "weather": {
+                                    "description": "天气",
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "city",
+                                "date",
+                                "advice",
+                                "weather"
+                            ],
+                            "type": "object"
+                        },
+                        "strict": true
+                    }
+                },
+                "result_format": "message",
+                "search_options": {
+                    "citation_format": "[ref_<number>]",
+                    "enable_citation": true,
+                    "enable_search_extension": true,
+                    "enable_source": true,
+                    "forced_search": true,
+                    "search_strategy": "max"
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\n  \"advice\": \"天气寒冷，建议穿厚外套、毛衣等保暖衣物。\",\n  \"city\": \"北京\",\n  \"date\": \"2025-01-18\",\n  \"weather\": \"晴转多云，微风，气温 -4℃ ~ 5℃。\"\n}"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 21,
+                    "total_tokens": 86,
+                    "completion_tokens": 65
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "advice",
+                    "city",
+                    "date",
+                    "weather"
+                ],
+                "expected_json": {
+                    "advice": "当前北京天气晴朗，气温适中，建议外出时注意防晒。",
+                    "city": "北京",
+                    "date": "2025-04-09",
+                    "weather": "晴转多云，气温15°C~25°C，西南风2-3级，空气质量良（AQI 85）"
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "第001条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第002条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第003条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第004条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第005条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第006条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第007条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第008条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第009条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第010条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第011条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第012条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第013条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第014条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第015条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第016条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第017条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第018条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第019条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第020条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第021条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第022条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第023条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第024条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第025条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第026条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第027条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第028条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第029条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第030条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第031条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第032条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第033条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第034条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第035条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第036条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第037条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第038条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第039条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第040条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第041条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第042条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第043条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第044条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第045条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第046条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第047条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第048条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n请忽略以上记录的语义，只按约束输出 JSON，marker 必须是 long-query-ok，record_count 必须是 48。"
+                    }
+                ],
+                "max_tokens": 64,
+                "temperature": 0,
+                "top_p": 1,
+                "top_k": 1,
+                "enable_thinking": false,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "long_query_48_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "marker": {
+                                    "type": "string",
+                                    "enum": [
+                                        "long-query-ok"
+                                    ]
+                                },
+                                "record_count": {
+                                    "type": "integer",
+                                    "enum": [
+                                        48
+                                    ]
+                                }
+                            },
+                            "required": [
+                                "marker",
+                                "record_count"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\"marker\":\"long-query-ok\",\"record_count\":48}"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "marker",
+                    "record_count"
+                ],
+                "expected_json": {
+                    "marker": "long-query-ok",
+                    "record_count": 48
+                },
+                "required_aux_info": {
+                    "input_len": 1425,
+                    "pd_sep": true,
+                    "prefill_total_reuse_len": 0,
+                    "decode_total_reuse_len": 1280
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "第001条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第002条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第003条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第004条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第005条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第006条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第007条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第008条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第009条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第010条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第011条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第012条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第013条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第014条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第015条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第016条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第017条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第018条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第019条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第020条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第021条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第022条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第023条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第024条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第025条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第026条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第027条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第028条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第029条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第030条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第031条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第032条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第033条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第034条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第035条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第036条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第037条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第038条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第039条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第040条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第041条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第042条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第043条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第044条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第045条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第046条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第047条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第048条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n请忽略以上记录的语义，只按约束输出 JSON，marker 必须是 long-query-ok，record_count 必须是 48。"
+                    }
+                ],
+                "max_tokens": 64,
+                "temperature": 0,
+                "top_p": 1,
+                "top_k": 1,
+                "enable_thinking": false,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "long_query_48_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "marker": {
+                                    "type": "string",
+                                    "enum": [
+                                        "long-query-ok"
+                                    ]
+                                },
+                                "record_count": {
+                                    "type": "integer",
+                                    "enum": [
+                                        48
+                                    ]
+                                }
+                            },
+                            "required": [
+                                "marker",
+                                "record_count"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\"marker\":\"long-query-ok\",\"record_count\":48}"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "marker",
+                    "record_count"
+                ],
+                "expected_json": {
+                    "marker": "long-query-ok",
+                    "record_count": 48
+                },
+                "required_aux_info": {
+                    "input_len": 1425,
+                    "pd_sep": true,
+                    "prefill_total_reuse_len": 1024,
+                    "decode_total_reuse_len": 1280
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "第001条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第002条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第003条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第004条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第005条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第006条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第007条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第008条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第009条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第010条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第011条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第012条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第013条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第014条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第015条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第016条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第017条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第018条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第019条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第020条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第021条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第022条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第023条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第024条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第025条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第026条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第027条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第028条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第029条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第030条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第031条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第032条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第033条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第034条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第035条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第036条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第037条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第038条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第039条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第040条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第041条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第042条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第043条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第044条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第045条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第046条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第047条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第048条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第049条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第050条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第051条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第052条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第053条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第054条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第055条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第056条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第057条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第058条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第059条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第060条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第061条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第062条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第063条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第064条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第065条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第066条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第067条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第068条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第069条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第070条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第071条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第072条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第073条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第074条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第075条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第076条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第077条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第078条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第079条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第080条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第081条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第082条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第083条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第084条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第085条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第086条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第087条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第088条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第089条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第090条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第091条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第092条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第093条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第094条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第095条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第096条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第097条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第098条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第099条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第100条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第101条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第102条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第103条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第104条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第105条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第106条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第107条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第108条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第109条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第110条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第111条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第112条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第113条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第114条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第115条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第116条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第117条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第118条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第119条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第120条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第121条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第122条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第123条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第124条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第125条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第126条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第127条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n第128条缓存校验记录：甲系统在固定位置保存状态，乙系统读取并核对序号，内容仅用于构造长上下文。\n请忽略以上记录的语义，只按约束输出 JSON，marker 必须是 long-query-ok，record_count 必须是 128。"
+                    }
+                ],
+                "max_tokens": 64,
+                "temperature": 0,
+                "top_p": 1,
+                "top_k": 1,
+                "enable_thinking": false,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "long_query_128_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "marker": {
+                                    "type": "string",
+                                    "enum": [
+                                        "long-query-ok"
+                                    ]
+                                },
+                                "record_count": {
+                                    "type": "integer",
+                                    "enum": [
+                                        128
+                                    ]
+                                }
+                            },
+                            "required": [
+                                "marker",
+                                "record_count"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\"marker\":\"long-query-ok\",\"record_count\":128}"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "marker",
+                    "record_count"
+                ],
+                "expected_json": {
+                    "marker": "long-query-ok",
+                    "record_count": 128
+                },
+                "required_aux_info": {
+                    "input_len": 3745,
+                    "pd_sep": true,
+                    "prefill_total_reuse_len": 1024,
+                    "decode_total_reuse_len": 3584
+                }
+            }
+        }
+    ]
+}

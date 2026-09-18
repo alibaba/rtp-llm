@@ -311,8 +311,7 @@ GptModelInputs makeInputs(const std::vector<int32_t>& input_lengths,
 
 class TestContextParallelProcessor: public IContextParallelProcessor {
 public:
-    explicit TestContextParallelProcessor(const ParallelismConfig& config):
-        IContextParallelProcessor(config, /*split_hidden_states=*/true) {}
+    explicit TestContextParallelProcessor(const ParallelismConfig& config): IContextParallelProcessor(config) {}
 
     size_t handleOutputs(torch::Tensor& hidden_states,
                          const GptModelInputs&,
@@ -402,7 +401,7 @@ Scenario makeMicroBatchScenario() {
     return scenario;
 }
 
-Scenario makeContextParallelScenario() {
+Scenario makeContextParallelScenario(size_t tp_rank) {
     auto     config = makeCacheConfig({{"linear", 1, 24}, {"full", 2, 16}});
     auto     layout = makeLayout(config);
     auto     inputs = makeInputs(/*input_lengths=*/{6},
@@ -416,7 +415,7 @@ Scenario makeContextParallelScenario() {
                              /*global_stride_bytes=*/24);
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     scenario.parallelism.tp_size                            = 2;
-    scenario.parallelism.tp_rank                            = 1;
+    scenario.parallelism.tp_rank                            = tp_rank;
     scenario.parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     scenario.parallelism.prefill_cp_config.kv_cache_sharded = false;
     scenario.replace_cp_processor                           = true;
@@ -451,8 +450,11 @@ Scenario makeScenario(const std::string& name) {
     if (name == "micro_batch") {
         return makeMicroBatchScenario();
     }
-    if (name == "cp_actual_lengths") {
-        return makeContextParallelScenario();
+    if (name == "cp_actual_lengths_rank0") {
+        return makeContextParallelScenario(/*tp_rank=*/0);
+    }
+    if (name == "cp_actual_lengths_rank1") {
+        return makeContextParallelScenario(/*tp_rank=*/1);
     }
     if (name == "mtp_sub_config") {
         return makeMtpScenario();

@@ -954,6 +954,7 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                     reuse_cache=False,
                     enable_device_cache=False,
                     enable_memory_cache=False,
+                    enable_disk_cache=False,
                     enable_remote_cache=False,
                     aux_info=True,
                     timeout_ms=timeout_ms,

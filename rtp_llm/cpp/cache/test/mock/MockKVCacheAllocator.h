@@ -14,7 +14,7 @@ public:
 
 public:
     MOCK_METHOD(void, free, (const FreeInfo&), (override));
-    MOCK_METHOD(void, insertIntoCache, (const InsertInfo&), (override));
+    MOCK_METHOD(void, insertIntoCache, (const InsertInfo&, size_t&), (override));
     MOCK_METHOD(BlockAddrInfo, convertIndexToAddr, (int layer_id, int block_id), (const, override));
     MOCK_METHOD(std::vector<BlockInfo>, convertIndexToBuffer, (int layer_id, int block_id), (const, override));
     MOCK_METHOD(std::vector<BlockInfo>,
@@ -25,7 +25,7 @@ public:
                 incrKVCacheRef,
                 (const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector),
                 (override));
-    MOCK_METHOD(void, decrKVCacheRef, (const KVCacheResource& kvcache_resource, bool is_connector), (override));
+    MOCK_METHOD(void, decrKVCacheRef, (const KVCacheResource& kvcache_resource), (override));
     MOCK_METHOD(GroupedCacheLayerLayout, allLayerCacheBase, (), (const, override));
     MOCK_METHOD(bool,
                 updateKVBlock,
@@ -49,6 +49,7 @@ public:
                 (const, override));
     MOCK_METHOD(size_t, availableBlocksNum, (), (const, override));
     MOCK_METHOD(size_t, totalBlocksNum, (), (const, override));
+    MOCK_METHOD(size_t, maxAvailableTokensNum, (), (const, override));
 
 protected:
     MOCK_METHOD(bool, doInit, (), (override));

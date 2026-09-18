@@ -339,7 +339,9 @@ torch::Tensor makeCudaInt32Range(int64_t end) {
 }
 
 torch::Tensor committedLenToDraftDecodePosition(const torch::Tensor& committed_len, TensorHolder& host_holder) {
-    return toCudaInt32(committed_len, host_holder);
+    // The carried target token is counted in committed_len, but shifted
+    // draft KV has only committed_len - 1 entries before the next proposal.
+    return (toCudaInt32(committed_len, host_holder) - 1).to(torch::kInt32);
 }
 
 torch::Tensor normalDecodePositionToDraftDecodePosition(const torch::Tensor& normal_decode_position,
@@ -348,7 +350,7 @@ torch::Tensor normalDecodePositionToDraftDecodePosition(const torch::Tensor& nor
     if (!position.defined() || position.numel() == 0) {
         return position;
     }
-    return (position + 1).to(torch::kInt32);
+    return position;
 }
 
 void setVerifyPairInputs(GptModelInputs& model_input,
@@ -847,12 +849,12 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
             model_input.combo_tokens      = std::move(combo_tokens_gpu);
             model_input.lm_output_indexes = makeCudaInt32Range(model_input.combo_tokens.numel());
             if (sequence_lengths_gpu.size() == batch_size) {
-                // next_seq_len includes the target token carried by the stream.
-                // Draft decode consumes the following position, while target
-                // verification must first write that carried token.
+                // next_seq_len includes the carried target token. Shifted
+                // draft KV and target verification both resume at length - 1;
+                // explicit rotary position IDs are managed separately.
                 auto committed_len           = torch::cat(sequence_lengths_gpu, 0);
                 model_input.sequence_lengths = committedLenToDraftDecodePosition(committed_len, host_holder);
-                model_input.prefix_lengths   = (model_input.sequence_lengths - 1).to(torch::kInt32);
+                model_input.prefix_lengths   = model_input.sequence_lengths;
             } else if (model_input.sequence_lengths.defined()) {
                 auto target_prefix_lengths = toCudaInt32(model_input.sequence_lengths, host_holder);
                 model_input.prefix_lengths = target_prefix_lengths;

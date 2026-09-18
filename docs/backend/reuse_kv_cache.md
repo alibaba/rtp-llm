@@ -30,6 +30,77 @@ pipeline.stop()
 
 ```
 
+## Cache Tiers (L1 / L2 / L3)
+
+Reused KV cache can live in three local tiers, each controlled by its own independent switch:
+
+| Tier | Location | Switch | Required companion settings |
+|------|----------|--------|-----------------------------|
+| L1 | GPU device memory | `ENABLE_DEVICE_CACHE` (default on) | — |
+| L2 | Pinned host memory | `ENABLE_MEMORY_CACHE` (default off) | `MEMORY_CACHE_SIZE_MB` |
+| L3 | Local disk | `ENABLE_DISK_CACHE` (default off) | `DISK_CACHE_SIZE_MB`, `DISK_CACHE_PATHS` |
+
+Device free-block headroom is managed by `BLOCK_TREE_DEVICE_EVICT_HIGH_WATERMARK_RATIO` (default 0.90)
+and `BLOCK_TREE_DEVICE_EVICT_LOW_WATERMARK_RATIO` (default 0.82). Reaching the high occupancy watermark
+triggers eviction toward the low watermark. Allocations can consume this headroom and reclaim cached
+blocks on demand; blocks still referenced by requests or transfers may delay physical reclamation.
+Scheduler admission separately uses `RESERVE_BLOCK_RATIO` (default 5%) to preserve headroom for
+running requests to grow. This admission reserve is independent of the cache eviction watermarks.
+
+All eight combinations are valid, including L2-only and L3-only deployments. Enabling a tier
+without its capacity or path settings is a startup error rather than a silent downgrade, so a
+misconfiguration never degrades quietly into a smaller cache than intended.
+
+When MULTI_TASK_PROMPT is configured, the server automatically enables `REUSE_CACHE` and L1 to
+preserve the existing static system-prompt behavior. Disable MULTI_TASK_PROMPT when testing a pure
+L2-only or L3-only configuration.
+
+`REUSE_CACHE` remains the deployment master switch: with it off, no tier is consulted or written.
+By default, a request must also set `reuse_cache=true` (the default) to use prefix-cache lookup
+or store its KV for later reuse.
+
+### Lookup and store targets
+
+The deployment switches select the local tiers used for lookup and storage. The per-request
+`enable_device_cache`, `enable_memory_cache` and `enable_disk_cache` fields remain accepted for
+protocol compatibility, but do not change this local-tier policy.
+
+- **Lookup** may use any enabled local tier, plus the configured remote backend.
+- **Storage after successful completion** selects one local target: L1 (DEVICE), then L2
+  (HOST), then L3 (DISK). Lower-tier demotion is a separate operation.
+
+With cache reuse enabled, the local-tier rules are:
+
+| Enabled local tiers (deployment) | Lookup may use | Request-completion store target |
+|---------------------------------|----------------|---------------------------------|
+| None | None locally | None |
+| L1 | L1 | L1 |
+| L2 | L2 | L2 |
+| L3 | L3 | L3 |
+| L1, L2 | L1, L2 | L1 |
+| L1, L3 | L1, L3 | L1 |
+| L2, L3 | L2, L3 | L2 |
+| L1, L2, L3 | L1, L2, L3 | L1 |
+
+Remote caching requires a backend enabled and initialized by the deployment configuration.
+Every DEVICE insert also prepares a remote upload when that backend exists, including
+resident inserts and duplicate keys. HOST/DISK inserts do not upload. Remote writes are
+asynchronous, submitted outside the tree lock, and do not delay insert until I/O completes;
+a failed upload does not roll back the DEVICE cache entry.
+
+The request's `enable_remote_cache` field remains accepted but does not control this DEVICE
+upload path or remote lookup admission. A remote-only deployment can still look up remote
+entries, but has no request-completion store target. Direct REMOTE inserts are unsupported.
+Backend availability does not bypass successful completion, `reuse_cache`, or allocator
+resource eligibility checks required to reach a DEVICE insert.
+
+### Ignoring request cache switches
+
+Setting `RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES=1` (default off) ignores the request's
+`reuse_cache` switch for lookup and storage. Local tiers and DEVICE uploads already follow
+deployment policy regardless of this setting. It does not enable a tier disabled by the
+deployment, and deployment-level `REUSE_CACHE=0` still disables reuse entirely.
+
 # MultiTaskPrompt
 Create static cache for long-text System Prompts, directly reading KV cache from static cache in each request instead of recomputing. This method can significantly reduce the model's First Token Latency.
 
@@ -83,6 +154,7 @@ pipeline.stop()
 ```
 
 ### Note:
-When using MULTI_TASK_PROMPT, if the REUSE_CACHE function is enabled, then KV cache can be reused. Refer to the document [ReuseKVCache](docs/ReuseKVCache-Tutorial.md).
+MULTI_TASK_PROMPT is served out of L1. When configured, it automatically enables `REUSE_CACHE`
+and `ENABLE_DEVICE_CACHE`, preserving the existing behavior.
 When a task ID is specified, the system prompt of the task_id is used to concatenate the request, and the longest matching historical request is found in the KV cache to reuse the KV cache.
 When no task ID is specified, the user's prompt is used to find the longest matching historical request in the KV cache to reuse the KV cache.
