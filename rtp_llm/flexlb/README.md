@@ -354,6 +354,24 @@ Authorization: Bearer <token>
 }
 ```
 
+### Follower recovery after one forward
+
+Schedule forwards at most once. If the receiver is also a follower, it returns
+`NOT_MASTER` (8517) before admission; the sender may run the existing local route.
+No-master and connection-establishment failures also allow local routing.
+This includes `UnknownHostException` and `UnresolvedAddressException` causes
+on an `UNAVAILABLE` result; error message text alone does not permit replay.
+
+Other `UNAVAILABLE` or `DEADLINE_EXCEEDED` failures can happen after admission.
+These failures are returned directly without cancellation or local replay.
+Business errors and cancelled or expired callers also do not trigger local
+execution. Unresolved forwards keep the existing terminal error response and
+frontend behavior.
+
+Local recovery keeps the request id and caller Context. State queries and cancel
+requests first check local ownership, so a recovering follower can manage its
+own request. This does not provide cross-node deduplication for frontend retries.
+
 ## Configuration reference
 
 - **FlexLB behavior**: one strict JSON document in `FLEXLB_CONFIG`.

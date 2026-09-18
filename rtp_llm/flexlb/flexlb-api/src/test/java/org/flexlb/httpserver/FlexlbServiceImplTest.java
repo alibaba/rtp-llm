@@ -46,10 +46,13 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class FlexlbServiceImplTest {
 
+    private final java.util.concurrent.ScheduledExecutorService deadlineTimer =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
     private RouteService routeService;
     private LBStatusConsistencyService lbStatusConsistencyService;
     private EngineHealthReporter engineHealthReporter;
@@ -75,7 +78,6 @@ class FlexlbServiceImplTest {
         FlexlbConfig flexlbConfig = org.flexlb.mock.TestFlexlbConfigs.create();
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
 
-
         service = new FlexlbServiceImpl(
                 routeService,
                 lbStatusConsistencyService,
@@ -96,6 +98,7 @@ class FlexlbServiceImplTest {
     @AfterEach
     void tearDown() {
         org.flexlb.telemetry.FlexlbTrace.configure(null, "");
+        deadlineTimer.shutdownNow();
         pvLogger.detachAppender(pvAppender);
         pvAppender.stop();
     }
@@ -496,14 +499,6 @@ class FlexlbServiceImplTest {
         CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> pendingForward =
                 new CompletableFuture<>();
         when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(pendingForward);
-        when(grpcForwarder.forwardCompensatingCancelToMaster(any(), any(), any(io.opentelemetry.context.Context.class)))
-                .thenAnswer(invocation -> {
-                    // The schedule RPC inherited the cancelled inbound Context. Its
-                    // reconciliation must not inherit that cancellation as well.
-                    assertFalse(Context.current().isCancelled());
-                    return CompletableFuture.completedFuture(
-                            FlexlbGrpcForwarder.CancelForwardResult.noMaster());
-                });
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
@@ -518,49 +513,304 @@ class FlexlbServiceImplTest {
         inbound.cancel(null);
         inbound.run(() -> pendingForward.complete(
                 FlexlbGrpcForwarder.MasterForwardResult.failed(
-                        "CANCELLED", "10.0.0.2:7001")));
+                        Status.CANCELLED.asRuntimeException(), "10.0.0.2:7001")));
 
         verify(routeService, never()).route(any());
-        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelRequestPB> cancel =
-                ArgumentCaptor.forClass(
-                        FlexlbScheduleProtocol.FlexlbCancelRequestPB.class);
-        verify(grpcForwarder).forwardCompensatingCancelToMaster(
-                cancel.capture(), org.mockito.ArgumentMatchers.eq("10.0.0.2:7001"),
-                any(io.opentelemetry.context.Context.class));
-        assertEquals(request.getRequestId(), cancel.getValue().getRequestId());
-        assertEquals(
-                FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED,
-                cancel.getValue().getReason());
+        verify(grpcForwarder).forwardScheduleToMaster(request);
+        verifyNoMoreInteractions(grpcForwarder);
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
                 ArgumentCaptor.forClass(
                         FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
         verify(observer).onNext(captor.capture());
         verify(observer).onCompleted();
         assertFalse(captor.getValue().getSuccess());
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 captor.getValue().getCode());
-        assertPvContains("\"code\":8511");
+        assertPvContains("\"code\":8504");
         assertPvContains("\"scheduleOrigin\":\"FORWARD_FAILED\"");
         assertPvContains("\"requestExpiresAtMs\":");
         assertPvContains("\"realMasterHost\":\"10.0.0.2:7001\"");
     }
 
     @Test
-    void testSchedule_guardFailureDoesNotStartCancellationReconciliation() {
+    void testSchedule_unsentSelfTargetRoutesLocallyWithoutCancel() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
         when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
                 CompletableFuture.completedFuture(
-                        FlexlbGrpcForwarder.MasterForwardResult.failed(
-                                "FORWARD_HOP_LIMIT", "10.0.0.2:7001")));
+                        FlexlbGrpcForwarder.MasterForwardResult.blocked(
+                                "SELF_FORWARD_BLOCKED", "10.0.0.2:7001")));
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12_349L)
                 .build(), mock(StreamObserver.class));
 
-        verify(grpcForwarder, never())
-                .forwardCompensatingCancelToMaster(any(), any(), any(io.opentelemetry.context.Context.class));
+        verify(grpcForwarder, never()).forwardCancelToMaster(any());
+        verify(routeService, times(1)).route(any());
+    }
+
+    @Test
+    void rejectedForwardRetriesOnceAndRetainsOriginalDeadline() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> pending = new CompletableFuture<>();
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(pending);
+        Response success = new Response();
+        success.setSuccess(true);
+        success.setCode(200);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(success));
+        var inbound = Context.current().withDeadlineAfter(5, java.util.concurrent.TimeUnit.SECONDS,
+                deadlineTimer);
+        when(routeService.route(any())).thenAnswer(invocation -> {
+            assertSame(inbound.getDeadline(), Context.current().getDeadline());
+            return CompletableFuture.completedFuture(success);
+        });
+        try {
+            inbound.run(() -> service.schedule(
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(81).build(),
+                    mock(StreamObserver.class)));
+            pending.complete(FlexlbGrpcForwarder.MasterForwardResult.forwarded(
+                    nodeRejected(), "old:7001")); // Complete outside the original Context.
+            ArgumentCaptor<BalanceContext> ctx = ArgumentCaptor.forClass(BalanceContext.class);
+            verify(routeService).route(ctx.capture());
+            assertEquals(81, ctx.getValue().getRequestId());
+            verify(grpcForwarder, times(1)).forwardScheduleToMaster(any());
+            verify(grpcForwarder, never()).forwardCancelToMaster(any());
+        } finally {
+            inbound.cancel(null);
+        }
+    }
+
+    @Test
+    void cancelledCallerCannotStartLocalRetryFromACompletionOnAnotherThread() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> pending = new CompletableFuture<>();
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(pending);
+        var inbound = Context.current().withCancellation();
+        inbound.run(() -> service.schedule(
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(82).build(),
+                mock(StreamObserver.class)));
+        inbound.cancel(null);
+        pending.complete(FlexlbGrpcForwarder.MasterForwardResult.forwarded(nodeRejected(), "old:7001"));
         verify(routeService, never()).route(any());
+    }
+
+    @Test
+    void ambiguousForwardFailureReturnsImmediatelyWithoutCancelOrLocalSchedule() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        for (var status : java.util.List.of(Status.UNAVAILABLE, Status.DEADLINE_EXCEEDED)) {
+            when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(CompletableFuture.completedFuture(
+                    FlexlbGrpcForwarder.MasterForwardResult.failed(status.asRuntimeException(), "old:7001")));
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+            assertTimeoutPreemptively(Duration.ofSeconds(1), () -> service.schedule(
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(83).build(), observer));
+            ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
+                    ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+            verify(observer).onNext(response.capture());
+            verify(observer).onCompleted();
+            assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getValue().getCode());
+            assertEquals("old:7001", response.getValue().getRealMasterHost());
+        }
+        verify(routeService, never()).route(any());
+        verify(grpcForwarder, times(2)).forwardScheduleToMaster(any());
+        verifyNoMoreInteractions(grpcForwarder);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void forwardCompletionDispatchesLocalRequestOnlyOnce() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> stage = new CompletableFuture<>();
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(stage);
+        CompletableFuture<Response> local = new CompletableFuture<>();
+        when(routeService.route(any())).thenReturn(local);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(91).build(), observer);
+
+        var rejection = FlexlbGrpcForwarder.MasterForwardResult.forwarded(nodeRejected(), "old:7001");
+        assertTrue(stage.complete(rejection));
+        assertFalse(stage.complete(rejection));
+        verify(grpcForwarder, times(1)).forwardScheduleToMaster(any());
+        verify(routeService, times(1)).route(any());
+        verifyNoInteractions(observer);
+        Response success = new Response();
+        success.setSuccess(true);
+        success.setCode(200);
+        local.complete(success);
+        verify(observer, times(1)).onNext(any());
+        verify(observer, times(1)).onCompleted();
+        verify(observer, never()).onError(any());
+    }
+
+    @Test
+    void formerMasterDoesNotClaimAnOwnedRequestWasNeverAccepted() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        when(routeService.getRequestState(88L, 0L)).thenReturn(new RequestState(88L,
+                RequestState.Phase.ACKNOWLEDGED, DeliveryClaimKind.BATCH_ENQUEUE,
+                1001L, 10L, 20L, "already dispatched"));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(88).setForwardHop(1).build(), observer);
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> result =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(result.capture());
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), result.getValue().getCode());
+        assertTrue(result.getValue().hasLifecycle());
+        verify(routeService, never()).route(any());
+        verifyNoInteractions(grpcForwarder);
+    }
+
+    @Test
+    void followerQueriesAndCancelsItsLocalOwnerBeforeConsultingTheLeader() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        RequestState owned = new RequestState(86L, RequestState.Phase.ACKNOWLEDGED,
+                DeliveryClaimKind.BATCH_ENQUEUE, 1001L, 10L, 20L, "owned here");
+        when(routeService.getRequestState(86L, 1001L)).thenReturn(owned);
+        when(routeService.cancelRequest(86L, 1001L, CancelReason.CLIENT_CANCELLED)).thenReturn(owned);
+        service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                .setRequestId(86).setBatchId(1001).build(), mock(StreamObserver.class));
+        service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                .setRequestId(86).setBatchId(1001).build(), mock(StreamObserver.class));
+        verify(routeService).cancelRequest(86L, 1001L, CancelReason.CLIENT_CANCELLED);
+        verifyNoInteractions(grpcForwarder);
+    }
+
+    @Test
+    void expiredInboundDeadlinePreventsLocalFallbackEvenWhenNoMasterExists() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(CompletableFuture.completedFuture(
+                FlexlbGrpcForwarder.MasterForwardResult.noMaster()));
+        var inbound = Context.current().withDeadlineAfter(-1, java.util.concurrent.TimeUnit.SECONDS, deadlineTimer);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        try {
+            inbound.run(() -> service.schedule(
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(87).build(), observer));
+            verify(routeService, never()).route(any());
+            ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> result =
+                    ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+            verify(observer).onNext(result.capture());
+            assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), result.getValue().getCode());
+        } finally {
+            inbound.cancel(null);
+        }
+    }
+
+    @Test
+    void localRetryRequiresAnExplicitUnacceptedNodeRejection() {
+        BalanceContext context = mock(BalanceContext.class);
+        var result = FlexlbGrpcForwarder.MasterForwardResult.forwarded(nodeRejected(), "old:7001");
+        when(context.requestExpired(anyLong())).thenReturn(false);
+        assertTrue(service.shouldScheduleLocally(context, result));
+        when(context.requestExpired(anyLong())).thenReturn(true);
+        assertFalse(service.shouldScheduleLocally(context, result));
+        verifyNoInteractions(grpcForwarder);
+    }
+
+    @Test
+    void businessErrorsAndContradictoryRejectionsCannotBeRetriedLocally() {
+        BalanceContext context = mock(BalanceContext.class);
+        for (var error : StrategyErrorType.values()) {
+            if (error == StrategyErrorType.NOT_MASTER) {
+                continue;
+            }
+            var response = FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder().setCode(error.getErrorCode()).build();
+            assertFalse(service.shouldScheduleLocally(context,
+                    FlexlbGrpcForwarder.MasterForwardResult.forwarded(response, "old:7001")), error.name());
+        }
+        var rejected = nodeRejected().toBuilder();
+        for (var response : java.util.List.of(
+                rejected.clone().setSuccess(true).build(),
+                rejected.clone().setCode(200).build(),
+                rejected.clone().setEnqueuedByMaster(true).build(),
+                rejected.clone().setLifecycle(FlexlbScheduleProtocol.RequestLifecyclePB.getDefaultInstance()).build(),
+                rejected.clone().addServerStatus(FlexlbScheduleProtocol.FlexlbServerStatusPB.getDefaultInstance()).build(),
+                rejected.clone().setCode(999).build())) {
+            assertFalse(service.shouldScheduleLocally(context,
+                    FlexlbGrpcForwarder.MasterForwardResult.forwarded(response, "old:7001")));
+        }
+        verifyNoInteractions(grpcForwarder);
+    }
+
+    @Test
+    void grpcStatusAloneNeverPermitsLocalReplay() {
+        BalanceContext context = mock(BalanceContext.class);
+        for (var code : Status.Code.values()) {
+            var failure = FlexlbGrpcForwarder.MasterForwardResult.failed(
+                    Status.fromCode(code).asRuntimeException(), "old:7001");
+            assertFalse(service.shouldScheduleLocally(context, failure), code.name());
+        }
+        assertFalse(service.shouldScheduleLocally(context, null));
+        verifyNoInteractions(grpcForwarder);
+    }
+
+    @Test
+    void connectionEstablishmentErrorsPermitLocalRoutingWithoutCancel() {
+        BalanceContext context = mock(BalanceContext.class);
+        for (var cause : java.util.List.of(
+                new java.net.ConnectException("connection refused"),
+                new io.netty.channel.ConnectTimeoutException("connect timeout"),
+                new java.net.UnknownHostException("master.invalid"),
+                new java.nio.channels.UnresolvedAddressException())) {
+            var failure = FlexlbGrpcForwarder.MasterForwardResult.failed(
+                    Status.UNAVAILABLE.withCause(new RuntimeException(cause)).asRuntimeException(), "old:7001");
+            when(context.requestExpired(anyLong())).thenReturn(false);
+            assertTrue(service.shouldScheduleLocally(context, failure));
+            when(context.requestExpired(anyLong())).thenReturn(true);
+            assertFalse(service.shouldScheduleLocally(context, failure));
+        }
+        verifyNoInteractions(grpcForwarder);
+    }
+
+    @Test
+    void resolutionFailuresDoNotOverrideCallerCancellationOrDeadline() {
+        BalanceContext context = mock(BalanceContext.class);
+        for (var cause : java.util.List.of(
+                new java.net.UnknownHostException("master.invalid"),
+                new java.nio.channels.UnresolvedAddressException())) {
+            for (var status : java.util.List.of(Status.CANCELLED, Status.DEADLINE_EXCEEDED)) {
+                var failure = FlexlbGrpcForwarder.MasterForwardResult.failed(
+                        status.withCause(cause).asRuntimeException(), "old:7001");
+                assertFalse(service.shouldScheduleLocally(context, failure));
+            }
+            var failure = FlexlbGrpcForwarder.MasterForwardResult.failed(
+                    Status.UNAVAILABLE.withCause(cause).asRuntimeException(), "old:7001");
+            try (var inbound = Context.current().withCancellation()) {
+                inbound.cancel(null);
+                inbound.run(() -> assertFalse(service.shouldScheduleLocally(context, failure)));
+            }
+        }
+        verifyNoInteractions(grpcForwarder);
+    }
+
+    @Test
+    void connectionResetAndRemoteUnavailableCannotMasqueradeAsConnectFailure() {
+        BalanceContext context = mock(BalanceContext.class);
+        for (var error : java.util.List.of(
+                Status.UNAVAILABLE.withCause(new java.net.SocketException("Connection reset")).asRuntimeException(),
+                Status.UNAVAILABLE.withDescription("Connection refused").asRuntimeException(),
+                Status.UNAVAILABLE.withDescription("Unable to resolve host master.invalid").asRuntimeException(),
+                Status.UNAVAILABLE.withCause(new java.net.NoRouteToHostException("No route to host")).asRuntimeException(),
+                Status.DEADLINE_EXCEEDED.asRuntimeException())) {
+            assertFalse(service.shouldScheduleLocally(context,
+                    FlexlbGrpcForwarder.MasterForwardResult.failed(error, "old:7001")));
+        }
+        verifyNoInteractions(grpcForwarder);
+        verify(routeService, never()).route(any());
+    }
+
+    private static FlexlbScheduleProtocol.FlexlbScheduleResponsePB nodeRejected() {
+        return FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                .setCode(StrategyErrorType.NOT_MASTER.getErrorCode()).build();
     }
 
     @Test
