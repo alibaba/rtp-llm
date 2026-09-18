@@ -28,6 +28,7 @@ from example.k3.kimi_k3_full_model_pd_cases import (
 from example.k3.kimi_k3_full_model_pd_cases_test import make_args
 from example.k3.kimi_k3_smoke_runtime_evidence import (
     GRAPH_BUCKETS,
+    physical_graph_buckets,
     collect,
     verify,
 )
@@ -80,11 +81,33 @@ class RegressionTest(unittest.TestCase):
                     self.assertEqual(len(re.findall(r"stopped:[0-9]+", result.stdout)), 0 if keep else 1)
                     self.assertIn(f"status={status}", pathlib.Path(tmp + "/summary").read_text())
 
+    def test_flow_covers_chunk_and_both_mixed_dp_owners(self):
+        args = make_args()
+        args.suite = "flow"
+        args.decode_role_addrs = args.decode_role_addrs[:2]
+        runner = Runner(args)
+        tokens = list(range(args.chunk_tokens + 1))
+        with mock.patch.object(runner, "fit_prompt", return_value=("chunk", tokens)) as fit, \
+             mock.patch.object(runner, "run_stage") as stage:
+            runner.run_flow()
+        self.assertEqual(fit.call_args.args[2], args.chunk_tokens + 1)
+        calls = stage.call_args_list
+        self.assertEqual(calls[0].args[1][0].expected_input_len, len(tokens))
+        self.assertEqual([c.args[1][0].decode_owner_rank for c in calls[1:3]], [0, 1])
+        self.assertEqual(Counter(c.decode_owner_rank for c in calls[3].args[1]), {0: 4, 1: 1})
+        self.assertEqual(Counter(c.decode_owner_rank for c in calls[4].args[1]), {0: 1, 1: 4})
+        self.assertTrue(calls[3].kwargs["concurrent"])
+        self.assertTrue(all(c.reuse == "hit" for c in calls[4].args[1]))
+
     def test_profile_admits_actual_concurrent_smoke_batches(self):
         from rtp_llm.utils.concurrency_controller import ConcurrencyController
 
         runner = Runner(make_args())
         with ExitStack() as patches:
+            patches.enter_context(mock.patch.object(
+                runner, "fit_prompt",
+                side_effect=lambda head, tail, target: (head + tail, [0] * target),
+            ))
             for method in (
                 "prewarm_rdma_pool", "run_owner_regressions", "run_prefix_branches",
                 "run_padding_boundaries", "run_long_prefix_case",
@@ -252,7 +275,7 @@ class RegressionTest(unittest.TestCase):
             runner.request(runner.record_case("bad", 0))
         self.assertNotIsInstance(error.exception, TransportFailure)
 
-    def test_owner_cases_cover_all_ranks_rotation_and_slot_waves(self):
+    def test_owner_cases_preserve_dp_rotation_without_ktp_slot_waves(self):
         runner = Runner(make_args())
         stages = {}
         with mock.patch.object(
@@ -267,9 +290,7 @@ class RegressionTest(unittest.TestCase):
             )
             self.assertEqual(len({json.dumps(c.expected_json) for c in cases}), 8)
         self.assertEqual(stages["owner_last_only"][0].decode_owner_rank, 7)
-        self.assertEqual(
-            [len(stages[f"graph_slot_wave_{i}"]) for i in range(3)], [7, 5, 6]
-        )
+        self.assertFalse(any(name.startswith("graph_slot_wave_") for name in stages))
         self.assertEqual(
             [c.decode_owner_rank for c in stages["historical_four_squares"]],
             [0, 0, 1, 2],
@@ -517,7 +538,7 @@ class RuntimeEvidenceTest(unittest.TestCase):
             self.assertEqual(events, [event])
             self.assertTrue(replay)
 
-    def dcp_log(self, ranks=range(8), buckets=GRAPH_BUCKETS, tp=8):
+    def dcp_log(self, ranks=range(8), buckets=(2, 4, 8), tp=8):
         lines = [f"[MLA_DCP] backend=a2a tp={tp} rank={rank}" for rank in ranks]
         lines.append(f"[K3_PAGE_RR_TARGET] role=Decode TP={tp} B=128 V=64")
         for bucket in buckets:
@@ -527,6 +548,12 @@ class RuntimeEvidenceTest(unittest.TestCase):
                     f"[CudaGraph Memory] captured batch size {bucket}: pool_delta=46 MiB"
                 )
         return "\n".join(lines) + "\n"
+
+    def test_physical_graph_buckets_match_tp_token_alignment(self):
+        self.assertEqual(physical_graph_buckets(8, 3), (2, 4, 8))
+        self.assertEqual(physical_graph_buckets(8, 1), (4, 8))
+        self.assertEqual(physical_graph_buckets(8, 7), (1, 2, 4, 8))
+        self.assertEqual(physical_graph_buckets(1, 3), (1, 2, 4, 8))
 
     def test_dcp_decode_evidence_needs_every_rank_and_bucket(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -548,6 +575,37 @@ class RuntimeEvidenceTest(unittest.TestCase):
                 self.assertFalse(
                     verify(events, "decode", replay, markers, True)["passed"]
                 )
+
+    def test_mixed_dcp_requires_both_dp_groups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            def logs(workers):
+                lines = ["[K3_PAGE_RR_TARGET] role=Decode TP=4 B=128 V=64"]
+                for world in workers:
+                    lines.append(f"[MLA_DCP] backend=a2a tp=4 rank={world % 4} world_rank={world} dp_rank={world // 4}")
+                    for bucket in physical_graph_buckets(4):
+                        lines.append(f"[RANK {world}] captured batch size {bucket}:")
+                return "\n".join(lines)
+            for workers, passed in ((range(8), True), (range(4), False), (range(1, 8), False)):
+                (root / "engine.log").write_text(logs(workers))
+                events, replay, markers = collect(root)
+                report = verify(events, "decode", replay, markers, True, 3, 4, 2)
+                self.assertEqual(report["passed"], passed, report)
+            bad = logs(range(8)).replace("world_rank=7 dp_rank=1", "world_rank=7 dp_rank=0")
+            (root / "engine.log").write_text(bad)
+            events, replay, markers = collect(root)
+            self.assertFalse(verify(events, "decode", replay, markers, True, 3, 4, 2)["passed"])
+
+    def test_mixed_page_rr_rejects_wrong_block_or_checkpoint_span(self):
+        markers = {
+            "dcp_backends": {(4, rank) for rank in range(4)},
+            "dcp_workers": {(rank, rank // 4, rank % 4) for rank in range(8)},
+            "graph_captures": {(rank, bucket) for rank in range(8) for bucket in physical_graph_buckets(4)},
+        }
+        for block, span, passed in ((1024, 4096, True), (128, 512, False), (1024, 8192, False)):
+            markers["page_rr_targets"] = {("Decode", 4, block, span)}
+            report = verify([], "decode", False, markers, True, 3, 4, 2, 1024)
+            self.assertEqual(report["passed"], passed, report)
 
     def test_dcp_round_rejects_projection_ktp_markers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -571,7 +629,7 @@ class RuntimeEvidenceTest(unittest.TestCase):
                     f"[K3_PAGE_RR_TARGET] role=Decode TP=8 B=128 V=64\n"
                     + "".join(
                         f"captured batch size {bucket}: pool_delta=46 MiB\n"
-                        for bucket in GRAPH_BUCKETS
+                        for bucket in (2, 4, 8)
                     )
                 )
             events, replay, markers = collect(root)

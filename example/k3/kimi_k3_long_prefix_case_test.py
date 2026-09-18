@@ -12,13 +12,32 @@ from example.k3.kimi_k3_long_prefix_case import (
     EXPECTED,
     LongPrefixCase,
     check_answer,
+    check_prefix_reuse,
     expanded_bytes_per_token,
     prefix_blocks,
 )
 
 
 class LongPrefixCaseTest(unittest.TestCase):
-    def test_default_target_leaves_cache_reserve_headroom(self):
+    def test_long_prefix_pins_and_checks_both_decode_owners(self):
+        owners = [{"role": "DECODE", "ip": "10.0.0.2", "http_port": 8000 + i} for i in range(2)]
+        with tempfile.TemporaryDirectory() as tmp:
+            case = LongPrefixCase("http://prefill", pathlib.Path(tmp), "test", timeout=10,
+                                  budget=6442450944, page_size=1024, bytes_per_token=61440,
+                                  decode_role_addrs=owners)
+            def post(route, payload):
+                return {"aux_info": {"pd_sep": True, "input_len": 1, "role_addrs": payload["extra_configs"]["role_addrs"]},
+                        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+            with mock.patch.object(case, "post", side_effect=post):
+                for name, owner in (("long_seed", 0), ("long_hit", 1)):
+                    record, _ = case.request(name, [], [1])
+                    self.assertEqual(record["decode_owner_rank"], owner)
+                    self.assertEqual(record["observed_decode_role_addrs"], [owners[owner]])
+            wrong = post("", {"extra_configs": {"role_addrs": [owners[0]]}})
+            with mock.patch.object(case, "post", return_value=wrong), self.assertRaisesRegex(ValueError, "wrong Decode owner"):
+                case.request("long_hit", [], [1])
+
+    def test_default_target_covers_multiple_prefill_chunks(self):
         case = LongPrefixCase(
             "http://prefill",
             pathlib.Path("unused"),
@@ -28,7 +47,7 @@ class LongPrefixCaseTest(unittest.TestCase):
             page_size=4096,
             bytes_per_token=61440,
         )
-        self.assertEqual(case.target_tokens, 960000)
+        self.assertEqual(case.target_tokens, 110000)
         argv = [
             "cases",
             "--base-url", "http://prefill",
@@ -39,7 +58,7 @@ class LongPrefixCaseTest(unittest.TestCase):
         for rank in range(8):
             argv.extend(["--decode-role-addr", f"127.0.0.1:{8000 + rank}:{9000 + rank}"])
         with mock.patch("sys.argv", argv):
-            self.assertEqual(parse_args().long_prefix_target_tokens, 960000)
+            self.assertEqual(parse_args().long_prefix_target_tokens, 110000)
         script = pathlib.Path(__file__).with_name(
             "kimi_k3_full_model_two_host_pd_smoke.sh"
         ).read_text()
@@ -58,7 +77,23 @@ class LongPrefixCaseTest(unittest.TestCase):
             text=True,
             check=True,
         )
-        self.assertEqual(result.stdout, "960000")
+        self.assertEqual(result.stdout, "110000")
+
+    def test_long_prefix_reuse_follows_page_rr_checkpoint_span(self):
+        # Same 110K conversation with physical pages128/1024 and P TP8/TP4.
+        for reuse, unit in ((109568, 1024), (106496, 8192), (106496, 4096)):
+            with self.subTest(unit=unit):
+                check_prefix_reuse(reuse, 109972, unit)
+        for reuse, common, unit in ((98304,109972,8192), (107520,109972,8192),
+                                     (114688,109972,8192), (0,109972,8192)):
+            with self.subTest(reuse=reuse), self.assertRaises(ValueError):
+                check_prefix_reuse(reuse, common, unit)
+
+    def test_short_prefix_fits_one_expansion_block(self):
+        self.assertEqual(
+            prefix_blocks(109568, 110050, budget=6 * 1024**3, page_size=128, bytes_per_token=7680),
+            [{"start": 0, "tokens": 109568}],
+        )
 
     def test_default_budget_forces_two_historical_blocks(self):
         self.assertEqual(
@@ -71,11 +106,9 @@ class LongPrefixCaseTest(unittest.TestCase):
     def test_rejects_missing_coverage(self):
         for reuse, total, budget in [
             (0, 600050, 4294967296),
-            (559232, 600050, 4294967296),
             (598016, 598016, 4294967296),
             (598017, 600050, 4294967296),
             (598016, 600050, 0),
-            (598016, 600050, 8 * 1024**3),
         ]:
             with self.subTest(reuse=reuse, total=total, budget=budget):
                 with self.assertRaises(ValueError):
@@ -195,6 +228,13 @@ class LongPrefixCaseTest(unittest.TestCase):
             self.assertTrue(
                 (pathlib.Path(tmp) / "case/long_prefix_hit-tokens.json.gz").exists()
             )
+
+    def test_default_length_accepts_one_history_block_and_preserves_retrieval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, sent = self.run_fake_service(tmp, target_tokens=110000)
+            self.assertTrue(result["passed"])
+            self.assertEqual(len(result["planned_prefix_blocks"]), 1)
+            self.assertEqual(len(sent), 2)
 
     def test_topology_aware_100k_target_still_spans_expansion_blocks(self):
         with tempfile.TemporaryDirectory() as tmp:

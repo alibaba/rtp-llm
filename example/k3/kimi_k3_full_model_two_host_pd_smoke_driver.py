@@ -207,6 +207,9 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
     names = (
         "SP_TYPE",
         "SP_MODEL_TYPE",
+        "SMOKE_PREFILL_TP_SIZE",
+        "SMOKE_DECODE_TP_SIZE",
+        "SMOKE_DECODE_DP_SIZE",
         "TP_SIZE",
         "EP_SIZE",
         "KIMI_K3_TP_SIZE",
@@ -222,6 +225,7 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_MTP_CHUNK_MAX_TOKENS",
         "SMOKE_LONG_PREFIX_TARGET_TOKENS",
         "SMOKE_LONG_PREFIX_TP_SIZE",
+        "SMOKE_PREFILL_KV_CACHE_MEM_MB",
         "SMOKE_DECODE_KV_CACHE_MEM_MB",
         "SMOKE_DECODE_KDA_POOL_BLOCKS",
         "SMOKE_DECODE_ROLE_ADDRS",
@@ -231,8 +235,6 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_RDMA_PREWARM_SETTLE_S",
         "SMOKE_ACCL_USE_NICS",
         "SMOKE_EXPECTED_LAYERS",
-        "SMOKE_PAGE_RR",
-        "SMOKE_DECODE_PAGE_RR",
         "SMOKE_DCP_PADDING_REGRESSION",
         "SMOKE_BLOCK_SIZE",
         "SMOKE_KERNEL_BLOCK_SIZE",
@@ -649,7 +651,10 @@ def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
                     f"{result.stderr.strip()}",
                     file=sys.stderr,
                 )
-                if poll_failures[role] >= 12:
+                # SSH transport/auth outages do not imply a detached worker
+                # failure. Allow reconnection until the overall deadline,
+                # just as for OSError/TimeoutExpired above.
+                if result.returncode != 255 and poll_failures[role] >= 12:
                     raise RuntimeError(
                         f"{role} status polling failed {poll_failures[role]} times"
                     )

@@ -72,6 +72,8 @@ public:
     struct LoadBufferCall {
         std::string                                      peer_ip;
         std::vector<std::shared_ptr<RequestBlockBuffer>> requests;
+        int partition_count = 1;
+        int partition_id = 0;
     };
 
     MemoryBackedCacheStore() {
@@ -101,8 +103,8 @@ public:
               uint32_t,
               uint32_t,
               uint32_t = 1000,
-              int      = 1,
-              int      = 0) override {
+              int partition_count = 1,
+              int partition_id = 0) override {
         bool ok = true;
         for (const auto& [key, block] : request_block_buffer->getBlocks()) {
             if (load_failure_predicate_ && load_failure_predicate_(peer_ip, key)) {
@@ -112,13 +114,19 @@ public:
             std::vector<uint8_t>        synthesized_bytes;
             const auto                  peer_it      = load_patterns_.find(peer_ip);
             const std::vector<uint8_t>* source_bytes = nullptr;
-            if (load_byte_pattern_) {
-                synthesized_bytes.assign(block->len, load_byte_pattern_(peer_ip, key));
+            if (source_byte_pattern_) {
+                synthesized_bytes.resize(static_cast<size_t>(block->len) * partition_count);
+                for (size_t i = 0; i < synthesized_bytes.size(); ++i) {
+                    synthesized_bytes[i] = source_byte_pattern_(peer_ip, key, i, block->len);
+                }
+                source_bytes = &synthesized_bytes;
+            } else if (load_byte_pattern_) {
+                synthesized_bytes.assign(static_cast<size_t>(block->len) * partition_count, load_byte_pattern_(peer_ip, key));
                 source_bytes = &synthesized_bytes;
             } else if (peer_it != load_patterns_.end()) {
                 const auto pattern_it = peer_it->second.find(key);
                 if (pattern_it != peer_it->second.end()) {
-                    synthesized_bytes.assign(block->len, pattern_it->second);
+                    synthesized_bytes.assign(static_cast<size_t>(block->len) * partition_count, pattern_it->second);
                     source_bytes = &synthesized_bytes;
                 }
             }
@@ -128,12 +136,13 @@ public:
                     source_bytes = &it->second;
                 }
             }
-            if (source_bytes == nullptr || source_bytes->size() != block->len) {
+            if (partition_count < 1 || partition_id < 0 || partition_id >= partition_count
+                || source_bytes == nullptr || source_bytes->size() != static_cast<size_t>(block->len) * partition_count) {
                 ok = false;
                 continue;
             }
-            auto host = torch::from_blob(const_cast<uint8_t*>(source_bytes->data()),
-                                         {(int64_t)source_bytes->size()},
+            auto host = torch::from_blob(const_cast<uint8_t*>(source_bytes->data()) + block->len * partition_id,
+                                         {(int64_t)block->len},
                                          torch::TensorOptions(torch::kUInt8).device(torch::kCPU))
                             .clone();
             auto dst_options = torch::TensorOptions(torch::kUInt8).device(block->gpu_mem ? torch::kCUDA : torch::kCPU);
@@ -158,7 +167,7 @@ public:
                 LoadContext::CheckCancelFunc                            check_cancel_func,
                 int                                                     partition_count,
                 int                                                     partition_id) override {
-        load_buffer_calls_.push_back({ip, request_block_buffers});
+        load_buffer_calls_.push_back({ip, request_block_buffers, partition_count, partition_id});
         load_buffer_requests_.insert(
             load_buffer_requests_.end(), request_block_buffers.begin(), request_block_buffers.end());
         auto context = std::make_shared<LoadContext>(shared_from_this(), false);
@@ -174,6 +183,7 @@ public:
     std::vector<std::shared_ptr<RequestBlockBuffer>>                          store_buffer_requests_;
     std::vector<std::shared_ptr<RequestBlockBuffer>>                          load_buffer_requests_;
     std::vector<LoadBufferCall>                                               load_buffer_calls_;
+    std::function<uint8_t(const std::string&, const std::string&, size_t, size_t)> source_byte_pattern_;
     std::function<bool(const std::string&, const std::string&)>               load_failure_predicate_;
     std::function<uint8_t(const std::string&, const std::string&)>            load_byte_pattern_;
     std::function<void(CacheStoreLoadDoneCallback, bool, const std::string&)> defer_load_callback_;
@@ -972,81 +982,89 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecodeFirstMallocBypassesLocalDeviceReus
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testK3PdDestinationDoesNotAllocateUnloadedLinearHistory) {
-    ParallelismConfig parallelism;
-    parallelism.role_type                         = RoleType::DECODE;
-    parallelism.prefill_cp_config.prefill_cp_size = 2;
-    auto      config                              = makeTinyK3PageRREagleConfig(parallelism);
-    const int linear_gid                          = config.layer_to_group_id[0];
-    ASSERT_EQ(config.group_seq_size_per_block[linear_gid], 256u);
-    std::vector<int> input_tokens(529);  // Two full LINEAR slots plus a partial terminal state.
-    std::iota(input_tokens.begin(), input_tokens.end(), 1);
-    prepareStreamWithConfig(input_tokens, config, 128, RoleType::DECODE);
-    auto& resource = stream_->streamCacheResource();
-    resource.setLinearPrefixLoadTokens(529);
-    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/3).ok());
-    const auto& blocks = resource.kvCache().blocks(0, linear_gid);
-    ASSERT_EQ(blocks.size(), 5u);
-    EXPECT_EQ(blocks[0], NULL_BLOCK_IDX);
-    EXPECT_EQ(blocks[1], NULL_BLOCK_IDX);
-    const auto terminal = blocks[2];
-    ASSERT_NE(terminal, NULL_BLOCK_IDX);
-    EXPECT_NE(blocks[3], NULL_BLOCK_IDX);
-    EXPECT_NE(blocks[4], NULL_BLOCK_IDX);
+    for (bool replay : {false, true}) {
+        SCOPED_TRACE(replay);
+        ParallelismConfig parallelism;
+        parallelism.role_type                         = RoleType::DECODE;
+        parallelism.prefill_cp_config.prefill_cp_size = 2;
+        auto      config                              = makeTinyK3PageRREagleConfig(parallelism);
+        if (!replay) {
+            config.linear_replay_group_ids.clear();
+        }
+        const int linear_gid                          = config.layer_to_group_id[0];
+        ASSERT_EQ(config.group_seq_size_per_block[linear_gid], 256u);
+        std::vector<int> input_tokens(529);  // Two full LINEAR slots plus a partial terminal state.
+        std::iota(input_tokens.begin(), input_tokens.end(), 1);
+        prepareStreamWithConfig(input_tokens, config, 128, RoleType::DECODE);
+        auto& resource = stream_->streamCacheResource();
+        resource.setLinearPrefixLoadTokens(529);
+        ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/3).ok());
+        const auto& blocks = resource.kvCache().blocks(0, linear_gid);
+        ASSERT_EQ(blocks.size(), config.isLinearReplayGroup(linear_gid) ? 3u : 5u);
+        EXPECT_EQ(blocks[0], NULL_BLOCK_IDX);
+        EXPECT_EQ(blocks[1], NULL_BLOCK_IDX);
+        const auto terminal = blocks[2];
+        ASSERT_NE(terminal, NULL_BLOCK_IDX);
+        if (!config.isLinearReplayGroup(linear_gid)) {
+            EXPECT_NE(blocks[3], NULL_BLOCK_IDX);
+            EXPECT_NE(blocks[4], NULL_BLOCK_IDX);
+        }
 
-    EngineInitParams params;
-    params.model_id                 = 9100;
-    params.model_config_.num_layers = 2;
-    params.parallelism_config       = parallelism;
-    auto draft                      = std::make_unique<EngineInitParams>();
-    draft->model_id                 = 9101;
-    draft->model_config_.num_layers = 1;
-    auto mtp_params                 = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-    mtp_params->push_back(std::move(draft));
-    ProposeModelEngineInitParams propose_params(SP_TYPE_EAGLE3, 3, std::move(mtp_params));
-    auto                         cache_store = std::make_shared<MemoryBackedCacheStore>();
-    cache_store->load_byte_pattern_          = [](const std::string&, const std::string&) { return uint8_t{0x5A}; };
-    DecodeRpcServer server;
-    server.engine_                                  = std::make_shared<MinimalEngine>(params, cache_manager_, true);
-    server.maga_init_params_                        = params;
-    server.propose_maga_init_params_                = &propose_params;
-    server.resource_.cache_store                    = cache_store;
-    const std::vector<std::string>      peers       = {testPeerIp(0) + ":12345:12346", testPeerIp(1) + ":12345:12346"};
-    const std::string                   request_key = "k3-linear-sparse-pd-destination";
-    grpc::ServerContext                 context;
-    DecodeRpcServer::LoadKVCacheContext load_context(9102,
-                                                     request_key,
-                                                     peers,
-                                                     stream_->cacheKeys(0),
-                                                     resource.kvCache().groupBlocks(0),
-                                                     0,
-                                                     5000,
-                                                     1,
-                                                     0,
-                                                     &context,
-                                                     /*prefill_cp_size=*/2);
-    const auto                          status = server.loadCache(load_context);
-    ASSERT_TRUE(status.ok()) << status.ToString();
-    expectK3BlockBytes(cache_manager_, terminal, /*global_layer_id=*/0, 0x5A);
+        EngineInitParams params;
+        params.model_id                 = 9100;
+        params.model_config_.num_layers = 2;
+        params.parallelism_config       = parallelism;
+        auto draft                      = std::make_unique<EngineInitParams>();
+        draft->model_id                 = 9101;
+        draft->model_config_.num_layers = 1;
+        auto mtp_params                 = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+        mtp_params->push_back(std::move(draft));
+        ProposeModelEngineInitParams propose_params(SP_TYPE_EAGLE3, 3, std::move(mtp_params));
+        auto                         cache_store = std::make_shared<MemoryBackedCacheStore>();
+        cache_store->load_byte_pattern_          = [](const std::string&, const std::string&) { return uint8_t{0x5A}; };
+        DecodeRpcServer server;
+        server.engine_                                  = std::make_shared<MinimalEngine>(params, cache_manager_, true);
+        server.maga_init_params_                        = params;
+        server.propose_maga_init_params_                = &propose_params;
+        server.resource_.cache_store                    = cache_store;
+        const std::vector<std::string>      peers       = {testPeerIp(0) + ":12345:12346", testPeerIp(1) + ":12345:12346"};
+        const std::string                   request_key = "k3-linear-sparse-pd-destination";
+        grpc::ServerContext                 context;
+        DecodeRpcServer::LoadKVCacheContext load_context(9102,
+                                                         request_key,
+                                                         peers,
+                                                         stream_->cacheKeys(0),
+                                                         resource.kvCache().groupBlocks(0),
+                                                         0,
+                                                         5000,
+                                                         1,
+                                                         0,
+                                                         &context,
+                                                         /*prefill_cp_size=*/2);
+        const auto                          status = server.loadCache(load_context);
+        ASSERT_TRUE(status.ok()) << status.ToString();
+        expectK3BlockBytes(cache_manager_, terminal, /*global_layer_id=*/0, 0x5A);
 
-    for (int seq_len : {530, 531, 769}) {
-        stream_->completeTokenIdsPtr()->setSeqLength(seq_len);
-        ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/3).ok());
-        EXPECT_EQ(resource.kvCache().blocks(0, linear_gid)[0], NULL_BLOCK_IDX);
-        EXPECT_EQ(resource.kvCache().blocks(0, linear_gid)[1], NULL_BLOCK_IDX);
-        EXPECT_EQ(resource.kvCache().blocks(0, linear_gid)[2], terminal);
+        for (int seq_len : {530, 531, 769}) {
+            stream_->completeTokenIdsPtr()->setSeqLength(seq_len);
+            ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/3).ok());
+            EXPECT_EQ(resource.kvCache().blocks(0, linear_gid)[0], NULL_BLOCK_IDX);
+            EXPECT_EQ(resource.kvCache().blocks(0, linear_gid)[1], NULL_BLOCK_IDX);
+            EXPECT_EQ(resource.kvCache().blocks(0, linear_gid)[2], terminal);
+        }
+        // Simulate the model completing the loaded partial state at token 768.
+        fillK3BlockBytes(cache_manager_, terminal, /*global_layer_id=*/0, 0x6B);
+        const auto keys = stream_->cacheKeys(0);
+        ASSERT_GE(keys.size(), 6u);
+        stream_->generate_status_->status = StreamState::FINISHED;
+        stream_->fillSubGenerateStatus(StreamState::FINISHED);
+        stream_->releaseResource();
+        auto shared_cache = cache_manager_->allocator_->sharedBlockCache();
+        EXPECT_EQ(shared_cache->matchGroup(keys[1], linear_gid), NULL_BLOCK_IDX);
+        EXPECT_EQ(shared_cache->matchGroup(keys[3], linear_gid), NULL_BLOCK_IDX);
+        EXPECT_EQ(shared_cache->matchGroup(keys[5], linear_gid), terminal);
+        expectK3BlockBytes(cache_manager_, terminal, /*global_layer_id=*/0, 0x6B);
     }
-    // Simulate the model completing the loaded partial state at token 768.
-    fillK3BlockBytes(cache_manager_, terminal, /*global_layer_id=*/0, 0x6B);
-    const auto keys = stream_->cacheKeys(0);
-    ASSERT_GE(keys.size(), 6u);
-    stream_->generate_status_->status = StreamState::FINISHED;
-    stream_->fillSubGenerateStatus(StreamState::FINISHED);
-    stream_->releaseResource();
-    auto shared_cache = cache_manager_->allocator_->sharedBlockCache();
-    EXPECT_EQ(shared_cache->matchGroup(keys[1], linear_gid), NULL_BLOCK_IDX);
-    EXPECT_EQ(shared_cache->matchGroup(keys[3], linear_gid), NULL_BLOCK_IDX);
-    EXPECT_EQ(shared_cache->matchGroup(keys[5], linear_gid), terminal);
-    expectK3BlockBytes(cache_manager_, terminal, /*global_layer_id=*/0, 0x6B);
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testK3LocalDecodeContextStillAllocatesComputedCheckpoints) {
@@ -1107,6 +1125,9 @@ TEST_F(PdSepKVCacheReleaseTest, testK3PdSparsePrefixPreservesSpeculativeGroupSpa
         parallelism.role_type                         = RoleType::DECODE;
         parallelism.prefill_cp_config.prefill_cp_size = 2;
         auto             config                       = makeTinyK3PageRREagleConfig(parallelism);
+        // This case exercises the legacy per-proposal block swaps. CUDA
+        // replay groups commit through their replay workspace instead.
+        config.linear_replay_group_ids.clear();
         std::vector<int> input_tokens(cached_len);
         std::iota(input_tokens.begin(), input_tokens.end(), 1);
         prepareStreamWithConfig(input_tokens, config, 128, RoleType::DECODE);
@@ -1857,7 +1878,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDcpDestinationPagesAndKdaHeadPartitions) {
     constexpr size_t model_id = 94;
     for (const auto layout :
          {Layout{1, 8, 1, 21, 7}, Layout{1, 16, 1, 21, 15}, Layout{1, 8, 2, 21, 7},
-          Layout{8, 8, 1, 21, 7}, Layout{8, 8, 2, 21, 7}, Layout{16, 16, 1, 21, 15},
+          Layout{8, 8, 1, 21, 7}, Layout{8, 8, 2, 21, 7},
+          Layout{4, 8, 1, 21, 0}, Layout{4, 8, 1, 21, 1}, Layout{4, 8, 1, 21, 7},
+          Layout{4, 8, 1, 1, 7}, Layout{8, 4, 2, 21, 0}, Layout{8, 4, 2, 21, 3}, Layout{16, 16, 1, 21, 15},
           Layout{16, 8, 1, 21, 0}, Layout{16, 8, 2, 21, 7}, Layout{32, 8, 2, 21, 7}, Layout{8, 8, 1, 1, 7}}) {
         SCOPED_TRACE(testing::Message() << "source=" << layout.source << " TP=" << layout.tp << " DP=" << layout.dp
                                        << " rank=" << layout.tp_rank << " pages=" << layout.pages);
@@ -1931,14 +1954,17 @@ TEST_F(PdSepKVCacheReleaseTest, testDcpDestinationPagesAndKdaHeadPartitions) {
                 fillK3BlockBytes(manager, blocks[local], layer, 0xEE);
                 const int partitions = linear ? std::max(1, layout.source / layout.tp) : 1;
                 for (int part = 0; part < partitions; ++part) {
-                    const int peer = linear ? rank * partitions + part :
+                    const int peer = linear ? (layout.source < layout.tp && layout.source > 1 ?
+                                              rank / (layout.tp / layout.source) : rank * partitions + part) :
                                              layout.source == 1 ? rank : page % layout.source;
                     const auto buffers = manager->convertIndexToBuffer(blocks[local], layer, partitions, part);
                     const uint8_t pattern = selected_block ? static_cast<uint8_t>(32 + peer * 4 + gid) : 0xEE;
                     const auto base_key = makeCacheKey(wire_model, std::to_string(keys[std::min<size_t>(page, pages - 1)]),
                                                        wire_layer, KVCacheRegionName::DEFAULT);
                     for (size_t segment = 0; segment < buffers.size(); ++segment) {
-                        checks.emplace_back(buffers[segment], pattern);
+                        checks.emplace_back(buffers[segment], pattern +
+                            (selected_block && linear && layout.source > 1 && layout.source < layout.tp ?
+                                 (rank % (layout.tp / layout.source)) * 16 : 0));
                         if (!selected_block) {
                             continue;
                         }
@@ -1948,6 +1974,13 @@ TEST_F(PdSepKVCacheReleaseTest, testDcpDestinationPagesAndKdaHeadPartitions) {
                     }
                 }
             }
+        }
+        if (layout.source > 1 && layout.source < layout.tp) {
+            store->source_byte_pattern_ = [store_ptr = store.get()](const std::string& peer, const std::string& key,
+                                                  size_t offset, size_t destination_bytes) {
+                return static_cast<uint8_t>(store_ptr->load_patterns_.at(peer).at(key)
+                                            + (offset / destination_bytes) * 16);
+            };
         }
         runtimeSyncAndCheck();
         const auto free_before = manager->freeBlocksNum();
@@ -1960,30 +1993,40 @@ TEST_F(PdSepKVCacheReleaseTest, testDcpDestinationPagesAndKdaHeadPartitions) {
         }
         ASSERT_TRUE(server.RemoteLoad(&rpc, &request, &response).ok());
         ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
+        std::unordered_map<std::string, std::unordered_map<std::string, void*>> actual;
         for (const auto& call : store->load_buffer_calls_) {
-            std::unordered_map<std::string, void*> actual;
             for (const auto& buffer : call.requests) {
                 for (const auto& [key, block] : buffer->getBlocks()) {
-                    EXPECT_TRUE(actual.emplace(key, block->addr.get()).second);
+                    EXPECT_TRUE(actual[call.peer_ip].emplace(key, block->addr.get()).second);
+                    const bool linear_key = key.find("linear_") == 0;
+                    const int source_parts = linear_key && layout.source > 1 && layout.source < layout.tp ?
+                                                 layout.tp / layout.source : 1;
+                    EXPECT_EQ(call.partition_count, source_parts);
+                    EXPECT_EQ(call.partition_id, source_parts > 1 ? rank % source_parts : 0);
                 }
             }
-            EXPECT_EQ(actual, expected[call.peer_ip]);
         }
-        ASSERT_EQ(store->load_buffer_calls_.size(), selected.size());
+        for (const auto& peer : selected) {
+            const auto ip = peer.substr(0, peer.find(':'));
+            EXPECT_EQ(actual[ip], expected[ip]);
+        }
         for (const auto& [block, pattern] : checks) {
             auto bytes = torch::from_blob(block.addr, {static_cast<int64_t>(block.size_bytes)},
                                            torch::TensorOptions(torch::kUInt8).device(torch::kCUDA)).cpu();
             EXPECT_TRUE(bytes.eq(pattern).all().item<bool>());
         }
         EXPECT_EQ(manager->freeBlocksNum(), free_before);
-        if (layout.dp == 2 && layout.source == 16) {
+        if ((layout.dp == 2 && layout.source == 16)
+            || (layout.source == 4 && layout.tp == 8 && rank == 7 && pages == 21)
+            || (layout.source == 8 && layout.tp == 4 && layout.dp == 2 && rank == 3)) {
             std::mutex mutex;
             std::vector<std::function<void()>> completions;
             std::promise<void> dispatched;
             auto all_dispatched = dispatched.get_future();
             bool release = false, signaled = false;
             store->load_failure_predicate_ = [&](const std::string& peer, const std::string&) {
-                return peer == testPeerIp(14);
+                return peer == testPeerIp(layout.source < layout.tp ? rank / (layout.tp / layout.source) :
+                                                                              rank * (layout.source / layout.tp));
             };
             store->defer_load_callback_ = [&](CacheStoreLoadDoneCallback callback, bool ok, const std::string& peer) {
                 auto complete = [callback = std::move(callback), ok]() {
@@ -1995,7 +2038,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDcpDestinationPagesAndKdaHeadPartitions) {
                     complete();
                 } else {
                     completions.push_back(std::move(complete));
-                    if (!signaled && peer == testPeerIp(15)) {
+                    if (!signaled && peer == testPeerIp(layout.source - 1)) {
                         signaled = true;
                         dispatched.set_value();
                     }

@@ -5,6 +5,26 @@
 
 namespace rtp_llm {
 
+bool supportsK3HeadShardTransfer(int source_tp, int destination_tp) {
+    return source_tp > 0 && destination_tp > 0
+           && (source_tp % destination_tp == 0 || destination_tp % source_tp == 0);
+}
+
+K3HeadShardLoadPlan planK3HeadShardLoad(int source_tp, int destination_tp,
+                                       int source_rank, int destination_rank) {
+    if (!supportsK3HeadShardTransfer(source_tp, destination_tp)
+        || source_rank < 0 || source_rank >= source_tp
+        || destination_rank < 0 || destination_rank >= destination_tp) {
+        throw std::invalid_argument("invalid K3 head-shard transfer coordinates");
+    }
+    if (source_tp >= destination_tp) {
+        const int count = source_tp / destination_tp;
+        return {source_rank / count == destination_rank, 1, 0, count, source_rank % count};
+    }
+    const int count = destination_tp / source_tp;
+    return {destination_rank / count == source_rank, count, destination_rank % count, 1, 0};
+}
+
 bool isK3PageRRToReplicatedDecode(int prefill_attention_tp,
                                   int decode_attention_tp,
                                   int source_shards,

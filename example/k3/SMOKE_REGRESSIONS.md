@@ -1,56 +1,44 @@
 # K3 双机 smoke 回归
 
-双机启动入口固定使用 Prefill TP8/EP8、Decode DP8/KTP8/EP8、Decode CUDA Graph、原生 MTP、chunk prefill、chunkwise RDMA 和 RDMA。历史 KV 展开仍受 expanded-KV 预算控制。Eagle3、Prefill TP 非 8、关闭 chunkwise RDMA 会在启动前被拒绝。Page-RR 是独立设置，保留原有默认值 0。
+默认配置为 Prefill TP8/EP8、Decode DP2×TP4/EP8，两端 KTP1、Page-RR；Decode 开启 DCP、CUDA Graph、原生 MTP，设置 NCCL_GRAPH_REGISTER=0。Prefill 开启 CP、chunk prefill 和 chunkwise RDMA。物理 block 默认为1024 tokens，attention 内核页仍为128 tokens，chunk budget为65536。
 
-`SMOKE_SUITE=all` 使用完整模型做答案验收；四层模型的 `flow` 仅检查连通与分块流程。默认 batch=4 且 require-MTP 时，all 有 34 个阶段、117 个正式请求；另外保留有界 RDMA 预热。请求记录中的 `phase` 区分预热与正式请求。
+支持通过 SMOKE_PREFILL_TP_SIZE、SMOKE_DECODE_TP_SIZE、SMOKE_DECODE_DP_SIZE 配置非对称传输和混合并行，例如 P8/EP8→DP2×TP4/EP8 或 P4/EP4→D8/EP8。对称P8→D8可显式设置 `SMOKE_DECODE_TP_SIZE=8 SMOKE_DECODE_DP_SIZE=1`。两端各自最多8卡，attention TP必须相互整除。旧KTP部署、Eagle3或关闭chunkwise RDMA不在该入口的验收范围。
 
-## 新增与优化
+`SMOKE_SUITE=all` 用完整模型验收答案；`flow` 用四层切片验收传输和执行流程，不能代替完整模型语义验证。长前缀默认为110K，可用 SMOKE_LONG_PREFIX_TARGET_TOKENS 显式覆盖。Prefill KV池默认42000MiB、Decode29000MiB，历史展开预算6GiB；更长请求需另行验证容量。110K允许历史前缀落在一个展开块内，多块数值行为由算子测试覆盖。
 
-| 用例 | 构造 | 判定 |
-|---|---|---|
-| owner_records_rotate_0/3 | 全部 8 个 owner，改变请求到 owner 的排列；每请求独有档案标签 | 从三条记录中按 key 检索 value，严格 JSON 相等，核对返回的 owner 地址 |
-| owner_last_only | 仅 owner 7 接收请求 | 唯一答案正确；Decode 日志另证明 rank0 空闲、rank7 活跃 |
-| historical_four_squares | 80–83 平方，owner [0,0,1,2]，短输入 | 最终 content 仅允许预期数字和首尾空白，禁止同时夹带其他答案 |
-| graph_slot_wave_0/1/2 | owner 7 分别提交 7、5、6 个不同字段复制请求 | 答案严格对应本请求；Decode 日志必须出现同一 bucket 8 的有效数 7→5→6 |
-| dp_rolling_refill | 窗口 8，16 个不同输出长度的请求，完成一个后补入下一个 | 所有结果与 owner 正确；保存每请求响应。HTTP 滚动窗口不被宣称为确定的引擎 batch |
-| prefix_A_seed/B_partial/A_return/AB_mixed | 同一公共前缀，尾部记录不同，A→B→A 后并发 A/B，切换 Decode owner | 服务 tokenizer 计算公共 token 前缀；准确检查页对齐 reuse 长度、当前尾部答案 |
-| padding_tail_1/7_cold/hit | 服务 tokenizer 精确构造 chunk_budget+1 和 +7 的输入，冷请求后换 owner 再次请求 | 检查实际 input_len、reuse；Prefill 日志必须观察到补 7 和 1 token 的真实 round |
-| whole_chunk_single_miss/hit | 合并原 mtp_chunk_prefill_miss 的检查到单请求长输入 cold/hit | 同时要求 chunk 和接受过 MTP draft token，减少一个重复长 cold 请求 |
+## 当前用例
 
-数学题采用完整答案匹配。非数学题由请求内档案生成期望答案，不依赖常识、外部数据集或另一个模型评分。JSON 答案只接受期望字段和值，拒绝重复字段、额外字段、解释与代码块。
+| 范围 | 检查 |
+|---|---|
+| 历史四平方数 | 请求内指定80–83平方，只接受对应完整答案 |
+| 滚动补位与并发 | 8请求窗口、16个不同长度请求；完成后补入，检查请求答案和owner |
+| batch miss/hit与混合复用 | 冷请求、全部命中及部分命中同批运行 |
+| A→B→A与并发A/B | 相同公共前缀、不同尾部；检查实际公共token前缀、reuse和当前答案 |
+| 多模态、原生MTP、整chunk单条/批量 | 保留多模态metadata、chunk输入及实际draft接受检查 |
+| padding 1/7 | 精确构造chunk budget+1/+7，冷请求和复用；检查实际padding日志 |
+| Page-RR边界 | 物理页owner轮转、回绕、两轮复用和一/两chunk边界前中后各1token的cold/repeat |
+| Decode跨页 | 从边界前1token起，实际输出覆盖两个页起点，含最后owner回到owner0 |
+| 长前缀 | seed后追加检索，检查三条记录与平方数的严格JSON、PD及充分复用 |
 
-RDMA 预热仅重试连接异常和 HTTP 408/429/502/503/504。模型答错、缺少 PD 元数据、错误 owner、格式错误、cache 判定失败均直接终止；即使同批另有连接失败，也优先报告语义错误。正式 case 不重试。
+默认P8、block1024时，复用单元为8192 tokens。边界组包含66条cold/repeat请求和20条Decode跨页请求，共86条，不因DP2增加请求。cold/repeat轮换Decode DP组，每个边界在两组都有验收；两个整chunk批量请求均要求实际MTP接受。repeat的期望reuse为 `floor((input_len-1)/reuse_unit)*reuse_unit`；不足首个完整checkpoint的repeat仍应miss。Decode跨页按 `[input_len,input_len+output_len-2]` 验收，排除最后一个可能尚未消费的输出token，不把MTP拒绝槽计入覆盖。
 
-发起预热前，两端都必须等全部 rank 的 RDMA transport 和模型 gRPC listener 就绪，避免 HTTP health 已通过、某个 Decode listener 尚未启动时发生路由重试。
+长前缀seed固定路由到DP0，追加检索路由到最后一个DP组，响应必须确认目标owner。长前缀命中也按Prefill的checkpoint跨度检查：reuse不得超过实际公共token前缀，必须按复用单元对齐，并达到公共前缀减去少量对话尾部后的完整checkpoint下限。它不能仅凭一次非零命中就通过。
 
-每请求在验证前保存输入和原始响应，验证后更新结果。单个请求失败不会丢弃已完成的同批请求。精确构造的输入另保存 tokenizer token IDs，便于复现。
+DP1跳过owner轮转、last-owner-only和不均匀DP batch；这些定义及断言全部保留，DP>1时执行。移除重复的identity、single_exact、partial_prefix单独阶段及旧KTP Graph 7→5→6波次；对应语义由batch、A/B分支和并发组覆盖。不把请求并发数量当成实际引擎batch或Graph replay证据。
 
-## 运行时证据
+## 运行时证据与失败处理
 
-双机入口设置 `KIMI_K3_SMOKE_EVIDENCE=1`。两个 Python 运行时位置增加了受此开关控制的主机端日志，不改变张量计算或调度逻辑：
+每个all-suite必须同时通过答案检查和两端的smoke-runtime-coverage.json。Prefill检查chunk round、padding算术和真实padding1/7；Decode检查各DP组全部rank的DCP A2A communicator、Page-RR物理block与TP×block checkpoint跨度、Graph捕获桶及KTP未启用。TP4/MTP3的捕获桶为1/2/4/8，TP8为2/4/8；capture不等于每一步replay。
 
-- `kimi_k3.py` 在 chunk round 提交后记录逻辑/物理 token 数与请求数。
-- `ktp_step.py` 记录每个 KTP rank 有请求时的 step 序号、有效 batch、物理 batch、Graph bucket、模式和 token 宽度。空闲轮询不计入序号，确保请求结束后可以读取稳定的多 rank 记录。
+所有正式请求不重试。输入、原始响应及精确构造的token IDs均保存，失败不会抹去同批已完成记录。RDMA预热只重试连接异常和HTTP408/429/502/503/504；语义、PD metadata、owner、格式、cache错误直接失败。预热前等待各rank的RDMA transport和gRPC listener就绪。
 
-`kimi_k3_smoke_runtime_evidence.py` 在两端分别生成 `smoke-runtime-coverage.json`。Prefill 要求 padding 算术正确且实际出现 padding=1/7。Decode 要求 8 rank 逐步记录一致、全部 owner 活跃、rank0 空闲时 rank7 活跃、Target Verify 使用 bucket 1/2/4/8、bucket8 有效数按顺序出现 7→5→6，并存在实际 Graph replay 日志。日志副本按 rank/step 去重，冲突副本判失败。
+Detached控制器遇到SSH rc255时允许认证/网络恢复，仍受总体超时约束；真实服务失败和总体超时会清理未完成端，不因连续12次SSH查询失败而误杀仍在运行的服务。
 
-每个 all-suite 必须同时通过答案检查和两端运行时检查。若调度没有形成预期状态，会报告覆盖不足，不能用请求并发数替代真实 batch 证据，也不能靠重复执行洗掉失败。
+未覆盖的分支包括MTP全部接受/部分接受/全部拒绝的可控枚举、拒绝后的cache frontier、逐请求dummy发布证明、长期淘汰和CPU cache恢复。PD取消、迟到回调与block复用由独立引擎测试验证，不冒充端到端故障注入结果。
 
-这些证据证明对应引擎状态出现过；当前没有把每条 KTP event 逐请求关联，也没有证明每一步都实际 replay。全局 replay 日志与逐步 Graph 选择证据分别记录，不能据此声称完全排除了中途 fallback。7→5→6 是同一物理 bucket 的跨请求槽位复用，并不代表某个指定请求持续占据同一槽位。
+## 无GPU检查
 
-## 尚未覆盖的分支
-
-- MTP 全部拒绝、部分接受、全部接受及拒绝后的 cache frontier。当前仅检查实际接受过 draft token，不能从 prompt 推断每类接受结果。
-- dummy 不发布 cache 的逐请求、逐 block 证明。padding round 和随后的 hit/答案已覆盖，但发布元数据完整审计仍依赖引擎测试。
-- PD/RDMA 中途取消、迟到完成事件与 block 复用。
-- cache 淘汰及 CPU cache 恢复、单 owner 超时恢复、长期反复复用。
-- 原历史多请求内部 round=63746 的精确同批复现；当前单请求边界稳定覆盖 TP padding=1/7，HTTP 四请求不能证明同批 Prefill。
-
-这些分支需要可控引擎测试或故障注入，应独立补充，不计入本版通过范围。
-
-## 无 GPU 检查
-
-在仓库根目录，使用 Python 3.10+ 与 Linux Bash：
+在Linux、Python3.10+中运行：
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest \
@@ -60,14 +48,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest \
   example.k3.kimi_k3_smoke_regressions_test
 ```
 
-这组单测验证测试程序、失败保留、重试策略、用例构造、并发补入和日志判定。它不替代完整模型在双机上的 GPU 验收。
+单测覆盖用例构造、边界判定、DP保留、混合启动配置、失败记录和控制器恢复，不代替合并后双机GPU验收。
 
-## 1M 与字段复制的预算
+## 引入来源
 
-完整模型的长前缀用例默认 1M tokens、历史 KV 展开预算 6 GiB。Decode 保留 32 个 KDA 状态块以覆盖并发请求和 speculative 预留页，hybrid cache 预算为 29000 MiB。SSM replay 新增约 465 MiB 预留后，28500 MiB 配置实际只有 244 个 FULL blocks（999424 tokens），不足以完成 1M 用例；追加预算保留 32 个 KDA 状态块及长前缀余量。
-
-字段复制用例为 reasoning 与最终 JSON 一起预留输出 token。16 个字段值的旧 512-token 上限曾导致 reasoning 或 JSON 被截断；增大预算后仍要求完整 JSON 精确相等、owner 正确，正式请求不重试。
-
-Prefill 的 HTTP 并发上限为 32，容纳不均匀 DP 用例同时提交的 10 个请求（4+3+2+1）；若设为 8，入口会拒绝其中两个请求。Decode 每个 owner 的并发上限为 8，与 Graph 最大 batch 桶一致，避免按并发 32 为 MTP 初始化 128 个物理 token 的额外显存峰值。滚动补位仍执行全部 16 个请求，保持 8 请求窗口；Graph 的 7→5→6 波次不变。CPU 回归从实际用例收集并发 batch，检查 Prefill 入口能同时接纳、Decode 的 owner 容量足够。
-
-Decode 固定 NCCL_MAX_CTAS=8，限制通信内部缓冲区占用。8 卡小复现中，默认 32 条 P2P 通道在剩余 3 GiB 显存时仍于首次 AllToAll 报 CUDA OOM；限制到 8 条后，剩余 1.5 GiB 时 AllGather、AllToAll 与 CUDA Graph 捕获和回放均通过。该配置用于正确性 smoke，不据此给出吞吐结论。
+K3_DCP提交925c0a5的block1024版本曾在144/145以P8D8完整模型通过50阶段、153正式请求+4预热，其中86条边界用例全部通过。该次长前缀为600K，不能当作本分支110K、混合DP配置的合并后运行证据。本分支保留110K默认及非对称/混合TPDP逻辑，并按实际Prefill复用单元适配长前缀检查。

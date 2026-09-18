@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Recommended one-command startup from a controller with SSH access to both
-# hosts (the driver enters lhc_GPU, waits for Decode readiness, then launches
-# Prefill):
+# hosts (the driver enters lhc_GPU and starts both peers before their
+# readiness gates):
 #
 # Merge-gate requirement: always use SMOKE_SUITE=all for the final 93-layer
 # accuracy/cache acceptance run. The flow suite is only a four-layer RDMA
@@ -29,8 +29,8 @@
 # lengths in the old padding path. Keep the default run as a separate baseline.
 #
 # Manual role startup remains available for debugging. Run from the RTP-LLM
-# repository root inside lhc_GPU. Start Decode first and wait for its health
-# endpoint before starting Prefill, matching the controller driver:
+# repository root inside lhc_GPU. Start both roles before waiting for health;
+# cache-store initialization may need the peer to be online:
 #
 # 1. Start the Decode role:
 #    SP_TYPE=mtp SP_MODEL_TYPE=kimi_k3_mtp \
@@ -57,18 +57,18 @@
 #
 # Run this same role script inside lhc_GPU on both hosts. There is no committed
 # machine address; the optional driver accepts all SSH/host paths at runtime
-# and enforces Decode-ready-before-Prefill ordering.
+# and starts both peers before their readiness gates.
 # The validated profile always enables Barex RDMA on both roles; this smoke is
 # intentionally not a TCP/cache-store fallback test.
-# Merge-gate runs must use SMOKE_SUITE=all; it is the only supported suite.
+# Merge-gate runs must use SMOKE_SUITE=all; flow is only a preflight.
 # Prefill checks both services, runs the complete request suite, validates model
 # answers and cache metadata, then reports PASS/FAIL back to Decode. Both
 # commands therefore have a meaningful exit status and clean only their own
 # process group.
 # The full-model profile enables the selected K3 draft mode on both roles. The
 # role-local draft checkpoint is mandatory; there is no non-MTP fallback.
-# The target model uses Projection-KTP while the selected draft remains KTP1.
-# Both ordinary Decode and Target Verify participate in synchronized graph waves.
+# Both roles use TP8/EP8, DP1/KTP1 and Page-RR KV caches. Decode MLA uses
+# DCP across its TP group, including ordinary Decode and Target Verify.
 
 set -Eeuo pipefail
 ulimit -c 0
@@ -99,13 +99,12 @@ remain native BF16. Use the same precision configuration and scales on both role
 Only native K3 MTP is supported: SP_TYPE=mtp and SP_MODEL_TYPE=kimi_k3_mtp.
 Other speculative modes are rejected before either role starts.
 See example/k3/FP8_MLA.md for FP8 examples.
-The all suite also seeds a configurable long conversation (default ~960K tokens), then appends a retrieval
-question. It checks the answer, PD metadata and a historical prefix larger than
-one expanded-KV budget. This correctness case runs by default without profiling;
+The all suite also seeds a configurable long conversation (default ~110K tokens), then appends a retrieval
+question. It checks the answer, PD metadata and substantial prefix reuse across
+Prefill chunks. Larger lengths remain opt-in via SMOKE_LONG_PREFIX_TARGET_TOKENS. This correctness case runs by default without profiling;
 its request, token IDs and results are saved under prefill/long-prefix/.
-The Projection-KTP profile uses Prefill TP8/EP8 plus Decode DP8/KTP8/EP8.
-The native MTP profile uses target KTP8 and draft KTP1, with Decode CUDA
-Graph enabled. MTP attention and cache remain native BF16.
+Both roles use TP8/EP8, DP1/KTP1 and Page-RR KV caches (P8D8).
+Decode uses DCP and CUDA Graph. Native MTP attention and cache remain BF16.
 
 Merge-gate accuracy validation must use SMOKE_SUITE=all. SMOKE_SUITE=flow is
 only a four-layer RDMA connectivity/multi-round preflight and does not satisfy
@@ -146,34 +145,20 @@ Important optional variables:
                                  and >64K single/batched chunk cases
   SMOKE_EXPECTED_LAYERS     checkpoint layer count; defaults to 93. Set to 4
                             only for the required four-layer RDMA flow smoke.
-  SMOKE_PAGE_RR             0 (default) keeps replicated Prefill cache;
-                            1 enables the two-host P8 -> DP8 Page-RR profile
-  SMOKE_DECODE_PAGE_RR      1 selects one Decode TP/DCP group instead of KTP;
-                            combine with SMOKE_PAGE_RR=0/1 for P1D8/P8D8
   SMOKE_DCP_PADDING_REGRESSION
-                            1 selects Decode DCP, GEN_NUM_PER_CIRCLE=2 and
-                            SMOKE_SUITE=all; defaults to 0. Run separately with
-                            a new SMOKE_RUN_ID. Conflicting overrides are rejected.
-  SMOKE_BLOCK_SIZE          physical cache page size; defaults to 4096
-                            (128 when SMOKE_PAGE_RR=1)
+                            1 runs the optional DCP draft-width-3 regression; defaults to 0.
+  SMOKE_BLOCK_SIZE          physical cache page size; defaults to 1024
   SMOKE_KERNEL_BLOCK_SIZE   attention kernel page size; defaults to 128
   SMOKE_CHUNK_TOKENS        whole-model chunk budget; defaults to 65536
+  SMOKE_PREFILL_KV_CACHE_MEM_MB
+                            Prefill cache budget; defaults to 42000 MiB; larger opt-in contexts may need more.
   SMOKE_DECODE_KV_CACHE_MEM_MB
-                            Decode hybrid-cache budget; defaults to 29000 MiB for the 960K case.
-                            Projection-KTP replicates DP-local KDA/O-proj
-                            weights, so the older 42000 MiB budget can OOM
-                            before CUDA Graph capture on a 93-layer model.
+                            Decode hybrid-cache budget; defaults to 29000 MiB.
   SMOKE_DECODE_KDA_POOL_BLOCKS
-                            Decode DP-local full-head KDA block count;
-                            defaults to 32. Projection-KTP owns full-head KDA
-                            state per DP rank, so capacity is sized per request
-                            owner rather than divided by KTP size. Thirty-two
-                            blocks cover a >64K request at 4096 tokens/block,
-                            an eight-request graph wave, and retained-prefix /
-                            decode reserve margin.
-  SMOKE_DECODE_ROLE_ADDRS   optional comma-separated ordered
-                            IP:HTTP_PORT:GRPC_PORT list. The DP8 default is
-                            derived from DECODE_ENDPOINT using the rank stride.
+                            Decode KDA block count; defaults to 32.
+  SMOKE_DECODE_ROLE_ADDRS   optional single IP:HTTP_PORT:GRPC_PORT address;
+                            defaults to the sole Decode DP1 owner derived
+                            from DECODE_ENDPOINT.
   SMOKE_LINEAR_STEP         KDA materialization step; defaults to 1
   SMOKE_CHUNKWISE_RDMA      1 (default) enables Layer x Chunk publication;
                             0 retains compute-all-then-transfer behavior
@@ -215,22 +200,32 @@ if [[ "${smoke_dcp_padding_regression}" == "1" ]]; then
     export SMOKE_SUITE=all
 fi
 
-smoke_page_rr="${SMOKE_PAGE_RR:-0}"
-[[ "${smoke_page_rr}" == "0" || "${smoke_page_rr}" == "1" ]] \
-    || die "SMOKE_PAGE_RR must be 0 or 1"
-smoke_decode_page_rr="${SMOKE_DECODE_PAGE_RR:-0}"
-[[ "${smoke_decode_page_rr}" == "0" || "${smoke_decode_page_rr}" == "1" ]] \
-    || die "SMOKE_DECODE_PAGE_RR must be 0 or 1"
-smoke_tp_size="${TP_SIZE:-${KIMI_K3_TP_SIZE:-8}}"
-smoke_ep_size="${EP_SIZE:-${KIMI_K3_EP_SIZE:-${smoke_tp_size}}}"
-[[ "${smoke_tp_size}" =~ ^[1-9][0-9]*$ && "${smoke_ep_size}" == "${smoke_tp_size}" ]] \
-    || die "this K3 MegaMoE smoke requires positive TP == EP"
-if [[ "${smoke_page_rr}" == "1" && "${smoke_tp_size}" != "8" && "${smoke_decode_page_rr}" != "1" ]]; then
-    die "this two-host SMOKE_PAGE_RR profile validates only Prefill TP8 -> Decode DP8"
+# These are test-driver settings only. Each service still receives the existing
+# TP_SIZE/DP_SIZE/EP_SIZE/WORLD_SIZE deployment parameters.
+smoke_prefill_tp_size="${SMOKE_PREFILL_TP_SIZE:-${TP_SIZE:-${KIMI_K3_TP_SIZE:-8}}}"
+smoke_decode_tp_size="${SMOKE_DECODE_TP_SIZE:-${TP_SIZE:-${KIMI_K3_TP_SIZE:-4}}}"
+# Default to eight-card mixed Decode; explicit TP8 retains the DP1 layout.
+smoke_decode_default_dp=1
+[[ "${smoke_decode_tp_size}" != 4 ]] || smoke_decode_default_dp=2
+smoke_decode_dp_size="${SMOKE_DECODE_DP_SIZE:-${smoke_decode_default_dp}}"
+for topology_size in "${smoke_prefill_tp_size}" "${smoke_decode_tp_size}" "${smoke_decode_dp_size}"; do
+    [[ "${topology_size}" =~ ^[1-9][0-9]*$ && "${#topology_size}" -le 1 ]] \
+        || die "smoke topology sizes must be integers in 1..8"
+done
+((smoke_prefill_tp_size <= 8 && smoke_decode_tp_size * smoke_decode_dp_size <= 8)) \
+    || die "each smoke deployment is limited to eight GPUs"
+((smoke_prefill_tp_size > 1 && smoke_decode_tp_size > 1)) \
+    || die "this smoke requires Page-RR on both roles"
+((smoke_prefill_tp_size % smoke_decode_tp_size == 0 || smoke_decode_tp_size % smoke_prefill_tp_size == 0)) \
+    || die "smoke attention TP sizes must divide one another"
+smoke_tp_size="${smoke_prefill_tp_size}"
+smoke_dp_size=1
+if [[ "${role}" == "decode" ]]; then
+    smoke_tp_size="${smoke_decode_tp_size}"
+    smoke_dp_size="${smoke_decode_dp_size}"
 fi
-
-[[ "${smoke_tp_size}" == "8" ]] \
-    || die "this two-host smoke requires Prefill TP8/EP8"
+smoke_world_size=$((smoke_tp_size * smoke_dp_size))
+smoke_ep_size="${smoke_world_size}"
 [[ "${SMOKE_CHUNKWISE_RDMA:-1}" == "1" ]] \
     || die "this two-host smoke requires SMOKE_CHUNKWISE_RDMA=1"
 
@@ -357,34 +352,29 @@ for timeout_value in "${startup_timeout}" "${request_timeout}" "${result_timeout
         || die "smoke timeouts must be positive integers"
 done
 
-if [[ "${smoke_page_rr}" == "1" ]]; then
-    smoke_block_size="${SMOKE_BLOCK_SIZE:-128}"
-    smoke_kernel_block_size="${SMOKE_KERNEL_BLOCK_SIZE:-128}"
-else
-    smoke_block_size="${SMOKE_BLOCK_SIZE:-4096}"
-    smoke_kernel_block_size="${SMOKE_KERNEL_BLOCK_SIZE:-128}"
-fi
+smoke_block_size="${SMOKE_BLOCK_SIZE:-1024}"
+smoke_kernel_block_size="${SMOKE_KERNEL_BLOCK_SIZE:-128}"
 smoke_chunk_tokens="${SMOKE_CHUNK_TOKENS:-65536}"
-smoke_decode_topology=dp8_ktp8_ep8
-smoke_decode_dp_size=8
-if [[ "${smoke_decode_page_rr}" == "1" ]]; then
-    smoke_decode_topology="tp${smoke_tp_size}_ep${smoke_tp_size}"
-    smoke_decode_dp_size=1
-fi
-if [[ "${smoke_page_rr}" == "1" ]]; then
-    case "${smoke_block_size}:${smoke_kernel_block_size}" in
-        128:128 | 256:256) ;;
-        *) die "SMOKE_PAGE_RR requires physical/kernel pages 128/128 or 256/256" ;;
-    esac
-fi
+smoke_decode_topology=legacy
+# Keep the smoke's page geometry consistent with K3 Page-RR validation.
+[[ "${smoke_block_size}" =~ ^[1-9][0-9]*$ && "${smoke_kernel_block_size}" == "128" ]] \
+    || die "Page-RR requires a positive physical page and kernel page 128"
+((smoke_block_size % 128 == 0)) \
+    || die "Page-RR physical page must be divisible by 128"
+smoke_page_ratio=$((smoke_block_size / 128))
+(( (smoke_page_ratio & (smoke_page_ratio - 1)) == 0 )) \
+    || die "Page-RR physical/kernel page ratio must be a power of two"
 smoke_proposal_tokens="${GEN_NUM_PER_CIRCLE:-3}"
 [[ "${smoke_proposal_tokens}" =~ ^[1-9][0-9]*$ ]] \
     || die "GEN_NUM_PER_CIRCLE must be positive"
 smoke_shared_expert_shard=$((smoke_tp_size % 2 == 0))
+# Keep routine smoke below extreme-context memory pressure. Larger explicit
+# contexts need separate cache-capacity and runtime-headroom validation.
+smoke_prefill_kv_cache_mem_mb="${SMOKE_PREFILL_KV_CACHE_MEM_MB:-42000}"
 smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-29000}"
 smoke_decode_kda_pool_blocks="${SMOKE_DECODE_KDA_POOL_BLOCKS:-32}"
-smoke_long_prefix_target_tokens="${SMOKE_LONG_PREFIX_TARGET_TOKENS:-960000}"
-smoke_long_prefix_tp_size="${SMOKE_LONG_PREFIX_TP_SIZE:-1}"
+smoke_long_prefix_target_tokens="${SMOKE_LONG_PREFIX_TARGET_TOKENS:-110000}"
+smoke_long_prefix_tp_size="${SMOKE_LONG_PREFIX_TP_SIZE:-${smoke_prefill_tp_size}}"
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
 smoke_keep_services="${SMOKE_KEEP_SERVICES:-0}"
@@ -399,6 +389,7 @@ for size_value in \
     "${smoke_block_size}" \
     "${smoke_kernel_block_size}" \
     "${smoke_chunk_tokens}" \
+    "${smoke_prefill_kv_cache_mem_mb}" \
     "${smoke_decode_kv_cache_mem_mb}" \
     "${smoke_decode_kda_pool_blocks}" \
     "${smoke_long_prefix_target_tokens}" \
@@ -572,11 +563,11 @@ verify_rdma_log() {
     local deadline=$((SECONDS + startup_timeout))
     # Rank zero's HTTP health can precede the other ranks' cache transports.
     # Sending a request then races their listeners and poisons retry state.
-    until python3 "${repo_root}/example/k3/kimi_k3_rdma_readiness.py" "${engine_log}" --ranks "${smoke_tp_size}"; do
+    until python3 "${repo_root}/example/k3/kimi_k3_rdma_readiness.py" "${engine_log}" --ranks "${smoke_world_size}"; do
         if ! kill -0 "${service_pid}" 2>/dev/null; then
-            die "${role} service exited before all ${smoke_tp_size} RDMA ranks were ready"
+            die "${role} service exited before all ${smoke_world_size} RDMA ranks were ready"
         fi
-        ((SECONDS < deadline)) || die "timed out waiting for all ${smoke_tp_size} RDMA ranks"
+        ((SECONDS < deadline)) || die "timed out waiting for all ${smoke_world_size} RDMA ranks"
         sleep 2
     done
     grep -E 'rdma messager init success' "${engine_log}" >"${role_dir}/rdma-all-ranks-ready.txt"
@@ -633,32 +624,20 @@ verify_decode_graph_log() {
     fi
     local logs=("${service_log}" "${engine_log}" "${rank_logs[@]}")
     : >"${evidence_file}"
-    if [[ "${smoke_decode_page_rr}" == "1" ]]; then
-        grep -Eh "\[MLA_DCP\].*backend=a2a tp=${smoke_tp_size} " "${logs[@]}" \
-            | tail -20 >>"${evidence_file}" \
-            || die "Decode log has no expected DCP backend evidence"
-        grep -Eh "K3_PAGE_RR_TARGET.*role=Decode TP=${smoke_tp_size} " "${logs[@]}" \
-            | tail -20 >>"${evidence_file}" \
-            || die "Decode log has no local Page-RR cache evidence"
-    else
-        for marker in \
-            K3_PROJECTION_KTP_LAYOUT \
-            K3_PROJECTION_KTP_STEP \
-            K3_PROJECTION_KTP_GRAPH_REPLAY; do
-            grep -Eh "${marker}" "${logs[@]}" | tail -20 >>"${evidence_file}" \
-                || die "Decode log has no ${marker} evidence"
-        done
-        if [[ "${smoke_page_rr}" == "1" ]]; then
-            grep -Eh \
-                "K3_PD_PAGE_RR_FAN_IN.*source_shards=${smoke_tp_size}.*kda_partitions=[1-9][0-9]*.*status=ok" \
-                "${logs[@]}" | tail -20 >>"${evidence_file}" \
-                || die "Decode log has no valid Page-RR fan-in evidence"
-        else
-            grep -Eh "K3_PD_FAN_IN" "${logs[@]}" | tail -20 >>"${evidence_file}" \
-                || die "Decode log has no K3_PD_FAN_IN evidence"
-        fi
-    fi
-    for bucket in 1 2 4 8; do
+    grep -Eh "\[MLA_DCP\].*backend=a2a tp=${smoke_tp_size} " "${logs[@]}" \
+        | tail -20 >>"${evidence_file}" \
+        || die "Decode log has no expected DCP backend evidence"
+    grep -Eh "K3_PAGE_RR_TARGET.*role=Decode TP=${smoke_tp_size} " "${logs[@]}" \
+        | tail -20 >>"${evidence_file}" \
+        || die "Decode log has no local Page-RR cache evidence"
+    local physical_buckets
+    physical_buckets="$(PYTHONPATH="${repo_root}/example/k3" python3 - "${smoke_tp_size}" "${smoke_proposal_tokens}" <<'PYBUCKETS'
+import sys
+from kimi_k3_smoke_runtime_evidence import physical_graph_buckets
+print(*physical_graph_buckets(int(sys.argv[1]), int(sys.argv[2])))
+PYBUCKETS
+)" || die "failed to derive physical Decode Graph buckets"
+    for bucket in ${physical_buckets}; do
         grep -Eh "captured batch[ _]size ${bucket}([ :]|$)" "${logs[@]}" \
             | tail -1 >>"${evidence_file}" \
             || die "Decode log has no CUDA Graph capture evidence for bucket ${bucket}"
@@ -669,7 +648,8 @@ verify_smoke_runtime_coverage() {
     [[ "${SMOKE_SUITE:-all}" == "all" ]] || return 0
     python3 "${repo_root}/example/k3/kimi_k3_smoke_runtime_evidence.py" \
         --role "${role}" --root "${role_dir}" \
-        --decode-page-rr "${smoke_decode_page_rr}"
+        --decode-page-rr 1 --proposal-tokens "${smoke_proposal_tokens}" \
+        --tp-size "${smoke_tp_size}" --dp-size "${smoke_dp_size}" --block-size "${smoke_block_size}"
 }
 
 verify_fp8_log() {
@@ -702,6 +682,7 @@ verify_role_environment() {
         "${smoke_block_size}" \
         "${smoke_kernel_block_size}" \
         "${smoke_chunk_tokens}" \
+        "${smoke_prefill_kv_cache_mem_mb}" \
         "${smoke_decode_kv_cache_mem_mb}" \
         "${smoke_decode_kda_pool_blocks}" \
         "${smoke_linear_step}" \
@@ -711,8 +692,8 @@ verify_role_environment() {
         "${smoke_sp_type}" \
         "${smoke_sp_model_type}" \
         "${smoke_tp_size}" \
-        "${smoke_page_rr}" \
-        "${smoke_decode_page_rr}" \
+        "${smoke_dp_size}" \
+        "${smoke_prefill_tp_size}" \
         "${smoke_decode_topology}" \
         "${smoke_proposal_tokens}" \
         "${FT_CORE_DUMP_ON_EXCEPTION}" <<'PY'
@@ -727,6 +708,7 @@ import sys
     block_size,
     kernel_block_size,
     chunk_tokens,
+    prefill_kv_cache_mem_mb,
     decode_kv_cache_mem_mb,
     decode_kda_pool_blocks,
     linear_step,
@@ -736,8 +718,8 @@ import sys
     sp_type,
     sp_model_type,
     tp_size,
-    page_rr,
-    decode_page_rr,
+    dp_size,
+    prefill_tp_size,
     decode_topology,
     proposal_tokens,
     core_dump_on_exception,
@@ -773,11 +755,15 @@ expected = {
     "SP_ACT_TYPE": "BF16",
     "GEN_NUM_PER_CIRCLE": proposal_tokens,
     "KIMI_K3_TP_SIZE": tp_size,
-    "KIMI_K3_EP_SIZE": tp_size,
-    "SMOKE_PAGE_RR": page_rr,
-    "SMOKE_DECODE_PAGE_RR": decode_page_rr,
+    "KIMI_K3_EP_SIZE": str(int(tp_size) * int(dp_size)),
+    "TP_SIZE": tp_size,
+    "EP_SIZE": str(int(tp_size) * int(dp_size)),
+    "DP_SIZE": dp_size,
+    "WORLD_SIZE": str(int(tp_size) * int(dp_size)),
+    "LOCAL_WORLD_SIZE": str(int(tp_size) * int(dp_size)),
+    "KTP_SIZE": "1",
 }
-absent = ["CUDA_LAUNCH_BLOCKING", "large_segment_size_mb", "KIMI_K3_EAGLE3_AUX_LAYER_IDS"]
+absent = ["CUDA_LAUNCH_BLOCKING", "large_segment_size_mb", "KIMI_K3_EAGLE3_AUX_LAYER_IDS", "CP_ROTATE_METHOD"]
 if accl_use_nics:
     expected["ACCL_USE_NICS"] = accl_use_nics
 else:
@@ -787,7 +773,7 @@ if role == "prefill":
         "CONCURRENCY_LIMIT": "32",
         "MAX_SEQ_LEN": "1258294",
         "MAX_BATCH_TOKENS_SIZE": "1258291",
-        "KV_CACHE_MEM_MB": "42000",
+        "KV_CACHE_MEM_MB": prefill_kv_cache_mem_mb,
         "REUSE_CACHE": "1",
         "KIMI_K3_KDA_POOL_BLOCKS": "0",
         "RESERVER_RUNTIME_MEM_MB": "15000",
@@ -798,11 +784,8 @@ if role == "prefill":
         "ENABLE_MEMORY_CACHE": "1",
         "MEMORY_CACHE_SIZE_MB": "65536",
     })
-    if page_rr == "1":
-        expected["PREFILL_CP_KV_CACHE_SHARDED"] = "1"
-        absent.append("PREFILL_CP_SIZE")
-    else:
-        absent.extend(["PREFILL_CP_KV_CACHE_SHARDED", "PREFILL_CP_SIZE"])
+    expected["PREFILL_CP_KV_CACHE_SHARDED"] = "1"
+    absent.extend(["PREFILL_CP_SIZE", "DECODE_CP_KV_CACHE_SHARDED"])
     absent.extend(["DECODE_CAPTURE_CONFIG", "MOE_STRATEGY"])
 else:
     expected.update({
@@ -818,17 +801,15 @@ else:
         "ENABLE_CUDA_GRAPH": "1",
         "DECODE_CAPTURE_CONFIG": "1,2,4,8",
         "KIMI_K3_DECODE_TOPOLOGY": decode_topology,
-        "DECODE_CP_KV_CACHE_SHARDED": decode_page_rr,
+        "DECODE_CP_KV_CACHE_SHARDED": "1",
+        "NCCL_GRAPH_REGISTER": "0",
         "RTP_MLA_DECODE_KERNEL": "tokenspeed_mla",
         "MOE_STRATEGY": "mega_moe_se",
         "RTP_LLM_DEVICE_INPUT": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
         "RTP_LLM_STREAM_ASYNC": "1",
     })
-    if page_rr == "1":
-        expected["PREFILL_CP_SIZE"] = tp_size
-    else:
-        absent.append("PREFILL_CP_SIZE")
+    expected["PREFILL_CP_SIZE"] = prefill_tp_size
     absent.append("PREFILL_CP_KV_CACHE_SHARDED")
     absent.extend([
         "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD",
@@ -909,19 +890,26 @@ apply_validated_common_profile() {
     export SP_ACT_TYPE=BF16
     export GEN_NUM_PER_CIRCLE="${smoke_proposal_tokens}"
     export TP_SIZE="${smoke_tp_size}"
-    export DP_SIZE=1
+    export DP_SIZE="${smoke_dp_size}"
+    export WORLD_SIZE="${smoke_world_size}"
+    export LOCAL_WORLD_SIZE="${smoke_world_size}"
+    export KTP_SIZE=1
+    unset CP_ROTATE_METHOD
     export EP_SIZE="${smoke_ep_size}"
     export KIMI_K3_TP_SIZE="${smoke_tp_size}"
     export KIMI_K3_EP_SIZE="${smoke_ep_size}"
-    export SMOKE_PAGE_RR="${smoke_page_rr}"
     # Discard legacy auxiliary-layer settings inherited from the shell.
-    export SMOKE_DECODE_PAGE_RR="${smoke_decode_page_rr}"
     unset KIMI_K3_EAGLE3_AUX_LAYER_IDS
     export RTP_LLM_SERVICE_ID="kimi-k3-full-pd-${SMOKE_RUN_ID}"
     # Keep TP Unix-domain sockets below Linux's 107-byte path limit even when
     # the externally visible run ID is descriptive and long.
     export RTP_LLM_TMPDIR="/tmp/k3pd-${run_hash:0:12}-${role}"
     export RUN_ROOT="${role_dir}/runtime"
+    # FlashInfer Ninja files contain absolute source paths. Keep JIT artifacts
+    # with this run so a previous checkout cannot supply stale build paths.
+    export FLASHINFER_WORKSPACE_BASE="${role_dir}/jit"
+    export TRITON_CACHE_DIR="${role_dir}/jit/triton"
+    export TORCH_EXTENSIONS_DIR="${role_dir}/jit/torch_extensions"
 
     # Canonical smoke runs asynchronously and uses the operator versions from
     # the Bazel runfiles rather than an inherited debugging overlay.
@@ -935,7 +923,7 @@ apply_validated_prefill_profile() {
     unset DECODE_CP_KV_CACHE_SHARDED
     export MAX_SEQ_LEN=1258294
     export MAX_BATCH_TOKENS_SIZE=1258291
-    export KV_CACHE_MEM_MB=42000
+    export KV_CACHE_MEM_MB="${smoke_prefill_kv_cache_mem_mb}"
     export REUSE_CACHE=1
     export KIMI_K3_KDA_POOL_BLOCKS=0
     export RESERVER_RUNTIME_MEM_MB=15000
@@ -945,22 +933,18 @@ apply_validated_prefill_profile() {
     export ENABLE_CUDA_GRAPH=0
     export ENABLE_MEMORY_CACHE=1
     export MEMORY_CACHE_SIZE_MB=65536
-    if [[ "${smoke_page_rr}" == "1" ]]; then
-        export PREFILL_CP_KV_CACHE_SHARDED=1
-        unset PREFILL_CP_SIZE
-    else
-        unset PREFILL_CP_KV_CACHE_SHARDED PREFILL_CP_SIZE
-    fi
+    export PREFILL_CP_KV_CACHE_SHARDED=1
+    unset PREFILL_CP_SIZE
     unset DECODE_CAPTURE_CONFIG MOE_STRATEGY
 }
 
 apply_validated_decode_profile() {
-    # Per-owner capacity matches the largest Graph bucket without extra warmup rows.
+    # The sole DP owner admits up to the largest Graph bucket.
     export CONCURRENCY_LIMIT=8
     export MAX_SEQ_LEN=1468006
     export MAX_BATCH_TOKENS_SIZE=1468006
     export KV_CACHE_MEM_MB="${smoke_decode_kv_cache_mem_mb}"
-    # Bound NCCL connection buffers so the 960K case leaves runtime headroom.
+    # Bound NCCL connection buffers to preserve runtime headroom.
     export NCCL_MAX_CTAS=8
     export REUSE_CACHE=0
     export KIMI_K3_KDA_POOL_BLOCKS="${smoke_decode_kda_pool_blocks}"
@@ -969,27 +953,19 @@ apply_validated_decode_profile() {
     unset KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD KIMI_K3_PREFILL_CHUNK_TOKENS
     unset ENABLE_MEMORY_CACHE MEMORY_CACHE_SIZE_MB
     export ENABLE_CUDA_GRAPH=1
-    # Exercise several arbitrary public graph buckets; the coordinator chooses
-    # one common key from the DP-local maximum batch.
+    # Exercise the DCP group with several public Graph buckets.
     export DECODE_CAPTURE_CONFIG=1,2,4,8
     export KIMI_K3_DECODE_TOPOLOGY="${smoke_decode_topology}"
-    export DECODE_CP_KV_CACHE_SHARDED="${smoke_decode_page_rr}"
-    if [[ "${smoke_decode_page_rr}" == "1" ]]; then
-        # Avoid Graph replay hangs/wrong answers with expandable-segment buffers.
-        # Keep an explicit override available for registration A/B diagnostics.
-        export NCCL_GRAPH_REGISTER="${NCCL_GRAPH_REGISTER:-0}"
-    fi
+    export DECODE_CP_KV_CACHE_SHARDED=1
+    # Avoid Graph replay hangs/wrong answers with expandable-segment buffers.
+    export NCCL_GRAPH_REGISTER=0
     export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
     export RTP_LLM_DROP_BROAD_SYNC=1
     export RTP_LLM_STREAM_ASYNC=1
     unset PREFILL_CP_KV_CACHE_SHARDED
-    if [[ "${smoke_page_rr}" == "1" ]]; then
-        export PREFILL_CP_SIZE="${smoke_tp_size}"
-    else
-        unset PREFILL_CP_SIZE
-    fi
+    export PREFILL_CP_SIZE="${smoke_prefill_tp_size}"
 }
 
 apply_validated_common_profile
@@ -1004,11 +980,7 @@ echo "[${role}] checkpoint=${checkpoint_real} (${checkpoint_fs}:${checkpoint_sou
 echo "[${role}] sp_type=${smoke_sp_type} sp_model_type=${smoke_sp_model_type}"
 echo "[${role}] draft_checkpoint=${sp_checkpoint_real} (${sp_checkpoint_fs}:${sp_checkpoint_source})"
 echo "[${role}] decode_topology=${smoke_decode_topology} decode_dp=${smoke_decode_dp_size} draft_ktp=1"
-if [[ "${smoke_page_rr}" == "1" ]]; then
-    echo "[${role}] source_cache=page-rr/${smoke_tp_size}"
-else
-    echo "[${role}] source_cache=replicated"
-fi
+echo "[${role}] source_cache=page-rr/${smoke_prefill_tp_size} destination_cache=page-rr/${smoke_decode_tp_size}"
 echo "[${role}] endpoints prefill=${PREFILL_ENDPOINT} decode=${DECODE_ENDPOINT}"
 
 setsid "${launcher}" "${role}" >"${service_log}" 2>&1 &
@@ -1126,7 +1098,7 @@ if [[ -n "${SMOKE_DECODE_ROLE_ADDRS:-}" ]]; then
     IFS=',' read -r -a decode_role_addrs <<<"${SMOKE_DECODE_ROLE_ADDRS}"
 else
     for ((rank = 0; rank < smoke_decode_dp_size; ++rank)); do
-        rank_http_port="$((decode_port + rank * 9))"
+        rank_http_port="$((decode_port + rank * smoke_decode_tp_size * 9))"
         rank_grpc_port="$((rank_http_port + 1))"
         decode_role_addrs+=(
             "${decode_host}:${rank_http_port}:${rank_grpc_port}"
@@ -1142,13 +1114,8 @@ for addr in "${decode_role_addrs[@]}"; do
     decode_role_addr_args+=(--decode-role-addr "${addr}")
 done
 
-# Page-RR Prefill checkpoints its KDA LINEAR group once per Prefill-shard
-# span, so branch reuse is only observable on that grid; replicated Prefill
-# reuses per physical page.
-smoke_reuse_unit_tokens="${smoke_block_size}"
-if [[ "${smoke_page_rr}" == "1" ]]; then
-    smoke_reuse_unit_tokens=$((smoke_block_size * smoke_tp_size))
-fi
+# Prefill KDA checkpoints span all eight page owners; reuse follows that grid.
+smoke_reuse_unit_tokens=$((smoke_block_size * smoke_prefill_tp_size))
 
 python3 -u "${case_runner}" \
     --base-url "http://127.0.0.1:${prefill_port}" \

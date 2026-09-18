@@ -46,13 +46,15 @@ def validate_mega_moe_topology(
             f"EP={ep_size}, world={world_size}"
         )
 
-    if attention_tp_size == ep_size == world_size:
-        return
-    if attention_tp_size == 1 and dp_size == ep_size == world_size:
+    if (
+        ktp_size == 1
+        and attention_tp_size > 0
+        and dp_size > 0
+        and attention_tp_size * dp_size == ep_size == world_size
+    ):
         return
     raise RuntimeError(
-        f"{label} requires either TP=EP=world or DP-local tokens with "
-        "TP=1 and DP=EP=world; got "
+        f"{label} with KTP=1 requires TP*DP=EP=world; got "
         f"TP={attention_tp_size}, DP={dp_size}, KTP={ktp_size}, "
         f"EP={ep_size}, world={world_size}"
     )

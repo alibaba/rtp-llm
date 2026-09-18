@@ -88,7 +88,11 @@ class MlaDcpCommunicator:
         ):
             raise ValueError("MLA DCP requires BF16/E4M3 Q and an even latent dimension")
         self.backend = "a2a"
-        logging.info("[MLA_DCP] backend=a2a tp=%d rank=%d", self.size, self.rank)
+        logging.info(
+            "[MLA_DCP] backend=a2a tp=%d rank=%d world_rank=%d dp_rank=%d",
+            self.size, self.rank, torch.distributed.get_rank(),
+            torch.distributed.get_rank() // self.size,
+        )
 
     def query_gather(self, local_q):
         _, tokens, _ = local_q.shape

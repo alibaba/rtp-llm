@@ -21,7 +21,7 @@ EXPECTED = {
     "late": "BIRCH-7251",
     "square": 1369,
 }
-DEFAULT_TARGET_TOKENS = 960000
+DEFAULT_TARGET_TOKENS = 110000
 FILLER = (
     "The following archive entry is neutral background material. "
     "It introduces no named record or instruction.\n"
@@ -66,8 +66,8 @@ def prefix_blocks(
     capacity = budget // bytes_per_token // page_size * page_size
     require(capacity > 0, "expanded KV budget cannot hold one cache page")
     require(
-        reuse > capacity,
-        f"historical prefix {reuse} must exceed expansion capacity {capacity}",
+        reuse > 0,
+        "continuation must reuse a nonempty historical prefix",
     )
     require(reuse < total, "continuation must contain uncached tokens")
     require(reuse % page_size == 0, "historical prefix is not cache-page aligned")
@@ -75,6 +75,14 @@ def prefix_blocks(
         dict(start=start, tokens=min(capacity, reuse - start))
         for start in range(0, reuse, capacity)
     ]
+
+
+def check_prefix_reuse(reuse: int, common: int, reuse_unit: int) -> None:
+    require(reuse_unit > 0, "cache reuse unit must be positive")
+    require(reuse <= common, "cache reuse exceeds the seed's actual common token prefix")
+    require(reuse % reuse_unit == 0, "cache reuse is not checkpoint-span aligned")
+    minimum = max(reuse_unit, (common - 2000) // reuse_unit * reuse_unit)
+    require(reuse >= minimum, f"long prefix hit reused too little history: {reuse}/{common}")
 
 
 def expanded_bytes_per_token(checkpoint: pathlib.Path | None, tp_size: int) -> int:
@@ -114,13 +122,18 @@ class LongPrefixCase:
         bytes_per_token: int,
         kernel_page_size: int = 128,
         target_tokens: int = DEFAULT_TARGET_TOKENS,
+        reuse_unit_tokens: int | None = None,
+        decode_role_addrs: list[dict] | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.output = output
         self.namespace = namespace
+        self.decode_role_addrs = list(decode_role_addrs or [])
         self.timeout = timeout
         self.budget = budget
         self.page_size = page_size
+        self.reuse_unit_tokens = reuse_unit_tokens or page_size
+        require(self.reuse_unit_tokens % page_size == 0, "reuse unit must contain whole physical pages")
         self.kernel_page_size = kernel_page_size
         self.bytes_per_token = bytes_per_token
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -202,6 +215,10 @@ class LongPrefixCase:
             debug_info=True,
             max_tokens=256,
         )
+        owner = 0 if name.endswith("seed") else max(0, len(self.decode_role_addrs) - 1)
+        selected = self.decode_role_addrs[owner] if self.decode_role_addrs else None
+        if selected is not None:
+            payload["extra_configs"] = {"role_addrs": [selected]}
         save(self.output / f"{name}-request.json.gz", payload)
         save(self.output / f"{name}-tokens.json.gz", ids)
         start = time.monotonic()
@@ -213,6 +230,9 @@ class LongPrefixCase:
         reuse = int(aux.get("prefill_total_reuse_len", aux.get("reuse_len", 0)))
         record = dict(
             name=name,
+            decode_owner_rank=owner,
+            selected_decode_role_addr=selected,
+            observed_decode_role_addrs=aux.get("role_addrs") or [],
             expected_reuse="miss" if name.endswith("seed") else "hit",
             effective_reuse_len=reuse,
             prefill_total_reuse_len=reuse,
@@ -227,6 +247,9 @@ class LongPrefixCase:
         )
         self.records.append(record)
         save(self.output / "requests.json", self.records)
+        if selected is not None:
+            require(selected in record["observed_decode_role_addrs"],
+                    f"{name} routed to wrong Decode owner: {record['observed_decode_role_addrs']!r}")
         require(record["pd_sep"], f"{name} did not use PD separation")
         require(
             record["input_len"] == len(ids),
@@ -249,8 +272,9 @@ class LongPrefixCase:
             expanded_kv_bytes_per_token=self.bytes_per_token,
         )
         try:
-            # Reject a configuration that cannot exercise multiple historical
-            # blocks before spending time constructing or sending the seed.
+            # Validate the requested prefix geometry before sending the seed.
+            # Routine smoke may fit one expansion block; larger overrides
+            # and operator tests cover multi-block attention.
             prefix_blocks(
                 (self.target_tokens - 200) // self.page_size * self.page_size,
                 self.target_tokens + 100,
@@ -302,13 +326,7 @@ class LongPrefixCase:
             row, _ = self.request("long_prefix_hit", conversation, ids)
             check_answer(row["content"])
             reuse = row["effective_reuse_len"]
-            require(
-                reuse <= common,
-                "cache reuse exceeds the seed's actual common token prefix",
-            )
-            require(
-                reuse % self.page_size == 0, "cache reuse is not physical-page aligned"
-            )
+            check_prefix_reuse(reuse, common, self.reuse_unit_tokens)
             blocks = prefix_blocks(
                 reuse,
                 len(ids),

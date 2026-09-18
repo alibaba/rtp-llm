@@ -27,6 +27,39 @@ std::vector<Pair> expectedFullPageRRPairs(size_t total_logical_blocks, int cp_ra
     return expected;
 }
 
+// Pure CPU: larger logical layouts never create a GPU process group.
+TEST(KVCacheTransferPlannerTest, HeadShardPlansReconstructGlobalHeads) {
+    constexpr int heads = 96;
+    for (const auto sizes : {Pair{8, 16}, Pair{8, 4}, Pair{4, 8}, Pair{8, 8}, Pair{8, 1}}) {
+        for (int dp = 0; dp < 4; ++dp) {
+            for (int dst = 0; dst < sizes.second; ++dst) {
+                std::vector<int> received(heads / sizes.second, -1);
+                for (int src = 0; src < sizes.first; ++src) {
+                    const auto plan = planK3HeadShardLoad(sizes.first, sizes.second, src, dst);
+                    if (!plan.selected) {
+                        continue;
+                    }
+                    const int count = heads / sizes.first / plan.source_partition_count;
+                    ASSERT_EQ(count, heads / sizes.second / plan.destination_partition_count);
+                    for (int h = 0; h < count; ++h) {
+                        const int destination = plan.destination_partition_id * count + h;
+                        ASSERT_EQ(received[destination], -1);  // no overlapping writes
+                        received[destination] = src * (heads / sizes.first)
+                                                + plan.source_partition_id * count + h;
+                    }
+                }
+                for (int h = 0; h < received.size(); ++h) {
+                    EXPECT_EQ(received[h], dst * (heads / sizes.second) + h);
+                }
+            }
+        }
+    }
+    EXPECT_THROW(planK3HeadShardLoad(3, 4, 0, 0), std::invalid_argument);
+    EXPECT_THROW(planK3HeadShardLoad(0, 8, 0, 0), std::invalid_argument);
+    EXPECT_THROW(planK3HeadShardLoad(4, 8, 4, 0), std::invalid_argument);
+    EXPECT_THROW(planK3HeadShardLoad(4, 8, 0, 8), std::invalid_argument);
+}
+
 TEST(KVCacheTransferPlannerTest, FullGroupPublishesOnlyRequestedRange) {
     const auto plan = buildIncrementalCacheStoreBlockPlan(
         8, 0, true, CacheGroupType::FULL, 0, 1, CacheStorePublishRange{2, 5, false});

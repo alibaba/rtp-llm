@@ -228,12 +228,20 @@ def _fixture(rank, size, queries, fp8, generation=0, *, draft=False, prefix_leng
     )
 
 
+def _reference_local_prefix_tokens(position, rank, size):
+    # Count owned complete pages and the optional partial page. This avoids
+    # scanning a million Python integers for every query of the 1M fixtures.
+    pages, tail = divmod(position + 1, 128)
+    owned_pages = (pages + size - 1 - rank) // size
+    return owned_pages * 128 + (tail if pages % size == rank else 0)
+
+
 def _assert_result(fixture, impl, output, rank, size):
     atol = 2e-3 if fixture.dtype == torch.float8_e4m3fn else 1e-3
     torch.testing.assert_close(output, fixture.expected, atol=atol, rtol=0.015)
     metadata = impl.fmha_params
     torch.testing.assert_close(metadata.positions_d, fixture.positions, rtol=0, atol=0)
-    expected_lengths = [sum((k // 128) % size == rank for k in range(p + 1)) for p in fixture.positions.tolist()]
+    expected_lengths = [_reference_local_prefix_tokens(p, rank, size) for p in fixture.positions.tolist()]
     assert metadata.local_causal_lens.flatten().tolist() == expected_lengths
     slots = metadata.slot_mapping.tolist()
     for row, position in enumerate(fixture.positions.tolist()):
@@ -344,6 +352,14 @@ def _worker(rank, size, port):
 
 
 class PageRRMlaDecodeTest(unittest.TestCase):
+    def test_prefix_reference_matches_token_ownership(self):
+        for size in (4, 8, 16):
+            counts = [0] * size
+            for position in range(128 * size * 3 + 19):
+                counts[(position // 128) % size] += 1
+                for rank in range(size):
+                    self.assertEqual(_reference_local_prefix_tokens(position, rank, size), counts[rank])
+
     def test_production_page_rr_decode(self):
         size = int(os.environ.get("DCP_TEST_WORLD_SIZE", "8"))
         self.assertIn(size, (4, 8, 16))

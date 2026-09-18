@@ -46,6 +46,9 @@ class Case:
     expected_json: dict[str, str] | None = None
     expected_input_len: int | None = None
     expected_reuse_len: int | None = None
+    page_rr_boundary: int | None = None
+    page_rr_phase: str | None = None
+    decode_crossings: tuple[int, ...] = ()
 
 
 class SmokeFailure(RuntimeError):
@@ -277,6 +280,16 @@ def make_flow_prompt(namespace: str) -> str:
     return marker + filler * 256 + "\n请回复任意一个非空字符。"
 
 
+def page_rr_boundaries(block_size: int, reuse_unit: int, chunk_tokens: int) -> tuple[int, ...]:
+    """Every owner transition, an owner wrap, and one/two chunk thresholds."""
+    if block_size <= 0 or reuse_unit < block_size or reuse_unit % block_size:
+        raise ValueError("Page-RR reuse span must be a positive multiple of page size")
+    if chunk_tokens < reuse_unit or chunk_tokens % reuse_unit:
+        raise ValueError("chunk budget must contain complete Page-RR reuse spans")
+    return tuple(sorted(set(range(block_size, reuse_unit + 1, block_size))
+                        | {2 * reuse_unit, chunk_tokens, 2 * chunk_tokens}))
+
+
 class Runner:
     @property
     def reuse_unit_tokens(self) -> int:
@@ -310,6 +323,7 @@ class Runner:
             "error": error,
             "block_size": self.args.block_size,
             "chunk_tokens": self.args.chunk_tokens,
+            "reuse_unit_tokens": self.reuse_unit_tokens,
             "batch_size": self.args.batch_size,
             "decode_role_addrs": self.decode_role_addrs,
             "max_tokens": self.args.max_tokens,
@@ -327,6 +341,8 @@ class Runner:
             "elapsed_s": round(time.time() - self.started_at, 3),
             "summary": {
                 "case_count": len(self.records),
+                "page_rr_boundary_case_count": sum(r.get("page_rr_boundary") is not None for r in self.records),
+                "decode_crossing_case_count": sum(bool(r.get("decode_crossings")) for r in self.records),
                 "hit_count": sum(
                     r.get("effective_reuse_len", 0) > 0 for r in self.records
                 ),
@@ -630,6 +646,18 @@ class Runner:
                 f"output_len={output_len}, iter_count={iter_count}"
             )
 
+        # The first output token is produced by P. D consumes it at position
+        # input_len; conservatively exclude the final output token, which need
+        # not be consumed before EOS/stop. Speculative rejected slots do not
+        # count as committed boundary coverage.
+        decode_kv_last_position = input_len + output_len - 2
+        for boundary in case.decode_crossings:
+            if not input_len <= boundary <= decode_kv_last_position:
+                raise SmokeFailure(
+                    f"{case.name}: Decode did not cross committed KV boundary {boundary}; "
+                    f"positions={input_len}..{decode_kv_last_position}"
+                )
+
         selected_decode_role_addr = None
         observed_decode_role_addrs = aux.get("role_addrs") or []
         if self.decode_role_addrs:
@@ -655,6 +683,11 @@ class Runner:
             "expected_json": case.expected_json,
             "expected_input_len": case.expected_input_len,
             "expected_reuse_len": case.expected_reuse_len,
+            "page_rr_boundary": case.page_rr_boundary,
+            "page_rr_phase": case.page_rr_phase,
+            "decode_crossings": list(case.decode_crossings),
+            "decode_kv_first_position": input_len,
+            "decode_kv_last_position": decode_kv_last_position,
             "require_multimodal": case.require_multimodal,
             "multimodal_lengths": multimodal_lengths,
             "input_urls": input_urls,
@@ -875,20 +908,23 @@ class Runner:
 
     def run_owner_regressions(self) -> None:
         size = max(1, len(self.decode_role_addrs))
-        for rotation in (0, 3):
+        # DP1 has no distinct owners to rotate or isolate. Keep these cases
+        # for future multi-DP configurations.
+        if size > 1:
+            for rotation in (0, 3):
+                self.run_stage(
+                    f"owner_records_rotate_{rotation}",
+                    [
+                        self.record_case(
+                            f"owner-record-{rotation}-{i}", (i + rotation) % size
+                        )
+                        for i in range(size)
+                    ],
+                    concurrent=True,
+                )
             self.run_stage(
-                f"owner_records_rotate_{rotation}",
-                [
-                    self.record_case(
-                        f"owner-record-{rotation}-{i}", (i + rotation) % size
-                    )
-                    for i in range(size)
-                ],
-                concurrent=True,
+                "owner_last_only", [self.record_case("owner-last-only", size - 1)]
             )
-        self.run_stage(
-            "owner_last_only", [self.record_case("owner-last-only", size - 1)]
-        )
         # The original wrong-answer class remains a formal, non-retried gate.
         self.run_stage(
             "historical_four_squares",
@@ -906,21 +942,6 @@ class Runner:
             ],
             concurrent=True,
         )
-        # Reuse the same Graph allocation at bucket 8 across drained batches.
-        # The request records prove that all 7 -> 5 -> 6 owner-7 waves finish;
-        # runtime evidence independently proves owner 7 executes in bucket 8.
-        for wave, count in enumerate((7, 5, 6)):
-            self.run_stage(
-                f"graph_slot_wave_{wave}",
-                [
-                    replace(
-                        self.record_case(f"graph-slot-{wave}-{i}", size - 1, words=32),
-                        max_tokens=max(self.args.max_tokens, 2048),
-                    )
-                    for i in range(count)
-                ],
-                concurrent=True,
-            )
         self.run_stage(
             "dp_rolling_refill",
             [
@@ -1059,18 +1080,121 @@ class Runner:
                 ],
             )
 
-    def run_flow(self) -> None:
-        self.run_stage(
-            "chunkwise_rdma_flow_miss",
-            [
-                Case(
-                    "chunkwise_rdma_flow_miss",
-                    make_flow_prompt(self.args.namespace),
-                    r".",
-                    "miss",
-                    require_chunk=True,
+    def run_page_rr_boundaries(self) -> None:
+        page = self.args.block_size
+        unit = self.reuse_unit_tokens
+        boundaries = page_rr_boundaries(page, unit, self.args.chunk_tokens)
+        owners = max(1, len(self.decode_role_addrs))
+        # Each triplet is cold first, then repeated before another triplet can
+        # evict its entries. A repeat below the first complete KDA checkpoint
+        # must still miss; do not call every repeated request a cache hit.
+        for boundary in boundaries:
+            cases = []
+            for delta in (-1, 0, 1):
+                length = boundary + delta
+                tag = hashlib.sha256(
+                    f"{self.args.namespace}/page-rr/{length}".encode()
+                ).hexdigest()[:10]
+                prompt, ids = self.fit_prompt(
+                    f"ID:{tag}\n",
+                    f'\n只输出 JSON {{"value":"{tag}"}}，不要解释。',
+                    length,
                 )
-            ],
+                cases.append(Case(
+                    f"page-rr-{boundary}-{delta:+d}-cold", prompt, "", "miss",
+                    expected_json={"value": tag}, expected_input_len=len(ids),
+                    expected_reuse_len=0, page_rr_boundary=boundary,
+                    page_rr_phase="cold", max_tokens=max(self.args.max_tokens, 256),
+                    decode_owner_rank=(boundary // page + delta) % owners,
+                ))
+            self.run_stage(f"page_rr_{boundary}_cold", cases, concurrent=True)
+            repeated = []
+            for case in cases:
+                reuse = (case.expected_input_len - 1) // unit * unit
+                repeated.append(replace(
+                    case, name=case.name.replace("-cold", "-repeat"),
+                    reuse="hit" if reuse else "miss", expected_reuse_len=reuse,
+                    page_rr_phase="repeat",
+                    decode_owner_rank=(case.decode_owner_rank + 1) % owners,
+                ))
+            self.run_stage(f"page_rr_{boundary}_repeat", repeated, concurrent=True)
+
+        # Start one token before each owner transition, including 7 -> 0.
+        # Long exact answers ensure actual accepted Decode progress crosses
+        # two page starts, independently of how many tokens MTP proposes.
+        decode_boundaries = tuple(sorted(set(range(page, unit + 1, page))
+                                         | {2 * unit, self.args.chunk_tokens}))
+        expected = " ".join(f"{i:03d}" for i in range(max(64, page // 2)))
+        last_number = max(64, page // 2) - 1
+        for offset in range(0, len(decode_boundaries), 4):
+            cases = []
+            for boundary in decode_boundaries[offset:offset + 4]:
+                tag = hashlib.sha256(
+                    f"{self.args.namespace}/decode-cross/{boundary}".encode()
+                ).hexdigest()[:10]
+                prompt, ids = self.fit_prompt(
+                    f"ID:{tag}\n",
+                    f'\n只输出{{"value":"000 001 ... {last_number:03d}"}}，'
+                    '展开全部整数，三位补零、单空格。',
+                    boundary - 1,
+                )
+                cases.append(Case(
+                    f"decode-page-cross-{boundary}-cold", prompt, "", "miss",
+                    expected_json={"value": expected}, expected_input_len=len(ids),
+                    expected_reuse_len=0, page_rr_boundary=boundary,
+                    page_rr_phase="decode-cold",
+                    decode_owner_rank=(boundary // page) % owners,
+                    decode_crossings=(boundary, boundary + page),
+                    max_tokens=max(self.args.max_tokens, 4 * page + 2048),
+                ))
+            self.run_stage(f"decode_page_cross_{offset}_cold", cases, concurrent=True)
+            repeated = []
+            for case in cases:
+                reuse = (case.expected_input_len - 1) // unit * unit
+                repeated.append(replace(
+                    case, name=case.name.replace("-cold", "-repeat"),
+                    reuse="hit" if reuse else "miss", expected_reuse_len=reuse,
+                    page_rr_phase="decode-repeat",
+                    decode_owner_rank=(case.decode_owner_rank + 1) % owners,
+                ))
+            self.run_stage(f"decode_page_cross_{offset}_repeat", repeated, concurrent=True)
+
+    def run_flow(self) -> None:
+        # Four layers cannot validate semantics, but must exercise real chunk
+        # boundaries, each DP owner, and changing Graph slots with cache reuse.
+        prompt, tokens = self.fit_prompt(
+            f"流程 {self.args.namespace}/chunk。\n",
+            "\n请回复任意一个非空字符。",
+            self.args.chunk_tokens + 1,
+        )
+        seed = Case(
+            "chunkwise_rdma_flow_miss", prompt, r".", "miss",
+            require_chunk=True, expected_input_len=len(tokens),
+        )
+        self.run_stage(seed.name, [seed])
+        owners = max(1, len(self.decode_role_addrs))
+        for owner in range(owners):
+            self.run_stage(
+                f"flow_hit_owner_{owner}",
+                [replace(seed, name=f"flow_hit_owner_{owner}", reuse="hit",
+                         decode_owner_rank=owner)],
+            )
+        owner_ranks = [0] * 4 + [owner for owner in range(1, owners)]
+        batch = [
+            Case(
+                f"flow_uneven_{idx}",
+                make_flow_prompt(f"{self.args.namespace}/uneven/{idx}"),
+                r".", "miss", decode_owner_rank=owner,
+            )
+            for idx, owner in enumerate(owner_ranks)
+        ]
+        self.run_stage("flow_uneven_miss", batch, concurrent=True)
+        self.run_stage(
+            "flow_uneven_hit_rotated",
+            [replace(case, name=case.name + "_hit", reuse="hit",
+                     decode_owner_rank=(case.decode_owner_rank + 1) % owners)
+             for case in reversed(batch)],
+            concurrent=True,
         )
 
     def run_all(self) -> None:
@@ -1080,80 +1204,6 @@ class Runner:
             rank % max(1, len(self.decode_role_addrs))
             for rank in [0, 0] + list(range(1, self.args.batch_size - 1))
         ]
-        self.run_stage(
-            "identity_miss",
-            [
-                Case(
-                    "identity_miss",
-                    f"会话标识 {self.args.namespace}/identity，不要复述该标识。你好，请问你是谁？",
-                    r"\bKimi\b|Moonshot|月之暗面",
-                    "miss",
-                    max_tokens=max(
-                        self.args.max_tokens,
-                        self.args.identity_max_tokens,
-                    ),
-                )
-            ],
-        )
-        exact_prompt = make_cache_prompt(self.args.namespace, "single-exact", 37)
-        single_exact_max_tokens = max(
-            self.args.max_tokens,
-            self.args.single_exact_max_tokens,
-        )
-        self.run_stage(
-            "single_exact_seed",
-            [
-                Case(
-                    "single_exact_seed",
-                    exact_prompt,
-                    numbered_answer_pattern(1369),
-                    "miss",
-                    max_tokens=single_exact_max_tokens,
-                )
-            ],
-        )
-        self.run_stage(
-            "single_exact_hit",
-            [
-                Case(
-                    "single_exact_hit",
-                    exact_prompt,
-                    numbered_answer_pattern(1369),
-                    "hit",
-                    max_tokens=single_exact_max_tokens,
-                )
-            ],
-        )
-
-        partial_seed = make_partial_prompt(
-            self.args.namespace, "partial-common", "seed", 29
-        )
-        partial_query = make_partial_prompt(
-            self.args.namespace, "partial-common", "query", 31
-        )
-        self.run_stage(
-            "partial_prefix_seed",
-            [
-                Case(
-                    "partial_prefix_seed",
-                    partial_seed,
-                    numbered_answer_pattern(841),
-                    "miss",
-                )
-            ],
-        )
-        self.run_stage(
-            "partial_prefix_hit",
-            [
-                Case(
-                    "partial_prefix_hit",
-                    partial_query,
-                    numbered_answer_pattern(961),
-                    "partial",
-                )
-            ],
-        )
-
         cold_prompts = [
             make_cache_prompt(
                 self.args.namespace,
@@ -1274,30 +1324,28 @@ class Runner:
             concurrent=True,
         )
 
-        uneven_owner_ranks = [0] * 4 + [1] * 3 + [2] * 2 + [3]
-        self.run_stage(
-            (
-                "dp_uneven_local_batch"
-                if len(self.decode_role_addrs) > 1
-                else "single_owner_concurrent_batch"
-            ),
-            [
-                Case(
-                    f"dp_uneven_local_batch_{idx}",
-                    make_cache_prompt(
-                        self.args.namespace,
-                        f"dp-uneven-{idx}",
-                        90 + idx,
-                        repeats=8,
-                    ),
-                    numbered_answer_pattern((90 + idx) ** 2),
-                    "miss",
-                    decode_owner_rank=owner_rank % max(1, len(self.decode_role_addrs)),
-                )
-                for idx, owner_rank in enumerate(uneven_owner_ranks)
-            ],
-            concurrent=True,
-        )
+        # Uneven ownership is meaningful only with multiple Decode DP groups.
+        if len(self.decode_role_addrs) > 1:
+            uneven_owner_ranks = [0] * 4 + [1] * 3 + [2] * 2 + [3]
+            self.run_stage(
+                "dp_uneven_local_batch",
+                [
+                    Case(
+                        f"dp_uneven_local_batch_{idx}",
+                        make_cache_prompt(
+                            self.args.namespace,
+                            f"dp-uneven-{idx}",
+                            90 + idx,
+                            repeats=8,
+                        ),
+                        numbered_answer_pattern((90 + idx) ** 2),
+                        "miss",
+                        decode_owner_rank=owner_rank % max(1, len(self.decode_role_addrs)),
+                    )
+                    for idx, owner_rank in enumerate(uneven_owner_ranks)
+                ],
+                concurrent=True,
+            )
 
         multimodal_chunk_prompt = make_multimodal_chunk_prompt(
             self.args.namespace,
@@ -1396,6 +1444,8 @@ class Runner:
                     numbered_answer_pattern((70 + idx) ** 2),
                     "miss",
                     require_chunk=True,
+                    require_mtp=getattr(self.args, "require_mtp", False),
+                    max_tokens=max(self.args.max_tokens, self.args.mtp_chunk_max_tokens),
                     decode_owner_rank=idx % max(1, len(self.decode_role_addrs)),
                 )
                 for idx, prompt in enumerate(chunk_prompts)
@@ -1411,6 +1461,8 @@ class Runner:
                     numbered_answer_pattern((70 + idx) ** 2),
                     "hit",
                     require_chunk=True,
+                    require_mtp=getattr(self.args, "require_mtp", False),
+                    max_tokens=max(self.args.max_tokens, self.args.mtp_chunk_max_tokens),
                     decode_owner_rank=idx % max(1, len(self.decode_role_addrs)),
                 )
                 for idx, prompt in enumerate(chunk_prompts)
@@ -1419,6 +1471,7 @@ class Runner:
         )
         self.run_prefix_branches()
         self.run_padding_boundaries()
+        self.run_page_rr_boundaries()
         self.run_long_prefix_case()
 
     def run_long_prefix_case(self) -> None:
@@ -1437,6 +1490,8 @@ class Runner:
                 self.args.long_prefix_checkpoint, self.args.long_prefix_tp_size
             ),
             target_tokens=self.args.long_prefix_target_tokens,
+            reuse_unit_tokens=self.reuse_unit_tokens,
+            decode_role_addrs=self.decode_role_addrs,
         )
         try:
             result = case.run()

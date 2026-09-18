@@ -20,6 +20,20 @@ struct K3CacheLoadSourcePlan {
     int  partition_id    = 0;
 };
 
+// Head sharding is independent of Page-RR ownership. Source partitions select
+// bytes on the remote peer; destination partitions select the local write range.
+struct K3HeadShardLoadPlan {
+    bool selected = false;
+    int source_partition_count = 1;
+    int source_partition_id = 0;
+    int destination_partition_count = 1;
+    int destination_partition_id = 0;
+};
+
+bool supportsK3HeadShardTransfer(int source_tp, int destination_tp);
+K3HeadShardLoadPlan planK3HeadShardLoad(int source_tp, int destination_tp,
+                                       int source_rank, int destination_rank);
+
 bool isK3PageRRToReplicatedDecode(int prefill_attention_tp,
                                   int decode_attention_tp,
                                   int source_shards,

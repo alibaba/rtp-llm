@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import pathlib
 import re
 
@@ -26,6 +27,20 @@ _MAIN_LOG = re.compile(r"main_(\d+)\.log")
 GRAPH_BUCKETS = (1, 2, 4, 8)
 
 
+def physical_graph_buckets(tp: int, proposal_tokens: int = 3) -> tuple[int, ...]:
+    """Mirror request alignment in CudaGraphRunner::getDecodeBatchSizesToCapture."""
+    if tp < 1 or proposal_tokens < 1:
+        raise ValueError("TP and proposal token count must be positive")
+    buckets = set()
+    for width in (1, proposal_tokens + 1):
+        alignment = tp // math.gcd(tp, width)
+        buckets.update(
+            ((size + alignment - 1) // alignment) * alignment
+            for size in GRAPH_BUCKETS
+        )
+    return tuple(sorted(buckets))
+
+
 def adjacent_unique(values):
     return [
         value
@@ -34,16 +49,21 @@ def adjacent_unique(values):
     ]
 
 
-def _dcp_checks(markers: dict, replay_seen: bool, events: list[dict]) -> dict:
+def _dcp_checks(markers: dict, replay_seen: bool, events: list[dict], proposal_tokens: int = 3, expected_tp: int | None = None, dp_size: int = 1, expected_block_size: int | None = None) -> dict:
     """Prove the Decode Page-RR path ran on every rank of a KTP1 topology."""
     backends = markers.get("dcp_backends", set())
     sizes = {tp for tp, _ in backends}
     ranks = {rank for _, rank in backends}
     tp = min(sizes) if sizes else None
+    world = (expected_tp or tp or 0) * dp_size
     checks = {
-        "dcp_backend_a2a_single_size": len(sizes) == 1,
+        "dcp_backend_a2a_single_size": len(sizes) == 1 and (expected_tp is None or sizes == {expected_tp}),
         "dcp_communicator_all_ranks": tp is not None and ranks == set(range(tp)),
     }
+    if dp_size > 1:
+        checks["dcp_communicator_all_workers"] = markers.get("dcp_workers", set()) == {
+            (rank, rank // (expected_tp or tp), rank % (expected_tp or tp)) for rank in range(world)
+        }
     targets = markers.get("page_rr_targets", set())
     decode_targets = {
         (tp, pages, checkpoints)
@@ -55,17 +75,19 @@ def _dcp_checks(markers: dict, replay_seen: bool, events: list[dict]) -> dict:
         and len(decode_targets) == 1
         and all(
             pages > 0 and checkpoints > 0 and {tp} == sizes
+            and (expected_block_size is None or (pages == expected_block_size and checkpoints == tp * pages))
             for tp, pages, checkpoints in decode_targets
         )
     )
     captures = markers.get("graph_captures", set())
+    expected_buckets = physical_graph_buckets(tp or 8, proposal_tokens)
     checks["graph_capture_buckets"] = all(
-        any(bucket == expected for _, bucket in captures) for expected in GRAPH_BUCKETS
+        any(bucket == expected for _, bucket in captures) for expected in expected_buckets
     )
     checks["graph_capture_all_ranks"] = tp is not None and all(
         {rank for rank, bucket in captures if bucket == expected and rank is not None}
-        == set(range(tp))
-        for expected in GRAPH_BUCKETS
+        == set(range(world))
+        for expected in expected_buckets
     )
     # A KTP>1 topology must not silently satisfy a DCP round.
     checks["projection_ktp_inactive"] = not replay_seen and not any(
@@ -82,10 +104,9 @@ def _dcp_checks(markers: dict, replay_seen: bool, events: list[dict]) -> dict:
             str(expected): sorted(
                 rank for rank, bucket in captures if bucket == expected and rank is not None
             )
-            for expected in GRAPH_BUCKETS
+            for expected in expected_buckets
         },
-        # P8 sources are replicated into the Decode pool here, so this KTP1-only
-        # marker is recorded for diagnosis without being an acceptance gate.
+        # The TP1 fan-in marker is diagnostic; DCP destinations store sharded pages.
         "pd_page_rr_fan_in_lines": markers.get("pd_page_rr_fan_in", 0),
     }
     return {"checks": checks, "observations": observations}
@@ -97,6 +118,10 @@ def _verify(
     replay_seen: bool = False,
     markers: dict | None = None,
     decode_page_rr: bool = False,
+    proposal_tokens: int = 3,
+    expected_tp: int | None = None,
+    dp_size: int = 1,
+    expected_block_size: int | None = None,
 ) -> dict:
     checks = {}
     observations = {}
@@ -116,7 +141,7 @@ def _verify(
                 e["physical_tokens"] - e["logical_tokens"] == padding for e in rounds
             )
     elif decode_page_rr:
-        report = _dcp_checks(markers or {}, replay_seen, events)
+        report = _dcp_checks(markers or {}, replay_seen, events, proposal_tokens, expected_tp, dp_size, expected_block_size)
         checks.update(report["checks"])
         observations.update(report["observations"])
     else:
@@ -198,9 +223,13 @@ def verify(
     replay_seen: bool = False,
     markers: dict | None = None,
     decode_page_rr: bool = False,
+    proposal_tokens: int = 3,
+    expected_tp: int | None = None,
+    dp_size: int = 1,
+    expected_block_size: int | None = None,
 ) -> dict:
     try:
-        return _verify(events, role, replay_seen, markers, decode_page_rr)
+        return _verify(events, role, replay_seen, markers, decode_page_rr, proposal_tokens, expected_tp, dp_size, expected_block_size)
     except (KeyError, TypeError, ValueError, IndexError) as exc:
         return {
             "role": role,
@@ -215,6 +244,7 @@ def collect(root: pathlib.Path):
     events, replay_seen = [], False
     markers = {
         "dcp_backends": set(),
+        "dcp_workers": set(),
         "page_rr_targets": set(),
         "graph_captures": set(),
         "pd_page_rr_fan_in": 0,
@@ -240,6 +270,9 @@ def collect(root: pathlib.Path):
                     markers["dcp_backends"].add(
                         (int(backend.group(2)), int(backend.group(3)))
                     )
+                worker = re.search(r"\[MLA_DCP\].* world_rank=(\d+) dp_rank=(\d+)", line)
+                if backend and worker and backend.group(1) == "a2a":
+                    markers["dcp_workers"].add((int(worker.group(1)), int(worker.group(2)), int(backend.group(3))))
                 target = _PAGE_RR_TARGET.search(line)
                 if target:
                     markers["page_rr_targets"].add(
@@ -273,11 +306,15 @@ def main():
         default="0",
         help="Decode runs a Page-RR (DCP) KTP1 topology instead of Projection-KTP",
     )
+    parser.add_argument("--proposal-tokens", type=int, default=3)
+    parser.add_argument("--tp-size", type=int)
+    parser.add_argument("--dp-size", type=int, default=1)
+    parser.add_argument("--block-size", type=int)
     args = parser.parse_args()
     try:
         events, replay, markers = collect(args.root)
         report = verify(
-            events, args.role, replay, markers, args.decode_page_rr == "1"
+            events, args.role, replay, markers, args.decode_page_rr == "1", args.proposal_tokens, args.tp_size, args.dp_size, args.block_size
         )
     except (ValueError, OSError) as exc:
         report = {

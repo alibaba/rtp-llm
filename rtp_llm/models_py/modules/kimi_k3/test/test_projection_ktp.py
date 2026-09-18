@@ -117,8 +117,22 @@ class KtpStepPlanTest(unittest.TestCase):
                     label="test",
                 )
 
+    def test_mega_moe_accepts_mixed_tp_dp(self):
+        for tp, dp in ((4, 2), (4, 4), (8, 1), (16, 1)):
+            with self.subTest(tp=tp, dp=dp):
+                validate_mega_moe_topology(
+                    attention_tp_size=tp, dp_size=dp, ktp_size=1,
+                    ep_size=tp * dp, world_size=tp * dp, label="test",
+                )
+        for tp, dp, ep, world in ((8, 2, 8, 8), (4, 2, 4, 8), (0, 2, 8, 8)):
+            with self.assertRaises(RuntimeError):
+                validate_mega_moe_topology(
+                    attention_tp_size=tp, dp_size=dp, ktp_size=1,
+                    ep_size=ep, world_size=world, label="test",
+                )
+
     def test_mega_moe_rejects_ambiguous_tp1_ep_layout(self):
-        with self.assertRaisesRegex(RuntimeError, "DP-local tokens"):
+        with self.assertRaisesRegex(RuntimeError, "TP\\*DP=EP=world"):
             validate_mega_moe_topology(
                 attention_tp_size=1,
                 dp_size=1,
@@ -651,6 +665,58 @@ class KtpProjectionLayoutTest(unittest.TestCase):
         self.assertEqual(tuple(result.q.shape), (batch, 4))
         self.assertEqual(result.q[1].tolist(), [11.0, 12.0, 111.0, 112.0])
         self.assertEqual(result.raw_beta[2].tolist(), [31.0, 131.0])
+
+
+class MixedTpDpInputPreparationTest(unittest.TestCase):
+    def test_target_verify_keeps_tp_rows_and_live_mask_in_each_dp(self):
+        from rtp_llm.models_py.modules.kimi_k3.input_preparation import (
+            KimiK3ExecutionSpec, prepare_round,
+        )
+        from rtp_llm.models_py.modules.kimi_k3.parallel_mode import KimiK3ParallelMode
+
+        for dp in range(2):
+            for rank in range(4):
+                for logical in (0, 1, 3, 4):
+                    with self.subTest(dp=dp, rank=rank, logical=logical):
+                        model = SimpleNamespace(
+                            kv_cache=object(), layers=[], _layer_group_ids=(),
+                            parallel_mode=KimiK3ParallelMode.TP_SP,
+                            parallelism_config=SimpleNamespace(
+                                tp_size=4, tp_rank=rank, dp_size=2, dp_rank=dp,
+                                ktp_size=1, ep_size=8, world_size=8,
+                            ),
+                            execution_spec=KimiK3ExecutionSpec(4, rank, 0, "mtp", (), frozenset(), ()),
+                            num_attn_res_blocks=1, config=SimpleNamespace(hidden_size=4),
+                            embedding_weight=torch.empty(1, 4),
+                        )
+                        mask = torch.zeros(16, dtype=torch.int32)
+                        mask[:logical * 4] = 1
+                        inputs = SimpleNamespace(
+                            input_ids=torch.arange(16) + dp * 1000,
+                            multimodal_inputs=None, ktp_valid_row_mask=mask,
+                            attention_inputs=SimpleNamespace(
+                                is_prefill=False, is_target_verify=True, is_cuda_graph=True,
+                                input_lengths=torch.ones(4, dtype=torch.int32),
+                                logical_request_count=logical, physical_request_count=4,
+                                logical_token_count=logical * 4, physical_token_count=16,
+                                decode_cu_seqlens_d=torch.arange(17, dtype=torch.int32),
+                            ),
+                        )
+                        with mock.patch(
+                            "rtp_llm.models_py.modules.kimi_k3.input_preparation.create_write_cache_store_impl",
+                            return_value=None,
+                        ):
+                            prepared = prepare_round(model, inputs)
+                        layout = prepared.attn_meta.sp_layout
+                        self.assertEqual(layout.tokens.local_tokens, 4)
+                        self.assertEqual(layout.tokens.local_start, rank * 4)
+                        self.assertEqual(layout.tokens.local_valid_tokens, 4 if rank < logical else 0)
+                        torch.testing.assert_close(prepared.embedding_ids, inputs.input_ids)
+                        local_mask = prepared.attn_meta.valid_token_mask
+                        self.assertEqual(local_mask.data_ptr(), mask[rank * 4:].data_ptr())
+                        # CUDA Graph metadata must retain the live mask view.
+                        mask.fill_(1)
+                        torch.testing.assert_close(local_mask, torch.ones(4, dtype=torch.int32))
 
 
 if __name__ == "__main__":

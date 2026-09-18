@@ -31,7 +31,10 @@ from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
 )
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLAContext
 from rtp_llm.models_py.modules.kimi_k3.parallel_mode import KimiK3ParallelMode
-from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
+from rtp_llm.models_py.modules.kimi_k3.moe import (
+    KimiK3LatentMoE,
+    validate_mega_moe_topology,
+)
 from rtp_llm.models_py.modules.kimi_k3.utils import (
     mask_multimodal_token_ids,
     prefill_chunk_tokens,
@@ -174,8 +177,17 @@ def prepare_round(
         model._decode_sp_startup_logged = True
     cu_seqlens = resolve_cu_seqlens(attention_inputs, input_ids)
     if model.parallel_mode is KimiK3ParallelMode.TP_SP and tp_size > 1:
-        if int(model.parallelism_config.ep_size) != tp_size:
-            raise RuntimeError("Kimi K3 Sequence Parallel requires TP == EP")
+        # The token layout above belongs to this request's TP group. Expert
+        # dispatch spans EP, which may contain several independent DP groups.
+        parallelism = model.parallelism_config
+        validate_mega_moe_topology(
+            attention_tp_size=tp_size,
+            dp_size=int(parallelism.dp_size),
+            ktp_size=int(getattr(parallelism, "ktp_size", 1)),
+            ep_size=int(parallelism.ep_size),
+            world_size=int(parallelism.world_size),
+            label="Kimi K3 Sequence Parallel",
+        )
     if model._layer_group_ids is None:
         layer_map_host = getattr(attention_inputs, "kv_cache_layer_to_group_host", None)
         if layer_map_host is not None and layer_map_host.numel():
