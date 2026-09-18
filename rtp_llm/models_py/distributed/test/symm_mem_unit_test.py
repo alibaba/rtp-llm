@@ -1,7 +1,9 @@
 import os
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
+from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.distributed import symm_mem
 
 
@@ -25,6 +27,12 @@ class SymmMemConfigurationTest(unittest.TestCase):
             ):
                 self.assertTrue(symm_mem._custom_all_reduce_enabled())
 
+    def test_explicit_config_overrides_environment(self) -> None:
+        with patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": "0"}, clear=True):
+            self.assertFalse(symm_mem._custom_all_reduce_enabled(True))
+        with patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": "1"}, clear=True):
+            self.assertTrue(symm_mem._custom_all_reduce_enabled(False))
+
     def test_disabled_switch_skips_communicator_construction(self) -> None:
         sentinel = object()
         symm_mem._symm_mem_comm = sentinel
@@ -37,6 +45,38 @@ class SymmMemConfigurationTest(unittest.TestCase):
         ):
             self.assertIsNone(symm_mem.init_symm_mem_communicator(object()))
             self.assertIsNone(symm_mem.get_symm_mem_communicator())
+
+    def test_explicit_disabled_config_skips_communicator_construction(self) -> None:
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            symm_mem,
+            "TorchSymmMemCommunicator",
+            side_effect=AssertionError("communicator must not be constructed"),
+        ):
+            self.assertIsNone(
+                symm_mem.init_symm_mem_communicator(
+                    object(), disable_custom_all_reduce=True
+                )
+            )
+
+    def test_collective_forwards_explicit_config(self) -> None:
+        world_group = object()
+        communicator_module = MagicMock()
+        config = SimpleNamespace(world_rank=0, world_size=2, tp_size=2, dp_size=1)
+
+        with patch.object(
+            collective.torch.distributed.group, "WORLD", world_group
+        ), patch.object(collective, "_get_symm_mem", return_value=communicator_module):
+            collective._create_process_groups(
+                config,
+                "nccl",
+                None,
+                disable_custom_all_reduce=True,
+            )
+
+        communicator_module.init_symm_mem_communicator.assert_called_once_with(
+            world_group,
+            disable_custom_all_reduce=True,
+        )
 
     def test_unlisted_architecture_votes_to_fall_back_before_allocation(self) -> None:
         group = object()
