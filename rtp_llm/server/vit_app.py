@@ -73,6 +73,7 @@ def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
                 request.timeout_ms,
                 user_id=headers.get("x-dashscope-uid", ""),
                 service_name=headers.get("x-dashscope-service", ""),
+                model_name=headers.get("x-rtp-model-name", ""),
             )
         except NotImplementedError as error:
             raise HTTPException(status_code=501, detail=str(error)) from error

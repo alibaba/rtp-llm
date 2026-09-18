@@ -874,6 +874,20 @@ class DashScGrpcRequestTest(TestCase):
                     },
                 )
 
+    def test_inspection_model_name_from_header_attributes(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "model": "  pre-kimi-k3-green-chat  ",
+                "x-rtp-model-name": "must-not-be-forwarded",
+            }
+        )
+
+        other = parse_other_params(req)
+
+        self.assertEqual(other.inspection_model_name, "pre-kimi-k3-green-chat")
+        self.assertNotIn("x-rtp-model-name", other.request_headers)
+
     def test_parse_other_params_thinking_controls(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["ds_header_attributes"].string_param = json.dumps(
@@ -895,6 +909,68 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
+
+    def test_parse_other_params_input_inspection_disable(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "X-DashScope-Inner-Gateway-DataInspection": json.dumps(
+                    {"input": "disable", "output": "disable"}
+                )
+            }
+        )
+        self.assertTrue(parse_other_params(req).skip_input_inspection)
+
+        req.parameters["qwenchat_datainspection"].bool_param = True
+        self.assertFalse(parse_other_params(req).skip_input_inspection)
+
+        req.parameters["qwenchat_datainspection"].bool_param = False
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"X-DashScope-Inner-Gateway-DataInspection": '{"input":"high"}'}
+        )
+        self.assertFalse(parse_other_params(req).skip_input_inspection)
+
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "X-DashScope-Inner-Gateway-DataInspection": '{"input":"high","output":"disable"}'
+            }
+        )
+        self.assertFalse(parse_other_params(req).skip_input_inspection)
+
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"X-DashScope-Inner-Gateway-DataInspection": "not-json"}
+        )
+        self.assertFalse(parse_other_params(req).skip_input_inspection)
+
+    def test_parse_other_params_input_inspection_override_from_payload(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "X-DashScope-Inner-Gateway-DataInspection": json.dumps(
+                    {"input": "disable", "output": "disable"}
+                )
+            }
+        )
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "input": {"messages": []},
+                "parameters": {"qwenchat_datainspection": True},
+            }
+        )
+        self.assertFalse(parse_other_params(req).skip_input_inspection)
+
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "input": {"messages": []},
+                "parameters": {"qwenchat_datainspection": False},
+            }
+        )
+        self.assertTrue(parse_other_params(req).skip_input_inspection)
+
+        req.parameters["payload"].string_param = json.dumps(
+            {"input": {"messages": []}, "parameters": {}}
+        )
+        self.assertTrue(parse_other_params(req).skip_input_inspection)
 
     def test_parse_other_params_reasoning_effort_max_alias(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()

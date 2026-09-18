@@ -7,18 +7,25 @@ import unittest
 from unittest.mock import Mock, patch
 
 import requests
+import torch
 from PIL import Image
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MMPreprocessConfigPB
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    MMPreprocessConfigPB,
+    MultimodalInputsPB,
+)
 from rtp_llm.multimodal.mm_error_messages import MMErr
 from rtp_llm.multimodal.multimodal_util import (
     collect_download_timing,
     get_bytes_io_from_url,
     request_get,
     trans_config,
+    trans_mm_input,
     url_data_cache_,
 )
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class _FakeResponse:
@@ -44,6 +51,19 @@ class _FakeResponse:
 
 
 class TestMultiModalUtil(unittest.TestCase):
+    def test_trans_mm_input_sets_inspection_policy_in_constructor(self):
+        inputs_pb = MultimodalInputsPB()
+        input_pb = inputs_pb.multimodal_inputs.add()
+        input_pb.multimodal_url = "image"
+        input_pb.multimodal_type = int(MMUrlType.IMAGE)
+        input_pb.skip_input_inspection = True
+        self.assertTrue(trans_mm_input(inputs_pb)[0].skip_input_inspection)
+
+        source = MultimodalInput(
+            "image", MMUrlType.IMAGE, torch.empty(0), MMPreprocessConfig(), True
+        )
+        self.assertTrue(trans_mm_input([source])[0].skip_input_inspection)
+
     def test_trans_config_preserves_fractional_fps(self):
         config = trans_config(MMPreprocessConfigPB(fps=0.2, max_long_side_pixel=1008))
 

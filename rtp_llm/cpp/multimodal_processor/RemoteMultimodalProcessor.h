@@ -61,6 +61,34 @@ private:
         return context;
     }
 
+    static ErrorInfo remoteEmbeddingError(const grpc::Status& status, const grpc::ClientContext& context) {
+        if (status.error_code() == grpc::StatusCode::CANCELLED) {
+            return ErrorInfo(ErrorCode::CANCELLED, status.error_message());
+        }
+        if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {
+            return ErrorInfo(ErrorCode::CONCURRENCY_LIMIT_ERROR, status.error_message());
+        }
+        if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+            return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, status.error_message());
+        }
+        if (status.error_code() == grpc::StatusCode::PERMISSION_DENIED) {
+            ErrorDetailsPB details;
+            bool parsed = !status.error_details().empty() && details.ParseFromString(status.error_details());
+            if (!parsed) {
+                const auto& metadata = context.GetServerTrailingMetadata();
+                const auto  it       = metadata.find("grpc-status-details-bin");
+                if (it != metadata.end()) {
+                    parsed = details.ParseFromArray(it->second.data(), static_cast<int>(it->second.size()));
+                }
+            }
+            if (parsed && details.error_code() == static_cast<int>(ErrorCode::UNSAFE_INPUT_CONTENT)) {
+                return ErrorInfo(ErrorCode::UNSAFE_INPUT_CONTENT,
+                                 details.error_message().empty() ? status.error_message() : details.error_message());
+            }
+        }
+        return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, status.error_message());
+    }
+
     // Best-effort: tell the encoder it can return the slot(s) to its free list. One response may
     // carry several slots (chunked output), so all handles are released in a single RPC.
     // This runs on the inference path, so the RPC is bounded by a short deadline: a slow
@@ -228,16 +256,7 @@ private:
         }
         auto status = stub->RemoteMultimodalEmbedding(context.get(), request, &output_pb);
         if (!status.ok()) {
-            if (status.error_code() == grpc::StatusCode::CANCELLED) {
-                return ErrorInfo(ErrorCode::CANCELLED, status.error_message());
-            }
-            if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {
-                return ErrorInfo(ErrorCode::CONCURRENCY_LIMIT_ERROR, status.error_message());
-            }
-            if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, status.error_message());
-            }
-            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, status.error_message());
+            return remoteEmbeddingError(status, *context);
         }
 
         // RDMA fast path: encoder returned descriptor(s) instead of inline output bytes. The
