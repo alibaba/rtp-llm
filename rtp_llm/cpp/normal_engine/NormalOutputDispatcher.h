@@ -1,11 +1,13 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 
 #include <torch/all.h>
 #include <utility>
 #include <vector>
 #include "absl/status/status.h"
+#include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 
@@ -18,8 +20,8 @@ std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_
 
 class NormalOutputDispatcher {
 public:
-    explicit NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids = {}):
-        output_vocab_ids_(std::move(output_vocab_ids)) {}
+    explicit NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids = {}, int async_worker_count = 0);
+    ~NormalOutputDispatcher();
 
     absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
 
@@ -40,7 +42,8 @@ private:
                               const torch::Tensor& success_cpu) const;
 
 private:
-    std::vector<int64_t> output_vocab_ids_;
+    std::vector<int64_t>                       output_vocab_ids_;
+    std::unique_ptr<autil::LockFreeThreadPool> thread_pool_;
 };
 
 }  // namespace rtp_llm

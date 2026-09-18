@@ -706,6 +706,8 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    // Join the async dispatch runner and release the dispatcher-owned worker pool.
+    executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();
     return absl::OkStatus();
 }

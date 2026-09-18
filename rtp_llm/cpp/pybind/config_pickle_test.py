@@ -1,7 +1,7 @@
 import pickle
 import unittest
 
-from rtp_llm.ops import GrammarConfig, HWKernelConfig
+from rtp_llm.ops import GrammarConfig, HWKernelConfig, RuntimeConfig
 
 
 def _new_grammar_config():
@@ -207,6 +207,28 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "HWKernelConfig unpickle error"):
             config = _new_hw_kernel_config()
             config.__setstate__(malformed_state)
+
+
+class RuntimeConfigPickleTest(unittest.TestCase):
+    def test_output_dispatcher_worker_count_round_trip(self):
+        config = RuntimeConfig()
+        config.output_dispatcher_worker_count = 3
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.output_dispatcher_worker_count, 3)
+
+    def test_previous_formats_default_to_serial_dispatch(self):
+        config = RuntimeConfig()
+        config.output_dispatcher_worker_count = 3
+        config.model_warm_up = False
+        state = config.__getstate__()
+        for size in (12, 13):
+            with self.subTest(size=size):
+                restored = RuntimeConfig.__new__(RuntimeConfig)
+                restored.__setstate__(state[:size])
+                self.assertEqual(restored.output_dispatcher_worker_count, 0)
+                self.assertEqual(restored.model_warm_up, size == 12)
 
 
 if __name__ == "__main__":
