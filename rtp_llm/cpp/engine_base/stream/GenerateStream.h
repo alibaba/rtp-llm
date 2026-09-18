@@ -440,7 +440,10 @@ public:
 
     torch::Tensor generateContextPositionIds();
 
-    void generateNextPositionId(int32_t* now_pos);
+    // Returns the canonical text-position anchor used to populate now_pos so
+    // async callers can safely rebase the result. A supplied sequence length
+    // lets callers avoid reading mutable host bookkeeping state.
+    int32_t generateNextPositionId(int32_t* now_pos, std::optional<int32_t> sequence_length = std::nullopt);
 
     torch::Tensor getContextPositionIds() const {
         return context_position_ids_.has_value() ? context_position_ids_.value() : torch::Tensor();

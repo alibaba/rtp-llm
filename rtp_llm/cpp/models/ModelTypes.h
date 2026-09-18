@@ -63,12 +63,13 @@ struct GptModelInitParams {
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
-    // DSv4 head-channel residual multiplier. Default 1 (no expansion).
-    // When >1, the model's pre-output residual ([T, hc_mult*hidden_size])
-    // is the contract between target and draft for MTP — see
-    // makeFakeSPOutputBuffer (MtpExecutor.cc) and CudaGraphRunner
-    // input_hiddens.
-    int64_t                                    hc_mult = 1;
+    // Hyper-connection residual multiplier. Kept separately because model
+    // internals can still be hc_mult * hidden_size wide even when the MTP draft
+    // consumes a collapsed target hidden state.
+    int64_t hc_mult = 1;
+    // Explicit MTP input_hiddens row width. Zero preserves the legacy fallback
+    // to hidden_size * hc_mult for direct/test construction sites.
+    int64_t                                    mtp_input_hidden_size = 0;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
     // Final CUDA-graph kernel block-table width. Executors compute it from
     // the published model topology, actual reserve, and fake caller bounds.
@@ -218,6 +219,34 @@ public:
     // after draining actual CacheStore publication; models without deferred
     // publication have nothing to wait for.
     virtual std::string waitCacheStorePublication() {
+        return {};
+    }
+
+    // Optional target-verify side-state transaction. Models that stage
+    // recurrent/side-cache candidates during speculative target verification
+    // opt in here. The prepare phase must validate and select the accepted
+    // candidates without mutating persistent cache pools. Once every TP rank
+    // has prepared successfully, finish(true) tentatively applies that
+    // prevalidated plan while retaining enough original state for rollback.
+    // finish(false) discards an uncommitted plan or rolls back a tentative
+    // commit and must be idempotent. Both finish paths report errors instead
+    // of throwing so every TP rank can reach the same status rendezvous.
+    virtual bool hasSpeculativeTargetCommitHooks() const {
+        return false;
+    }
+
+    virtual std::string prepareSpeculativeTargetCommit(const torch::Tensor& /*accept_len*/) {
+        return {};
+    }
+
+    virtual std::string finishSpeculativeTargetCommit(bool /*commit*/) {
+        return {};
+    }
+
+    // Called only after every TP rank has tentatively committed. This releases
+    // the retained originals/undo log without changing the committed state.
+    // A finalize error is fail-stop because rollback is no longer legal.
+    virtual std::string finalizeSpeculativeTargetCommit() {
         return {};
     }
 

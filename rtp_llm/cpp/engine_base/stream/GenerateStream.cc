@@ -720,12 +720,19 @@ torch::Tensor GenerateStream::generateContextPositionIds() {
     return context_position_ids_.value();
 }
 
-void GenerateStream::generateNextPositionId(int32_t* now_pos) {
+int32_t GenerateStream::generateNextPositionId(int32_t* now_pos, std::optional<int32_t> sequence_length) {
+    // Do not use value_or(seqLength()) here: value_or eagerly evaluates its
+    // argument and would reintroduce a racy read for device-authoritative MTP.
+    const int32_t effective_sequence_length = sequence_length.has_value() ? sequence_length.value() : seqLength();
     if (!context_position_ids_) {
-        return;
+        const int32_t anchor = effective_sequence_length - 1;
+        const int32_t width  = mm_position_ids_style_ == PositionIdsStyle::MROPE ? 3 : 1;
+        std::fill_n(now_pos, width, anchor);
+        return anchor;
     }
     PositionIdsGenerator::generateNextPositionId(
-        now_pos, seqLength(), mm_position_ids_style_, context_position_ids_.value());
+        now_pos, effective_sequence_length, mm_position_ids_style_, context_position_ids_.value());
+    return effective_sequence_length - 1;
 }
 
 vector<int> GenerateStream::currentExecuteTokens(int batch_idx) const {

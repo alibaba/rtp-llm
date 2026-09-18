@@ -232,6 +232,17 @@ py_test(
 )
 
 py_test(
+    name = "lazy_registry_test",
+    srcs = [
+        "lazy_registry_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
     name = "pipeline_test",
     srcs = [
         "pipeline_test.py",

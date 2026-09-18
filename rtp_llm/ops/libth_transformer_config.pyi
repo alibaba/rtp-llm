@@ -107,6 +107,7 @@ class AttentionConfigs:
     kernel_tokens_per_block: int
     use_logn_attn: bool
     use_mla: bool
+    use_sparse_gqa_fmha: bool
     v_head_dim: int
     def __init__(self) -> None:
         ...
@@ -1133,6 +1134,7 @@ class ModelConfig:
     moe_style: int
     moe_topk_group: int
     hc_mult: int
+    mtp_input_hidden_size: int
     hc_sinkhorn_iters: int
     hc_eps: float
     swiglu_limit: float
@@ -1163,6 +1165,8 @@ class ModelConfig:
     def __init__(self) -> None:
         ...
     def getAttentionConfigs(self, arg0: int) -> AttentionConfigs:
+        ...
+    def getMtpInputHiddenSize(self) -> int:
         ...
     def isGatedActivation(self) -> bool:
         ...

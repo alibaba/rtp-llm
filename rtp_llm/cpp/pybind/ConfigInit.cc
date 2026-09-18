@@ -1838,6 +1838,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
         .def_readwrite("is_sparse", &AttentionConfigs::is_sparse)
+        .def_readwrite("use_sparse_gqa_fmha", &AttentionConfigs::use_sparse_gqa_fmha)
         .def_readwrite("indexer_head_dim", &AttentionConfigs::indexer_head_dim)
         .def_readwrite("indexer_head_num", &AttentionConfigs::indexer_head_num)
         .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
@@ -2128,6 +2129,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("moe_normalize_expert_scale", &ModelConfig::moe_normalize_expert_scale)
         .def_readwrite("scoring_func", &ModelConfig::scoring_func)
         .def_readwrite("hc_mult", &ModelConfig::hc_mult)
+        .def_readwrite("mtp_input_hidden_size", &ModelConfig::mtp_input_hidden_size)
         .def_readwrite("hc_sinkhorn_iters", &ModelConfig::hc_sinkhorn_iters)
         .def_readwrite("hc_eps", &ModelConfig::hc_eps)
         .def_readwrite("swiglu_limit", &ModelConfig::swiglu_limit)
@@ -2190,6 +2192,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ptuning_path", &ModelConfig::ptuning_path)
         .def_readwrite("mm_model_config", &ModelConfig::mm_model_config)
         .def("getAttentionConfigs", &ModelConfig::getAttentionConfigs)
+        .def("getMtpInputHiddenSize", &ModelConfig::getMtpInputHiddenSize)
         .def("isGatedActivation", &ModelConfig::isGatedActivation)
         .def("isKvCacheQuant", &ModelConfig::isKvCacheQuant)
         .def("to_string", &ModelConfig::to_string);

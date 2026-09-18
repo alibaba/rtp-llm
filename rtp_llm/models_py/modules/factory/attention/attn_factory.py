@@ -317,6 +317,47 @@ def get_fmha_impl(
     raise Exception("can not find mha type")
 
 
+def _select_attention_impl_key(
+    attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+) -> str:
+    """Route to the attention implementation family.
+
+    * ``mla`` -- MLA models (DSv4, GLM5.3, ...).
+    * ``sparse_gqa`` -- isolated sparse GQA bridge for qwen4.
+      Opt-in via ``attn_configs.use_sparse_gqa_fmha``: the sparse impl needs
+      the indexer's ``selected_indices``, which the production attention ABI
+      does not carry yet. The same implementation owns prefill and paged
+      decode; either path still requires a model-side selection and must never
+      fall through to dense MHA.
+    * ``mha`` -- everything else (dense prefill/decode).
+    """
+    if attn_configs.use_mla:
+        return "mla"
+    if attn_configs.is_sparse and attn_configs.use_sparse_gqa_fmha:
+        return "sparse_gqa"
+    return "mha"
+
+
+def get_sparse_gqa_impl(
+    attn_configs: AttentionConfigs,
+    weight: ModelWeights,
+    attn_inputs: PyAttentionInputs,
+    fmha_config: Optional[FMHAConfig] = None,
+    quant_config: Optional[object] = None,
+    is_cuda_graph: bool = False,
+    max_seq_len: int = 0,
+    parallelism_config: Optional[ParallelismConfig] = None,
+) -> AttentionImpl:
+    """Factory entry for the sparse GQA family (qwen4 prefill and decode).
+
+    Imported lazily: the impl pulls in the qwen4 Triton scoring kernels, which
+    should not be imported for models that never route here.
+    """
+    from rtp_llm.models_py.modules.qwen4_exp.sparse_gqa_impl import SparseGqaFmhaImpl
+
+    return SparseGqaFmhaImpl(attn_configs, attn_inputs, parallelism_config)
+
+
 class AttnImplFactory(object):
     """Factory class for creating FMHA implementations based on attention_type."""
 
@@ -324,6 +365,7 @@ class AttnImplFactory(object):
     FMHA_IMPL_REGISTRY: Dict[str, AttentionImplFactory] = {
         "mha": get_fmha_impl,
         "mla": get_mla_impl,
+        "sparse_gqa": get_sparse_gqa_impl,
     }
 
     @classmethod
@@ -342,7 +384,7 @@ class AttnImplFactory(object):
             parallelism_config.get_attn_tp_size()
         )
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
-        key_str = "mla" if attn_configs.use_mla else "mha"
+        key_str = _select_attention_impl_key(attn_configs, attn_inputs)
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
         instance = fmha_impl_method(
             attn_configs,

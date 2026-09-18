@@ -361,6 +361,12 @@ class TemplateTest(TestCase):
     def test_qwen35_dense_mtp_uses_qwen35_renderer(self):
         assert _renderer_factory["qwen35_dense_mtp"] is Qwen35Renderer
 
+    def test_qwen4_exp_uses_qwen35_renderer(self):
+        assert _renderer_factory["qwen4_exp"] is Qwen35Renderer
+
+    def test_qwen4_exp_mtp_uses_qwen35_renderer(self):
+        assert _renderer_factory["qwen4_exp_mtp"] is Qwen35Renderer
+
     def test_qwen35_passes_chat_template_kwargs_to_template(self):
         tokenizer = _Qwen35DefaultTemplateTokenizer()
         renderer = Qwen35Renderer(
