@@ -29,6 +29,9 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -44,6 +47,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -70,11 +74,9 @@ class FlexlbForwardHopGuardNettyTest {
 
             assertEquals(8, node.inboundCalls.get());
             assertEquals(0, node.rejections.get());
-            assertTrue(responses.stream().noneMatch(
+            assertTrue(responses.stream().allMatch(
                     FlexlbScheduleProtocol.FlexlbScheduleResponsePB::getSuccess));
-            assertTrue(responses.stream().allMatch(response ->
-                    response.getErrorMessage().contains("SELF_FORWARD_BLOCKED")));
-            verify(node.routeService, never()).route(any());
+            verify(node.routeService, times(8)).route(any());
             node.awaitExecutorIdle();
         }
     }
@@ -96,18 +98,126 @@ class FlexlbForwardHopGuardNettyTest {
             assertTrue(Duration.ofNanos(System.nanoTime() - started)
                             .compareTo(Duration.ofSeconds(2)) < 0,
                     "hop guard must terminate stale follower ping-pong");
-            assertFalse(response.getSuccess());
-            assertTrue(response.getErrorMessage().contains("FORWARD_HOP_LIMIT"));
+            assertTrue(response.getSuccess());
             assertEquals(1, first.inboundCalls.get(),
                     "request must not return to the first follower");
             assertEquals(1, second.inboundCalls.get(),
                     "only one forwarded RPC is allowed");
             assertEquals(0, first.rejections.get());
             assertEquals(0, second.rejections.get());
-            verify(first.routeService, never()).route(any());
+            verify(first.routeService, times(1)).route(any());
             verify(second.routeService, never()).route(any());
             first.awaitExecutorIdle();
             second.awaitExecutorIdle();
+        }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void stoppedMasterFallsBackToLocalScheduling() throws Exception {
+        try (Node first = Node.start("10.0.0.1"); Node closing = Node.start("10.0.0.2")) {
+            first.masterAddress.set(closing.httpAddress());
+            when(closing.consistency.isMaster()).thenReturn(true);
+            closing.server.shutdown().awaitTermination(3, TimeUnit.SECONDS);
+            try (Client client = Client.connect(first.grpcPort())) {
+                assertTrue(client.stub.schedule(request(73_001L)).getSuccess());
+            }
+            assertEquals(1, first.inboundCalls.get());
+            assertEquals(0, closing.inboundCalls.get());
+            verify(first.routeService, times(1)).route(any());
+            verify(closing.routeService, never()).route(any());
+        }
+    }
+
+    @Test
+    @Timeout(value = 15, unit = TimeUnit.SECONDS)
+    void deadMasterBeforeConnectRoutesLocallyWithoutSendingAnRpc() throws Exception {
+        try (Node first = Node.start("10.0.0.1"); Node dead = Node.start("10.0.0.2")) {
+            first.masterAddress.set(dead.httpAddress());
+            dead.server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+            try (Client client = Client.connect(first.grpcPort())) {
+                var response = client.stub.schedule(request(74_001L));
+                assertTrue(response.getSuccess());
+            }
+            verify(first.routeService, times(1)).route(any());
+            verify(dead.routeService, never()).route(any());
+        }
+    }
+
+    @Test
+    @Timeout(value = 15, unit = TimeUnit.SECONDS)
+    void masterDiesAfterAdmissionDoesNotDoubleDispatch() throws Exception {
+        try (Node sender = Node.start("10.0.0.1"); Node master = Node.start("10.0.0.2");
+             Client client = Client.connect(sender.grpcPort())) {
+            sender.masterAddress.set(master.httpAddress());
+            when(master.consistency.isMaster()).thenReturn(true);
+            var admitted = new java.util.concurrent.CountDownLatch(1);
+            when(master.routeService.route(any())).thenAnswer(invocation -> {
+                admitted.countDown();
+                return new CompletableFuture<Response>();
+            });
+            var pending = FlexlbServiceGrpc.newFutureStub(client.channel)
+                    .withDeadlineAfter(8, TimeUnit.SECONDS).schedule(request(75_001L));
+            assertTrue(admitted.await(3, TimeUnit.SECONDS));
+            master.server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+            var response = pending.get(8, TimeUnit.SECONDS);
+            assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
+            verify(master.routeService, times(1)).route(any());
+            verify(sender.routeService, never()).route(any());
+        }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void remoteTransportErrorsDoNotCancelOrScheduleLocally() throws Exception {
+        for (var status : List.of(io.grpc.Status.UNAVAILABLE, io.grpc.Status.DEADLINE_EXCEEDED)) {
+            var scheduleCalls = new AtomicInteger();
+            var cancelCalls = new AtomicInteger();
+            Server master = NettyServerBuilder.forPort(0)
+                    .addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
+                        @Override
+                        public void schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+                                             io.grpc.stub.StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
+                            scheduleCalls.incrementAndGet();
+                            observer.onError(status.asRuntimeException());
+                        }
+
+                        @Override
+                        public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
+                                           io.grpc.stub.StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer) {
+                            cancelCalls.incrementAndGet();
+                            observer.onNext(FlexlbScheduleProtocol.FlexlbCancelResponsePB.getDefaultInstance());
+                            observer.onCompleted();
+                        }
+                    }).build().start();
+            try (Node sender = Node.start("10.0.0.1"); Client client = Client.connect(sender.grpcPort())) {
+                sender.masterAddress.set("127.0.0.1:"
+                        + (master.getPort() - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET));
+                var response = client.stub.schedule(request(77_001L));
+                assertFalse(response.getSuccess());
+                assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
+                assertEquals(1, scheduleCalls.get());
+                assertEquals(0, cancelCalls.get());
+                verify(sender.routeService, never()).route(any());
+            } finally {
+                master.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void resourceRejectionIsReturnedWithoutLocalReplay() throws Exception {
+        try (Node sender = Node.start("10.0.0.1"); Node master = Node.start("10.0.0.2");
+             Client client = Client.connect(sender.grpcPort())) {
+            sender.masterAddress.set(master.httpAddress());
+            when(master.consistency.isMaster()).thenReturn(true);
+            when(master.routeService.route(any())).thenReturn(
+                    CompletableFuture.completedFuture(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
+            var response = client.stub.schedule(request(76_001L));
+            assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+            verify(master.routeService, times(1)).route(any());
+            verify(sender.routeService, never()).route(any());
         }
     }
 
@@ -255,6 +365,7 @@ class FlexlbForwardHopGuardNettyTest {
         private final ExecutorService channelExecutor;
         private final ThreadPoolExecutor serverExecutor;
         private final Server server;
+        private final FlexlbServiceImpl service;
 
         private Node(String localIdentity) throws Exception {
             consistency = mock(LBStatusConsistencyService.class);
@@ -267,6 +378,10 @@ class FlexlbForwardHopGuardNettyTest {
             ConfigService configService = mock(ConfigService.class);
             when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
             routeService = mock(RouteService.class);
+            Response local = new Response();
+            local.setSuccess(true);
+            local.setCode(200);
+            when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(local));
             EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
 
             channelEventLoop = new NioEventLoopGroup(1);
@@ -274,7 +389,7 @@ class FlexlbForwardHopGuardNettyTest {
             forwarder = new FlexlbGrpcForwarder(
                     consistency, configService, healthReporter,
                     channelEventLoop, channelExecutor);
-            FlexlbServiceImpl service = new FlexlbServiceImpl(
+            service = new FlexlbServiceImpl(
                     routeService,
                     consistency,
                     healthReporter,
