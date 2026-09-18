@@ -627,6 +627,7 @@ class MMProcessEngine:
         profiling_debug_logging_config: ProfilingDebugLoggingConfig,
         server_id: int = 0,
         is_proxy_mode: bool = False,
+        kv_cache_config: Optional[Any] = None,
     ):
         """
         Initialize the multimodal process engine.
@@ -651,6 +652,52 @@ class MMProcessEngine:
         )
 
         self.mm_part = mm_part
+
+        self._remote_embedding_cache = None
+        if vit_config.mm_remote_cache_enable:
+            from rtp_llm.multimodal.kvcm import RtpKvMetaObjectClient
+            from rtp_llm.multimodal.mm_remote_embedding_cache import (
+                MMRemoteEmbeddingCache,
+            )
+
+            if vit_config.mm_cache_cpu_max_bytes <= 0:
+                raise ValueError(
+                    "MM_REMOTE_CACHE_ENABLE requires a nonzero CPU embedding cache"
+                )
+            limits = (
+                vit_config.mm_remote_cache_max_object_bytes,
+                vit_config.mm_remote_cache_max_inflight_bytes,
+                vit_config.mm_remote_cache_max_pending,
+                vit_config.mm_remote_cache_read_timeout_ms,
+            )
+            if min(limits) <= 0:
+                raise ValueError("remote embedding cache limits must be positive")
+            client = (
+                RtpKvMetaObjectClient.from_kv_cache_config(
+                    kv_cache_config, max_object_bytes=limits[0]
+                )
+                if kv_cache_config is not None
+                else RtpKvMetaObjectClient.from_env(max_object_bytes=limits[0])
+            )
+            self._remote_embedding_cache = MMRemoteEmbeddingCache(
+                client,
+                max_object_bytes=limits[0],
+                max_inflight_bytes=limits[1],
+                max_pending=limits[2],
+                read_timeout_ms=limits[3],
+                cuda_device=(
+                    torch.device("cuda", torch.cuda.current_device())
+                    if torch.cuda.is_available()
+                    else None
+                ),
+            )
+            logging.info(
+                "ViT shared remote cache enabled: instance=%s group=%s limits=%s; "
+                "local eviction never removes shared objects",
+                client.instance_id,
+                client.instance_group,
+                limits,
+            )
 
         # threading.Lock: protects gRPC-handler-thread access within this
         # process. multiprocessing.Lock would round-trip through an OS
@@ -734,6 +781,11 @@ class MMProcessEngine:
             gpu_max_bytes=self.vit_config.mm_cache_gpu_max_bytes,
             cpu_max_bytes=self.vit_config.mm_cache_cpu_max_bytes,
             report_metrics=True,
+            on_cpu_evict=(
+                self._remote_embedding_cache.submit_eviction
+                if self._remote_embedding_cache is not None
+                else None
+            ),
         )
         # Keep the old private name as an alias for callers/tests that inspect
         # async submission state. Both paths now use the same cache instance.
@@ -1373,6 +1425,15 @@ class MMProcessEngine:
                     defer_feature_hashes=defer_feature_hashes,
                 )
                 work_items.append(work_item)
+                remote_cache = self._remote_embedding_cache
+                if (
+                    remote_cache is not None
+                    and work_item.cache_state == "miss"
+                    and work_item.should_preprocess
+                ):
+                    work_item.embedding_result = remote_cache.load(
+                        work_item.cache_key, timeout_ms=work_item.mm_timeout_ms
+                    )
                 self.preprocess_executor.submit(work_item)
 
         except Exception as error:
@@ -2020,9 +2081,13 @@ class MMProcessEngine:
 
     def stop(self) -> None:
         """Shutdown the preprocessing executor and embedding scheduler."""
-        self._async_compute_executor.shutdown(wait=False, cancel_futures=True)
+        self._async_compute_executor.shutdown(
+            wait=self._remote_embedding_cache is not None, cancel_futures=True
+        )
         self.preprocess_executor.shutdown()
         self._scheduler.close()
         self._shutdown_greennet_loop()
         self._embedding_cache.clear(RuntimeError("MMProcessEngine stopped"))
         self._hash_key_cache.clear()
+        if self._remote_embedding_cache is not None:
+            self._remote_embedding_cache.close()

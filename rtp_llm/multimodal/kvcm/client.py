@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping, Sequence
 from types import TracebackType
 from typing import Any, TypeVar
@@ -61,6 +62,9 @@ class RtpKvMetaObjectClient:
 
         self._config = config
         self._client = client
+        self._lookup = None
+        self._lookup_lock = threading.Lock()
+        self._closed = False
 
     @classmethod
     def from_env(
@@ -135,6 +139,53 @@ class RtpKvMetaObjectClient:
         self.load((key,), (tensor,), trace_id=trace_id)
         return tensor
 
+    def object_size(self, key: str, *, trace_id=None, timeout_ms=None):
+        """Return exact object size or None, using the existing KVMeta Get RPC."""
+        from .lookup import KvMetaLookup
+
+        with self._lookup_lock:
+            if self._closed:
+                raise RuntimeError("KVCM client is closed")
+            if self._lookup is None:
+                self._lookup = KvMetaLookup(self._config)
+            lookup = self._lookup
+        return lookup.size(key, trace_id=trace_id, timeout_ms=timeout_ms)
+
+    def save_object(self, key: str, value: Any, *, devices=None, trace_id=None):
+        """Save one complete tensor tree; synchronize GPU producer streams first."""
+        from .tensor_object import pack_object, plan_object
+
+        plan = plan_object(
+            value, devices=devices, max_bytes=self._config.max_object_bytes
+        )
+        self.save_one(key, pack_object(plan), trace_id=trace_id)
+
+    def load_object(
+        self,
+        key: str,
+        *,
+        trace_id=None,
+        cuda_device=None,
+        restore_devices=True,
+        timeout_ms=None,
+    ):
+        """Restore a complete object; return None on a metadata cache miss."""
+        import torch
+
+        from .tensor_object import unpack_object
+
+        size = self.object_size(key, trace_id=trace_id, timeout_ms=timeout_ms)
+        if size is None:
+            return None
+        buffer = torch.empty(size, dtype=torch.uint8)
+        self.load_one(key, buffer, trace_id=trace_id)
+        return unpack_object(
+            buffer,
+            cuda_device=cuda_device,
+            restore_devices=restore_devices,
+            max_bytes=self._config.max_object_bytes,
+        )
+
     def remove(self, keys: Sequence[str], *, trace_id: str | None = None) -> None:
         """Remove exact object keys."""
 
@@ -148,7 +199,14 @@ class RtpKvMetaObjectClient:
     def close(self) -> None:
         """Release local KVCM resources; safe to call more than once."""
 
-        self._client.close()
+        try:
+            self._client.close()
+        finally:
+            with self._lookup_lock:
+                self._closed = True
+                lookup = self._lookup
+            if lookup is not None:
+                lookup.close()
 
     def __enter__(self) -> RtpKvMetaObjectClient:  # noqa: PYI034 - Python 3.10.
         self._client.__enter__()
@@ -162,4 +220,11 @@ class RtpKvMetaObjectClient:
     ) -> None:
         # Cleanup must never turn a body failure into apparent success, even if
         # a future optional client accidentally returns a truthy value here.
-        self._client.__exit__(exc_type, exc_value, traceback)
+        try:
+            self._client.__exit__(exc_type, exc_value, traceback)
+        finally:
+            with self._lookup_lock:
+                self._closed = True
+                lookup = self._lookup
+            if lookup is not None:
+                lookup.close()

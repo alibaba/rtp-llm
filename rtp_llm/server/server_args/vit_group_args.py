@@ -144,6 +144,41 @@ def init_vit_group_args(parser, vit_config):
         default=VitConfig.DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES,
         help="每个ViT进程的CPU hash缓存容量，单位bytes，包含hash张量和key元数据，0关闭",
     )
+    for name, parser, default, description in (
+        (
+            "mm_remote_cache_enable",
+            str2bool,
+            False,
+            "启用共享KVCM多模态完整结果缓存，默认关闭",
+        ),
+        (
+            "mm_remote_cache_max_object_bytes",
+            int,
+            256 * 1024**2,
+            "远端缓存单对象最大bytes",
+        ),
+        (
+            "mm_remote_cache_max_inflight_bytes",
+            int,
+            1024**3,
+            "远端缓存读写暂存内存预算bytes",
+        ),
+        ("mm_remote_cache_max_pending", int, 8, "远端缓存最大未完成任务数"),
+        (
+            "mm_remote_cache_read_timeout_ms",
+            int,
+            200,
+            "远端缓存读取等待预算ms，超时回退计算",
+        ),
+    ):
+        vit_group.add_argument(
+            "--" + name,
+            env_name=name.upper(),
+            bind_to=(vit_config, name),
+            type=parser,
+            default=default,
+            help=description,
+        )
     vit_group.add_argument(
         "--url_cache_item_num",
         env_name="URL_CACHE_ITEM_NUM",

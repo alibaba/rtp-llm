@@ -55,6 +55,26 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(config.mm_cache_cpu_max_bytes, 1024)
         self.assertEqual(config.mm_hash_key_cache_max_bytes, 67108864)
 
+    def test_remote_embedding_cache_defaults_env_cli(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        sys.argv = ["prog"]
+        config = setup_args().vit_config
+        self.assertFalse(config.mm_remote_cache_enable)
+        os.environ["MM_REMOTE_CACHE_ENABLE"] = "true"
+        os.environ["MM_REMOTE_CACHE_MAX_OBJECT_BYTES"] = "4096"
+        os.environ["MM_REMOTE_CACHE_MAX_INFLIGHT_BYTES"] = "65536"
+        os.environ["MM_REMOTE_CACHE_MAX_PENDING"] = "2"
+        os.environ["MM_REMOTE_CACHE_READ_TIMEOUT_MS"] = "350"
+        config = setup_args().vit_config
+        self.assertTrue(config.mm_remote_cache_enable)
+        self.assertEqual(config.mm_remote_cache_max_object_bytes, 4096)
+        self.assertEqual(config.mm_remote_cache_max_inflight_bytes, 65536)
+        self.assertEqual(config.mm_remote_cache_max_pending, 2)
+        self.assertEqual(config.mm_remote_cache_read_timeout_ms, 350)
+        sys.argv = ["prog", "--mm_remote_cache_enable", "false"]
+        self.assertFalse(setup_args().vit_config.mm_remote_cache_enable)
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables

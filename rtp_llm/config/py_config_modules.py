@@ -268,6 +268,11 @@ class VitConfig:
         self.mm_hash_key_cache_max_bytes: int = (
             VitConfig.DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES
         )
+        self.mm_remote_cache_enable: bool = False
+        self.mm_remote_cache_max_object_bytes: int = 256 * 1024**2
+        self.mm_remote_cache_max_inflight_bytes: int = 1024**3
+        self.mm_remote_cache_max_pending: int = 8
+        self.mm_remote_cache_read_timeout_ms: int = 200
         self.url_cache_item_num: int = 100
         self.use_igraph_cache: bool = True
         self.igraph_search_dom: str = "com.taobao.search.igraph.common"
@@ -341,6 +346,11 @@ class VitConfig:
             f"mm_cache_gpu_max_bytes: {self.mm_cache_gpu_max_bytes}\n"
             f"mm_cache_cpu_max_bytes: {self.mm_cache_cpu_max_bytes}\n"
             f"mm_hash_key_cache_max_bytes: {self.mm_hash_key_cache_max_bytes}\n"
+            f"mm_remote_cache_enable: {self.mm_remote_cache_enable}\n"
+            f"mm_remote_cache_max_object_bytes: {self.mm_remote_cache_max_object_bytes}\n"
+            f"mm_remote_cache_max_inflight_bytes: {self.mm_remote_cache_max_inflight_bytes}\n"
+            f"mm_remote_cache_max_pending: {self.mm_remote_cache_max_pending}\n"
+            f"mm_remote_cache_read_timeout_ms: {self.mm_remote_cache_read_timeout_ms}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"
             f"igraph_search_dom: {self.igraph_search_dom}\n"

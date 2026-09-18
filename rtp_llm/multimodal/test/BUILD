@@ -144,3 +144,18 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     exec_properties = {"gpu": "A10"},
 )
+
+py_test(
+    name = "mm_kvcm_tensor_object_test",
+    srcs = ["mm_kvcm_tensor_object_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
+    name = "mm_remote_embedding_cache_test",
+    srcs = ["mm_remote_embedding_cache_test.py", "multimodal_process_engine_test.py"],
+    data = [":testdata"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10"},
+)

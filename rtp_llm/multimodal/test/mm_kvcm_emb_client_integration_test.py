@@ -596,6 +596,36 @@ class RtpKvMetaObjectClientIntegrationTest(TestCase):
                     producer.remove_one(single_key, trace_id="rtp-emb-it-remove-one")
                     cleanup_keys.remove(single_key)
 
+                    # One multimodal input key owns the complete result, even
+                    # when extra_input contains several differently typed tensors.
+                    whole_key = f"rtp-mm-whole-it-{uuid.uuid4().hex}"
+                    whole_result = (
+                        torch.arange(24, dtype=torch.bfloat16).reshape(3, 8),
+                        torch.arange(6, dtype=torch.int64).reshape(3, 2),
+                        [
+                            torch.tensor([0.25, 0.5], dtype=torch.float32),
+                            torch.tensor([2, 4, 8], dtype=torch.int32),
+                            torch.empty((0, 2), dtype=torch.float16),
+                        ],
+                    )
+                    cleanup_keys.append(whole_key)
+                    producer.save_object(whole_key, whole_result)
+                    self.assertGreater(consumer.object_size(whole_key), 0)
+                    restored = explicit_consumer.load_object(whole_key)
+                    self.assertIsInstance(restored, tuple)
+                    self.assertIsInstance(restored[2], list)
+                    for expected, actual in zip(
+                        [whole_result[0], whole_result[1], *whole_result[2]],
+                        [restored[0], restored[1], *restored[2]],
+                    ):
+                        self.assertEqual(actual.dtype, expected.dtype)
+                        self.assertEqual(actual.shape, expected.shape)
+                        self.assertTrue(torch.equal(actual, expected))
+                    # Test-only cleanup after every reader has completed.
+                    producer.remove_one(whole_key)
+                    cleanup_keys.remove(whole_key)
+                    self.assertIsNone(consumer.load_object(whole_key))
+
                     source = _variable_embedding_tensors()
                     keys = [f"rtp-emb-it-{uuid.uuid4().hex}" for _ in source]
                     # Record keys before the first mutation because a failed

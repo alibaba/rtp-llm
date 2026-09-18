@@ -931,7 +931,9 @@ class MMEmbeddingCache:
         gpu_max_bytes: int,
         cpu_max_bytes: int,
         report_metrics: bool = False,
+        on_cpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
     ):
+        self._on_cpu_evict = on_cpu_evict
         self._validate_limits(gpu_max_bytes, cpu_max_bytes)
         self._lock = threading.Lock()
         # All residency mutations take this lock before _lock. Copies never
@@ -1071,8 +1073,16 @@ class MMEmbeddingCache:
 
     def _remove_entry_locked(self, cache_key: str, eviction: bool = False) -> None:
         entry = self._entries.pop(cache_key)
+        was_cpu = entry.tier == "cpu"
         self._uncharge_locked(cache_key, entry)
         self._detach_pool_storage(entry)
+        if eviction and was_cpu and self._on_cpu_evict is not None and entry.is_done:
+            try:
+                self._on_cpu_evict(cache_key, entry)
+            except Exception:
+                logging.warning(
+                    "Skipping failed remote cache eviction admission", exc_info=True
+                )
         if eviction:
             self._stats["eviction"] += 1
             if self._report_metrics_enabled:

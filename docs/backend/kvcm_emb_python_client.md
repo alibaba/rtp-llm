@@ -3,7 +3,9 @@
 This module is a small RTP-facing facade for storing variable-size multimodal
 embedding tensors in KVCM's KVMeta object service. It contains only the Python
 client and configuration adapter: it does not select an RTP transport, change
-the multimodal RPC protocol, or modify the C++ inference path.
+the multimodal RPC protocol, or modify the C++ inference path. For the optional
+shared ViT embedding cache built on this facade, see
+[ViT embedding remote cache](vit_embedding_remote_cache.md).
 
 ## Quick start
 
@@ -45,7 +47,9 @@ For production use:
 
 - Create one client when the worker starts, reuse it across requests, and
   close it when the worker stops.
-- Use a unique key for every object and remove the object after consumption.
+- For request-owned transport objects, use a unique key and remove it after
+  all consumers finish. Shared ViT cache objects instead reuse the existing
+  multimodal input key and are not removed by a consuming worker.
 - `load_one()` writes into the supplied tensor; allocate it with the expected
   shape, dtype, device, and byte size before loading.
 
