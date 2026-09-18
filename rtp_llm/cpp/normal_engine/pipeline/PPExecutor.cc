@@ -106,6 +106,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                        ProposeModelEngineInitParams*          propose_params):
     Executor(),
     warm_up_(warm_up),
+    role_type_(params.pd_sep_config.role_type),
     cache_manager_(cache_manager),
     sp_enabled_(params.sp_config.type != SP_TYPE_NONE),
     is_dspark_(params.sp_config.type == SP_TYPE_DSPARK),
@@ -286,7 +287,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                                                                        params.profiling_debug_logging_config,
                                                                        cache_config,
                                                                        warm_up_,
-                                                                       sp_enabled_);
+                                                                       params.sp_config.type);
     LogitsProcessorFactory::init(params.model_config_, params.grammar_config, params.sp_config.tree_decode_config);
     cudaProfilerBegin();
 }
@@ -300,6 +301,14 @@ PPExecutor::~PPExecutor() {
     cudaProfilerEnd();
 }
 
+void PPExecutor::releaseAllModelBuffers() {
+    buffer_holder_.release();
+    model_->releaseBuffers();
+    if (draft_model_) {
+        draft_model_->releaseBuffers();
+    }
+}
+
 absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
     RTP_LLM_CHECK_WITH_INFO(model_ != nullptr, "model is not initialized for PP warmup");
 
@@ -311,8 +320,7 @@ absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
     /* Each stage warms up the same fake request locally and only requires TP synchronization. */
     tpSyncModelInputs(model_input, parallelism_config_);
 
-    buffer_holder_.release();
-    model_->releaseBuffers();
+    releaseAllModelBuffers();
     if (cache_manager_) {
         cache_manager_->zeroBlocks(model_input.kv_cache_blocks_to_zero);
         model_input.kv_cache_blocks_to_zero = torch::Tensor();
@@ -327,7 +335,7 @@ absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
         input_tensors = model_->makePPWarmUpInputTensors(model_input);
     }
 
-    auto model_output = model_->forwardPP(
+    (void)model_->forwardPP(
         model_input, isFirstStage() ? nullptr : &input_tensors, isLastStage() ? nullptr : &output_tensors);
     if (expert_balancer_) {
         RtpLLMExecutorMetricsCollector collector;
@@ -336,8 +344,7 @@ absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
 
     /* Keep model tensors alive until lazy initialization kernels finish. */
     cudaSyncAndCheck();
-    (void)model_output;
-    model_->releaseBuffers();
+    releaseAllModelBuffers();
     return absl::OkStatus();
 }
 
@@ -620,7 +627,6 @@ void PPExecutor::runDSparkCommit(const GptModelInputs& target_input, const GptMo
     tpSyncModelInputs(commit_input, parallelism_config_);
     /** Sync shared geometry before binding rank-local target features. */
     mtp::prepareDSparkCommitInput(commit_input, target_features);
-    draft_model_->releaseBuffers();
     if (cache_manager_) {
         const auto& draft_cache_config     = cache_manager_->getMTPModuleCacheConfig(0);
         commit_input.kv_block_stride_bytes = draft_cache_config.kv_block_stride_bytes;
@@ -639,7 +645,6 @@ torch::Tensor PPExecutor::proposeDraftTokens(GptModelInputs draft_input, size_t 
     if (is_dspark_) {
         tpSyncModelInputs(draft_input, parallelism_config_);
         draft_input.dspark_call_phase = DSparkCallPhase::PROPOSE;
-        draft_model_->releaseBuffers();
         if (cache_manager_) {
             const auto& draft_cache_config    = cache_manager_->getMTPModuleCacheConfig(0);
             draft_input.kv_block_stride_bytes = draft_cache_config.kv_block_stride_bytes;
@@ -662,14 +667,12 @@ torch::Tensor PPExecutor::proposeDraftTokens(GptModelInputs draft_input, size_t 
             proposed_tokens = draft_output.draft_tokens.to(torch::kCPU).contiguous();
         }
         cudaSyncAndCheck();
-        draft_model_->releaseBuffers();
         return proposed_tokens;
     }
 
     torch::Tensor proposed_tokens;
     for (size_t step = 0; step < num_draft_tokens; ++step) {
         tpSyncModelInputs(draft_input, parallelism_config_);
-        draft_model_->releaseBuffers();
         if (cache_manager_) {
             const auto& draft_cache_config    = cache_manager_->getMTPModuleCacheConfig(0);
             draft_input.kv_block_stride_bytes = draft_cache_config.kv_block_stride_bytes;
@@ -735,7 +738,6 @@ torch::Tensor PPExecutor::proposeDraftTokens(GptModelInputs draft_input, size_t 
         proposed_tokens = proposed_tokens.to(torch::kCPU);
     }
     cudaSyncAndCheck();
-    draft_model_->releaseBuffers();
     return proposed_tokens;
 }
 
@@ -760,13 +762,18 @@ void PPExecutor::sampleTokens(const PPExecutionPlan& plan,
     }
 }
 
-void PPExecutor::draftSampleAndPropose(const PPExecutionPlan& plan,
-                                       const GptModelOutputs& model_output,
-                                       PPExecutionResult&     execution_result) {
-    auto draft_input = plan.model_input;
+void PPExecutor::runDraftStep(const PPExecutionPlan& plan,
+                              const GptModelOutputs& model_output,
+                              PPExecutionResult&     execution_result) {
     if (is_dspark_) {
         runDSparkCommit(plan.model_input, model_output);
+        if (role_type_ == RoleType::PREFILL) {
+            /** P-side prefill commits draft KV without generating proposals. */
+            execution_result.propose_token_ids = torch::Tensor();
+            return;
+        }
     }
+    auto draft_input = plan.model_input;
     if (isStageRoot()) {
         /** Replace failed rows with draft placeholders; request_errors prevents their commit. */
         auto& accepted_tokens  = execution_result.new_token_ids;
@@ -836,7 +843,7 @@ void PPExecutor::draftSampleAndPropose(const PPExecutionPlan& plan,
         }
     }
     /** MTP/EAGLE PD prefill hands off d1 after one draft forward; D pads the remaining candidate slots. */
-    const size_t draft_count = !is_dspark_ && !plan.is_decode && plan.model_input.pd_separation ? 1 : propose_step_;
+    const size_t draft_count           = !is_dspark_ && role_type_ == RoleType::PREFILL ? 1 : propose_step_;
     execution_result.propose_token_ids = proposeDraftTokens(std::move(draft_input), draft_count);
 }
 
@@ -880,6 +887,8 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     /** 2. do the sync across the all ranks in the same stage. */
     tpSyncModelInputs(plan.model_input, parallelism_config_);
 
+    releaseAllModelBuffers();
+
     /** 3. Wait on this slot's previous sends before resetting it. CUDA waits order subsequent operations on the current
      * stream after communication. */
     auto& inflight = slots_[current_slot_];
@@ -914,8 +923,6 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         }
 
         GptModelInputs& local_model_input = plan.model_input;
-        buffer_holder_.release();
-        model_->releaseBuffers();
         if (cache_manager_) {
             cache_manager_->zeroBlocks(local_model_input.kv_cache_blocks_to_zero);
             local_model_input.kv_cache_blocks_to_zero = torch::Tensor();
@@ -957,7 +964,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             }
 
             if (sp_enabled_) {
-                draftSampleAndPropose(plan, model_output, execution_result);
+                runDraftStep(plan, model_output, execution_result);
             }
 
             if (isStageRoot()) {

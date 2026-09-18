@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <utility>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
@@ -495,10 +496,7 @@ protected:
         request.add_position_ids(2);
         request.add_position_ids(12);
         if (remote_payload) {
-            const bool pp_mtp = rpc_.maga_init_params_.parallelism_config.pp_size > 1
-                                && rpc_.maga_init_params_.sp_config.type != SP_TYPE_NONE && !engine_->isDSpark();
-            const auto tokens = pp_mtp ? std::vector<int>{7, 8} : std::vector<int>{7, 8, 9, 10};
-            for (int token : tokens) {
+            for (int token : {7, 8, 9, 10}) {
                 request.add_propose_token_ids(token);
             }
             QueryConverter::transTensorPB(request.mutable_propose_probs(), torch::full({1, 1, 128}, 1.0f / 128));
@@ -538,7 +536,7 @@ protected:
     std::unique_ptr<RpcService::Stub> stub_;
 };
 
-TEST_F(DecodeRpcBootstrapTest, PpMtpAndEaglePreserveD1AndPadCandidates) {
+TEST_F(DecodeRpcBootstrapTest, PpMtpAndEaglePreserveUnpaddedHandoff) {
     for (auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE}) {
         SCOPED_TRACE(type);
         rpc_.maga_init_params_.sp_config.type = type;
@@ -568,14 +566,12 @@ TEST_F(DecodeRpcBootstrapTest, PpMtpAndEaglePreserveD1AndPadCandidates) {
                 const auto buffer = stream->getSPOutputBuffer();
                 ASSERT_NE(buffer, nullptr);
                 EXPECT_EQ(buffer->propose_step, count);
-                EXPECT_EQ(buffer->tokens.sizes().vec(), (std::vector<int64_t>{1, count + 1}));
+                EXPECT_EQ(buffer->tokens.sizes().vec(), (std::vector<int64_t>{1, 2}));
                 EXPECT_EQ(buffer->tokens.scalar_type(), torch::kInt32);
                 EXPECT_TRUE(buffer->tokens.is_pinned());
-                std::vector<int> expected_tokens(count + 1, 0);
-                expected_tokens[0] = 7;
-                expected_tokens[1] = 8;
+                const std::vector<int> expected_tokens{7, 8};
                 EXPECT_TRUE(torch::equal(buffer->tokens,
-                                         torch::tensor(expected_tokens, torch::kInt32).reshape({1, count + 1})));
+                                         torch::tensor(expected_tokens, torch::kInt32).reshape({1, 2})));
                 EXPECT_FALSE(buffer->hidden_states.defined());
                 EXPECT_FALSE(buffer->all_probs.defined());
                 EXPECT_EQ(stream->getProposeToken(), expected_tokens);
@@ -586,34 +582,137 @@ TEST_F(DecodeRpcBootstrapTest, PpMtpAndEaglePreserveD1AndPadCandidates) {
     }
 }
 
+TEST_F(DecodeRpcBootstrapTest, PpHandoffPreservesLongerProposalPayload) {
+    for (auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE}) {
+        SCOPED_TRACE(type);
+        rpc_.maga_init_params_.sp_config.type = type;
+        rpc_.maga_init_params_.sp_config.gen_num_per_cycle = 1;
+        auto stream = makeStream();
+        const auto request = makeRequest();
+        ASSERT_TRUE(runHandoff(stream, request).ok());
+        EXPECT_EQ(engine_->enqueue_count, 1);
+        const std::vector<int> expected_tokens{7, 8, 9, 10};
+        EXPECT_EQ(stream->getProposeToken(), expected_tokens);
+        const auto buffer = stream->getSPOutputBuffer();
+        ASSERT_NE(buffer, nullptr);
+        EXPECT_EQ(buffer->propose_step, 1);
+        EXPECT_TRUE(torch::equal(buffer->tokens, torch::tensor(expected_tokens, torch::kInt32).reshape({1, 4})));
+    }
+}
+
+TEST_F(DecodeRpcBootstrapTest, InvalidProposalPayloadFailsBeforeEnqueue) {
+    struct Case {
+        SpeculativeType type;
+        int token_count;
+    };
+    const std::vector<Case> cases = {
+        {SP_TYPE_MTP, 0}, {SP_TYPE_MTP, 1}, {SP_TYPE_EAGLE, 0}, {SP_TYPE_EAGLE, 1},
+        {SP_TYPE_DSPARK, 1}, {SP_TYPE_DSPARK, 2}};
+    for (int pp_size : {1, 2}) {
+        rpc_.maga_init_params_.parallelism_config.pp_size = pp_size;
+        for (const auto& c : cases) {
+            SCOPED_TRACE("pp_size=" + std::to_string(pp_size) + ", type=" + std::to_string(c.type)
+                         + ", token_count=" + std::to_string(c.token_count));
+            rpc_.maga_init_params_.sp_config.type = c.type;
+            engine_->is_dspark = c.type == SP_TYPE_DSPARK;
+            auto stream = makeStream();
+            auto request = makeRequest(false);
+            for (int idx = 0; idx < c.token_count; ++idx) {
+                request.add_propose_token_ids(7 + idx);
+            }
+            const auto status = runHandoff(stream, request);
+            /** The test service maps assertion exceptions to INTERNAL. */
+            EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+            EXPECT_NE(status.error_message().find("speculative handoff has invalid proposal count"), std::string::npos);
+            EXPECT_EQ(engine_->enqueue_count, 0);
+            EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
+        }
+    }
+}
+
 TEST_F(DecodeRpcBootstrapTest, NonPipelineHandoffRestoresRemoteDraftState) {
     rpc_.maga_init_params_.parallelism_config.pp_size = 1;
     for (auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE}) {
         rpc_.maga_init_params_.sp_config.type = type;
-        for (const std::string flag : {"0", "1"}) {
-            autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", flag);
-            autil::EnvGuard mtp_async("RTP_LLM_MTP_ASYNC_DEVICE_STATE", flag);
+        for (int64_t count : {1, 3, 4}) {
+            rpc_.maga_init_params_.sp_config.gen_num_per_cycle = count;
+            for (int wire_count : {2, 4}) {
+                SCOPED_TRACE("type=" + std::to_string(type) + ", K=" + std::to_string(count)
+                             + ", wire_count=" + std::to_string(wire_count));
+                for (const auto& [stream_flag, mtp_flag] : std::vector<std::pair<std::string, std::string>>{
+                         {"0", "0"}, {"1", "0"}, {"0", "1"}, {"1", "1"}}) {
+                    SCOPED_TRACE("stream_async=" + stream_flag + ", mtp_async=" + mtp_flag);
+                    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", stream_flag);
+                    autil::EnvGuard mtp_async("RTP_LLM_MTP_ASYNC_DEVICE_STATE", mtp_flag);
+                    auto stream = makeStream();
+                    auto request = makeRequest();
+                    /** Accept both the two-token P payload and longer payloads. */
+                    request.mutable_propose_token_ids()->Truncate(wire_count);
+                    const std::vector<int> expected_tokens(request.propose_token_ids().begin(),
+                                                           request.propose_token_ids().end());
+                    ASSERT_TRUE(runHandoff(stream, request).ok());
+                    EXPECT_EQ(engine_->enqueue_count, 1);
+                    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 2, 3, 7}));
+                    EXPECT_EQ(processor_->update_calls, 1);
+                    EXPECT_FALSE(processor_->had_sp_buffer_at_update);
+                    EXPECT_EQ(processor_->committed_tokens, (std::vector<int>{7}));
+                    EXPECT_EQ(stream->reuseLength(), 3);
+                    EXPECT_EQ(stream->getMtpTokenIndex(), 3);
+                    EXPECT_TRUE(torch::equal(stream->getContextPositionIds(), torch::tensor({2, 12}, torch::kInt32)));
+                    const auto buffer = stream->getSPOutputBuffer();
+                    ASSERT_NE(buffer, nullptr);
+                    EXPECT_EQ(buffer->propose_step, count);
+                    EXPECT_TRUE(torch::equal(buffer->tokens,
+                                             torch::tensor(expected_tokens, torch::kInt32).reshape({1, wire_count})));
+                    EXPECT_EQ(stream->getProposeToken(), expected_tokens);
+                    EXPECT_TRUE(buffer->hidden_states.is_cuda());
+                    EXPECT_TRUE(buffer->all_probs.is_cuda());
+                    EXPECT_TRUE(torch::equal(buffer->hidden_states.cpu(),
+                                             QueryConverter::transTensor(request.propose_hidden())));
+                    EXPECT_TRUE(torch::equal(buffer->all_probs.cpu(), QueryConverter::transTensor(request.propose_probs())));
+                    const auto& state = stream->getMtpAsyncDeviceState();
+                    const bool async_enabled = stream_flag == "1" || mtp_flag == "1";
+                    EXPECT_EQ(state.next_real_seq_len, async_enabled ? 4 : -1);
+                    EXPECT_EQ(state.next_seq_len_gpu.defined(), async_enabled);
+                }
+            }
+        }
+    }
+}
+
+TEST_F(DecodeRpcBootstrapTest, PpDSparkPreservesEmptyHandoff) {
+    rpc_.maga_init_params_.sp_config.type = SP_TYPE_DSPARK;
+    engine_->is_dspark = true;
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "1");
+    autil::EnvGuard mtp_async("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "1");
+    for (int64_t count : {1, 3, 4}) {
+        rpc_.maga_init_params_.sp_config.gen_num_per_cycle = count;
+        for (bool tensor_payload : {false, true}) {
+            SCOPED_TRACE("K=" + std::to_string(count) + ", tensor_payload=" + std::to_string(tensor_payload));
             auto stream = makeStream();
-            auto request = makeRequest();
+            auto request = makeRequest(false);
+            ASSERT_EQ(request.propose_token_ids_size(), 0);
+            if (tensor_payload) {
+                /** PP ignores remote draft features and probabilities. */
+                request.mutable_propose_hidden();
+                request.mutable_propose_probs();
+            }
             ASSERT_TRUE(runHandoff(stream, request).ok());
             EXPECT_EQ(engine_->enqueue_count, 1);
             EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 2, 3, 7}));
+            EXPECT_EQ(stream->last_output_pos_, 4);
             EXPECT_EQ(processor_->update_calls, 1);
             EXPECT_FALSE(processor_->had_sp_buffer_at_update);
             EXPECT_EQ(processor_->committed_tokens, (std::vector<int>{7}));
             EXPECT_EQ(stream->reuseLength(), 3);
             EXPECT_EQ(stream->getMtpTokenIndex(), 3);
+            EXPECT_FALSE(stream->isContextStream());
+            EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
+            EXPECT_TRUE(stream->getProposeToken().empty());
+            EXPECT_FALSE(stream->contain_propose_token_);
+            EXPECT_EQ(stream->getMtpAsyncDeviceState().next_real_seq_len, -1);
+            EXPECT_FALSE(stream->getMtpAsyncDeviceState().propose_tokens_gpu.defined());
             EXPECT_TRUE(torch::equal(stream->getContextPositionIds(), torch::tensor({2, 12}, torch::kInt32)));
-            const auto buffer = stream->getSPOutputBuffer();
-            ASSERT_NE(buffer, nullptr);
-            EXPECT_TRUE(torch::equal(buffer->tokens, torch::tensor({{7, 8, 9, 10}}, torch::kInt32)));
-            EXPECT_TRUE(buffer->hidden_states.is_cuda());
-            EXPECT_TRUE(buffer->all_probs.is_cuda());
-            EXPECT_TRUE(torch::equal(buffer->hidden_states.cpu(), QueryConverter::transTensor(request.propose_hidden())));
-            EXPECT_TRUE(torch::equal(buffer->all_probs.cpu(), QueryConverter::transTensor(request.propose_probs())));
-            const auto& state = stream->getMtpAsyncDeviceState();
-            EXPECT_EQ(state.next_real_seq_len, flag == "1" ? 4 : -1);
-            EXPECT_EQ(state.next_seq_len_gpu.defined(), flag == "1");
         }
     }
 }
@@ -639,19 +738,25 @@ TEST_F(DecodeRpcBootstrapTest, NonPipelineDSparkKeepsItsProposalContract) {
     engine_->is_dspark = true;
     autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "1");
     autil::EnvGuard mtp_async("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "1");
-    auto stream = makeStream();
-    ASSERT_TRUE(runHandoff(stream, makeRequest(false)).ok());
-    EXPECT_EQ(engine_->enqueue_count, 1);
-    EXPECT_EQ(processor_->update_calls, 1);
-    EXPECT_EQ(stream->getMtpAsyncDeviceState().next_real_seq_len, -1);
-    EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
-    EXPECT_TRUE(stream->getProposeToken().empty());
+    for (int64_t count : {1, 3, 4}) {
+        SCOPED_TRACE("K=" + std::to_string(count));
+        rpc_.maga_init_params_.sp_config.gen_num_per_cycle = count;
+        auto stream = makeStream();
+        ASSERT_TRUE(runHandoff(stream, makeRequest(false)).ok());
+        EXPECT_EQ(engine_->enqueue_count, 1);
+        EXPECT_EQ(processor_->update_calls, 1);
+        EXPECT_EQ(stream->getMtpAsyncDeviceState().next_real_seq_len, -1);
+        EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
+        EXPECT_TRUE(stream->getProposeToken().empty());
+    }
 }
 
 TEST_F(DecodeRpcBootstrapTest, AsyncFlagsNeverPublishUnsupportedPpState) {
-    for (const std::string flag : {"0", "1"}) {
-        autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", flag);
-        autil::EnvGuard mtp_async("RTP_LLM_MTP_ASYNC_DEVICE_STATE", flag);
+    for (const auto& [stream_flag, mtp_flag] : std::vector<std::pair<std::string, std::string>>{
+             {"0", "0"}, {"1", "0"}, {"0", "1"}, {"1", "1"}}) {
+        SCOPED_TRACE("stream_async=" + stream_flag + ", mtp_async=" + mtp_flag);
+        autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", stream_flag);
+        autil::EnvGuard mtp_async("RTP_LLM_MTP_ASYNC_DEVICE_STATE", mtp_flag);
         auto stream = makeStream();
         ASSERT_TRUE(runHandoff(stream, makeRequest()).ok());
         EXPECT_EQ(stream->getMtpAsyncDeviceState().epoch, 0);

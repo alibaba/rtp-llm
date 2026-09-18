@@ -264,6 +264,7 @@ void NormalEngine::initScheduler() {
                                          pd_sep_config,
                                          parallelism_config,
                                          model_specific_config,
+                                         sp_config,
                                          resource_context_.cache_manager,
                                          metrics_reporter_));
         RTP_LLM_LOG_INFO("create pipeline parallel scheduler done");

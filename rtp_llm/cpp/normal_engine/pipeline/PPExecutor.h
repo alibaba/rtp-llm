@@ -81,6 +81,8 @@ private:
 
     absl::Status warmUp(const ScheduleOutput& schedule_output);
 
+    void releaseAllModelBuffers();
+
     void prepareStreams(std::list<GenerateStreamPtr>& streams);
 
     absl::StatusOr<PPExecutionPlan> buildPlan(const StreamGroups&         stream_groups,
@@ -108,9 +110,9 @@ private:
 
     void runDSparkCommit(const GptModelInputs& target_input, const GptModelOutputs& target_output);
 
-    void draftSampleAndPropose(const PPExecutionPlan& plan,
-                               const GptModelOutputs& model_output,
-                               PPExecutionResult&     execution_result);
+    void runDraftStep(const PPExecutionPlan& plan,
+                      const GptModelOutputs& model_output,
+                      PPExecutionResult&     execution_result);
 
     torch::Tensor proposeDraftTokens(GptModelInputs draft_input, size_t num_draft_tokens);
 
@@ -144,11 +146,13 @@ private:
 
 private:
     const bool                              warm_up_;
+    const RoleType                          role_type_;
     std::shared_ptr<KVCacheManager>         cache_manager_;
     std::unique_ptr<ModelBase>              model_;
     std::unique_ptr<Sampler>                sampler_;
     std::unique_ptr<PPBatchStreamProcessor> batch_stream_processor_;
     std::shared_ptr<ExpertBalancer>         expert_balancer_;
+    // Holds executor-owned CPU sources for copies to the device; models and PPCommTicket own their buffers.
     TensorHolder                            buffer_holder_;
     SamplingStates                          sampling_states_;
 

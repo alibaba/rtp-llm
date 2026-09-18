@@ -15,6 +15,7 @@ public:
                 const PDSepConfig&                     pd_sep_config,
                 const ParallelismConfig&               parallelism_config,
                 const ModelSpecificConfig&             model_specific_config,
+                const SpeculativeExecutionConfig&      sp_config,
                 const std::shared_ptr<KVCacheManager>& cache_manager,
                 const kmonitor::MetricsReporterPtr     metrics_reporter = nullptr);
 
@@ -42,6 +43,10 @@ private:
 
     bool waitPredicate() override;
 
+    void onRunningStream(const GenerateStreamPtr& stream) override;
+
+    void initializeDecodeCandidates(const GenerateStreamPtr& stream) const;
+
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) override;
 
     std::list<GenerateStreamPtr> evaluateRunningStreams();
@@ -65,8 +70,9 @@ private:
 
     size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
 
-    const size_t         max_batch_tokens_without_cache_ = 0;
-    std::vector<int64_t> finished_request_ids_;
+    const size_t                     max_batch_tokens_without_cache_ = 0;
+    const SpeculativeExecutionConfig sp_config_;
+    std::vector<int64_t>              finished_request_ids_;
 };
 
 }  // namespace rtp_llm

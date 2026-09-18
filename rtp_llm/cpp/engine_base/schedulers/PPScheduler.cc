@@ -17,6 +17,7 @@ PPScheduler::PPScheduler(const RuntimeConfig&                   runtime_config,
                          const PDSepConfig&                     pd_sep_config,
                          const ParallelismConfig&               parallelism_config,
                          const ModelSpecificConfig&             model_specific_config,
+                         const SpeculativeExecutionConfig&      sp_config,
                          const std::shared_ptr<KVCacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr     metrics_reporter):
     FIFOSchedulerBase(runtime_config,
@@ -26,12 +27,48 @@ PPScheduler::PPScheduler(const RuntimeConfig&                   runtime_config,
                       model_specific_config,
                       cache_manager,
                       metrics_reporter),
-    max_batch_tokens_without_cache_(static_cast<size_t>(
-        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))) {}
+    max_batch_tokens_without_cache_(
+        static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
+    sp_config_(sp_config) {}
 
 PPScheduler::~PPScheduler() {
     (void)stop();
     RTP_LLM_LOG_INFO("destroy PPScheduler");
+}
+
+/** PP separates prefill and decode batches, so legacy batch_with_prefill_* metrics are not updated. */
+void PPScheduler::onRunningStream(const GenerateStreamPtr& stream) {
+    if (pd_sep_config_.role_type != RoleType::DECODE || sp_config_.type == SP_TYPE_NONE) {
+        return;
+    }
+    if (stream->isContextStream() || stream->isFakeStream() || stream->isPerfTest()) {
+        return;
+    }
+
+    /** This hook runs on entry to RUNNING; later decode rounds retain the last stage's proposals. */
+    initializeDecodeCandidates(stream);
+}
+
+void PPScheduler::initializeDecodeCandidates(const GenerateStreamPtr& stream) const {
+    /**
+     * MTP/EAGLE hands off [anchor, d1]; DSpARK hands off no proposals.
+     * The anchor is already in the real history. Only the verify candidates are padded here.
+     */
+    auto candidates = stream->getProposeToken();
+    candidates.resize(sp_config_.gen_num_per_cycle + 1, 0);
+    candidates[0] = stream->currentExecuteTokens()[0];
+
+    auto buffer = stream->getSPOutputBuffer();
+    if (!buffer) {
+        buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+    }
+    buffer->propose_step = sp_config_.gen_num_per_cycle;
+    buffer->tokens       = torch::empty({1, static_cast<int64_t>(candidates.size())},
+                                  torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    std::copy(candidates.begin(), candidates.end(), buffer->tokens.data_ptr<int32_t>());
+    stream->setSPOutputBuffer(buffer);
+    stream->setProposeToken(candidates);
+    stream->setContainProposeToken(true);
 }
 
 void PPScheduler::addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) {

@@ -9,6 +9,7 @@
 
 #include "gtest/gtest.h"
 #include "torch/all.h"
+#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 
 #define private public
 #define protected public
@@ -43,6 +44,19 @@ std::vector<T> tensorToVector(const torch::Tensor& tensor) {
 torch::Tensor intTensor(std::vector<int32_t> values) {
     return torch::tensor(std::move(values), torch::kInt32);
 }
+
+class DeferredCacheLoad: public AsyncContext {
+public:
+    void waitDone() override {}
+    bool done() const override {
+        return ready;
+    }
+    bool success() const override {
+        return true;
+    }
+
+    bool ready = false;
+};
 
 class RecordingDraftModel: public ModelBase {
 public:
@@ -94,7 +108,8 @@ public:
 
 class RecordingDSparkModel: public ModelBase {
 public:
-    explicit RecordingDSparkModel(int64_t propose_step): propose_step_(propose_step) {}
+    explicit RecordingDSparkModel(int64_t propose_step, int32_t first_token = 100):
+        propose_step_(propose_step), first_token_(first_token) {}
 
     GptModelOutputs
     forwardPP(const GptModelInputs& input, const PPIntermediateTensors*, PPIntermediateTensors*) override {
@@ -120,8 +135,8 @@ public:
         GptModelOutputs output;
         if (input.dspark_call_phase == DSparkCallPhase::PROPOSE) {
             const auto batch_size = input.input_lengths.numel();
-            output.draft_tokens   = torch::arange(100,
-                                                100 + batch_size * propose_step_,
+            output.draft_tokens   = torch::arange(first_token_,
+                                                first_token_ + batch_size * propose_step_,
                                                 torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
                                       .reshape({batch_size, propose_step_});
         }
@@ -129,6 +144,7 @@ public:
     }
 
     int64_t                     propose_step_;
+    int32_t                     first_token_;
     std::vector<GptModelInputs> inputs;
 };
 
@@ -411,7 +427,7 @@ TEST_F(PPBatchStreamProcessorTest, DSparkDecodeCommitsThenProposesFromAcceptedRo
     result.accept_len    = intTensor({2, 4});
     result.request_errors.resize(2);
 
-    executor.draftSampleAndPropose(plan, target_output, result);
+    executor.runDraftStep(plan, target_output, result);
 
     ASSERT_EQ(recorded_draft->inputs.size(), 2u);
     const auto& commit_input = recorded_draft->inputs[0];
@@ -445,12 +461,13 @@ TEST_F(PPBatchStreamProcessorTest, DSparkDecodeCommitsThenProposesFromAcceptedRo
     EXPECT_EQ(tensorToVector<int32_t>(result.propose_token_ids), (std::vector<int32_t>{100, 101, 102, 103, 104, 105}));
 }
 
-TEST_F(PPBatchStreamProcessorTest, DSparkPrefillCommitsThenProposesFromSampledTokens) {
+TEST_F(PPBatchStreamProcessorTest, DSparkFusionPrefillCommitsThenProposesFromSampledTokens) {
     constexpr int32_t gamma                  = 3;
     constexpr int32_t mask_id                = 99;
     auto              params                 = makeMtpParams(gamma);
     params.sp_config.type                    = SP_TYPE_DSPARK;
     params.sp_config.sp_dspark_mask_token_id = mask_id;
+    params.pd_sep_config.role_type           = RoleType::PDFUSION;
     PPExecutor executor(params, nullptr, true);
 
     auto target_model = std::make_unique<RecordingDraftModel>();
@@ -478,7 +495,7 @@ TEST_F(PPBatchStreamProcessorTest, DSparkPrefillCommitsThenProposesFromSampledTo
     result.accept_len    = intTensor({1, 1});
     result.request_errors.resize(2);
 
-    executor.draftSampleAndPropose(plan, target_output, result);
+    executor.runDraftStep(plan, target_output, result);
 
     ASSERT_EQ(recorded_draft->inputs.size(), 2u);
     EXPECT_EQ(recorded_draft->inputs[0].dspark_call_phase, DSparkCallPhase::COMMIT);
@@ -632,7 +649,7 @@ TEST_F(PPBatchStreamProcessorTest, SamplingAndDraftProposalLeaveHistoryForExplic
             auto* recorded_draft = draft_model.get();
             executor.draft_model_ = std::move(draft_model);
             executor.fast_topk_sampler_ = std::make_unique<speculative::FastTopKSampler>();
-            executor.draftSampleAndPropose(plan.value(), output, result);
+            executor.runDraftStep(plan.value(), output, result);
             EXPECT_EQ(tensorToVector<int32_t>(result.propose_token_ids), (std::vector<int32_t>{10, 12, 14}));
             ASSERT_EQ(recorded_draft->inputs.size(), 3);
             EXPECT_EQ(tensorToVector<int32_t>(recorded_draft->inputs[0].combo_tokens), (std::vector<int32_t>{2, 20}));
@@ -646,14 +663,15 @@ TEST_F(PPBatchStreamProcessorTest, SamplingAndDraftProposalLeaveHistoryForExplic
     }
 }
 
-TEST_F(PPBatchStreamProcessorTest, PdPrefillPublishesOnlyD1ForMtpAndEagle) {
+TEST_F(PPBatchStreamProcessorTest, PrefillPublishesDraftStateForItsRoleAndAlgorithm) {
     for (int64_t count : {1, 3, 4}) {
-        for (const auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE}) {
+        for (const auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
             for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
                 SCOPED_TRACE("K=" + std::to_string(count) + ", type=" + std::to_string(type)
                              + ", role=" + std::to_string(role));
                 auto params = makeMtpParams(count);
                 params.sp_config.type = type;
+                params.sp_config.sp_dspark_mask_token_id = 63;
                 params.pd_sep_config.role_type = role;
                 auto cache_config = test::makeSimpleMhaCacheConfig(1, 16, 4, DataType::TYPE_FP16);
                 const auto draft_config = cache_config;
@@ -668,6 +686,7 @@ TEST_F(PPBatchStreamProcessorTest, PdPrefillPublishesOnlyD1ForMtpAndEagle) {
                 resource_context.role_type = role;
                 auto stream = makeStream(resource_context, params.model_config_, 101, {1, 2}, 0);
                 stream->generateConfig()->max_new_tokens = 20;
+                stream->generateConfig()->pd_separation = role == RoleType::PREFILL;
                 stream->fakeInitKVBlock(4);
                 std::list<GenerateStreamPtr> streams{stream};
                 executor.prepareStreams(streams);
@@ -682,9 +701,17 @@ TEST_F(PPBatchStreamProcessorTest, PdPrefillPublishesOnlyD1ForMtpAndEagle) {
                 target_model->hidden_buffer =
                     torch::arange(8, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA)).reshape({2, 4});
                 executor.setModel(std::move(target_model));
-                auto draft_model = std::make_unique<RecordingDraftModel>();
-                auto* recorded_draft = draft_model.get();
-                executor.draft_model_ = std::move(draft_model);
+                RecordingDraftModel* recorded_mtp = nullptr;
+                RecordingDSparkModel* recorded_dspark = nullptr;
+                if (type == SP_TYPE_DSPARK) {
+                    auto draft = std::make_unique<RecordingDSparkModel>(count, 10);
+                    recorded_dspark = draft.get();
+                    executor.draft_model_ = std::move(draft);
+                } else {
+                    auto draft = std::make_unique<RecordingDraftModel>();
+                    recorded_mtp = draft.get();
+                    executor.draft_model_ = std::move(draft);
+                }
                 const int32_t vocab_offset = type == SP_TYPE_EAGLE ? 17 : 0;
                 torch::Tensor d2t_map;
                 if (vocab_offset) {
@@ -696,17 +723,31 @@ TEST_F(PPBatchStreamProcessorTest, PdPrefillPublishesOnlyD1ForMtpAndEagle) {
                 auto result = makeInitializedResult(plan.sampling_plan);
                 result.new_token_ids = intTensor({20}).reshape({1, 1});
                 result.accept_len = intTensor({1});
-                executor.draftSampleAndPropose(plan, GptModelOutputs{}, result);
+                executor.runDraftStep(plan, GptModelOutputs{}, result);
 
-                const int64_t draft_count = role == RoleType::PREFILL ? 1 : count;
-                ASSERT_EQ(recorded_draft->inputs.size(), draft_count);
-                EXPECT_EQ(tensorToVector<int32_t>(recorded_draft->inputs[0].combo_tokens),
-                          (std::vector<int32_t>{2, 20}));
+                const bool commit_only = type == SP_TYPE_DSPARK && role == RoleType::PREFILL;
+                const int64_t draft_count = role == RoleType::PREFILL ? (commit_only ? 0 : 1) : count;
+                if (recorded_dspark) {
+                    ASSERT_EQ(recorded_dspark->inputs.size(), commit_only ? 1u : 2u);
+                    const auto& commit = recorded_dspark->inputs[0];
+                    EXPECT_EQ(commit.dspark_call_phase, DSparkCallPhase::COMMIT);
+                    EXPECT_TRUE(torch::equal(commit.combo_tokens, plan.model_input.combo_tokens));
+                    EXPECT_TRUE(torch::equal(commit.last_hidden_states, executor.model_->getMtpTargetHiddenStates(2)));
+                    EXPECT_TRUE(torch::equal(commit.request_id, plan.model_input.request_id));
+                    EXPECT_TRUE(torch::equal(commit.request_pd_separation, plan.model_input.request_pd_separation));
+                    EXPECT_TRUE(torch::equal(commit.cache_keys, plan.model_input.cache_keys));
+                } else {
+                    ASSERT_EQ(recorded_mtp->inputs.size(), draft_count);
+                    EXPECT_EQ(tensorToVector<int32_t>(recorded_mtp->inputs[0].combo_tokens),
+                              (std::vector<int32_t>{2, 20}));
+                }
                 result =
                     pp_serialization::deserializeExecutionResult(pp_serialization::serializeExecutionResult(result));
-                EXPECT_EQ(result.propose_token_ids.sizes().vec(), (std::vector<int64_t>{1, draft_count}));
-                EXPECT_TRUE(torch::equal(result.propose_token_ids.flatten(),
-                                         torch::arange(10, 10 + 2 * draft_count, 2, torch::kInt32) + vocab_offset));
+                if (commit_only) {
+                    EXPECT_FALSE(result.propose_token_ids.defined());
+                } else {
+                    EXPECT_EQ(result.propose_token_ids.sizes().vec(), (std::vector<int64_t>{1, draft_count}));
+                }
 
                 ASSERT_TRUE(
                     executor.batch_stream_processor_->dispatchExecutionResult(StreamGroups(streams), result).ok());
@@ -714,9 +755,13 @@ TEST_F(PPBatchStreamProcessorTest, PdPrefillPublishesOnlyD1ForMtpAndEagle) {
                 EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 2, 20}));
                 EXPECT_EQ(stream->getSPOutputBuffer()->propose_step, count);
                 EXPECT_EQ(stream->getSPOutputBuffer()->tokens.numel(), count + 1);
-                std::vector<int> expected_proposals{20};
+                EXPECT_EQ(stream->getSPOutputBuffer()->tokens[0][0].item<int32_t>(), 20);
+                std::vector<int> expected_proposals;
+                if (!commit_only) {
+                    expected_proposals.push_back(20);
+                }
                 for (int64_t step = 0; step < draft_count; ++step) {
-                    expected_proposals.push_back(10 + 2 * step + vocab_offset);
+                    expected_proposals.push_back(10 + (type == SP_TYPE_DSPARK ? step : 2 * step) + vocab_offset);
                 }
                 EXPECT_EQ(stream->getProposeToken(), expected_proposals);
             }
@@ -1270,7 +1315,7 @@ TEST_F(PPBatchStreamProcessorTest, TailInitializationFailurePreservesHealthyRequ
                 executor.setModel(std::move(target_model));
                 executor.draft_model_ = std::make_unique<RecordingDraftModel>();
                 executor.fast_topk_sampler_ = std::make_unique<speculative::FastTopKSampler>();
-                executor.draftSampleAndPropose(plan, output, result);
+                executor.runDraftStep(plan, output, result);
                 EXPECT_EQ(result.accept_len[failed_idx].item<int32_t>(), 1);
                 EXPECT_TRUE(torch::equal(result.new_token_ids[failed_idx],
                                          torch::zeros_like(result.new_token_ids[failed_idx])));
@@ -1463,6 +1508,188 @@ TEST_F(PPBatchStreamProcessorTest, OrdinaryPpErrorsUseRequestCoordinatesWithMult
     }
 }
 
+TEST_F(PPBatchStreamProcessorTest, DecodeAdmissionSizesCandidatesOnlyWhenEnteringRunning) {
+    for (const auto& [type, wire_count] : std::vector<std::pair<SpeculativeType, int>>{
+             {SP_TYPE_MTP, 2}, {SP_TYPE_MTP, 4}, {SP_TYPE_EAGLE, 2}, {SP_TYPE_EAGLE, 4}, {SP_TYPE_DSPARK, 0}}) {
+        SCOPED_TRACE("type=" + std::to_string(type) + ", wire_count=" + std::to_string(wire_count));
+        for (int64_t count : {1, 3, 4}) {
+            SCOPED_TRACE(count);
+            auto params = makeMtpParams(count);
+            params.sp_config.type = type;
+            params.pd_sep_config.role_type = RoleType::DECODE;
+            params.runtime_config.max_generate_batch_size = 1;
+            auto cache = std::make_shared<KVCacheManager>(
+                test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+            ASSERT_TRUE(cache->init());
+            PPScheduler scheduler(params.runtime_config, params.model_config_, params.pd_sep_config,
+                                  params.parallelism_config, params.model_specific_config, params.sp_config, cache);
+            PPExecutor executor(params, cache, true);
+            ResourceContext resources;
+            resources.cache_manager = cache;
+            resources.role_type = RoleType::DECODE;
+            std::vector<GenerateStreamPtr> streams;
+            for (int row = 0; row < 2; ++row) {
+                auto stream = makeStream(resources, params.model_config_, 101 + row, {1, 2, 3}, 0);
+                stream->generateConfig()->max_new_tokens = 16;
+                stream->setReserveStep(count + 1);
+                stream->generate_status_->status = StreamState::WAITING;
+                ASSERT_TRUE(stream->stream_cache_resource_->initKVBlock().ok());
+                stream->reportEvent(StreamEvents::LoadInitiated);
+                stream->reportEvent(StreamEvents::CanRun);
+                /** RPC appends only the target anchor to real history. */
+                stream->setIsContextStream(false);
+                stream->step();
+                stream->update({intTensor({7 + row}).reshape({1, 1}), 1});
+                stream->initSpeculativeHandoffPositions();
+                if (type != SP_TYPE_DSPARK) {
+                    std::vector<int> wire_tokens;
+                    for (int idx = 0; idx < wire_count; ++idx) {
+                        wire_tokens.push_back(7 + row + 10 * idx);
+                    }
+                    stream->setProposeToken(wire_tokens);
+                    stream->setContainProposeToken(true);
+                    auto buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+                    buffer->propose_step = count;
+                    buffer->tokens = intTensor(wire_tokens).reshape({1, wire_count});
+                    stream->setSPOutputBuffer(buffer);
+                }
+                streams.push_back(stream);
+            }
+            const auto first = streams[0];
+            const auto waiting = streams[1];
+            const auto wire_tokens = waiting->getProposeToken();
+            const auto wire_buffer = waiting->getSPOutputBuffer();
+            auto load = std::make_shared<DeferredCacheLoad>();
+            waiting->stream_cache_resource_->load_cache_context_ = load;
+            waiting->generate_status_->status = StreamState::LOADING_CACHE;
+            scheduler.loading_cache_streams_.push_back(waiting);
+            ASSERT_TRUE(scheduler.enqueue(first).ok());
+
+            auto scheduled = scheduler.schedule();
+            ASSERT_TRUE(scheduled.ok());
+            ASSERT_EQ(scheduled->streams, (std::list<GenerateStreamPtr>{first}));
+            EXPECT_EQ(waiting->getStatus(), StreamState::LOADING_CACHE);
+            EXPECT_EQ(waiting->getProposeToken(), wire_tokens);
+            EXPECT_EQ(waiting->getSPOutputBuffer(), wire_buffer);
+            std::vector<int> padded(count + 1, 0);
+            padded[0] = 7;
+            for (int idx = 1; idx < wire_count && idx <= count; ++idx) {
+                padded[idx] = 7 + 10 * idx;
+            }
+            EXPECT_EQ(first->getProposeToken(), padded);
+            ASSERT_NE(first->getSPOutputBuffer(), nullptr);
+            EXPECT_EQ(first->getSPOutputBuffer()->propose_step, count);
+            EXPECT_TRUE(first->getSPOutputBuffer()->tokens.is_pinned());
+            EXPECT_EQ(first->getSPOutputBuffer()->tokens.sizes().vec(), (std::vector<int64_t>{1, count + 1}));
+            EXPECT_EQ(tensorToVector<int32_t>(first->getSPOutputBuffer()->tokens), padded);
+            EXPECT_EQ(first->completeTokenIdsVec(0), (std::vector<int>{1, 2, 3, 7}));
+            EXPECT_EQ(first->currentExecuteTokenSize(), 1);
+            EXPECT_EQ(first->reuseLength(), 3);
+            EXPECT_EQ(first->getMtpTokenIndex(), 3);
+            executor.prepareStreams(scheduled->streams);
+            auto plan = executor.buildPlan(StreamGroups(scheduled->streams), {});
+            ASSERT_TRUE(plan.ok());
+            EXPECT_TRUE(plan->model_input.is_target_verify);
+            EXPECT_EQ(tensorToVector<int32_t>(plan->model_input.combo_tokens), padded);
+
+            /** The last stage replaces initial candidates with real proposals. */
+            PPExecutionResult result;
+            result.request_ids = torch::tensor({first->streamId()}, torch::kInt64);
+            result.accept_len = intTensor({1});
+            result.new_token_ids = torch::full({1, count + 1}, 31, torch::kInt32);
+            result.propose_token_ids = torch::arange(40, 40 + count, torch::kInt32).reshape({1, count});
+            result.request_errors.resize(1);
+            result.prompt_logits.resize(1);
+            ASSERT_TRUE(executor.batch_stream_processor_->dispatchExecutionResult(
+                StreamGroups(scheduled->streams), result).ok());
+            const auto real_proposals = first->getProposeToken();
+            const auto real_token_buffer = first->getSPOutputBuffer()->tokens;
+
+            /** Cache loading is done, but the batch is still full. */
+            load->ready = true;
+            auto next = scheduler.schedule();
+            ASSERT_TRUE(next.ok());
+            ASSERT_EQ(next->streams, (std::list<GenerateStreamPtr>{first}));
+            EXPECT_EQ(waiting->getStatus(), StreamState::WAITING);
+            EXPECT_EQ(waiting->getProposeToken(), wire_tokens);
+            EXPECT_EQ(waiting->getSPOutputBuffer(), wire_buffer);
+            EXPECT_EQ(first->getProposeToken(), real_proposals);
+            EXPECT_EQ(first->getSPOutputBuffer()->tokens.data_ptr<int32_t>(), real_token_buffer.data_ptr<int32_t>());
+
+            /** Admit another handoff without overwriting the running request's proposals. */
+            first->clearPPInflight();
+            scheduler.max_generate_batch_size_ = 2;
+            auto mixed = scheduler.schedule();
+            ASSERT_TRUE(mixed.ok());
+            ASSERT_EQ(mixed->streams, (std::list<GenerateStreamPtr>{first, waiting}));
+            padded[0] = 8;
+            for (int idx = 1; idx < wire_count && idx <= count; ++idx) {
+                padded[idx] = 8 + 10 * idx;
+            }
+            EXPECT_EQ(waiting->getProposeToken(), padded);
+            ASSERT_NE(waiting->getSPOutputBuffer(), nullptr);
+            EXPECT_EQ(tensorToVector<int32_t>(waiting->getSPOutputBuffer()->tokens), padded);
+            EXPECT_EQ(waiting->completeTokenIdsVec(0), (std::vector<int>{1, 2, 3, 8}));
+            EXPECT_EQ(waiting->currentExecuteTokenSize(), 1);
+            EXPECT_EQ(first->getProposeToken(), real_proposals);
+            EXPECT_EQ(first->getSPOutputBuffer()->tokens.data_ptr<int32_t>(), real_token_buffer.data_ptr<int32_t>());
+            EXPECT_EQ(scheduler.last_admitted_context_batch_size_, 0);
+            EXPECT_EQ(scheduler.last_admitted_context_token_size_, 0);
+            EXPECT_EQ(first->batch_with_prefill_times_, 0);
+            EXPECT_EQ(first->batch_with_prefill_len_, 0);
+            executor.prepareStreams(mixed->streams);
+            auto mixed_plan = executor.buildPlan(StreamGroups(mixed->streams), {});
+            ASSERT_TRUE(mixed_plan.ok());
+            auto expected = real_proposals;
+            expected.insert(expected.end(), padded.begin(), padded.end());
+            EXPECT_EQ(tensorToVector<int32_t>(mixed_plan->model_input.combo_tokens), expected);
+        }
+    }
+}
+
+TEST_F(PPBatchStreamProcessorTest, SpeculativeAdmissionPreservesPrefillAccounting) {
+    for (auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        SCOPED_TRACE(static_cast<int>(role));
+        for (auto type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
+            SCOPED_TRACE(type);
+            auto params = makeMtpParams(3);
+            params.sp_config.type = type;
+            params.pd_sep_config.role_type = role;
+            params.runtime_config.max_generate_batch_size = 8;
+            params.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 32;
+            auto cache = std::make_shared<KVCacheManager>(
+                test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+            ASSERT_TRUE(cache->init());
+            PPScheduler scheduler(params.runtime_config, params.model_config_, params.pd_sep_config,
+                                  params.parallelism_config, params.model_specific_config, params.sp_config, cache);
+            ResourceContext resources;
+            resources.cache_manager = cache;
+            resources.role_type = role;
+            const auto first = makeStream(resources, params.model_config_, 101, {1, 2}, 0);
+            const auto second = makeStream(resources, params.model_config_, 102, {3, 4, 5}, 0);
+            for (const auto& stream : {first, second}) {
+                stream->generate_status_->status = StreamState::WAITING;
+                ASSERT_TRUE(scheduler.enqueue(stream).ok());
+            }
+            auto scheduled = scheduler.schedule();
+            ASSERT_TRUE(scheduled.ok());
+            EXPECT_EQ(scheduled->streams, (std::list<GenerateStreamPtr>{first, second}));
+            EXPECT_EQ(scheduler.last_admitted_context_batch_size_, 2);
+            EXPECT_EQ(scheduler.last_admitted_context_token_size_, 5);
+            PPScheduler::ScheduleRuntime runtime;
+            scheduler.initScheduleRuntime(scheduled->streams, runtime);
+            EXPECT_EQ(runtime.scheduled_stream_count, 2);
+            EXPECT_EQ(runtime.scheduled_prefill_token_size_with_cache, 5);
+            EXPECT_EQ(runtime.scheduled_prefill_max_seq_len_with_cache, 3);
+            EXPECT_EQ(runtime.admitted_prefill_token_size_without_cache, 5);
+            for (const auto& stream : scheduled->streams) {
+                EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
+                EXPECT_TRUE(stream->getProposeToken().empty());
+            }
+        }
+    }
+}
+
 TEST_F(PPBatchStreamProcessorTest, MtpAdmissionRejectsBeforePlanAndSchedulerReclaimsRequest) {
     auto params = makeMtpParams(3);
     params.pd_sep_config.role_type = RoleType::PDFUSION;
@@ -1474,7 +1701,7 @@ TEST_F(PPBatchStreamProcessorTest, MtpAdmissionRejectsBeforePlanAndSchedulerRecl
     const auto free_blocks = cache_manager->freeBlocksNum();
     PPExecutor executor(params, cache_manager, false);
     PPScheduler scheduler(params.runtime_config, params.model_config_, params.pd_sep_config,
-                          params.parallelism_config, params.model_specific_config, cache_manager);
+                          params.parallelism_config, params.model_specific_config, params.sp_config, cache_manager);
     ResourceContext context;
     context.cache_manager = cache_manager;
     auto stream = makeStream(context, params.model_config_, 101, {1, 2}, 0);
@@ -1568,7 +1795,7 @@ TEST_F(PPBatchStreamProcessorTest, RequestErrorsAndCancellationReachSchedulerAnd
             tail_params.parallelism_config.world_size = 2;
             PPExecutor tail(tail_params, cache_manager, false);
             PPScheduler scheduler(params.runtime_config, params.model_config_, params.pd_sep_config,
-                                  params.parallelism_config, params.model_specific_config, cache_manager);
+                                  params.parallelism_config, params.model_specific_config, params.sp_config, cache_manager);
             ResourceContext context;
             context.cache_manager = cache_manager;
             auto failed = makeStream(context, params.model_config_, 101, {1, 2}, 0);
@@ -1692,7 +1919,7 @@ TEST_F(PPBatchStreamProcessorTest, EosAndStopKeepSharedStreamTerminationSemantic
     }
 }
 
-TEST_F(PPBatchStreamProcessorTest, MtpPreparePreservesLoadedProposalsAndExpandsFakeTokens) {
+TEST_F(PPBatchStreamProcessorTest, MtpPreparePreservesPreparedProposalsAndExpandsFakeTokens) {
     auto params = makeMtpParams(3);
     PPExecutor executor(params, nullptr, true);
     ResourceContext resource_context;
@@ -1808,12 +2035,22 @@ TEST_F(PPBatchStreamProcessorTest, MtpCancelledOrFinishedUpdatePreservesProposal
 
 TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
     for (const auto& [count, type] : std::vector<std::pair<int32_t, SpeculativeType>>{
-             {1, SP_TYPE_MTP}, {3, SP_TYPE_MTP}, {4, SP_TYPE_MTP}, {3, SP_TYPE_EAGLE}}) {
-        for (bool pd_bootstrap : {false, true}) {
+             {1, SP_TYPE_MTP}, {3, SP_TYPE_MTP}, {4, SP_TYPE_MTP},
+             {1, SP_TYPE_EAGLE}, {3, SP_TYPE_EAGLE}, {4, SP_TYPE_EAGLE},
+             {1, SP_TYPE_DSPARK}, {3, SP_TYPE_DSPARK}, {4, SP_TYPE_DSPARK}}) {
+        for (const auto& [pd_bootstrap, first_accept_len] : std::vector<std::pair<bool, int32_t>>{
+                 {false, 1}, {true, 1}, {true, 2}}) {
+            /** DSpARK has no incoming d1 to accept. */
+            if (type == SP_TYPE_DSPARK && first_accept_len == 2) {
+                continue;
+            }
             SCOPED_TRACE("K=" + std::to_string(count) + ", type=" + std::to_string(type)
-                         + ", PD=" + std::to_string(pd_bootstrap));
+                         + ", PD=" + std::to_string(pd_bootstrap)
+                         + ", first_accept_len=" + std::to_string(first_accept_len));
             auto params = makeMtpParams(count);
             params.sp_config.type = type;
+            params.sp_config.sp_dspark_mask_token_id = 63;
+            params.model_config_.special_tokens.eos_token_id = -1;
             params.pd_sep_config.role_type = pd_bootstrap ? RoleType::DECODE : RoleType::PDFUSION;
             auto cache = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
             ASSERT_TRUE(cache->init());
@@ -1827,9 +2064,18 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
             auto target = std::make_unique<RecordingDraftModel>();
             auto* target_model = target.get();
             tail.setModel(std::move(target));
-            auto draft = std::make_unique<RecordingDraftModel>();
-            auto* draft_model = draft.get();
-            tail.draft_model_ = std::move(draft);
+            std::vector<GptModelInputs>* draft_inputs = nullptr;
+            RecordingDSparkModel* dspark_model = nullptr;
+            if (type == SP_TYPE_DSPARK) {
+                auto draft = std::make_unique<RecordingDSparkModel>(count, 10);
+                dspark_model = draft.get();
+                draft_inputs = &draft->inputs;
+                tail.draft_model_ = std::move(draft);
+            } else {
+                auto draft = std::make_unique<RecordingDraftModel>();
+                draft_inputs = &draft->inputs;
+                tail.draft_model_ = std::move(draft);
+            }
             const int32_t vocab_offset = type == SP_TYPE_EAGLE ? 17 : 0;
             if (vocab_offset) {
                 const auto d2t_map =
@@ -1856,7 +2102,7 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
             std::list<GenerateStreamPtr> batch(streams.begin(), streams.end());
             head.prepareStreams(batch);
             if (pd_bootstrap) {
-                /** Incoming D state: one padded handoff and one request with a full steady-state proposal. */
+                /** Post-admission state: a new handoff and a running request with full proposals. */
                 for (int row = 0; row < 2; ++row) {
                     const int32_t anchor = 20 + row * 10;
                     if (row == 1) {
@@ -1868,7 +2114,9 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                     history[row].push_back(anchor);
                     std::vector<int32_t> proposals(count + 1, 0);
                     proposals[0] = anchor;
-                    proposals[1] = 10 + row + vocab_offset;
+                    if (type != SP_TYPE_DSPARK || row == 1) {
+                        proposals[1] = 10 + row + vocab_offset;
+                    }
                     if (row == 1) {
                         for (int32_t step = 1; step < count; ++step) {
                             proposals[step + 1] = 11 + 2 * step + vocab_offset;
@@ -1899,7 +2147,7 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                 }
                 std::vector<int32_t> lengths{1, 1};
                 if (round == 1) {
-                    lengths = {pd_bootstrap ? 2 : 1, count + 1};
+                    lengths = {first_accept_len, count + 1};
                 } else if (round == 2) {
                     lengths = {count + 1, std::min(3, count + 1)};
                 }
@@ -1930,15 +2178,36 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                     wire->received_tensors.push_back(object);
                 }
                 const auto sends_before = wire->sent_tensors.size();
-                const auto draft_before = draft_model->inputs.size();
+                const auto draft_before = draft_inputs->size();
+                if (dspark_model) {
+                    dspark_model->first_token_ = 10 + round * 4;
+                }
                 ASSERT_TRUE(tail.process(ScheduleOutput{}).ok());
                 ASSERT_EQ(wire->sent_tensors.size(), sends_before + 2);
                 const auto result = pp_serialization::deserializeExecutionResult(wire->sent_tensors.back());
                 EXPECT_EQ(tensorToVector<int32_t>(result.accept_len), lengths);
-                ASSERT_EQ(draft_model->inputs.size(), draft_before + count);
+                ASSERT_EQ(draft_inputs->size(), draft_before + (dspark_model ? 2 : count));
                 EXPECT_EQ(result.propose_token_ids.sizes().vec(), (std::vector<int64_t>{2, count}));
-                if (round != 0) {
-                    const auto& update = draft_model->inputs[draft_before];
+                if (dspark_model) {
+                    const auto& commit = draft_inputs->at(draft_before);
+                    EXPECT_EQ(commit.dspark_call_phase, DSparkCallPhase::COMMIT);
+                    EXPECT_TRUE(torch::equal(commit.combo_tokens, plan.model_input.combo_tokens));
+                    EXPECT_TRUE(torch::equal(commit.input_lengths, plan.model_input.input_lengths));
+                    EXPECT_TRUE(torch::equal(commit.prefix_lengths, plan.model_input.prefix_lengths));
+                    EXPECT_TRUE(torch::equal(commit.last_hidden_states,
+                                             target_model->getMtpTargetHiddenStates(plan.model_input.combo_tokens.numel())));
+                    const auto& propose = draft_inputs->at(draft_before + 1);
+                    EXPECT_EQ(propose.dspark_call_phase, DSparkCallPhase::PROPOSE);
+                    const auto expected_prefix = plan.model_input.prefix_lengths.cpu()
+                                                 + (round == 0 ? plan.model_input.input_lengths.cpu() : intTensor(lengths));
+                    EXPECT_TRUE(torch::equal(propose.prefix_lengths.cpu(), expected_prefix));
+                    auto expected_query = torch::full({2, count}, 63, torch::kInt32);
+                    for (int row = 0; row < 2; ++row) {
+                        expected_query[row][0] = committed[row].back();
+                    }
+                    EXPECT_TRUE(torch::equal(propose.combo_tokens.cpu(), expected_query.flatten()));
+                } else if (round != 0) {
+                    const auto& update = draft_inputs->at(draft_before);
                     auto expected_tokens = committed[0];
                     expected_tokens.insert(expected_tokens.end(), committed[1].begin(), committed[1].end());
                     EXPECT_EQ(tensorToVector<int32_t>(update.combo_tokens), expected_tokens);
@@ -1954,7 +2223,7 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                     EXPECT_TRUE(torch::equal(update.last_hidden_states, expected_hidden));
                     for (int32_t step = 1; step < count; ++step) {
                         EXPECT_TRUE(torch::equal(
-                            draft_model->inputs[draft_before + step].sequence_lengths.cpu(),
+                            draft_inputs->at(draft_before + step).sequence_lengths.cpu(),
                             plan.model_input.prefix_lengths.cpu() + intTensor(lengths) + step - 1));
                     }
                 }
@@ -1970,7 +2239,8 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                     EXPECT_FALSE(streams[row]->isPPInflight());
                     std::vector<int32_t> expected_proposals{committed[row].back()};
                     for (int32_t step = 0; step < count; ++step) {
-                        expected_proposals.push_back(10 + 2 * (draft_before + step) + row + vocab_offset);
+                        expected_proposals.push_back(dspark_model ? dspark_model->first_token_ + row * count + step :
+                                                                    10 + 2 * (draft_before + step) + row + vocab_offset);
                     }
                     EXPECT_EQ(streams[row]->getProposeToken(), expected_proposals);
                 }
@@ -1980,10 +2250,10 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
             const auto payload = pp_serialization::serializePlan(cleanup.value(), false);
             wire->received_tensors.push_back(torch::tensor({payload.numel()}, torch::kInt64));
             wire->received_tensors.push_back(payload);
-            const auto calls_before = draft_model->inputs.size();
+            const auto calls_before = draft_inputs->size();
             ASSERT_TRUE(tail.process(ScheduleOutput{}).ok());
             EXPECT_TRUE(tail.sampling_states_.empty());
-            EXPECT_EQ(draft_model->inputs.size(), calls_before);
+            EXPECT_EQ(draft_inputs->size(), calls_before);
         }
     }
 }
@@ -2097,7 +2367,7 @@ TEST_F(PPBatchStreamProcessorTest, MtpDispatchCommitsAcceptedLinearState) {
         resource.mutableBlockIds("full1").assign(BlockIndicesType{5, 6, 7, 8});
 
         PPBatchStreamProcessor processor(
-            model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, true, /*mtp_enabled=*/true);
+            model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, true, SP_TYPE_MTP);
         PPExecutionResult result;
         result.request_ids    = torch::tensor({101}, torch::kInt64);
         result.new_token_ids  = torch::arange(10, 11 + c.draft_count, torch::kInt32).reshape({1, c.draft_count + 1});

@@ -16,7 +16,7 @@ public:
                            const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                            const CacheConfig&                 cache_config,
                            bool                               warm_up,
-                           bool                               sp_enabled = false);
+                           SpeculativeType                    sp_type = SP_TYPE_NONE);
 
     PPSamplingPlan gatherSamplingPlan(const StreamGroups& stream_groups) const;
 
@@ -80,8 +80,8 @@ private:
                                     int64_t                  loss_offset,
                                     int64_t                  loss_size) const;
 
-    absl::Status dispatchMtpExecutionResult(const StreamGroups& stream_groups,
-                                           const PPExecutionResult& result) const;
+    absl::Status dispatchSpeculativeExecutionResult(const StreamGroups& stream_groups,
+                                                   const PPExecutionResult& result) const;
 
 private:
     const bool                sp_enabled_;

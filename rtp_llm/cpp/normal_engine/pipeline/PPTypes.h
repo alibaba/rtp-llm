@@ -114,7 +114,8 @@ struct PPExecutionResult {
     std::vector<ErrorInfo> request_errors;
 
     torch::Tensor accept_len;         // [total_batch_size], includes correction/bonus
-    torch::Tensor propose_token_ids;  // [total_batch_size, draft_count]; PD MTP/EAGLE prefill uses 1, otherwise K
+    torch::Tensor propose_token_ids;  // [total_batch_size, draft_count]; PD prefill: 0 for DSpARK, 1 for
+                                      // MTP/EAGLE; otherwise K.
 };
 
 }  // namespace rtp_llm

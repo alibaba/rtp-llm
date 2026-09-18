@@ -42,9 +42,9 @@ PPBatchStreamProcessor::PPBatchStreamProcessor(const ModelConfig&               
                                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                                                const CacheConfig&                 cache_config,
                                                bool                               warm_up,
-                                               bool                               sp_enabled):
+                                               SpeculativeType                    sp_type):
     NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
-    sp_enabled_(sp_enabled),
+    sp_enabled_(sp_type != SP_TYPE_NONE),
     output_vocab_ids_(model_config.output_vocab_ids),
     processor_eos_token_id_(getProcessorEosTokenId(model_config)) {}
 
@@ -591,7 +591,7 @@ absl::Status PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups&
                                                              const PPExecutionResult& result) const {
     validateExecutionResult(stream_groups, result);
     if (sp_enabled_) {
-        return dispatchMtpExecutionResult(stream_groups, result);
+        return dispatchSpeculativeExecutionResult(stream_groups, result);
     }
     return dispatchNormalExecutionResult(stream_groups, result);
 }
@@ -768,12 +768,11 @@ absl::StatusOr<GptModelInputs> PPBatchStreamProcessor::gatherTargetVerifyModelIn
     return model_input;
 }
 
-absl::Status PPBatchStreamProcessor::dispatchMtpExecutionResult(const StreamGroups& stream_groups,
-                                                                const PPExecutionResult& result) const {
-    const auto all_streams   = stream_groups.allStreams();
-    const auto batch_size    = static_cast<int64_t>(all_streams.size());
-    const bool is_prefill    = all_streams.empty() || all_streams.front()->isContextStream();
-    const bool is_pd_prefill = is_prefill && model_input_gatherer_config_.role_type == RoleType::PREFILL;
+absl::Status PPBatchStreamProcessor::dispatchSpeculativeExecutionResult(const StreamGroups& stream_groups,
+                                                                        const PPExecutionResult& result) const {
+    const auto all_streams = stream_groups.allStreams();
+    const auto batch_size  = static_cast<int64_t>(all_streams.size());
+    const bool is_prefill  = all_streams.empty() || all_streams.front()->isContextStream();
     RTP_LLM_CHECK_WITH_INFO(
         stream_groups.totalModelBatchSize() == all_streams.size() && result.accept_len.defined()
             && result.accept_len.device().is_cpu() && result.accept_len.scalar_type() == torch::kInt32
@@ -800,14 +799,9 @@ absl::Status PPBatchStreamProcessor::dispatchMtpExecutionResult(const StreamGrou
             RTP_LLM_CHECK_WITH_INFO(accepted_length >= 1 && accepted_length <= result.new_token_ids.size(1)
                                         && (!is_prefill || accepted_length == 1),
                                     "PP speculative execution result has an invalid accepted length");
-            const auto sp_output_buffer = stream->getSPOutputBuffer();
-            RTP_LLM_CHECK_WITH_INFO(
-                sp_output_buffer
-                    && ((is_pd_prefill && result.propose_token_ids.size(1) == 1)
-                        || sp_output_buffer->propose_step == static_cast<size_t>(result.propose_token_ids.size(1)))
-                    && result.new_token_ids.size(1) == (is_prefill ? 1 : sp_output_buffer->propose_step + 1),
-                "PP speculative execution result does not match the prepared proposal count");
-            draft_tokens = result.propose_token_ids[row];
+            if (result.propose_token_ids.defined()) {
+                draft_tokens = result.propose_token_ids[row];
+            }
             new_tokens = result.new_token_ids.narrow(0, row, 1).narrow(1, 0, accepted_length).contiguous();
         }
 

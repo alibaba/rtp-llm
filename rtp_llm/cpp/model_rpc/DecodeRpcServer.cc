@@ -330,20 +330,14 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
 
         const bool is_pipeline = maga_init_params_.parallelism_config.pp_size > 1;
-        const bool pp_mtp      = is_pipeline && !engine_->isDSpark();
+        const bool is_dspark   = engine_->isDSpark();
         std::vector<int> propose_tokens;
         propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
-        /** DSpARK seeds without proposals; PP MTP hands off only the anchor and d1. */
-        RTP_LLM_CHECK_WITH_INFO(engine_->isDSpark() ? propose_tokens.empty() :
-                                   (pp_mtp ? propose_tokens.size() == 2 : propose_tokens.size() >= 2),
-                                "decode rpc speculative handoff has invalid proposal count=%zu for dspark=%d pp_mtp=%d",
+        /** Preserve the handoff payload; PPScheduler pads PP candidates on admission. */
+        RTP_LLM_CHECK_WITH_INFO(is_dspark ? propose_tokens.empty() : propose_tokens.size() >= 2,
+                                "decode rpc speculative handoff has invalid proposal count=%zu for dspark=%d",
                                 propose_tokens.size(),
-                                static_cast<int>(engine_->isDSpark()),
-                                static_cast<int>(pp_mtp));
-        if (pp_mtp) {
-            /** Keep P's argmax d1 and pad deterministic candidates for fixed-width target verification. */
-            propose_tokens.resize(propose_step + 1, 0);
-        }
+                                static_cast<int>(is_dspark));
         generate_stream->initSpeculativeHandoffPositions();
         if (!propose_tokens.empty()) {
             generate_stream->setContainProposeToken(true);
@@ -356,7 +350,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             memcpy(
                 sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
-            if (!pp_mtp) {
+            if (!is_pipeline) {
                 auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
                 auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
                 sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
