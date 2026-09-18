@@ -580,6 +580,61 @@ TEST_F(KVCacheManagerTest, FactoryFailureDoesNotPublishOrInjectBlockTreeCache) {
     EXPECT_EQ(cache_manager->allocator_->blockTreeCache(), nullptr);
 }
 
+TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysicalPools) {
+    ModelConfig model_config;
+    model_config.num_layers                                      = 4;
+    model_config.max_seq_len                                     = 64;
+    model_config.data_type                                       = DataType::TYPE_FP16;
+    model_config.attn_config.head_num                            = 2;
+    model_config.attn_config.kv_head_num                         = 2;
+    model_config.attn_config.size_per_head                       = 16;
+    model_config.attn_config.tokens_per_block                    = 4;
+    model_config.hybrid_attention_config.enable_hybrid_attention = true;
+    model_config.hybrid_attention_config.hybrid_attention_types  = {
+        HybridAttentionType::LINEAR, HybridAttentionType::NONE, HybridAttentionType::LINEAR, HybridAttentionType::NONE};
+    model_config.linear_attention_config.linear_conv_kernel_dim = 2;
+    model_config.linear_attention_config.linear_key_head_dim    = 8;
+    model_config.linear_attention_config.linear_value_head_dim  = 8;
+    model_config.linear_attention_config.linear_num_key_heads   = 2;
+    model_config.linear_attention_config.linear_num_value_heads = 2;
+    setHybridAttentionKvCacheSpecs(model_config);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 6;
+    auto cache_config =
+        CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+
+    ASSERT_TRUE(cache_manager->init());
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    EXPECT_EQ(cache_config.groupTagsSnapshot(), std::vector<std::string>({"full", "linear"}));
+    const int full_gid   = cache_config.groupIdForTag("full");
+    const int linear_gid = cache_config.groupIdForTag("linear");
+    ASSERT_GE(full_gid, 0);
+    ASSERT_GE(linear_gid, 0);
+    EXPECT_NE(cache_config.blockSizeBytesForGroup(static_cast<size_t>(full_gid)),
+              cache_config.blockSizeBytesForGroup(static_cast<size_t>(linear_gid)));
+
+    const auto& pools = allocator->groupBlockPools();
+    ASSERT_EQ(pools.size(), 2u);
+    EXPECT_NE(pools[static_cast<size_t>(full_gid)], pools[static_cast<size_t>(linear_gid)]);
+
+    size_t linear_group_set_memberships = 0;
+    for (const GroupSetPtr& group_set : cache_manager->blockTreeCache()->groupSets()) {
+        ASSERT_EQ(group_set->groupIds().size(), group_set->devicePools().size());
+        for (size_t member = 0; member < group_set->groupIds().size(); ++member) {
+            if (group_set->groupIds()[member] != static_cast<size_t>(linear_gid)) {
+                continue;
+            }
+            ++linear_group_set_memberships;
+            EXPECT_EQ(group_set->devicePools()[member], pools[static_cast<size_t>(linear_gid)]);
+            EXPECT_NE(group_set->devicePools()[member], pools[static_cast<size_t>(full_gid)]);
+        }
+    }
+    EXPECT_EQ(linear_group_set_memberships, 1u);
+}
+
 TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
     auto expect_pool_backing = [](RoleType role_type) {
         auto config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
