@@ -342,12 +342,16 @@ def local_rank_start(
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
         install_oom_dump()
-        backend_manager = BackendManager(py_env_configs, service_draining)
-        if shutdown_pending:
-            backend_manager.request_shutdown()
         defer_service_start = (
             scr_manifest is not None and is_scr_template_phase_active()
         )
+        backend_manager = BackendManager(
+            py_env_configs,
+            service_draining,
+            defer_service_draining_watcher=defer_service_start,
+        )
+        if shutdown_pending:
+            backend_manager.request_shutdown()
         backend_manager.start(defer_service_start=defer_service_start)
         install_signal_handlers("after backend start")
         if shutdown_pending:
@@ -382,6 +386,10 @@ def local_rank_start(
         )
         if defer_service_start:
             backend_manager.start_service()
+        # This Python thread is deliberately excluded from SCR templates. The
+        # shared Event is level-triggered, so notifications raised during the
+        # barrier are still observed when the watcher starts here.
+        backend_manager.start_service_draining_watcher()
 
         # Enter service loop to keep the process alive
         logging.info("Entering service loop to keep backend_manager alive")

@@ -29,7 +29,12 @@ BACKEND_STORE_FAILURE_TIMEOUT_S = 600.0
 
 
 class BackendManager(object):
-    def __init__(self, py_env_configs: PyEnvConfigs, service_draining=None):
+    def __init__(
+        self,
+        py_env_configs: PyEnvConfigs,
+        service_draining=None,
+        defer_service_draining_watcher: bool = False,
+    ):
         self.py_env_configs = py_env_configs
         self._service_draining = service_draining
         kmonitor.bind_service_draining(service_draining)
@@ -50,12 +55,30 @@ class BackendManager(object):
         self._world_info = None
         self._shutdown_requested = threading.Event()
         self._stopped = threading.Event()
-        if service_draining is not None:
-            threading.Thread(
+        self._service_draining_thread: Optional[threading.Thread] = None
+        if not defer_service_draining_watcher:
+            self.start_service_draining_watcher()
+
+    def start_service_draining_watcher(self) -> None:
+        """Start the process-shared drain watcher once services may run.
+
+        SCR templates must not capture a live Python helper thread: restoring
+        one can preserve stale CPython/GIL synchronization state. Normal startup
+        still starts the watcher from __init__; template startup calls this
+        after the checkpoint barrier and deferred service release.
+        """
+        if self._service_draining is None:
+            return
+        with self.thread_lock_:
+            if self._service_draining_thread is not None:
+                return
+            watcher = threading.Thread(
                 target=self._wait_for_service_draining,
                 name="service_draining",
                 daemon=True,
-            ).start()
+            )
+            self._service_draining_thread = watcher
+            watcher.start()
 
     def _wait_for_service_draining(self):
         self._service_draining.wait()
