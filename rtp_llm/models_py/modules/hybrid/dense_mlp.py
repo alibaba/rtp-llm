@@ -17,6 +17,9 @@ from rtp_llm.utils.model_weight import W
 # (silu_and_mul) and one launch (per_token_group_quant_8bit) per forward.
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
+    from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+        silu_mul_mxfp8_quant_act_packed_fused,
+    )
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
         CudaFp8GEMMLinear,
     )
@@ -29,6 +32,7 @@ if _DEVICE_TYPE == DeviceType.Cuda:
 else:
     CudaFp8GEMMLinear = None  # type: ignore
     CudaMxfp8Linear = None  # type: ignore
+    silu_mul_mxfp8_quant_act_packed_fused = None  # type: ignore
 
 _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
     ActivationType.Swiglu: FusedSiluAndMul,
@@ -122,6 +126,16 @@ class DenseMLP(nn.Module):
         )
         if self._fuse_silu_quant and self.down_proj.scale_ue8m0:
             self._fuse_silu_quant = self.down_proj.K % 512 == 0
+        # HY4's MXFP8 down projections use 1x32 UE8M0 scales.  This is a
+        # separate contract from the existing group-128 FP8 fusion above.
+        self._fuse_silu_mxfp8_quant = (
+            fuse_kernels_enabled(hw_kernel_config)
+            and self.is_gated
+            and CudaMxfp8Linear is not None
+            and isinstance(self.down_proj, CudaMxfp8Linear)
+            and silu_mul_mxfp8_quant_act_packed_fused is not None
+            and self.down_proj.K % 128 == 0
+        )
 
     @property
     def accepts_fp8_input(self) -> bool:
@@ -153,7 +167,12 @@ class DenseMLP(nn.Module):
             up = self.up_proj(x_fp8, input_scales=x_scale)
         else:
             up = self.up_proj(x)
-        if self._fuse_silu_quant and up.dim() == 2:
+        if self._fuse_silu_mxfp8_quant and up.dim() == 2:
+            fp8_out, scale_out = silu_mul_mxfp8_quant_act_packed_fused(
+                up.contiguous()
+            )
+            output = self.down_proj(fp8_out, input_scales=scale_out)
+        elif self._fuse_silu_quant and up.dim() == 2:
             scale_ue8m0 = self.down_proj.scale_ue8m0
             fp8_out, scale_out = (
                 silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(

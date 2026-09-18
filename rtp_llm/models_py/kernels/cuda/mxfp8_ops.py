@@ -99,6 +99,107 @@ def _mxfp8_quant_act_packed_kernel(
 
 
 @triton.jit
+def _silu_mul_mxfp8_quant_act_packed_kernel(
+    input_ptr,
+    output_q_ptr,
+    output_scale_ptr,
+    M,
+    input_stride_m,
+    output_q_stride_m,
+    output_scale_stride_k,
+    N: tl.constexpr,
+    GROUPS_PER_ROW: tl.constexpr,
+    PACKS_PER_ROW: tl.constexpr,
+    PACKS_PER_CTA: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+):
+    """vLLM SiLU+MXFP8 fusion with FlashInfer UE8M0 scale semantics.
+
+    This is adapted from vLLM's
+    ``_silu_mul_quant_fp8_packed_kernel``.  The execution/persistence shape is
+    retained; its generic ``max(absmax / 448, 1e-10)`` scale floor is replaced
+    by the FlashInfer-compatible ``_float_to_ue8m0`` conversion used by the
+    existing RTP MXFP8 activation quantizer.
+    """
+    GROUPS_PER_PACK: tl.constexpr = 4
+    HIDDEN_SIZE: tl.constexpr = N // 2
+
+    pack_tile = tl.program_id(0)
+    row_start = tl.program_id(1).to(tl.int64) * BLOCK_M
+    row_step = tl.num_programs(1).to(tl.int64) * BLOCK_M
+
+    groups_per_cta: tl.constexpr = PACKS_PER_CTA * GROUPS_PER_PACK
+    elements_per_cta: tl.constexpr = groups_per_cta * GROUP_SIZE
+    col_start = pack_tile * elements_per_cta
+    col_offsets = tl.arange(0, elements_per_cta)
+    row_offsets = tl.arange(0, BLOCK_M)
+    pack_offsets = tl.arange(0, PACKS_PER_CTA)
+    col_mask = (col_start + col_offsets) < (GROUPS_PER_ROW * GROUP_SIZE)
+
+    while row_start < M:
+        rows = row_start + row_offsets
+        row_mask = rows < M
+        input_row_start = rows[:, None] * input_stride_m
+        output_row_start = rows[:, None] * output_q_stride_m
+
+        gate_flat = tl.load(
+            input_ptr + input_row_start + col_start + col_offsets[None, :],
+            mask=row_mask[:, None] & col_mask[None, :],
+            other=0.0,
+        )
+        up_flat = tl.load(
+            input_ptr
+            + input_row_start
+            + HIDDEN_SIZE
+            + col_start
+            + col_offsets[None, :],
+            mask=row_mask[:, None] & col_mask[None, :],
+            other=0.0,
+        )
+        gate = tl.reshape(gate_flat, (BLOCK_M, groups_per_cta, GROUP_SIZE)).to(
+            tl.float32
+        )
+        up = tl.reshape(up_flat, (BLOCK_M, groups_per_cta, GROUP_SIZE)).to(
+            tl.float32
+        )
+
+        # Match the unfused path: SiLU/multiply followed by a BF16 materialized
+        # activation, then groupwise MXFP8 quantization.
+        y = (gate / (1.0 + tl.exp(-gate))) * up
+        y = y.to(tl.bfloat16).to(tl.float32)
+
+        absmax = tl.max(tl.abs(y), axis=2)
+        scale_exponent = _float_to_ue8m0(
+            absmax * tl.full(absmax.shape, 1.0 / 448.0, tl.float32)
+        )
+        inv_scale = _ue8m0_to_inv_scale(scale_exponent)
+        y_q = tl.clamp(y * inv_scale[:, :, None], -448.0, 448.0)
+
+        y_q_flat = tl.reshape(y_q, (BLOCK_M, elements_per_cta))
+        tl.store(
+            output_q_ptr + output_row_start + col_start + col_offsets[None, :],
+            y_q_flat.to(output_q_ptr.dtype.element_ty),
+            mask=row_mask[:, None] & col_mask[None, :],
+        )
+
+        scale_bytes = tl.reshape(
+            scale_exponent, (BLOCK_M, PACKS_PER_CTA, GROUPS_PER_PACK)
+        )
+        shifts = tl.arange(0, GROUPS_PER_PACK) * 8
+        packed_scale = tl.sum(scale_bytes << shifts[None, None, :], axis=2)
+        scale_pack = pack_tile * PACKS_PER_CTA + pack_offsets
+        tl.store(
+            output_scale_ptr
+            + scale_pack[None, :] * output_scale_stride_k
+            + rows[:, None],
+            packed_scale,
+            mask=row_mask[:, None] & (scale_pack[None, :] < PACKS_PER_ROW),
+        )
+        row_start += row_step
+
+
+@triton.jit
 def _pack_flashinfer_mxfp8_scale_kernel(
     scale_u8_ptr,
     packed_ptr,
@@ -219,6 +320,71 @@ def mxfp8_quant_act_packed_fused(
             num_stages=1,
         )
     return q, packed_scale
+
+
+def silu_mul_mxfp8_quant_act_packed_fused(
+    gate_up: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Fuse SiLU/mul and HY4's 1x32 MXFP8 activation quantization.
+
+    The Triton scheduling and layout are adapted from vLLM's
+    ``silu_mul_quant_fp8_packed_triton`` for group size 32.  Unlike vLLM's
+    generic FP8 helper, output scales precisely follow FlashInfer's UE8M0
+    contract, including a zero byte for all-zero groups and upward exponent
+    rounding for tiny nonzero groups.
+    """
+    assert gate_up.dim() == 2, f"expected 2D activation, got {gate_up.shape}"
+    assert gate_up.is_cuda, "fused SiLU/MXFP8 quant requires CUDA input"
+    assert gate_up.is_contiguous(), "gate_up must be contiguous"
+    # HY4's MXFP8 down-projection input is BF16.  The fused path intentionally
+    # reproduces the legacy BF16 materialization before FlashInfer quantizes;
+    # do not silently route FP16 callers through a numerically different path.
+    assert gate_up.dtype == torch.bfloat16, (
+        f"fused SiLU/MXFP8 quant expects BF16 input, got {gate_up.dtype}"
+    )
+    m, n = gate_up.shape
+    assert n % 2 == 0, f"expected [gate|up] input, got last dimension {n}"
+    hidden_size = n // 2
+    assert hidden_size % (4 * MX_BLOCK) == 0, (
+        f"hidden size {hidden_size} must be a multiple of {4 * MX_BLOCK}"
+    )
+
+    output_q = torch.empty(
+        (m, hidden_size), dtype=torch.float8_e4m3fn, device=gate_up.device
+    )
+    output_scale = create_mxfp8_packed_scale(m, hidden_size, gate_up.device)
+    if m == 0:
+        return output_q, output_scale
+
+    groups_per_row = hidden_size // MX_BLOCK
+    packs_per_row = groups_per_row // 4
+    # Keep vLLM's tuned group-32 persistent layout: 8 packed-scale columns
+    # (1024 values) per CTA, with one row per CTA for large prefill.
+    packs_per_cta = 8
+    block_m = 1
+    grid = (
+        triton.cdiv(packs_per_row, packs_per_cta),
+        min(triton.cdiv(m, block_m), 4096),
+    )
+    with torch.cuda.device(gate_up.device):
+        _silu_mul_mxfp8_quant_act_packed_kernel[grid](
+            gate_up,
+            output_q,
+            output_scale,
+            m,
+            gate_up.stride(0),
+            output_q.stride(0),
+            output_scale.stride(1),
+            N=n,
+            GROUPS_PER_ROW=groups_per_row,
+            PACKS_PER_ROW=packs_per_row,
+            PACKS_PER_CTA=packs_per_cta,
+            BLOCK_M=block_m,
+            GROUP_SIZE=MX_BLOCK,
+            num_warps=4,
+            num_stages=2,
+        )
+    return output_q, output_scale
 
 
 def _use_fused_quant(x: torch.Tensor) -> bool:

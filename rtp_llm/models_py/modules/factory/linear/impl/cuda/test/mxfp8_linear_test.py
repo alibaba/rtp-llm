@@ -7,10 +7,12 @@ from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
     MX_BLOCK,
     _pack_flashinfer_mxfp8_scale,
     mxfp8_quant_act_packed_fused,
+    silu_mul_mxfp8_quant_act_packed_fused,
 )
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
     CudaMxfp8Linear,
 )
+from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 
 # DeepGEMM's default relative JIT path is not stable under Bazel's launcher.
@@ -82,6 +84,41 @@ class Mxfp8QuantActPackedTest(unittest.TestCase):
                 x[:, ::MX_BLOCK] = values
                 x[:, 1::MX_BLOCK] = -values
                 self._check_exact(x)
+
+    def _check_silu_mul_exact(self, gate_up: torch.Tensor) -> None:
+        import flashinfer
+
+        activated = flashinfer.activation.silu_and_mul(gate_up)
+        ref_q, ref_scale_u8 = flashinfer.mxfp8_quantize(
+            activated,
+            is_sf_swizzled_layout=False,
+            alignment=MX_BLOCK,
+            backend="cute-dsl",
+        )
+        ref_scale = _pack_flashinfer_mxfp8_scale(
+            ref_scale_u8, activated.shape[0], activated.shape[1]
+        )
+        actual_q, actual_scale = silu_mul_mxfp8_quant_act_packed_fused(gate_up)
+
+        self.assertTrue(
+            torch.equal(ref_q.view(torch.uint8), actual_q.view(torch.uint8))
+        )
+        self.assertEqual(ref_scale.stride(), actual_scale.stride())
+        self.assertTrue(torch.equal(ref_scale, actual_scale))
+
+    def test_silu_mul_mxfp8_matches_flashinfer_for_random_and_boundaries(self):
+        for m in (1, 3, 32):
+            with self.subTest(kind="random", m=m):
+                torch.manual_seed(20260918 + m)
+                gate_up = torch.randn(m, 4096, dtype=torch.bfloat16, device="cuda")
+                self._check_silu_mul_exact(gate_up)
+
+        for name, value in (("zero", 0.0), ("tiny", 2.0**-30)):
+            with self.subTest(kind=name):
+                gate_up = torch.full(
+                    (3, 4096), value, dtype=torch.bfloat16, device="cuda"
+                )
+                self._check_silu_mul_exact(gate_up)
 
 
 class CudaMxfp8LinearTest(unittest.TestCase):
@@ -165,6 +202,46 @@ class CudaMxfp8LinearTest(unittest.TestCase):
         expected = mlp(x)
         actual = mlp(x, x_fp8=x_q, x_scale=x_scale)
         self.assertTrue(torch.equal(actual, expected))
+
+    def _make_mxfp8_dense_mlp(self, fuse_silu_quant: bool) -> DenseMLP:
+        mlp = DenseMLP.__new__(DenseMLP)
+        torch.nn.Module.__init__(mlp)
+        mlp.up_proj = torch.nn.Identity()
+        mlp.down_proj = self.linear
+        mlp.act_fn = FusedSiluAndMul()
+        mlp._fuse_silu_quant = False
+        mlp._fuse_silu_mxfp8_quant = fuse_silu_quant
+        mlp.parallelism_config = type(
+            "Parallelism", (), {"get_ffn_tp_size": lambda self: 1}
+        )()
+        return mlp
+
+    def test_dense_mlp_mxfp8_silu_fusion_matches_unfused(self):
+        fused = self._make_mxfp8_dense_mlp(True)
+        unfused = self._make_mxfp8_dense_mlp(False)
+        for name, gate_up in (
+            (
+                "random",
+                torch.randn(
+                    4, 2 * self.K, dtype=torch.bfloat16, device=self.device
+                ),
+            ),
+            (
+                "zero",
+                torch.zeros(4, 2 * self.K, dtype=torch.bfloat16, device=self.device),
+            ),
+            (
+                "tiny",
+                torch.full(
+                    (4, 2 * self.K),
+                    2.0**-30,
+                    dtype=torch.bfloat16,
+                    device=self.device,
+                ),
+            ),
+        ):
+            with self.subTest(input=name):
+                self.assertTrue(torch.equal(fused(gate_up), unfused(gate_up)))
 
     def test_quant_and_linear_cuda_graph_replay(self):
         static_x = torch.randn(
