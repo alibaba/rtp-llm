@@ -290,6 +290,66 @@ class OpenaiEndpoint(object):
                 variants.append(ids)
         return sorted(variants, key=len, reverse=True)
 
+    def _think_end_id_variants(self) -> List[List[int]]:
+        """Token forms of the think end tag, longest first.
+
+        Derived from the same ``THINK_END_TAG`` the no-think excludes ban, so
+        "what the grammar forbids" and "what counts as an already-closed block"
+        cannot drift apart. Unlike ``_think_anchor_id_variants`` this takes no
+        ``config``: the end tag is a deployment constant, and ``end_think_token_ids``
+        is deliberately not used -- on DISABLED requests it is empty, and a
+        deployment may point it at a generic terminator token.
+        """
+        think_end_tag = normalize_think_tag(self.generate_env_config.think_end_tag)
+        variants: List[List[int]] = []
+        for text in (think_end_tag, think_end_tag.rstrip("\n")):
+            if not text:
+                continue
+            ids = self.tokenizer.encode(text, add_special_tokens=False)
+            if ids and ids not in variants:
+                variants.append(ids)
+        return sorted(variants, key=len, reverse=True)
+
+    def _prompt_inside_think_block(
+        self, config: GenerateConfig, input_ids: Optional[List[int]]
+    ) -> bool:
+        """Whether the prompt's last think boundary is an opener.
+
+        ``_request_prompt_has_think_anchor`` only looks at the tail, so a prompt
+        that already opened a block and continued it (a caller prefill behind the
+        template's anchor) reads as unanchored there. Masking the end tag in that
+        state would leave the block unclosable and the answer unreachable, so an
+        unterminated block is its own exemption. The scan walks backwards and
+        stops at the last boundary, so a prompt that does end near one is cheap.
+        A prompt with no think markup at all -- the main DISABLED shape -- has no
+        boundary to stop at and scans the whole prompt, but each token is a single
+        set-membership test against the boundary first-tokens, not a substring
+        match, so the pass stays linear and allocation-free.
+        """
+        if input_ids is None:
+            return False
+        start_variants = self._think_anchor_id_variants(config)
+        end_variants = self._think_end_id_variants()
+        start_first = {variant[0] for variant in start_variants}
+        end_first = {variant[0] for variant in end_variants}
+        boundary_first = start_first | end_first
+
+        def matches(position: int, variants: List[List[int]]) -> bool:
+            return any(
+                input_ids[position : position + len(variant)] == variant
+                for variant in variants
+            )
+
+        for position in range(len(input_ids) - 1, -1, -1):
+            token_id = input_ids[position]
+            if token_id not in boundary_first:
+                continue
+            if token_id in end_first and matches(position, end_variants):
+                return False
+            if token_id in start_first and matches(position, start_variants):
+                return True
+        return False
+
     def _reasoning_format_for_prompt(
         self,
         config: GenerateConfig,
@@ -301,7 +361,7 @@ class OpenaiEndpoint(object):
             ThinkingMode.ENABLED,
             ThinkingMode.ADAPTIVE,
         ):
-            return None
+            return self._disabled_no_think_format(config, renderer, input_ids, request)
 
         base_format = renderer.get_reasoning_format()
         think_start_tag = normalize_think_tag(self.generate_env_config.think_start_tag)
@@ -343,6 +403,71 @@ class OpenaiEndpoint(object):
             tag_end=base_format.tag_end,
             suffix=base_format.suffix,
             no_think_excludes=base_format.no_think_excludes,
+        )
+
+    def _disabled_no_think_format(
+        self,
+        config: GenerateConfig,
+        renderer: CustomChatRenderer,
+        input_ids: Optional[List[int]],
+        request: Optional[ChatCompletionRequest],
+    ) -> Optional[ReasoningFormat]:
+        """Enforce no-think on a DISABLED request whose prompt is not mid-think.
+
+        ``thinking_mode=disabled`` is the deployer's statement that the request
+        must not reason. A hybrid reasoning checkpoint can still emit a think
+        block on its own -- after the template's closed empty block, or with no
+        think markup in the prompt at all -- and that text spends the caller's
+        whole ``max_new_tokens`` before the answer starts; the response path can
+        only re-route text that already exists. Keep the boundary tags out of
+        the grammar instead.
+
+        The exemptions are the shapes where the model already is (or was) asked
+        to think, and masking ``</think>`` there would leave the block unclosable
+        and the reply stuck in reasoning:
+
+        - an OPEN anchor at the end of the prompt (the template just injected
+          it), and
+        - a prompt inside an unterminated think block (a caller prefill behind
+          that anchor).
+
+        Two request shapes keep the previous behavior as well: a renderer that
+        installs its own grammar for this request (the engine accepts one grammar
+        field per request), and a caller structural_tag that already bounds an
+        any_text/any_tokens region (the envelope cannot wrap it).
+
+        This runs on the OpenAI endpoint path only; raw ``prompt`` callers and
+        the C++ api_server never reach it. Correct exclusion also depends on
+        ``THINK_START_TAG``/``THINK_END_TAG`` matching this deployment's template.
+        """
+        if not self.generate_env_config.enforce_no_think_on_disabled:
+            return None
+        if not renderer.emits_reasoning_stream:
+            return None
+        # ``request`` is Optional on this helper's signature (the tail-anchor and
+        # think-block probes accept a bare prompt); the renderer hook is declared
+        # for a concrete request, so only ask it when there is one. A None request
+        # carries no tool_choice/response_format, so the renderer cannot be about
+        # to install a grammar and the envelope is safe to apply.
+        if request is not None and renderer.installs_request_grammar(request):
+            return None
+        if self._request_prompt_has_think_anchor(config, input_ids, request):
+            return None
+        if self._prompt_inside_think_block(config, input_ids):
+            return None
+        base_format = renderer.get_reasoning_format()
+        # Exclude the bare tags, not the template's newline-suffixed forms:
+        # banning "<think>\n" alone would still admit a bare "<think>".
+        return ReasoningFormat(
+            tag_begin=normalize_think_tag(
+                self.generate_env_config.think_start_tag
+            ).rstrip("\n"),
+            tag_end=normalize_think_tag(self.generate_env_config.think_end_tag).rstrip(
+                "\n"
+            ),
+            suffix=base_format.suffix,
+            no_think_excludes=base_format.no_think_excludes,
+            enforce_no_think=True,
         )
 
     def _tokenize_request_stop_words(self, stop_words: List[str]) -> List[List[int]]:

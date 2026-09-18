@@ -1,0 +1,157 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "grammar_constraint_only": true,
+    "_comment": "No-think contract for a DISABLED request (production shape: server think_mode=0). thinking_mode=disabled declares this request must not reason, yet a hybrid reasoning checkpoint can still emit a think block on its own and spend the whole max_tokens inside it; the renderer can only re-route text that already exists, so the endpoint keeps the boundary tags out of the grammar (structural_tag: any_text + excludes). Two prompt shapes trigger it -- the template's closed empty block (enable_thinking=false) and templates with no think markup at all; a prompt ending on an OPEN anchor is exempt because the template itself asked the model to think. On this model only the closed-block shape is reachable (the Qwen3.5 template injects an anchor when enable_thinking is absent); the no-markup shape seen on the qwen_3 deployment is covered by generate_config_test instead. Three queries: (1) engine enforces that envelope -- content must contain no <think>/</think>; (2) thinking off still answers -- content must be exactly one digit; (3) production shape with NO caller response_format, where the endpoint compiles the envelope itself -- no-break guard only, because OpenaiComparer skips constraint validation when the query declares no response_format (the auto-compilation contract is covered by generate_config_test and by checking generate_config.structural_tag in /v1/chat/render). Queries (1) and (2) declare exactly the constraint the endpoint compiles for (3) when the caller declares nothing, so the engine-side contract is identical across all three. grammar_constraint_only=true: reasoning_content/usage/timing are model-version-dependent, so validate the constraint only, never golden bytes.",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你是电商场景的售前/售后判别助手。只输出一个阿拉伯数字：\"1\" 表示售后，\"2\" 表示售前，\"0\" 表示不确定；禁止输出任何解释、标点或其他字符。"
+                    },
+                    {
+                        "role": "user",
+                        "content": "图片展示某电商 App 上运动鞋的商品页面，包含商品主图、上脚实拍图、价格 ¥404 及“立即购买”按钮。"
+                    }
+                ],
+                "response_format": {
+                    "type": "structural_tag",
+                    "structural_tag": {
+                        "type": "structural_tag",
+                        "format": {
+                            "type": "any_text",
+                            "excludes": ["<think>", "</think>"]
+                        }
+                    }
+                },
+                "max_tokens": 24,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{}",
+                            "reasoning_content": null
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                },
+                "aux_info": null,
+                "_comment": "constraint_only — the validator asserts <think>/</think> never appear in content (xgrammar excludes guarantee); content/usage/aux_info are filled in from actual when the constraint validates."
+            },
+            "_comment": "Engine enforcement of the answer-mode no-think envelope. Without the grammar the model spends the budget inside a re-opened think block; with it that token path is masked, so the think markers cannot appear. This declared shape is bit-identical to what the endpoint compiles for query (3)."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你是电商场景的售前/售后判别助手。只输出一个阿拉伯数字：\"1\" 表示售后，\"2\" 表示售前，\"0\" 表示不确定；禁止输出任何解释、标点或其他字符。"
+                    },
+                    {
+                        "role": "user",
+                        "content": "图片展示某电商 App 上运动鞋的商品页面，包含商品主图、上脚实拍图、价格 ¥404 及“立即购买”按钮。"
+                    }
+                ],
+                "response_format": {
+                    "type": "regex",
+                    "pattern": "[012]"
+                },
+                "max_tokens": 24,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "2",
+                            "reasoning_content": null
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                },
+                "aux_info": null,
+                "_comment": "constraint_only — re.fullmatch('[012]', content) must hold."
+            },
+            "_comment": "Thinking-off answer quality: the fullmatch rejects every failure shape of this bug -- a re-opened think block in content, a markdown fence, empty content after the budget was burnt, or a multi-token explanation. A regression that makes the model think instead of answer fails here."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你是电商场景的售前/售后判别助手。只输出一个阿拉伯数字：\"1\" 表示售后，\"2\" 表示售前，\"0\" 表示不确定；禁止输出任何解释、标点或其他字符。"
+                    },
+                    {
+                        "role": "user",
+                        "content": "图片展示某电商 App 上运动鞋的商品页面，包含商品主图、上脚实拍图、价格 ¥404 及“立即购买”按钮。"
+                    }
+                ],
+                "max_tokens": 24,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "2",
+                            "reasoning_content": null
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                },
+                "aux_info": null,
+                "_comment": "No-break guard: the comparer validates nothing here, but a request that errors out (e.g. the engine rejecting the compiled structural_tag) still fails the case."
+            },
+            "_comment": "Production shape: the caller declares no response_format, so the endpoint has to compile the no-think envelope itself (answer-mode prompt + thinking DISABLED on a reasoning renderer). Catches the worst regression of this fix -- a request that no longer gets served because the grammar backend rejects the envelope -- and documents the shape the deployed classifier uses."
+        }
+    ]
+}

@@ -99,6 +99,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_IMAGE_MAX_FILE_SIZE_KB"] = "2048"
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
+        os.environ["ENFORCE_NO_THINK_ON_DISABLED"] = "0"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
         os.environ["ENABLE_FA4_SPEC_DECODE"] = "0"
 
@@ -182,6 +183,11 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.vit_config.mm_image_max_file_size_kb, 2048)
         self.assertEqual(py_env_configs.vit_config.mm_video_max_file_size_kb, 4096)
         self.assertEqual(py_env_configs.generate_env_config.think_mode, "adaptive")
+        # ENFORCE_NO_THINK_ON_DISABLED=0 is the deployment rollback for the
+        # DISABLED no-think grammar; it must reach GenerateEnvConfig.
+        self.assertFalse(
+            py_env_configs.generate_env_config.enforce_no_think_on_disabled
+        )
         self.assertEqual(
             py_env_configs.jit_config.remote_jit_dir,
             "dfs://bucket/jit/cache",
@@ -237,6 +243,8 @@ class ServerArgsSetTest(TestCase):
             "--disable_flashinfer_hybrid_prefill",
             "true",
             "--enable_fa4_spec_decode",
+            "false",
+            "--enforce_no_think_on_disabled",
             "false",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
@@ -308,6 +316,11 @@ class ServerArgsSetTest(TestCase):
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_native)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
         self.assertFalse(py_env_configs.fmha_config.enable_fa4_spec_decode)
+
+        # --enforce_no_think_on_disabled false turns the default-on hardening off.
+        self.assertFalse(
+            py_env_configs.generate_env_config.enforce_no_think_on_disabled
+        )
 
     def test_model_warm_up_env_and_global_master(self):
         os.environ["WARM_UP"] = "0"

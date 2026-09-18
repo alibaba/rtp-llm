@@ -72,6 +72,18 @@ def init_generate_group_args(parser, generate_env_config):
         help="思考阶段被特殊 token 立刻终止时的 token id(DSV4 默认为 1);<=0 表示禁用该路径",
     )
     generate_group.add_argument(
+        "--enforce_no_think_on_disabled",
+        env_name="ENFORCE_NO_THINK_ON_DISABLED",
+        bind_to=(generate_env_config, "enforce_no_think_on_disabled"),
+        type=str2bool,
+        default=True,
+        help=(
+            "thinking_mode=disabled 时，若渲染后的 prompt 不在开放 think 锚点内，"
+            "禁止生成 think 边界标记（防止推理模型自发思考吃满 max_new_tokens）；"
+            "置 0 可按部署回退到只剥离不禁止"
+        ),
+    )
+    generate_group.add_argument(
         "--generation_config_path",
         env_name="GENERATION_CONFIG_PATH",
         bind_to=(generate_env_config, "generation_config_path"),

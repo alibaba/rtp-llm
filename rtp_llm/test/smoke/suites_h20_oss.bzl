@@ -299,6 +299,15 @@ def h20_oss_suites():
                 gpu_type = ["H20"],
                 concurrency_test = True,
             ),
+            # Answer-mode no-think envelope: thinking OFF + enable_thinking=false, the shape the
+            # production classifier deploys. Asserts the model answers instead of re-opening <think>.
+            smoke_test(
+                name = "qwen35_answer_mode_no_think",
+                task_info = "data/model/qwen35/q_r_no_think_answer_mode.json",
+                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --warm_up 0 --think_mode 0 --load_method scratch",
+                envs = ["NCCL_DISABLE_ABORT=1", "NCCL_DEBUG=INFO", "LOG_LEVEL=INFO", "PYTHONUNBUFFERED=TRUE"],
+                gpu_type = ["H20"],
+            ),
             # PD + MTP + grammar + reasoning — highest-risk axis stack.
             smoke_test(
                 name = "qwen35_grammar_pd_mtp_reasoning",
