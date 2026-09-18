@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -133,6 +134,16 @@ public:
     }
 
     virtual ErrorResult<GenerateOutputs> nextOutput() = 0;
+    // Cancellation-aware variant. A stream that produces no output -- a non-streaming PD decode, which
+    // only emits once it is finished -- leaves a caller blocked here for the whole generation, so a
+    // cancellation that no output would ever reveal cannot be honoured. Implementations wait in
+    // bounded slices and re-evaluate `is_cancelled` between them, returning ErrorCode::CANCELLED when
+    // it fires. The default ignores the predicate and defers to nextOutput(), which keeps every
+    // existing override and mock valid.
+    virtual ErrorResult<GenerateOutputs> nextOutput(const std::function<bool()>& is_cancelled) {
+        (void)is_cancelled;
+        return nextOutput();
+    }
     virtual bool                         hasOutput() {
         return false;
     }

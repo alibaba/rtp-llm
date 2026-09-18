@@ -501,6 +501,15 @@ class FrontendServer(object):
             # its finally chain down to the model-RPC client's response_iterator.cancel(); that gRPC
             # cancellation is what makes the backend release the stream, its KV blocks and its
             # admission slot. Await it first so the generator is no longer running when it is closed.
+            #
+            # Log it: an abandoned request is an operational event, and this is the first link of
+            # the cancellation chain (frontend detection -> RPC cancel -> prefill downstream cancel
+            # -> decode stream removal and KV release). Without a timestamp here the latency of the
+            # remaining links cannot be attributed.
+            logging.warning(
+                "request [%s] client disconnected during generation; cancelling the backend call",
+                req.get(request_id_field_name),
+            )
             drain.cancel()
             try:
                 await drain

@@ -143,6 +143,22 @@ cc_test(
     exec_properties = {'gpu':'H20'},
 )
 
+# CPU-only: an in-process gRPC pair (no torch, no device, no engine) that pins native cancellation
+# propagation from an upstream server call to the downstream prefill->decode call. Depends on the
+# generated service alone so it stays runnable without a GPU.
+cc_test(
+    name = "grpc_cancellation_propagation_test",
+    srcs = [
+        "GrpcCancellationPropagationTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_test(
     name = "rpc_server_runtime_meta_test",
     srcs = [

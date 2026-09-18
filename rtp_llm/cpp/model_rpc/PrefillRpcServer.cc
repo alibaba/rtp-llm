@@ -285,7 +285,34 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
-    auto    client_context     = std::make_shared<ClientContext>();
+    // Link this downstream call to the upstream server call so cancellation propagates natively.
+    //
+    // A prefill handler spends nearly all of its life blocked in client_stream->Read(), and the only
+    // isRequestCancelled() evaluations are inside the read loop, so an upstream client disconnect was
+    // not acted on until the decode leg happened to produce another output. Until then the downstream
+    // call kept its decode-side engine stream, KV blocks and admission slot, and a replacement request
+    // for that rank queued behind them.
+    //
+    // FromServerContext makes the upstream call this call's C-core parent with
+    // GRPC_PROPAGATE_CANCELLATION (part of GRPC_PROPAGATE_DEFAULTS). When the upstream call receives its
+    // final op the core walks the parent's child list and cancels every inheriting child, which
+    // unblocks the pending Read() immediately -- no watcher thread and no polling.
+    //
+    // Deadline propagation is DISABLED deliberately: the core would take GPR_MIN(our deadline, the
+    // parent's), silently replacing the explicit policy below with the upstream call's deadline. Keep
+    // deriving it here so retries and callers without a server context behave exactly as before.
+    //
+    // server_context is null on the deferred batch path -- PrefillBatchRpcServer builds its slot
+    // contexts on a prepare-resource worker thread after the EnqueueBatch handler has returned, so
+    // there is no live server call to inherit from (the core also asserts the parent is a server call).
+    // That path keeps driving cancellation through cancel_state / tryCancelDownstream().
+    std::shared_ptr<ClientContext> client_context;
+    if (prefill_context.server_context != nullptr) {
+        client_context = ClientContext::FromServerContext(*prefill_context.server_context,
+                                                         grpc::PropagationOptions().disable_deadline_propagation());
+    } else {
+        client_context = std::make_shared<ClientContext>();
+    }
     auto    request_timeout_ms = prefill_context.request_timeout_ms;
     auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
     int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
@@ -530,6 +557,15 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             prefill_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, "request output consumer closed");
             return;
         }
+    }
+    // The read loop also ends when the downstream call itself ends -- including when the core cancels
+    // it because the upstream client went away (the propagation set up in remoteAllocateResource).
+    // That is the moment this leg stops holding the decode-side stream, so make it observable instead
+    // of silent: right after this returns, the context destructor's stopStream() dequeues the stream
+    // from the runtime meta and lets the scheduler drive it to FINISHED, which releases its resources.
+    if (prefill_context.isRequestCancelled()) {
+        RTP_LLM_LOG_WARNING(
+            "request [%ld] downstream ended while cancelled by user; releasing the decode stream", request_id);
     }
     auto status = prefill_context.closeGrpcStream();
     if (!status.ok() && status.error_code() != grpc::StatusCode::CANCELLED) {

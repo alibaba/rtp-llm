@@ -1,12 +1,46 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include <chrono>
+#include <functional>
+#include <mutex>
 
 namespace rtp_llm {
 
+namespace {
+// The queue's own waitNotEmpty() slices on autil's DEF_WAIT_TIME (1 s). Wait on our own condition
+// variable instead so the slice is short enough to re-check the caller's cancellation predicate
+// promptly: a producer's notify keeps an arriving output immediate, while the bounded slice bounds how
+// long a stream producing nothing -- queued behind admission, stalled, or a non-streaming PD decode
+// that only emits once it finishes -- can park before the predicate is evaluated again. 100 ms keeps
+// that far under a second at a handful of wakeups per blocked stream, so it is a timed wait and not a
+// busy-poll.
+constexpr auto kOutputWaitSlice = std::chrono::milliseconds(100);
+}  // namespace
+
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
+    return nextOutput(std::function<bool()>());
+}
+
+ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(const std::function<bool()>& is_cancelled) {
     // TODO(xinfei.sxf) 某些case下会出现1s的等待
     while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
+        // Without this, a cancellation could only be observed AFTER an output arrived -- which for a
+        // non-streaming PD decode never happens until the generation ends, so an abandoned request
+        // held its admission slot, KV blocks and per-rank capacity for the whole generation. The RPC
+        // layer passes its gRPC context's IsCancelled(); the propagation set up on the prefill's
+        // downstream ClientContext is what makes that flag become true.
+        if (is_cancelled && is_cancelled()) {
+            return ErrorInfo(ErrorCode::CANCELLED, "request cancelled while waiting for an output");
+        }
         checkTimeout();
-        generate_outputs_queue_.waitNotEmpty();
+        // Clear the flag before re-testing emptiness so a push landing between the test and the wait
+        // still wakes us; a notify missed entirely is bounded by the slice anyway.
+        output_wait_->wake.store(false, std::memory_order_release);
+        if (generate_outputs_queue_.isEmpty()) {
+            std::unique_lock<std::mutex> lock(output_wait_->mu);
+            output_wait_->cv.wait_for(lock, kOutputWaitSlice, [this] {
+                return output_wait_->wake.load(std::memory_order_acquire) || !generate_outputs_queue_.isEmpty();
+            });
+        }
     }
     if (hasError()) {
         return statusInfo();
@@ -154,6 +188,11 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
     } else {
         generate_outputs_queue_.push(std::move(generate_results));
     }
+    // Wake a nextOutput() waiter on BOTH branches: the error branch is a terminal transition, so a
+    // waiter must not sit out the rest of its slice before observing it. An atomic store plus a notify
+    // keeps this off the producer's lock path -- this runs while the stream mutex_ is held.
+    output_wait_->wake.store(true, std::memory_order_release);
+    output_wait_->cv.notify_all();
 }
 
 void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
