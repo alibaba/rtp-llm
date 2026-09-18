@@ -2712,7 +2712,7 @@ class AttentionFP8(nn.Module):
             return False
         if self.compress_ratio == 0:
             return False
-        if self.compress_ratio not in (4, 128):
+        if self.compress_ratio not in (1, 2, 4, 128):
             return False
         if common.device.type != "cuda":
             return False
