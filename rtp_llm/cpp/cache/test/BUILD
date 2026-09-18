@@ -415,3 +415,28 @@ cc_test(
     ],
     env = {},
 )
+
+cc_test(
+    name = "single_type_kv_cache_allocator_update_test",
+    srcs = ["SingleTypeKVCacheAllocatorUpdateTest.cc"],
+    copts = copts(),
+    deps = [
+        ":cache_config_test_utils",
+        ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:kv_cache_allocator",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + select({
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+        ],
+        "//conditions:default": [
+            "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        ],
+    }) + cuda13_torch_link_deps,
+    env = {
+        "LOG_LEVEL": "ERROR",
+    },
+    exec_properties = {"gpu": "A10"},
+)
