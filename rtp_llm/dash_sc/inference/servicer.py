@@ -1191,6 +1191,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
         grammar_validator: Optional[GrammarValidator] = None,
+        model_type: str = "",
     ):
         self._backend_visitor = backend_visitor
         self._ip = ip
@@ -1227,6 +1228,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._server_id = to_optional_int(server_id)
         self._rep_cfg = repetition_monitor_config or RequestRepetitionMonitorConfig()
         self._grammar_validator = grammar_validator
+        self._model_type = model_type
 
     async def _validate_request_grammar(
         self, sampling: SamplingParams, request_id: str
@@ -1371,7 +1373,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     request.model_name,
                 )
                 try:
-                    input_ids, sampling, other = parse_dash_sc_grpc_request(request)
+                    input_ids, sampling, other = parse_dash_sc_grpc_request(
+                        request, model_type=self._model_type
+                    )
                 except (DashScParameterError, DashScInputIdsError) as e:
                     if first_request:
                         record.record_request_frame(request)
