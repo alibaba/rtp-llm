@@ -1631,6 +1631,7 @@ class RopeStyle:
     def value(self) -> int:
         ...
 class RuntimeConfig:
+    output_dispatcher_worker_count: int
     max_block_size_per_item: int
     max_generate_batch_size: int
     model_name: str

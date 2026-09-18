@@ -455,6 +455,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["ENABLE_CUDA_GRAPH"] = "1"
         os.environ["GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS"] = "4"
         os.environ["GENERATION_PREFILL_CAPTURE_CONFIG"] = "64,128,256"
+        os.environ["OUTPUT_DISPATCHER_WORKER_COUNT"] = "3"
 
         sys.argv = ["prog"]
 
@@ -566,6 +567,9 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
             4,
         )
+        self.assertEqual(
+            py_env_configs.runtime_config.output_dispatcher_worker_count, 3
+        )
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -611,6 +615,8 @@ class ServerArgsSetTest(TestCase):
             "true",
             "--disable_flashinfer_hybrid_prefill",
             "true",
+            "--output_dispatcher_worker_count",
+            "4",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -687,6 +693,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
             HWKernelConfig().generation_prefill_capture_token_buckets,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.output_dispatcher_worker_count, 4
         )
 
     def test_generation_prefill_cuda_graph_cli_binding_and_validation(self):
@@ -1137,6 +1146,37 @@ class ServerArgsSetTest(TestCase):
         with self.assertRaisesRegex(ArgumentTypeError, "invalid literal") as caught:
             _parse_generation_prefill_capture_config("64,invalid")
         self.assertIsInstance(caught.exception.__cause__, ValueError)
+
+    def test_output_dispatcher_worker_count_boundaries(self):
+        from rtp_llm.server.server_args import server_args
+
+        for source in ("cli", "env", "env_only"):
+            for value in ("0", "2", "-1", "1.5", "invalid"):
+                with self.subTest(source=source, value=value):
+                    env = (
+                        {"OUTPUT_DISPATCHER_WORKER_COUNT": value}
+                        if source != "cli"
+                        else {}
+                    )
+                    args = (
+                        ["--output_dispatcher_worker_count", value]
+                        if source == "cli"
+                        else []
+                    )
+                    if source == "env_only":
+                        args = None
+                    with patch.dict(os.environ, env, clear=True), patch.object(
+                        sys, "argv", ["prog"]
+                    ):
+                        if value in ("0", "2"):
+                            configs = server_args.setup_args(args)
+                            self.assertEqual(
+                                configs.runtime_config.output_dispatcher_worker_count,
+                                int(value),
+                            )
+                        else:
+                            with self.assertRaises(SystemExit):
+                                server_args.setup_args(args)
 
     def test_model_warm_up_env_and_global_master(self):
         os.environ["WARM_UP"] = "0"

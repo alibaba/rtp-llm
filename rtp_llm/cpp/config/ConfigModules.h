@@ -489,6 +489,8 @@ struct RuntimeConfig {
     bool    warm_up_with_loss      = false;
     bool    model_warm_up          = true;
 
+    int output_dispatcher_worker_count = 0;
+
     // Scheduler configuration
     bool                       use_batch_decode_scheduler = false;
     BatchDecodeSchedulerConfig batch_decode_scheduler_config;
