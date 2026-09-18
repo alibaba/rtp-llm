@@ -715,6 +715,34 @@ class BuildPackagingContractTest(TestCase):
                 self.assertFalse(any(path.startswith(arg.split("=", 1)[1])
                                      for arg in config["tool"]["pytest"]["ini_options"]["addopts"]
                                      if arg.startswith("--ignore=")))
+        from rtp_llm.test.remote_tests.plugin import RemoteREAPIPlugin
+        from rtp_llm.test.remote_tests.remote_exec_rtp import RemoteRuntimeConfig
+        from rtp_llm.test.remote_tests.remote_timeout_policy import select_remote_timeout_policy
+
+        cpu_path = "rtp_llm/model_loader/test/test_pure_tp_preshard.py"
+        for name in ("py_ut_sm8x", "py_ut_oss_sm8x"):
+            profile = profiles[name]
+            self.assertEqual(profile["isolated_env"], {cpu_path: {"CUDA_VISIBLE_DEVICES": ""}})
+            plugin = object.__new__(RemoteREAPIPlugin)
+            plugin.workers = 4
+            plugin._collect_outputs = False
+            plugin.config = SimpleNamespace(
+                option=SimpleNamespace(markexpr=profile["markexpr"], keyword=""),
+                rootpath=PROJECT_ROOT,
+            )
+            plugin.timeout_policy = select_remote_timeout_policy(name, per_test=False)
+            runtime = RemoteRuntimeConfig(ignore_args=[], env_vars={},
+                                          platform_properties={"gpu": "A10", "gpu_count": "4"},
+                                          remote_setup_prefix="")
+            shell = plugin._build_session_command("", runtime, ci_profile=name)[2]
+            cpu_start = shell.index(f"--- Isolated file: {cpu_path} ---")
+            next_start = shell.index("--- Isolated file:", cpu_start + 20)
+            self.assertIn("device_resource.py env CUDA_VISIBLE_DEVICES= python -m pytest",
+                          shell[cpu_start:next_start])
+            self.assertEqual(shell.count("env CUDA_VISIBLE_DEVICES="), 1)
+        loader_source = (PROJECT_ROOT / "rtp_llm/model_loader/test/test_compressed_w8a8_int8_per_channel.py").read_text()
+        self.assertIn('pytest.mark.gpu(type="A10")', loader_source)
+        self.assertNotIn('pytest.mark.gpu(type="H20")', loader_source)
         sm120 = profiles["py_ut_sm120"]
         self.assertEqual(sm120["gpu_type"], "RTX_5000_PRO")
         self.assertEqual(len(sm120["paths"]), 7)
@@ -733,6 +761,7 @@ class BuildPackagingContractTest(TestCase):
             f"libth_{name}_py_wrapper_test.so"
             for name in ("context_parallel", "eplb")
         }
+        expected["//rtp_llm/cpp/cache/test:cache_config_creator_py_test"] = "libcache_config_creator_py_test.so"
         entries = setup_module._selected_bazel_staged_outputs("cuda12_9", ["--config=cuda12_9"])
         selected = [entry for entry in entries if entry[1] in expected]
         self.assertEqual({entry[1] for entry in selected}, set(expected))

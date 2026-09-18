@@ -2094,6 +2094,7 @@ class RemoteREAPIPlugin:
         profile_ignore_args = ""
         profile_isolated_paths: List[str] = []
         profile_isolated_gpu_counts: Dict[str, int] = {}
+        profile_isolated_env: Dict[str, Dict[str, str]] = {}
         require_isolated_tests = False
         forbid_skips = False
         profile_isolated_ignore_args = ""
@@ -2138,6 +2139,17 @@ class RemoteREAPIPlugin:
                     if prof.get("isolate_all_paths")
                     else prof.get("isolated_paths")
                 ) or []
+                isolated_env = prof.get("isolated_env", {})
+                if not isinstance(isolated_env, dict) or any(
+                    path not in isolated_paths
+                    or not isinstance(values, dict)
+                    or any(not isinstance(key, str)
+                           or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None
+                           or not isinstance(value, str)
+                           for key, value in values.items())
+                    for path, values in isolated_env.items()
+                ):
+                    raise ValueError("invalid isolated_env: expected selected paths and string environment values")
                 if isinstance(isolated_paths, list) and all(
                     isinstance(path, str) for path in isolated_paths
                 ):
@@ -2146,6 +2158,7 @@ class RemoteREAPIPlugin:
                         while worker_path.startswith("../"):
                             worker_path = worker_path[3:]
                         profile_isolated_paths.append(worker_path)
+                        profile_isolated_env[worker_path] = isolated_env.get(path, {})
                         profile_isolated_gpu_counts[worker_path] = prof.get(
                             "isolated_gpu_counts", {}
                         ).get(path, 1)
@@ -2271,6 +2284,13 @@ class RemoteREAPIPlugin:
             isolated_mark_arg = (
                 f"-m {shlex.quote(isolated_mark)} " if isolated_mark else ""
             )
+            # Apply legacy target env only to this pytest child, after the
+            # allocator reserves its device; never leak it into later phases.
+            isolated_env_args = " ".join(
+                shlex.quote(f"{key}={value}")
+                for key, value in profile_isolated_env.get(isolated_path, {}).items()
+            )
+            isolated_env_prefix = f"env {isolated_env_args} " if isolated_env_args else ""
             isolated_output = f"bazel-testlogs/pytest/test_isolated_{index}.xml"
             empty_guard = "" if require_isolated_tests else "[ $ec -ne 5 ] && "
             lines.append(
@@ -2280,6 +2300,7 @@ class RemoteREAPIPlugin:
                 "unset WORLD_SIZE; "
                 f"export GPU_COUNT_PER_WORKER={gpu_count}; "
                 "python rtp_llm/test/utils/device_resource.py "
+                f"{isolated_env_prefix}"
                 "python -m pytest -p no:remote-gpu -p no:rtp-ci-profile "
                 f"-p rtp_remote_nodeid_plugin -p rtp_remote_heartbeat_plugin {common} "
                 f"{shlex.quote(isolated_path)} "

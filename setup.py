@@ -748,6 +748,11 @@ _CUDA_PY_WRAPPER_TEST_BAZEL_STAGED_OUTPUTS = [
         "//rtp_llm/cpp/models/eplb/test:th_eplb_py_wrapper_test",
         (("libth_eplb_py_wrapper_test.so", "test/libth_eplb_py_wrapper_test.so"),),
     ),
+    (
+        _STAGED_OUTPUT_TEST,
+        "//rtp_llm/cpp/cache/test:cache_config_creator_py_test",
+        (("libcache_config_creator_py_test.so", "test/libcache_config_creator_py_test.so"),),
+    ),
 ]
 
 _CUDA13_RUNTIME_BAZEL_STAGED_OUTPUTS = [

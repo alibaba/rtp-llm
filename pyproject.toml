@@ -587,6 +587,8 @@ isolated_paths = [
     "rtp_llm/cpp/models/context_parallel/test/context_parallel_py_wrapper_test.py",
     "rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py",
 ]
+# Preserve the original CPU-only Bazel environment for this isolated file.
+isolated_env = { "rtp_llm/model_loader/test/test_pure_tp_preshard.py" = { CUDA_VISIBLE_DEVICES = "" } }
 markexpr = "not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke and not perf and not manual"
 
 [tool.rtp_llm.pytest_ci.profiles.py_ut_oss_sm8x]
@@ -644,6 +646,8 @@ isolated_paths = [
     "rtp_llm/cpp/models/context_parallel/test/context_parallel_py_wrapper_test.py",
     "rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py",
 ]
+# Preserve the original CPU-only Bazel environment for this isolated file.
+isolated_env = { "rtp_llm/model_loader/test/test_pure_tp_preshard.py" = { CUDA_VISIBLE_DEVICES = "" } }
 markexpr = "not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke and not perf and not manual and not open_skip and not frontend"
 
 [tool.rtp_llm.pytest_ci.profiles.py_ut_sm9x]

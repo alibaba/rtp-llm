@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-pytestmark = [pytest.mark.gpu(type="H20")]
+# The original Bazel target runs these 30 methods on A10.
+pytestmark = [pytest.mark.gpu(type="A10")]
 from rtp_llm.config.quant_config import (
     CompressedW8A8Int8PerChannelQuantConfig,
     Fp8PerChannelCompressedQuantConfig,
