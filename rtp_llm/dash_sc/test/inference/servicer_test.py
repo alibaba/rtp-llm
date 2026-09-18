@@ -629,6 +629,46 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("empty outputs_list", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
 
+    async def test_schema_errors_preserve_public_parameter_contract(self) -> None:
+        for at_enqueue in (False, True):
+            for message in (
+                'Unsupported type "String"',
+                "enum must be an array",
+                "required must be an array",
+            ):
+                with self.subTest(at_enqueue=at_enqueue, message=message):
+
+                    class InvalidSchemaStream(_FakeAsyncStream):
+                        async def __anext__(self):
+                            raise FtRuntimeException(
+                                ExceptionType.INVALID_PARAMS, message
+                            )
+
+                    stream = InvalidSchemaStream([])
+
+                    class InvalidSchemaVisitor:
+                        async def enqueue(self, generate_input):
+                            if at_enqueue:
+                                raise FtRuntimeException(
+                                    ExceptionType.INVALID_PARAMS, message
+                                )
+                            return stream
+
+                    chunks = await _drain(
+                        iter_real_model_stream_infer(
+                            self._minimal_request(),
+                            [1, 2],
+                            SamplingParams(),
+                            DashScRequestControls(),
+                            InvalidSchemaVisitor(),
+                            rtp_llm_request_id=1,
+                        )
+                    )
+                    self.assertEqual(len(chunks), 1)
+                    _assert_parameter_error_response(self, chunks[0], message)
+                    if not at_enqueue:
+                        self.assertTrue(stream.aclose_called)
+
     async def test_enqueue_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
 
