@@ -62,6 +62,10 @@ from rtp_llm.models_py.triton_kernels.fla.chunk import (
     is_flydsl_chunk_gdn_enabled,
     is_flydsl_chunk_gdn_shape_supported,
 )
+from rtp_llm.models_py.triton_kernels.fla.flashinfer_decode import (
+    flashinfer_gdn_decode,
+    gdn_decode_backend,
+)
 from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
@@ -878,6 +882,29 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         )
 
         ssm_states = self._get_ssm_states(kv_cache_tensor)
+        if (
+            torch.version.hip is None
+            and gdn_decode_backend() == "flashinfer"
+            and not is_target_verify
+            and seq == 1
+        ):
+            core_attn_out = flashinfer_gdn_decode(
+                q=query,
+                k=key,
+                v=value,
+                a=a,
+                b=b,
+                A_log=self.alog,
+                dt_bias=self.dt_bias,
+                initial_state=ssm_states,
+                block_map=self._get_fla_block_map(attn_inputs),
+                sequence_lengths_plus_1=attn_inputs.sequence_lengths_plus_1_device,
+                seq_size_per_block=seq_size_per_block,
+            )
+            return core_attn_out.reshape(
+                [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
+            )
+
         block_map = attn_inputs.kv_cache_kernel_block_id_device
         cache_entry = None
         # The state-index adapter resolves one recurrent transition per request.
@@ -1001,7 +1028,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         is_target_verify = self._is_target_verify(attn_inputs, attn_meta)
         g = None
         beta = None
-        if torch.version.hip is None and not is_target_verify:
+        if torch.version.hip is None and not is_target_verify and gdn_decode_backend() != "flashinfer":
             batch, seq = self._get_bs_from_attenion_input(
                 mixed_qkv, attn_inputs, is_target_verify
             )
