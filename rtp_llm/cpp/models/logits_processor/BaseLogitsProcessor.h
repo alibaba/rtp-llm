@@ -40,6 +40,15 @@ public:
     virtual int64_t finishedThinkOutputLen() const {
         return -1;
     }
+    // Generated-token offset at which budget-forced closing started, or -1.
+    virtual int64_t forcedThinkEndOffset() const {
+        return -1;
+    }
+    virtual int64_t forcedThinkEndOffsetAfter(const torch::Tensor& new_tokens, int32_t num_new_tokens) const {
+        (void)new_tokens;
+        (void)num_new_tokens;
+        return forcedThinkEndOffset();
+    }
     void          memFill(const torch::Tensor& new_tokens_logits, size_t vocab_size, size_t index);
     void          maskLogits(torch::Tensor& new_token_logits, const torch::Tensor& vocab_mask);
     torch::Tensor generateVocabMask(size_t                                  batch_size,

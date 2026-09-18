@@ -462,6 +462,7 @@ def trans_output(
                 context_execute_time_with_cache_us=(
                     aux_info_pb.context_execute_time_with_cache_us
                 ),
+                forced_think_end=aux_info_pb.forced_think_end,
                 aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,
             )

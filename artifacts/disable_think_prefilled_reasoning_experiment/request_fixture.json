@@ -1,0 +1,73 @@
+{
+  "model_type": "glm_5",
+  "model_path": "/data4/GLM-5.2-FP8",
+  "query_result": [
+    {
+      "endpoint": "/__dash_sc_grpc__",
+      "query": {
+        "input_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25,
+          7487,
+          154827,
+          99032,
+          109611,
+          105087,
+          220,
+          99457,
+          98845,
+          103767,
+          220,
+          154828,
+          154841,
+          16,
+          13,
+          3070,
+          99158,
+          103424,
+          5122,
+          1019,
+          262,
+          154842
+        ],
+        "generate_config": {
+          "max_new_tokens": 500,
+          "num_return_sequences": 1,
+          "frequency_penalty": 0,
+          "presence_penalty": 0,
+          "repetition_penalty": 1,
+          "temperature": 1,
+          "top_k": 0,
+          "top_p": 0.95,
+          "min_new_tokens": 0,
+          "return_logprobs": false,
+          "top_logprobs": 0,
+          "random_seed": 42
+        },
+        "enable_thinking": false,
+        "input_ints": {
+          "n": 1,
+          "top_logprobs": 0
+        },
+        "grpc_timeout_seconds": 600,
+        "stop_when_requirements_met": false,
+        "yield_generator": true
+      },
+      "result": {
+        "min_generated_ids": 1,
+        "parameters_equal": {
+          "max_new_tokens": 500
+        },
+        "forbidden_parameters": [
+          "generate_think_token_num"
+        ]
+      }
+    }
+  ]
+}

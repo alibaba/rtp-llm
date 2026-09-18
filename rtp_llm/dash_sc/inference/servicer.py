@@ -20,6 +20,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any, AsyncIterator, Callable, Iterator, Optional
 
 import torch
@@ -510,6 +511,7 @@ class _ThinkRuntime:
     bos_tokens: tuple[int, ...] = ()
     eos_tokens: tuple[int, ...] = ()
     empty_tokens: tuple[int, ...] = ()
+    max_seq_len: int = 0
     close_token_id: Optional[int] = None
     terminate_token_id: Optional[int] = None
     phase2_enabled: bool = False
@@ -525,6 +527,7 @@ def build_think_runtime(
     terminate_token_id: Optional[int] = _DEFAULT_TERMINATE_TOKEN_ID,
     eos_token_id: Optional[int] = None,
     max_token_id: Optional[int] = None,
+    max_seq_len: int = 0,
 ) -> _ThinkRuntime:
     """Pre-compute the per-startup think/dashllm snapshot.
 
@@ -564,14 +567,18 @@ def build_think_runtime(
     think_end_tag = _decode_env_tag(generate_env_config, "think_end_tag")
     bos_tokens = tuple(_encode_tag(tokenizer, think_start_tag))
     eos_tokens = tuple(_encode_tag(tokenizer, think_end_tag))
-    empty_tokens = tuple(
-        _encode_tag(tokenizer, think_start_tag + _EMPTY_THINK_BODY + think_end_tag)
+    empty_think_text = (
+        "<think></think>"
+        if _is_glm5(model_type)
+        else think_start_tag + _EMPTY_THINK_BODY + think_end_tag
     )
+    empty_tokens = tuple(_encode_tag(tokenizer, empty_think_text))
     close_token_id = int(eos_tokens[0]) if eos_tokens else None
     phase2_enabled = (_is_deepseek_v4(model_type) or _is_glm5(model_type)) and bool(
         empty_tokens
     )
     return _ThinkRuntime(
+        max_seq_len=max_seq_len,
         bos_tokens=bos_tokens,
         eos_tokens=eos_tokens,
         empty_tokens=empty_tokens,
@@ -1054,6 +1061,9 @@ async def iter_real_model_stream_infer(
         request_shape = list(request.inputs[0].shape) if request.inputs else None
         chunk_idx = 0
         phase2_needed = False
+        forced_phase2_input_ids: Optional[list[int]] = None
+        forced_phase2_max_new_tokens: Optional[int] = None
+        forced_phase2_prompt_usage: Optional[tuple[int, int]] = None
         # One-shot guard: ``phase2_triggered`` flips True the instant we
         # commit to phase-2 (before the ``await backend_visitor.enqueue``
         # below). It pins the invariant "at most ONE phase-2 enqueue per
@@ -1062,6 +1072,11 @@ async def iter_real_model_stream_infer(
         # ``phase2_triggered`` blocks the second entry. Tracking only one
         # boolean keeps the guard cheap on the hot path.
         phase2_triggered = False
+        phase1_start = (
+            monotonic()
+            if phase2_enabled and (generate_config.timeout_ms or 0) > 0
+            else 0.0
+        )
         stream = await backend_visitor.enqueue(generate_input)
         async for go in stream:
             chunk_idx += 1
@@ -1090,6 +1105,7 @@ async def iter_real_model_stream_infer(
             ids_for_accounting = generated_ids
             if should_echo and not echoed and generated_ids:
                 ids_for_accounting = matched_echo_ids + generated_ids
+            forced_close = False
             close_offset: Optional[int] = None
             term_offset: Optional[int] = None
             if generate_think_token_num is None:
@@ -1111,14 +1127,18 @@ async def iter_real_model_stream_infer(
                 if close_offset is not None and (
                     term_offset is None or close_offset < term_offset
                 ):
-                    generate_think_token_num = (
-                        len(cumulative_sent_ids) + close_offset + 1
+                    forced_close = (
+                        phase2_enabled
+                        and not phase2_triggered
+                        and bool(getattr(aux_info, "forced_think_end", False))
                     )
-                    # Natural ``</think>`` close keeps the stream single-phase
-                    # (DashLLM-aligned). Phase-2 is exclusively triggered by
-                    # the terminate-token-id (DSV4 token 1) path below — see
-                    # the comment block near ``phase2_triggered`` init.
-            if (
+                    if not forced_close:
+                        # Natural close (including older backends without the
+                        # explicit reason) remains a single-phase continuation.
+                        generate_think_token_num = (
+                            len(cumulative_sent_ids) + close_offset + 1
+                        )
+            if forced_close or (
                 phase2_enabled
                 and not phase2_triggered
                 and term_id is not None
@@ -1126,7 +1146,23 @@ async def iter_real_model_stream_infer(
                 and generated_ids
                 and term_id in generated_ids
             ):
-                term_index = generated_ids.index(term_id)
+                term_index = generated_ids.index(
+                    think_close_token_id if forced_close else term_id
+                )
+                if forced_close:
+                    # Match the DashLLM GLM policy: discard the truncated
+                    # reasoning and restart from the original prompt plus an
+                    # empty, already-closed think block. Retaining incomplete
+                    # reasoning makes GLM continue its analysis in content.
+                    forced_phase2_prompt_usage = (
+                        prompt_token_num,
+                        prompt_cached_token_num,
+                    )
+                    forced_phase2_input_ids = _phase2_input_ids_for_deepseek_v4(
+                        input_ids_list,
+                        matched_think_bos_ids,
+                        list(runtime.empty_tokens),
+                    )
                 generated_ids = _slice_generate_output_token_span(out_py, 0, term_index)
                 ids_for_accounting = generated_ids
                 if should_echo and not echoed and generated_ids:
@@ -1135,7 +1171,37 @@ async def iter_real_model_stream_infer(
                     ids_for_accounting
                 )
                 will_do_phase2 = True
-                if sampling.max_new_tokens_from_completion_alias:
+                if forced_close:
+                    generate_think_token_num += len(runtime.eos_tokens)
+                    generated_thinking = generate_think_token_num - len(
+                        matched_echo_ids
+                    )
+                    forced_phase2_max_new_tokens = max(
+                        0,
+                        max_new_tokens
+                        - (0 if max_tokens_exclude_thinking else generated_thinking),
+                    )
+                    if sampling.max_new_tokens_from_completion_alias:
+                        forced_phase2_max_new_tokens = min(
+                            forced_phase2_max_new_tokens,
+                            _phase2_max_new_tokens_for_completion_alias(
+                                sampling, generate_think_token_num
+                            ),
+                        )
+                    if (
+                        runtime.max_seq_len > 0
+                        and len(forced_phase2_input_ids) >= runtime.max_seq_len
+                    ):
+                        forced_phase2_max_new_tokens = 0
+                    will_do_phase2 = forced_phase2_max_new_tokens > 0
+                    logging.info(
+                        "[DashScGrpc] [%s] budget-forced think close: reasoning_tokens=%s "
+                        "answer_budget=%s, restart from empty think prompt",
+                        tag,
+                        generate_think_token_num,
+                        forced_phase2_max_new_tokens,
+                    )
+                elif sampling.max_new_tokens_from_completion_alias:
                     will_do_phase2 = (
                         _phase2_max_new_tokens_for_completion_alias(
                             sampling, generate_think_token_num
@@ -1421,12 +1487,9 @@ async def iter_real_model_stream_infer(
             stats = (0, None, None, len(input_ids_list), 0, ())
             yield (response, stats) if yield_access_stats else response
             return
-        # No implicit natural-finish phase-2 trigger here. DashLLM-aligned
-        # policy: phase-2 is exclusively initiated by terminate_token_id
-        # (DSV4 token 1) in the think phase. If phase-1 reaches stream end
-        # without ever emitting close or term token, treat the whole stream
-        # as reasoning content — do NOT silently restart with empty-think.
-        if phase2_needed:
+        # No implicit natural-finish replay. Only an explicit terminate token
+        # or the backend's budget-forced close can enter the second phase.
+        if phase2_needed or forced_phase2_input_ids is not None:
             await _close_async_stream_if_possible(stream, tag)
         if phase2_needed and not phase2_triggered:
             # One-shot pin BEFORE any await so a future / unexpected re-entry
@@ -1453,10 +1516,29 @@ async def iter_real_model_stream_infer(
                 )
         if phase2_needed:
             phase2_config = _clone_generate_config(generate_config)
+            if (
+                forced_phase2_input_ids is not None
+                and (generate_config.timeout_ms or 0) > 0
+            ):
+                remaining_ms = generate_config.timeout_ms - int(
+                    (monotonic() - phase1_start) * 1000
+                )
+                if remaining_ms <= 0:
+                    raise FtRuntimeException(
+                        ExceptionType.GENERATE_TIMEOUT,
+                        "request timed out before budget-forced reasoning continuation",
+                    )
+                phase2_config.timeout_ms = remaining_ms
+                if (phase2_config.ttft_timeout_ms or 0) > 0:
+                    phase2_config.ttft_timeout_ms = min(
+                        phase2_config.ttft_timeout_ms, remaining_ms
+                    )
             phase2_config.in_think_mode = False
             if hasattr(phase2_config, "thinking"):
                 phase2_config.thinking = False
-            if sampling.max_new_tokens_from_completion_alias:
+            if forced_phase2_max_new_tokens is not None:
+                phase2_config.max_new_tokens = forced_phase2_max_new_tokens
+            elif sampling.max_new_tokens_from_completion_alias:
                 phase2_config.max_new_tokens = (
                     _phase2_max_new_tokens_for_completion_alias(
                         sampling, generate_think_token_num
@@ -1467,8 +1549,12 @@ async def iter_real_model_stream_infer(
             # carried by request_log_tag (phase=2) and by the ``-2`` suffix on
             # the response infer.id (client-facing).
             phase2_config.trace_id = trace_str
-            phase2_input_ids = _phase2_input_ids_for_deepseek_v4(
-                input_ids_list, matched_think_bos_ids, list(runtime.empty_tokens)
+            phase2_input_ids = (
+                forced_phase2_input_ids
+                if forced_phase2_input_ids is not None
+                else _phase2_input_ids_for_deepseek_v4(
+                    input_ids_list, matched_think_bos_ids, list(runtime.empty_tokens)
+                )
             )
             phase2_request_id = (
                 phase2_request_id_factory()
@@ -1542,15 +1628,28 @@ async def iter_real_model_stream_infer(
                 ):
                     # model_rpc_client copies the final submitted role_addrs here.
                     access_agg.record_role_addrs(aux_info.role_addrs, phase="phase2")
+                if forced_phase2_prompt_usage is not None:
+                    prompt_token_num, prompt_cached_token_num = (
+                        forced_phase2_prompt_usage
+                    )
                 response = build_stream_response_from_generate_outputs(
                     dash_sc_request_id=f"{request.id}{_PHASE2_SUFFIX}",
                     model_name=request.model_name,
                     go=resp_go,
                     request_log_tag=phase2_tag,
-                    request_input_ids=phase2_input_ids,
+                    request_input_ids=(
+                        input_ids_list
+                        if forced_phase2_input_ids is not None
+                        else phase2_input_ids
+                    ),
+                    prompt_usage_override=forced_phase2_prompt_usage,
                     return_input_ids=other.return_input_ids,
                     is_streaming=is_streaming,
-                    generate_config=phase2_config,
+                    generate_config=(
+                        generate_config
+                        if forced_phase2_input_ids is not None
+                        else phase2_config
+                    ),
                     debug=other.debug,
                     eos_token_id=eos_id,
                     max_token_id=max_id,
@@ -1593,7 +1692,10 @@ async def iter_real_model_stream_infer(
             # cleanly. Pre-close chunks are buffered in ``phase2_pending``
             # until classification completes.
             phase2_pending: list[Any] = []
-            phase2_seen_close = False
+            # Forced-budget continuation already has a closed reasoning prefix;
+            # stream its answer immediately instead of buffering to stream end
+            # for the legacy empty-thinking replay's marker classification.
+            phase2_seen_close = forced_phase2_input_ids is not None
 
             def _flush_phase2_pending() -> (
                 Iterator[predict_v2_pb2.ModelStreamInferResponse]

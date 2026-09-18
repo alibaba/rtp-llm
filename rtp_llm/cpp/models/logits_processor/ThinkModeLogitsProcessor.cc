@@ -171,6 +171,10 @@ void advanceThinkStateForSpec(StreamThinkInfo& info, int32_t token_id) {
         return;
     }
 
+    if (isActiveThinkState(info) && !thinkEndCloseInProgress(info) && specThinkBudgetExhausted(info)
+        && token_id == info.end_think_token_ids.front()) {
+        info.forced_think_end_offset = info.current_output_length;
+    }
     info.current_output_length += 1;
     if (!isActiveThinkState(info) || info.max_thinking_tokens <= 0 || !info.dfa_ptr) {
         return;
@@ -226,6 +230,9 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
                 }
 
                 if (thinkEndCloseInProgress(info) || thinkBudgetExhausted(inputs, batch_idx, info)) {
+                    if (!thinkEndCloseInProgress(info)) {
+                        info.forced_think_end_offset = info.current_output_length;
+                    }
                     info.process_state = ThinkProcessState::CLOSING_THINK;
                     forceThinkEndToken(inputs.logits[batch_idx], info, inputs.vocab_size);
                     break;
@@ -330,6 +337,12 @@ void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int
                 continue;
             }
 
+            // Speculative row masks run on a copy. Mark the real state only
+            // when the forced close token survives rejection and is committed.
+            if (isActiveThinkState(info) && !thinkEndCloseInProgress(info) && specThinkBudgetExhausted(info)
+                && current_token_id == info.end_think_token_ids.front()) {
+                info.forced_think_end_offset = info.current_output_length;
+            }
             info.current_output_length += 1;
             if (!isActiveThinkState(info)) {
                 continue;
@@ -371,6 +384,33 @@ int64_t ThinkModeLogitsProcessor::finishedThinkOutputLen() const {
         return -1;
     }
     return snapshot->info.finishedThinkOutputLen();
+}
+
+int64_t ThinkModeLogitsProcessor::forcedThinkEndOffset() const {
+    auto snapshot = std::atomic_load_explicit(&spec_snapshot_, std::memory_order_acquire);
+    return snapshot && snapshot->eligible ? snapshot->info.forced_think_end_offset : -1;
+}
+
+int64_t ThinkModeLogitsProcessor::forcedThinkEndOffsetAfter(const torch::Tensor& new_tokens,
+                                                            int32_t              num_new_tokens) const {
+    auto snapshot = std::atomic_load_explicit(&spec_snapshot_, std::memory_order_acquire);
+    if (!snapshot || !snapshot->eligible) {
+        return -1;
+    }
+    const auto& info = snapshot->info;
+    if (info.forced_think_end_offset >= 0 || !isActiveThinkState(info)
+        || info.current_output_length + num_new_tokens <= info.bodyTokenBudget()) {
+        return info.forced_think_end_offset;
+    }
+    // Responses are prepared before updateStatus(). Preview only this packet's
+    // committed prefix; never publish draft/rejected tokens or mutate the DFA.
+    RTP_LLM_CHECK(new_tokens.dim() == 2 && new_tokens.size(0) == 1);
+    RTP_LLM_CHECK(num_new_tokens >= 0 && num_new_tokens <= new_tokens.size(1));
+    auto preview = info.copy();
+    for (int32_t i = 0; i < num_new_tokens; ++i) {
+        advanceThinkStateForSpec(preview, new_tokens.data_ptr<int32_t>()[i]);
+    }
+    return preview.forced_think_end_offset;
 }
 
 int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {

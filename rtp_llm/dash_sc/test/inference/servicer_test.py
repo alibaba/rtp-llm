@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -52,6 +53,7 @@ from rtp_llm.dash_sc.inference.servicer import (
     _make_frontend_metric_observer,
     _request_qos_level,
     _slice_generate_output_token_span,
+    _ThinkRuntime,
     build_think_runtime,
     iter_real_model_stream_infer,
 )
@@ -1609,6 +1611,264 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             3,
         )
 
+    async def test_glm_budget_close_discards_reasoning_and_preserves_answer_budget(
+        self,
+    ) -> None:
+        # Same-packet tokens after a forced close must never reach the caller.
+        # Cover an earlier streamed reasoning frame and a one-frame response.
+        for exclude, limit, forced, split, expected_budget, logprobs in [
+            ("1", 8, True, True, 8, False),
+            ("0", 8, True, True, 5, False),
+            ("1", 8, True, False, 8, False),
+            ("0", 2, True, True, 0, False),
+            ("1", 8, False, True, None, False),
+            ("1", 8, True, True, 8, True),
+        ]:
+            with self.subTest(exclude=exclude, limit=limit, forced=forced, split=split):
+
+                def output(ids, finished, forced_end=False, input_len=3):
+                    return GenerateOutputs(
+                        generate_outputs=[
+                            GenerateOutput(
+                                output_ids=torch.tensor(ids, dtype=torch.int32),
+                                finished=finished,
+                                aux_info=AuxInfo(
+                                    input_len=input_len, forced_think_end=forced_end
+                                ),
+                                token_logprobs=(
+                                    torch.full((len(ids),), -0.1) if logprobs else None
+                                ),
+                                top_logprob_token_ids=(
+                                    torch.tensor(ids).reshape(-1, 1)
+                                    if logprobs
+                                    else None
+                                ),
+                                top_logprobs=(
+                                    torch.full((len(ids), 1), -0.1)
+                                    if logprobs
+                                    else None
+                                ),
+                            )
+                        ]
+                    )
+
+                phase1_chunks = (
+                    [output([10], False), output([11, 128822, 99, 98], True, forced)]
+                    if split
+                    else [output([10, 11, 128822, 99, 98], True, forced)]
+                )
+                phase1_stream = _FakeAsyncStream(phase1_chunks)
+                visitor = _MultiStreamVisitor(
+                    [
+                        phase1_stream,
+                        _FakeAsyncStream([output([20, 21], True, input_len=8)]),
+                    ]
+                )
+                runtime = _ThinkRuntime(
+                    bos_tokens=(128821, 198),
+                    eos_tokens=(128822,),
+                    empty_tokens=(128821, 128822),
+                    close_token_id=128822,
+                    terminate_token_id=154820,
+                    phase2_enabled=True,
+                )
+                with patch(
+                    "rtp_llm.dash_sc.inference.servicer.monotonic",
+                    side_effect=[100.0, 101.0],
+                ), patch.dict(
+                    os.environ, {"RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING": exclude}
+                ):
+                    chunks = await _drain(
+                        iter_real_model_stream_infer(
+                            self._minimal_request(),
+                            [7, 8, 128821],
+                            SamplingParams(
+                                max_new_tokens=limit,
+                                max_new_think_tokens=10,
+                                num_return_sequences=1,
+                                return_logprobs=logprobs,
+                                top_logprobs=1 if logprobs else 0,
+                            ),
+                            OtherParams(
+                                enable_thinking=True,
+                                return_input_ids=True,
+                                timeout_ms=10000,
+                            ),
+                            visitor,
+                            rtp_llm_request_id=100,
+                            echo_prefix_ids=[128821, 198],
+                            think_runtime=runtime,
+                            phase2_request_id_factory=lambda: 200,
+                        )
+                    )
+                ids = [token for chunk in chunks for token in _gen_ids(chunk)]
+                if not forced:
+                    self.assertEqual(visitor.enqueue_called, 1)
+                    self.assertEqual(ids, [128821, 10, 11, 128822, 99, 98])
+                    continue
+                self.assertTrue(phase1_stream.aclose_called)
+                self.assertNotIn(70, ids)
+                self.assertNotIn(71, ids)
+                self.assertNotIn(99, ids)
+                self.assertNotIn(98, ids)
+                self.assertEqual(
+                    chunks[-1]
+                    .infer_response.parameters["generate_think_token_num"]
+                    .int64_param,
+                    4,
+                )
+                if expected_budget:
+                    self.assertEqual(visitor.enqueue_called, 2)
+                    phase2 = visitor.generate_inputs[1]
+                    self.assertEqual(
+                        phase2.token_ids.tolist(),
+                        [7, 8, 128821, 128822],
+                    )
+                    self.assertNotIn(10, phase2.token_ids.tolist())
+                    self.assertNotIn(11, phase2.token_ids.tolist())
+                    self.assertEqual(
+                        phase2.generate_config.max_new_tokens, expected_budget
+                    )
+                    self.assertFalse(phase2.generate_config.in_think_mode)
+                    self.assertEqual(phase2.generate_config.timeout_ms, 7000)
+                    self.assertEqual(ids, [128821, 10, 11, 128822, 20, 21])
+                    final = chunks[-1].infer_response
+                    self.assertEqual(
+                        final.parameters["prompt_token_num"].int64_param, 3
+                    )
+                    self.assertEqual(
+                        _int32_output(chunks[-1], "prompt_token_ids"), [7, 8, 128821]
+                    )
+                    self.assertEqual(
+                        final.parameters["max_new_tokens"].int64_param, limit
+                    )
+                    if logprobs:
+                        self.assertEqual(
+                            len(_fp32_output(chunks[-1], "token_logprobs")), 2
+                        )
+
+                else:
+                    self.assertEqual(visitor.enqueue_called, 1)
+                    self.assertEqual(ids, [128821, 10, 11, 128822])
+
+    async def test_glm_budget_close_respects_deadline_and_context_capacity(
+        self,
+    ) -> None:
+        for max_seq_len, elapsed in ((4, 1.0), (0, 9.0)):
+            with self.subTest(max_seq_len=max_seq_len, elapsed=elapsed):
+                phase1 = _FakeAsyncStream(
+                    [
+                        GenerateOutputs(
+                            generate_outputs=[
+                                GenerateOutput(
+                                    output_ids=torch.tensor(
+                                        [10, 11, 128822, 99], dtype=torch.int32
+                                    ),
+                                    finished=False,
+                                    aux_info=AuxInfo(
+                                        input_len=3, forced_think_end=True
+                                    ),
+                                )
+                            ]
+                        )
+                    ]
+                )
+                visitor = _MultiStreamVisitor([phase1])
+                runtime = _ThinkRuntime(
+                    bos_tokens=(128821,),
+                    eos_tokens=(128822,),
+                    empty_tokens=(128821, 128822),
+                    close_token_id=128822,
+                    phase2_enabled=True,
+                    max_seq_len=max_seq_len,
+                )
+                with patch.dict(
+                    os.environ, {"RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING": "1"}
+                ), patch(
+                    "rtp_llm.dash_sc.inference.servicer.monotonic",
+                    side_effect=[100.0, 100.0 + elapsed],
+                ):
+                    chunks = await _drain(
+                        iter_real_model_stream_infer(
+                            self._minimal_request(),
+                            [7, 8, 128821],
+                            SamplingParams(max_new_tokens=8, max_new_think_tokens=10),
+                            OtherParams(enable_thinking=True, timeout_ms=10000),
+                            visitor,
+                            rtp_llm_request_id=100,
+                            echo_prefix_ids=[128821],
+                            think_runtime=runtime,
+                        )
+                    )
+                self.assertEqual(visitor.enqueue_called, 1)
+                self.assertTrue(phase1.aclose_called)
+                if max_seq_len:
+                    self.assertEqual(_int32_output(chunks[-1], "finish_reason")[0], 1)
+                else:
+                    error_no, _ = _dash_error_payload(chunks[-1])
+                    self.assertEqual(error_no, DASH_ERROR_TIMEOUT.error_no)
+
+    async def test_glm_budget_continuation_streams_before_backend_finishes(
+        self,
+    ) -> None:
+        release_last_chunk = asyncio.Event()
+
+        def output(ids, finished, forced=False):
+            return GenerateOutputs(
+                generate_outputs=[
+                    GenerateOutput(
+                        output_ids=torch.tensor(ids, dtype=torch.int32),
+                        finished=finished,
+                        aux_info=AuxInfo(input_len=3, forced_think_end=forced),
+                    )
+                ]
+            )
+
+        async def answer():
+            yield output([20], False)
+            await release_last_chunk.wait()
+            yield output([21], True)
+
+        visitor = _MultiStreamVisitor(
+            [
+                _FakeAsyncStream([output([10, 128822, 99], False, True)]),
+                answer(),
+            ]
+        )
+        runtime = _ThinkRuntime(
+            bos_tokens=(128821,),
+            eos_tokens=(128822,),
+            empty_tokens=(128821, 128822),
+            close_token_id=128822,
+            phase2_enabled=True,
+        )
+        with patch.dict(os.environ, {"RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING": "1"}):
+            stream = iter_real_model_stream_infer(
+                self._minimal_request(),
+                [7, 8, 128821],
+                SamplingParams(max_new_tokens=8, max_new_think_tokens=10),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821],
+                think_runtime=runtime,
+            )
+            try:
+                first_content = None
+                for _ in range(4):
+                    chunk = await asyncio.wait_for(stream.__anext__(), timeout=1)
+                    if _gen_ids(chunk) == [20]:
+                        first_content = chunk
+                        break
+                self.assertIsNotNone(first_content)
+                self.assertFalse(release_last_chunk.is_set())
+                release_last_chunk.set()
+                rest = await _drain(stream)
+                self.assertEqual(_gen_ids(rest[-1]), [21])
+            finally:
+                release_last_chunk.set()
+                await stream.aclose()
+
     async def test_glm5_uses_own_eos_token_for_phase2(self) -> None:
         req = self._minimal_request()
         phase1 = GenerateOutputs(
@@ -1637,6 +1897,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 "<think>\n": [128821, 198],
                 "</think>\n\n": [128822, 271],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "<think></think>": [128821, 128822],
                 "</think>": [128822],
             }
         )
@@ -1661,8 +1922,12 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(runtime.phase2_enabled)
+        self.assertEqual(runtime.empty_tokens, (128821, 128822))
         self.assertEqual(runtime.terminate_token_id, 154820)
         self.assertEqual(visitor.enqueue_called, 2)
+        self.assertEqual(
+            visitor.generate_inputs[1].token_ids.tolist(), [7, 8, 128821, 128822]
+        )
         # DSV4's token id 1 is ordinary GLM5 output; GLM5's own EOS triggers.
         self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 1, 11])
         self.assertEqual(_gen_ids(chunks[1]), [128822, 271])

@@ -129,7 +129,7 @@ TEST_F(GenerateStreamTest, testAsyncReleaseConcurrentHandoff) {
         ASSERT_GT(stream->stream_cache_resource_->curBlocksNum(), 0);
         stream->incPendingAsyncBookkeeping();
         std::atomic<bool> start{false};
-        std::thread worker([&] {
+        std::thread       worker([&] {
             while (!start.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
             }
@@ -151,16 +151,16 @@ TEST_F(GenerateStreamTest, testAsyncReleaseConcurrentHandoff) {
 TEST_F(GenerateStreamTest, testMtpMinNewTokensIgnoresEarlyStopWithinAcceptedBatch) {
     for (bool use_eos : {false, true}) {
         for (bool stop_at_minimum : {false, true}) {
-            auto config = std::make_shared<GenerateConfig>();
+            auto config            = std::make_shared<GenerateConfig>();
             config->min_new_tokens = 8;
             config->max_new_tokens = 8;
-            config->aux_info = true;
-            config->is_streaming = false;
-            config->ignore_eos = !use_eos;
+            config->aux_info       = true;
+            config->is_streaming   = false;
+            config->ignore_eos     = !use_eos;
             if (!use_eos) {
                 config->stop_words_list = {{7}};
             }
-            auto stream = GenerateStreamBuilder().createContextStream({1, 2}, config);
+            auto stream                          = GenerateStreamBuilder().createContextStream({1, 2}, config);
             stream->special_tokens_.eos_token_id = 7;
             stream->update({torch::tensor({{3, 4, 5, 6}}, torch::kInt32), 4});
             ASSERT_FALSE(stream->hasOutput());
@@ -381,6 +381,49 @@ TEST_F(GenerateStreamTest, testNegativeMaxThinkingTokensKeepsInclusiveMaxNewToke
 
     ASSERT_EQ(config->max_thinking_tokens, -1);
     ASSERT_EQ(stream->maxTokenNum(), 6);
+}
+
+TEST_F(GenerateStreamTest, testForcedThinkReasonIsOnTheFirstCloseFrame) {
+    autil::EnvGuard guard("RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING", "true");
+    for (const int budget : {5, 100}) {
+        auto config                   = std::make_shared<GenerateConfig>();
+        config->max_new_tokens        = 20;
+        config->is_streaming          = true;
+        config->in_think_mode         = true;
+        config->max_thinking_tokens   = budget;
+        config->begin_think_token_ids = {7};
+        config->end_think_token_ids   = {8, 9};
+        auto stream                   = GenerateStreamBuilder().createContextStream({1, 2}, config);
+        // The output is constructed before updateLogitProcessorStatus(). The
+        // first half of a forced two-token tag must already carry its reason.
+        stream->update({torch::tensor({{3, 4, 8}}, torch::kInt32), 3});
+        auto first = stream->nextOutput();
+        ASSERT_TRUE(first.ok());
+        ASSERT_EQ(first.value().generate_outputs.size(), 1);
+        EXPECT_EQ(first.value().generate_outputs[0].aux_info.forced_think_end, budget == 5);
+        stream->update({torch::tensor({{9, 6}}, torch::kInt32), 2});
+        auto second = stream->nextOutput();
+        ASSERT_TRUE(second.ok());
+        EXPECT_EQ(second.value().generate_outputs[0].aux_info.forced_think_end, budget == 5);
+    }
+}
+
+TEST_F(GenerateStreamTest, testStopBeforeForcedCloseDoesNotReportForcedReason) {
+    auto config                   = std::make_shared<GenerateConfig>();
+    config->max_new_tokens        = 20;
+    config->is_streaming          = true;
+    config->in_think_mode         = true;
+    config->max_thinking_tokens   = 5;
+    config->begin_think_token_ids = {7};
+    config->end_think_token_ids   = {8, 9};
+    config->stop_words_list       = {{4}};
+    auto stream                   = GenerateStreamBuilder().createContextStream({1, 2}, config);
+    stream->update({torch::tensor({{3, 4, 8, 9}}, torch::kInt32), 4});
+    auto output = stream->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1);
+    EXPECT_FALSE(output.value().generate_outputs[0].aux_info.forced_think_end);
+    EXPECT_EQ(stream->completeTokenIdsVec(), std::vector<int>({1, 2, 3, 4}));
 }
 
 TEST_F(GenerateStreamTest, testThinkEndTrimsMtpBatchToOneContentToken) {

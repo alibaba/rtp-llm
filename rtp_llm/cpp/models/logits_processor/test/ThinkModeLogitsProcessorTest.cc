@@ -23,6 +23,66 @@ TEST(ThinkModeTokenBudgetTest, PositiveBudgetAlwaysKeepsOneBodyToken) {
     EXPECT_EQ(3, thinkGeneratedTokenBudget(4, 1, 1));
 }
 
+TEST(ThinkModeTokenBudgetTest, ForcedCloseReasonTracksCommittedTokens) {
+    StreamThinkInfo info(
+        true, 5, {7}, {8, 9}, 0, 0, false, std::make_shared<StringContainDFA<size_t, int>>(std::vector<int>{8, 9}));
+    ThinkModeLogitsProcessor   processor({info});
+    const size_t               words = SpecLogitsProcessor::bitmaskWordCount(16);
+    std::vector<int32_t>       draft = {3, 4, 8, 9, 5};
+    std::vector<int32_t>       bitmask((draft.size() + 1) * words);
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft.data();
+    request.propose_step       = draft.size();
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = words;
+    request.vocab_size         = 16;
+    processor.tryAcceptAndFillBitmask(request);
+    auto packet = torch::tensor({{3, 4, 8, 9, 5}}, torch::kInt32);
+    EXPECT_EQ(-1, processor.forcedThinkEndOffsetAfter(packet, 2));
+    EXPECT_EQ(2, processor.forcedThinkEndOffsetAfter(packet, 3));
+    EXPECT_EQ(2, processor.forcedThinkEndOffsetAfter(packet, 5));
+    EXPECT_EQ(0, processor.acceptedTokenLen());
+    // Previewing an entire forced close must not change committed metadata.
+    EXPECT_EQ(-1, processor.forcedThinkEndOffset());
+    processor.updateStatus(torch::tensor({{3}}, torch::kInt32), 1);
+    EXPECT_EQ(-1, processor.forcedThinkEndOffset());
+    processor.updateStatus(torch::tensor({{4, 8}}, torch::kInt32), 2);
+    EXPECT_EQ(2, processor.forcedThinkEndOffset());
+    processor.updateStatus(torch::tensor({{9, 5}}, torch::kInt32), 2);
+    EXPECT_EQ(2, processor.forcedThinkEndOffset());
+    EXPECT_EQ(processor.finishedThinkOutputLen(), 4);
+    processor.updateStatus(torch::tensor({{6}}, torch::kInt32), 1);
+    EXPECT_EQ(2, processor.forcedThinkEndOffset());
+}
+
+TEST(ThinkModeTokenBudgetTest, NaturalCloseAcrossBudgetBoundaryIsNotForced) {
+    StreamThinkInfo info(
+        true, 5, {7}, {8, 9}, 0, 0, false, std::make_shared<StringContainDFA<size_t, int>>(std::vector<int>{8, 9}));
+    ThinkModeLogitsProcessor processor({info});
+    // The natural close starts before body budget=2; its final token lands
+    // after that boundary. It is still a natural close, even with more content.
+    processor.updateStatus(torch::tensor({{3, 8}}, torch::kInt32), 2);
+    processor.updateStatus(torch::tensor({{9, 4, 5}}, torch::kInt32), 3);
+    EXPECT_EQ(-1, processor.forcedThinkEndOffset());
+    EXPECT_EQ(processor.finishedThinkOutputLen(), 3);
+}
+
+TEST(ThinkModeTokenBudgetTest, NormalForcedCloseReasonSurvivesPendingCommit) {
+    StreamThinkInfo info(
+        true, 3, {7}, {8}, 0, 0, false, std::make_shared<StringContainDFA<size_t, int>>(std::vector<int>{8}));
+    ThinkModeLogitsProcessor processor({info});
+    processor.updateStatus(torch::tensor({{3}}, torch::kInt32), 1);
+    SamplerInputs inputs;
+    inputs.vocab_size       = 16;
+    inputs.logits           = torch::zeros({1, 16});
+    inputs.input_lengths    = torch::tensor({0}, torch::kInt32);
+    inputs.sequence_lengths = torch::tensor({1}, torch::kInt32);
+    processor.process(inputs, 0, 1);
+    processor.updateStatus(torch::tensor({{8}}, torch::kInt32), 1);
+    EXPECT_EQ(1, processor.forcedThinkEndOffset());
+    EXPECT_EQ(processor.finishedThinkOutputLen(), 2);
+}
+
 class SamplerDataBuilder {
 public:
     SamplerDataBuilder() = default;

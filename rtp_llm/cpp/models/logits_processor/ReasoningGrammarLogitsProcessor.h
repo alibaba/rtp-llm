@@ -43,12 +43,14 @@ public:
     }
     int64_t acceptedTokenLen() const override;
     int64_t finishedThinkOutputLen() const override;
+    int64_t forcedThinkEndOffset() const override;
+    int64_t forcedThinkEndOffsetAfter(const torch::Tensor& new_tokens, int32_t num_new_tokens) const override;
 
 private:
     bool applyReasoningOrGrammarMaskLocked(const SamplerInputs& inputs, size_t batch_idx);
     bool applyGrammarMaskLocked(const torch::Tensor& logits);
     void maskGrammarThinkBoundaryTokens(const torch::Tensor& logits);
-    bool forceThinkEndTokenLocked(const torch::Tensor& logits);
+    bool forceThinkEndTokenLocked(const torch::Tensor& logits, bool forced_by_budget);
     void acceptCommittedGrammarTokenLocked(int32_t token_id);
     void reportErrorOnce(ErrorCode error_code, const std::string& error_msg, bool stream_lock_held);
     void forceToken(const torch::Tensor& logits, int64_t token_id);

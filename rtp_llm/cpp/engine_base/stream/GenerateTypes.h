@@ -100,6 +100,7 @@ struct AuxInfo {
     int32_t                      output_len                         = 0;
     int32_t                      step_output_len                    = 0;
     bool                         pd_sep                             = false;
+    bool                         forced_think_end                   = false;
     int32_t                      first_token_cost_time_us           = 0;
     int32_t                      wait_time_us                       = 0;
     int32_t                      local_reuse_len                    = 0;

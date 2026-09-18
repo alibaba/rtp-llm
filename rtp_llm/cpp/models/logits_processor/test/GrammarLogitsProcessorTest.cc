@@ -379,7 +379,7 @@ TEST(GrammarLogitsProcessorTest, Glm5PaddedToken154879IsMaskedAndRejectedIfCommi
 
     bool        reported = false;
     std::string reported_message;
-    auto        matcher = backend.createMatcher(compiled, false, std::nullopt);
+    auto        matcher   = backend.createMatcher(compiled, false, std::nullopt);
     auto        processor = std::make_shared<GrammarLogitsProcessor>(
         matcher,
         /*eos_token_id=*/kStopTokenId,
@@ -422,7 +422,7 @@ TEST(GrammarLogitsProcessorTest, Glm5DegenerateGrammarReportsNoValidMtpReplaceme
     XGrammarBackendOptions options;
     options.max_compiler_threads = 1;
     XGrammarBackendCpp backend(makeGlm5PaddedTokenizerInfoJson(), options);
-    auto compiled = backend
+    auto               compiled = backend
                         .compileNow({"json",
                                      R"({
   "$ref": "#/definitions/Self",
@@ -433,16 +433,15 @@ TEST(GrammarLogitsProcessorTest, Glm5DegenerateGrammarReportsNoValidMtpReplaceme
                         .compiled;
     ASSERT_TRUE(compiled);
 
-    bool        reported = false;
-    std::string reported_message;
-    auto        matcher = backend.createMatcher(compiled, false, std::nullopt);
-    GrammarLogitsProcessor processor(
-        matcher,
-        /*eos_token_id=*/154820,
-        [&reported, &reported_message](ErrorCode, const std::string& message, bool) {
-            reported         = true;
-            reported_message = message;
-        });
+    bool                   reported = false;
+    std::string            reported_message;
+    auto                   matcher = backend.createMatcher(compiled, false, std::nullopt);
+    GrammarLogitsProcessor processor(matcher,
+                                     /*eos_token_id=*/154820,
+                                     [&reported, &reported_message](ErrorCode, const std::string& message, bool) {
+                                         reported         = true;
+                                         reported_message = message;
+                                     });
 
     const int            P = 1;
     const size_t         W = SpecLogitsProcessor::bitmaskWordCount(kModelVocabSize);
@@ -642,6 +641,7 @@ TEST(ReasoningGrammarLogitsProcessorTest, NaturalCloseForcesTrailingPadBeforeGra
     EXPECT_EQ(inputs.logits[0][static_cast<int>('{')].item<float>(), BaseLogitsProcessor::neg_inf);
 
     processor.updateStatus(torch::tensor({{kPadToken}}, torch::kInt32), 1);
+    EXPECT_EQ(processor.forcedThinkEndOffset(), -1);
 
     inputs.logits           = torch::zeros({1, kVocabSize}, torch::kFloat32);
     inputs.sequence_lengths = torch::tensor({2}, torch::kInt32);
@@ -706,6 +706,7 @@ TEST(ReasoningGrammarLogitsProcessorTest, BudgetForceCloseThenGrammar) {
                                               /*input_length=*/0);
 
     EXPECT_EQ(processor.finishedThinkOutputLen(), -1);
+    EXPECT_EQ(processor.forcedThinkEndOffset(), -1);
     processor.updateStatus(torch::tensor({{5}}, torch::kInt32), 1);
 
     SamplerInputs inputs;
@@ -716,6 +717,7 @@ TEST(ReasoningGrammarLogitsProcessorTest, BudgetForceCloseThenGrammar) {
     inputs.vocab_size       = 128;
     processor.process(inputs, 0, 1);
 
+    EXPECT_EQ(processor.forcedThinkEndOffset(), 1);
     EXPECT_EQ(inputs.logits[0][8].item<float>(), 1.0f);
     EXPECT_EQ(inputs.logits[0][9].item<float>(), BaseLogitsProcessor::neg_inf);
 
@@ -736,6 +738,44 @@ TEST(ReasoningGrammarLogitsProcessorTest, BudgetForceCloseThenGrammar) {
     EXPECT_GT(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
     EXPECT_EQ(inputs.logits[0][static_cast<int>('b')].item<float>(), BaseLogitsProcessor::neg_inf);
     EXPECT_EQ(processor.acceptedTokenLen(), 3);
+}
+
+TEST(ReasoningGrammarLogitsProcessorTest, SpecBudgetForceClosePreviewsAndCommitsReason) {
+    auto backend  = makeBackend();
+    auto compiled = backend.compileNow({"regex", "a"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    auto matcher = backend.createMatcher(compiled, /*require_reasoning=*/false, std::nullopt);
+    ReasoningGrammarLogitsProcessor processor(matcher,
+                                              /*eos_token_id=*/0,
+                                              /*max_thinking_tokens=*/4,
+                                              {7},
+                                              {8, 9},
+                                              /*input_length=*/0);
+
+    const int            propose_step = 4;
+    const size_t         words        = SpecLogitsProcessor::bitmaskWordCount(128);
+    std::vector<int32_t> draft_tokens = {5, 8, 9, static_cast<int32_t>('a')};
+    std::vector<int32_t> bitmask((propose_step + 1) * words, SpecLogitsProcessor::kBitmaskAllowAll);
+
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft_tokens.data();
+    request.propose_step       = propose_step;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = words;
+    request.vocab_size         = 128;
+
+    EXPECT_EQ(processor.tryAcceptAndFillBitmask(request), propose_step);
+    auto packet = torch::tensor(draft_tokens, torch::kInt32).reshape({1, propose_step});
+    EXPECT_EQ(processor.forcedThinkEndOffsetAfter(packet, 1), -1);
+    EXPECT_EQ(processor.forcedThinkEndOffsetAfter(packet, 2), 1);
+    EXPECT_EQ(processor.forcedThinkEndOffsetAfter(packet, propose_step), 1);
+    EXPECT_EQ(processor.forcedThinkEndOffset(), -1);
+
+    processor.updateStatus(packet, propose_step);
+    EXPECT_EQ(processor.forcedThinkEndOffset(), 1);
+    EXPECT_EQ(processor.finishedThinkOutputLen(), 3);
+    EXPECT_EQ(processor.acceptedTokenLen(), propose_step);
 }
 
 TEST(ReasoningGrammarLogitsProcessorTest, SingleTokenCloseMasksEndBeforeAndAfterCommit) {

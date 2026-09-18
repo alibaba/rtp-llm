@@ -1513,11 +1513,14 @@ def _append_aux_info_metrics_outputs(
     infer: predict_v2_pb2.ModelInferResponse,
     out_py: Any,
     prompt_token_fallback: int = 0,
+    prompt_usage_override: tuple[int, int] | None = None,
 ) -> None:
     """``prompt_token_num`` = AuxInfo.input_len; ``prompt_cached_token_num`` = AuxInfo.reuse_len."""
     ax = getattr(out_py, "aux_info", None)
     input_len = int(ax.input_len) if ax is not None else int(prompt_token_fallback)
     reuse_len = int(ax.reuse_len) if ax is not None else 0
+    if prompt_usage_override is not None:
+        input_len, reuse_len = prompt_usage_override
     _append_int32_scalar_output(infer, "prompt_token_num", input_len)
     _append_int32_scalar_output(infer, "prompt_cached_token_num", reuse_len)
     _append_prompt_cache_usage_parameters(infer, input_len, reuse_len)
@@ -2095,6 +2098,7 @@ def build_stream_response_from_generate_outputs(
     logprob_placeholder_prefix_token_count: int = 0,
     logprob_phase: str = "unspecified",
     logprob_pre_content_token_count: int | None = None,
+    prompt_usage_override: tuple[int, int] | None = None,
     debug: bool = False,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
@@ -2167,6 +2171,7 @@ def build_stream_response_from_generate_outputs(
         infer,
         out_py,
         prompt_token_fallback=len(request_input_ids or []),
+        prompt_usage_override=prompt_usage_override,
     )
     # Append new optional tensors after the legacy response outputs so existing
     # positional consumers retain their original indices. raw_output_contents

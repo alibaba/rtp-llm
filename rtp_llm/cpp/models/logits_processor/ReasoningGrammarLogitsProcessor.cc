@@ -170,6 +170,10 @@ void advanceThinkStateForSpec(StreamThinkInfo& info, int32_t token_id) {
         return;
     }
 
+    if (isActiveThinkState(info) && !thinkEndCloseInProgress(info) && specThinkBudgetExhausted(info)
+        && token_id == firstTokenOrInvalid(info.end_think_token_ids)) {
+        info.forced_think_end_offset = info.current_output_length;
+    }
     info.current_output_length += 1;
     if (!isActiveThinkState(info) || !info.dfa_ptr) {
         return;
@@ -274,21 +278,12 @@ void ReasoningGrammarLogitsProcessor::updateStatus(const torch::Tensor& new_toke
             continue;
         }
 
-        think_info_.current_output_length += 1;
         if (isActiveThinkState(think_info_)) {
-            if (think_info_.dfa_ptr) {
-                think_info_.dfa_ptr->next(token_id);
-                if (think_info_.dfa_ptr->isFinished()) {
-                    think_info_.markAfterThink();
-                } else if (thinkEndCloseInProgress(think_info_)) {
-                    think_info_.process_state = ThinkProcessState::CLOSING_THINK;
-                } else if (think_info_.process_state == ThinkProcessState::CLOSING_THINK) {
-                    think_info_.process_state = ThinkProcessState::IN_THINK;
-                }
-            }
+            advanceThinkStateForSpec(think_info_, token_id);
             continue;
         }
 
+        think_info_.current_output_length += 1;
         acceptCommittedGrammarTokenLocked(token_id);
         if (reported_error_.load(std::memory_order_relaxed)) {
             return;
@@ -386,6 +381,30 @@ int64_t ReasoningGrammarLogitsProcessor::finishedThinkOutputLen() const {
     return think_info_.finishedThinkOutputLen();
 }
 
+int64_t ReasoningGrammarLogitsProcessor::forcedThinkEndOffset() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return think_info_.forced_think_end_offset;
+}
+
+int64_t ReasoningGrammarLogitsProcessor::forcedThinkEndOffsetAfter(const torch::Tensor& new_tokens,
+                                                                   int32_t              num_new_tokens) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (think_info_.forced_think_end_offset >= 0 || !isActiveThinkState(think_info_)
+        || think_info_.current_output_length + num_new_tokens <= think_info_.bodyTokenBudget()) {
+        return think_info_.forced_think_end_offset;
+    }
+    RTP_LLM_CHECK(new_tokens.dim() == 2 && new_tokens.size(0) == 1);
+    RTP_LLM_CHECK(num_new_tokens >= 0 && num_new_tokens <= new_tokens.size(1));
+    auto preview = think_info_.copy();
+    for (int32_t i = 0; i < num_new_tokens; ++i) {
+        advanceThinkStateForSpec(preview, new_tokens.data_ptr<int32_t>()[i]);
+        if (preview.forced_think_end_offset >= 0) {
+            break;
+        }
+    }
+    return preview.forced_think_end_offset;
+}
+
 bool ReasoningGrammarLogitsProcessor::applyReasoningOrGrammarMaskLocked(const SamplerInputs& inputs, size_t batch_idx) {
     auto logits = inputs.logits[batch_idx];
 
@@ -397,9 +416,11 @@ bool ReasoningGrammarLogitsProcessor::applyReasoningOrGrammarMaskLocked(const Sa
             if (transitionToAfterThinkIfClosed(think_info_)) {
                 return applyGrammarMaskLocked(logits);
             }
-            if (thinkEndCloseInProgress(think_info_) || thinkBudgetExhausted(inputs, batch_idx, think_info_)) {
+            const bool close_in_progress = thinkEndCloseInProgress(think_info_);
+            const bool budget_exhausted  = thinkBudgetExhausted(inputs, batch_idx, think_info_);
+            if (close_in_progress || budget_exhausted) {
                 think_info_.process_state = ThinkProcessState::CLOSING_THINK;
-                return forceThinkEndTokenLocked(logits);
+                return forceThinkEndTokenLocked(logits, budget_exhausted && !close_in_progress);
             }
             maskToken(logits, firstTokenOrInvalid(think_info_.begin_think_token_ids));
             maskToken(logits, eos_token_id_);
@@ -409,7 +430,7 @@ bool ReasoningGrammarLogitsProcessor::applyReasoningOrGrammarMaskLocked(const Sa
             if (transitionToAfterThinkIfClosed(think_info_)) {
                 return applyGrammarMaskLocked(logits);
             }
-            if (forceThinkEndTokenLocked(logits)) {
+            if (forceThinkEndTokenLocked(logits, false)) {
                 return true;
             }
             maskToken(logits, firstTokenOrInvalid(think_info_.begin_think_token_ids));
@@ -475,7 +496,7 @@ void ReasoningGrammarLogitsProcessor::maskGrammarThinkBoundaryTokens(const torch
     maskToken(logits, firstTokenOrInvalid(think_info_.end_think_token_ids));
 }
 
-bool ReasoningGrammarLogitsProcessor::forceThinkEndTokenLocked(const torch::Tensor& logits) {
+bool ReasoningGrammarLogitsProcessor::forceThinkEndTokenLocked(const torch::Tensor& logits, bool forced_by_budget) {
     if (!think_info_.dfa_ptr || think_info_.dfa_ptr->isFinished() || think_info_.end_think_token_ids.empty()) {
         return false;
     }
@@ -490,6 +511,9 @@ bool ReasoningGrammarLogitsProcessor::forceThinkEndTokenLocked(const torch::Tens
         return false;
     }
 
+    if (forced_by_budget && think_info_.forced_think_end_offset < 0) {
+        think_info_.forced_think_end_offset = think_info_.current_output_length;
+    }
     think_info_.dfa_ptr->next(token_id);
     think_info_.pending_forced_think_end_token_ids.push_back(token_id);
     think_info_.current_output_length += 1;

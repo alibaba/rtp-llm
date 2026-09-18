@@ -449,6 +449,7 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_input_len(response.aux_info.input_len);
             aux_info->set_prefix_len(response.aux_info.prefix_len);
             aux_info->set_output_len(response.aux_info.output_len);
+            aux_info->set_forced_think_end(response.aux_info.forced_think_end);
             aux_info->set_step_output_len(response.aux_info.step_output_len);
             aux_info->set_pd_sep(response.aux_info.pd_sep);
             aux_info->set_total_reuse_len(response.aux_info.reuse_len);

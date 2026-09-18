@@ -520,6 +520,7 @@ class DashScApp:
                     base_tok,
                     self.py_env_configs.generate_env_config,
                     model_config.model_type,
+                    max_seq_len=int(model_config.max_seq_len),
                     terminate_token_id=(
                         env_terminate_id if env_terminate_id > 0 else None
                     ),
@@ -543,9 +544,7 @@ class DashScApp:
                     and grammar_config.grammar_backend.strip().lower() == "xgrammar"
                 ):
                     grammar_validator = GrammarValidator(
-                        build_model_grammar_tokenizer_info_json(
-                            base_tok, model_config
-                        ),
+                        build_model_grammar_tokenizer_info_json(base_tok, model_config),
                         grammar_config,
                         self.py_env_configs.grammar_admission_config,
                     )

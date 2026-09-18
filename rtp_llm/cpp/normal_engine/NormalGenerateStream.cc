@@ -149,6 +149,18 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         }
 
         generate_output.finished = isSubGenerateDoneWithoutLock(i);
+        const int start_pos =
+            update_info.output_start_pos >= 0 ? update_info.output_start_pos : seqLength() - update_info.num_new_tokens;
+        const int committed_tokens = std::max(0, seqLength() - start_pos);
+        for (const auto& processor : logits_processor_list_) {
+            if (!processor) {
+                continue;
+            }
+            const auto forced_offset = processor->forcedThinkEndOffsetAfter(update_info.new_tokens, committed_tokens);
+            if (forced_offset >= 0 && forced_offset < subGenerateOutputLength(i)) {
+                generate_output.aux_info.forced_think_end = true;
+            }
+        }
         if (generate_input_->generate_config->aux_info) {
             generate_output.aux_info.iter_count   = iter_count_;
             generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;

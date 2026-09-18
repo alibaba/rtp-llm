@@ -86,6 +86,7 @@ class FakeStub:
         aux_info2 = output_pb2.aux_info.add()
         aux_info2.iter_count = 2
         aux_info2.output_len = 2
+        aux_info2.forced_think_end = True
         aux_info2.speculative_verify_rounds = 3
         aux_info2.speculative_accepted_token_num = 9
         aux_info2.speculative_proposed_draft_tokens = 12
@@ -274,6 +275,8 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(res[1].aux_info.context_execute_time_us, 100)
         self.assertEqual(res[1].aux_info.generate_execute_time_us, 200)
         self.assertEqual(res[1].aux_info.context_execute_time_with_cache_us, 80)
+        self.assertFalse(res[0].aux_info.forced_think_end)
+        self.assertTrue(res[1].aux_info.forced_think_end)
 
         self.assertEqual(res[2].finished, True)
 
