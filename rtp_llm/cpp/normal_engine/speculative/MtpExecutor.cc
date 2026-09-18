@@ -2045,41 +2045,6 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     return model_output;
 }
 
-<<<<<<< HEAD
-=======
-absl::Status MtpExecutor::runDecodeAlignmentOnly(GptModelInputs& model_input) {
-    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(alignment_only)");
-    RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "decode alignment requires cache manager");
-
-    const size_t proposal_forward_count = is_block_draft_ ? 1 : propose_step_ - 1;
-    const auto&  draft_cache_config     = cache_manager_->getMTPModuleCacheConfig(0);
-
-    applyCacheStrideToModelInput(model_input, draft_cache_config);
-    model_input.is_target_verify = is_block_draft_;
-    for (size_t i = 0; i < proposal_forward_count; ++i) {
-        ensureModelInputsOnCuda(model_input, "decode.alignment_propose");
-        if (is_block_draft_) {
-            maybePrintModelInput(model_input, "decode dspark propose model");
-            draft_model_->forward(model_input);
-        } else {
-            forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT);
-        }
-    }
-
-    applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
-    model_input.is_target_verify = true;
-    ensureModelInputsOnCuda(model_input, "decode.alignment_target_verify");
-    forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET);
-
-    applyCacheStrideToModelInput(model_input, draft_cache_config);
-    runDraftPrefillForward(model_input);
-
-    cudaSyncAndCheck();
-    releaseAllModelBuffers();
-    return absl::OkStatus();
-}
->>>>>>> 27ddb4500 (feat: support DFlash block drafting on CUDA and ROCm)
-
 SpecLogitsVerifyRunner::LaunchResult
 MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                          const torch::Tensor&                draft_tokens,
