@@ -701,6 +701,28 @@ class DeepseekV4DetectorTest(TestCase):
         self.assertEqual(result.normal_text, text)
         self.assertEqual(result.calls, [])
 
+    def test_v41_space_prefixed_dsml_tags_are_parsed(self):
+        class V41Encoding:
+            tool_calls_block_name = " calls"
+            tool_call_tag_name = " invoke"
+            tool_parameter_tag_name = " parameter"
+
+        detector = DeepSeekV4Detector(encoding_module=V41Encoding())
+        text = (
+            "<｜DSML｜ calls>\n"
+            '<｜DSML｜ invoke name="get_weather">\n'
+            '<｜DSML｜ parameter name="city" string="true">杭州</｜DSML｜ parameter>\n'
+            "</｜DSML｜ invoke>\n"
+            "</｜DSML｜ calls>"
+        )
+
+        result = detector.detect_and_parse(text, self._tools())
+
+        self.assertEqual(result.normal_text, "")
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].name, "get_weather")
+        self.assertEqual(json.loads(result.calls[0].parameters), {"city": "杭州"})
+
 
 class DeepseekV4ReasoningToolPipelineTest(IsolatedAsyncioTestCase):
     def _output(self):
@@ -987,6 +1009,59 @@ class DeepseekV4ReasoningToolPipelineTest(IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(tool_args[0]), {"city": "杭州"})
         self.assertNotIn("</think>", "".join(reasoning_parts + content_parts))
         self.assertNotIn("<｜DSML｜", "".join(reasoning_parts + content_parts))
+
+    async def test_streaming_v41_space_prefixed_dsml_tags_are_parsed(self):
+        class V41Encoding:
+            tool_calls_block_name = " calls"
+            tool_call_tag_name = " invoke"
+            tool_parameter_tag_name = " parameter"
+
+        renderer = _make_renderer(None)
+        renderer._generate_log_probs = AsyncMock(return_value=None)
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Weather?"}],
+            tools=_rtp_tools(),
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        status = ReasoningToolStreamStatus(
+            request,
+            DeepSeekV4Detector(encoding_module=V41Encoding()),
+            ReasoningParser(model_type="deepseek-v3", force_reasoning=True),
+        )
+        output = self._output()
+        chunks = [
+            "Let me inspect</think>\n\n<｜DSML｜",
+            ' calls>\n<｜DSML｜ invoke name="get_weather">\n',
+            '<｜DSML｜ parameter name="city" string="true">杭州</｜DSML｜',
+            " parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>",
+        ]
+
+        tool_names = {}
+        tool_args = {}
+        reasoning_parts = []
+        for chunk in chunks:
+            delta = await renderer._process_single_token_delta(
+                status,
+                chunk,
+                output,
+                stop_words_str=[],
+                stop_word_slice_list=[],
+                is_streaming=True,
+            )
+            if delta is None:
+                continue
+            message = delta.output_str
+            if message.reasoning_content:
+                reasoning_parts.append(message.reasoning_content)
+            for tool_call in message.tool_calls or []:
+                tool_names.setdefault(tool_call.index, tool_call.function.name)
+                tool_args[tool_call.index] = tool_args.get(tool_call.index, "") + (
+                    tool_call.function.arguments or ""
+                )
+
+        self.assertEqual("".join(reasoning_parts), "Let me inspect")
+        self.assertEqual(tool_names, {0: "get_weather"})
+        self.assertEqual(json.loads(tool_args[0]), {"city": "杭州"})
 
 
 class DeepseekV4StreamResponseTest(TestCase):

@@ -92,18 +92,37 @@ class DeepSeekV4Detector(BaseFormatDetector):
 
     def __init__(self, encoding_module=None, thinking_mode: str = "chat"):
         super().__init__()
-        self.bot_token = "<｜DSML｜tool_calls>"
-        self.eot_token = "</｜DSML｜tool_calls>"
-        self.invoke_end_token = "</｜DSML｜invoke>"
-        self.parameter_regex = r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="([^"]+)"\s*>(.*?)</｜DSML｜parameter>'
+        dsml_token = "｜DSML｜"
+        tool_calls_block_name = getattr(
+            encoding_module, "tool_calls_block_name", "tool_calls"
+        )
+        tool_call_tag_name = getattr(encoding_module, "tool_call_tag_name", "invoke")
+        tool_parameter_tag_name = getattr(
+            encoding_module, "tool_parameter_tag_name", "parameter"
+        )
+        self.bot_token = f"<{dsml_token}{tool_calls_block_name}>"
+        self.eot_token = f"</{dsml_token}{tool_calls_block_name}>"
+        self.invoke_prefix = f"<{dsml_token}{tool_call_tag_name}"
+        self.invoke_end_token = f"</{dsml_token}{tool_call_tag_name}>"
+        self.parameter_start_token = f"<{dsml_token}{tool_parameter_tag_name}"
+        self.parameter_end_token = f"</{dsml_token}{tool_parameter_tag_name}>"
+        parameter_start = re.escape(self.parameter_start_token)
+        parameter_end = re.escape(self.parameter_end_token)
+        self.parameter_regex = (
+            rf'{parameter_start}\s+name="([^"]+)"\s+string="([^"]+)"\s*>'
+            rf"(.*?){parameter_end}"
+        )
         self.partial_parameter_regex = (
-            r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="([^"]+)"\s*>(.*)$'
+            rf'{parameter_start}\s+name="([^"]+)"\s+string="([^"]+)"\s*>(.*)$'
         )
-        self.function_calls_regex = r"<｜DSML｜tool_calls>(.*?)</｜DSML｜tool_calls>"
+        self.function_calls_regex = (
+            rf"{re.escape(self.bot_token)}(.*?){re.escape(self.eot_token)}"
+        )
         self.invoke_regex = (
-            r'<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)(</｜DSML｜invoke>|$)'
+            rf'{re.escape(self.invoke_prefix)}\s+name="([^"]+)"\s*>(.*?)'
+            rf"({re.escape(self.invoke_end_token)}|$)"
         )
-        self.prefix_parameter_end_call = ["</", "｜DSML｜", "parameter"]
+        self.prefix_parameter_end_call = ["</", dsml_token, tool_parameter_tag_name]
         self.current_tool_id = -1
         self.encoding_module = encoding_module
         self.thinking_mode = thinking_mode
@@ -148,7 +167,7 @@ class DeepSeekV4Detector(BaseFormatDetector):
 
     def has_tool_call(self, text: str) -> bool:
         """Check if the text contains a deepseek v4 format tool call."""
-        return self.bot_token in text or "<｜DSML｜invoke" in text
+        return self.bot_token in text or self.invoke_prefix in text
 
     def _get_param_config(self, func_name: str, tools: List[Tool]) -> Dict[str, Any]:
         for tool in tools:
@@ -513,9 +532,9 @@ class DeepSeekV4Detector(BaseFormatDetector):
 
     def structure_info(self) -> _GetInfoFunc:
         return lambda name: StructureInfo(
-            begin=f'<｜DSML｜invoke name="{name}">',
-            end="</｜DSML｜invoke>",
-            trigger=f"<｜DSML｜invoke",
+            begin=f'{self.invoke_prefix} name="{name}">',
+            end=self.invoke_end_token,
+            trigger=self.invoke_prefix,
         )
 
     def tool_call_structural_tag(

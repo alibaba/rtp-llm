@@ -45,6 +45,7 @@ _GRAMMAR_RESPONSE_FORMAT_TYPES = {
 }
 DSML_PREFIX = "<｜DSML｜"
 DSML_TOOL_CALLS_MARKER = f"{DSML_PREFIX}tool_calls>"
+DSML_TOOL_CALLS_MARKERS = (DSML_TOOL_CALLS_MARKER, f"{DSML_PREFIX} calls>")
 
 
 def _dsv4_renderer_debug_enabled() -> bool:
@@ -65,9 +66,14 @@ def _preview_text(text: str, limit: int = 512) -> str:
 
 
 def _split_reasoning_before_dsml(text: str) -> Optional[Tuple[str, str]]:
-    idx = text.find(DSML_TOOL_CALLS_MARKER)
-    if idx == -1:
+    positions = [
+        text.find(marker)
+        for marker in DSML_TOOL_CALLS_MARKERS
+        if text.find(marker) != -1
+    ]
+    if not positions:
         return None
+    idx = min(positions)
 
     reasoning_text = text[:idx].replace("<think>", "").replace("</think>", "").strip()
     return reasoning_text, text[idx:]
@@ -669,7 +675,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
 
         think_start = getattr(detector, "think_start_token", "<think>")
         think_end = getattr(detector, "think_end_token", "</think>")
-        dsml_start = DSML_TOOL_CALLS_MARKER
+        dsml_starts = list(DSML_TOOL_CALLS_MARKERS)
 
         detector._buffer += text
         current_text = detector._buffer
@@ -690,7 +696,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                 detector._dsv4_after_think = False
 
             hold_len = _longest_suffix_prefix(
-                current_text, [think_start, think_end, dsml_start]
+                current_text, [think_start, think_end, *dsml_starts]
             )
             if hold_len:
                 detector._buffer = current_text[-hold_len:]
@@ -699,7 +705,12 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             return "", current_text
 
         end_idx = current_text.find(think_end)
-        dsml_idx = current_text.find(dsml_start)
+        dsml_positions = [
+            current_text.find(marker)
+            for marker in dsml_starts
+            if current_text.find(marker) != -1
+        ]
+        dsml_idx = min(dsml_positions) if dsml_positions else -1
         if end_idx != -1 and (dsml_idx == -1 or end_idx < dsml_idx):
             reasoning_text = current_text[:end_idx].rstrip()
             normal_text = current_text[end_idx + len(think_end) :].lstrip()
@@ -726,7 +737,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             detector._in_reasoning = False
             return reasoning_text, normal_text
 
-        hold_len = _longest_suffix_prefix(current_text, [think_end, dsml_start])
+        hold_len = _longest_suffix_prefix(current_text, [think_end, *dsml_starts])
         if getattr(detector, "stream_reasoning", True):
             if hold_len:
                 reasoning_text = current_text[:-hold_len]
@@ -753,11 +764,11 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             reasoning_text, remaining_text = super()._extract_reasoning_content(
                 reasoning_parser, text, is_streaming
             )
-        if (
-            reasoning_parser
-            and DSML_TOOL_CALLS_MARKER in text
-            and DSML_TOOL_CALLS_MARKER not in remaining_text
-        ):
+        text_has_tool_marker = any(marker in text for marker in DSML_TOOL_CALLS_MARKERS)
+        remaining_has_tool_marker = any(
+            marker in remaining_text for marker in DSML_TOOL_CALLS_MARKERS
+        )
+        if reasoning_parser and text_has_tool_marker and not remaining_has_tool_marker:
             split_result = _split_reasoning_before_dsml(text)
             if split_result is not None:
                 reasoning_text, remaining_text = split_result
