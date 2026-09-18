@@ -77,7 +77,7 @@ struct GptModelInputs {
     torch::Tensor v41_is_fake;           // bool [all requests], scheduler-only placeholders.
     torch::Tensor v41_execution_context;  // int64 [requests, 4]: prompt length, encoder end, decoder end, protected N.
     torch::Tensor v41_swa_ranges;         // int64 [requests, 43, 3]: valid start/end/replay floor; -1 is unknown.
-    std::vector<std::shared_ptr<DSV41CheckpointPublisher>> v41_checkpoint_publishers;  // Scheduling-rank seam only.
+    std::vector<std::shared_ptr<DSV41CheckpointPublisher>> v41_checkpoint_publishers;  // Per-rank publish/install seam.
 
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index

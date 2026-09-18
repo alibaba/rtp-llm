@@ -123,8 +123,9 @@ std::array<int64_t, 2> decodeMtpHiddenStatesShape(int64_t total_numel, int64_t r
 }
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
-    if (parallelism_config.tp_rank != 0)
-        inputs.v41_checkpoint_publishers.clear();
+    // Every rank keeps its locally created V4.1 checkpoint publishers: the
+    // scheduling rank publishes through its own stream while every other
+    // producer rank installs the same restored checkpoint on its own resource.
     if (parallelism_config.tp_size <= 1) {
         return;
     }

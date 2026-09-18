@@ -7,6 +7,7 @@ states. CP prefill uses the engine's canonical zigzag row and page metadata.
 
 from contextlib import nullcontext
 from dataclasses import dataclass, fields
+import logging
 import os
 
 import torch
@@ -49,6 +50,7 @@ _REGIONS = {
     CacheRegion.INDEX_K: KVCacheRegionName.DSV41_INDEX_KV,
 }
 _PAIR_BYTES = 4112
+_LOGGER = logging.getLogger(__name__)
 
 
 def _host_vector(value, count, dtype, name):
@@ -874,6 +876,13 @@ class DeepSeekV41Model(GptModelBase):
         except Exception as exc:
             error = exc
             status.zero_()
+            _LOGGER.error(
+                "V4.1 checkpoint %s failed on CP rank %d (request %d): %r",
+                "publish" if self._cp_rank == 0 else "install",
+                self._cp_rank,
+                publication.request_id,
+                exc,
+            )
         status = collective_torch.all_reduce(status, Group.TP)
         if int(status.item()) != self.layout.cp_size:
             raise RuntimeError(
