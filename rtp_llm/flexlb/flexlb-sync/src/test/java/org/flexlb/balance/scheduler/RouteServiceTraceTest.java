@@ -3,7 +3,6 @@ package org.flexlb.balance.scheduler;
 import com.google.protobuf.ByteString;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Context;
-import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.BalanceContext;
@@ -55,18 +54,12 @@ class RouteServiceTraceTest {
                     SchedulingTestConfig.useBatchDispatcher(config);
                 }
             }
-            ConfigService configs = mock(ConfigService.class);
-            when(configs.loadBalanceConfig()).thenReturn(config);
             RequestScheduler scheduler = mock(RequestScheduler.class);
-            DefaultRouter router = mock(DefaultRouter.class);
             CompletableFuture<Response> pending = new CompletableFuture<>();
             when(scheduler.submit(any())).thenReturn(pending);
-            Response response = new Response();
-            response.setSuccess(true);
-            when(router.routeDirect(any())).thenReturn(response);
-            RouteService service = new RouteService(configs, router, scheduler,
+            RouteService service = new RouteService(scheduler,
                     mock(RecentCacheKeyTraceReporter.class));
-            BalanceContext ctx = new BalanceContext();
+            BalanceContext ctx = new BalanceContext(config);
             Request request = new Request();
             request.setRequestId(700L);
             ctx.setRequest(request);
@@ -76,27 +69,20 @@ class RouteServiceTraceTest {
             ctx.setTraceContext(Context.root().with(span));
             CompletableFuture<Response> result = service.route(ctx);
             verify(span).setAttribute(FlexlbTrace.SCHEDULE_MODE, mode);
-            if (mode.equals("DIRECT")) {
-                assertSame(response, result.join());
-                verifyNoInteractions(scheduler);
-            } else {
-                assertSame(pending, result);
-                result.cancel(true);
-                assertTrue(pending.isCancelled());
-                verifyNoInteractions(router);
-            }
+            assertSame(pending, result);
+            result.cancel(true);
+            assertTrue(pending.isCancelled());
+            verify(scheduler).submit(ctx);
         }
     }
 
     @Test
     void missingBatchInputStillRejectsWithoutDirectFallback() {
-        ConfigService configs = mock(ConfigService.class);
-        when(configs.loadBalanceConfig()).thenReturn(SchedulingTestConfig.batchConfig());
-        DefaultRouter router = mock(DefaultRouter.class);
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
         RequestScheduler scheduler = mock(RequestScheduler.class);
-        RouteService service = new RouteService(configs, router, scheduler,
+        RouteService service = new RouteService(scheduler,
                 mock(RecentCacheKeyTraceReporter.class));
-        BalanceContext ctx = new BalanceContext();
+        BalanceContext ctx = new BalanceContext(config);
         Request request = new Request();
         request.setRequestId(701L);
         ctx.setRequest(request);
@@ -107,6 +93,6 @@ class RouteServiceTraceTest {
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.BATCH_BUILD_FAILED.getErrorCode(), response.getCode());
         verify(span).setAttribute(FlexlbTrace.SCHEDULE_MODE, "BATCH");
-        verifyNoInteractions(router, scheduler);
+        verifyNoInteractions(scheduler);
     }
 }
