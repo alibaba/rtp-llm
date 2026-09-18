@@ -134,10 +134,10 @@ struct BitonicSort<32, ascending, T, idxT, is_stable> {
                 bool is_better;
                 if constexpr (is_stable) {
                     if constexpr (ascending) {
-                        is_better = ((*val_arr > other) || ((*val_arr == other) && (*idx_arr < other_idx)))
+                        is_better = ((*val_arr > other) | ((*val_arr == other) & (*idx_arr < other_idx)))
                                     != (reverse != is_second);
                     } else {
-                        is_better = ((*val_arr > other) || ((*val_arr == other) && (*idx_arr > other_idx)))
+                        is_better = ((*val_arr > other) | ((*val_arr == other) & (*idx_arr > other_idx)))
                                     != (reverse != is_second);
                     }
                 } else {
@@ -169,10 +169,10 @@ struct BitonicMerge<32, ascending, reverse, T, idxT, is_stable> {
             bool is_better;
             if constexpr (is_stable) {
                 if constexpr (ascending) {
-                    is_better = ((*val_arr > other) || ((*val_arr == other) && (*idx_arr < other_idx)))
+                    is_better = ((*val_arr > other) | ((*val_arr == other) & (*idx_arr < other_idx)))
                                 == (reverse != is_second);  // for min
                 } else {
-                    is_better = ((*val_arr > other) || ((*val_arr == other) && (*idx_arr > other_idx)))
+                    is_better = ((*val_arr > other) | ((*val_arr == other) & (*idx_arr > other_idx)))
                                 == (reverse != is_second);  // for max
                 }
             } else {
@@ -301,6 +301,9 @@ public:
         if (smem_buf_len_ >= WARP_SIZE) {
             __syncwarp();
             merge_buf_(val_smem_[lane_], idx_smem_[lane_]);
+            // All lanes must finish reading the current batch before overflow
+            // candidates reuse its shared-memory slots.
+            __syncwarp();
             smem_buf_len_ -= WARP_SIZE;
         }
         if (do_add) {
@@ -536,7 +539,12 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
                 }
             }
         }
-        queue.done();
+    }
+
+    // All warps must finish using the candidate buffers before shared-memory reuse.
+    queue.done();
+
+    if (case_id < num_tokens && if_proceed_next_topk) {
         __syncwarp();
         // Get the topk_idx
         queue.dumpIdx(s_topk_idx);
