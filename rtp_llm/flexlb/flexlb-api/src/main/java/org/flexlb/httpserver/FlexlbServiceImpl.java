@@ -1003,7 +1003,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                                 .setRole(ss.getRole().getCode())
                                 .setServerIp(ss.getServerIp() != null ? ss.getServerIp() : "")
                                 .setHttpPort(ss.getHttpPort())
-                                .setGrpcPort(ss.getGrpcPort());
+                                .setGrpcPort(ss.getGrpcPort())
+                                .addAllPreemptRequestIds(ss.getPreemptRequestIds());
                 if (ss.getEngineIndex() != null) {
                     status.setEngineIndex(ss.getEngineIndex());
                 }

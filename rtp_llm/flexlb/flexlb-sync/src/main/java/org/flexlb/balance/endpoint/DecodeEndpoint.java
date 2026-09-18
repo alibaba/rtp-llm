@@ -184,6 +184,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
          */
         private boolean engineLifecycleOwned;
         private EngineDispatchPermit dispatchPermit;
+        /** Incoming instruction owner until dispatch crosses the rollback boundary. */
+        private volatile long returnedPreemptionToken;
         /**
          * Current protocol owners for this exact request generation.
          */
@@ -913,7 +915,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return false;
             }
             if (current.confirmed() || exactEngineLifecycle || exactProtection
-                    || exactClaim || exactAttempt) {
+                    || exactClaim || exactAttempt && current.returnedPreemptionToken == 0L) {
                 throw localReleaseInvariant(reservation,
                         "exact ownership is held by Engine/protocol lifecycle");
             }
@@ -922,6 +924,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 throw localReleaseInvariant(reservation,
                         "request id has a dispatch permit for another reservation");
             }
+            rollbackReturnedPreemptionLocked(current);
             if (!removeShadowExactLocked(requestId, current)) {
                 throw localReleaseInvariant(reservation,
                         "exact shadow changed while admissionLock was held");
@@ -1264,15 +1267,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /**
      * Caller holds {@link #admissionLock}.
      */
-    private boolean settleAuthoritativeTerminalLocked(AuthoritativeTerminalProof proof,
-            long settledAtMs) {
+    private boolean settleAuthoritativeTerminalLocked(AuthoritativeTerminalProof proof, long settledAtMs) {
         ReservationHandle reservation = proof.reservation;
         String requestId = reservation.requestId();
         DecodeRequestState state = requestState(requestId);
         boolean exactState = isExactReservation(state, reservation);
 
         PreemptionClaim claim = state == null ? null : state.preemptionClaim;
-        if (claim != null && exactState) {
+        if (claim != null && exactState && !claim.returnedInstruction) {
             throw terminalInvariant(reservation,
                     "priority claim must settle before generic terminal ownership");
         }
@@ -1290,6 +1292,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 && currentProtection != proof.protection) {
             throw terminalInvariant(reservation,
                     "another Engine fence owns the same reservation generation");
+        }
+
+        if (claim != null && exactState && claim.returnedInstruction) {
+            return settlePriorityClaimTerminalLocked(claim.attemptToken, reservation, claim);
         }
 
         boolean syntheticSlotRemoved = exactProtection
@@ -1797,6 +1803,63 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     // ==================== Priority-preemption transaction ====================
+
+    /** Atomically prepare an instruction-bearing route using exact victim generations. */
+    public PreemptionBeginResult beginReturnedPreemption(long attemptToken,
+                                                         List<ReservationHandle> victims,
+                                                         String incomingRequestId,
+                                                         long incomingKvTokens,
+                                                         long incomingExpectedKvTokens,
+                                                         int incomingPriority,
+                                                         AdmissionCapacity capacity) {
+        GenerationPin pin = tryPinGeneration();
+        if (pin == null) {
+            return PreemptionBeginResult.ENDPOINT_RETIRED;
+        }
+        try (pin) {
+            admissionLock.lock();
+            try {
+                PreemptionBeginResult result = beginPriorityPreemptionPinned(attemptToken, victims,
+                        incomingRequestId, incomingKvTokens, incomingExpectedKvTokens, incomingPriority, capacity);
+                if (result == PreemptionBeginResult.SUCCESS) {
+                    shadowReservation(incomingRequestId).returnedPreemptionToken = attemptToken;
+                    for (ReservationHandle victim : victims) {
+                        preemptionClaim(victim.requestId()).returnedInstruction = true;
+                    }
+                }
+                return result;
+            } finally {
+                admissionLock.unlock();
+            }
+        }
+    }
+
+    /** Unpublished instructions release their claims while preserving unrelated cancellation owners. */
+    private void rollbackReturnedPreemptionLocked(DecodeRequestState incoming) {
+        long token = incoming.returnedPreemptionToken;
+        if (token == 0L) {
+            return;
+        }
+        EndpointPreemptionAttempt attempt = preemptionAttempts.remove(token);
+        incoming.returnedPreemptionToken = 0L;
+        for (ReservationHandle victim : attempt.remainingVictims.values()) {
+            PreemptionClaim claim = exactPreemptionClaimLocked(token, victim);
+            DecodeRequestState state = requestState(victim.requestId());
+            if (claim.kvHeldAfterWorkerRelease) {
+                EngineFenceProtection protection = state.engineFenceProtection;
+                if (protection != null) {
+                    retainEngineFenceDemandLocked(protection, claim.hardKvTokens, claim.expectedKvTokens);
+                    ensureEngineFenceSyntheticHoldLocked(protection, true);
+                } else {
+                    removeConfirmedExactLocked(victim.requestId(), state);
+                    confirmedEngineOwnedCount = Math.max(0, confirmedEngineOwnedCount - 1);
+                }
+            }
+            releaseHeldKv(claim);
+            removePreemptionClaimLocked(victim.requestId(), claim);
+        }
+        admissionVersion.incrementAndGet();
+    }
 
     public enum PreemptionBeginResult {
         SUCCESS,
@@ -3345,8 +3408,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    private EngineDispatchPermitTransferStatus
-    transferEngineDispatchPermitToLifecyclePinned(EngineDispatchPermit permit) {
+    private EngineDispatchPermitTransferStatus transferEngineDispatchPermitToLifecyclePinned(EngineDispatchPermit permit) {
         EngineDispatchPermitTransferStatus transferStatus;
         boolean capacityIncreased;
         admissionLock.lock();
@@ -3367,6 +3429,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 // same lock. Transfer only changes ownership; it never re-reads the cap.
                 removeQueuedPhaseLocked(permit.requestId, permit.reservation);
                 permit.reservation.engineLifecycleOwned = true;
+                // Instruction delivery is irrevocable at the same boundary as
+                // the incoming route. Victim claims await ordinary terminal proof.
+                if (permit.reservation.returnedPreemptionToken != 0L) {
+                    preemptionAttempts.remove(permit.reservation.returnedPreemptionToken);
+                    permit.reservation.returnedPreemptionToken = 0L;
+                }
                 admissionVersion.incrementAndGet();
                 transferStatus = EngineDispatchPermitTransferStatus.TRANSFERRED;
             }
@@ -3573,9 +3641,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * projected exactly once here.
      */
     private boolean isEngineDispatchCapacityFullSnapshot(DecodeRequestState candidate,
-            long concurrencyLimit,
-            long maxKvUsagePercent,
-            WorkerStatus.EngineObservation fields) {
+                                                         long concurrencyLimit,
+                                                         long maxKvUsagePercent,
+                                                         WorkerStatus.EngineObservation fields) {
+        // The atomic preemption plan already reserved the incoming demand.
+        // Decode gates execution on victim cancellation; the route must reach it.
+        if (candidate.returnedPreemptionToken != 0L) {
+            return false;
+        }
         return !engineDispatchCapacityFits(getEngineLoad() + Math.max(0, activeEngineDispatchPermitCount),
                 engineFacingKvAvailable(fields),
                 engineFacingKvUsed(fields),
@@ -3705,6 +3778,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         private final long hardKvTokens;
         private final long expectedKvTokens;
         private PreemptionCancelPhase phase = PreemptionCancelPhase.CLAIMED;
+        /** Cancellation execution belongs to the consumer of the route response. */
+        private boolean returnedInstruction;
         /**
          * Endpoint accounting moved from this attempt to the Engine fence.
          */

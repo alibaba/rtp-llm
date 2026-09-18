@@ -125,6 +125,45 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void scheduleReturnsStringPreemptionIdsOnTheirDecodeRoute() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("10.0.0.11");
+        ServerStatus decode = new ServerStatus();
+        decode.setRole(RoleType.DECODE);
+        decode.setServerIp("10.0.0.21");
+        decode.setGrpcPort(8001);
+        decode.setSelectedEngineIndex(0, 2);
+        decode.setPreemptRequestIds(List.of("request-a", "9007199254740993"));
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(List.of(prefill, decode));
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId("incoming-2002").build(),
+                observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(captor.capture());
+        var result = captor.getValue();
+        assertEquals(List.of(), result.getServerStatus(0).getPreemptRequestIdsList());
+        assertEquals("10.0.0.21", result.getServerStatus(1).getServerIp());
+        assertEquals(8001, result.getServerStatus(1).getGrpcPort());
+        assertEquals(List.of("request-a", "9007199254740993"),
+                result.getServerStatus(1).getPreemptRequestIdsList());
+        assertFalse(result.getServerStatus(0).hasEngineIndex());
+        assertTrue(result.getServerStatus(1).hasEngineIndex());
+        assertEquals(0, result.getServerStatus(1).getEngineIndex());
+        assertEquals(6, FlexlbScheduleProtocol.FlexlbServerStatusPB.ENGINE_INDEX_FIELD_NUMBER);
+        assertEquals(7, FlexlbScheduleProtocol.FlexlbServerStatusPB.PREEMPT_REQUEST_IDS_FIELD_NUMBER);
+        assertFalse(result.getEnqueuedByMaster());
+    }
+
+    @Test
     void testSchedule_localRouting() {
         // Given: not master, no consistency needed
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);

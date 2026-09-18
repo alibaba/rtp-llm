@@ -202,6 +202,11 @@ public final class QueueRouteAdmission implements AutoCloseable {
         }
     }
 
+    /** Attach instructions to the selected logical Decode before publication. */
+    public void setDecodePreemptRequestIds(List<String> requestIds) {
+        requireOwned().decodeStatus().setPreemptRequestIds(List.copyOf(requestIds));
+    }
+
     public ScheduledRequest buildItem(
             BalanceContext context,
             CompletableFuture<Response> future,

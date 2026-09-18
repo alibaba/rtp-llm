@@ -13,6 +13,8 @@ import lombok.ToString;
 import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.route.RoleType;
 
+import java.util.List;
+
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class ServerStatus {
@@ -27,6 +29,9 @@ public class ServerStatus {
 
     @JsonProperty("grpc_port")
     private int grpcPort;
+
+    @JsonProperty("preempt_request_ids")
+    private List<String> preemptRequestIds = List.of();
 
     @JsonProperty("dp_rank")
     private long dpRank;

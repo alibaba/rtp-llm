@@ -58,6 +58,7 @@ class EvictionPlannerDecodeContractTest {
     private static PreemptionConfig engineOwned() {
         PreemptionConfig p = new PreemptionConfig();
         p.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_ENGINE_OWNED));
+        p.setEngineCancellation(new org.flexlb.config.EngineCancellationConfig());
         return p;
     }
 

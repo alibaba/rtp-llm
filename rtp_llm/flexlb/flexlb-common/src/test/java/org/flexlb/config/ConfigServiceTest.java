@@ -35,6 +35,28 @@ class ConfigServiceTest {
     }
 
     @Test
+    void engineCancellationModeDefaultsToRpcAndReturnRequiresNonBatch() {
+        String template = """
+                {
+                  "scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY",
+                    "preemption":{"allowedVictimStages":["DECODE_ENGINE_OWNED"],
+                      "engineCancellation":%s}}},
+                  "dispatcher":{"type":"%s"}
+                }
+                """;
+        FlexlbConfig rpc = ConfigService.parse(template.formatted("{}", "BATCH"));
+        assertEquals(EngineCancellationConfig.Mode.RPC,
+                rpc.priorityOrdering().getPreemption().getEngineCancellation().getMode());
+        FlexlbConfig returned = ConfigService.parse(template.formatted("{\"mode\":\"RETURN\"}", "NON_BATCH"));
+        assertEquals(EngineCancellationConfig.Mode.RETURN,
+                returned.priorityOrdering().getPreemption().getEngineCancellation().getMode());
+        assertThrows(ConfigValidationException.class,
+                () -> ConfigService.parse(template.formatted("{\"mode\":\"RETURN\"}", "BATCH")));
+        assertThrows(ConfigValidationException.class,
+                () -> ConfigService.parse(template.formatted("{\"mode\":\"OTHER\"}", "NON_BATCH")));
+    }
+
+    @Test
     void empty_environment_uses_valid_defaults() {
         ConfigService configService = createConfigService(Map.of());
         FlexlbConfig config = configService.loadBalanceConfig();

@@ -80,6 +80,7 @@ export FLEXLB_CONFIG='{
           "DECODE_ENGINE_OWNED"
         ],
         "engineCancellation": {
+          "mode": "RPC",
           "ackTimeoutMs": 50,
           "completionTimeoutMs": 1000
         }
@@ -259,6 +260,53 @@ export MODEL_SERVICE_CONFIG='{
     ]
 }'
 ```
+
+### Engine-owned Decode preemption
+
+`scheduler.ordering.preemption.allowedVictimStages` includes `DECODE_ENGINE_OWNED`
+when Engine-visible Decode requests may be preempted. `engineCancellation.mode`
+selects how the cancellation instruction is delivered:
+
+| Mode | Dispatcher | Behavior |
+| --- | --- | --- |
+| `RPC` (default) | `BATCH`, `NON_BATCH` | Master sends the existing Cancel RPC and waits for authoritative completion before placing the incoming request. |
+| `RETURN` | `NON_BATCH` | Master returns `server_status[].preempt_request_ids` on the selected Decode route without a priority Cancel RPC or a completion wait. |
+
+A configuration enabling returned preemption is:
+
+```json
+{
+  "schemaVersion": 2,
+  "scheduler": {
+    "type": "QUEUE",
+    "ordering": {
+      "type": "PRIORITY",
+      "preemption": {
+        "allowedVictimStages": ["DECODE_ENGINE_OWNED"],
+        "engineCancellation": {"mode": "RETURN"}
+      }
+    },
+    "decision": {"type": "SINGLE"}
+  },
+  "dispatcher": {"type": "NON_BATCH"}
+}
+```
+
+The client forwards the string IDs unchanged to the selected Decode Engine together
+with the incoming request. Decode must finish all victim cancellations and resource
+release before executing the incoming request. The route's optional `engine_index = 6`
+selects the logical Engine; index 0 is valid when present. The instruction field is
+`repeated string preempt_request_ids = 7`, and field 5 is reserved. Other route entries
+carry an empty list. The instructions are independent of `RequestLifecyclePB`.
+
+Master reserves incoming capacity and retains victim accounting until authoritative
+terminal proof arrives. Claims prevent selecting the same victim twice. Failure before
+the route crosses its delivery boundary rolls back the incoming reservation and its
+claims; after that boundary, victim claims remain until terminal settlement. Mere
+absence from a running-task snapshot does not release a claimed victim.
+
+`ackTimeoutMs` (default 50) and `completionTimeoutMs` (default 1000) apply to `RPC`.
+In `RETURN`, the client/Decode consumer controls execution and its cancellation deadline.
 
 ### Scheduler, ordering, decision, and dispatcher
 

@@ -13,6 +13,7 @@
           "DECODE_ENGINE_OWNED"
         ],
         "engineCancellation": {
+          "mode": "RPC",
           "ackTimeoutMs": 50,
           "completionTimeoutMs": 1000
         }

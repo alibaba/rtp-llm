@@ -98,6 +98,15 @@ Java 还可能等待接近 30 秒才发现新内容。因此两段等待叠加�
 的 404）和非法配置仍会阻止启动。启动前应先在部署 UniConfig 页面保存合法配置。
 运行时 HTTP 异常保留有效快照并继续按 30 秒间隔重试。
 
+### Decode 抢占交付方式
+
+`scheduler.ordering.preemption.allowedVictimStages` 包含 `DECODE_ENGINE_OWNED` 时，
+`engineCancellation.mode` 可设为 `RPC` 或 `RETURN`，默认 `RPC`。
+`RPC` 使用主动 Cancel 和完成确认；`RETURN` 将待抢占请求的字符串 ID 随目标 Decode
+路由返回，由客户端/Decode 消费，要求 `dispatcher.type=NON_BATCH`。
+`ackTimeoutMs` 和 `completionTimeoutMs` 只约束 RPC。该配置随请求快照绑定，外部配置
+来源与其他调度字段一致。
+
 ### 凑批窗口热更新
 
 `scheduler.decision.type` 和 `scheduler.globalDecision.type` 是启动期拓扑字段。ConfigService 在初始

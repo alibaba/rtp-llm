@@ -2534,6 +2534,7 @@ public class RequestRegistry {
         status.setServerIp(src.getServerIp());
         status.setHttpPort(src.getHttpPort());
         status.setGrpcPort(src.getGrpcPort());
+        status.setPreemptRequestIds(List.copyOf(src.getPreemptRequestIds()));
         status.setDpRank(src.getDpRank());
         status.setSelectedEngineIndex(
                 src.getRoutingEngineIndex(),

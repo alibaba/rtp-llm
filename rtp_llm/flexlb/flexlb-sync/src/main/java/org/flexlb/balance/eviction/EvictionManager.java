@@ -349,13 +349,12 @@ public class EvictionManager {
     }
 
     /** Commit exactly the immutable plan selected before takeover. */
-    private boolean commitDecodeEviction(
-            BalanceContext ctx,
-            CompletableFuture<Response> future,
-            PlannedDecodeEviction planned,
-            FlexlbConfig config,
-            PreemptionConfig preemption,
-            QueueRouteAdmission admission) {
+    private boolean commitDecodeEviction(BalanceContext ctx,
+                                         CompletableFuture<Response> future,
+                                         PlannedDecodeEviction planned,
+                                         FlexlbConfig config,
+                                         PreemptionConfig preemption,
+                                         QueueRouteAdmission admission) {
         DecodeEvictionProposal proposal = planned.proposal();
         long seqLen = ctx.getRequest().getSeqLen();
         long maxNewTokens = ctx.getRequest().getMaxNewTokens();
@@ -369,9 +368,9 @@ public class EvictionManager {
 
         // Ownership is homogeneous by planner invariant: Master-queued victims
         // use a local transaction; Engine-may-have-seen/accepted/running
-        // victims use the tokenized Cancel coordinator.
+        // victims use the configured RPC or route-response delivery.
         if (proposal.requiresEngineCancel()) {
-            return startEngineCancelPreemption(ctx, future, preemption, proposal,
+            return startEnginePreemption(ctx, future, preemption, proposal,
                     decodeEp, seqLen, expectedKvTokens, capacity, admission);
         }
 
@@ -439,7 +438,7 @@ public class EvictionManager {
                 return true;
             }
             Response placementFailure = placeReservedDecode(
-                    ctx, future, decodeEp, incoming, admission);
+                    ctx, future, decodeEp, incoming, admission, List.of());
             if (placementFailure != null) {
                 mutation.terminate(placementFailure);
                 return true;
@@ -449,18 +448,19 @@ public class EvictionManager {
     }
 
     /** Publish preempted Decode capacity through the already selected route. */
-    private Response placeReservedDecode(
-            BalanceContext context,
-            CompletableFuture<Response> future,
-            DecodeEndpoint endpoint,
-            DecodeEndpoint.ReservationHandle reservation,
-            QueueRouteAdmission admission) {
+    private Response placeReservedDecode(BalanceContext context,
+                                         CompletableFuture<Response> future,
+                                         DecodeEndpoint endpoint,
+                                         DecodeEndpoint.ReservationHandle reservation,
+                                         QueueRouteAdmission admission,
+                                         List<String> preemptRequestIds) {
         if (!admission.adoptDecodeReservation(endpoint, reservation)) {
             return admissionError(
                     StrategyErrorType.RESOURCE_EXHAUSTED,
                     AdmissionRejectReason.RESOURCE_EXHAUSTED,
                     "Decode generation retired before canonical placement");
         }
+        admission.setDecodePreemptRequestIds(preemptRequestIds);
         ScheduledRequest item = admission.buildItem(
                 context, future, System.currentTimeMillis());
         context.setRouteSubmittedNanos(System.nanoTime());
@@ -552,17 +552,18 @@ public class EvictionManager {
                 proposal.endpointId());
     }
 
-    private boolean startEngineCancelPreemption(BalanceContext ctx,
-                                                CompletableFuture<Response> future,
-                                                PreemptionConfig preemption,
-                                                DecodeEvictionProposal proposal,
-                                                DecodeEndpoint decodeEp,
-                                                long seqLen,
-                                                long expectedKvTokens,
-                                                DecodeEndpoint.AdmissionCapacity capacity,
-                                                QueueRouteAdmission admission) {
+    private boolean startEnginePreemption(BalanceContext ctx,
+                                          CompletableFuture<Response> future,
+                                          PreemptionConfig preemption,
+                                          DecodeEvictionProposal proposal,
+                                          DecodeEndpoint decodeEp,
+                                          long seqLen,
+                                          long expectedKvTokens,
+                                          DecodeEndpoint.AdmissionCapacity capacity,
+                                          QueueRouteAdmission admission) {
         String detail = "preempted by higher-priority request " + ctx.getRequestId();
         EngineCancellationConfig cancellation = requiredEngineCancellation(preemption);
+        boolean returnInstructions = cancellation.getMode() == EngineCancellationConfig.Mode.RETURN;
         DecodePreemptionCoordinator.PreemptionCommand command =
                 new DecodePreemptionCoordinator.PreemptionCommand(
                         decodeEp,
@@ -583,15 +584,18 @@ public class EvictionManager {
             return true;
         }
         try {
-            // execute() performs the victim-claim and sends every Cancel
-            // before returning. The mutation claim keeps an incoming
-            // Cancel pending until this asynchronous attempt settles.
-            execution = preemptionCoordinator.preempt(command);
+            // The mutation keeps incoming cancellation pending until victim
+            // claiming and the reservation handoff complete.
+            execution = returnInstructions
+                    ? preemptionCoordinator.prepareReturnedPreemption(command)
+                    : preemptionCoordinator.preempt(command);
             if (!execution.takeoverRequired()) {
                 mutation.close();
                 return false;
             }
-            reportCancelRequests(ctx, proposal);
+            if (!returnInstructions) {
+                reportCancelRequests(ctx, proposal);
+            }
         } catch (RuntimeException | Error startFailure) {
             mutation.close();
             throw startFailure;
@@ -604,7 +608,7 @@ public class EvictionManager {
                         try {
                             terminal = enginePreemptionTerminal(
                                     ctx, future, proposal,
-                                    decodeEp, result, error, admission);
+                                    decodeEp, result, error, admission, returnInstructions);
                         } catch (RuntimeException | Error callbackError) {
                             Logger.error(
                                     "[eviction-manager] cancel completion failed:"
@@ -626,16 +630,18 @@ public class EvictionManager {
     }
 
     /** Convert one typed coordinator result into commit or one terminal response. */
-    private Response enginePreemptionTerminal(
-            BalanceContext ctx,
-            CompletableFuture<Response> future,
-            DecodeEvictionProposal proposal,
-            DecodeEndpoint decodeEp,
-            DecodePreemptionCoordinator.PreemptionResult result,
-            Throwable error,
-            QueueRouteAdmission admission) {
+    private Response enginePreemptionTerminal(BalanceContext ctx,
+                                              CompletableFuture<Response> future,
+                                              DecodeEvictionProposal proposal,
+                                              DecodeEndpoint decodeEp,
+                                              DecodePreemptionCoordinator.PreemptionResult result,
+                                              Throwable error,
+                                              QueueRouteAdmission admission,
+                                              boolean returnInstructions) {
         if (error != null || result == null) {
-            reportCancelTimeout(ctx, proposal.endpointId());
+            if (!returnInstructions) {
+                reportCancelTimeout(ctx, proposal.endpointId());
+            }
             Logger.error(
                     "[eviction-manager] cancel coordinator returned no typed result:"
                             + " request_id={} worker={}",
@@ -654,12 +660,16 @@ public class EvictionManager {
                         AdmissionRejectReason.RESOURCE_EXHAUSTED,
                         "Decode reservation disappeared before placement");
             }
-            reportCommittedEnginePreemption(ctx, proposal);
+            if (!returnInstructions) {
+                reportCommittedEnginePreemption(ctx, proposal);
+            }
             recordDecodePlanObservability(ctx, proposal);
             return placeReservedDecode(
-                    ctx, future, decodeEp, reservation, admission);
+                    ctx, future, decodeEp, reservation, admission, returnInstructions
+                            ? proposal.victims().stream().map(DecodeRequestView::requestId).toList()
+                            : List.of());
         }
-        if (result.controlFailure()) {
+        if (!returnInstructions && result.controlFailure()) {
             reportCancelTimeout(ctx, proposal.endpointId());
         }
         return admissionError(

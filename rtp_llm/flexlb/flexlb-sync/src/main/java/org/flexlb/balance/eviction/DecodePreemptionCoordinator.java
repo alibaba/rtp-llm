@@ -22,9 +22,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 
 /**
- * Executes one Engine-Cancel preemption transaction.
+ * Prepares returned preemption instructions or executes an Engine-Cancel transaction.
  *
- * <p>The scheduler supplies a pure plan and consumes one result.  This class
+ * <p>The scheduler supplies a pure plan and consumes one result. The RPC path
  * owns the two-phase protocol, token fencing and exactly-once child settlement.
  * Engine acknowledgement is only control evidence; the canonical victim
  * terminal transaction may complete before or after that acknowledgement.</p>
@@ -128,6 +128,24 @@ public final class DecodePreemptionCoordinator {
         this.cancelChannel = Objects.requireNonNull(
                 cancelChannel, "cancelChannel");
         this.requests = Objects.requireNonNull(requests, "requests");
+    }
+
+    /** Claim exact victims and reserve an incoming route without invoking Cancel. */
+    PreemptionExecution prepareReturnedPreemption(PreemptionCommand command) {
+        long generation = command.endpoint().getStatus().getGenerationId();
+        List<DecodeEndpoint.ReservationHandle> victims = command.victims().stream()
+                .map(victim -> new DecodeEndpoint.ReservationHandle(generation,
+                        victim.requestId(), victim.reservationToken()))
+                .toList();
+        DecodeEndpoint.PreemptionBeginResult begin = command.endpoint()
+                .beginReturnedPreemption(nextToken(), victims, command.incomingRequestId(), command.incomingKvTokens(),
+                        command.incomingExpectedKvTokens(), command.incomingPriority(), command.capacity());
+        PreemptionResult result = new PreemptionResult(begin == DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                begin == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED,
+                "return_" + begin.name().toLowerCase());
+        return result.committed()
+                ? PreemptionExecution.started(CompletableFuture.completedFuture(result))
+                : PreemptionExecution.declined(result);
     }
 
     PreemptionExecution preempt(

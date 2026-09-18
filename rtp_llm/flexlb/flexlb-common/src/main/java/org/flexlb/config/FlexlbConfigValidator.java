@@ -129,7 +129,7 @@ public final class FlexlbConfigValidator {
         positive(config.getFallbackBatchTokenCapacity(), "fallbackBatchTokenCapacity");
 
         if (!config.isDirect()) {
-            validateQueue(config.queueScheduler());
+            validateQueue(config);
         }
         config.getDispatcher().validateFor(config.getScheduler());
         validateRouting(config.getRouter());
@@ -150,7 +150,8 @@ public final class FlexlbConfigValidator {
         validateConsistency(config.getConsistency());
     }
 
-    private static void validateQueue(SchedulerConfig queue) {
+    private static void validateQueue(FlexlbConfig config) {
+        SchedulerConfig queue = config.queueScheduler();
         positive(queue.getQueueTimeoutMs(), "scheduler.queueTimeoutMs");
         require(queue.getOrdering() != null, "scheduler.ordering", "is required for QUEUE");
         require(queue.getDecision() != null, "scheduler.decision", "is required for QUEUE");
@@ -224,10 +225,18 @@ public final class FlexlbConfigValidator {
                     require(cancellation != null,
                             "scheduler.ordering.preemption.engineCancellation",
                             "is required when DECODE_ENGINE_OWNED is allowed");
-                    positive(cancellation.getAckTimeoutMs(),
-                            "scheduler.ordering.preemption.engineCancellation.ackTimeoutMs");
-                    positive(cancellation.getCompletionTimeoutMs(),
-                            "scheduler.ordering.preemption.engineCancellation.completionTimeoutMs");
+                    require(cancellation.getMode() != null,
+                            "scheduler.ordering.preemption.engineCancellation.mode", "is required");
+                    if (cancellation.getMode() == EngineCancellationConfig.Mode.RETURN) {
+                        require(!config.isBatchDispatch(),
+                                "scheduler.ordering.preemption.engineCancellation.mode",
+                                "RETURN requires the NON_BATCH dispatcher");
+                    } else {
+                        positive(cancellation.getAckTimeoutMs(),
+                                "scheduler.ordering.preemption.engineCancellation.ackTimeoutMs");
+                        positive(cancellation.getCompletionTimeoutMs(),
+                                "scheduler.ordering.preemption.engineCancellation.completionTimeoutMs");
+                    }
                 } else {
                     require(cancellation == null,
                             "scheduler.ordering.preemption.engineCancellation",

@@ -97,6 +97,16 @@ strategy 时复用普通选择流程，因而保留普通 reason，且没有 `gl
 - `queueTimeoutMs`（默认 3600000）给 QUEUE 所有权提供上界；
   `RequestLifecycleConfig` 另外约束 stale inflight 和已交付未确认请求。
 
+## Decode 抢占指令交付
+
+`EvictionManager` 在原路由选定的逻辑 Decode 容量不足时规划抢占；
+`engineCancellation.mode` 选择 `RPC`（默认）或 `RETURN`。RPC 由
+`DecodePreemptionCoordinator` 发起 Cancel 并等待权威终态；RETURN 只原子占有精确的
+victim 代际和新请求预留，随后通过 `QueueRouteAdmission` 发布普通路由结果。
+
+RETURN 要求 NON_BATCH。客户端将指令透传给目标 Decode，由 Decode 完成所有老请求取消及资源释放后执行新请求。
+Master 不发起此次抢占的 Cancel RPC，也不等待取消完成才返回。
+
 ## 默认配置
 
 - scheduler：`QUEUE` + `FIFO`，`queueTimeoutMs=3600000`，
