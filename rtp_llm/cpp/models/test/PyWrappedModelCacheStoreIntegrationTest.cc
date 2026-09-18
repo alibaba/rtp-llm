@@ -42,6 +42,9 @@ void registerExecCtxOps(pybind11::module& m);
 namespace rtp_llm::test {
 
 struct PyWrappedModelTestPeer {
+    static auto splitMixedInputs(PyWrappedModel& model, const GptModelInputs& inputs) {
+        return model.splitMixedInputs(inputs);
+    }
     static auto splitInputsIntoMicroBatches(PyWrappedModel& model, const GptModelInputs& inputs) {
         return model.splitInputsIntoMicroBatches(inputs, model.planMicroBatches(inputs));
     }
@@ -728,6 +731,38 @@ Scenario makeMtpScenario() {
     return scenario;
 }
 
+Scenario makeMixedBatchScenario() {
+    auto config = makeCacheConfig({{"full", 2, 16}, {"linear", 2, 24}});
+    auto layout = makeLayout(config);
+    auto inputs = makeInputs(/*input_lengths=*/{1, 1, 3},
+                             /*request_ids=*/{0, 0, 501},
+                             /*cache_keys=*/{0, 0, 0, 0, 5101, 5102},
+                             /*cache_keys_width=*/2,
+                             /*block_ids=*/{1, -1, 2, -1, 3, 4, 5, -1, 6, -1, 7, 0},
+                             /*group_tags=*/{"full", "linear"},
+                             /*block_table_width=*/2,
+                             /*global_tokens_per_block=*/2,
+                             /*global_stride_bytes=*/16);
+
+    inputs.combo_tokens          = pinnedTensor({11, 12, 21, 22, 23}, {5});
+    inputs.input_lengths         = pinnedTensor({8, 9, 3}, {3});
+    inputs.sequence_lengths      = pinnedTensor({7, 8}, {2});
+    inputs.prefix_lengths        = pinnedTensor({0}, {1});
+    inputs.lm_output_indexes     = pinnedTensor({0, 1, 4}, {3});
+    inputs.request_id            = pinnedLongTensor({501}, {1});
+    inputs.request_pd_separation = pinnedBoolTensor(1, true);
+    inputs.cache_keys            = pinnedLongTensor({5101, 5102}, {1, 2});
+    inputs.combo_position_ids    = pinnedTensor(
+        {100, 101, 102, 103, 104, 105, 106, 107, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211}, {20});
+    inputs.text_tokens_mask = pinnedTensor({1, 1, 0, 0, 1}, {5});
+    inputs.mm_features_locs = pinnedTensor({3}, {1});
+    inputs.multimodal_features =
+        std::vector<torch::Tensor>{torch::ones({1, 1}, torch::TensorOptions().dtype(torch::kFloat16))};
+    inputs.trace_ids = {"decode-0", "decode-1", "context-0"};
+
+    return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
+}
+
 Scenario makeScenario(const std::string& name) {
     if (name == "mtp_placeholders" || name == "mtp_placeholders_extra_payload" || name == "mtp_missing_placeholder"
         || name == "single_model_extra_payload") {
@@ -959,6 +994,9 @@ Scenario makeScenario(const std::string& name) {
         return scenario;
     }
 
+    if (name == "mixed_batch") {
+        return makeMixedBatchScenario();
+    }
     throw std::invalid_argument("unknown PyWrappedModel cache-store integration scenario: " + name);
 }
 
@@ -1143,7 +1181,8 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                                              size_t             forward_count,
                                              bool               ignore_deferred_errors,
                                              bool               capture_only_first_forward,
-                                             bool               skip_first_deferred_error_take) {
+                                             bool               skip_first_deferred_error_take,
+                                             bool need_all_logits, bool need_all_hidden_states) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
         initRuntime(/*device_id=*/0,
@@ -1165,6 +1204,10 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     const auto input_scenario = inspect_split ? (single_group_split ? "micro_batch" : "micro_batch_multi_tag") :
                                                 ((cacheless_warmup || eplb_phase) ? "multi_tag" : scenario_name);
     auto       scenario       = makeScenario(input_scenario);
+    if (scenario_name == "mixed_batch") {
+        scenario.inputs.need_all_logits = need_all_logits;
+        scenario.inputs.need_all_hidden_states = need_all_hidden_states;
+    }
     if (inspect_split) {
         scenario.inputs.kv_cache_kernel_block_id.add_(100);
         scenario.inputs.kv_cache_kernel_block_id.masked_fill_(scenario.inputs.kv_cache_block_id.lt(0), -1);
@@ -1194,10 +1237,10 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
             torch::tensor({0.5f, 1.5f}, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA));
         weights.final_layernorm = std::move(final_layernorm);
     }
-    if (scenario.install_lm_head) {
+    if (scenario.install_lm_head || scenario_name == "mixed_batch") {
         auto lm_head = std::make_shared<DenseWeights>();
         lm_head->kernel =
-            torch::ones({2, scenario.hidden_size}, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA));
+            torch::ones({scenario_name == "mixed_batch" ? 1 : 2, scenario.hidden_size}, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA));
         weights.lm_head = std::move(lm_head);
     }
     GptModelDescription description;
@@ -1249,10 +1292,23 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     size_t                     cp_handle_outputs_calls{0};
     std::vector<torch::Tensor> forward_hidden_states;
     std::vector<std::string>   deferred_capture_errors;
+    bool mixed_split_host_tensors_pinned = false;
     forward_hidden_states.reserve(forward_count);
     {
         PyWrappedModel                model(params, std::move(py_model));
         TestContextParallelProcessor* test_cp_processor = nullptr;
+        if (scenario_name == "mixed_batch") {
+            const auto [decode, context]     = PyWrappedModelTestPeer::splitMixedInputs(model, scenario.inputs);
+            const auto is_pinned_host_tensor = [](const torch::Tensor& tensor) {
+                return !tensor.defined() || !tensor.device().is_cpu() || tensor.numel() == 0 || tensor.is_pinned();
+            };
+            mixed_split_host_tensors_pinned = is_pinned_host_tensor(decode.kv_cache_block_id)
+                                              && is_pinned_host_tensor(decode.kv_cache_kernel_block_id)
+                                              && is_pinned_host_tensor(context.kv_cache_block_id)
+                                              && is_pinned_host_tensor(context.kv_cache_kernel_block_id)
+                                              && is_pinned_host_tensor(context.lm_output_indexes)
+                                              && is_pinned_host_tensor(context.mm_features_locs);
+        }
         if (inspect_split) {
             const auto split = PyWrappedModelTestPeer::splitInputsIntoMicroBatches(model, scenario.inputs);
             py::list   batches;
@@ -1326,6 +1382,13 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     }
 
     auto result                    = serializeResult(*cache_store, scenario.base_addresses, output);
+    if (scenario_name == "mixed_batch") {
+        result["mixed_split_host_tensors_pinned"] = mixed_split_host_tensors_pinned;
+        if (output.logits.defined()) result["logits"] = output.logits.cpu();
+        if (output.hidden_states.defined()) result["hidden_states"] = output.hidden_states.cpu();
+        if (output.all_logits.defined()) result["all_logits"] = output.all_logits.cpu();
+        if (output.all_hidden_states.defined()) result["all_hidden_states"] = output.all_hidden_states.cpu();
+    }
     auto capture_metrics           = fake_metrics_reporter.snapshotHiddenStateCaptureMetrics();
     result["capture_metrics"]      = capture_metrics[0];
     result["capture_metric_types"] = capture_metrics[1];
@@ -1859,7 +1922,9 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           py::arg("forward_count")                  = 1,
           py::arg("ignore_deferred_errors")         = false,
           py::arg("capture_only_first_forward")     = false,
-          py::arg("skip_first_deferred_error_take") = false);
+          py::arg("skip_first_deferred_error_take") = false,
+          py::arg("need_all_logits") = false,
+          py::arg("need_all_hidden_states") = false);
     m.def("run_dirty_generation_prefill_capture_scenario",
           &rtp_llm::test::runDirtyGenerationPrefillCaptureScenario,
           py::arg("py_model"));

@@ -109,7 +109,9 @@ public:
 private:
     friend struct test::PyWrappedModelTestPeer;
 
-    std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
+    std::optional<PyCacheStoreInputs>         prepareWriteCacheParams(const GptModelInputs& inputs);
+    GptModelOutputs                           forwardMixedBatched(const GptModelInputs& inputs);
+    std::pair<GptModelInputs, GptModelInputs> splitMixedInputs(const GptModelInputs& inputs) const;
 
 private:
     // Helper functions to reduce code duplication
@@ -186,7 +188,12 @@ private:
     std::vector<DSparkBudgetGraph>     dspark_budget_graphs_;
     py::object                         py_model_;
     py::object                         py_forward_method_;
-    py::object                         held_attn_pyobj_;
+    // Keep every eager-attention preparation object alive until the executor
+    // releases this forward cycle. Mixed continuous batching performs a pure
+    // decode pass followed by a pure context pass, so a single object would
+    // release decode-side workspaces while their CUDA kernels may still be in
+    // flight.
+    std::vector<py::object> held_attn_pyobjs_;
     // Per-wrapper ownership, not the process-wide configuration request. Only
     // the normal main-generation wrapper can own this secondary runner.
     const bool                       owns_generation_prefill_cuda_graph_{false};
