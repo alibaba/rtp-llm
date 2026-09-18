@@ -1,6 +1,7 @@
 #include <memory>
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
 #include "rtp_llm/cpp/multimodal_processor/test/FakeMultimodalProcessor.h"
 
 using namespace std;
@@ -8,6 +9,31 @@ using namespace std;
 namespace rtp_llm {
 
 class MultimodalProcessorTest: public DeviceTestBase {};
+
+TEST(RemoteMultimodalProcessorErrorTest, preservesStructuredUnsafeInput) {
+    ErrorDetailsPB details;
+    details.set_error_code(static_cast<int>(ErrorCode::UNSAFE_INPUT_CONTENT));
+    details.set_error_message("Input data may contain inappropriate content.");
+    grpc::ClientContext context;
+    auto result = RemoteMultimodalProcessor::remoteEmbeddingError(
+        grpc::Status(grpc::StatusCode::PERMISSION_DENIED, "rejected", details.SerializeAsString()), context);
+    EXPECT_EQ(result.code(), ErrorCode::UNSAFE_INPUT_CONTENT);
+    EXPECT_EQ(result.ToString(), "Input data may contain inappropriate content.");
+}
+
+TEST(RemoteMultimodalProcessorErrorTest, doesNotInferUnsafeInputFromGrpcStatusAlone) {
+    grpc::ClientContext context;
+    auto result = RemoteMultimodalProcessor::remoteEmbeddingError(
+        grpc::Status(grpc::StatusCode::PERMISSION_DENIED, "[UNSAFE_INPUT_CONTENT] rejected"), context);
+    EXPECT_EQ(result.code(), ErrorCode::MM_PROCESS_ERROR);
+
+    ErrorDetailsPB details;
+    details.set_error_code(static_cast<int>(ErrorCode::MM_PROCESS_ERROR));
+    result = RemoteMultimodalProcessor::remoteEmbeddingError(
+        grpc::Status(grpc::StatusCode::PERMISSION_DENIED, "inspection unavailable", details.SerializeAsString()),
+        context);
+    EXPECT_EQ(result.code(), ErrorCode::MM_PROCESS_ERROR);
+}
 
 TEST_F(MultimodalProcessorTest, testPrecomputedFeatureHashes) {
     auto                       processor  = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 100);

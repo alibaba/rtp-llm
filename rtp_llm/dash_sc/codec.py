@@ -81,6 +81,12 @@ DASH_ERROR_BAD_REQUEST = DashErrorSpec(
     status_code=400,
     status_name="InvalidParameter",
 )
+DASH_ERROR_DATA_INSPECTION_FAILED = DashErrorSpec(
+    error_no=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=400,
+    status_name="DataInspectionFailed",
+)
 DASH_ERROR_TOO_LONG = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
     finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
@@ -671,6 +677,8 @@ class OtherParams:
     traffic_reject_priority: int | None = None
     reasoning_effort: str | None = None
     request_headers: dict[str, str] = field(default_factory=dict)
+    skip_input_inspection: bool = False
+    inspection_model_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -939,6 +947,39 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
                     return_input_ids = vf != 0.0
 
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
+    inspection = ds_attrs.get("x-dashscope-inner-gateway-datainspection")
+    try:
+        inspection = (
+            json.loads(inspection) if isinstance(inspection, str) else inspection
+        )
+    except (TypeError, ValueError):
+        inspection = None
+    input_inspection_disabled = (
+        isinstance(inspection, dict)
+        and str(inspection.get("input", "")).strip().lower() == "disable"
+    )
+    qwenchat_inspection = _parse_optional_parameter_bool(
+        request, "qwenchat_datainspection"
+    )
+    if qwenchat_inspection is None:
+        qwenchat_inspection = _parse_optional_bool(
+            _lookup_ds_request_control(ds_attrs, "qwenchat_datainspection")
+        )
+    if (
+        input_inspection_disabled
+        and qwenchat_inspection is None
+        and "payload" in request.parameters
+    ):
+        # The VL chat wrapper forwards the original DashScope parameters inside
+        # parameters["payload"], not as individual gRPC parameters.
+        payload = _load_multimodal_payload(request)
+        if isinstance(payload, dict):
+            qwenchat_inspection = _parse_optional_bool(
+                _lookup_ds_request_control(payload, "qwenchat_datainspection")
+            )
+    skip_input_inspection = (
+        input_inspection_disabled and qwenchat_inspection is not True
+    )
     enable_thinking = _parse_optional_bool(
         _lookup_ds_request_control(ds_attrs, "x-ds-llm-thinking")
     )
@@ -982,6 +1023,11 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
             ds_attrs.get("x-dashscope-inner-request-priority")
         )
 
+    # ModelInferRequest.model_name identifies the Triton serving endpoint and can
+    # be the generic literal "model".  Spectrum preserves the user-facing model
+    # in ds_header_attributes.model; that is the identifier expected by GreenNet.
+    inspection_model_name = _normalize_non_empty_str(ds_attrs.get("model"))
+
     request_headers: dict[str, str] = {}
     for header_name in (
         "user_id",
@@ -1000,6 +1046,8 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
         timeout_ms=timeout_ms,
         traffic_reject_priority=traffic_reject_priority,
         reasoning_effort=reasoning_effort,
+        inspection_model_name=inspection_model_name,
+        skip_input_inspection=skip_input_inspection,
         request_headers=request_headers,
     )
 

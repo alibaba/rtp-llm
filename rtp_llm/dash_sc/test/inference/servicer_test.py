@@ -14,11 +14,17 @@ import logging
 import struct
 import unittest
 from io import BytesIO
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import (
+    ExceptionCategory,
+    ExceptionType,
+    FtRuntimeException,
+    http_status_for,
+)
 from rtp_llm.config.generate_config import RoleAddr
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
@@ -27,6 +33,7 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
+    DASH_ERROR_DATA_INSPECTION_FAILED,
     DASH_ERROR_INTERNAL,
     DASH_ERROR_INVALID_OUTPUT,
     DASH_ERROR_TIMEOUT,
@@ -40,7 +47,9 @@ from rtp_llm.dash_sc.codec import (
 )
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    _build_mm_inputs,
     _dash_error_spec_for_ft_exception,
+    _make_generate_input,
     build_think_runtime,
     iter_real_model_stream_infer,
 )
@@ -130,6 +139,23 @@ class _MultiStreamVisitor:
         return self._streams[self.enqueue_called - 1]
 
 
+class GenerateInputInspectionPolicyTest(unittest.TestCase):
+    def test_opt_out_is_attached_to_multimodal_input(self) -> None:
+        mm_inputs = _build_mm_inputs(
+            [MultimodalPart(url="image", mm_type=MMUrlType.IMAGE)],
+            skip_input_inspection=True,
+        )
+        generated = _make_generate_input(
+            request_id=1,
+            input_ids_list=[1],
+            generate_config=SimpleNamespace(trace_id=""),
+            headers={"x-rtp-model-name": "k3"},
+            mm_inputs=mm_inputs,
+        )
+        self.assertTrue(generated.mm_inputs[0].skip_input_inspection)
+        self.assertEqual(generated.headers["x-rtp-model-name"], "k3")
+
+
 class DashErrorSpecForFtExceptionTest(unittest.TestCase):
     def test_non_default_exception_groups(self) -> None:
         cases = (
@@ -140,6 +166,7 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
             (ExceptionType.GENERATE_TIMEOUT, DASH_ERROR_TIMEOUT),
             (ExceptionType.OUT_OF_VOCAB_RANGE, DASH_ERROR_INVALID_OUTPUT),
             (ExceptionType.CANCELLED_ERROR, DASH_ERROR_ABORT),
+            (ExceptionType.UNSAFE_INPUT_CONTENT, DASH_ERROR_DATA_INSPECTION_FAILED),
         )
         for exception_type, expected in cases:
             with self.subTest(exception_type=exception_type):
@@ -156,6 +183,16 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
                 FtRuntimeException(ExceptionType.CONNECT_FAILED, "boom")
             ),
             DASH_ERROR_INTERNAL,
+        )
+
+    def test_unsafe_input_is_a_client_error(self) -> None:
+        error = FtRuntimeException(ExceptionType.UNSAFE_INPUT_CONTENT, "unsafe image")
+        self.assertEqual(error.exception_type.category, ExceptionCategory.BAD_REQUEST)
+        self.assertEqual(http_status_for(error), 400)
+        self.assertEqual(_dash_error_spec_for_ft_exception(error).status_code, 400)
+        self.assertEqual(
+            _dash_error_spec_for_ft_exception(error).status_name,
+            "DataInspectionFailed",
         )
 
 
@@ -446,6 +483,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             (ExceptionType.MM_EMPTY_ENGINE_ERROR, DASH_ERROR_INTERNAL),
             (ExceptionType.MM_NOT_SUPPORTED_ERROR, DASH_ERROR_UNSUPPORTED),
             (ExceptionType.MM_DOWNLOAD_FAILED, DASH_ERROR_INTERNAL),
+            (ExceptionType.UNSAFE_INPUT_CONTENT, DASH_ERROR_DATA_INSPECTION_FAILED),
         )
         for exception_type, error_spec in cases:
             with self.subTest(exception_type=exception_type):
@@ -2881,6 +2919,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             ("User_ID", "u2"),
             ("X-DashScope-Uid", "uid-metadata"),
             ("X-DashScope-Service", "service-metadata"),
+            ("X-Rtp-Model-Name", "metadata-must-not-override-request"),
             ("x-dashscope-apikeyid", "ak2"),
             ("authorization", "secret"),
         )
@@ -2890,6 +2929,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             {
                 "x-dashscope-uid": "uid-attributes",
                 "x-dashscope-service": "service-attributes",
+                "x-rtp-model-name": "attributes-must-not-override-request",
             }
         )
         await _drain(servicer.ModelStreamInfer(_areq_iter([request]), context))
@@ -2902,7 +2942,32 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 "x-dashscope-apikeyid": "ak2",
                 "x-dashscope-uid": "uid-metadata",
                 "x-dashscope-service": "service-metadata",
+                "x-rtp-model-name": "default",
             },
+        )
+
+    async def test_real_mode_uses_business_model_for_input_inspection(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        context = MagicMock()
+        context.invocation_metadata.return_value = (
+            ("X-Rtp-Model-Name", "metadata-must-not-override-request"),
+        )
+        request = self._valid_infer_request()
+        request.model_name = "model"
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "model": "pre-kimi-k3-green-chat",
+                "x-rtp-model-name": "attributes-must-not-override-request",
+            }
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([request]), context))
+
+        self.assertIsNotNone(visitor.last_generate_input)
+        self.assertEqual(
+            visitor.last_generate_input.headers["x-rtp-model-name"],
+            "pre-kimi-k3-green-chat",
         )
 
     async def test_real_mode_uses_ds_header_attributes_for_backend_controls(
@@ -2936,7 +3001,11 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generate_config.traffic_reject_priority, 10)
         self.assertEqual(
             visitor.last_generate_input.headers,
-            {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
+            {
+                "user_id": "u1",
+                "x-dashscope-apikeyid": "ak1",
+                "x-rtp-model-name": "default",
+            },
         )
 
 

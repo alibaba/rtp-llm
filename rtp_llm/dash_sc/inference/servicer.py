@@ -34,6 +34,7 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
+    DASH_ERROR_DATA_INSPECTION_FAILED,
     DASH_ERROR_INTERNAL,
     DASH_ERROR_INVALID_OUTPUT,
     DASH_ERROR_TIMEOUT,
@@ -99,7 +100,9 @@ _KIMI_K3_MEDIA_PAD = "<|media_pad|>"
 
 
 def _build_mm_inputs(
-    mm_parts: list, tensors: Optional[list[torch.Tensor]] = None
+    mm_parts: list,
+    tensors: Optional[list[torch.Tensor]] = None,
+    skip_input_inspection: bool = False,
 ) -> list:
     """Build ``MultimodalInput`` list from parsed dash_sc multimodal parts.
 
@@ -143,6 +146,7 @@ def _build_mm_inputs(
                 -1,  # use VitConfig.mm_timeout_ms
                 part.max_long_side_pixel,
             ),
+            skip_input_inspection,
         )
         for part, tensor in zip(mm_parts, tensors)
     ]
@@ -172,6 +176,7 @@ async def _prepare_kimi_k3_multimodal_request(
     *,
     tokenizer: Any,
     vit_config: Optional[VitConfig] = None,
+    skip_input_inspection: bool = False,
 ) -> tuple[list[int], list]:
     """Expand K3 chat-template placeholders and build backend multimodal inputs."""
     mm_parts = parse_multimodal_parts_from_request(request)
@@ -239,7 +244,9 @@ async def _prepare_kimi_k3_multimodal_request(
             cursor = offset + len(placeholder_ids)
         expanded_ids.extend(input_ids_list[cursor:])
 
-    return expanded_ids, _build_mm_inputs(mm_parts, tensors)
+    return expanded_ids, _build_mm_inputs(
+        mm_parts, tensors, skip_input_inspection=skip_input_inspection
+    )
 
 
 def _exception_metric_code(error_code: Any) -> str:
@@ -259,6 +266,8 @@ def _set_access_backend_error_code(access_agg: Any, e: BaseException) -> None:
 
 
 def _dash_error_spec_for_ft_exception(exc: FtRuntimeException) -> DashErrorSpec:
+    if exc.exception_type == ExceptionType.UNSAFE_INPUT_CONTENT:
+        return DASH_ERROR_DATA_INSPECTION_FAILED
     return _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exc.exception_type.category]
 
 
@@ -535,12 +544,10 @@ def _make_generate_input(
     request_id: int,
     input_ids_list: list[int],
     generate_config: Any,
-    invocation_metadata: Optional[Any],
-    request_headers: Optional[dict[str, str]] = None,
+    headers: Optional[dict[str, str]] = None,
     mm_inputs: Optional[list] = None,
 ) -> GenerateInput:
-    headers = dict(request_headers or {})
-    headers.update(_headers_from_invocation_metadata(invocation_metadata))
+    headers = dict(headers or {})
     trace_id = str(
         getattr(generate_config, "trace_id", "") or extract_trace_id(headers) or ""
     )
@@ -752,6 +759,7 @@ async def iter_real_model_stream_infer(
                         input_ids_list,
                         tokenizer=tokenizer,
                         vit_config=vit_config,
+                        skip_input_inspection=other.skip_input_inspection,
                     )
                 )
             apply_kimi_k3_request_contract(
@@ -764,8 +772,22 @@ async def iter_real_model_stream_infer(
             )
         elif mm_inputs is None:
             mm_inputs = _build_mm_inputs(
-                parse_multimodal_parts_from_request(request)
+                parse_multimodal_parts_from_request(request),
+                skip_input_inspection=other.skip_input_inspection,
             )
+
+        headers = dict(other.request_headers or {})
+        headers.update(_headers_from_invocation_metadata(invocation_metadata))
+        headers.pop("x-rtp-model-name", None)
+        # GreenNet needs the user-facing model identifier.  Triton model_name is
+        # only the serving endpoint and Spectrum commonly sets it to "model".
+        # Keep the transport value as a compatibility fallback for callers that
+        # do not provide ds_header_attributes.model.
+        model_name = other.inspection_model_name or str(
+            request.model_name or ""
+        ).strip()
+        if model_name:
+            headers["x-rtp-model-name"] = model_name
 
         matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)
         should_echo = bool(matched_echo_ids)
@@ -807,8 +829,7 @@ async def iter_real_model_stream_infer(
             request_id=rtp_llm_request_id,
             input_ids_list=input_ids_list,
             generate_config=generate_config,
-            invocation_metadata=invocation_metadata,
-            request_headers=other.request_headers,
+            headers=headers,
             mm_inputs=mm_inputs,
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
@@ -1106,8 +1127,7 @@ async def iter_real_model_stream_infer(
                 request_id=phase2_request_id,
                 input_ids_list=phase2_input_ids,
                 generate_config=phase2_config,
-                invocation_metadata=invocation_metadata,
-                request_headers=other.request_headers,
+                headers=headers,
                 mm_inputs=mm_inputs,
             )
             logging.debug(

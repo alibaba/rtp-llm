@@ -1452,6 +1452,7 @@ class _StubGreenNetProvider(GreenNetProvider):
         self.last_handle = None
         self.request_ids = []
         self.user_ids = []
+        self.model_names = []
 
     def is_enabled(self) -> bool:
         return True
@@ -1460,6 +1461,7 @@ class _StubGreenNetProvider(GreenNetProvider):
         self.calls += 1
         self.request_ids.append(str(request.id))
         self.user_ids.append(request.user_id)
+        self.model_names.append(request.model_name)
         if self._rewrite_suffix is not None:
             rewritten = [
                 MultimodalInput(
@@ -1558,10 +1560,12 @@ class MMProcessEngineGreenNetTest(TestCase):
             [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
             request_id,
             user_id="uid-local",
+            model_name="qwen3.5-plus",
         )
 
         self.assertEqual(provider.user_ids, ["uid-local"])
         self.assertEqual(provider.request_ids, [str(request_id)])
+        self.assertEqual(provider.model_names, ["qwen3.5-plus"])
         self.assertEqual(
             engine._access_logger.log_query_access.call_args.args[1], request_id
         )
@@ -1612,6 +1616,20 @@ class MMProcessEngineGreenNetTest(TestCase):
             [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
         )
         self.assertEqual(res.embeddings, [torch.tensor(0)])
+        engine.stop()
+
+    def test_local_path_respects_inspection_disable(self):
+        engine = self._make_engine()
+        provider = _StubGreenNetProvider(GreenNetVerdict(passed=True, code=1))
+        engine._greennet_provider = provider
+        engine.mm_embedding_cpp(
+            ["./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?gn_local_skip"],
+            [MMUrlType.IMAGE],
+            [torch.empty(0)],
+            [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
+            skip_input_inspection=[True],
+        )
+        self.assertEqual(provider.calls, 0)
         engine.stop()
 
     def test_local_path_raises_when_verdict_fails(self):
@@ -1702,6 +1720,27 @@ class MMProcessEngineGreenNetTest(TestCase):
         engine.async_submit([inp])
         verdict = engine.wait_greennet_verdict([inp])
         self.assertTrue(verdict.passed)
+        engine.stop()
+
+    def test_disabled_inspection_does_not_submit_or_pollute_inspected_cache(self):
+        engine = self._make_engine()
+        provider = _StubGreenNetProvider(GreenNetVerdict(passed=True, code=1))
+        engine._greennet_provider = provider
+        url = "./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?gn_skip"
+        skipped = self._make_input(url)
+        skipped.skip_input_inspection = True
+        inspected = self._make_input(url)
+
+        self.assertNotEqual(skipped.cache_key(), inspected.cache_key())
+        engine.async_submit([skipped])
+        self.assertTrue(engine.wait_greennet_verdict([skipped]).passed)
+        engine.get_embedding_result([skipped])
+        self.assertEqual(provider.calls, 0)
+
+        engine.async_submit([inspected])
+        self.assertTrue(engine.wait_greennet_verdict([inspected]).passed)
+        engine.get_embedding_result([inspected])
+        self.assertEqual(provider.calls, 1)
         engine.stop()
 
     @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")

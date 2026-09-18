@@ -163,6 +163,7 @@ class VitWorkerRequestIdTest(TestCase):
             ctx.invocation_metadata.return_value = (
                 ("x-dashscope-uid", "uid-worker"),
                 ("x-dashscope-service", "service-worker"),
+                ("x-rtp-model-name", "minimax-m3"),
             )
         wait_context.add_callback.return_value = True
         remote_context.add_callback.return_value = True
@@ -172,7 +173,11 @@ class VitWorkerRequestIdTest(TestCase):
         servicer.RemoteMultimodalEmbedding(request, remote_context)
 
         engine.async_submit.assert_called_once_with(
-            converted, 987654321, user_id="uid-worker", service_name="service-worker"
+            converted,
+            987654321,
+            user_id="uid-worker",
+            service_name="service-worker",
+            model_name="minimax-m3",
         )
         engine.wait_greennet_verdict.assert_called_once_with(
             converted,
@@ -181,6 +186,7 @@ class VitWorkerRequestIdTest(TestCase):
             cancellation_event=ANY,
             user_id="uid-worker",
             service_name="service-worker",
+            model_name="minimax-m3",
         )
         engine.get_embedding_result.assert_called_once_with(
             converted,
@@ -189,6 +195,7 @@ class VitWorkerRequestIdTest(TestCase):
             cancellation_event=ANY,
             user_id="uid-worker",
             service_name="service-worker",
+            model_name="minimax-m3",
         )
 
         wait_context.add_callback.call_args.args[0]()

@@ -484,26 +484,32 @@ def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
 def trans_mm_input(multimodal_inputs):
     # vit sep
     if isinstance(multimodal_inputs, MultimodalInputsPB):
-        return [
-            MultimodalInput(
-                mm_input.multimodal_url,
-                MMUrlType(mm_input.multimodal_type),
-                trans_tensor(mm_input.multimodal_tensor),
-                trans_config(mm_input.mm_preprocess_config),
+        converted = []
+        for mm_input in multimodal_inputs.multimodal_inputs:
+            converted.append(
+                MultimodalInput(
+                    mm_input.multimodal_url,
+                    MMUrlType(mm_input.multimodal_type),
+                    trans_tensor(mm_input.multimodal_tensor),
+                    trans_config(mm_input.mm_preprocess_config),
+                    bool(getattr(mm_input, "skip_input_inspection", False)),
+                )
             )
-            for mm_input in multimodal_inputs.multimodal_inputs
-        ]
+        return converted
     # not sep
     elif isinstance(multimodal_inputs, list):
-        return [
-            MultimodalInput(
-                mm_input.url,
-                MMUrlType(mm_input.mm_type),
-                mm_input.tensor,
-                mm_input.mm_preprocess_config,
+        converted = []
+        for mm_input in multimodal_inputs:
+            converted.append(
+                MultimodalInput(
+                    mm_input.url,
+                    MMUrlType(mm_input.mm_type),
+                    mm_input.tensor,
+                    mm_input.mm_preprocess_config,
+                    bool(getattr(mm_input, "skip_input_inspection", False)),
+                )
             )
-            for mm_input in multimodal_inputs
-        ]
+        return converted
     else:
         raise ValueError(
             f"Unsupported multimodal input type: {type(multimodal_inputs)}"
