@@ -359,13 +359,9 @@ inline void setGroupBlockNums(CacheConfig& config, uint32_t block_num) {
 
 inline CacheConfig makeCompactDsv4CacheConfig(uint32_t block_num) {
     ParallelismConfig parallelism;
-    auto              config = CacheConfigCreator::createBasicConfig(makeCompactDsv4ModelConfig(),
-                                                        parallelism,
-                                                        /*is_mtp=*/false,
-                                                        /*mtp_module_num=*/0);
-    config.block_num         = block_num;
+    auto              config = CacheConfigCreator::createWarmupConfig(makeCompactDsv4ModelConfig(), parallelism, 0);
     config.linear_step       = 1;
-    setGroupBlockNums(config, block_num);
+    config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
 

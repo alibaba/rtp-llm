@@ -1345,7 +1345,8 @@ bool KVCacheAllocator::doInit() {
     for (int group_id = 0; group_id < group_nums; ++group_id) {
         DeviceBlockPoolConfig pool_config =
             DeviceBlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(group_id));
-        const CacheGroupPolicy policy = config_.policyForGroup(static_cast<size_t>(group_id));
+        pool_config.allow_sentinel_only = allow_sentinel_only_;
+        const CacheGroupPolicy policy   = config_.policyForGroup(static_cast<size_t>(group_id));
         if (policy.memory_placement == CacheMemoryPlacement::DEVICE) {
             pool_config.use_pinned_cpu_backing = allocation_type_ == AllocationType::HOST;
             pool_config.use_device_malloc_backing =

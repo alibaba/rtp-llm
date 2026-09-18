@@ -3,6 +3,7 @@
 #include <cstdlib>
 
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
@@ -29,6 +30,30 @@ TEST_F(NormalEngineTest, testDecodeWarmupReserveTokensAreConvertedToBlocksAfterA
     EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/9, /*reserve_tokens=*/8, /*tokens_per_block=*/8), 3u);
     EXPECT_ANY_THROW(
         NormalEngine::warmUpReservedBlockCount(/*seq_len=*/1, /*reserve_tokens=*/1, /*tokens_per_block=*/0));
+}
+
+TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) {
+    ModelConfig model;
+    model.num_layers                   = 1;
+    model.attn_config.head_num         = 1;
+    model.attn_config.kv_head_num      = 1;
+    model.attn_config.size_per_head    = 1;
+    model.attn_config.tokens_per_block = 1;
+    model.kv_cache_spec_descs          = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
+    const auto config                  = CacheConfigCreator::createWarmupConfig(model, {});
+
+    auto            previous  = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
+    auto            candidate = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
+    ResourceContext resource_context;
+    resource_context.cache_manager = previous;
+    resource_context.role_type     = RoleType::PREFILL;
+    int group_num                  = 17;
+
+    EXPECT_ANY_THROW(NormalEngine::initializeAndPublishCacheManager(
+        resource_context, group_num, RoleType::DECODE, candidate, [](KVCacheManager&) { return false; }));
+    EXPECT_EQ(resource_context.cache_manager, previous);
+    EXPECT_EQ(resource_context.role_type, RoleType::PREFILL);
+    EXPECT_EQ(group_num, 17);
 }
 
 TEST_F(NormalEngineTest, testRejectGenerationPrefillWithSpeculativeBeforeRunnerCreation) {

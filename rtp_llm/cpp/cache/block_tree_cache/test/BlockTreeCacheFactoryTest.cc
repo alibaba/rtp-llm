@@ -215,7 +215,8 @@ CacheConfig makeSparseMlaIndexerConfig() {
 
     KVCacheConfig kv_cache_config;
     kv_cache_config.test_block_num = 8;
-    return CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
+    return test::finalizeCacheConfig(
+        CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config));
 }
 
 CacheConfig makeCompatibleSwaGroupsConfig(int                second_window,
@@ -1868,7 +1869,8 @@ TEST_F(BlockTreeCacheFactoryTest, UnifiedCreatorPreservesRuntimeTierConfiguratio
     runtime.block_tree_memory_evict_high_watermark_ratio = 0.72;
     runtime.block_tree_disk_evict_low_watermark_ratio    = 0.63;
     runtime.block_tree_disk_evict_high_watermark_ratio   = 0.73;
-    auto config    = CacheConfigCreator::createConfig(model, ParallelismConfig{}, RuntimeConfig{}, runtime);
+    auto config                                          = test::finalizeCacheConfig(
+        CacheConfigCreator::createConfig(model, ParallelismConfig{}, RuntimeConfig{}, runtime));
     auto allocator = initAllocator<KVCacheAllocator>(config);
     auto cache     = createBlockTreeCache(config, runtime, allocator);
     ASSERT_NE(cache, nullptr);

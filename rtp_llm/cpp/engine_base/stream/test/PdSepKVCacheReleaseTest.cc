@@ -323,7 +323,7 @@ protected:
         KVCacheConfig     kv_config;
         kv_config.seq_size_per_block        = seq_size_per_block;
         kv_config.kernel_seq_size_per_block = kernel_seq_size_per_blk;
-        auto config                         = CacheConfigCreator::createBasicConfig(mc, pc, kv_config, false, 0);
+        auto config                         = CacheConfigCreator::createWarmupConfig(mc, pc, kv_config, 0);
         // KVCacheManager::init() calls finalizeBlockNums(block_num), which fans the
         // global block count out to every group according to its capacity policy.
         config.block_num = block_num;

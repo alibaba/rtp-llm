@@ -159,6 +159,8 @@ public:
 
 private:
     void                  allocateAndSync();
+    uint32_t              synchronizeBlockNum(uint32_t candidate_block_num);
+    static uint32_t       selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service);
     std::function<void()> allocationChangeCallback() const;
     void                  reportMetricsLoop();
     bool collectCacheHitRates(std::chrono::steady_clock::time_point now, RtpLLMCacheReuseMetricsCollector& metrics);

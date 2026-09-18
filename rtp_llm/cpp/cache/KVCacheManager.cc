@@ -213,8 +213,11 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     use_device_malloc_block_pool_(use_device_malloc_block_pool),
     warmup_(warmup),
     allocation_wait_state_(std::make_shared<KVCacheAllocationWaitState>()) {
+    RTP_LLM_CHECK_WITH_INFO(config_.block_num > 0, "cache manager requires a positive baseline block count");
     if (warmup) {
-        config_.finalizeBlockNums(/*global_block_num=*/2, runtime_config_);
+        for (const auto& group : config_.topology().groups()) {
+            RTP_LLM_CHECK_WITH_INFO(group.block_num > 0, "warmup requires capacity-complete cache groups");
+        }
     } else {
         allocateAndSync();
     }
@@ -282,7 +285,8 @@ bool KVCacheManager::init() {
                                                     AllocationType::DEVICE,
                                                     metrics_reporter_,
                                                     kv_cache_config_.reserve_block_ratio,
-                                                    pd_sep_config_.role_type);
+                                                    pd_sep_config_.role_type,
+                                                    warmup_);
 
     if (use_device_malloc_block_pool_) {
         RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use raw device malloc KV cache block-pool backing");
@@ -910,26 +914,46 @@ void KVCacheManager::stopCacheEventPublisher() {
     cache_event_publisher_.reset();
 }
 
-void KVCacheManager::allocateAndSync() {
-    RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%d", config_.block_num);
-    size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
+uint32_t KVCacheManager::synchronizeBlockNum(uint32_t candidate_block_num) {
+    const auto& parallelism_config = parallelism_config_;
+    size_t      world_size         = parallelism_config.tp_size * parallelism_config.dp_size;
     if (world_size > 1) {
-        size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
+        RTP_LLM_CHECK_WITH_INFO(candidate_block_num <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max()),
+                                "candidate cache block count exceeds collective int32 range");
+        size_t local_rank    = parallelism_config.tp_size * parallelism_config.dp_rank + parallelism_config.tp_rank;
         auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
         auto   block_num_ptr = block_num_t.data_ptr<int>();
-        block_num_ptr[local_rank] = config_.block_num;
+        block_num_ptr[local_rank] = static_cast<int>(candidate_block_num);
         execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});
         execSyncCommunication(false);
         cudaSyncAndCheck();
 
-        if (parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
-            config_.block_num = 1;
-        } else {
-            config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
-        }
+        return selectConfirmedBlockNum(
+            block_num_ptr, world_size, parallelism_config.ffn_disaggregate_config.is_ffn_service());
     }
-    config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
-    RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
+    return candidate_block_num;
+}
+
+uint32_t KVCacheManager::selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service) {
+    RTP_LLM_CHECK_WITH_INFO(candidates != nullptr && count > 0, "cross-rank cache candidates must not be empty");
+    if (is_ffn_service) {
+        return 1;
+    }
+    const auto confirmed = *std::min_element(candidates, candidates + count);
+    RTP_LLM_CHECK_WITH_INFO(confirmed > 0, "cross-rank cache block count must be positive");
+    return static_cast<uint32_t>(confirmed);
+}
+
+void KVCacheManager::allocateAndSync() {
+    const auto confirmed_block_num = synchronizeBlockNum(config_.block_num);
+    // Child views are shared CacheConfig pointers; capacity confirmation must
+    // not mutate the caller's copies.
+    for (auto& sub : config_.mtp_sub_configs) {
+        RTP_LLM_CHECK_WITH_INFO(sub != nullptr, "null MTP cache configuration");
+        sub = std::make_shared<CacheConfig>(*sub);
+    }
+    config_.finalizeBlockNums(confirmed_block_num, runtime_config_);
+    RTP_LLM_LOG_INFO("block_num is %u after tp sync", config_.block_num);
 }
 
 void KVCacheManager::recordCacheHitTokens(int64_t input_length, const RtpLLMCacheReuseMetricsCollector& metrics) {

@@ -6,6 +6,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -19,6 +20,12 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::test {
+
+// Single-rank acceptance tests confirm the local candidate without collectives.
+inline CacheConfig finalizeCacheConfig(CacheConfig config) {
+    config.finalizeBlockNums(config.block_num, RuntimeConfig{});
+    return config;
+}
 
 inline constexpr uint32_t DSV4_FP8_KV_ENTRY_BYTES            = 584;
 inline constexpr uint32_t DSV4_FP8_INDEXER_ENTRY_BYTES       = 132;

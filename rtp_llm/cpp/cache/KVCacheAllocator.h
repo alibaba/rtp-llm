@@ -55,10 +55,12 @@ public:
                      AllocationType                     allocation_type     = AllocationType::DEVICE,
                      const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
                      int64_t                            reserve_block_ratio = 0,
-                     RoleType                           role_type           = RoleType::PDFUSION):
+                     RoleType                           role_type           = RoleType::PDFUSION,
+                     bool                               allow_sentinel_only = false):
         config_(config),
         allocation_type_(allocation_type),
         metrics_reporter_(metrics_reporter),
+        allow_sentinel_only_(allow_sentinel_only),
         reserve_block_ratio_(reserve_block_ratio),
         role_type_(role_type) {}
 
@@ -70,8 +72,8 @@ public:
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
-    virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int group_id, int block_id) const;
+                          convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
+    virtual BlockAddrInfo convertIndexToAddr(int layer_id, int group_id, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int group_id, int block_id, int partition_count, int partition_id) const;
@@ -218,6 +220,7 @@ protected:
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_             = nullptr;
     bool                               use_device_malloc_block_pool_ = false;
+    const bool                         allow_sentinel_only_          = false;
 
     size_t  reserve_block_num_{0};
     int64_t reserve_block_ratio_{0};

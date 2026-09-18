@@ -89,6 +89,7 @@ cc_test(
     copts = test_copts,
     deps =  [
         ":mock_engine",
+        "//rtp_llm/cpp/cache:cache",
     ] + cuda13_torch_link_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",

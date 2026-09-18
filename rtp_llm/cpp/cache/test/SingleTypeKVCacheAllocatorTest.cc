@@ -205,15 +205,15 @@ static rtp_llm::CacheConfig makeMtpCacheConfigByCreateSpConfig(uint32_t main_lay
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = mtp_module_num;
 
-    return rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
-                                                       propose_model_config,
-                                                       parallelism_config,
-                                                       runtime_config,
-                                                       kv_cache_config,
-                                                       sp_config,
-                                                       /*warm_up_result=*/std::nullopt,
-                                                       /*is_mtp=*/true,
-                                                       /*is_eagle=*/false);
+    return rtp_llm::test::finalizeCacheConfig(CacheConfigCreator::createConfig(score_model_config,
+                                                                               parallelism_config,
+                                                                               runtime_config,
+                                                                               kv_cache_config,
+                                                                               /*warm_up_result=*/std::nullopt,
+                                                                               sp_config,
+                                                                               &propose_model_config,
+                                                                               /*is_mtp=*/true,
+                                                                               /*is_eagle=*/false));
 }
 
 CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block = 8) {
@@ -1630,9 +1630,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteQuantizedMhaS
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
-    auto config                = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
-    config.block_num           = 5;
-    config.setGroupBlockLayout({5}, {config.kvBlockStrideBytesForGroup(0)}, {config.kvScaleStrideBytesForGroup(0)});
+    auto config                = CacheConfigCreator::createWarmupConfig(model_config, parallelism_config, 0);
+    config.finalizeBlockNums(/*global_block_num=*/5, RuntimeConfig{});
 
     ASSERT_FALSE(config.is_sparse);
     ASSERT_GT(config.kvScaleStrideBytesForGroup(0), 0u);

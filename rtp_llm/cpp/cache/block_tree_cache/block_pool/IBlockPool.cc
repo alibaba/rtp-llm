@@ -8,7 +8,10 @@ namespace rtp_llm {
 
 IBlockPool::IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config): config_(std::move(config)) {
     RTP_LLM_CHECK(config_ != nullptr);
-    RTP_LLM_CHECK(config_->physical_block_count > 1);
+    // Specialized pools validate whether a sentinel-only layout is allowed.
+    // The generic bookkeeping is well-defined with one reserved block and no
+    // allocatable blocks, but never with an empty physical id space.
+    RTP_LLM_CHECK(config_->physical_block_count > 0);
     allocated_.assign(config_->physical_block_count, 0);
     tree_refcounts_.assign(config_->physical_block_count, 0);
     for (std::vector<uint32_t>& typed_refcounts : tree_refcounts_by_type_) {
