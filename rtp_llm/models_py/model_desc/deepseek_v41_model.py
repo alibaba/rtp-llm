@@ -856,17 +856,28 @@ class DeepSeekV41Model(GptModelBase):
         status = torch.ones(1, dtype=torch.int32, device=decoder.query_device)
         torch.cuda.current_stream().synchronize()
         collective_torch.barrier(Group.TP)
-        if self._cp_rank == 0:
-            try:
-                if native.publish(publication, per_rank[0], per_rank) is False:
-                    raise RuntimeError("V4.1 native checkpoint copy did not complete")
-            except Exception as exc:
-                error = exc
-                status.zero_()
-        collective_torch.broadcast(status, 0, Group.TP)
-        if int(status.item()) != 1:
+        try:
+            if self._cp_rank == 0:
+                completed = native.publish(publication, per_rank[0], per_rank)
+            else:
+                if native is None:
+                    raise RuntimeError(
+                        "V4.1 producer rank lacks its native checkpoint publisher"
+                    )
+                # Every producer rank installs the same restored checkpoint on its
+                # own resource so its local cache publication carries the recovery
+                # metadata and its own fixed-group pages; the scheduling rank alone
+                # stages the memory copy.
+                completed = native.install(publication, per_rank[self._cp_rank], per_rank)
+            if completed is False:
+                raise RuntimeError("V4.1 native checkpoint copy did not complete")
+        except Exception as exc:
+            error = exc
+            status.zero_()
+        status = collective_torch.all_reduce(status, Group.TP)
+        if int(status.item()) != self.layout.cp_size:
             raise RuntimeError(
-                "V4.1 native state update failed on the scheduling rank"
+                "V4.1 native state update failed on a producer rank"
             ) from error
         return True
 

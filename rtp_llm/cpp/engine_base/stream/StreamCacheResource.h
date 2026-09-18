@@ -43,6 +43,12 @@ public:
     bool publishDsv41Checkpoint(const DSV41CheckpointPublication&             publication,
                                 const std::vector<std::vector<int32_t>>&      actual_block_ids,
                                 const std::vector<std::vector<std::vector<int32_t>>>& worker_block_ids);
+    // Non-scheduling CP ranks install the same restored checkpoint metadata on
+    // their own resource (no memory staging) so their local cache publication
+    // carries the recovery metadata and fixed-group slots.
+    bool installDsv41Checkpoint(const DSV41CheckpointPublication&             publication,
+                                const std::vector<std::vector<int32_t>>&      actual_block_ids,
+                                const std::vector<std::vector<std::vector<int32_t>>>& worker_block_ids);
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
@@ -132,6 +138,10 @@ private:
     void loadCacheSync();
     void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
     void updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context);
+    bool prepareDsv41Checkpoint(const DSV41CheckpointPublication&             publication,
+                                const std::vector<std::vector<int32_t>>&      actual_block_ids,
+                                const std::vector<std::vector<std::vector<int32_t>>>& worker_block_ids,
+                                bool                                                       scheduling_rank);
     std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
                                                   bool                                         enable_memory_cache,
                                                   bool                                         enable_remote_cache);

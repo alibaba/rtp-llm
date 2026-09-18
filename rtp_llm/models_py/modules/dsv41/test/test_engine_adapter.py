@@ -637,6 +637,120 @@ class EngineAdapterContractTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "actual boundary"):
             DeepSeekV41Model._cp_publication(decoder, history)
 
+    @staticmethod
+    def _cp_publish_fixture(rank, install_result=True, publish_result=True):
+        from unittest.mock import Mock
+
+        from rtp_llm.models_py.modules.dsv41.cache_layout import CacheRegion
+        from rtp_llm.ops.compute_ops import KVCacheRegionName
+
+        cp_size = 2
+        counts = [1] * 6
+        native = SimpleNamespace(
+            block_ids_by_group=[[gid] for gid in range(6)],
+            publish=Mock(return_value=publish_result),
+            install=Mock(return_value=install_result),
+        )
+
+        class Slot:
+            def __init__(self, owner_layer, region):
+                self.owner_layer = owner_layer
+                self.region = region
+
+        tables = {}
+        groups = {}
+        for gid, (owner, region) in enumerate(
+            [(2, CacheRegion.GLOBAL), (8, CacheRegion.GLOBAL),
+             (2, CacheRegion.INDEX_K), (8, CacheRegion.INDEX_K)]
+        ):
+            slot = Slot(owner, region)
+            tables[slot] = torch.tensor([[10 + gid], [20 + gid]])
+            groups[(owner, int(KVCacheRegionName.DSV41_GLOBAL_KV if region == CacheRegion.GLOBAL
+                                  else KVCacheRegionName.DSV41_INDEX_KV))] = gid
+        swa_slot = Slot(0, CacheRegion.SWA)
+        tables[swa_slot] = torch.tensor([[50], [60]])
+        groups[(0, int(KVCacheRegionName.SWA_KV))] = 5
+        groups[(2, int(KVCacheRegionName.DSV41_PAIR_STATE))] = 4
+        groups[(8, int(KVCacheRegionName.DSV41_PAIR_STATE))] = 4
+        groups[(14, int(KVCacheRegionName.DSV41_PAIR_STATE))] = 4
+        cache = SimpleNamespace(
+            request_id="101",
+            layout=SimpleNamespace(draft_enabled=True),
+            swa_ends={layer: 1024 for layer in range(43)},
+            owners={layer: SimpleNamespace(materialized_end=1024) for layer in GLOBAL_OWNERS},
+            swa={
+                layer: SimpleNamespace(valid_starts=[896], valid_ends=[1024])
+                for layer in range(43)
+            },
+        )
+        decoder = SimpleNamespace(
+            cache=cache,
+            end=1024,
+            replay_floor=896,
+            query_device="cpu",
+            tables=tables,
+            pair_tables={2: torch.tensor([[30], [40]])},
+        )
+        history = SimpleNamespace(token_ids=(31, 129264, 37), image_mask=(False, True, False))
+        model = SimpleNamespace(
+            _cp_rank=rank,
+            _groups=groups,
+            kv_cache=SimpleNamespace(group_region_names=[""] * 6),
+            layout=SimpleNamespace(cp_size=cp_size),
+        )
+        remote_flat = [110, 111, 112, 113, 130, 150]
+        local_flat = [10, 11, 12, 13, 30, 50]
+        gathered = local_flat + remote_flat if rank == 0 else remote_flat + local_flat
+
+        def fake_broadcast(tensor, src, group):
+            tensor.copy_(torch.tensor(counts, dtype=torch.int64))
+
+        def fake_all_gather(tensor, group):
+            return torch.tensor(gathered)
+
+        def fake_all_reduce(tensor, group):
+            return tensor + (cp_size - 1)
+
+        patches = (
+            patch("rtp_llm.models_py.distributed.collective_torch.broadcast", fake_broadcast),
+            patch("rtp_llm.models_py.distributed.collective_torch.all_gather", fake_all_gather),
+            patch("rtp_llm.models_py.distributed.collective_torch.all_reduce", fake_all_reduce),
+            patch("rtp_llm.models_py.distributed.collective_torch.barrier", lambda group: None),
+            patch("torch.cuda.current_stream", return_value=SimpleNamespace(synchronize=lambda: None)),
+        )
+        return model, native, decoder, history, patches
+
+    def test_cp_publish_installs_checkpoint_on_every_producer_rank(self):
+        model, native, decoder, history, patches = self._cp_publish_fixture(rank=1)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            self.assertTrue(DeepSeekV41Model._cp_publish(model, native, decoder, history))
+        self.assertEqual(native.publish.call_count, 0)
+        self.assertEqual(native.install.call_count, 1)
+        publication, actual, workers = native.install.call_args.args
+        self.assertEqual(publication.request_id, 101)
+        self.assertEqual(publication.materialized_end, 1024)
+        self.assertEqual(actual, [[10], [11], [12], [13], [30], [50]])
+        self.assertEqual(workers[0], [[110], [111], [112], [113], [130], [150]])
+        self.assertEqual(workers[1], actual)
+
+        model, native, decoder, history, patches = self._cp_publish_fixture(rank=0)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            self.assertTrue(DeepSeekV41Model._cp_publish(model, native, decoder, history))
+        self.assertEqual(native.install.call_count, 0)
+        self.assertEqual(native.publish.call_count, 1)
+        _, actual, workers = native.publish.call_args.args
+        self.assertEqual(actual, [[10], [11], [12], [13], [30], [50]])
+        self.assertEqual(workers[1], [[110], [111], [112], [113], [130], [150]])
+
+    def test_cp_publish_fails_when_a_worker_install_fails(self):
+        model, native, decoder, history, patches = self._cp_publish_fixture(
+            rank=1, install_result=False
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            with self.assertRaisesRegex(RuntimeError, "producer rank"):
+                DeepSeekV41Model._cp_publish(model, native, decoder, history)
+        self.assertEqual(native.install.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

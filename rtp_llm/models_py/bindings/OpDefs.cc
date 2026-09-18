@@ -250,6 +250,12 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("publication"),
              pybind11::arg("actual_block_ids_by_group"),
              pybind11::arg("block_ids_by_rank") = DSV41CheckpointPublisher::WorkerBlockIds{},
+             pybind11::call_guard<pybind11::gil_scoped_release>())
+        .def("install",
+             &DSV41CheckpointPublisher::installCheckpoint,
+             pybind11::arg("publication"),
+             pybind11::arg("actual_block_ids_by_group"),
+             pybind11::arg("block_ids_by_rank") = DSV41CheckpointPublisher::WorkerBlockIds{},
              pybind11::call_guard<pybind11::gil_scoped_release>());
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")

@@ -140,6 +140,13 @@ struct DSV41CheckpointPublisher {
                        const std::vector<std::vector<int32_t>>&,
                        const WorkerBlockIds&)>
         publish;
+    // Non-scheduling CP ranks install the same restored checkpoint metadata on
+    // their own resource; the memory copy itself is staged by the scheduling
+    // rank alone through publish.
+    std::function<bool(const DSV41CheckpointPublication&,
+                       const std::vector<std::vector<int32_t>>&,
+                       const WorkerBlockIds&)>
+        install;
 
     bool publishCheckpoint(const DSV41CheckpointPublication&             publication,
                            const std::vector<std::vector<int32_t>>&      actual_block_ids,
@@ -147,6 +154,14 @@ struct DSV41CheckpointPublisher {
         if (publication.request_id != request_id || !publish)
             throw std::invalid_argument("V4.1 checkpoint publisher belongs to another request");
         return publish(publication, actual_block_ids, worker_block_ids);
+    }
+
+    bool installCheckpoint(const DSV41CheckpointPublication&             publication,
+                           const std::vector<std::vector<int32_t>>&      actual_block_ids,
+                           const WorkerBlockIds&                         worker_block_ids = {}) const {
+        if (publication.request_id != request_id || !install)
+            throw std::invalid_argument("V4.1 checkpoint publisher belongs to another request");
+        return install(publication, actual_block_ids, worker_block_ids);
     }
 };
 

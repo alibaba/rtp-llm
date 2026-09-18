@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include <algorithm>
 #include <thread>
 #include <torch/extension.h>
 
@@ -798,13 +799,22 @@ std::shared_ptr<DSV41CheckpointPublisher> StreamCacheResource::createDsv41Checkp
                && owner->streamCacheResource().publishDsv41Checkpoint(
                       publication, actual_block_ids, worker_block_ids);
     };
+    publisher->install                    = [request](const DSV41CheckpointPublication&                publication,
+                                   const std::vector<std::vector<int32_t>>&         actual_block_ids,
+                                   const DSV41CheckpointPublisher::WorkerBlockIds& worker_block_ids) {
+        const auto owner = request.lock();
+        return owner && owner->isActive()
+               && owner->streamCacheResource().installDsv41Checkpoint(
+                      publication, actual_block_ids, worker_block_ids);
+    };
     return publisher;
 }
 
-bool StreamCacheResource::publishDsv41Checkpoint(
+bool StreamCacheResource::prepareDsv41Checkpoint(
     const DSV41CheckpointPublication&                       publication,
     const std::vector<std::vector<int32_t>>&                actual_block_ids,
-    const std::vector<std::vector<std::vector<int32_t>>>&   worker_block_ids) {
+    const std::vector<std::vector<std::vector<int32_t>>>&   worker_block_ids,
+    bool                                                    scheduling_rank) {
     if (stream_->hasError() || !reuseCache() || !enableMemoryCache() || !resource_context_.cache_manager
         || batch_kv_cache_resource_->batchSize() != 1 || publication.request_id != stream_->streamId())
         return false;
@@ -839,8 +849,16 @@ bool StreamCacheResource::publishDsv41Checkpoint(
                     throw std::invalid_argument("V4.1 checkpoint worker block ID is outside its physical pool");
         }
     }
-    if (!worker_block_ids.empty() && worker_block_ids.front() != actual_block_ids)
-        throw std::invalid_argument("V4.1 scheduling-rank block IDs differ from its actual producer mapping");
+    if (!worker_block_ids.empty()) {
+        const bool mapped =
+            scheduling_rank ?
+                worker_block_ids.front() == actual_block_ids :
+                std::find(worker_block_ids.begin(), worker_block_ids.end(), actual_block_ids) != worker_block_ids.end();
+        if (!mapped)
+            throw std::invalid_argument(
+                scheduling_rank ? "V4.1 scheduling-rank block IDs differ from its actual producer mapping" :
+                                  "V4.1 checkpoint worker block IDs omit the installing rank's actual mapping");
+    }
     if (publication.global_entries.size() != 4 || publication.index_entries.size() != 4
         || publication.swa_valid_start.size() != 43 || publication.swa_valid_end.size() != 43
         || publication.swa_replay_floor.size() != 43 || publication.history_token_ids.size() != 3
@@ -873,6 +891,23 @@ bool StreamCacheResource::publishDsv41Checkpoint(
     metadata->pair_empty      = publication.materialized_end % 2 == 0;
     resource.setDsv41WorkerBlockIds(worker_block_ids);
     resource.setDsv41RestoredCheckpoint(metadata, metadata->materialized_end);
+    return true;
+}
+
+bool StreamCacheResource::installDsv41Checkpoint(
+    const DSV41CheckpointPublication&                       publication,
+    const std::vector<std::vector<int32_t>>&                actual_block_ids,
+    const std::vector<std::vector<std::vector<int32_t>>>&   worker_block_ids) {
+    return prepareDsv41Checkpoint(publication, actual_block_ids, worker_block_ids, /*scheduling_rank=*/false);
+}
+
+bool StreamCacheResource::publishDsv41Checkpoint(
+    const DSV41CheckpointPublication&                       publication,
+    const std::vector<std::vector<int32_t>>&                actual_block_ids,
+    const std::vector<std::vector<std::vector<int32_t>>>&   worker_block_ids) {
+    if (!prepareDsv41Checkpoint(publication, actual_block_ids, worker_block_ids, /*scheduling_rank=*/true))
+        return false;
+    auto& resource = batch_kv_cache_resource_->cacheResource(0);
     // CP callers fence every producer rank before this callback and hold the
     // ranks at the boundary until the existing all-worker memory copy returns.
     runtimeSyncAndCheck();
