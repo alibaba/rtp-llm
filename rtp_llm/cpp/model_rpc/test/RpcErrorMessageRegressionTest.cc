@@ -6,6 +6,7 @@
 #include "google/protobuf/stubs/common.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorMessage.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorStatus.h"
 
 namespace rtp_llm {
 namespace {
@@ -113,6 +114,7 @@ void expectTransportedError(const std::string& input,
     ErrorDetailsPB parsed;
     ASSERT_TRUE(parsed.ParseFromString(status.error_details()));
     EXPECT_EQ(parsed.error_code(), static_cast<int64_t>(code));
+    EXPECT_EQ(parsed.error_code_str(), ErrorCodeToString(code));
     EXPECT_EQ(parsed.error_message(), expected);
     expectValidMessage(parsed.error_message());
 }
@@ -120,14 +122,53 @@ void expectTransportedError(const std::string& input,
 TEST(RpcErrorMessageRegressionTest, GrpcChannelCarriesSanitizedBinaryDetailsAndOriginalCode) {
     const auto input = poisonedHistoryMessage();
     ASSERT_FALSE(google::protobuf::internal::IsStructurallyValidUTF8(input));
-    const auto expected = safeRpcErrorMessage(input);
+    const auto expected = safeGrpcErrorMessage(input);
     ASSERT_NE(expected.find("invalid UTF-8; hex="), std::string::npos);
     expectTransportedError(input, expected);
+}
+
+TEST(RpcErrorMessageRegressionTest, GrpcChannelCarriesLongAsciiWithinDefaultMetadataBudget) {
+    expectTransportedError(std::string(65536, 'x'), std::string(1024, 'x') + "...[truncated]");
+}
+
+TEST(RpcErrorMessageRegressionTest, GrpcChannelCarriesLongChineseWithinDefaultMetadataBudget) {
+    std::string input;
+    std::string prefix;
+    for (int i = 0; i < 10000; ++i) {
+        input += u8"中";
+        if (i < 341) {
+            prefix += u8"中";
+        }
+    }
+    // 1024 cuts the next three-byte code point. The on-wire message must keep
+    // both the valid prefix and the application error, despite percent encoding.
+    expectTransportedError(input, prefix + "...[truncated]");
 }
 
 TEST(RpcErrorMessageRegressionTest, GrpcChannelPreservesShortUnicodeWithoutTruncation) {
     const std::string input = u8"正常错误信息：资源不足，稍后重试 🌏";
     expectTransportedError(input, input);
+}
+
+TEST(RpcErrorMessageRegressionTest, GrpcChannelKeepsLoadStageAndDownstreamSleepCause) {
+    ErrorDetailsPB downstream;
+    downstream.set_error_code(8600);
+    downstream.set_error_code_str("ENGINE_UNAVAILABLE");
+    downstream.set_state("DRAINING");
+    downstream.set_sleep_epoch(9);
+    downstream.set_error_message(std::string(65536, 'x'));
+    const grpc::Status status(
+        grpc::StatusCode::UNAVAILABLE, downstream.error_message(), downstream.SerializeAsString());
+    const auto input = "stage=load_cache, failed to load kv cache in rank: rank=1, worker=worker-1, peer=peer-1, cq=0, "
+                       + formatGrpcErrorStatus(status) + "; " + std::string(4096, 'z');
+    const auto expected = safeGrpcErrorMessage(input);
+    EXPECT_EQ(expected.find("stage=load_cache"), 0);
+    EXPECT_NE(expected.find("business_code=8600, symbol=ENGINE_UNAVAILABLE, state=DRAINING, sleep_epoch=9"),
+              std::string::npos);
+    EXPECT_NE(expected.find("...[truncated]"), std::string::npos);
+    // The stage failure remains 8212/INTERNAL; 8600 is the nested cause, not a
+    // replacement that would silently change caller retry/error semantics.
+    expectTransportedError(input, expected, ErrorCode::LOAD_KV_CACHE_FAILED);
 }
 
 TEST(RpcErrorMessageRegressionTest, LegacyBinaryErrorIsSanitizedByRealGrpcSerializer) {
@@ -141,6 +182,7 @@ TEST(RpcErrorMessageRegressionTest, LegacyBinaryErrorIsSanitizedByRealGrpcSerial
     ErrorDetailsPB parsed;
     ASSERT_TRUE(parsed.ParseFromString(status.error_details()));
     EXPECT_EQ(parsed.error_code(), 8600);
+    EXPECT_EQ(parsed.error_code_str(), "ENGINE_UNAVAILABLE");
     expectValidMessage(parsed.error_message());
 }
 
@@ -151,6 +193,7 @@ TEST(RpcErrorMessageRegressionTest, RealGrpcSerializerPreservesNormalUnicodeAndC
     ErrorDetailsPB parsed;
     ASSERT_TRUE(parsed.ParseFromString(status.error_details()));
     EXPECT_EQ(parsed.error_code(), 8600);
+    EXPECT_EQ(parsed.error_code_str(), "ENGINE_UNAVAILABLE");
     EXPECT_EQ(parsed.error_message(), text);
     EXPECT_EQ(status.error_message(), text);
 }

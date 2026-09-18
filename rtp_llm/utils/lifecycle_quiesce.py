@@ -19,14 +19,17 @@ def _check_coverage(results, addresses, phase):
 
 
 async def prepare_sleep_rounds(
-    request, addresses, statuses, call, broadcast, timeout_s
+    request, addresses, statuses, call, broadcast, rpc_timeout_s
 ):
     """Drain all peers, freeze their admitted rounds, then catch up to max(round).
 
     The caller owns the instance lease and must roll back this token on ANY
     pre-commit failure/cancellation. Never run a collective from a serving thread.
     Freeze ACKs must be collected before ANY target is sent, including target 0.
+    Both drain stages receive the full request budget; the RPC timeout separately
+    includes transport headroom and must not extend the backend drain budget.
     """
+    drain_timeout_ms = request.timeout_ms
     failures = _check_coverage(statuses, addresses, "drain preflight")
     if failures:
         return failures
@@ -53,7 +56,7 @@ async def prepare_sleep_rounds(
         prepared.append((status["address"], drain))
     results = await asyncio.gather(
         *(
-            call(address, "SleepServing", drain, timeout_s)
+            call(address, "SleepServing", drain, rpc_timeout_s)
             for address, drain in prepared
         )
     )
@@ -63,8 +66,12 @@ async def prepare_sleep_rounds(
 
     frozen = await broadcast(
         "QuiesceSleep",
-        pb2.SleepQuiesceRequestPB(token=request.quiesce_token, freeze_only=True),
-        30.0,
+        pb2.SleepQuiesceRequestPB(
+            token=request.quiesce_token,
+            freeze_only=True,
+            timeout_ms=drain_timeout_ms,
+        ),
+        rpc_timeout_s,
     )
     failures = _check_coverage(frozen, addresses, "freeze")
     if failures:
@@ -85,6 +92,6 @@ async def prepare_sleep_rounds(
         pb2.SleepQuiesceRequestPB(
             token=request.quiesce_token, target_round=max(rounds), timeout_ms=60000
         ),
-        max(75.0, timeout_s),
+        max(75.0, rpc_timeout_s),
     )
     return _check_coverage(results, addresses, "quiesce") or results

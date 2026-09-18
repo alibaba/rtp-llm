@@ -6,9 +6,11 @@
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/engine_base/sleep/AdmissionGate.h"
 #include "rtp_llm/cpp/engine_base/sleep/SleepLifecycleController.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -232,6 +234,142 @@ TEST(LocalRpcServerAdmissionTest, ExecuteFunctionAdmittedWhenRunning) {
     EXPECT_EQ(controller.activeAdmissionCount(), 0);
 }
 
+TEST(LocalRpcServerAdmissionTest, MemoryCopyContinuationPassesDrainingGate) {
+    auto           controller = drainingController();
+    LocalRpcServer server;
+    server.admission_gate_ = std::make_shared<AdmissionGate>(controller.get(), "memory-peer");
+    for (auto direction : {MemoryOperationRequestPB::H2D, MemoryOperationRequestPB::D2H}) {
+        grpc::ServerContext context;
+        FunctionRequestPB   request;
+        request.mutable_mem_request()->set_copy_direction(direction);
+        FunctionResponsePB response;
+        const auto         status = server.ExecuteFunction(&context, &request, &response);
+        // The real handler must pass admission and reach the deliberately
+        // unwired engine, not reject this internal operation as a new root.
+        EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+        EXPECT_EQ(status.error_message(), "engine is null");
+        EXPECT_EQ(controller->activeAdmissionCount(), 0);
+    }
+}
+
+TEST(LocalRpcServerAdmissionTest, ConnectorDispatchOwnsConservativeContinuationPolicy) {
+    struct PolicyCase {
+        FunctionRequestPB::RequestCase request_case;
+        bool                           continuation;
+    };
+    for (const auto& test : {PolicyCase{FunctionRequestPB::REQUEST_NOT_SET, false},
+                             PolicyCase{FunctionRequestPB::kMemRequest, true},
+                             PolicyCase{FunctionRequestPB::kRemoteRequest, true},
+                             PolicyCase{FunctionRequestPB::kP2PRequest, false}}) {
+        FunctionRequestPB request;
+        switch (test.request_case) {
+            case FunctionRequestPB::kMemRequest:
+                request.mutable_mem_request();
+                break;
+            case FunctionRequestPB::kRemoteRequest:
+                request.mutable_remote_request();
+                break;
+            case FunctionRequestPB::kP2PRequest:
+                request.mutable_p2p_request();
+                break;
+            default:
+                break;
+        }
+        EXPECT_EQ(KVCacheConnectorCoordinator::isCacheTransferContinuation(request), test.continuation)
+            << request.DebugString();
+    }
+    // A field from a newer sender must not turn into a continuation merely
+    // because the local proto cannot recognize its oneof variant yet.
+    FunctionRequestPB unknown;
+    ASSERT_TRUE(unknown.ParseFromString(std::string("\x22\x00", 2)));  // unknown message field 4
+    EXPECT_EQ(unknown.request_case(), FunctionRequestPB::REQUEST_NOT_SET);
+    EXPECT_FALSE(KVCacheConnectorCoordinator::isCacheTransferContinuation(unknown));
+}
+
+TEST(LocalRpcServerAdmissionTest, RemoteCacheContinuationPassesDrainingGate) {
+    auto           controller = drainingController();
+    LocalRpcServer server;
+    server.admission_gate_ = std::make_shared<AdmissionGate>(controller.get(), "remote-cache-peer");
+    grpc::ServerContext context;
+    FunctionRequestPB   request;
+    request.mutable_remote_request();
+    FunctionResponsePB response;
+    const auto         status = server.ExecuteFunction(&context, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    EXPECT_EQ(status.error_message(), "engine is null");
+    EXPECT_EQ(controller->activeAdmissionCount(), 0);
+}
+
+TEST(LocalRpcServerAdmissionTest, KvFunctionsCannotCrossClosedFreezeGate) {
+    SleepLifecycleController controller(true);
+    SleepOptions             options;
+    options.prepare_only = true;
+    ASSERT_TRUE(controller.sleep(options).ok);
+    ASSERT_EQ(controller.state(), SleepState::DRAINING);
+    LocalRpcServer server;
+    server.admission_gate_ = std::make_shared<AdmissionGate>(&controller, "frozen-peer");
+    for (bool remote : {false, true}) {
+        grpc::ServerContext context;
+        FunctionRequestPB   request;
+        if (remote) {
+            request.mutable_remote_request();
+        } else {
+            request.mutable_mem_request();
+        }
+        FunctionResponsePB response;
+        EXPECT_EQ(server.ExecuteFunction(&context, &request, &response).error_code(), grpc::StatusCode::UNAVAILABLE);
+    }
+    EXPECT_EQ(controller.activeAdmissionCount(), 0);
+}
+
+TEST(LocalRpcServerAdmissionTest, P2pFunctionKeepsRootAdmissionDuringDrain) {
+    auto           controller = drainingController();
+    LocalRpcServer server;
+    server.admission_gate_ = std::make_shared<AdmissionGate>(controller.get(), "p2p-peer");
+    grpc::ServerContext context;
+    FunctionRequestPB   request;
+    request.mutable_p2p_request();
+    FunctionResponsePB response;
+    EXPECT_EQ(server.ExecuteFunction(&context, &request, &response).error_code(), grpc::StatusCode::UNAVAILABLE);
+}
+
+TEST(LocalRpcServerAdmissionTest, KvFunctionsRejectSleepingWakingAndErrorAndReopenAfterWake) {
+    SleepLifecycleController controller(true);
+    LocalRpcServer           server;
+    server.admission_gate_ = std::make_shared<AdmissionGate>(&controller, "cache-peer");
+    auto check_status      = [&](grpc::StatusCode expected) {
+        for (bool remote : {false, true}) {
+            grpc::ServerContext context;
+            FunctionRequestPB   request;
+            if (remote) {
+                request.mutable_remote_request();
+            } else {
+                request.mutable_mem_request();
+            }
+            FunctionResponsePB response;
+            EXPECT_EQ(server.ExecuteFunction(&context, &request, &response).error_code(), expected);
+            EXPECT_EQ(controller.activeAdmissionCount(), 0);
+        }
+    };
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    check_status(grpc::StatusCode::UNAVAILABLE);
+    WakeUpOptions prepare;
+    prepare.prepare_only = true;
+    ASSERT_TRUE(controller.wakeUp(prepare).ok);
+    ASSERT_EQ(controller.state(), SleepState::WAKING_UP);
+    check_status(grpc::StatusCode::UNAVAILABLE);
+    WakeUpOptions commit;
+    commit.commit_only = true;
+    ASSERT_TRUE(controller.wakeUp(commit).ok);
+    check_status(grpc::StatusCode::INTERNAL);  // admitted, then missing test engine
+    SleepHooks hooks;
+    hooks.releaseKvMemoryBacking = [](const SleepOptions&) { return false; };
+    controller.setHooks(hooks);
+    ASSERT_FALSE(controller.sleep(SleepOptions{}).ok);
+    ASSERT_EQ(controller.state(), SleepState::ERROR);
+    check_status(grpc::StatusCode::UNAVAILABLE);
+}
+
 TEST(LocalRpcServerAdmissionTest, UpdateWeightsRejectedWhenNotRunning) {
     auto controller = drainingController();
     ASSERT_EQ(controller->state(), SleepState::DRAINING);
@@ -249,6 +387,38 @@ TEST(LocalRpcServerAdmissionTest, UpdateWeightsRejectedWhenNotRunning) {
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
     EXPECT_EQ(controller->activeAdmissionCount(), 0);
+}
+
+TEST(LocalRpcServerSleepAbortTest, WrongDpRemoteLoadIsNoopBeforeCheckingDrainingOrSleepingAdmission) {
+    SleepLifecycleController controller(true);
+    SleepHooks               hooks;
+    bool                     allow_drain = false;
+    hooks.drain                          = [&](const SleepOptions&) { return allow_drain; };
+    controller.setHooks(hooks);
+    DecodeRpcServer server;
+    server.maga_init_params_.parallelism_config.dp_rank = 3;
+    server.admission_gate_                              = std::make_shared<AdmissionGate>(&controller, "decode-peer");
+    // No engine/cache store is installed: the wrong-DP no-op must not touch it.
+    grpc::ServerContext    context;
+    BroadcastLoadRequestPB request;
+    request.set_dp_rank(2);
+    BroadcastLoadResponsePB response;
+    ASSERT_FALSE(controller.sleep(SleepOptions{}).ok);
+    ASSERT_EQ(controller.state(), SleepState::DRAINING);
+    EXPECT_TRUE(server.RemoteLoad(&context, &request, &response).ok());
+    EXPECT_EQ(controller.activeAdmissionCount(), 0);
+    allow_drain = true;
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    EXPECT_TRUE(server.RemoteLoad(&context, &request, &response).ok());
+    EXPECT_EQ(controller.activeAdmissionCount(), 0);
+    // A real same-DP load must still be rejected while resources are absent.
+    request.set_dp_rank(3);
+    const auto status = server.RemoteLoad(&context, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.state(), "SLEEPING");
+    EXPECT_EQ(details.error_code(), static_cast<int64_t>(ErrorCode::ENGINE_UNAVAILABLE));
 }
 
 }  // namespace rtp_llm

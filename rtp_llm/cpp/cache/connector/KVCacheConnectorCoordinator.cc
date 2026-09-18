@@ -471,6 +471,16 @@ void KVCacheConnectorCoordinator::handleRead(const P2PConnectorStartLoadRequestP
     p2p_connector_->handleRead(request, response, std::move(is_cancelled));
 }
 
+bool KVCacheConnectorCoordinator::isCacheTransferContinuation(const FunctionRequestPB& request) {
+    switch (request.request_case()) {
+        case FunctionRequestPB::kMemRequest:
+        case FunctionRequestPB::kRemoteRequest:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (request.has_mem_request()) {
         RTP_LLM_CHECK(memory_connector_ != nullptr);

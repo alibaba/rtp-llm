@@ -598,7 +598,7 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
 
 grpc::Status
 LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& request_info, ErrorInfo error_info) {
-    const auto  error_msg       = safeRpcErrorMessage(error_info.ToString());
+    const auto  error_msg       = safeGrpcErrorMessage(error_info.ToString());
     const auto  request_log_tag = formatRequestLogTag(request_key, request_info);
     RTP_LLM_LOG_WARNING("%s, error code [%s], error message [%s]",
                         request_log_tag.c_str(),
@@ -607,6 +607,7 @@ LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& 
     auto           grpc_error_code = transErrorCodeToGrpc(error_info.code());
     ErrorDetailsPB error_details;
     error_details.set_error_code(static_cast<int>(error_info.code()));
+    error_details.set_error_code_str(ErrorCodeToString(error_info.code()));
     error_details.set_error_message(error_msg);
     std::string error_details_serialized;
     if (error_details.SerializeToString(&error_details_serialized)) {
@@ -1136,12 +1137,11 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
     }
 
-    // Admission must gate GPU/KV access before anything else: executeFunction
-    // issues P2P KV D2H/H2D copies that touch cache backing. Without a lease a
-    // copy could start after sleep closed the gate and released the KV VA ->
-    // use-after-unmap. Hold the lease for the full RPC; the async transfer tail
-    // is tracked by the connector_inflight drain counter.
-    auto admission = acquireAdmission();
+    // The connector dispatcher owns the continuation classification and its
+    // completion contract. Retain this lease until receiver-side copying has
+    // finished; connector_inflight tracks the initiating side, not this RPC.
+    const bool cache_continuation = KVCacheConnectorCoordinator::isCacheTransferContinuation(*request);
+    auto       admission          = cache_continuation ? acquireCacheTransferAdmission() : acquireAdmission();
     if (!admission.detail.admitted) {
         return AdmissionGate::toGrpcStatus(admission.detail);
     }

@@ -43,6 +43,8 @@ public:
     // Linearizable admission check. A successful result carries a move-only
     // lease that must remain alive for the full inference request.
     AdmissionAcquireResult acquire() const;
+    // Only for internal KV continuations of admitted work, never new roots.
+    AdmissionAcquireResult acquireCacheTransfer() const;
 
     // RUNNING (or no controller wired) -> OK. Otherwise UNAVAILABLE with the
     // error body serialized into grpc error_details as ErrorDetailsPB.

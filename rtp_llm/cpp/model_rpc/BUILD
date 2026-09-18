@@ -39,6 +39,19 @@ cc_library(
 )
 
 cc_library(
+    name = "rpc_error_status",
+    hdrs = ["RpcErrorStatus.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":rpc_error_message",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:error_code",
+        "@grpc//:grpc++",
+    ],
+)
+
+cc_library(
     name = "model_rpc_pool",
     srcs = [],
     hdrs = ["RPCPool.h"],
@@ -51,6 +64,7 @@ cc_library(
     ],
 )
 
+
 cc_library(
     name = "model_rpc_server",
     srcs = glob(
@@ -61,7 +75,7 @@ cc_library(
     ),
     hdrs = glob(
         ["*.h"],
-        exclude = ["RPCPool.h", "RpcErrorMessage.h"],
+        exclude = ["RPCPool.h", "RpcErrorMessage.h", "RpcErrorStatus.h"],
     ),
     visibility = ["//visibility:public"],
     deps = [
@@ -69,6 +83,7 @@ cc_library(
         ":model_rpc_pool",
         ":rpc_error_code",
         ":rpc_error_message",
+        ":rpc_error_status",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",

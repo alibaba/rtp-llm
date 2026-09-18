@@ -2,10 +2,16 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <future>
 #include <set>
 #include <thread>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
+#include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
+#include "rtp_llm/cpp/engine_base/sleep/DrainManager.h"
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
@@ -105,6 +111,67 @@ public:
     int                   enqueue_group_calls = 0;
     bool                  omit_last_result    = false;
     EnqueueGroupRequestPB captured_group_request;
+};
+
+class DrainAfterAdmissionServer: public PrefillBatchRpcServer {
+public:
+    DrainAfterAdmissionServer(SleepLifecycleController& controller, int accepted_before_drain):
+        controller_(controller), accepted_before_drain_(accepted_before_drain) {
+        admission_gate_ = std::make_shared<AdmissionGate>(&controller_, "partial-batch");
+    }
+
+protected:
+    AdmissionAcquireResult acquireAdmission() const override {
+        auto result = LocalRpcServer::acquireAdmission();
+        if (++admission_calls_ == accepted_before_drain_) {
+            // Deterministically close the real gate between the Nth successful
+            // acquire and the next iteration of the production group loop.
+            EXPECT_TRUE(result.detail.admitted);
+            EXPECT_FALSE(controller_.sleep(SleepOptions{}).ok);
+            EXPECT_EQ(controller_.state(), SleepState::DRAINING);
+        }
+        return result;
+    }
+
+private:
+    SleepLifecycleController& controller_;
+    const int                 accepted_before_drain_;
+    mutable int               admission_calls_{0};
+};
+
+class BlockingMemoryCopyConnector: public KVCacheMemoryConnector {
+public:
+    BlockingMemoryCopyConnector():
+        KVCacheMemoryConnector(CacheConfig{}, KVCacheConfig{}, nullptr, {}, nullptr),
+        copy_started(started_.get_future()),
+        copy_released_(release_.get_future().share()) {}
+
+    bool copyCache(const MemoryOperationRequestPB&, MemoryOperationResponsePB& response) override {
+        if (copy_calls.fetch_add(1) != 0) {
+            response.set_success(false);
+            return false;
+        }
+        started_.set_value();
+        // Bounded even if a test assertion fails before releasing the copy.
+        const bool completed = copy_released_.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+        response.set_success(completed);
+        return completed;
+    }
+
+    void finishCopy() {
+        release_.set_value();
+    }
+
+private:
+    std::promise<void> started_;
+    std::promise<void> release_;
+
+public:
+    std::future<void> copy_started;
+    std::atomic<int>  copy_calls{0};
+
+private:
+    std::shared_future<void> copy_released_;
 };
 
 EnqueueBatchExternalInputPB* addInput(EnqueueBatchDpSlotPB* slot, int64_t request_id) {
@@ -1125,6 +1192,441 @@ TEST(PrefillBatchRpcServerTest, CancelAllClearsAndCancelsDeferredContexts) {
     const auto shutdown_status = contexts->store(3008, after_shutdown);
     EXPECT_EQ(shutdown_status.error_code(), grpc::StatusCode::UNAVAILABLE);
     EXPECT_EQ(shutdown_status.error_message(), "Prefill batch server is shutting down");
+}
+
+class PrefillBatchSleepTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        server_.meta_           = std::make_shared<RpcServerRuntimeMeta>();
+        server_.admission_gate_ = std::make_shared<AdmissionGate>(&controller_, "prefill");
+        SleepHooks hooks;
+        hooks.drain                  = [this](const SleepOptions&) { return controller_.activeAdmissionCount() == 0; };
+        hooks.releaseKvMemoryBacking = [this](const SleepOptions&) {
+            ++releases_;
+            return true;
+        };
+        controller_.setHooks(hooks);
+    }
+
+    std::vector<PrefillBatchRpcServer::BatchSlot> admit(int64_t id = 4001, int count = 1) {
+        EnqueueGroupRequestPB request;
+        request.set_batch_id(4000);
+        request.set_dp_rank(0);
+        for (int i = 0; i < count; ++i) {
+            request.add_requests()->mutable_input()->set_request_id(id + i);
+        }
+        EnqueueBatchResponsePB                        response;
+        std::vector<PrefillBatchRpcServer::BatchSlot> slots;
+        EXPECT_TRUE(server_.admitGroup(&request, &response, slots).ok());
+        EXPECT_EQ(response.errors_size(), 0);
+        return slots;
+    }
+
+    SleepLifecycleController controller_{true};
+    PrefillBatchRpcServer    server_;
+    int                      releases_{0};
+};
+
+TEST_F(PrefillBatchSleepTest, RootGroupRejectedDuringDrainWithOneResultPerInput) {
+    auto root = controller_.acquireAdmission();
+    ASSERT_TRUE(root.admitted());
+    ASSERT_FALSE(controller_.sleep(SleepOptions{}).ok);
+    EnqueueGroupRequestPB request;
+    request.set_batch_id(4000);
+    request.add_requests()->mutable_input()->set_request_id(4001);
+    request.add_requests()->mutable_input()->set_request_id(4002);
+    request.add_requests();  // malformed members still need an individual result
+    EnqueueBatchResponsePB                        response;
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots;
+    ASSERT_TRUE(server_.admitGroup(&request, &response, slots).ok());
+    EXPECT_TRUE(slots.empty());
+    ASSERT_EQ(response.errors_size(), 3);
+    EXPECT_EQ(response.errors(0).error_info().error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    for (int i = 1; i < 3; ++i) {
+        EXPECT_EQ(response.errors(i).error_info().error_code(), static_cast<int64_t>(ErrorCode::ENGINE_UNAVAILABLE));
+        EXPECT_NE(response.errors(i).error_info().error_message().find("DRAINING"), std::string::npos);
+    }
+    EXPECT_EQ(controller_.activeAdmissionCount(), 1);
+}
+
+TEST_F(PrefillBatchSleepTest, AdmissionCoversPrepareBeforeSchedulerHasAnyStream) {
+    auto slots = admit(4010, 2);
+    ASSERT_EQ(slots.size(), 2);
+    EXPECT_EQ(controller_.activeAdmissionCount(), 2);
+    EXPECT_FALSE(controller_.sleep(SleepOptions{}).ok);
+    EXPECT_EQ(releases_, 0);
+    slots.clear();
+    EXPECT_EQ(controller_.activeAdmissionCount(), 0);
+    EXPECT_TRUE(controller_.sleep(SleepOptions{}).ok);
+    EXPECT_EQ(releases_, 1);
+}
+
+TEST_F(PrefillBatchSleepTest, DeferredAndFetchedContextRetainOriginalLeaseDuringDrain) {
+    auto slots = admit();
+    ASSERT_EQ(slots.size(), 1);
+    server_.buildSlotContexts(slots);
+    auto deferred = slots[0].deferred;
+    ASSERT_TRUE(server_.deferred_contexts_->store(4001, deferred).ok());
+    EXPECT_FALSE(deferred->finishOperation());
+    slots.clear();
+    deferred.reset();
+    EXPECT_EQ(controller_.activeAdmissionCount(), 1);
+    EXPECT_FALSE(controller_.sleep(SleepOptions{}).ok);
+    std::shared_ptr<DeferredPrefillContext> fetched;
+    ASSERT_TRUE(server_.deferred_contexts_->take(4001, fetched).ok());
+    EXPECT_EQ(controller_.activeAdmissionCount(), 1);
+    EXPECT_FALSE(controller_.sleep(SleepOptions{}).ok);
+    server_.deferred_contexts_->finish(4001, fetched.get());
+    // Removing from registries is not the cleanup boundary.
+    EXPECT_EQ(controller_.activeAdmissionCount(), 1);
+    fetched.reset();
+    EXPECT_EQ(controller_.activeAdmissionCount(), 0);
+    EXPECT_TRUE(controller_.sleep(SleepOptions{}).ok);
+    EXPECT_EQ(releases_, 1);
+}
+
+TEST_F(PrefillBatchSleepTest, ExpiredContextKeepsLeaseUntilItsLastCleanupOwnerExits) {
+    auto slots = admit();
+    server_.buildSlotContexts(slots);
+    auto deferred = slots[0].deferred;
+    ASSERT_TRUE(server_.deferred_contexts_->store(4001, deferred).ok());
+    slots.clear();
+    EXPECT_FALSE(controller_.sleep(SleepOptions{}).ok);
+    // Invoke the actual alarm callback deterministically, without wall-clock sleeps.
+    server_.deferred_contexts_->expire(4001, deferred.get());
+    EXPECT_TRUE(deferred->context->cancel_state->load());
+    EXPECT_EQ(deferred->context->error_status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(controller_.activeAdmissionCount(), 1);
+    EXPECT_FALSE(controller_.sleep(SleepOptions{}).ok);
+    deferred.reset();
+    EXPECT_TRUE(controller_.sleep(SleepOptions{}).ok);
+}
+
+TEST_F(PrefillBatchSleepTest, RegistrationFailureAndShutdownDoNotLeakLeases) {
+    auto slots = admit(4020, 2);
+    server_.deferred_contexts_->stopAccepting();
+    server_.buildSlotContexts(slots);
+    EXPECT_EQ(controller_.activeAdmissionCount(), 2);
+    for (const auto& slot : slots) {
+        EXPECT_EQ(slot.registration_status.error_code(), grpc::StatusCode::UNAVAILABLE);
+    }
+    slots.clear();
+    EXPECT_EQ(controller_.activeAdmissionCount(), 0);
+    EXPECT_TRUE(controller_.sleep(SleepOptions{}).ok);
+}
+
+TEST_F(PrefillBatchSleepTest, PublicBatchRpcReturnsOneErrorPerInputInEveryClosedState) {
+    auto check_rejected = [&] {
+        EnqueueBatchRequestPB request;
+        request.set_batch_id(4050);
+        auto* dp_slot = request.add_dp_slots();
+        dp_slot->set_dp_rank(0);
+        for (int i = 0; i < 3; ++i) {
+            dp_slot->add_requests()->mutable_input()->set_request_id(4051 + i);
+        }
+        grpc::ServerContext    context;
+        EnqueueBatchResponsePB response;
+        ASSERT_TRUE(server_.EnqueueBatch(&context, &request, &response).ok());
+        EXPECT_EQ(response.batch_id(), 4050);
+        EXPECT_EQ(response.successes_size(), 0);
+        ASSERT_EQ(response.errors_size(), 3);
+        for (int i = 0; i < 3; ++i) {
+            EXPECT_EQ(response.errors(i).request_id(), 4051 + i);
+            EXPECT_EQ(response.errors(i).error_info().error_code(),
+                      static_cast<int64_t>(ErrorCode::ENGINE_UNAVAILABLE));
+            EXPECT_NE(response.errors(i).error_info().error_message().find(sleepStateToString(controller_.state())),
+                      std::string::npos);
+        }
+    };
+    auto existing = controller_.acquireAdmission();
+    ASSERT_FALSE(controller_.sleep(SleepOptions{}).ok);
+    ASSERT_EQ(controller_.state(), SleepState::DRAINING);
+    check_rejected();
+    existing.lease = AdmissionLease{};
+    ASSERT_TRUE(controller_.sleep(SleepOptions{}).ok);
+    ASSERT_EQ(controller_.state(), SleepState::SLEEPING);
+    check_rejected();
+    WakeUpOptions prepare;
+    prepare.prepare_only = true;
+    ASSERT_TRUE(controller_.wakeUp(prepare).ok);
+    ASSERT_EQ(controller_.state(), SleepState::WAKING_UP);
+    check_rejected();
+    WakeUpOptions commit;
+    commit.commit_only = true;
+    ASSERT_TRUE(controller_.wakeUp(commit).ok);
+    auto slots = admit(4060);
+    ASSERT_EQ(slots.size(), 1);
+    slots.clear();
+    SleepHooks hooks;
+    hooks.releaseKvMemoryBacking = [](const SleepOptions&) { return false; };
+    controller_.setHooks(hooks);
+    ASSERT_FALSE(controller_.sleep(SleepOptions{}).ok);
+    ASSERT_EQ(controller_.state(), SleepState::ERROR);
+    check_rejected();
+}
+
+TEST_F(PrefillBatchSleepTest, ContextCleanupFinishesBeforeLeaseRelease) {
+    auto slots = admit();
+    server_.buildSlotContexts(slots);
+    auto deferred        = slots[0].deferred;
+    bool input_destroyed = false;
+    // RPCContext borrows this input. Its deleter runs after the real context
+    // destructor, but must still be covered by the original admission lease.
+    deferred->input =
+        std::shared_ptr<GenerateInputPB>(new GenerateInputPB(*slots[0].input), [&](GenerateInputPB* input) {
+            input_destroyed = true;
+            EXPECT_EQ(controller_.activeAdmissionCount(), 1);
+            EXPECT_FALSE(controller_.sleep(SleepOptions{}).ok);
+            EXPECT_EQ(releases_, 0);
+            delete input;
+        });
+    deferred->context->rpc_context.request = deferred->input.get();
+    server_.deferred_contexts_->finish(4001, deferred.get());
+    slots.clear();
+    deferred.reset();
+    EXPECT_TRUE(input_destroyed);
+    EXPECT_EQ(controller_.activeAdmissionCount(), 0);
+    EXPECT_TRUE(controller_.sleep(SleepOptions{}).ok);
+}
+
+TEST_F(PrefillBatchSleepTest, PriorityFinalizationRetainsLeaseUntilCleanupOwnerExits) {
+    auto slots = admit();
+    server_.buildSlotContexts(slots);
+    auto deferred = slots[0].deferred;
+    ASSERT_TRUE(server_.deferred_contexts_->store(4001, deferred).ok());
+    EXPECT_FALSE(deferred->finishOperation());
+    slots.clear();
+    ASSERT_FALSE(controller_.sleep(SleepOptions{}).ok);
+    std::shared_ptr<DeferredPrefillContext> canceled;
+    ASSERT_EQ(server_.deferred_contexts_->cancelByPriorityPreemption(4001, canceled), PriorityCancelResult::ACCEPTED);
+    ASSERT_TRUE(canceled->requestPriorityFinalization());
+    deferred.reset();
+    server_.finalizePriorityPreemption(4001, canceled);
+    EXPECT_EQ(controller_.activeAdmissionCount(), 1);
+    EXPECT_FALSE(controller_.sleep(SleepOptions{}).ok);
+    canceled.reset();
+    EXPECT_EQ(controller_.activeAdmissionCount(), 0);
+    EXPECT_TRUE(controller_.sleep(SleepOptions{}).ok);
+}
+
+TEST_F(PrefillBatchSleepTest, CancelAllCannotReleaseAnInFlightCleanupOwner) {
+    auto slots = admit();
+    server_.buildSlotContexts(slots);
+    auto deferred = slots[0].deferred;
+    ASSERT_TRUE(server_.deferred_contexts_->store(4001, deferred).ok());
+    slots.clear();
+    server_.deferred_contexts_->cancelAll(grpc::Status(grpc::StatusCode::CANCELLED, "test shutdown"));
+    EXPECT_TRUE(deferred->context->cancel_state->load());
+    EXPECT_EQ(controller_.activeAdmissionCount(), 1);
+    EXPECT_FALSE(controller_.sleep(SleepOptions{}).ok);
+    deferred.reset();
+    EXPECT_EQ(controller_.activeAdmissionCount(), 0);
+    EXPECT_TRUE(controller_.sleep(SleepOptions{}).ok);
+}
+
+TEST_F(PrefillBatchSleepTest, DisabledSleepPreservesUntrackedBatchAdmission) {
+    SleepLifecycleController disabled(false);
+    server_.admission_gate_ = std::make_shared<AdmissionGate>(&disabled, "disabled");
+    auto slots              = admit(4070, 2);
+    ASSERT_EQ(slots.size(), 2);
+    server_.buildSlotContexts(slots);
+    EXPECT_EQ(disabled.activeAdmissionCount(), 0);
+    slots.clear();
+    EXPECT_EQ(disabled.activeAdmissionCount(), 0);
+}
+
+TEST(PrefillBatchRpcServerTest, DrainAfterThirdAdmissionSplitsExactRequestIdsAndGroupSize) {
+    SleepLifecycleController controller(true);
+    SleepHooks               hooks;
+    hooks.drain = [&](const SleepOptions&) { return controller.activeAdmissionCount() == 0; };
+    controller.setHooks(hooks);
+    DrainAfterAdmissionServer server(controller, /*accepted_before_drain=*/3);
+    EnqueueGroupRequestPB     request;
+    request.set_batch_id(4150);
+    request.set_dp_rank(0);
+    for (int64_t id : {4151, 4152, 4153, 4154, 4155}) {
+        request.add_requests()->mutable_input()->set_request_id(id);
+    }
+    EnqueueBatchResponsePB                        response;
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots;
+    ASSERT_TRUE(server.admitGroup(&request, &response, slots).ok());
+    ASSERT_EQ(slots.size(), 3);
+    ASSERT_EQ(response.errors_size(), 2);
+    EXPECT_EQ(response.successes_size(), 0);  // ACK follows scheduler admission, not just this gate.
+    EXPECT_EQ(controller.activeAdmissionCount(), 3);
+    for (size_t i = 0; i < slots.size(); ++i) {
+        EXPECT_EQ(slots[i].input->request_id(), 4151 + i);
+        EXPECT_EQ(slots[i].input->group_size(), 3);
+        EXPECT_EQ(slots[i].input->group_id().value(), 4150);
+    }
+    for (int i = 0; i < response.errors_size(); ++i) {
+        EXPECT_EQ(response.errors(i).request_id(), 4154 + i);
+        EXPECT_EQ(response.errors(i).error_info().error_code(), static_cast<int64_t>(ErrorCode::ENGINE_UNAVAILABLE));
+    }
+    slots.clear();
+    EXPECT_EQ(controller.activeAdmissionCount(), 0);
+    EXPECT_TRUE(controller.sleep(SleepOptions{}).ok);
+}
+
+TEST_F(PrefillBatchSleepTest, AcceptedBatchAndLateReceiverCopyMustDrainBeforeFreeze) {
+    auto engine      = std::make_shared<PartialEnqueueEngine>();
+    auto manager     = std::make_shared<KVCacheManager>(CacheConfig{}, /*warmup=*/true);
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
+        CacheConfig{}, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, nullptr);
+    auto copy                               = std::make_shared<BlockingMemoryCopyConnector>();
+    coordinator->memory_connector_          = copy;
+    manager->coordinator_                   = coordinator;
+    engine->resource_context_.cache_manager = manager;
+    server_.engine_                         = engine;
+
+    DrainManager drain;
+    drain.registerCounter("admission_leases", [&] { return controller_.activeAdmissionCount(); });
+    drain.registerCounter(
+        "connector_inflight",
+        [&] { return coordinator->inflightTransferCount(); },
+        DrainManager::CounterKind::CACHE_TRANSFER);
+    std::promise<void> freeze_drain_started;
+    auto               freeze_drain_entered = freeze_drain_started.get_future();
+    int                drain_calls          = 0;
+    std::atomic<int>   freezes{0};
+    SleepHooks         hooks;
+    hooks.drain = [&](const SleepOptions& options) {
+        if (++drain_calls == 3) {
+            freeze_drain_started.set_value();
+        }
+        return drain.drain(options);
+    };
+    hooks.freezeEngineRounds = [&] {
+        ++freezes;
+        return uint64_t{7};
+    };
+    hooks.releaseKvMemoryBacking = [&](const SleepOptions&) {
+        ++releases_;
+        return true;
+    };
+    controller_.setHooks(hooks);
+
+    // Prepare the payload locally, then use the real admitted-context,
+    // scheduler-ACK and deferred-map phases. No downstream Decode/model is
+    // started: this is a component integration test, not the model E2E test.
+    auto slots = admit(4201);
+    ASSERT_EQ(slots.size(), 1);
+    server_.buildSlotContexts(slots);
+    slots[0].deferred->context->generate_input = makeGenerateInput(4201);
+    EnqueueBatchResponsePB response;
+    auto                   deferred = server_.storeSlot(slots[0], &response);
+    ASSERT_NE(deferred, nullptr);
+    std::vector<PrefillBatchRpcServer::ReadySlot> ready_slots{{&slots[0], deferred}};
+    engine->streams           = {makeGenerateStream(deferred->context->generate_input)};
+    engine->enqueue_successes = {true};
+    ASSERT_TRUE(server_.enqueueGroupStreams(ready_slots, &response).ok());
+    ASSERT_EQ(ready_slots.size(), 1);
+    server_.publishSlot(ready_slots[0], &response);
+    ASSERT_EQ(response.successes_size(), 1);
+    EXPECT_EQ(response.successes(0).request_id(), 4201);
+    EXPECT_EQ(response.errors_size(), 0);
+    const auto* expected = deferred.get();
+    ready_slots.clear();
+    slots.clear();
+    deferred.reset();
+
+    SleepOptions options;
+    options.prepare_only         = true;
+    options.drain_only           = true;
+    options.quiesce_token        = "batch-copy";
+    options.expected_incarnation = controller_.status().worker_incarnation;
+    options.expected_sleep_epoch = controller_.sleepEpoch();
+    EXPECT_FALSE(controller_.sleep(options).ok);  // Accepted batch still owns one lease.
+    EXPECT_EQ(controller_.activeAdmissionCount(), 1);
+    server_.deferred_contexts_->expire(4201, expected);
+    EXPECT_EQ(controller_.activeAdmissionCount(), 0);
+    ASSERT_TRUE(controller_.sleep(options).ok);
+
+    // A late continuation reaches the actual LocalRpcServer -> KVCacheManager
+    // -> coordinator dispatcher -> blocking memory connector, after drain ACK.
+    auto       rpc          = std::async(std::launch::async, [&] {
+        grpc::ServerContext context;
+        FunctionRequestPB   request;
+        FunctionResponsePB  copy_response;
+        request.mutable_mem_request()->set_copy_direction(MemoryOperationRequestPB::D2H);
+        return server_.ExecuteFunction(&context, &request, &copy_response);
+    });
+    const bool copy_started = copy->copy_started.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    EXPECT_TRUE(copy_started);
+    if (!copy_started) {
+        copy->finishCopy();
+        EXPECT_TRUE(rpc.get().ok());
+        return;
+    }
+    EXPECT_EQ(controller_.activeAdmissionCount(), 1);
+    EXPECT_EQ(coordinator->inflightTransferCount(), 0);  // Receiver isn't in the initiating-side lists.
+    auto freeze = std::async(std::launch::async, [&] {
+        uint64_t round  = 0;
+        auto     result = controller_.quiesce({"batch-copy", true, 0, 5000}, round);
+        return std::make_pair(result, round);
+    });
+    EXPECT_EQ(freeze_drain_entered.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(freeze.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    EXPECT_EQ(freezes.load(), 0);
+    EXPECT_EQ(releases_, 0);
+    EXPECT_FALSE(controller_.acquireCacheTransferAdmission().admitted());
+    // Release all async work before fatal assertions or leaving this scope.
+    copy->finishCopy();
+    const auto rpc_status = rpc.get();
+    const auto frozen     = freeze.get();
+    ASSERT_TRUE(rpc_status.ok()) << rpc_status.error_message();
+    ASSERT_TRUE(frozen.first.ok) << frozen.first.message;
+    EXPECT_EQ(frozen.second, 7);
+    EXPECT_EQ(freezes.load(), 1);
+    EXPECT_EQ(controller_.activeAdmissionCount(), 0);
+
+    grpc::ServerContext postfreeze_context;
+    FunctionRequestPB   postfreeze_request;
+    FunctionResponsePB  postfreeze_response;
+    postfreeze_request.mutable_mem_request();
+    EXPECT_EQ(server_.ExecuteFunction(&postfreeze_context, &postfreeze_request, &postfreeze_response).error_code(),
+              grpc::StatusCode::UNAVAILABLE);
+    EXPECT_EQ(copy->copy_calls.load(), 1);
+    uint64_t round = 0;
+    ASSERT_TRUE(controller_.quiesce({"batch-copy", false, frozen.second, 5000}, round).ok);
+    options.prepare_only = false;
+    options.drain_only   = false;
+    options.commit_only  = true;
+    ASSERT_TRUE(controller_.sleep(options).ok);
+    EXPECT_EQ(releases_, 1);
+}
+
+TEST_F(PrefillBatchSleepTest, ConcurrentBatchAdmissionAndDrainCountEveryAcceptedSlot) {
+    EnqueueGroupRequestPB request;
+    request.set_batch_id(4100);
+    for (int i = 0; i < 1000; ++i) {
+        request.add_requests()->mutable_input()->set_request_id(4101 + i);
+    }
+    auto                                          existing = controller_.acquireAdmission();
+    std::atomic<bool>                             start{false};
+    EnqueueBatchResponsePB                        response;
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots;
+    std::thread                                   enqueue([&] {
+        while (!start.load()) {
+            std::this_thread::yield();
+        }
+        EXPECT_TRUE(server_.admitGroup(&request, &response, slots).ok());
+    });
+    start.store(true);
+    EXPECT_FALSE(controller_.sleep(SleepOptions{}).ok);
+    enqueue.join();
+    EXPECT_EQ(slots.size() + response.errors_size(), 1000);
+    EXPECT_EQ(controller_.activeAdmissionCount(), slots.size() + 1);
+    for (const auto& slot : slots) {
+        EXPECT_EQ(slot.input->group_size(), slots.size());
+    }
+    for (const auto& error : response.errors()) {
+        EXPECT_EQ(error.error_info().error_code(), static_cast<int64_t>(ErrorCode::ENGINE_UNAVAILABLE));
+    }
+    existing.lease = AdmissionLease{};
+    slots.clear();
+    EXPECT_EQ(controller_.activeAdmissionCount(), 0);
+    EXPECT_TRUE(controller_.sleep(SleepOptions{}).ok);
 }
 
 }  // namespace

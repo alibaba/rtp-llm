@@ -660,7 +660,7 @@ class GrpcClientWrapper:
             # Every rank drains while empty peers still execute fake forwards.
             # Only then freeze admission, collect stable ticket snapshots, and
             # allow bounded catch-up. All three stages remain reversible.
-            timeout_s = max(60.0, timeout_ms / 1000.0 + 30.0)
+            rpc_timeout_s = max(60.0, timeout_ms / 1000.0 + 30.0)
             try:
                 prepare_results = await prepare_sleep_rounds(
                     request,
@@ -668,7 +668,7 @@ class GrpcClientWrapper:
                     rank_snapshots,
                     self._call_control_rpc,
                     self._broadcast_control_rpc,
-                    timeout_s,
+                    rpc_timeout_s,
                 )
             except asyncio.CancelledError:
                 # Prepare only closes admission and drains in-flight work -- no
@@ -737,7 +737,7 @@ class GrpcClientWrapper:
                     operation="commit sleep",
                     rpc_name="SleepServing",
                     commit_request=commit_request,
-                    timeout_s=timeout_s,
+                    timeout_s=rpc_timeout_s,
                     transitional_state="DRAINING",
                     final_state="SLEEPING",
                 )

@@ -27,8 +27,8 @@ std::string sleepStateToString(SleepState state);
 
 class SleepLifecycleController;
 
-// Move-only proof that an inference request was admitted while the controller
-// was RUNNING. Destruction releases exactly one active admission.
+// Move-only proof that a root request or internal KV continuation was admitted.
+// Destruction releases exactly one active admission.
 class AdmissionLease {
 public:
     AdmissionLease() = default;
@@ -57,9 +57,10 @@ struct ControllerAdmissionResult {
     AdmissionLease lease;
     SleepState     state       = SleepState::RUNNING;
     int64_t        sleep_epoch = 0;
+    bool           accepted    = false;
 
     bool admitted() const {
-        return state == SleepState::RUNNING;
+        return accepted;
     }
 };
 
@@ -284,6 +285,11 @@ public:
     // Atomically check RUNNING and, if admitted, increment the controller-owned
     // active admission tracker. The returned lease releases the tracker once.
     ControllerAdmissionResult acquireAdmission();
+    // INTERNAL KV continuations only. Root leases / connector inflight counters
+    // cover their parent work. Keep them admitted during all-rank drain, then
+    // atomically close/re-drain before acknowledging freeze.
+    // Never use this for new inference roots or reopen it after freeze.
+    ControllerAdmissionResult acquireCacheTransferAdmission();
     int64_t                   activeAdmissionCount() const;
 
     int64_t sleepEpoch() const;
@@ -300,6 +306,8 @@ private:
     bool transitionLocked(SleepState expected_from, SleepState to);
 
     void releaseAdmission();
+    ControllerAdmissionResult acquireAdmissionImpl(bool cache_transfer);
+    SleepResult               closeCacheTransferAdmissionAndDrain(const SleepOptions& opt);
     void setLastError(const std::string& msg);
     // Read last_error_ under status_mutex_ only. Error paths use this instead of
     // status().last_error so they do not fire the activeRequestCount /
@@ -309,8 +317,10 @@ private:
     std::string disabledReason() const;
 
     static constexpr uint64_t kAdmissionStateShift = 61;
-    static constexpr uint64_t kAdmissionCountMask = (uint64_t{1} << kAdmissionStateShift) - 1;
-    // RUNNING is zero: lower bits count leases, upper bits encode SleepState.
+    static constexpr uint64_t kCacheTransferClosedMask = uint64_t{1} << 60;
+    static constexpr uint64_t kAdmissionCountMask      = kCacheTransferClosedMask - 1;
+    // State, continuation gate and count share a CAS word: closing the gate
+    // cannot miss a concurrent lease. RUNNING is zero with both gates open.
     std::atomic<uint64_t> admission_state_{0};
     std::atomic<int64_t>    sleep_epoch_{0};
     std::atomic<bool>       enabled_{false};

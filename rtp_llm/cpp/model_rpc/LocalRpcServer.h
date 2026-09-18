@@ -128,8 +128,11 @@ protected:
     grpc::Status checkAdmission() const {
         return admission_gate_ ? admission_gate_->check() : grpc::Status::OK;
     }
-    AdmissionAcquireResult acquireAdmission() const {
+    virtual AdmissionAcquireResult acquireAdmission() const {
         return admission_gate_ ? admission_gate_->acquire() : AdmissionAcquireResult{};
+    }
+    AdmissionAcquireResult acquireCacheTransferAdmission() const {
+        return admission_gate_ ? admission_gate_->acquireCacheTransfer() : AdmissionAcquireResult{};
     }
 
     // Wire the sleep/wake_up SleepHooks (M3 drain counters, M5 KV memory,

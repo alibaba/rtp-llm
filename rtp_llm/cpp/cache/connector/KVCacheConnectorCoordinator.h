@@ -55,6 +55,14 @@ public:
     virtual std::shared_ptr<AsyncContext>
     asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) override;
 
+    // Internal memory/remote copies may continue during DRAINING. Keep their
+    // admission policy next to dispatch; P2P and unknown functions are roots.
+    static bool isCacheTransferContinuation(const FunctionRequestPB& request);
+    // Receiver-side GPU accesses must finish before returning: the RPC lease
+    // ends with the handler. A future asynchronous implementation must first
+    // transfer that lease or register local in-flight work through completion.
+    // inflightTransferCount() only tracks initiating async contexts,
+    // and does not automatically track work dispatched by this method.
     virtual bool              executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
     std::vector<CacheKeyType> memoryCacheKeys() const;
     std::vector<CacheKeyType> memoryCacheKeysForStatus() const;

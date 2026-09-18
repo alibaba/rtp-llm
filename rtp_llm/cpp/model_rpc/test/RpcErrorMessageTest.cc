@@ -67,4 +67,19 @@ TEST(RpcErrorMessageTest, ArbitraryDetailsHaveBoundedAsciiHexRepresentation) {
     EXPECT_LT(safeRpcErrorMessage(all_bytes + std::string(100000, 'x')).size(), 600);
 }
 
+TEST(RpcErrorMessageTest, GrpcMetadataBudgetPreservesShortTextAndUtf8Boundaries) {
+    EXPECT_EQ(safeGrpcErrorMessage(u8"资源不足 💤"), u8"资源不足 💤");
+    EXPECT_EQ(safeGrpcErrorMessage(std::string(1024, 'x')), std::string(1024, 'x'));
+    EXPECT_EQ(safeGrpcErrorMessage(std::string(1025, 'x')), std::string(1024, 'x') + "...[truncated]");
+    for (const std::string codepoint : {u8"é", u8"中", u8"💤"}) {
+        for (size_t cut = 1; cut < codepoint.size(); ++cut) {
+            const std::string prefix(1024 - cut, 'a');
+            EXPECT_EQ(safeGrpcErrorMessage(prefix + codepoint + "suffix"), prefix + "...[truncated]");
+        }
+    }
+    const std::string body_text(2048, 'x');
+    EXPECT_EQ(safeRpcErrorMessage(body_text), body_text);
+    EXPECT_LT(safeGrpcErrorMessage(body_text).size(), body_text.size());
+}
+
 }  // namespace rtp_llm

@@ -189,7 +189,9 @@ bool SleepLifecycleController::transitionLocked(SleepState expected_from, SleepS
     // the count while this CAS retries; preserve every pre-drain lease.
     while (!admission_state_.compare_exchange_weak(
         word,
-        (word & kAdmissionCountMask) | (static_cast<uint64_t>(to) << kAdmissionStateShift),
+        (word & kAdmissionCountMask)
+            | ((to == SleepState::RUNNING || to == SleepState::DRAINING) ? 0 : kCacheTransferClosedMask)
+            | (static_cast<uint64_t>(to) << kAdmissionStateShift),
         std::memory_order_acq_rel,
         std::memory_order_acquire)) {}
     RTP_LLM_LOG_INFO("sleep state transition: %s -> %s (epoch=%ld)",
@@ -390,6 +392,10 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
     }
 
     if (!opt.commit_only && !engine_quiesced_.load(std::memory_order_acquire)) {
+        const auto closed = closeCacheTransferAdmissionAndDrain(opt);
+        if (!closed.ok) {
+            return closed;
+        }
         if (hooks_.quiesceEngine) {
             if (!timing.run("quiesce_engine", hooks_.quiesceEngine, opt)) {
                 setLastError("quiesceEngine failed, staying in DRAINING");
@@ -407,6 +413,10 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
     if (!engine_quiesced_.load(std::memory_order_acquire)) {
         setLastError("sleep commit rejected: engine is not quiesced");
         return SleepResult::failedPrecondition(lastError());
+    }
+
+    if (!(admission_state_.load(std::memory_order_acquire) & kCacheTransferClosedMask) || activeAdmissionCount() != 0) {
+        return SleepResult::failedPrecondition("sleep commit requires closed and drained KV admission");
     }
 
     if (!transitionLocked(SleepState::DRAINING, SleepState::SUSPENDING)) {
@@ -474,6 +484,17 @@ SleepResult SleepLifecycleController::quiesce(const SleepQuiesceOptions& opt, ui
     try {
         if (opt.freeze_only) {
             if (!rounds_frozen_) {
+                // All-rank drain ACKs precede freeze in lifecycle_quiesce.py.
+                // An early-drained peer may since have served a late child of
+                // another rank's admitted root, including a cancelled RPC whose
+                // server-side cleanup outlived that root. Close + re-drain before
+                // ANY rank may quiesce; freeze ACKs form the second barrier.
+                SleepOptions drain_options;
+                drain_options.timeout_ms = opt.timeout_ms;
+                const auto closed        = closeCacheTransferAdmissionAndDrain(drain_options);
+                if (!closed.ok) {
+                    return closed;
+                }
                 frozen_round_  = hooks_.freezeEngineRounds ? hooks_.freezeEngineRounds() : 0;
                 rounds_frozen_ = true;
             }
@@ -719,12 +740,23 @@ bool SleepLifecycleController::admit() const {
 }
 
 ControllerAdmissionResult SleepLifecycleController::acquireAdmission() {
+    return acquireAdmissionImpl(false);
+}
+
+ControllerAdmissionResult SleepLifecycleController::acquireCacheTransferAdmission() {
+    return acquireAdmissionImpl(true);
+}
+
+ControllerAdmissionResult SleepLifecycleController::acquireAdmissionImpl(bool cache_transfer) {
     ControllerAdmissionResult result;
     if (!enabled()) {
+        result.accepted = true;
         return result;  // OFF requests have no tracking or lease release work.
     }
     auto word = admission_state_.load(std::memory_order_acquire);
-    while ((word >> kAdmissionStateShift) == static_cast<uint64_t>(SleepState::RUNNING)) {
+    while ((word >> kAdmissionStateShift) == static_cast<uint64_t>(SleepState::RUNNING)
+           || (cache_transfer && !(word & kCacheTransferClosedMask)
+               && (word >> kAdmissionStateShift) == static_cast<uint64_t>(SleepState::DRAINING))) {
         // Unreachable in practice, but never let count overflow reopen the gate.
         if ((word & kAdmissionCountMask) == kAdmissionCountMask) {
             result.state = SleepState::ERROR;
@@ -733,6 +765,8 @@ ControllerAdmissionResult SleepLifecycleController::acquireAdmission() {
         }
         if (admission_state_.compare_exchange_weak(word, word + 1, std::memory_order_acq_rel,
                                                  std::memory_order_acquire)) {
+            result.state    = static_cast<SleepState>(word >> kAdmissionStateShift);
+            result.accepted = true;
             result.lease = AdmissionLease(this);
             return result;
         }
@@ -740,6 +774,32 @@ ControllerAdmissionResult SleepLifecycleController::acquireAdmission() {
     result.state = static_cast<SleepState>(word >> kAdmissionStateShift);
     result.sleep_epoch = sleepEpoch();
     return result;
+}
+
+SleepResult SleepLifecycleController::closeCacheTransferAdmissionAndDrain(const SleepOptions& opt) {
+    admission_state_.fetch_or(kCacheTransferClosedMask, std::memory_order_acq_rel);
+    try {
+        // Close first, THEN re-drain. A pre-close CAS winner remains counted;
+        // a post-close arrival cannot invalidate the freeze acknowledgement.
+        // The first drain already issued cancellation for mode=abort. This
+        // second barrier only joins late cleanup; do not cancel twice.
+        auto continuation_options = opt;
+        continuation_options.mode = "wait";
+        if (hooks_.drain && !hooks_.drain(continuation_options)) {
+            setLastError("KV continuation drain failed; admission remains closed, state=DRAINING");
+            return SleepResult::failedPrecondition(lastError());
+        }
+        if (activeAdmissionCount() != 0) {
+            setLastError("KV continuation leases remain; refusing to freeze or release");
+            return SleepResult::failedPrecondition(lastError());
+        }
+        return SleepResult::success();
+    } catch (const std::exception& e) {
+        setLastError(std::string("KV continuation drain threw: ") + e.what());
+    } catch (...) {
+        setLastError("KV continuation drain threw an unknown exception");
+    }
+    return SleepResult::failedPrecondition(lastError());
 }
 
 void SleepLifecycleController::releaseAdmission() {

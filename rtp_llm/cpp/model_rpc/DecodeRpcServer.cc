@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorMessage.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorStatus.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
@@ -514,7 +515,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
     size_t      finished_count            = 0;
     auto        total_timeout_ms          = load_context.timeout_ms + EXTRA_TIMEOUT_MS;
     ErrorCode   error_code                = ErrorCode::NONE_ERROR;
-    std::string error_msg                 = "failed to load kv cache in rank: ";
+    std::string error_msg                 = "stage=load_cache, failed to load kv cache in rank: ";
     int64_t     min_response_done_time_us = 1lu << 60;
     int64_t     max_response_done_time_us = 0;
     while (true) {
@@ -578,10 +579,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
                                               decode_context.peer_addrs[rank] :
                                               "<missing>";
                 error_msg += "rank=" + std::to_string(rank) + ", worker=" + worker_addr + ", peer=" + peer_addr
-                             + ", cq=" + std::to_string(i) + ", grpc_code="
-                             + std::to_string(static_cast<int>(status.error_code())) + ", grpc_message="
-                             + status.error_message() + ", grpc_details_hex="
-                             + rpcErrorDetailsHex(status.error_details()) + "; ";
+                             + ", cq=" + std::to_string(i) + ", " + formatGrpcErrorStatus(status) + "; ";
             } else if (pb_error_code != ErrorCodePB::NONE_ERROR) {
                 all_success = false;
                 error_code  = transRPCErrorCode(pb_error_code);
@@ -1120,15 +1118,17 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                          const BroadcastLoadRequestPB* request,
                                          BroadcastLoadResponsePB*      response) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto admission = acquireAdmission();
-    if (!admission.detail.admitted) {
-        return AdmissionGate::toGrpcStatus(admission.detail);
-    }
-    auto admission_lease = std::move(admission.lease);
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;
     }
+    // The admitted RemoteGenerate owns/joins these internal KV-load children.
+    // Allow them through all-rank drain, but never past the freeze barrier.
+    auto admission = acquireCacheTransferAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto admission_lease = std::move(admission.lease);
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
     GroupBlockIds             block_ids_by_group;

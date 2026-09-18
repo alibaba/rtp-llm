@@ -231,4 +231,91 @@ TEST_F(AdmissionGateTest, AdmitsAgainAfterWakeUp) {
     EXPECT_GE(detail.sleep_epoch, 1);
 }
 
+TEST_F(AdmissionGateTest, KvContinuationIsCountedDuringDrainButRootAdmissionStaysClosed) {
+    SleepHooks hooks;
+    hooks.drain = [](const SleepOptions&) { return false; };
+    controller_.setHooks(hooks);
+    ASSERT_FALSE(controller_.sleep(SleepOptions{}).ok);
+    auto child = gate_.acquireCacheTransfer();
+    EXPECT_TRUE(child.detail.admitted);
+    EXPECT_TRUE(static_cast<bool>(child.lease));
+    EXPECT_EQ(controller_.activeAdmissionCount(), 1);
+    EXPECT_FALSE(gate_.acquire().detail.admitted);
+    EXPECT_EQ(gate_.check().error_code(), grpc::StatusCode::UNAVAILABLE);
+    EXPECT_TRUE(child.detail.message.empty());
+    child.lease = AdmissionLease{};
+    EXPECT_EQ(controller_.activeAdmissionCount(), 0);
+}
+
+TEST_F(AdmissionGateTest, ClosedContinuationGateKeepsStructuredErrorAndReopensAfterWake) {
+    controller_.setHooks(successHooks());
+    ASSERT_TRUE(controller_.sleep(SleepOptions{}).ok);
+    auto child = gate_.acquireCacheTransfer();
+    ASSERT_FALSE(child.detail.admitted);
+    EXPECT_FALSE(static_cast<bool>(child.lease));
+    const auto status = AdmissionGate::toGrpcStatus(child.detail);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.error_code(), kEngineUnavailable);
+    EXPECT_EQ(details.state(), "SLEEPING");
+    EXPECT_EQ(details.sleep_epoch(), 1);
+    EXPECT_EQ(details.instance_id(), "test_instance_0");
+    // Later lifecycle states retain their normal state-specific explanation.
+    EXPECT_EQ(status.error_message(), gate_.acquire().detail.message);
+    ASSERT_TRUE(controller_.wakeUp().ok);
+    EXPECT_TRUE(gate_.acquireCacheTransfer().detail.admitted);
+    EXPECT_TRUE(gate_.acquire().detail.admitted);
+}
+
+TEST_F(AdmissionGateTest, FrozenContinuationExplainsPhaseWithoutChangingErrorContract) {
+    controller_.setHooks(successHooks());
+    SleepOptions options;
+    options.prepare_only = true;
+    ASSERT_TRUE(controller_.sleep(options).ok);
+    ASSERT_EQ(controller_.state(), SleepState::DRAINING);
+
+    const auto root  = gate_.acquire();
+    const auto child = gate_.acquireCacheTransfer();
+    ASSERT_FALSE(root.detail.admitted);
+    ASSERT_FALSE(child.detail.admitted);
+    EXPECT_FALSE(static_cast<bool>(child.lease));
+    EXPECT_EQ(controller_.activeAdmissionCount(), 0);
+    const auto epoch = std::to_string(controller_.sleepEpoch());
+    EXPECT_EQ(root.detail.message,
+              "engine unavailable: DRAINING (sleep_epoch=" + epoch + "), request can be retried elsewhere");
+    EXPECT_EQ(child.detail.message,
+              "engine unavailable: cache-transfer continuation admission is frozen in DRAINING (sleep_epoch=" + epoch
+                  + "), retry the inference request after wake or on another engine");
+
+    const auto status = AdmissionGate::toGrpcStatus(child.detail);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+    EXPECT_EQ(status.error_message(), child.detail.message);
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.error_code(), kEngineUnavailable);
+    EXPECT_EQ(details.error_code_str(), "ENGINE_UNAVAILABLE");
+    EXPECT_EQ(details.error_message(), child.detail.message);
+    EXPECT_EQ(details.state(), "DRAINING");
+    EXPECT_EQ(details.instance_id(), "test_instance_0");
+    EXPECT_EQ(details.sleep_epoch(), controller_.sleepEpoch());
+    const auto json = AdmissionGate::toJson(child.detail);
+    EXPECT_NE(json.find("cache-transfer continuation admission is frozen"), std::string::npos);
+    EXPECT_NE(json.find("\"error_code\":8600"), std::string::npos);
+    EXPECT_NE(json.find("\"state\":\"DRAINING\""), std::string::npos);
+}
+
+TEST(AdmissionGateDisabledTest, NullAndDisabledContinuationGatesDoNotTrack) {
+    AdmissionGate null_gate(nullptr, "none");
+    auto          null_child = null_gate.acquireCacheTransfer();
+    EXPECT_TRUE(null_child.detail.admitted);
+    EXPECT_FALSE(static_cast<bool>(null_child.lease));
+    SleepLifecycleController disabled(false);
+    AdmissionGate            disabled_gate(&disabled, "disabled");
+    auto                     child = disabled_gate.acquireCacheTransfer();
+    EXPECT_TRUE(child.detail.admitted);
+    EXPECT_FALSE(static_cast<bool>(child.lease));
+    EXPECT_EQ(disabled.activeAdmissionCount(), 0);
+}
+
 }  // namespace rtp_llm
