@@ -380,7 +380,7 @@ void CacheStoreAsyncWriter::waitAllDone() {
 
 void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                                   const torch_ext::LayerKVCache&       layer_kv) {
-    if (!active_cache_store_ || !cache_config_) {
+    if ((!active_cache_store_ && !cache_store_inputs.p2p_layer_write) || !cache_config_) {
         // Fail closed when publication is tracked: the executor waits on this
         // cycle and reduces the result across TP before dispatching decode. A
         // silent skip here would leave zero pending callbacks, so the wait would
@@ -408,7 +408,7 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
         RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
                                 "CacheStoreAsyncWriter::write() called when not RUNNING. Call init() first.");
         auto completion_state     = active_store_completion_state_;
-        register_store_completion = [completion_state, cache_manager = cache_manager_, cache_config](
+        if (cache_store) register_store_completion = [completion_state, cache_manager = cache_manager_, cache_config](
                                         const std::vector<int64_t>& cache_keys,
                                         const std::vector<int32_t>& block_ids,
                                         size_t                      group_id) {

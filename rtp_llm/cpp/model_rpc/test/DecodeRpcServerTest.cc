@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -321,6 +322,92 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatch) {
     row->add_block_ids(1);
 
     EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(missing_tag, *topology));
+}
+
+TEST(PrefillRpcServerTest, PDSepEligibilityRejectsUnsupportedGenerationModes) {
+    GenerateInputPB  input;
+    auto*            config = input.mutable_generate_config();
+    config->set_max_new_tokens(2);
+    config->set_num_beams(1);
+    config->set_num_return_sequences(1);
+    config->set_can_use_pd_separation(true);
+
+    EXPECT_TRUE(checkPDSupport(input).supported);
+
+    auto single_token = input;
+    single_token.mutable_generate_config()->set_max_new_tokens(1);
+    EXPECT_FALSE(checkPDSupport(single_token).supported);
+
+    auto beam_search = input;
+    beam_search.mutable_generate_config()->set_num_beams(2);
+    EXPECT_FALSE(checkPDSupport(beam_search).supported);
+
+    auto variable_beam = input;
+    variable_beam.mutable_generate_config()->add_variable_num_beams(2);
+    EXPECT_FALSE(checkPDSupport(variable_beam).supported);
+
+    auto multi_return = input;
+    multi_return.mutable_generate_config()->set_num_return_sequences(2);
+    EXPECT_FALSE(checkPDSupport(multi_return).supported);
+
+    auto explicitly_disabled = input;
+    explicitly_disabled.mutable_generate_config()->set_can_use_pd_separation(false);
+    EXPECT_FALSE(checkPDSupport(explicitly_disabled).supported);
+
+    auto expect_aux_output_allowed = [&](auto setter) {
+        auto with_aux_output = input;
+        setter(*with_aux_output.mutable_generate_config());
+        EXPECT_TRUE(checkPDSupport(with_aux_output).supported);
+    };
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_calculate_loss(1); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_hidden_states(true); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_all_hidden_states(true); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_logits(true); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_all_probs(true); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_all_probs_mode(2); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_softmax_probs(true); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_cum_log_probs(true); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_prompt_logits(true); });
+
+    auto target_logprob_without_prompt_logits = input;
+    target_logprob_without_prompt_logits.mutable_generate_config()->set_return_target_logprob(true);
+    EXPECT_TRUE(checkPDSupport(target_logprob_without_prompt_logits).supported);
+}
+
+TEST(PrefillRpcServerTest, LossRequestsStayLocalWithoutDisablingDecodeEntrancePD) {
+    PrefillRpcServer server;
+    GenerateInputPB request;
+    request.add_token_ids(10);
+    request.add_token_ids(20);
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(2);
+    config->set_can_use_pd_separation(true);
+    config->set_return_logits(true);
+    config->set_return_hidden_states(true);
+
+    EXPECT_TRUE(server.canUsePDSep(request));
+    for (int loss_mode : {1, 2}) {
+        config->set_calculate_loss(loss_mode);
+        EXPECT_FALSE(server.canUsePDSep(request));
+        EXPECT_TRUE(checkPDSupport(request).supported);
+
+        // Batch admission must use the same rule as GenerateStreamCall. A loss
+        // request mixed with a PD request is rejected before any engine/RPC work.
+        for (bool loss_first : {false, true}) {
+            BatchGenerateInputPB batch;
+            *batch.add_inputs() = request;
+            *batch.add_inputs() = request;
+            batch.mutable_inputs(loss_first ? 1 : 0)->mutable_generate_config()->set_calculate_loss(0);
+            grpc::ServerContext context;
+            BatchGenerateOutputsPB response;
+            const auto status = server.BatchGenerateCall(&context, &batch, &response);
+            EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+            EXPECT_NE(status.error_message().find("mixing PD and non-PD"), std::string::npos);
+        }
+    }
+    config->set_calculate_loss(0);
+    config->set_can_use_pd_separation(false);
+    EXPECT_FALSE(server.canUsePDSep(request));
 }
 
 TEST(DecodeRpcServerTest, MtpCacheKeyUsesSharedBaseModelIdForEverySlot) {

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <memory>
 #include <unistd.h>
+#include <thread>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -11,6 +12,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/multimodal_processor/MMProcessorConfig.h"
+#include "rtp_llm/cpp/model_rpc/BatchStreamOutputCollector.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
@@ -194,12 +196,22 @@ LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& 
     }
 }
 
-grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             context,
-                                              const string&                    request_key,
-                                              WriterInterface*                 writer,
-                                              std::shared_ptr<GenerateStream>& stream) {
+grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*                              context,
+                                              const string&                                     request_key,
+                                              WriterInterface*                                  writer,
+                                              std::shared_ptr<GenerateStream>&                  stream,
+                                              const std::function<FirstError::Snapshot(bool&)>& check_remote) {
     RTP_LLM_PROFILE_FUNCTION();
+    // Observe local and remote failures before waiting for another token.
+    bool remote_done = !check_remote;
     while (true) {
+        auto remote_error = check_remote ? check_remote(remote_done) : FirstError::Snapshot{};
+        auto first        = FirstError::earlier(stream->firstError(), remote_error);
+        if (first.error.hasError()) {
+            stream->reportError(first.error.code(), first.error.ToString());
+            return serializeErrorMsg(request_key, first.error);
+        }
+        stream->checkTimeout();
         const auto result = stream->nextOutput(kRpcOutputWaitTimeoutMs);
         if (isCancelled(context)) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
@@ -213,6 +225,10 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             if (result.status().code() != ErrorCode::FINISHED) {
                 return serializeErrorMsg(request_key, stream->generateInput()->request_info, result.status());
             } else {
+                if (!remote_done) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
                 break;
             }
         }
@@ -224,6 +240,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                       stream->generateConfig()->aux_info,
                                       maga_init_params_.misc_config.aux_string,
                                       stream->specialTokens().eos_token_id);
+        updateAuxInfo(outputs_pb, stream);
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
@@ -231,11 +248,111 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             return grpc::Status(grpc::StatusCode::CANCELLED, "request output consumer closed");
         }
         if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+            if (stream->queryPdSep() && stream->resourceContext().role_type == RoleType::PREFILL
+                && stream->resourceContext().decode_entrance) {
+                while (!context->IsCancelled() && !stream->hasError() && stream->getStatus() != StreamState::FINISHED) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                if (context->IsCancelled()) {
+                    stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
+                    RTP_LLM_LOG_WARNING("request [%s] cancelled by user during decode_entrance wait", request_key.c_str());
+                    return serializeErrorMsg(request_key, stream->statusInfo());
+                }
+            }
             break;
         }
     }
+    if (stream->hasError()) {
+        return serializeErrorMsg(request_key, stream->statusInfo());
+    }
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
 
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::pollBatchStreamOutput(grpc::ServerContext*                                context,
+                                                   const std::vector<std::shared_ptr<GenerateStream>>& streams,
+                                                   BatchGenerateOutputsPB*                             response,
+                                                   const std::function<FirstError::Snapshot(bool&)>&   check_remote) {
+    std::vector<BatchStreamOutputCollector> collectors;
+    collectors.reserve(streams.size());
+    for (const auto& stream : streams) {
+        collectors.emplace_back(stream->generateConfig()->logits_index);
+    }
+    FirstError::Snapshot                    observed_error;
+    auto                                    fail = [&](const grpc::Status& status) {
+        FirstError failure;
+        failure.record(errorInfoFromGrpcStatus(status));
+        auto first = FirstError::earlier(observed_error, failure.snapshot());
+        for (const auto& stream : streams)
+            first = FirstError::earlier(first, stream->firstError());
+        for (const auto& stream : streams) {
+            if (!stream->hasError() && stream->getStatus() != StreamState::FINISHED) {
+                stream->reportError(first.error.code(), first.error.ToString());
+            }
+        }
+        return grpcStatusFromErrorInfo(first.error);
+    };
+    while (true) {
+        bool remote_done = true;
+        auto first       = check_remote ? check_remote(remote_done) : FirstError::Snapshot{};
+        for (const auto& stream : streams)
+            first = FirstError::earlier(first, stream->firstError());
+        observed_error = first;
+        if (first.error.hasError())
+            return fail(grpcStatusFromErrorInfo(first.error));
+        if (context->IsCancelled()) {
+            return fail(grpcStatusFromErrorInfo(ErrorInfo(ErrorCode::CANCELLED, "BatchGenerateCall cancelled")));
+        }
+        bool all_finished = true;
+        bool progress     = false;
+        for (size_t i = 0; i < streams.size(); ++i) {
+            auto&      stream = streams[i];
+            const auto key =
+                "batch item " + std::to_string(i) + " request " + std::to_string(stream->generateInput()->request_id);
+            if (stream->getStatus() != StreamState::FINISHED)
+                stream->checkTimeout();
+            if (stream->hasError())
+                return fail(serializeErrorMsg(
+                    key, ErrorInfo(stream->statusInfo().code(), key + ": " + stream->statusInfo().ToString())));
+            if (stream->hasOutput()) {
+                auto output = stream->nextOutput();
+                if (!output.ok())
+                    return fail(serializeErrorMsg(
+                        key, ErrorInfo(output.status().code(), key + ": " + output.status().ToString())));
+                auto status = collectors[i].add(std::move(output.value()));
+                if (!status.ok())
+                    return fail(serializeErrorMsg(key, ErrorInfo(status.code(), key + ": " + status.ToString())));
+                progress = true;
+            }
+            if (stream->getStatus() != StreamState::FINISHED || stream->hasOutput()) {
+                all_finished = false;
+                if (stream->generateInput()->request_deadline_ms <= currentTimeMs()) {
+                    return fail(grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, key + " deadline exceeded"));
+                }
+            }
+        }
+        if (all_finished && remote_done)
+            break;
+        if (!progress)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    response->Clear();
+    for (size_t i = 0; i < streams.size(); ++i) {
+        if (collectors[i].empty()) {
+            return fail(grpc::Status(grpc::StatusCode::INTERNAL,
+                                     "batch item " + std::to_string(i) + " completed without output"));
+        }
+        auto  output = collectors[i].finish();
+        auto* pb     = response->add_results()->mutable_final_output();
+        auto  stream = streams[i];
+        QueryConverter::transResponse(pb,
+                                      &output,
+                                      stream->generateConfig()->aux_info,
+                                      maga_init_params_.misc_config.aux_string,
+                                      stream->specialTokens().eos_token_id);
+        updateAuxInfo(*pb, stream);
+    }
     return grpc::Status::OK;
 }
 
@@ -297,7 +414,7 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
         const auto output_result = stream->nextOutput(kRpcOutputWaitTimeoutMs);
         if (isCancelled(context)) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
-            return ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client");
+            return stream->statusInfo();
         }
         if (!output_result.ok()) {
             if (output_result.status().code() == ErrorCode::OUTPUT_QUEUE_NO_UPDATE) {
@@ -395,6 +512,11 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
         generate_context.setStream(engine_->enqueue(input));
     }
+    if (generate_context.getStream()->hasError()) {
+        generate_context.error_status =
+            serializeErrorMsg(generate_context.request_key, generate_context.getStream()->statusInfo());
+    }
+    CHECK_ERROR_STATUS(generate_context);
 
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
 
@@ -428,12 +550,9 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
             for (int j = 0; j < batch_size; j++) {
                 auto* result = response->add_results();
                 auto* err_pb = result->mutable_error_info();
-                err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
-                if (j == i) {
-                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
-                } else {
-                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
-                }
+                err_pb->set_error_code(transErrorCodeToRPC(err.code()));
+                err_pb->set_error_message("batch preprocessing item=" + std::to_string(i) + " request="
+                                          + std::to_string(request->inputs(i).request_id()) + ": " + err.ToString());
             }
             return grpc::Status::OK;
         }
@@ -455,8 +574,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
         if (!err.ok()) {
             auto* err_pb = result->mutable_error_info();
-            err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
-                                                                        ErrorCodePB::UNKNOWN_ERROR);
+            err_pb->set_error_code(transErrorCodeToRPC(err.code()));
             err_pb->set_error_message(err.ToString());
         } else {
             auto* output_pb = result->mutable_final_output();
@@ -1023,8 +1141,19 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
     if (!cache_manager->executeFunction(*request, *response)) {
-        RTP_LLM_LOG_WARNING("execute function failed, request: [%s]", request->DebugString().c_str());
-        const std::string error_msg = "execute function failed, request: [" + request->DebugString() + "]";
+        std::string request_case;
+        if (request->has_mem_request()) {
+            request_case = "mem_request";
+        } else if (request->has_remote_request()) {
+            request_case = "remote_request(trace_id=" + request->remote_request().trace_id() + ")";
+        } else if (request->has_p2p_request()) {
+            request_case = "p2p_request";
+        } else {
+            request_case = "unknown";
+        }
+        RTP_LLM_LOG_WARNING(
+            "execute function failed, peer: %s, request_case: %s", context->peer().c_str(), request_case.c_str());
+        const std::string error_msg = "execute function failed, request_case: " + request_case;
         return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
     }
     return grpc::Status::OK;

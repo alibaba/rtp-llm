@@ -19,6 +19,7 @@ struct SendRequest {
     std::string     unique_key;
     KeyBlockInfoMap block_info;
     int64_t         deadline_ms = 0;
+    int64_t         timeout_ms = 0;
 };
 
 using SendRequestPtr = std::shared_ptr<SendRequest>;

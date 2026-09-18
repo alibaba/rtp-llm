@@ -1377,7 +1377,8 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
         }
 
         sp_output_buffer->all_probs     = to_cuda_async(propose_probs_t);
-        sp_output_buffer->hidden_states = to_cuda_async(propose_hidden_t);
+        // P2P side-channel hidden states may arrive in FP32; use the draft model dtype.
+        sp_output_buffer->hidden_states = to_cuda_async(propose_hidden_t).to(dataTypeToTorchType(data_type_));
 
         auto       accept_len_cpu     = torch::ones({1}, pinned_i32);
         auto       accept_tokens_cpu  = torch::zeros({1, static_cast<int64_t>(propose_step_ + 1)}, pinned_i32);

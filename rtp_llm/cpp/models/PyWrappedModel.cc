@@ -531,6 +531,19 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     cache_store_inputs.host_kv_cache_offset  = to_host(inputs.kv_cache_block_id);
     cache_store_inputs.request_id            = inputs.request_id;
     cache_store_inputs.request_pd_separation = inputs.request_pd_separation;
+    cache_store_inputs.request_deadline_ms   = to_host(inputs.request_deadline_ms);
+    if (inputs.decode_entrance && cache_manager_->hasP2PConnector()) {
+        cache_store_inputs.p2p_layer_write = [manager = cache_manager_](size_t                               model_id,
+                                                                        int                                  layer_id,
+                                                                        const std::string&                   tag,
+                                                                        const std::vector<int64_t>&          keys,
+                                                                        const std::vector<int32_t>&          blocks,
+                                                                        int64_t                              request_id,
+                                                                        const std::shared_ptr<torch::Event>& event,
+                                                                        int64_t deadline_ms) {
+            return manager->writeP2PLayer(model_id, layer_id, tag, keys, blocks, request_id, event, deadline_ms);
+        };
+    }
     cache_store_inputs.cache_keys            = inputs.cache_keys;
     return cache_store_inputs;
 }
@@ -1372,6 +1385,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
+                micro_model_inputs.request_deadline_ms =
+                    inputs.request_deadline_ms.defined() ?
+                        inputs.request_deadline_ms.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
 
@@ -1408,6 +1425,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_batch_idx, d_micro_batch_size);
+                micro_model_inputs.request_id            = torch::Tensor();
+                micro_model_inputs.request_pd_separation = torch::Tensor();
+                micro_model_inputs.cache_keys            = torch::Tensor();
+                micro_model_inputs.request_deadline_ms   = torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, d_micro_batch_size});
 
@@ -1453,6 +1474,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
+                micro_model_inputs.request_deadline_ms =
+                    inputs.request_deadline_ms.defined() ?
+                        inputs.request_deadline_ms.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
 
@@ -1505,6 +1530,7 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
 
     buffer_holder_.hold_host(inputs.request_id);
     buffer_holder_.hold_host(inputs.request_pd_separation);
+    buffer_holder_.hold_host(inputs.request_deadline_ms);
     buffer_holder_.hold_host(inputs.cache_keys);
 }
 

@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
@@ -182,7 +183,7 @@ std::optional<ErrorInfo> PrefillRpcServer::parseDownstreamError(const grpc::Stat
             }                                                                                                          \
         }                                                                                                              \
         if (prefill_context.getStream()) {                                                                             \
-            prefill_context.getStream()->reportEvent(StreamEvents::Error, new_error_code, new_error_msg);              \
+            prefill_context.getStream()->reportError(new_error_code, new_error_msg);                                   \
         }                                                                                                              \
         setContextError(prefill_context, ErrorInfo(new_error_code, new_error_msg));                                    \
         logPrefillFailureTrace("client_grpc_error", prefill_context);                                                  \
@@ -201,6 +202,12 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     return grpc::Status::OK;
 }
 
+bool PrefillRpcServer::canUsePDSep(const GenerateInputPB& request) const {
+    // RemoteGenerate does not transfer prompt loss to Decode. Keep loss requests
+    // local so Decode never tries to compute prompt loss from a single decode token.
+    return request.generate_config().calculate_loss() == 0 && checkPDSupport(request).supported;
+}
+
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
     const int64_t max_wait_timeout_us =
         static_cast<int64_t>(maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms) * 1000;
@@ -211,7 +218,7 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
         auto cost_time_us    = current_time_us - begin_time_us;
         if (cost_time_us > max_wait_timeout_us) {
             string new_error_msg = "wait to run timeout, timeout is " + std::to_string(max_wait_timeout_us) + " us";
-            stream->reportEvent(StreamEvents::Error, ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
+            stream->reportError(ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
             return ErrorInfo(ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
         }
     }
@@ -476,6 +483,11 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
     auto stream = engine_->enqueue(prefill_context.generate_input);
     prefill_context.setStream(stream);
+    if (stream->hasError()) {
+        prefill_context.error_info   = stream->statusInfo();
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        return;
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", prefill_context.request_id);
 }
 

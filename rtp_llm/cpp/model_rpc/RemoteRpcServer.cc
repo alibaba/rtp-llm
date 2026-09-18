@@ -7,7 +7,8 @@ namespace rtp_llm {
 
 grpc::Status RemoteRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                                   py::object                                             mm_process_engine) {
+                                   py::object                                             mm_process_engine,
+                                   bool                                                   init_cache_store) {
     rtp_llm::ProposeModelEngineInitParams* propose_params_ptr = propose_params ? propose_params.get() : nullptr;
     auto ret = LocalRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
     if (!ret.ok()) {
@@ -15,7 +16,9 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
     }
     initLocalHostInfo();
     initLocalPeerInfo();
-    initCacheStore(maga_init_params, propose_params_ptr);
+    if (init_cache_store) {
+        initCacheStore(maga_init_params, propose_params_ptr);
+    }
     return grpc::Status::OK;
 }
 

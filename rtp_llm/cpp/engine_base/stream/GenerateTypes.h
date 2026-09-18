@@ -94,6 +94,7 @@ public:
     // Auto-TPM QoS priority (task40): 30/40/50/60/70; 0 = not set. TPS metrics
     // tagging only — never used for engine-side scheduling decisions.
     int32_t priority = 0;
+    int64_t request_deadline_ms = 0;  // Local P2P deadline.
 
     // Batch grouping params
     int     group_size = 1;

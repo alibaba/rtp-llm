@@ -4,6 +4,12 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 
+namespace {
+inline size_t alignUp(size_t value, size_t alignment) {
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+}  // namespace
+
 namespace rtp_llm {
 namespace transfer {
 namespace tcp {
@@ -76,6 +82,10 @@ private:
 TcpKVCacheSender::TcpKVCacheSender(const kmonitor::MetricsReporterPtr& metrics_reporter):
     metrics_reporter_(metrics_reporter), cuda_copy_util_(std::make_unique<CudaCopyUtil>()) {}
 
+TcpKVCacheSender::~TcpKVCacheSender() {
+    releaseStagedMemoryCopyScratch(staged_scratch_);
+}
+
 bool TcpKVCacheSender::init(int                       io_thread_count,
                             std::chrono::milliseconds channel_idle_ttl,
                             std::uint64_t             sweep_interval_calls) {
@@ -114,8 +124,7 @@ TcpKVCacheSender::makeTransferRequest(const transfer::SendRequest&              
                                       const std::shared_ptr<TransferClientMetricsCollector>& collector) {
     auto transfer_request = std::make_shared<::tcp_transfer::TcpLayerBlockTransferRequest>();
     transfer_request->set_unique_key(request.unique_key);
-    transfer_request->set_deadline_ms(
-        std::max(request.deadline_ms - 10, currentTimeMs()));  // 10ms for network latency and processing time
+    transfer_request->set_timeout_ms(request.timeout_ms);
 
     if (request.block_info.empty()) {
         return nullptr;
@@ -139,9 +148,21 @@ TcpKVCacheSender::makeTransferRequest(const transfer::SendRequest&              
     }
 
     if (!copy_tasks.empty()) {
-        if (!cuda_copy_util_->batchCopyToHost(copy_tasks)) {
-            RTP_LLM_LOG_WARNING("TcpKVCacheSender: batchCopyToHost failed, unique_key: %s", request.unique_key.c_str());
-            return nullptr;
+        int device_index = -1;
+        for (const auto& [cache_key, kbi_ptr] : request.block_info) {
+            for (const auto& bi : kbi_ptr->blocks) {
+                if (bi.addr != nullptr && bi.is_cuda) {
+                    device_index = bi.device_index;
+                    goto found_device;
+                }
+            }
+        }
+        found_device:
+        if (!tryStagedGatherCopyToHost(copy_tasks, device_index)) {
+            if (!cuda_copy_util_->batchCopyToHost(copy_tasks)) {
+                RTP_LLM_LOG_WARNING("TcpKVCacheSender: batchCopyToHost failed, unique_key: %s", request.unique_key.c_str());
+                return nullptr;
+            }
         }
     }
     return transfer_request;
@@ -165,11 +186,35 @@ void TcpKVCacheSender::loadToRemote(
     auto controller        = new arpc::ANetRPCController();
     auto timeout_ms        = deadline_ms - currentTimeMs();
     controller->SetExpireTime(timeout_ms > 0 ? timeout_ms : 1);
-
     auto closure = new TcpTransferClosure(ip, port, transfer_request, transfer_response, controller, callback);
     ::tcp_transfer::TcpTransferService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
                                                  ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
     stub.transfer(controller, transfer_request.get(), transfer_response.get(), closure);
+}
+
+bool TcpKVCacheSender::tryStagedGatherCopyToHost(std::vector<CopyTask>& copy_tasks, int device_index) {
+    constexpr size_t kMinTilesForStaged = 4;
+    if (device_index < 0 || copy_tasks.size() < kMinTilesForStaged) {
+        return false;
+    }
+
+    constexpr size_t kAlignment = 16;
+    StagedMemoryCopyParams params;
+    params.direction    = StagedMemoryCopyDirection::D2H;
+    params.device_index = device_index;
+    params.host_bytes   = 0;
+
+    params.tiles.reserve(copy_tasks.size());
+    params.host_segments.reserve(copy_tasks.size());
+    for (auto& task : copy_tasks) {
+        size_t offset = alignUp(params.host_bytes, kAlignment);
+        params.tiles.push_back(StagedMemoryCopyTile{task.src_ptr, offset, task.size});
+        params.host_segments.push_back(StagedMemoryCopyHostSegment{task.dst_ptr, offset, task.size});
+        params.host_bytes = offset + task.size;
+    }
+
+    std::lock_guard<std::mutex> lock(staged_scratch_mutex_);
+    return execStagedMemoryCopy(params, &staged_scratch_);
 }
 
 void TcpKVCacheSender::send(const transfer::SendRequest&                               request,
@@ -186,13 +231,43 @@ void TcpKVCacheSender::send(const transfer::SendRequest&                        
         callback(error_code, error_msg);
     };
 
+    // makeTransferRequest is synchronous (D2H copy with cudaStreamSynchronize)
+    // and can block the dispatcher thread for a long time under cuda runtime
+    // contention; track the sync prefix latency and warn on slow paths.
+    const int64_t make_req_start_us = currentTimeUs();
     auto transfer_request = makeTransferRequest(request, collector);
-    if (!transfer_request) {
+    const int64_t make_req_cost_us = currentTimeUs() - make_req_start_us;
+    if (transfer_request == nullptr) {
+        if (make_req_cost_us >= 100000) {
+            RTP_LLM_LOG_WARNING("TcpKVCacheSender::send makeTransferRequest failed after %ld us, "
+                                "unique_key=%s, peer=%s:%u",
+                                make_req_cost_us,
+                                request.unique_key.c_str(),
+                                request.ip.c_str(),
+                                request.port);
+        }
         callback2(TransferErrorCode::BUILD_REQUEST_FAILED, "make transfer request failed");
         return;
     }
 
+    // loadToRemote = getChannel + arpc stub.transfer; only the synchronous
+    // prefix is measured here (the closure runs on arpc IO threads).
+    const int64_t load_remote_start_us = currentTimeUs();
     loadToRemote(request.ip, request.port, transfer_request, callback2, request.deadline_ms);
+    const int64_t load_remote_cost_us = currentTimeUs() - load_remote_start_us;
+
+    const int64_t total_sync_cost_us = make_req_cost_us + load_remote_cost_us;
+    if (total_sync_cost_us >= 100000) {
+        RTP_LLM_LOG_WARNING("TcpKVCacheSender::send slow sync prefix, "
+                            "unique_key=%s, peer=%s:%u, total_sync_us=%ld, "
+                            "make_req_us=%ld (cuda copy + sync), load_remote_us=%ld (getChannel + arpc submit)",
+                            request.unique_key.c_str(),
+                            request.ip.c_str(),
+                            request.port,
+                            total_sync_cost_us,
+                            make_req_cost_us,
+                            load_remote_cost_us);
+    }
 }
 
 }  // namespace tcp

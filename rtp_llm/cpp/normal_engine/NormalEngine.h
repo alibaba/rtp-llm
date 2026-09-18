@@ -29,6 +29,7 @@ public:
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
          enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override;
     void enqueue(std::shared_ptr<GenerateStream>& stream) override;
+    std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;

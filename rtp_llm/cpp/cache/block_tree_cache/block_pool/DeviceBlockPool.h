@@ -47,6 +47,9 @@ public:
     void decRef(const BlockIdList& blocks);
 
     uint32_t refCount(BlockIdxType block) const;
+    // Raw request refcount that also reports reclaimed blocks, which refCount()
+    // rejects. For diagnostics only; the count is read under the pool lock.
+    uint32_t refCountNoCheck(BlockIdxType block) const;
     using IBlockPool::referencedBlocksNum;
     size_t referencedBlocksNum() const;
 

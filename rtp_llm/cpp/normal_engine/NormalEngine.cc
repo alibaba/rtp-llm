@@ -638,6 +638,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       cache_store_config,
                                                                       use_device_malloc_block_pool);
         resource_context_.role_type     = pd_sep_config.role_type;
+        resource_context_.decode_entrance = pd_sep_config.decode_entrance;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -663,6 +664,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       cache_store_config,
                                                                       use_device_malloc_block_pool);
         resource_context_.role_type     = pd_sep_config.role_type;
+        resource_context_.decode_entrance = pd_sep_config.decode_entrance;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -763,6 +765,13 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
         streams.push_back(stream);
     }
     return scheduler_->enqueueGroup(streams);
+}
+
+std::vector<GenerateStreamPtr> NormalEngine::batchEnqueue(const std::vector<GenerateStreamPtr>& streams) {
+    for (const auto& stream : streams) {
+        stream->setReserveStep(reserve_step_);
+    }
+    return scheduler_->enqueueGroup(streams).second;
 }
 
 absl::Status NormalEngine::step() try {

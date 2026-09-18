@@ -399,6 +399,17 @@ TEST_F(CacheStoreAsyncWriterTest, ExceptionPropagation) {
     ASSERT_EQ(1, counter.load());
 }
 
+TEST_F(CacheStoreAsyncWriterTest, FailedForwardDrainRestoresIdle) {
+    CacheStoreAsyncWriter writer;
+    writer.init();
+    writer.submit([]() { throw std::runtime_error("background failure during forward unwind"); });
+
+    ASSERT_THROW(writer.waitAllDone(), std::runtime_error);
+
+    writer.init();
+    writer.waitAllDone();
+}
+
 TEST_F(CacheStoreAsyncWriterTest, FirstExceptionKeptOnMultipleFailures) {
     CacheStoreAsyncWriter writer;
     writer.init();
