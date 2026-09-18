@@ -199,7 +199,7 @@ class V41DecodePreprocessingCUDA(unittest.TestCase):
             6
         )
         region = CSA_KV if ratio == 2 else HCA_KV
-        pool = torch.empty(12, eb, 584, dtype=torch.uint8, device="cuda")
+        pool = torch.empty(12, eb, 288, dtype=torch.uint8, device="cuda")
         attn = SimpleNamespace(
             compress_ratio=ratio,
             _cp_ctx=None,

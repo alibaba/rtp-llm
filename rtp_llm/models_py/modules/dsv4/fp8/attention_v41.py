@@ -66,6 +66,21 @@ def fp8_roundtrip(x):
     return (x.float() / scale).to(torch.float8_e4m3fn).float() * scale
 
 
+def fp4_roundtrip(x):
+    """Fake-quantize the trailing 128-dim to the indexer MX FP4 form.
+
+    Keeps the non-paged decode fallback numerically identical to the
+    DeepGEMM paged scorer (same group-32 UE8M0 quantization of Q).
+    """
+    from rtp_llm.models_py.modules.dsv4.fp8._v41_prefill_indexer import (
+        _fp4_rows_torch,
+    )
+
+    shape = x.shape
+    values = _fp4_rows_torch(x.reshape(-1, shape[-1]).float().contiguous())[2]
+    return values.view(shape)
+
+
 def select_candidate_blocks(logits, visible, block_size, topk_blocks):
     """V4.1 candidate max-pooling, including the newest visible block."""
     nblocks = (logits.shape[1] + block_size - 1) // block_size
@@ -786,12 +801,10 @@ class AttentionV41FP8(AttentionFP8):
 
     def _produce_global_decode(self, x, positions, req_ids, starts):
         """Fixed-shape global writes and index reads, safe for CUDA graphs."""
-        from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
-            dequantize_indexer_k,
-            quantize_indexer_k,
-        )
-        from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
-            quantize_and_insert_k_cache,
+        from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
+            dequantize_indexer_k_fp4,
+            quantize_and_insert_k_cache_fp4,
+            quantize_indexer_k_fp4,
         )
         from rtp_llm.models_py.modules.dsv4.fp8.compressor import _linear_bf16_bf16_fp32
 
@@ -841,13 +854,13 @@ class AttentionV41FP8(AttentionFP8):
                 freqs,
                 self.rope_head_dim,
             )
-            quantize_and_insert_k_cache(
+            quantize_and_insert_k_cache_fp4(
                 global_keys.contiguous(),
                 self._source_pool(self._global_region()),
                 self._slots(self._global_region(), positions, req_ids),
             )
             index_pool = self._source_pool(INDEXER_KV)
-            quantize_indexer_k(
+            quantize_indexer_k_fp4(
                 index_keys.contiguous(),
                 self._slots(INDEXER_KV, positions, req_ids),
                 index_pool,
@@ -890,7 +903,7 @@ class AttentionV41FP8(AttentionFP8):
         slots = torch.where(
             ids < ((starts + S) // self.compress_ratio)[:, None], slots, -1
         )
-        keys = dequantize_indexer_k(index_pool, slots.reshape(-1)).view(
+        keys = dequantize_indexer_k_fp4(index_pool, slots.reshape(-1)).view(
             B, capacity, self.index_head_dim
         )
         self._shared_attention["global"] = {self.layer_id: keys}
@@ -936,7 +949,7 @@ class AttentionV41FP8(AttentionFP8):
                     "V4.1 paged indexer support changed within a forward"
                 )
         else:
-            q = fp8_roundtrip(rope_only(q, freqs, self.rope_head_dim))
+            q = fp4_roundtrip(rope_only(q, freqs, self.rope_head_dim))
         config = self.v41_config
         candidate_source = int(config.get("candidate_source_layer_id", -1))
         candidate_blocks = int(config.get("candidate_topk_blocks", 0))
@@ -1055,23 +1068,23 @@ class AttentionV41FP8(AttentionFP8):
                 starts = metadata.start_pos[:B].long()
                 self._produce_global_decode(x, positions, req, starts)
             selected = self._select_indices_decode(x, qkv.qr, positions)
-            from rtp_llm.models_py.modules.dsv4.fp8.decode.attention_kernels import (
-                attn_fp8_dual_paged,
+            from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_decode_attn import (
+                fp4_dual_decode_attention,
             )
             from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
                 get_or_build_sched_meta,
             )
 
             slots = self._decode_global_slots(selected, metadata.req_id_per_token[:T])
-            o = attn_fp8_dual_paged(
+            o = fp4_dual_decode_attention(
                 q=qkv.q,
                 swa_pool_3d=self._pool_view_3d_fp8(SWA_KV),
-                cmp_pool_3d=self._source_pool(self._global_region()),
+                global_pool_3d=self._source_pool(self._global_region()),
                 attn_sink=self.attn_sink,
                 swa_topk_3d=metadata.swa_global_slots[:T]
                 .view(B, S, self.window_size)
                 .contiguous(),
-                cmp_topk_3d=slots.int().view(B, S, self.index_topk).contiguous(),
+                global_topk_3d=slots.int().view(B, S, self.index_topk).contiguous(),
                 swa_block_table=metadata.pool_block_tables[SWA_KV][:B],
                 sched_meta=get_or_build_sched_meta(
                     metadata,
@@ -1079,11 +1092,9 @@ class AttentionV41FP8(AttentionFP8):
                     q_len=S,
                     num_heads=self.n_heads,
                     topk=self.window_size,
-                    extra_attn_type=self._global_region(),
+                    extra_attn_type=None,
                 ),
                 fp8_op=self._get_fp8_decode_op(),
-                topk_length=None,
-                extra_topk_length=None,
             )
         out = self._project_output(o, qkv.freqs_cis)
         self._prefill_output_all_reduce(out)

@@ -136,6 +136,58 @@ def _get_num_sms(device: torch.device) -> int:
     return _num_sms_cache
 
 
+# ---------------------------------------------------------------------------
+# V4.1 FP4 (MX mode) decode paged indexer wrapper around
+# ``deep_gemm.fp8_fp4_paged_mqa_logits``.
+#
+# The fused cache is the INDEX_K pool itself: the planar per-block layout
+# (payload plane then packed-UE8M0 scale plane) is exactly DeepGEMM's fused
+# paged form — [num_blocks, block_kv, 1, 68] uint8 with per-block stride
+# ``block_kv * 68``. DeepGEMM derives the payload/SF views from it.
+#
+# Shape contract:
+#   q_payload  [B, next_n, H, 64]  int8   (packed e2m1; logical head_dim 128)
+#   q_sf       [B, next_n, H]      int32  (packed UE8M0, one int32 per token/head)
+#   kv_pool    [num_blocks, block_kv, 68] uint8 (planar per block)
+#   weights    [B*next_n, H]       fp32   (raw head weights; scales live in SFs)
+#
+# Returns ``[B*next_n, max_ctx_len] fp32`` logits — same semantics as the
+# FP8 paged path (columns >= context_lens are left as DeepGEMM writes them;
+# the caller compacts and masks).
+# ---------------------------------------------------------------------------
+
+
+def fp8_fp4_paged_indexer_score(
+    q_payload: torch.Tensor,  # [B, next_n, H, 64] int8 packed e2m1
+    q_sf: torch.Tensor,  # [B, next_n, H] int32 packed UE8M0
+    kv_pool_uint8: torch.Tensor,  # [num_blocks, block_kv, 68] uint8 — planar pool
+    weights: torch.Tensor,  # [B*next_n, H] fp32
+    block_table: torch.Tensor,  # [B, max_blocks] int32 — logical→physical
+    context_lens: torch.Tensor,  # [B, next_n] int32 — live K length per row
+    block_size: int,  # entries per cache block (= pool.shape[1])
+    max_ctx_len: int,  # output T dim (physical capacity)
+) -> torch.Tensor:
+    """MX-mode FP4 paged indexer logits via DeepGEMM.
+
+    Both scale factors use DeepGEMM's packed-UE8M0 int32 form (group 32 along
+    the head dim), matching the V4.1-Flash official indexer quantization.
+    """
+    kv_4d = kv_pool_uint8.unsqueeze(2)  # [num_blocks, block_kv, 1, 68]
+    num_sms = _get_num_sms(q_payload.device)
+    schedule = _deep_gemm.get_paged_mqa_logits_metadata(
+        context_lens, block_size, num_sms
+    )
+    return _deep_gemm.fp8_fp4_paged_mqa_logits(
+        (q_payload.contiguous(), q_sf.contiguous()),
+        kv_4d,
+        weights.contiguous(),
+        context_lens,
+        block_table,
+        schedule,
+        max_ctx_len,
+    )
+
+
 def fp8_paged_indexer_score(
     q_fp8: torch.Tensor,  # [B, next_n, H, D] float8_e4m3fn
     w_fold: torch.Tensor,  # [B*next_n, H]    fp32
