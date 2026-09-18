@@ -24,6 +24,18 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         help="最大 batch tokens 大小。",
     )
     fifo_scheduler_group.add_argument(
+        "--enable_mixed_continuous_batching",
+        env_name="ENABLE_MIXED_CONTINUOUS_BATCHING",
+        bind_to=[(fifo_scheduler_config, "enable_mixed_continuous_batching")],
+        type=str2bool,
+        default=False,
+        help=(
+            "Allow Qwen3.5-VL MoE to admit new prefill requests into a running "
+            "decode batch in the unified PDFUSION FIFO scheduler. Pure decode "
+            "forwards keep the CUDA Graph fast path."
+        ),
+    )
+    fifo_scheduler_group.add_argument(
         "--max_batch_tokens_without_cache",
         env_name="MAX_BATCH_TOKENS_WITHOUT_CACHE",
         bind_to=[(fifo_scheduler_config, "max_batch_tokens_without_cache")],

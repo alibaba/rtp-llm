@@ -404,6 +404,11 @@ PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode);
 struct FIFOSchedulerConfig {
     int64_t max_context_batch_size = 1;
     int64_t max_batch_tokens_size  = 0;
+    // Allow the unified PDFUSION FIFO scheduler to admit context streams into
+    // a running decode batch for the Qwen3.5-VL MoE model. PyWrappedModel runs
+    // native pure-decode and pure-context forwards in the same scheduling round;
+    // pure decode retains its CUDA graph fast path.
+    bool enable_mixed_continuous_batching = false;
     // PDFUSION scheduler mode. Supported values:
     //   ""      -> default FIFO/decode-first scheduler
     //   "ratio" -> PDFusionRatioScheduler with decode_prefill_ratio

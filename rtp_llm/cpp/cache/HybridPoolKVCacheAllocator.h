@@ -50,6 +50,11 @@ public:
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr) override;
     int64_t getMrCostTimeMs() const override;
 
+    // Per-pool additional peak demand for one sequence. An empty result means unsupported.
+    std::vector<int> estimateSingleSequencePeakNeedBlocksByPool(
+        const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+        int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, bool enable_reuse_cache) const override;
+
     // Per-pool access for diagnostics / per-pool metrics reporting.
     const std::vector<BlockPoolPtr>& groupBlockPools() const {
         return group_block_pools_;

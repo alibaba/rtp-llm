@@ -133,6 +133,11 @@ MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
     }
 }
 
+std::vector<int> KVCacheAllocator::estimateSingleSequencePeakNeedBlocksByPool(
+    const BatchKVCacheResourcePtr&, int, int, int, int, bool) const {
+    return {};
+}
+
 int KVCacheAllocator::estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                   int                            seq_len,
                                                   int                            common_seq_len,

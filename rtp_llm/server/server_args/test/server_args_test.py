@@ -209,6 +209,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["PREFILL_PREPARE_RESOURCE_POOL_SIZE"] = "256"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["MAX_BATCH_TOKENS_WITHOUT_CACHE"] = "2048"
+        os.environ["ENABLE_MIXED_CONTINUOUS_BATCHING"] = "1"
         os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
@@ -266,6 +267,9 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache,
             2048,
         )
+        self.assertTrue(
+            py_env_configs.runtime_config.fifo_scheduler_config.enable_mixed_continuous_batching
+        )
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.cp_force_single_prefill,
             False,
@@ -274,6 +278,7 @@ class ServerArgsSetTest(TestCase):
             pickle.dumps(py_env_configs.runtime_config.fifo_scheduler_config)
         )
         self.assertEqual(restored_fifo_config.max_batch_tokens_without_cache, 2048)
+        self.assertTrue(restored_fifo_config.enable_mixed_continuous_batching)
         # Old pickles carry only the two original slots; every field added later
         # must fall back to its default instead of raising.
         fifo_config_type = type(py_env_configs.runtime_config.fifo_scheduler_config)
@@ -283,6 +288,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(legacy_fifo_config.max_batch_tokens_size, 8192)
         self.assertEqual(legacy_fifo_config.max_inited_kv_cache_streams, 0)
         self.assertEqual(legacy_fifo_config.max_batch_tokens_without_cache, 0)
+        self.assertFalse(legacy_fifo_config.enable_mixed_continuous_batching)
 
         # Verify frontend and DashSc pre-stop windows are configured independently.
         self.assertEqual(

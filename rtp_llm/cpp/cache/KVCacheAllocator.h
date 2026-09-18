@@ -84,6 +84,11 @@ public:
                                     bool                           enable_reuse_cache,
                                     int                            target_batch_size) const;
 
+    // Per-pool additional peak demand for one sequence. An empty result means unsupported.
+    virtual std::vector<int> estimateSingleSequencePeakNeedBlocksByPool(
+        const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+        int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, bool enable_reuse_cache) const;
+
     MallocResult malloc(const MallocInfo& malloc_info);
     virtual void blockCopy(int src_block_index, int dest_block_index);
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);

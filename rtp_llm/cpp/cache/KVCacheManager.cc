@@ -368,6 +368,17 @@ int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_
                                                    target_batch_size);
 }
 
+std::vector<int> KVCacheManager::estimateSingleSequencePeakNeedBlocksByPool(
+    const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+    int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, bool enable_reuse_cache) const {
+    return allocator_->estimateSingleSequencePeakNeedBlocksByPool(
+        batch_kv_cache_resource, seq_len, common_seq_len, remaining_tokens, reserve_step, enable_reuse_cache);
+}
+
+std::vector<KVCachePoolMetricsSnapshot> KVCacheManager::poolMetricsSnapshots() const {
+    return allocator_->poolMetricsSnapshots();
+}
+
 // 块操作相关
 
 void KVCacheManager::blockCopy(int src_block_index, int dest_block_index) {

@@ -740,6 +740,44 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockCacheFreeIgnoresDuplicateAndNullBloc
 // hasAvailableBlocksForReserve via reserve_block_num
 // ---------------------------------------------------------------------------
 
+TEST_F(HybridPoolKVCacheAllocatorTest, SingleSequencePeakDemandPreservesIndependentPools) {
+    auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/32, /*full_block_num=*/4);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    auto resource = makeBatchResource(/*batch_size=*/1, config);
+    resource->setBatchCacheKeys(0, CacheKeysType{100});
+
+    // The same request needs two physical blocks in EACH pool at its peak.
+    // A surplus of linear blocks cannot cover a full-attention shortage.
+    const auto fresh_need = allocator->estimateSingleSequencePeakNeedBlocksByPool(
+        resource, /*seq_len=*/3, /*common_seq_len=*/3, /*remaining_tokens=*/3,
+        /*reserve_step=*/0, /*enable_reuse_cache=*/false);
+    ASSERT_EQ(fresh_need, (std::vector<int>{2, 2}));
+    auto tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/3, /*seq_size_per_block=*/4);
+    MallocInfo info{resource, tokens};
+    info.enable_device_cache = false;
+    info.reuse_cache = false;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    const auto initialized_need = allocator->estimateSingleSequencePeakNeedBlocksByPool(
+        resource, 3, 3, 3, 0, false);
+    EXPECT_EQ(initialized_need, (std::vector<int>{1, 1}));
+    const auto snapshots = allocator->poolMetricsSnapshots();
+    ASSERT_EQ(snapshots.size(), 2u);
+    EXPECT_GT(snapshots[0].available_blocks, snapshots[1].available_blocks);
+    allocator->free(FreeInfo{resource, tokens});
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, SingleSequencePeakDemandRejectsFanOutAndCP) {
+    auto config = makeTinyMultiPoolHybridConfig();
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    auto resource = makeBatchResource(/*batch_size=*/2, config);
+    EXPECT_TRUE(allocator->estimateSingleSequencePeakNeedBlocksByPool(resource, 3, 3, 3, 0, false).empty());
+    resource = makeBatchResource(/*batch_size=*/1, config);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
+    EXPECT_TRUE(allocator->estimateSingleSequencePeakNeedBlocksByPool(resource, 3, 3, 3, 0, false).empty());
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksAreDistributedAcrossGroupsForInitMalloc) {
     // Group 0 (linear) gets 6 blocks (5 free), group 1 (full) gets 4 blocks (3 free).
     // total_available = 8. Set reserve = 4.
