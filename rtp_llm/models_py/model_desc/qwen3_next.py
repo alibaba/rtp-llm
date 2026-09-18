@@ -527,6 +527,16 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             if kv_cache_tensor is not None
             else None
         )
+        fuse_qkv = (
+            os.getenv("RTP_QWEN35_FUSED_CONV_QKV_NORM", "0") == "1"
+            and mixed_qkv.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(mixed_qkv.device)[0] == 10
+            and mixed_qkv.dtype == self.conv_weights.dtype == torch.bfloat16
+            and mixed_qkv.shape[0] >= 2048
+            and self.head_k_dim == self.head_v_dim == 128
+            and self.local_num_k_heads % 2 == self.local_num_v_heads % 2 == 0
+        )
         out = causal_conv1d_fn(
             x=mixed_qkv.transpose(0, 1),
             weight=self.conv_weights,
@@ -537,8 +547,11 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths_device,
             metadata=metadata,
-        ).transpose(0, 1)
-        return out
+            fused_qkv_heads=(
+                (self.local_num_k_heads, self.local_num_v_heads) if fuse_qkv else None
+            ),
+        )
+        return out if fuse_qkv else out.transpose(0, 1)
 
     def _fla(
         self,
@@ -549,6 +562,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
         attn_meta: Qwen3NextMetadata,
+        normalized_qkv=None,
     ) -> torch.Tensor:
         gating = fused_gdn_gating
         if os.getenv(
@@ -585,7 +599,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         # M >= 2048: scatter_qkv (Triton, SGLang port) avoids the .view() ->
         # .contiguous() copies that torch.split + view triggers. Below 2048,
         # kernel launch overhead beats the savings (microbench measured).
-        if mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
+        if normalized_qkv is not None:
+            query, key, value = normalized_qkv
+        elif mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
             query, key, value = scatter_qkv(
                 mixed_qkv,
                 self.local_num_k_heads,
@@ -630,6 +646,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 cu_seqlens_without_padding,
                 initial_state=initial_states,
                 checkpoint_interval=seq_size_per_block,
+                qk_normalized=normalized_qkv is not None,
             )
             if ssm_states is not None:
                 store_flashinfer_ssm_state(
@@ -706,7 +723,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_state=initial_states,
                 output_final_state=need_final_state,
                 cu_seqlens=cu_seqlens_without_padding,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=normalized_qkv is None,
             )
         else:
             attn_out, h, final_state = chunk_gated_delta_rule(
@@ -718,7 +735,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_state=initial_states,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens_without_padding,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=normalized_qkv is None,
             )
         if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
@@ -749,7 +766,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 kv_cache.kv_cache_base.shape[0], -1
             )
             seq_size_per_block = kv_cache.seq_size_per_block
-        mixed_qkv = self._conv1d(
+        conv_output = self._conv1d(
             mixed_qkv,
             kv_cache_tensor,
             seq_size_per_block,
@@ -757,13 +774,14 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             metadata=attn_meta.get_prefill_conv1d_meta(),
         )
         attn_out = self._fla(
-            mixed_qkv,
+            mixed_qkv if isinstance(conv_output, tuple) else conv_output,
             b,
             a,
             kv_cache_tensor,
             seq_size_per_block,
             attn_inputs,
             attn_meta,
+            normalized_qkv=conv_output if isinstance(conv_output, tuple) else None,
         )
         cache_store_inputs = attn_inputs.cache_store_inputs
         cache_store_writer = attn_inputs.cache_store_writer
