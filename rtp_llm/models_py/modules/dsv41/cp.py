@@ -876,8 +876,15 @@ class V41CPAttentionContext(V41AttentionContext):
         position = int(raw[4096:4104].view(torch.int64).item())
         valid = int(raw[4104:4108].view(torch.int32).item())
         if position != self.start or valid != position % 2:
+            nonzero = [int(v) for v in (received[:, 1] != 0).sum(-1).cpu().tolist()]
             raise ValueError(
-                "CP pair slices disagree with the restored execution boundary"
+                "CP pair slices disagree with the restored execution boundary: "
+                f"owner={owner} start={self.start} previous={self.previous} "
+                f"position={position} valid={valid} "
+                f"restored_state_ready={restored_state_ready} "
+                f"snapshots={self._pair_snapshots[owner]} "
+                f"reuse_unit={self.cache.layout.reuse_unit} "
+                f"rank_slice_nonzero_bytes={nonzero}"
             )
         return PairCarry(
             owner,
