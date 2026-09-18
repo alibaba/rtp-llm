@@ -221,6 +221,9 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                 && serviceType != ServiceType.ENGINE_CANCEL;
     }
 
+    /**
+     * Queries worker status asynchronously, recreating a broken connection and retrying once.
+     */
     public CompletableFuture<EngineRpcService.WorkerStatusPB> getWorkerStatusAsync(
             String ip,
             int port,
@@ -234,6 +237,9 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                 ServiceType.WORKER_STATUS);
     }
 
+    /**
+     * Queries cache status asynchronously, recreating a broken connection and retrying once.
+     */
     public CompletableFuture<EngineRpcService.CacheStatusPB> getCacheStatusAsync(
             String ip,
             int port,
@@ -247,6 +253,9 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                 ServiceType.CACHE_STATUS);
     }
 
+    /**
+     * Queries multimodal worker status asynchronously, recreating a broken connection and retrying once.
+     */
     public CompletableFuture<EngineRpcService.WorkerStatusPB> getMultimodalWorkerStatusAsync(
             String ip,
             int port,
@@ -260,6 +269,9 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                 ServiceType.MULTIMODAL_WORKER_STATUS);
     }
 
+    /**
+     * Queries multimodal cache status asynchronously, recreating a broken connection and retrying once.
+     */
     public CompletableFuture<EngineRpcService.CacheStatusPB> getMultimodalCacheStatusAsync(
             String ip,
             int port,
@@ -273,6 +285,9 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                 ServiceType.MULTIMODAL_CACHE_STATUS);
     }
 
+    /**
+     * Enqueues a batch asynchronously without transport retry because replay may duplicate accepted work.
+     */
     public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(
             String ip,
             int port,
@@ -293,6 +308,9 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                 ServiceType.BATCH_ENQUEUE);
     }
 
+    /**
+     * Cancels a request asynchronously without transport retry because the original cancel may have succeeded.
+     */
     public CompletableFuture<EngineRpcService.CancelResponsePB> cancelAsync(
             String ip,
             int port,
