@@ -26,15 +26,17 @@ namespace {
 GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0) {
     using namespace block_transfer_engine_test;
 
-    auto policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.enable_prefix_reuse                          = true;
-    const GroupBase                            group    = makeTestGroupBase(policy);
-    const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
-    DeviceBlockPoolPtr pool      = makeTestDevicePool({{group.kv_block_stride_bytes, group.kv_scale_stride_bytes}},
+    auto policy                                             = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    policy.enable_prefix_reuse                              = true;
+    const auto                                 group_config = makeTestGroupBase(policy);
+    const auto                                 kv_bytes     = group_config.group.kvBlockStrideBytes();
+    const auto                                 scale_bytes  = group_config.group.kvScaleStrideBytes();
+    const std::shared_ptr<const CacheTopology> topology     = makeTestTopology({group_config});
+    DeviceBlockPoolPtr                         pool         = makeTestDevicePool({{kv_bytes, scale_bytes}},
                                                  /*usable_count=*/1,
                                                  "load_task_runner_" + std::to_string(group_set_id));
-    auto               host_pool = makeHostPool(group.kv_block_stride_bytes, /*usable_count=*/2);
-    auto               disk_pool = makeDiskPool(group.kv_block_stride_bytes,
+    auto                                       host_pool    = makeHostPool(kv_bytes, /*usable_count=*/2);
+    auto                                       disk_pool    = makeDiskPool(kv_bytes,
                                   /*usable_count=*/2,
                                   "/tmp",
                                   std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK));
@@ -170,7 +172,6 @@ TEST(LoadTaskRunnerTest, CreateTaskSkipsDeviceDescriptors) {
     EXPECT_EQ(task, nullptr);
 }
 
-
 TEST(LoadTaskRunnerTest, CreateTaskPartitionsHostAndDiskDescriptors) {
     GroupSetPtr                                   group = makeTaskRunnerTestGroupSet();
     const std::vector<GroupSetPtr>                group_sets{group};
@@ -301,11 +302,11 @@ TEST(LoadTaskRunnerTest, SplitsEachDirectionByGroupSetId) {
     BlockTransferDispatcher dispatcher(engine, nullptr, 8);
     BlockTreeCacheMetricsReporter metrics_reporter{nullptr};
     auto                          task = makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {1}),
-                                                       TransferDescriptor::hostToDevice(0, 2, {2}),
-                                                       TransferDescriptor::hostToDevice(1, 3, {3}),
-                                                       TransferDescriptor::diskToDevice(0, 4, {4}),
-                                                       TransferDescriptor::diskToDevice(1, 5, {5}),
-                                                       TransferDescriptor::diskToDevice(1, 6, {6})});
+                              TransferDescriptor::hostToDevice(0, 2, {2}),
+                              TransferDescriptor::hostToDevice(1, 3, {3}),
+                              TransferDescriptor::diskToDevice(0, 4, {4}),
+                              TransferDescriptor::diskToDevice(1, 5, {5}),
+                              TransferDescriptor::diskToDevice(1, 6, {6})});
     std::optional<ErrorInfo>      result;
 
     runner.runTransfer(task, dispatcher, metrics_reporter, [&](ErrorInfo error) { result.emplace(std::move(error)); });

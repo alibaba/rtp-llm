@@ -104,7 +104,7 @@ public:
         resource_context_.cache_manager = std::move(previous_cache_manager_);
     }
 
-    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&)            = delete;
+    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&) = delete;
     ScopedWarmUpCacheManagerBinding& operator=(const ScopedWarmUpCacheManagerBinding&) = delete;
 
 private:
@@ -115,9 +115,6 @@ private:
 std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManager(const EngineInitParams& params) {
     auto cache_config = CacheConfigCreator::createBasicConfig(
         params.model_config_, params.parallelism_config, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
-    if (cache_config.kernel_seq_size_per_block == 0) {
-        cache_config.kernel_seq_size_per_block = cache_config.seq_size_per_block;
-    }
 
     RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0,
                             "generation prefill CUDA graph warmup requires a positive KV block size");
@@ -626,7 +623,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
         RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
                          result.block_num,
-                         result.block_size_bytes / 1024);
+                         result.totalGroupBlockSizeBytes() / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
         resource_context_.cache_manager = make_shared<KVCacheManager>(result,
                                                                       false,

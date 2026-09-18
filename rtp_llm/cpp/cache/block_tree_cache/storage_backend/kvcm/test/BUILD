@@ -34,6 +34,7 @@ cc_test_wrapper(
     deps = [
         "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:group_policy",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

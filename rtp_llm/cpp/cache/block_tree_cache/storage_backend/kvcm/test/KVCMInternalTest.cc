@@ -10,25 +10,23 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
 
 namespace rtp_llm::kvcm {
 namespace {
 
 GroupBase makeGroup(std::string tag, int layer_id, CacheGroupType type, size_t kv_block_stride_bytes = 16) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 8;
+    (void)layer_id;
+    auto base_spec                       = test::makeResolvedMhaSpec(DataType::TYPE_UINT8, 1, 1, 8, tag);
+    base_spec->kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
+    auto spec                            = std::make_shared<test::TestLayoutSpec>(*base_spec, kv_block_stride_bytes, 0);
 
     GroupBase group;
-    group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(type);
-    group.layer_ids                 = {layer_id};
-    group.block_num                 = 16;
-    group.seq_size_per_block        = 8;
-    group.kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
-    group.kv_block_stride_bytes     = kv_block_stride_bytes;
+    group.tag       = std::move(tag);
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(type);
+    group.block_num = 16;
     return group;
 }
 
@@ -142,10 +140,10 @@ TEST(KVCMInternalTest, FullAggregateUsesCanonicalNameOrderIndependentOfNumericGr
 
 TEST(KVCMInternalTest, FullLinearPolicyPreservesTheSameCanonicalFullIdentityAndSortsCombinedSpecs) {
     auto                       topology = CacheTopology::create({makeGroup("z_group", 0, CacheGroupType::FULL),
-                                                                 makeGroup("a_group", 1, CacheGroupType::FULL),
-                                                                 makeGroup("z_linear", 2, CacheGroupType::LINEAR),
-                                                                 makeGroup("a_linear", 3, CacheGroupType::LINEAR)},
-                                                                {{0, {"z_group"}}, {1, {"a_group"}}, {2, {"z_linear"}}, {3, {"a_linear"}}});
+                                           makeGroup("a_group", 1, CacheGroupType::FULL),
+                                           makeGroup("z_linear", 2, CacheGroupType::LINEAR),
+                                           makeGroup("a_linear", 3, CacheGroupType::LINEAR)},
+                                          {{0, {"z_group"}}, {1, {"a_group"}}, {2, {"z_linear"}}, {3, {"a_linear"}}});
     FullLinearLayerGroupPolicy policy(
         *topology, unusedResolver(), /*full_group_ids=*/{0, 1}, /*other_group_ids=*/{2, 3}, /*write_interval=*/1);
     ASSERT_TRUE(policy.init());

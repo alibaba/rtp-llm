@@ -1074,7 +1074,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessUsesCpGroupPolicyReuseUn
     auto policies     = cache_config.groupPoliciesSnapshot();
     ASSERT_EQ(policies.size(), 1u);
     policies.front().cp_mapping = CpBlockMappingMode::NONE;
-    cache_config.setGroupPolicies(policies);
+    test::setTestGroupPolicies(cache_config, policies);
     prepareResourceWithCacheConfig(cache_config, {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
 
@@ -1178,8 +1178,9 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback(
-        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
+    context->setMatchCallback([](LoadAsyncContext&, size_t) {
+        return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
+    });
 
     resource.allocator_load_context_ = context;
     stream_->reportEvent(StreamEvents::CanRun);
@@ -1238,8 +1239,9 @@ TEST_F(StreamCacheResourceTest, testPrefillPermanentMaterializationFailureTermin
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{5678}), {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback(
-        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED}; });
+    context->setMatchCallback([](LoadAsyncContext&, size_t) {
+        return LoadMatchResult{false, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED};
+    });
 
     resource.allocator_load_context_ = context;
     stream_->reportEvent(StreamEvents::CanRun);
@@ -1359,8 +1361,9 @@ TEST_F(StreamCacheResourceTest, PollAllocatorLoadPreservesRetryableMaterializati
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{0, NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, 0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback(
-        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
+    context->setMatchCallback([](LoadAsyncContext&, size_t) {
+        return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
+    });
     resource.allocator_load_context_ = context;
     EXPECT_FALSE(resource.pollAllocatorLoad().has_value());
     context->startBackendMatch();

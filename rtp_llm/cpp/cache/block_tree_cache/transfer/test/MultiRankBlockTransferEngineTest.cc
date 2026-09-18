@@ -165,7 +165,7 @@ static BlockIdxType prepareDeviceTarget(const std::shared_ptr<FullGroupSet>& gro
 
 static void initializeBroadcastGroups(const std::vector<std::shared_ptr<FullGroupSet>>& groups,
                                       size_t                                            payload_bytes = 256) {
-    std::vector<GroupBase> group_bases;
+    std::vector<block_transfer_engine_test::TestGroupConfig> group_bases;
     group_bases.reserve(groups.size());
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
         group_bases.push_back(block_transfer_engine_test::makeTestGroupBase(
@@ -747,7 +747,9 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsTask) {
 class ScopedRpcResponseRelease {
 public:
     explicit ScopedRpcResponseRelease(std::shared_ptr<std::promise<void>> release): release_(std::move(release)) {}
-    ~ScopedRpcResponseRelease() { release(); }
+    ~ScopedRpcResponseRelease() {
+        release();
+    }
     void release() {
         if (release_) {
             release_->set_value();
@@ -765,9 +767,9 @@ TEST_F(MultiRankBlockTransferEngineTest, CacheShutdownWaitsForLateMultiRankEvict
         auto                                  state = std::make_shared<MultiRankBlockTransferRpcState>();
         const MemoryOperationResponsePB::Code second_response =
             transfer_success ? MemoryOperationResponsePB::OK : MemoryOperationResponsePB::FAILED;
-        auto release_promise = std::make_shared<std::promise<void>>();
-        auto response_release = release_promise->get_future().share();
-        const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        auto                                               release_promise  = std::make_shared<std::promise<void>>();
+        auto                                               response_release = release_promise->get_future().share();
+        const std::vector<MultiRankBlockTransferRpcConfig> configs          = {
             {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state, /*sleep_millis=*/0, response_release},
             {true, second_response, grpc::Status::OK, state, /*sleep_millis=*/0, response_release},
         };
@@ -805,17 +807,17 @@ TEST_F(MultiRankBlockTransferEngineTest, CacheShutdownWaitsForLateMultiRankEvict
 
         // On a regression timeout the worker retains its cache and RPC servers.
         // std::async would still block in the future destructor after an early return.
-        auto started = std::make_shared<std::promise<void>>();
-        auto cache_destroyed = std::make_shared<std::promise<void>>();
-        auto started_future = started->get_future();
-        auto destroyed_future = cache_destroyed->get_future();
-        BoundedThread<void> destroy([cache = std::move(cache), servers = std::move(servers),
-                                     started, cache_destroyed]() mutable {
-            started->set_value();
-            cache.reset();
-            cache_destroyed->set_value();
-            servers.clear();
-        });
+        auto                started          = std::make_shared<std::promise<void>>();
+        auto                cache_destroyed  = std::make_shared<std::promise<void>>();
+        auto                started_future   = started->get_future();
+        auto                destroyed_future = cache_destroyed->get_future();
+        BoundedThread<void> destroy(
+            [cache = std::move(cache), servers = std::move(servers), started, cache_destroyed]() mutable {
+                started->set_value();
+                cache.reset();
+                cache_destroyed->set_value();
+                servers.clear();
+            });
         ASSERT_EQ(started_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
         // Check cache destruction itself; server shutdown must not mask an early return.
         EXPECT_EQ(destroyed_future.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);

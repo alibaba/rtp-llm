@@ -30,14 +30,11 @@ namespace {
 // Two-group hybrid: group_id=0 linear (won't be exercised here), group_id=1 full (the CP-shard target).
 CacheConfig makeCPHybridConfig() {
     CacheConfig config;
-    config.dtype                     = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num                 = 4;
-    config.layer_all_num             = 4;
-    config.block_num                 = 32;  // headroom for cp_size=2 expansion
-    config.seq_size_per_block        = 4;
-    config.kernel_seq_size_per_block = 2;
-    config.linear_step               = 2;
-    config.group_layer_num           = 2;
+    config.dtype              = rtp_llm::DataType::TYPE_FP16;
+    config.layer_num          = 4;
+    config.block_num          = 32;  // headroom for cp_size=2 expansion
+    config.seq_size_per_block = 4;
+    config.linear_step        = 2;
 
     auto linear_spec = makeResolvedLinearSpec(config.dtype,
                                               1,
@@ -50,17 +47,10 @@ CacheConfig makeCPHybridConfig() {
                                               config.dtype,
                                               "linear");
     auto full_spec = makeResolvedMhaSpec(config.dtype, 1, 1, static_cast<uint32_t>(config.seq_size_per_block), "full");
+    full_spec->kernel_seq_size_per_block = 2;
 
     config.fromGroupedSpecs(
         {linear_spec, full_spec}, {{0, 1}, {2, 3}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
-
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = 0;
-    config.kv_scale_size_bytes   = 0;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-    config.layer_to_block_stride_bytes.assign(
-        config.layer_all_num, static_cast<int>(config.kv_block_stride_bytes + config.kv_scale_stride_bytes));
 
     return config;
 }

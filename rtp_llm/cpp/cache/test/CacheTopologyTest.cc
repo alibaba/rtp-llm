@@ -10,24 +10,22 @@
 namespace rtp_llm {
 namespace {
 
-GroupBase makeGroup(std::string tag, std::vector<int> layer_ids, CacheGroupType type = CacheGroupType::FULL) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 8;
+GroupBase makeGroup(std::string tag, CacheGroupType type = CacheGroupType::FULL) {
+    auto spec                       = std::make_shared<MHAKVCacheSpec>();
+    spec->tag                       = tag;
+    spec->seq_size_per_block        = 8;
+    spec->kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
 
     GroupBase group;
-    group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(type);
-    group.layer_ids                 = std::move(layer_ids);
-    group.block_num                 = 16;
-    group.seq_size_per_block        = 8;
-    group.kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
+    group.tag       = std::move(tag);
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(type);
+    group.block_num = 16;
     return group;
 }
 
 TEST(CacheTopologyTest, SupportsSingleGlobalGroupAsNEqualsOne) {
-    auto topology = CacheTopology::create({makeGroup("full", {0, 1})}, {{0, {"full"}}, {1, {"full"}}});
+    auto topology = CacheTopology::create({makeGroup("full")}, {{0, {"full"}}, {1, {"full"}}});
 
     EXPECT_TRUE(topology->hasSingleGlobalGroup());
     EXPECT_TRUE(topology->hasOneGroupPerLayer());
@@ -35,10 +33,31 @@ TEST(CacheTopologyTest, SupportsSingleGlobalGroupAsNEqualsOne) {
     EXPECT_EQ(topology->groupsForLayer(1).front().get().tag, "full");
 }
 
+TEST(CacheTopologyTest, SpecConstructorValidatesGeometryAndHeadCount) {
+    MHAKVCacheSpec spec("full", 8, 2, 4);
+    EXPECT_EQ(spec.tag, "full");
+    EXPECT_EQ(spec.seq_size_per_block, 8u);         // tokens/physical block
+    EXPECT_EQ(spec.kernel_seq_size_per_block, 2u);  // tokens/kernel page
+    EXPECT_EQ(spec.local_kv_head_num, 4u);          // heads/rank
+    EXPECT_ANY_THROW(MHAKVCacheSpec("full", 0, 2, 4));
+    EXPECT_ANY_THROW(MHAKVCacheSpec("full", 8, 0, 4));
+    EXPECT_ANY_THROW(MHAKVCacheSpec("full", 8, 3, 4));
+    EXPECT_ANY_THROW(MHAKVCacheSpec("full", 8, 2, 0));
+}
+
+TEST(CacheTopologyTest, MaximumKernelExpansionDoesNotDependOnGroupOrder) {
+    auto full     = makeGroup("full");
+    auto swa      = makeGroup("swa", CacheGroupType::SWA);
+    auto topology = CacheTopology::create({swa, full}, {{0, {"swa"}}, {1, {"full"}}});
+    EXPECT_EQ(topology->groupById(0).kernelBlocksPerKvBlock(), 1u);
+    EXPECT_EQ(topology->maxKernelBlocksPerKvBlock(), 4u);
+    auto reversed = CacheTopology::create({full, swa}, {{0, {"swa"}}, {1, {"full"}}});
+    EXPECT_EQ(reversed->maxKernelBlocksPerKvBlock(), 4u);
+}
+
 TEST(CacheTopologyTest, SupportsDistinctOneToOneGroupsAndOneToManyLayers) {
-    auto topology =
-        CacheTopology::create({makeGroup("full", {0, 2}), makeGroup("linear", {1, 2}, CacheGroupType::LINEAR)},
-                              {{0, {"full"}}, {1, {"linear"}}, {2, {"full", "linear"}}});
+    auto topology = CacheTopology::create({makeGroup("full"), makeGroup("linear", CacheGroupType::LINEAR)},
+                                          {{0, {"full"}}, {1, {"linear"}}, {2, {"full", "linear"}}});
 
     EXPECT_FALSE(topology->hasSingleGlobalGroup());
     EXPECT_FALSE(topology->hasOneGroupPerLayer());
@@ -47,36 +66,44 @@ TEST(CacheTopologyTest, SupportsDistinctOneToOneGroupsAndOneToManyLayers) {
     EXPECT_ANY_THROW(topology->soleGroupForLayer(2));
 }
 
-TEST(CacheTopologyTest, CompatibilitySnapshotsAreLazyStableAndReadOnly) {
-    auto topology = CacheTopology::create({makeGroup("full", {0}), makeGroup("linear", {0}, CacheGroupType::LINEAR)},
+TEST(CacheTopologyTest, CompatibilitySnapshotsAreIndependentValues) {
+    auto topology = CacheTopology::create({makeGroup("full"), makeGroup("linear", CacheGroupType::LINEAR)},
                                           {{0, {"full", "linear"}}});
 
-    const auto& tags_first  = topology->groupTagsSnapshot();
+    auto        tags_first  = topology->groupTagsSnapshot();
     const auto& tags_second = topology->groupTagsSnapshot();
-    const auto& spec_types  = topology->groupSpecTypesSnapshot();
-    EXPECT_EQ(&tags_first, &tags_second);
     EXPECT_EQ(tags_first, (std::vector<std::string>{"full", "linear"}));
-    EXPECT_EQ(spec_types,
-              (std::vector<KVCacheSpecType>{KVCacheSpecType::MultiHeadAttention, KVCacheSpecType::MultiHeadAttention}));
+    EXPECT_EQ(topology->groupTypesSnapshot(),
+              (std::vector<CacheGroupType>{CacheGroupType::FULL, CacheGroupType::LINEAR}));
     EXPECT_EQ(topology->layerGroupIdsSnapshot(), (std::vector<std::vector<int>>{{0, 1}}));
-    EXPECT_EQ(topology->layerTagToGroupIdSnapshot().front().at("linear"), 1);
+    tags_first.clear();
+    EXPECT_EQ(tags_second.size(), 2u);
+    EXPECT_EQ(topology->groupTagsSnapshot().size(), 2u);
 }
 
 TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
-    auto first    = CacheTopology::create({makeGroup("full", {0}), makeGroup("linear", {0}, CacheGroupType::LINEAR)},
-                                          {{0, {"full", "linear"}}});
-    auto reversed = CacheTopology::create({makeGroup("linear", {0}, CacheGroupType::LINEAR), makeGroup("full", {0})},
+    auto first    = CacheTopology::create({makeGroup("full"), makeGroup("linear", CacheGroupType::LINEAR)},
+                                       {{0, {"full", "linear"}}});
+    auto reversed = CacheTopology::create({makeGroup("linear", CacheGroupType::LINEAR), makeGroup("full")},
                                           {{0, {"full", "linear"}}});
 
     EXPECT_NE(first->groupIdForTag("full"), reversed->groupIdForTag("full"));
+    EXPECT_EQ(first->groupIdForTag("full"), 0u);
+    EXPECT_EQ(reversed->groupIdForTag("full"), 1u);
+    EXPECT_EQ(&first->group("full"), &first->groupById(first->groupIdForTag("full")));
+    EXPECT_ANY_THROW(first->groupIdForTag("missing"));
     EXPECT_EQ(first->group("full").policy.group_type, reversed->group("full").policy.group_type);
     EXPECT_EQ(first->group("linear").policy.group_type, reversed->group("linear").policy.group_type);
     EXPECT_EQ(first->groupForLayer(0, "full").tag, reversed->groupForLayer(0, "full").tag);
     EXPECT_EQ(first->groupForLayer(0, "linear").tag, reversed->groupForLayer(0, "linear").tag);
 }
 
-TEST(CacheTopologyTest, RejectsInconsistentReverseMembership) {
-    EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full", {0})}, {{0, {"full"}}, {1, {"full"}}}));
+TEST(CacheTopologyTest, DerivesReverseMembershipFromLayers) {
+    auto topology = CacheTopology::create({makeGroup("full")}, {{0, {"full"}}, {1, {"full"}}});
+    EXPECT_EQ(topology->layerIdsForGroup(0), (std::vector<int>{0, 1}));
+    EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full")}, {{0, {"missing"}}}));
+    EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full")}, {{0, {"full", "full"}}}));
+    EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full"), makeGroup("full")}, {{0, {"full"}}}));
 }
 
 }  // namespace

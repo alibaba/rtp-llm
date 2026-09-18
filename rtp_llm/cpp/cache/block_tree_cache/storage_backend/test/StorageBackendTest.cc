@@ -406,30 +406,22 @@ private:
 };
 
 std::shared_ptr<const CacheTopology> makeTopology() {
-    auto spec = std::make_shared<MHAKVCacheSpec>();
-    spec->tag = "default";
+    auto      spec = std::make_shared<MHAKVCacheSpec>("default", 1, 1, 1);
     GroupBase group;
-    group.tag                       = spec->tag;
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.layer_ids                 = {0};
-    group.seq_size_per_block        = 1;
-    group.kernel_seq_size_per_block = 1;
+    group.tag    = spec->tag;
+    group.spec   = std::move(spec);
+    group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
     return CacheTopology::create({std::move(group)}, {{0, {"default"}}});
 }
 
 std::shared_ptr<const CacheTopology> makeSharedPoolTopology() {
     std::vector<GroupBase> groups;
     for (size_t group_id = 0; group_id < 2; ++group_id) {
-        auto spec = std::make_shared<MHAKVCacheSpec>();
-        spec->tag = "group_" + std::to_string(group_id);
+        auto      spec = std::make_shared<MHAKVCacheSpec>("group_" + std::to_string(group_id), 1, 1, 1);
         GroupBase group;
-        group.tag                       = spec->tag;
-        group.spec                      = std::move(spec);
-        group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        group.layer_ids                 = {0};
-        group.seq_size_per_block        = 1;
-        group.kernel_seq_size_per_block = 1;
+        group.tag    = spec->tag;
+        group.spec   = std::move(spec);
+        group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
         groups.push_back(std::move(group));
     }
     return CacheTopology::create(std::move(groups), {{0, {"group_0", "group_1"}}});
@@ -862,9 +854,7 @@ TEST(StorageBackendTest, ShutdownFromCompletionIsRejectedWithoutDeadlock) {
         EXPECT_TRUE(success);
         try {
             backend.shutdown();
-        } catch (...) {
-            rejected = true;
-        }
+        } catch (...) { rejected = true; }
     });
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_TRUE(rejected);

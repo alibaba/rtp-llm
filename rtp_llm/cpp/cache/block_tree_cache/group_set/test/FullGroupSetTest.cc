@@ -252,10 +252,9 @@ TEST_F(FullGroupSetTest, CompleteDeviceValueRequiresDeviceTierAndNoNullBlocks) {
     ASSERT_NE(second_pool, nullptr);
     auto two_pool_group =
         std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_, second_pool}, nullptr, nullptr);
-    auto      first          = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 1);
-    GroupBase second         = first;
-    two_pool_group->initialize(
-        0, makeTestTopology({std::move(first), std::move(second)}), {0, 1});
+    auto first  = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 1);
+    auto second = first;
+    two_pool_group->initialize(0, makeTestTopology({std::move(first), std::move(second)}), {0, 1});
 
     GroupSetResource resource;
     EXPECT_FALSE(resource.hasCompleteDeviceValue());

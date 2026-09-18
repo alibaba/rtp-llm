@@ -167,12 +167,7 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cac
         const auto& actual   = group->config();
         const auto& declared = cache_config.topology().groupById(group_id);
         if (actual.spec != declared.spec || !CacheConfig::samePolicy(actual.policy, declared.policy)
-            || actual.layer_ids != declared.layer_ids || actual.block_num != declared.block_num
-            || actual.local_kv_head_num != declared.local_kv_head_num
-            || actual.seq_size_per_block != declared.seq_size_per_block
-            || actual.kernel_seq_size_per_block != declared.kernel_seq_size_per_block
-            || actual.kv_block_stride_bytes != declared.kv_block_stride_bytes
-            || actual.kv_scale_stride_bytes != declared.kv_scale_stride_bytes) {
+            || actual.block_num != declared.block_num) {
             RTP_LLM_LOG_ERROR("allocator group_id=%zu does not exactly match topology", group_id);
             return {};
         }
@@ -235,7 +230,7 @@ BlockTreeDiskBlockPoolPtr createDiskPool(const KVCacheConfig&                   
 bool groupSetSemanticsCompatible(const CacheConfig& cache_config, int lhs_group_id, int rhs_group_id) {
     const GroupBase& lhs = cache_config.topology().groupById(static_cast<size_t>(lhs_group_id));
     const GroupBase& rhs = cache_config.topology().groupById(static_cast<size_t>(rhs_group_id));
-    if (lhs.policy.group_type != rhs.policy.group_type || lhs.seq_size_per_block != rhs.seq_size_per_block
+    if (lhs.policy.group_type != rhs.policy.group_type || lhs.seqSizePerBlock() != rhs.seqSizePerBlock()
         || lhs.policy.cp_mapping != rhs.policy.cp_mapping) {
         return false;
     }
@@ -307,28 +302,29 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheTopology&               
                                              int                                    block_id) {
     RTP_LLM_CHECK_WITH_INFO(
         group_id >= 0 && static_cast<size_t>(group_id) < group_pools.size(), "invalid storage group_id=%d", group_id);
-    const auto& group = topology.groupById(static_cast<size_t>(group_id));
-    const auto  layer = std::find(group.layer_ids.begin(), group.layer_ids.end(), layer_id);
+    const auto& group     = topology.groupById(static_cast<size_t>(group_id));
+    const auto  layer_ids = topology.layerIdsForGroup(static_cast<size_t>(group_id));
+    const auto  layer     = std::find(layer_ids.begin(), layer_ids.end(), layer_id);
     RTP_LLM_CHECK_WITH_INFO(
-        layer != group.layer_ids.end(), "layer_id=%d does not belong to storage group_id=%d", layer_id, group_id);
+        layer != layer_ids.end(), "layer_id=%d does not belong to storage group_id=%d", layer_id, group_id);
     // Pools are laid out in group-local layer order. This is the same model-global -> pool-layer mapping used by
     // KVCacheGroup::convertIndexToBuffer; model layer IDs cannot be passed
     // directly to these physical pools.
     auto buffers = group_pools[static_cast<size_t>(group_id)]->convertIndexToBuffer(
-        static_cast<int>(std::distance(group.layer_ids.begin(), layer)), block_id);
+        static_cast<int>(std::distance(layer_ids.begin(), layer)), block_id);
     RTP_LLM_CHECK_WITH_INFO(!buffers.empty(), "storage group_id=%d returned no block buffers", group_id);
-    RTP_LLM_CHECK_WITH_INFO(buffers[0].size_bytes >= group.kv_block_stride_bytes,
+    RTP_LLM_CHECK_WITH_INFO(buffers[0].size_bytes >= group.kvBlockStrideBytes(),
                             "storage group_id=%d physical kv block is smaller than logical block",
                             group_id);
-    buffers[0].size_bytes = group.kv_block_stride_bytes;
-    if (group.kv_scale_stride_bytes == 0) {
+    buffers[0].size_bytes = group.kvBlockStrideBytes();
+    if (group.kvScaleStrideBytes() == 0) {
         buffers.resize(1);
         return buffers;
     }
-    RTP_LLM_CHECK_WITH_INFO(buffers.size() >= 2 && buffers[1].size_bytes >= group.kv_scale_stride_bytes,
+    RTP_LLM_CHECK_WITH_INFO(buffers.size() >= 2 && buffers[1].size_bytes >= group.kvScaleStrideBytes(),
                             "storage group_id=%d has an invalid scale block buffer",
                             group_id);
-    buffers[1].size_bytes = group.kv_scale_stride_bytes;
+    buffers[1].size_bytes = group.kvScaleStrideBytes();
     buffers.resize(2);
     return buffers;
 }
@@ -509,7 +505,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block <= std::numeric_limits<size_t>::max() / cp_size,
                                 "canonical CP cache key stride overflow");
         for (auto& group : groups) {
-            group.cache_key_token_stride = cache_config.seq_size_per_block * cp_size;
+            auto spec                    = group.spec->clone();
+            spec->cache_key_token_stride = cache_config.seq_size_per_block * cp_size;
+            group.spec                   = std::move(spec);
         }
         cache_topology = CacheTopology::create(std::move(groups), cache_topology->layers());
     }

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 
 #include <chrono>
 #include <cstdint>
@@ -108,7 +109,7 @@ static void assertScaleEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_
     ASSERT_NE(addr_info.kv_scale_addr, nullptr);
     ASSERT_EQ(expected_k.size(), expected_v.size());
 
-    const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kv_scale_stride_bytes;
+    const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kvScaleStrideBytesForGroup(0);
     ASSERT_GT(kv_scale_stride_bytes, 0u);
     const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
     void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr_info.kv_scale_addr) + kv_scale_block_bytes);
@@ -152,8 +153,8 @@ static ModelConfig makeDSV4ManagerFlashModelConfig() {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
     ratios.push_back(0);
-    mc.attn_config.layer_compress_ratios                         = ratios;
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    mc.attn_config.layer_compress_ratios               = ratios;
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
     setDsv4KvCacheSpecs(mc, ratios);
     return mc;
 }
@@ -167,7 +168,7 @@ static void setGroupBlockNumsForTest(CacheConfig& config, const std::vector<uint
         kv_strides.push_back(config.kvBlockStrideBytesForGroup(gid));
         scale_strides.push_back(config.kvScaleStrideBytesForGroup(gid));
     }
-    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
+    rtp_llm::test::setGroupBlockLayout(config, block_nums, kv_strides, scale_strides);
 }
 
 static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
@@ -253,7 +254,7 @@ static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, ui
             policy.explicit_block_num = 2u * swa_batch_size;
         }
     }
-    config.setGroupPolicies(policies);
+    setTestGroupPolicies(config, policies);
     std::vector<uint32_t> block_nums(static_cast<size_t>(config.groupNums()), full_block_num);
     for (int gid = 0; gid < config.groupNums(); ++gid) {
         block_nums[static_cast<size_t>(gid)] = isFullGroup(config, gid) ? full_block_num : (2u * swa_batch_size);
@@ -476,7 +477,7 @@ TEST_F(KVCacheManagerTest, WarmupPreservesExplicitChargedIndependentPoolPolicy) 
     auto policies                                                      = config.groupPoliciesSnapshot();
     policies[static_cast<size_t>(explicit_gid)].explicit_block_num     = 4;
     policies[static_cast<size_t>(explicit_gid)].charge_to_paged_budget = true;
-    config.setGroupPolicies(policies);
+    setTestGroupPolicies(config, policies);
 
     auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
     ASSERT_TRUE(manager->init());
@@ -486,7 +487,7 @@ TEST_F(KVCacheManagerTest, WarmupPreservesExplicitChargedIndependentPoolPolicy) 
     EXPECT_EQ(policy.explicit_block_num, 4u);
     EXPECT_TRUE(policy.charge_to_paged_budget);
     EXPECT_EQ(finalized.blockNumForGroup(static_cast<size_t>(explicit_gid)), 4u);
-    EXPECT_GT(finalized.explicitly_sized_pool_reserve_bytes, 0u);
+    EXPECT_GT(explicitPoolReserveBytes(finalized), 0u);
 }
 
 TEST_F(KVCacheManagerTest, InitAcceptsSingleIndependentLinearGroup) {
@@ -816,9 +817,10 @@ TEST_F(KVCacheManagerTest, WriteKVBlockUsesTargetLayerSpec) {
     auto small_spec = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 4, 2, "small");
     config.fromGroupedSpecs(
         {large_spec, small_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"large", "small"});
-    config.setGroupBlockLayout({4, 4},
-                               {large_spec->block_size_bytes(), small_spec->block_size_bytes()},
-                               {large_spec->scale_block_size_bytes(), small_spec->scale_block_size_bytes()});
+    rtp_llm::test::setGroupBlockLayout(config,
+                                       {4, 4},
+                                       {large_spec->block_size_bytes(), small_spec->block_size_bytes()},
+                                       {large_spec->scale_block_size_bytes(), small_spec->scale_block_size_bytes()});
     auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
@@ -838,9 +840,10 @@ TEST_F(KVCacheManagerTest, WriteKVBlockRejectsMultiGroupLayer) {
     auto second = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 4, 2, "second");
     config.fromGroupedSpecs(
         {first, second}, {{0}, {0}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"first", "second"});
-    config.setGroupBlockLayout({4, 4},
-                               {first->block_size_bytes(), second->block_size_bytes()},
-                               {first->scale_block_size_bytes(), second->scale_block_size_bytes()});
+    rtp_llm::test::setGroupBlockLayout(config,
+                                       {4, 4},
+                                       {first->block_size_bytes(), second->block_size_bytes()},
+                                       {first->scale_block_size_bytes(), second->scale_block_size_bytes()});
     auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
     auto k = torch::zeros({static_cast<int64_t>(first->k_block_size_bytes())}, torch::kInt8);
@@ -920,7 +923,7 @@ TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {
         auto host_k_t = torch::tensor(src_k, torch::kFloat32);
         auto host_v_t = torch::tensor(src_v, torch::kFloat32);
 
-        const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kv_scale_stride_bytes;
+        const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kvScaleStrideBytesForGroup(0);
         ASSERT_GT(kv_scale_stride_bytes, 0u);
         const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
         void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr.kv_scale_addr) + kv_scale_block_bytes);
@@ -1433,7 +1436,7 @@ protected:
     // raw bytes also catches scale corruption that float tolerances could hide.
     torch::Tensor payload(int pattern_id, int block, int layer, bool scale) const {
         const auto&  config = manager_->cacheConfig();
-        const size_t bytes  = scale ? config.kv_scale_stride_bytes : config.kv_block_stride_bytes;
+        const size_t bytes  = scale ? config.kvScaleStrideBytesForGroup(0) : config.kvBlockStrideBytesForGroup(0);
         auto         host   = torch::empty({static_cast<int64_t>(bytes)}, torch::kUInt8);
         // Keep tuple identity in 32 bits: an additive uint8_t seed can make
         // entire regions identical after wrapping, hiding cross-region copies.

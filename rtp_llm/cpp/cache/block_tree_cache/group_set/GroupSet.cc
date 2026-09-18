@@ -1,5 +1,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 
+#include <limits>
+
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+
 namespace rtp_llm {
 
 namespace {
@@ -52,8 +56,11 @@ void GroupSet::initialize(size_t                               group_set_id,
                           std::vector<size_t>                  group_ids) {
     size_t payload_bytes = 0;
     for (size_t group_id : group_ids) {
-        const auto& group = topology->groupById(group_id);
-        payload_bytes += group.layer_ids.size() * (group.kv_block_stride_bytes + group.kv_scale_stride_bytes);
+        const size_t group_bytes = topology->blockSizeBytesForGroup(group_id);
+        RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - payload_bytes,
+                                "GroupSet payload size overflow at group_id=%zu",
+                                group_id);
+        payload_bytes += group_bytes;
     }
 
     group_set_id_  = group_set_id;

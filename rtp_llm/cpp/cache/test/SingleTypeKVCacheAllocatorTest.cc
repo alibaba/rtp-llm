@@ -331,7 +331,7 @@ protected:
 
     static std::vector<uint8_t> readDeviceBytes(const void* src_device, size_t bytes) {
         auto        device_tensor = torch::from_blob(const_cast<void*>(src_device),
-                                                     {static_cast<int64_t>(bytes)},
+                                              {static_cast<int64_t>(bytes)},
                                               torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
         auto        host_tensor   = device_tensor.cpu();
         const auto* data          = host_tensor.data_ptr<uint8_t>();
@@ -1228,7 +1228,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {
     auto policies = config.groupPoliciesSnapshot();
     ASSERT_EQ(policies.size(), 1u);
     policies[0].enable_prefix_reuse = false;
-    config.setGroupPolicies(policies);
+    setTestGroupPolicies(config, policies);
 
     allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
@@ -1332,7 +1332,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSlicesDescriptorAndAt
     config.kv_cache_spec_descs[1][0].tag                   = "layer1";
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::LINEAR,
-                                                              HybridAttentionType::SLIDING_WINDOW};
+                                                             HybridAttentionType::SLIDING_WINDOW};
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
 
@@ -1345,11 +1345,11 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSlicesDescriptorAndAt
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSupportsDescriptorDrivenIndependentPools) {
-    auto config                                                      = makeTestModelConfig(/*num_layers=*/2);
-    config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.hybrid_attention_types            = {};
-    auto second_desc                                                 = config.kv_cache_spec_descs[1][0];
-    second_desc.tag                                                  = "layer1_state";
+    auto config                                            = makeTestModelConfig(/*num_layers=*/2);
+    config.hybrid_attention_config.enable_hybrid_attention = true;
+    config.hybrid_attention_config.hybrid_attention_types  = {};
+    auto second_desc                                       = config.kv_cache_spec_descs[1][0];
+    second_desc.tag                                        = "layer1_state";
     config.kv_cache_spec_descs[1].push_back(second_desc);
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
@@ -1632,11 +1632,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteQuantizedMhaS
     parallelism_config.tp_size = 1;
     auto config                = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
     config.block_num           = 5;
-    config.setGroupBlockLayout({5}, {config.kv_block_stride_bytes}, {config.kv_scale_stride_bytes});
+    config.setGroupBlockLayout({5}, {config.kvBlockStrideBytesForGroup(0)}, {config.kvScaleStrideBytesForGroup(0)});
 
     ASSERT_FALSE(config.is_sparse);
-    ASSERT_GT(config.kv_scale_stride_bytes, 0u);
-    ASSERT_EQ(config.kv_scale_stride_bytes, config.kvScaleStrideBytesForGroup(0));
+    ASSERT_GT(config.kvScaleStrideBytesForGroup(0), 0u);
 
     allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
@@ -1649,7 +1648,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteQuantizedMhaS
     ASSERT_EQ(allocated->size(), 4u);
     pool->incRef(*allocated);
 
-    const auto stride   = config.kv_scale_stride_bytes;
+    const auto stride   = config.kvScaleStrideBytesForGroup(0);
     auto       snapshot = [&]() {
         std::vector<std::vector<uint8_t>> blocks(allocated->size());
         for (size_t index = 0; index < allocated->size(); ++index) {
