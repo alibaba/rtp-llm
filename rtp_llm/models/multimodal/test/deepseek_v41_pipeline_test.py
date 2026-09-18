@@ -284,6 +284,43 @@ class V41SyntheticImageRowInjectionTest(TestCase):
         self.assertTrue(torch.equal(injected[2:3], hidden[2:3]))
         self.assertTrue(torch.equal(injected[5], hidden[5]))
 
+    def test_cp_zigzag_padding_indices_stay_text_rows(self):
+        # Zigzag shuffle indices are in the per-request PADDED coordinate
+        # space: the odd pair reads from the padded tail, so entries can
+        # reach padded_length - 1 >= actual_length. Regression: the gather
+        # used to index rows out of bounds (device assert on the last
+        # request) or silently cross into the next request's span.
+        model = self.bare_model()
+        features = torch.arange(4, dtype=torch.float32)[:, None].expand(-1, 8).contiguous() + 50.0
+        # One request of 12 actual tokens padded to 16; this rank's odd pair
+        # reads the padded tail: local tokens {0, 5, 12..15} where 12..15
+        # are padding (>= actual length 12). The image occupies [4, 8).
+        cp = SimpleNamespace(
+            prefill_shuffle_indices=torch.tensor([0, 5, 12, 13, 14, 15], dtype=torch.int64),
+            prefill_actual_input_lengths_cpu=torch.tensor([12]),
+            prefill_cp_chunk_lengths=torch.tensor([6], dtype=torch.int64),
+        )
+        model._prepare_image_features(self.fake_inputs([features], [4], cp=cp))
+        rows = model._image_row_indices(6, torch.device("cpu"))
+        self.assertEqual(rows.tolist(), [-1, 1, -1, -1, -1, -1])
+
+        # Two requests: the first one's zigzag padding indices must not
+        # leak into the second request's image span. Request 0 spans global
+        # [0, 6) with its image at [2, 6); request 1 spans [6, 12) with its
+        # image at [7, 10). This rank keeps 2 tokens per request; request
+        # 0's second entry is a padding index (7 >= actual 6).
+        second = torch.arange(3, dtype=torch.float32)[:, None].expand(-1, 8).contiguous() + 150.0
+        cp = SimpleNamespace(
+            prefill_shuffle_indices=torch.tensor([1, 7, 0, 2], dtype=torch.int64),
+            prefill_actual_input_lengths_cpu=torch.tensor([6, 6]),
+            prefill_cp_chunk_lengths=torch.tensor([2, 2], dtype=torch.int64),
+        )
+        model._prepare_image_features(self.fake_inputs([features, second], [2, 7], cp=cp))
+        rows = model._image_row_indices(4, torch.device("cpu"))
+        # Local token 0 -> global 1 (text); local 1 -> padding (masked);
+        # local 2 -> global 6 (text); local 3 -> global 8 (image row 5).
+        self.assertEqual(rows.tolist(), [-1, -1, -1, 5])
+
     def test_decode_prefix_rows_stay_text(self):
         model = self.bare_model()
         features = torch.ones(2, 8)
