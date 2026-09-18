@@ -5,7 +5,7 @@
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/hy4_ihc.h"
 
-#include <ATen/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 
 namespace {
