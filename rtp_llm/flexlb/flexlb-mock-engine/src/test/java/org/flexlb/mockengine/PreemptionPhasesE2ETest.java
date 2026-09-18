@@ -25,7 +25,7 @@ import static org.mockito.Mockito.verify;
  *
  * <ul>
  *   <li>A1 Prefill 优先级插队 — 保留低优请求，不再为 token 配额驱逐；</li>
- *   <li>A2 decode reserved 驱逐 — victim 8400，影子账目正确移交；</li>
+ *   <li>A2 decode reserved 让位 — victim 重排，影子账目正确移交；</li>
  *   <li>A3 accepted 让位 — 真实 MockEngineCancelChannel，victim 8429，
  *       cancel→确认→派发顺序 + cancel 超时不泄漏（铁律4）；</li>
  *   <li>A5 同优不抢占 — 同优请求满载时绝不驱逐同优 victim。</li>
@@ -72,7 +72,7 @@ class PreemptionPhasesE2ETest {
 
     @Test
     @Timeout(30)
-    void a2_decode_reserved_eviction_victim_8400_and_shadow_accounting_transfers() throws Exception {
+    void a2_decode_reserved_eviction_requeues_victim_and_transfers_shadow_accounting() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "50", 1.0, false)) {
             h.allowPreemption(VictimStage.DECODE_RESERVED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
@@ -97,10 +97,10 @@ class PreemptionPhasesE2ETest {
 
             CompletableFuture<Response> high = h.scheduler.submit(h.context(202, 70));
 
-            Response victim = low.get(2, TimeUnit.SECONDS);
-            assertFalse(victim.isSuccess());
-            assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), victim.getCode(),
-                    "reserved victim terminal must be 8400 (never 8429): " + victim.getErrorMessage());
+            AutoTpmE2EHarness.await(
+                    () -> decodeEp.resourceSnapshot().reserved().containsKey(202L),
+                    5_000, "higher-priority request must take the Decode reservation");
+            assertFalse(low.isDone(), "a displaced queued request must retain its original future");
 
             // 账目正确：victim 影子预留释放，高优恰好占据一份
             assertFalse(high.isDone(), "high-priority request should sit in the queue after eviction");
@@ -109,6 +109,17 @@ class PreemptionPhasesE2ETest {
             assertEquals(1, decodeEp.getInflightCount());
             assertEquals(hardKvBefore, decodeEp.routingView().inflightHardKv(),
                     "hard KV must transfer 1:1 from victim to incoming");
+
+            // Restore physical capacity, dispatch the winner, then let finished
+            // status release its single request slot for the requeued victim.
+            h.setDecodeKvCapacity(0, 1_000_000, 1_000_000);
+            h.fixedWindowDecision().setMaxCollectionWaitMs(1);
+            h.fixedWindowDecision().setMaxRequests(1);
+            h.startAutoPump(10);
+            assertTrue(high.get(5, TimeUnit.SECONDS).isSuccess());
+            assertTrue(low.get(5, TimeUnit.SECONDS).isSuccess());
+            assertEquals(java.util.List.of(202L, 201L), new java.util.ArrayList<>(h.engineArrivalOrder),
+                    "the requeued request must reach the engine once, after the higher-priority winner");
         }
     }
 
