@@ -13,6 +13,7 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
@@ -222,6 +223,34 @@ CacheConfig makeCompatibleFullGroupsConfig() {
     config.layer_to_block_stride_bytes.assign(2, static_cast<int>(stride));
     config.setGroupBlockLayout({8, 8}, {stride, stride}, {0, 0});
     return config;
+}
+
+CacheConfig makeSparseMlaIndexerConfig() {
+    ModelConfig model_config;
+    model_config.num_layers                          = 2;
+    model_config.attn_config.use_mla                 = true;
+    model_config.attn_config.kv_lora_rank            = 8;
+    model_config.attn_config.rope_head_dim           = 4;
+    model_config.attn_config.tokens_per_block        = 128;
+    model_config.attn_config.kernel_tokens_per_block = 128;
+    model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+
+    KVCacheSpecDesc default_desc;
+    default_desc.tag        = "default";
+    default_desc.cache_type = KVCacheSpecType::MultiHeadLatentAttention;
+
+    KVCacheSpecDesc indexer_desc;
+    indexer_desc.tag               = "indexer_kv";
+    indexer_desc.cache_type        = KVCacheSpecType::OpaqueKV;
+    indexer_desc.entry_dtype       = DataType::TYPE_UINT8;
+    indexer_desc.entry_elems       = 132;
+    indexer_desc.entry_count_mode  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    indexer_desc.compression_ratio = 1;
+    model_config.kv_cache_spec_descs.assign(2, {default_desc, indexer_desc});
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 8;
+    return CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
 }
 
 CacheConfig makeCompatibleSwaGroupsConfig(int                second_window,
@@ -1014,6 +1043,92 @@ TEST_F(BlockTreeCacheFactoryTest, PrefixReuseDisabledGroupStaysAllocatorOwnedBut
     ASSERT_EQ(allocator->cacheGroups().size(), 2u);
     ASSERT_EQ(cache->groupSets().size(), 1u);
     EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{1}));
+}
+
+TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPackedTransfer) {
+    const auto config    = makeSparseMlaIndexerConfig();
+    auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    const auto cache_groups = allocator->cacheGroups();
+    ASSERT_EQ(cache_groups.size(), 2u);
+    ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
+    EXPECT_NE(allocator->groupBlockPools()[0], allocator->groupBlockPools()[1]);
+    EXPECT_EQ(allocator->blockTreeCache(), nullptr);
+
+    auto          backend = std::make_shared<CountingStorageBackend>();
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_remote_cache  = true;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 4;
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend);
+
+    ASSERT_NE(cache, nullptr);
+    EXPECT_EQ(allocator->blockTreeCache(), nullptr);
+    ASSERT_EQ(cache->groupSets().size(), 1u);
+    EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{0, 1}));
+    ASSERT_EQ(cache->groupSets()[0]->devicePools().size(), 2u);
+    EXPECT_EQ(cache->groupSets()[0]->devicePools()[0], allocator->groupBlockPools()[0]);
+    EXPECT_EQ(cache->groupSets()[0]->devicePools()[1], allocator->groupBlockPools()[1]);
+    EXPECT_NE(cache->tree()->reusableGroupLocation(0), nullptr);
+    EXPECT_NE(cache->tree()->reusableGroupLocation(1), nullptr);
+
+    auto match   = cache->match({701});
+    auto context = std::dynamic_pointer_cast<LoadAsyncContext>(match.async_context);
+    ASSERT_NE(context, nullptr);
+    ASSERT_EQ(context->backendHandles().size(), 1u);
+    ASSERT_EQ(context->backendHandles()[0].size(), 2u);
+    EXPECT_EQ(context->backendHandles()[0][0].group_id, 0u);
+    EXPECT_EQ(context->backendHandles()[0][1].group_id, 1u);
+
+    const GroupSetPtr& group_set = cache->groupSets()[0];
+    ASSERT_NE(group_set->hostPool(), nullptr);
+    EXPECT_EQ(group_set->hostPool()->payloadBytes(), group_set->payloadBytes());
+    auto device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group_set, 1);
+    ASSERT_EQ(device_blocks.size(), 1u);
+    ASSERT_EQ(device_blocks[0].size(), 2u);
+    const auto host_block = group_set->hostPool()->malloc();
+    ASSERT_TRUE(host_block.has_value());
+    group_set->hostPool()->incTreeRef(*host_block, BlockTreeRefType::STORE);
+
+    for (size_t member = 0; member < cache_groups.size(); ++member) {
+        const auto& cache_group = cache_groups[member];
+        const size_t layer_bytes = cache_group->config().kv_block_stride_bytes
+                                   + cache_group->config().kv_scale_stride_bytes;
+        for (size_t local_layer = 0; local_layer < cache_group->config().layer_ids.size(); ++local_layer) {
+            const int     global_layer = cache_group->config().layer_ids[local_layer];
+            const uint8_t pattern      = static_cast<uint8_t>(0x21 + member * 0x20 + local_layer);
+            writeDevicePattern(
+                cache_group->convertIndexToAddr(global_layer, device_blocks[0][member]).kv_addr, layer_bytes, pattern);
+        }
+    }
+    EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
+        {TransferDescriptor::deviceToHost(group_set->groupSetId(), device_blocks[0], *host_block)})));
+    for (size_t member = 0; member < cache_groups.size(); ++member) {
+        const auto& cache_group = cache_groups[member];
+        const size_t layer_bytes = cache_group->config().kv_block_stride_bytes
+                                   + cache_group->config().kv_scale_stride_bytes;
+        for (int global_layer : cache_group->config().layer_ids) {
+            writeDevicePattern(
+                cache_group->convertIndexToAddr(global_layer, device_blocks[0][member]).kv_addr, layer_bytes, 0);
+        }
+    }
+    EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
+        {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, device_blocks[0])})));
+    for (size_t member = 0; member < cache_groups.size(); ++member) {
+        const auto& cache_group = cache_groups[member];
+        const size_t layer_bytes = cache_group->config().kv_block_stride_bytes
+                                   + cache_group->config().kv_scale_stride_bytes;
+        for (size_t local_layer = 0; local_layer < cache_group->config().layer_ids.size(); ++local_layer) {
+            const int     global_layer = cache_group->config().layer_ids[local_layer];
+            const uint8_t pattern      = static_cast<uint8_t>(0x21 + member * 0x20 + local_layer);
+            expectDevicePattern(
+                cache_group->convertIndexToAddr(global_layer, device_blocks[0][member]).kv_addr, layer_bytes, pattern);
+        }
+    }
+    block_tree_cache_test::unreferenceDeviceBlocksForTest(*group_set, device_blocks);
+    group_set->hostPool()->decTreeRef(*host_block, BlockTreeRefType::STORE);
+
+    allocator->attachBlockTreeCache(cache);
+    EXPECT_EQ(allocator->blockTreeCache(), cache);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentPhysicalLayoutsAggregate) {
