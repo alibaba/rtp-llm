@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
+from rtp_llm.models_py.triton_kernels.sparse_msa.test.compact_test_utils import (
     compact_bf16_pages_for_topk,
 )
 

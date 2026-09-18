@@ -39,6 +39,11 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.triton_kernels.sparse_msa.test.compact_test_utils import (
+    compact_bf16_pages_for_topk,
+    compact_sparse_prefill_reference,
+)
+
 
 class SparsePrefillChunkPolicyTest(unittest.TestCase):
     def test_chunking_defaults_on_and_allows_explicit_rollback(self):
@@ -443,7 +448,8 @@ class SparsePrefillChunkTest(unittest.TestCase):
             sm,
             chunk,
         )
-        out = self.tbf.sparse_prefill_from_topk(
+        out = compact_sparse_prefill_reference(
+            self.tbf,
             q,
             k,
             v,
@@ -453,8 +459,7 @@ class SparsePrefillChunkTest(unittest.TestCase):
             self.TOPK,
             self.BLK,
             sm,
-            compact_oracle=True,
-            query_chunk_size=chunk,
+            chunk,
         )
         self.assertTrue(
             torch.equal(out, ref),
@@ -585,7 +590,7 @@ class SparsePrefillChunkTest(unittest.TestCase):
                     device=device,
                 )
                 topk_idx[head, 1::2, 1] += 1
-            compact_k, _, _, selected = self.tbf.compact_bf16_pages_for_topk(
+            compact_k, _, _, selected = compact_bf16_pages_for_topk(
                 k,
                 v,
                 topk_idx,

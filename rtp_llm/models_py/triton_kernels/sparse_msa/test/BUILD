@@ -13,7 +13,10 @@ py_test(
 # precision regression test. Runs on SM100 (fmha_sm100 cute-DSL backend).
 py_test(
     name = "test_sparse_prefill_chunk",
-    srcs = ["test_sparse_prefill_chunk.py"],
+    srcs = [
+        "compact_test_utils.py",
+        "test_sparse_prefill_chunk.py",
+    ],
     deps = [
         "//rtp_llm:fmha-sm100",
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
@@ -38,7 +41,10 @@ py_test(
 # Local compact-page oracle validation; explicitly hide GPUs.
 py_test(
     name = "test_compact_prefill_pages",
-    srcs = ["test_compact_prefill_pages.py"],
+    srcs = [
+        "compact_test_utils.py",
+        "test_compact_prefill_pages.py",
+    ],
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],

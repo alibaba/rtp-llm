@@ -148,16 +148,20 @@ class CompactGeometryCacheTest(unittest.TestCase):
         self.assertIs(self.geometry()[0], first)
         self.assertEqual(self.builder.call_count, 1)
 
-    def test_versionless_inference_map_bypasses_cache(self):
+    def test_versionless_inference_map_reuses_per_forward_cache(self):
         with torch.inference_mode():
             page_map = self.page_map.clone()
         first, _ = self.geometry(page_map=page_map)
-        with torch.inference_mode():
-            page_map.add_(1)
         second, _ = self.geometry(page_map=page_map)
-        self.assertIsNot(first, second)
-        self.assertTrue(torch.equal(second["pages"], page_map))
-        self.assertNotIn("_compact_geometry", self.plan)
+        self.assertIs(first, second)
+        self.assertIn("_compact_geometry", self.plan)
+        self.assertEqual(self.builder.call_count, 1)
+
+        with torch.inference_mode():
+            replacement = page_map.clone()
+        third, _ = self.geometry(page_map=replacement)
+        self.assertIsNot(second, third)
+        self.assertEqual(self.builder.call_count, 2)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")

@@ -1357,77 +1357,6 @@ def _build_chunk_meta(
     )
 
 
-def compact_bf16_pages_for_topk(k_pages, v_pages, topk_idx, page_table, cu_q):
-    """Local oracle: deduplicate selected physical pages without changing IDs.
-
-    Physical IDs belong to ONE input tensor namespace. CP owners must first
-    resolve (owner, block ID) into that namespace; equal IDs on different
-    owners must never alias. Shared prefix aliases deduplicate naturally;
-    suffix pages must already contain the original BF16 activations.
-    Unselected entries point to a dedicated zero sentinel page.
-    """
-    if k_pages.dtype != torch.bfloat16 or v_pages.dtype != torch.bfloat16:
-        raise ValueError("compact oracle requires BF16 K/V pages")
-    if k_pages.shape != v_pages.shape or k_pages.ndim != 4:
-        raise ValueError("K/V must have matching HND page shapes")
-    if any(t.device != k_pages.device for t in (v_pages, topk_idx, page_table, cu_q)):
-        raise ValueError("compact inputs must be on the same device")
-    integer_dtypes = (torch.int32, torch.int64)
-    if any(t.dtype not in integer_dtypes for t in (topk_idx, page_table, cu_q)):
-        raise ValueError(
-            "topk, page table and query boundaries must be integer tensors"
-        )
-    if (
-        topk_idx.ndim != 3
-        or topk_idx.shape[0] != k_pages.shape[1]
-        or topk_idx.shape[2] == 0
-    ):
-        raise ValueError("topk must have shape [KV heads, queries, positive topk]")
-    if page_table.ndim != 2 or page_table.shape[0] == 0:
-        raise ValueError("page table must be rank 2 with a nonempty batch")
-    if cu_q.ndim != 1:
-        raise ValueError("query boundaries must be rank 1")
-    boundaries = cu_q.tolist()
-    if (
-        len(boundaries) != page_table.shape[0] + 1
-        or boundaries[0] != 0
-        or boundaries[-1] != topk_idx.shape[1]
-        or any(lo > hi for lo, hi in zip(boundaries, boundaries[1:]))
-    ):
-        raise ValueError(
-            "query boundaries must start at 0, be monotonic, and match batch/query rows"
-        )
-    selected = []
-    for row, (lo, hi) in enumerate(zip(boundaries, boundaries[1:])):
-        logical = topk_idx[:, lo:hi].reshape(-1).long()
-        if bool((logical < -1).any()):
-            raise ValueError("topk padding must be -1")
-        logical = logical[logical >= 0].unique(sorted=True)
-        if bool((logical >= page_table.shape[1]).any()):
-            raise ValueError("selected logical page is outside page table")
-        physical = page_table[row, logical].long()
-        if bool(((physical < 0) | (physical >= k_pages.shape[0])).any()):
-            raise ValueError("selected physical page is outside input pages")
-        selected.append((row, logical, physical))
-    ids = torch.cat([x[2] for x in selected]).unique(sorted=True)
-    # Preserve row alignment required by native FMHA, including nonmultiple-of-4 widths.
-    width = page_table.shape[1]
-    storage = torch.zeros(
-        (page_table.shape[0], ((width + 3) // 4) * 4),
-        dtype=torch.int32,
-        device=page_table.device,
-    )
-    compact_map = storage[:, :width]
-    for row, logical, physical in selected:
-        compact_map[row, logical] = (
-            torch.searchsorted(ids, physical).to(torch.int32) + 1
-        )
-    zero = k_pages.new_zeros((1, *k_pages.shape[1:]))
-    compact_k = torch.cat((zero, k_pages.index_select(0, ids)))
-    compact_v = torch.cat((zero, v_pages.index_select(0, ids)))
-    return compact_k, compact_v, compact_map, ids
-
-
 def run_sparse_attn_chunk(
     q,
     k_pages,
@@ -1509,7 +1438,6 @@ def _sparse_attn_chunked(
     chunk_size: int,
     *,
     refresh_page_map: bool = False,
-    compact_oracle: bool = False,
 ):
     """Step3 with the query dim split into ``chunk_size`` chunks (memory-saving).
 
@@ -1575,18 +1503,13 @@ def _sparse_attn_chunked(
         # dim-1 slice of the contiguous [nkv, total_q, topk] is non-contiguous
         # across heads -> small copy (nkv * csz * topk int32)
         topk_chunk = topk_idx[:, g0:g1, :].contiguous()
-        chunk_k, chunk_v, chunk_pt = k_paged_f, v_paged_f, c["pt"]
-        if compact_oracle:
-            chunk_k, chunk_v, chunk_pt, _ = compact_bf16_pages_for_topk(
-                k_paged_f, v_paged_f, topk_chunk, c["pt"], c["cu_q"]
-            )
         run_sparse_attn_chunk(
             q[g0:g1],
-            chunk_k,
-            chunk_v,
+            k_paged_f,
+            v_paged_f,
             topk_chunk,
             c,
-            chunk_pt,
+            c["pt"],
             builder=meta["builder"],
             topk=topk,
             block_size_k=block_size_k,
@@ -1769,36 +1692,21 @@ def sparse_prefill_from_topk(
     sm_scale,
     *,
     refresh_page_map=True,
-    compact_oracle=False,
-    query_chunk_size=None,
 ):
     """Execute step3 with logical topk IDs and a separate main-KV physical map.
 
     New callers refresh chunk page tables by default. The legacy wrapper opts
     out because its page map is immutable across layers of one forward.
-    compact_oracle retains full input pages and copies each chunk's selected
-    physical union into BF16 pages. It is a correctness oracle, not a memory
-    optimization; its Python checks may synchronize the device.
     """
     from fmha_sm100.api import sparse_fmha
 
     total_q, num_q_heads, head_dim = q.shape
-    if query_chunk_size is not None and query_chunk_size < 1:
-        raise ValueError("query_chunk_size must be positive")
-    if compact_oracle:
-        if q.dtype != torch.bfloat16:
-            raise ValueError("compact oracle requires BF16 Q")
-        if sparse_attn_plan.get("partial_dtype", torch.bfloat16) not in (
-            torch.bfloat16,
-            torch.float8_e4m3fn,
-        ):
-            raise ValueError("compact oracle requires BF16 or E4M3 partial output")
     # Opt-in chunked step3 (M3_SPARSE_ATTN_CHUNK_ENABLE): route BOTH step3 paths
     # (direct CSR and adapter -- they converge on the same sparse_atten_func)
     # through the chunked implementation to bound the O_partial workspace.
-    if compact_oracle or _sparse_attn_chunk_enabled():
-        chunk_size = query_chunk_size or _sparse_attn_chunk_size()
-        if compact_oracle or total_q > chunk_size:
+    if _sparse_attn_chunk_enabled():
+        chunk_size = _sparse_attn_chunk_size()
+        if total_q > chunk_size:
             out_f = _sparse_attn_chunked(
                 q,
                 k_paged_f,
@@ -1811,7 +1719,6 @@ def sparse_prefill_from_topk(
                 sm_scale,
                 chunk_size,
                 refresh_page_map=refresh_page_map,
-                compact_oracle=compact_oracle,
             )
             return out_f.view(total_q, num_q_heads, head_dim)
     # Opt-1+ direct path: when the per-forward CSR buffers are attached, bypass the

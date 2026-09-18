@@ -369,12 +369,15 @@ def materialize_pages(
 
 
 def _compact_tensor_key(tensor):
-    # Inference tensors have no mutation counter. Bypass caching for those
-    # instead of accepting an undetectable in-place page-map change.
+    # These tensors are created once per forward and remain immutable while the
+    # sparse layers share their plan. Inference tensors do not expose a version
+    # counter, but exact object identity plus a retained strong reference is
+    # sufficient for this per-forward cache. Normal tensors keep mutation-based
+    # invalidation through their version counter.
     try:
         version = tensor._version
     except RuntimeError:
-        return None
+        version = None
     return (
         id(tensor),
         version,
@@ -399,9 +402,11 @@ def _get_compact_geometry(
 ):
     """Cache immutable geometry on this forward's plan, never selected pages.
 
-    Tensor references prevent identity reuse, while version/shape checks detect
-    map or length changes. A copied plan cannot inherit the original cache.
-    This cache is independent of the legacy ``_chunk_meta`` namespace.
+    Retained tensor references plus object/shape checks detect replacements;
+    version counters additionally detect in-place mutation for normal tensors.
+    Inference tensors rely on the per-forward immutability contract. A copied
+    plan cannot inherit the original cache. This cache is independent of the
+    legacy ``_chunk_meta`` namespace.
     """
     from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
         _build_chunk_meta,
@@ -415,7 +420,6 @@ def _get_compact_geometry(
         plan["kv_segment_lens"],
     )
     tensor_keys = tuple(_compact_tensor_key(tensor) for tensor in tensors)
-    cacheable = all(key is not None for key in tensor_keys)
     key = (
         tensor_keys,
         topk,
@@ -428,12 +432,7 @@ def _get_compact_geometry(
         int(plan["num_kv_heads"]),
     )
     cached = plan.get("_compact_geometry")
-    if (
-        cacheable
-        and cached is not None
-        and cached["owner_id"] == id(plan)
-        and cached["key"] == key
-    ):
+    if cached is not None and cached["owner_id"] == id(plan) and cached["key"] == key:
         return cached["meta"], cached["boundaries"]
 
     meta = _build_chunk_meta(
@@ -457,16 +456,13 @@ def _get_compact_geometry(
     meta["query_segments"] = [
         _query_segment_ids(offsets, device) for offsets in boundaries
     ]
-    if cacheable:
-        plan["_compact_geometry"] = {
-            "owner_id": id(plan),
-            "key": key,
-            "tensors": tensors,
-            "meta": meta,
-            "boundaries": boundaries,
-        }
-    else:
-        plan.pop("_compact_geometry", None)
+    plan["_compact_geometry"] = {
+        "owner_id": id(plan),
+        "key": key,
+        "tensors": tensors,
+        "meta": meta,
+        "boundaries": boundaries,
+    }
     return meta, boundaries
 
 

@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/models_py/bindings/core/RuntimeDevice.h"
 #include "autil/LockFreeThreadPool.h"
@@ -911,20 +912,16 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 peer_cnt);
     }
 
-    const int64_t decode_attn_tp_size = maga_init_params_.parallelism_config.get_attn_tp_size();
-    const int64_t decode_attn_tp_rank = maga_init_params_.parallelism_config.get_attn_tp_rank();
-    const bool    slice_opaque_kv_by_head =
-        use_opaque_kv_store && !use_mla && !use_hybrid && decode_attn_tp_size > 1;
-    const int32_t opaque_kv_partition_count =
-        slice_opaque_kv_by_head ? static_cast<int32_t>(decode_attn_tp_size) : 0;
-    const int32_t opaque_kv_partition_id =
-        slice_opaque_kv_by_head ? static_cast<int32_t>(decode_attn_tp_rank) : 0;
+    const int64_t decode_attn_tp_size       = maga_init_params_.parallelism_config.get_attn_tp_size();
+    const int64_t decode_attn_tp_rank       = maga_init_params_.parallelism_config.get_attn_tp_rank();
+    const bool    slice_opaque_kv_by_head   = use_opaque_kv_store && !use_mla && !use_hybrid && decode_attn_tp_size > 1;
+    const int32_t opaque_kv_partition_count = slice_opaque_kv_by_head ? static_cast<int32_t>(decode_attn_tp_size) : 0;
+    const int32_t opaque_kv_partition_id    = slice_opaque_kv_by_head ? static_cast<int32_t>(decode_attn_tp_rank) : 0;
     // The scale block only follows the data block's head partition when it actually
     // holds a per-head quantization scale. M3 MSA parks a head-independent indexer-K
     // cache in that slot, and prefill stores it whole -- asking for half of it makes
     // prefill reject the load. partition_count 1 means "the whole stored block".
-    const bool slice_opaque_scale_by_head =
-        slice_opaque_kv_by_head && cache_config.scale_region_is_head_partitioned;
+    const bool    slice_opaque_scale_by_head = slice_opaque_kv_by_head && cache_config.scale_region_is_head_partitioned;
     const int32_t opaque_scale_partition_count =
         slice_opaque_scale_by_head ? static_cast<int32_t>(decode_attn_tp_size) : (slice_opaque_kv_by_head ? 1 : 0);
     const int32_t opaque_scale_partition_id =
@@ -1197,7 +1194,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                            const BlockInfo&   block,
                                            bool               partition_kv_halves = false,
                                            int32_t            partition_count     = 0,
-                                           int32_t            partition_id       = 0) {
+                                           int32_t            partition_id        = 0) {
                         RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
                         RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
                         std::shared_ptr<void> addr(block.addr, [](void*) {});
@@ -1436,7 +1433,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                        const BlockInfo&   block,
                                                        bool               partition_kv_halves = false,
                                                        int32_t            partition_count     = 0,
-                                                       int32_t            partition_id       = 0) {
+                                                       int32_t            partition_id        = 0) {
                                     RTP_LLM_CHECK_WITH_INFO(
                                         block.addr != nullptr, "null block addr for key=%s", key.c_str());
                                     RTP_LLM_CHECK_WITH_INFO(
@@ -1575,6 +1572,9 @@ grpc::Status DecodeRpcServer::allocateResourceFunc(DecodeGenerateContext& decode
 
 grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context, ServerStream* grpc_stream) {
     RTP_LLM_PROFILE_FUNCTION();
+    // gRPC workers are shared with high-frequency status RPCs and retain CUDA TLS.
+    // Rebind before RemoteGenerate performs any CUDA/ATen work.
+    pinThreadToDeviceOnce(static_cast<int>(getDeviceId()));
     AtomicGuard      request_guard(onflight_requests_);
     DecodeRpcContext rpc_context{grpc_stream};
     // TODO(xinfei.sxf) request id is 0 here
