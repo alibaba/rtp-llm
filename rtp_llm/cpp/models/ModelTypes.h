@@ -71,6 +71,7 @@ struct GptModelInitParams {
     // input_hiddens.
     int64_t                                    hc_mult = 1;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
+    bool                                       enable_custom_output = false;
 };
 
 enum GptModelInputIndex : size_t {

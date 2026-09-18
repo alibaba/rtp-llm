@@ -3009,6 +3009,31 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         await return_output_ids_test_suite.test_no_stream()
 
+        custom_output = [[-0.67578125]]
+        custom_output_test_suite = self.ExtraOutputsTestSuite(
+            self,
+            GenerateConfig(),
+            lambda *args, **kwargs: GenerateOutput(
+                *args, **{**kwargs, "custom_output": torch.tensor(custom_output)}
+            ),
+            ChatCompletionExtraOutputs(custom_output=custom_output),
+        )
+        await custom_output_test_suite.test_no_stream()
+
+    def test_native_chat_final_preserves_custom_output(self):
+        _, renderer = self._create_adaptive_qwen_renderer()
+        values = [[-0.25, 1.75]]
+        status = [custom_renderer.StreamStatusSync(ChatCompletionRequest(messages=[]))]
+        args = (status, [3], [2], [0], torch.tensor(values))
+        final = renderer.render_stream_response_final_blocking(*args)
+        for response in (
+            renderer.render_stream_response_final(*args),
+            renderer.collect_complete_response([final]),
+        ):
+            self.assertEqual(
+                json.loads(response)["extra_outputs"]["custom_output"], values
+            )
+
     async def test_debug_info_with_output_ids_and_raw_output(self):
         """Test that debug_info includes output_ids and raw_output when debug_info=True (non-streaming)"""
         tokenizer = QwenTestTokenizer(

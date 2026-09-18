@@ -263,6 +263,8 @@ message GenerateInputPB {
     // priority). Used as a metrics tag on engine-side TPS
     // reporting; never affects engine scheduling.
     int32 priority = 10;
+    reserved 11, 12, 13;
+    reserved "custom_output_token_position", "custom_output_tracked_token_id", "custom_output_expected_token_id";
 }
 
 message AuxInfoPB {
@@ -318,6 +320,8 @@ message FlattenOutputPB {
     TensorPB all_probs = 7;
     TensorPB all_hidden_states = 8;
     PromptLogitsOutputPB prompt_logits = 9;
+    // Output of the deployment-registered post-layers CustomHandler.
+    TensorPB custom_output = 10;
 }
 
 message GenerateOutputsPB {

@@ -19,6 +19,9 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#if USING_CUDA
+#include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
+#endif
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -720,11 +723,170 @@ py::dict runGenerationPrefillCaptureScenario(py::object py_model, const std::str
     return result;
 }
 
+// Exercise input preparation, Python forward, graphs and custom output together.
+// Only decoder math is replaced; all routing and post-layers code is production.
+py::dict runCustomOutput(py::object                   py_model,
+                         py::object                   handler,
+                         torch::Tensor                hidden,
+                         torch::Tensor                lm_indexes,
+                         std::optional<torch::Tensor> custom_indexes,
+                         int64_t                      decode_batch,
+                         bool                         python_norm,
+                         bool                         all_logits,
+                         bool                         enable_graph) {
+    static std::once_flag runtime_once;
+    std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
+    const auto width = hidden.size(1);
+    Weights    weights;
+    weights.layers.resize(1);
+    auto lm_head            = std::make_shared<DenseWeights>();
+    lm_head->kernel         = torch::eye(width, hidden.options());
+    weights.lm_head         = lm_head;
+    auto norm               = std::make_shared<LayerNormWeights>();
+    norm->gamma             = torch::ones({width}, hidden.options());
+    weights.final_layernorm = norm;
+    GptModelDescription description;
+    description.data_type                    = torchDTypeToDataType(hidden.dtype());
+    description.norm_type                    = NormType::rmsnorm;
+    description.attention_conf.head_num      = 1;
+    description.attention_conf.kv_head_num   = 1;
+    description.attention_conf.size_per_head = width;
+    auto layout =
+        enable_graph ? std::make_optional(makeLayout(makeCacheConfig({{"full", 4, 64}})).layout) : std::nullopt;
+    GptModelInitParams params{weights, description, layout};
+    if (enable_graph) {
+        params.cache_manager = std::make_shared<KVCacheManager>(makeCacheConfig({{"full", 4, 64}}),
+                                                                /*warmup=*/true,
+                                                                /*metrics_reporter=*/nullptr,
+                                                                KVCacheConfig{},
+                                                                ParallelismConfig{});
+        TORCH_CHECK(params.cache_manager->init(), "custom output test cache manager init failed");
+        params.max_seq_len      = 8;
+        params.hidden_size      = width;
+        params.tokens_per_block = params.kernel_tokens_per_block           = 4;
+        params.hw_kernel_config.enable_cuda_graph                          = true;
+        params.hw_kernel_config.generation_prefill_cuda_graph_max_requests = 2;
+        params.hw_kernel_config.generation_prefill_capture_token_buckets   = {8};
+        params.hw_kernel_config.decode_capture_batch_sizes                 = {1, 2};
+        params.runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+    }
+    params.device_resource_config.enable_layer_micro_batch = python_norm ? 0 : 1;
+    params.enable_custom_output                            = !handler.is_none();
+    if (params.enable_custom_output) {
+        py_model.attr("custom_output_handler") = std::move(handler);
+    }
+    PyWrappedModel model(params, std::move(py_model));
+
+    GptModelInputs inputs;
+    const auto     batch_size    = lm_indexes.size(0);
+    inputs.combo_tokens          = torch::arange(hidden.size(0), torch::kInt32).pin_memory();
+    inputs.sequence_lengths      = torch::ones({decode_batch}, torch::kInt32).pin_memory();
+    inputs.lm_output_indexes     = lm_indexes;
+    inputs.custom_output_indexes = custom_indexes.value_or(torch::Tensor());
+    inputs.need_all_logits       = all_logits;
+    inputs.prefix_lengths        = torch::zeros({batch_size - decode_batch}, torch::kInt32).pin_memory();
+    auto starts          = torch::cat({torch::zeros({1}, torch::kInt32), lm_indexes.slice(0, 0, batch_size - 1) + 1});
+    inputs.input_lengths = (lm_indexes + 1 - starts).pin_memory();
+    inputs.lm_output_lengths        = torch::ones({batch_size}, torch::kInt32).pin_memory();
+    inputs.kv_cache_kernel_block_id = torch::zeros({batch_size, 2}, torch::kInt32).pin_memory();
+    inputs.kv_cache_block_id        = inputs.kv_cache_kernel_block_id;
+    py::dict result;
+    if (enable_graph) {
+        model.prepareAttentionInputs(inputs);
+        model.updateKVCacheKernelBlockId(inputs);
+    }
+    const auto outputs            = model.forward(inputs);
+    result["graph_status"]  = generationPrefillCudaGraphStatusString(outputs.generation_prefill_cuda_graph_status);
+    result["custom_output"] = outputs.custom_output;
+    result["custom_output_error"] = outputs.custom_output_error;
+    result["logits"]              = outputs.logits;
+    if (enable_graph) {
+        auto       decode              = inputs;
+        const auto batch               = inputs.input_lengths.size(0);
+        decode.combo_tokens            = torch::arange(batch, torch::kInt32).pin_memory();
+        decode.sequence_lengths        = inputs.input_lengths;
+        decode.prefix_lengths          = torch::empty({0}, torch::kInt32).pin_memory();
+        decode.lm_output_indexes       = torch::arange(batch, torch::kInt32).pin_memory();
+        decode.custom_output_indexes   = torch::Tensor();
+        result["decode_custom_output"] = model.forward(decode).custom_output;
+        // Same graph shape, different tokens and scoring positions: no stale replay data.
+        inputs.combo_tokens          = inputs.combo_tokens.flip({0}).pin_memory();
+        inputs.custom_output_indexes = (inputs.custom_output_indexes - 1).pin_memory();
+        model.prepareAttentionInputs(inputs);
+        model.updateKVCacheKernelBlockId(inputs);
+        auto next                    = model.forward(inputs);
+        result["next_custom_output"] = next.custom_output;
+        result["next_logits"]        = next.logits;
+    }
+    return result;
+}
+
+#if USING_CUDA
+void runCustomOutputSelection() {
+    initRuntime(0, false, false, MlaOpsType::AUTO);
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.runtime_config.warm_up = false;
+    int calls = 0;
+    auto selector =
+        py::cpp_function([&](const torch::Tensor& ids, const std::optional<torch::Tensor>& mask) {
+            ++calls;
+            TORCH_CHECK(!ids.is_cuda(), "selector input must be CPU");
+            TORCH_CHECK(mask.has_value(), "selector must see the text mask");
+            // The selector sees expanded text positions; the trailing image row is excluded.
+            return ids.data_ptr<int>()[0] == 9 ? static_cast<int>(ids.numel()) : 2;
+        });
+    NormalExecutor::test_model_factory            = [vocab = model_config.vocab_size](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(vocab);
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+    // Match the service entrypoint: engine threads may release Python-owned tensors.
+    py::gil_scoped_release release;
+    NormalEngine engine(params, nullptr);
+    {
+        py::gil_scoped_acquire gil;
+        engine.custom_output_selector_ = selector;
+    }
+    auto         input      = std::make_shared<GenerateInput>();
+    input->generate_config  = std::make_shared<GenerateConfig>();
+    input->input_ids        = torch::tensor({1, 7, 7, 7}, torch::kInt32);
+    input->text_tokens_mask = torch::tensor({1, 1, 1, 0}, torch::kInt32);
+    auto stream             = engine.makeStream(input);
+    TORCH_CHECK(!stream->hasError(), "valid prompt selection failed");
+    TORCH_CHECK(input->custom_output_token_position == 2, "selected position was lost");
+    auto invalid       = std::make_shared<GenerateInput>(*input);
+    invalid->input_ids = torch::tensor({9, 7, 7, 7}, torch::kInt32);
+    auto result        = engine.enqueueMultiple({invalid});
+    TORCH_CHECK(result.second[0]->hasError(), "invalid selection must fail the request");
+    TORCH_CHECK(calls == 2, "select once per request");
+}
+#endif
+
 }  // namespace
 }  // namespace rtp_llm::test
 
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
+#if USING_CUDA
+    m.def("run_custom_output_selection", &rtp_llm::test::runCustomOutputSelection);
+#endif
+    m.def("run_post_layers",
+          &rtp_llm::test::runCustomOutput,
+          py::arg("model"),
+          py::arg("handler"),
+          py::arg("hidden"),
+          py::arg("lm_indexes"),
+          py::arg("custom_indexes"),
+          py::arg("decode_batch"),
+          py::arg("python_norm"),
+          py::arg("all_logits"),
+          py::arg("enable_graph")  = false);
     m.def("run_scenario",
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),

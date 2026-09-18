@@ -131,6 +131,24 @@ TEST_F(GenerateStreamWrapperTest, generateResponseMapsErrorAfterOutput) {
     }
 }
 
+TEST_F(GenerateStreamWrapperTest, CustomOutputPreservesShapeAndSequenceOrder) {
+    auto config                  = std::make_shared<GenerateConfig>();
+    config->aux_info = false;
+    config->num_return_sequences = 2;
+    for (const auto dtype : {torch::kFloat32, torch::kInt32}) {
+        GenerateOutput output;
+        output.custom_output = torch::tensor({{-1, 2}}, dtype);
+        GenerateOutputs outputs;
+        outputs.generate_outputs = {output, GenerateOutput{}};
+        auto response            = GenerateStreamWrapper::formatResponse({"a", "b"}, outputs, config, {});
+        ASSERT_TRUE(response.custom_output.has_value());
+        EXPECT_EQ(autil::legacy::ToJsonString(*response.custom_output, true), "[[[-1,2]],null]");
+        outputs.generate_outputs = {GenerateOutput{}};
+        response                 = GenerateStreamWrapper::formatResponse({"a"}, outputs, config, {});
+        EXPECT_FALSE(response.custom_output.has_value());
+    }
+}
+
 TEST_F(GenerateStreamWrapperTest, formatResponse_NumBeams) {
     std::vector<std::string> generate_texts;
     generate_texts.push_back("fake response");

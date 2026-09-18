@@ -36,6 +36,15 @@ py_test(
 )
 
 py_test(
+    name = "custom_output_hidden_stage_test",
+    srcs = ["custom_output_hidden_stage_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    # CPU tensors, but importing PyModelInputs requires the CUDA compute_ops image.
+    exec_properties = {"gpu": "A10", "gpu_count": "1"},
+)
+
+py_test(
     name = "generic_moe_allreduce_test",
     srcs = ["generic_moe_allreduce_test.py"],
     deps = py_test_deps + [

@@ -981,6 +981,114 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     EXPECT_NEAR(2.25525, *(torch::mean(loss4).exp().data_ptr<float>()), 0.0001);
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testCustomOutputDispatch) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2048;
+    model_config.num_layers  = 2;
+    CacheConfig cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    NormalBatchStreamProcessor processor(model_config, {}, {}, cache_config, false);
+    auto                       make_stream = [&](bool decode) {
+        auto query                                   = make_shared<GenerateInput>();
+        query->input_ids                             = hostIntBuffer({0, 1});
+        query->generate_config                       = make_shared<GenerateConfig>();
+        query->custom_output_token_position          = decode ? -1 : 0;
+        query->generate_config->is_streaming         = true;
+        query->generate_config->num_return_sequences = decode ? 1 : 2;
+        query->generate_config->max_new_tokens       = 2;
+        auto stream =
+            make_shared<NormalGenerateStream>(query, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+        if (decode) {
+            query->input_ids = hostIntBuffer({0});
+            stream->setIsContextStream(false);
+        }
+        BatchKVCacheResource addr;
+        addr.resetBatchSize(stream->currentBatchSize());
+        addr.initGroups(cache_config.topologyPtr());
+        for (int i = 0; i < stream->currentBatchSize(); ++i) {
+            addr.setBatchBlocks(i, 0, {1, 2});
+        }
+        stream->setKVCache(addr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+    // Two scores are expected; zero models a handler failure, one a malformed result.
+    for (const auto& [score_rows, cached_first] : {std::pair{2, false},
+                                                   std::pair{2, true},
+                                                   std::pair{0, false},
+                                                   std::pair{0, true},
+                                                   std::pair{1, false},
+                                                   std::pair{1, true}}) {
+        auto         decode  = make_stream(true);
+        auto         context = make_stream(false);
+        auto         cached  = make_stream(false);
+        cached->setReuseLength(1);  // The scoring token at position 0 is already cached.
+        StreamGroups groups(cached_first ? std::list<GenerateStreamPtr>{decode, cached, context} :
+                                          std::list<GenerateStreamPtr>{decode, context, cached});
+        TensorHolder holder;
+        auto         input = processor.gatherModelInput(groups, holder);
+        ASSERT_TRUE(input.ok());
+        EXPECT_EQ(toVec<int64_t>(input->custom_output_indexes),
+                  cached_first ? (std::vector<int64_t>{3, 5}) : (std::vector<int64_t>{1, 3}));
+        EXPECT_EQ(cached->reuseLength(), 1);
+        MergedOutput outputs;
+        outputs.sampler_output.token_ids = torch::tensor({{0, 1}, {0, 1}, {0, 1}, {0, 1}, {0, 1}}, torch::kInt32);
+        if (score_rows == 0) {
+            outputs.model_output.custom_output_error = "handler failure";
+        } else {
+            outputs.model_output.custom_output =
+                torch::tensor({{5.f, 6.f}, {7.f, 8.f}}, torch::kCUDA).narrow(0, 0, score_rows);
+        }
+        ASSERT_TRUE(processor.dispatch(groups, outputs).ok());
+        auto decode_result = decode->nextOutput(100);
+        ASSERT_TRUE(decode_result.ok());
+        EXPECT_FALSE(decode_result.value().generate_outputs[0].custom_output.has_value());
+        auto cached_result = cached->nextOutput(100);
+        ASSERT_TRUE(cached_result.ok());  // Another request's head failure must not affect this request.
+        for (const auto& output : cached_result.value().generate_outputs) {
+            EXPECT_FALSE(output.custom_output.has_value());
+            EXPECT_FALSE(output.finished);
+        }
+        auto result = context->nextOutput(100);
+        if (score_rows < 2) {
+            EXPECT_FALSE(result.ok());
+            EXPECT_EQ(context->statusInfo().ToString(),
+                      score_rows == 0 ? "custom output processor failed: handler failure" :
+                                        "custom output row count mismatch");
+        } else {
+            for (int step = 0; step < 2; ++step) {
+                ASSERT_TRUE(result.ok());
+                ASSERT_EQ(result.value().generate_outputs.size(), 2u);
+                for (int i = 0; i < 2; ++i) {
+                    const auto& output = result.value().generate_outputs[i];
+                    ASSERT_TRUE(output.custom_output.has_value());
+                    EXPECT_FALSE(output.custom_output->is_cuda());
+                    EXPECT_EQ(toVec<float>(*output.custom_output), (std::vector<float>{5.f + 2 * i, 6.f + 2 * i}));
+                    EXPECT_EQ(output.finished, step == 1);
+                }
+                if (step == 0) {
+                    context->setIsContextStream(false);
+                    outputs.model_output             = {};
+                    outputs.sampler_output.token_ids = torch::tensor({{2}, {2}}, torch::kInt32);
+                    ASSERT_TRUE(processor.dispatch(StreamGroups({context}), outputs).ok());
+                    result = context->nextOutput(100);
+                }
+            }
+        }
+        cached->setIsContextStream(false);
+        outputs.model_output             = {};
+        outputs.sampler_output.token_ids = torch::tensor({{2}, {2}}, torch::kInt32);
+        ASSERT_TRUE(processor.dispatch(StreamGroups({cached}), outputs).ok());
+        cached_result = cached->nextOutput(100);
+        ASSERT_TRUE(cached_result.ok());
+        for (const auto& output : cached_result.value().generate_outputs) {
+            EXPECT_FALSE(output.custom_output.has_value());
+            EXPECT_TRUE(output.finished);
+        }
+    }
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     ResourceContext resource_context;
     ModelConfig     model_config;

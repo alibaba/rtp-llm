@@ -147,6 +147,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.enable_custom_output = !warm_up_ && !is_propose_;
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -479,6 +480,7 @@ void NormalExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const 
     to_cuda(model_input.prefix_lengths, "prefix_lengths");
     to_cuda(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
     to_cuda(model_input.lm_output_indexes, "lm_output_indexes");
+    to_cuda(model_input.custom_output_indexes, "custom_output_indexes");
     checkModelInputsOnCuda(model_input, tag);
 }
 
@@ -503,6 +505,7 @@ void NormalExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, c
     check(model_input.prefix_lengths, "prefix_lengths");
     check(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
     check(model_input.lm_output_indexes, "lm_output_indexes");
+    check(model_input.custom_output_indexes, "custom_output_indexes");
 }
 
 bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) const {

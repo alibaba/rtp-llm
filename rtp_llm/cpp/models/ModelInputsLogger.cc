@@ -34,7 +34,7 @@ constexpr size_t      kQueueMaxBytes   = 256ULL * 1024ULL * 1024ULL;
 std::atomic<uint64_t> g_file_sequence{0};
 // clang-format off
 #define MODEL_INPUT_TENSORS(X)                                                                                       \
-    X(combo_tokens) X(input_lengths) X(sequence_lengths) X(lm_output_indexes) X(lm_output_lengths) X(prefix_lengths) \
+    X(combo_tokens) X(input_lengths) X(sequence_lengths) X(lm_output_indexes) X(custom_output_indexes) X(lm_output_lengths) X(prefix_lengths) \
     X(sequence_lengths_plus_1)                                                                                      \
     X(combo_tokens_type_ids) X(combo_position_ids) X(last_hidden_states) X(attention_mask)                           \
     X(kv_cache_block_id) X(kv_cache_kernel_block_id) X(kv_cache_group_types) X(kv_cache_update_mapping)             \

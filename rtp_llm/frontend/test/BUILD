@@ -1,6 +1,15 @@
 load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
 
 py_test(
+    name = "custom_output_response_test",
+    srcs = ["custom_output_response_test.py"],
+    deps = [
+        "//rtp_llm:frontend",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "incremental_decode_test",
     srcs = [
         "incremental_decode_test.py",

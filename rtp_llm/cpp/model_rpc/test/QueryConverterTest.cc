@@ -256,6 +256,26 @@ TEST_F(QueryConverterTest, testTransOutput) {
     }
 }
 
+TEST_F(QueryConverterTest, CustomOutputResponseSerialization) {
+    GenerateOutput output;
+    output.output_ids    = torch::tensor({{1}}, torch::kInt32);
+    output.custom_output = torch::tensor({{-0.25f, 1.75f}});
+    GenerateOutputs outputs;
+    outputs.generate_outputs = {output, output};
+    GenerateOutputsPB response;
+    QueryConverter::transResponse(&response, &outputs, false, "", 0);
+    TensorPB expected;
+    QueryConverter::transTensorPB(&expected, torch::stack({*output.custom_output, *output.custom_output}));
+    EXPECT_EQ(response.flatten_output().custom_output().SerializeAsString(), expected.SerializeAsString());
+    EXPECT_EQ(response.flatten_output().aux_info_size(), 0);
+    output.custom_output.reset();
+    outputs.generate_outputs = {output, output};
+    GenerateOutputsPB absent;
+    QueryConverter::transResponse(&absent, &outputs, false, "", 0);
+    EXPECT_FALSE(absent.flatten_output().has_custom_output());
+    EXPECT_EQ(absent.flatten_output().finished_size(), 2);
+}
+
 TEST_F(QueryConverterTest, TransTensorPB_FP32) {
 
     torch::Tensor tensor = torch::rand({2, 3}, torch::kFloat32);
