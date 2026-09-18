@@ -35,6 +35,8 @@ public enum StrategyErrorType {
     // (VERSION_MISMATCH / eviction CONFLICT on every attempt, design doc 16.3).
     // Distinct from NO_AVAILABLE_WORKER, which still covers capacity shortage.
     SCHEDULER_PLAN_CONFLICT(8515, false),
+    // Returned only before scheduler admission; the same request may run on another node.
+    NOT_MASTER(8517, false),
     // Auto-TPM victim terminal: an already-admitted request was cancelled by
     // a strictly higher-priority admission attempt.
     PRIORITY_PREEMPTED(8429, false),

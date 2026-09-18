@@ -3,11 +3,21 @@ package org.flexlb.httpserver;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
+import io.grpc.ForwardingServerCallListener;
+import io.grpc.ServerCall;
+import io.grpc.ServerCallHandler;
+import io.grpc.ServerInterceptor;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.config.ConfigService;
+import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.service.RouteService;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleResponsePB;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
@@ -16,14 +26,90 @@ import org.springframework.mock.env.MockEnvironment;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
+import static org.mockito.ArgumentMatchers.any;
 
 class FlexlbGrpcDrainTest {
+    @Test
+    void acceptedRpcCanEnterServiceAndFinishAfterQuietPeriod() throws Exception {
+        var accepted = new CountDownLatch(1);
+        var resume = new CountDownLatch(1);
+        var timing = new GrpcServerTimingInterceptor();
+        var config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(ConfigService.parse("""
+                {"requestLifecycle":{"request":{"timeoutMs":60000}},
+                 "grpcServer":{"shutdownQuietPeriodMs":100}}
+                """));
+        var routes = mock(RouteService.class);
+        var success = new Response();
+        success.setSuccess(true);
+        success.setCode(200);
+        when(routes.route(any())).thenReturn(CompletableFuture.completedFuture(success));
+        var service = new FlexlbServiceImpl(routes, mock(LBStatusConsistencyService.class),
+                mock(EngineHealthReporter.class), mock(FlexlbGrpcForwarder.class), config,
+                mock(BatchSchedulerReporter.class), mock(ServerScheduleLatencyRecorder.class),
+                mock(RequestSchedulerReporter.class));
+        ServerInterceptor pauseBeforeSchedule = new ServerInterceptor() {
+            @Override
+            public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
+                    ServerCall<ReqT, RespT> call, io.grpc.Metadata headers,
+                    ServerCallHandler<ReqT, RespT> next) {
+                return new ForwardingServerCallListener.SimpleForwardingServerCallListener<>(
+                        next.startCall(call, headers)) {
+                    @Override
+                    public void onHalfClose() {
+                        accepted.countDown();
+                        try {
+                            assertTrue(resume.await(5, TimeUnit.SECONDS));
+                        } catch (InterruptedException error) {
+                            Thread.currentThread().interrupt();
+                            throw new AssertionError(error);
+                        }
+                        super.onHalfClose();
+                    }
+                };
+            }
+        };
+        var server = NettyServerBuilder.forPort(0).addService(ServerInterceptors.intercept(
+                service, pauseBeforeSchedule, timing)).build().start();
+        var grpc = new FlexlbGrpcServer(service, config, new MockEnvironment(), null, null, timing, null);
+        ReflectionTestUtils.setField(grpc, "server", server);
+        var channel = NettyChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
+        var drainer = new Thread(grpc::drain);
+        try {
+            var pending = FlexlbServiceGrpc.newFutureStub(channel).withDeadlineAfter(8, TimeUnit.SECONDS)
+                    .schedule(FlexlbScheduleRequestPB.newBuilder().setRequestId(101).build());
+            assertTrue(accepted.await(3, TimeUnit.SECONDS));
+            drainer.start();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (!server.isShutdown() && System.nanoTime() < deadline) {
+                Thread.sleep(10);
+            }
+            assertTrue(server.isShutdown());
+            assertFalse(pending.isDone());
+            assertTrue(drainer.isAlive());
+            resume.countDown();
+            assertTrue(pending.get(3, TimeUnit.SECONDS).getSuccess());
+            verify(routes, times(1)).route(any());
+            drainer.join(3000);
+            assertFalse(drainer.isAlive());
+        } finally {
+            resume.countDown();
+            channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+            server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+            drainer.join(3000);
+        }
+    }
+
     @Test
     void normalIdleDoesNotShutdownAndDrainStartsWithAFullQuietPeriod() throws Exception {
         try (var fixture = new Fixture(300)) {

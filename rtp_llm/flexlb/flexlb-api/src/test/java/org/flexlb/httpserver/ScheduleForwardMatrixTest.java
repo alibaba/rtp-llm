@@ -2,6 +2,7 @@ package org.flexlb.httpserver;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
@@ -60,9 +61,8 @@ import static org.mockito.Mockito.when;
  *       MAX_FORWARD_HOPS=1 negative guards.</li>
  * </ol></p>
  *
- * <p>Terminal code: every failed forward answers 8511
- * ({@code StrategyErrorType.BATCH_SLO_EXPIRED}, canRetry=false — the
- * no-retry terminal code of the ambiguity window).</p>
+ * <p>Unresolved delivery uses the existing terminal error (8511). Proven unsent
+ * requests may route locally; ambiguous delivery is terminal.</p>
  */
 class ScheduleForwardMatrixTest {
 
@@ -162,35 +162,29 @@ class ScheduleForwardMatrixTest {
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    @DisplayName("state ② cached master is dead + forward fails: terminal 8511 + Cancel disambiguation, never routed locally")
-    void state2DeadMasterForwardFailsWithTerminal8511AndCancel() {
+    @DisplayName("state ② attempted forward with unresolved owner: terminal 8511, no local dispatch")
+    void state2AmbiguousForwardRemainsTerminalWithoutCancel() {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(false);
         when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
                 CompletableFuture.completedFuture(
                         FlexlbGrpcForwarder.MasterForwardResult.failed(
-                                "UNAVAILABLE", DEAD_MASTER)));
-        when(grpcForwarder.forwardCancelToMaster(any())).thenReturn(
-                CompletableFuture.completedFuture(
-                        FlexlbGrpcForwarder.CancelForwardResult.noMaster()));
+                                Status.UNAVAILABLE.asRuntimeException(), DEAD_MASTER)));
 
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
 
         service.schedule(request(90_002L), observer);
 
-        // Terminal 8511, success=false, master host surfaced for observability.
+        // Unresolved delivery, success=false, original owner retained for observability.
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = capturedResponse(observer);
         assertFalse(response.getSuccess());
         assertEquals(TERMINAL_FORWARD_CODE, response.getCode());
         assertEquals(DEAD_MASTER, response.getRealMasterHost());
         assertEquals(8511, TERMINAL_FORWARD_CODE);
 
-        // Ambiguity reconciliation: ownership handed to the cancel reducer.
-        FlexlbScheduleProtocol.FlexlbCancelRequestPB cancel = capturedCancel();
-        assertEquals(90_002L, cancel.getRequestId());
-        assertEquals(FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED,
-                cancel.getReason());
+        // Ambiguous delivery must neither cancel the owner nor replay the request.
+        verify(grpcForwarder, never()).forwardCancelToMaster(any());
 
         // The failed forward is terminal: no local routing attempt at all.
         verify(routeService, never()).route(any());
@@ -277,17 +271,18 @@ class ScheduleForwardMatrixTest {
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    @DisplayName("negative: SELF_TARGET guard failure skips cancel reconciliation (guard rejected before any RPC)")
-    void guardBlockedFailureSkipsCancelReconciliation() {
+    @DisplayName("SELF_TARGET rejected before RPC: route locally without cancellation")
+    void unsentSelfTargetRoutesLocallyWithoutCancel() {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(false);
         // Pathological config: cached master equals self while isMaster=false.
         // The guard rejects it before any RPC, so ownership is unambiguous and
-        // no cancel reconciliation may be started.
+        // no cancellation may be started.
         when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
                 CompletableFuture.completedFuture(
-                        FlexlbGrpcForwarder.MasterForwardResult.failed(
+                        FlexlbGrpcForwarder.MasterForwardResult.blocked(
                                 "SELF_FORWARD_BLOCKED", FOLLOWER_IP + ":7001")));
+        stubSuccessfulLocalRoute();
 
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
@@ -295,10 +290,9 @@ class ScheduleForwardMatrixTest {
         service.schedule(request(90_006L), observer);
 
         verify(grpcForwarder, never()).forwardCancelToMaster(any());
-        verify(routeService, never()).route(any());
-        FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = capturedResponse(observer);
-        assertFalse(response.getSuccess());
-        assertEquals(TERMINAL_FORWARD_CODE, response.getCode());
+        verify(routeService, times(1)).route(any());
+        assertSuccessfulResponse(observer);
+        assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
     }
 
     // ------------------------------------------------------------------
@@ -334,7 +328,7 @@ class ScheduleForwardMatrixTest {
                             .toCompletableFuture().get(5, TimeUnit.SECONDS);
 
             assertTrue(result.masterFound(), "a master was selected (self) before the guard");
-            assertNull(result.response(), "SELF_TARGET must not attempt an RPC");
+            assertEquals(StrategyErrorType.NOT_MASTER.getErrorCode(), result.response().getCode());
             assertEquals("SELF_FORWARD_BLOCKED", result.failure());
             assertEquals(selfTarget, result.masterHost());
             verify(fixture.engineHealthReporter).reportForwardToMasterResult(
@@ -358,7 +352,7 @@ class ScheduleForwardMatrixTest {
                             .toCompletableFuture().get(5, TimeUnit.SECONDS);
 
             assertTrue(result.masterFound());
-            assertNull(result.response(), "hop-limit violation must not attempt another RPC");
+            assertEquals(StrategyErrorType.NOT_MASTER.getErrorCode(), result.response().getCode());
             assertEquals("FORWARD_HOP_LIMIT", result.failure());
             assertEquals(LIVE_MASTER, result.masterHost());
             verify(fixture.engineHealthReporter).reportForwardToMasterResult(
@@ -368,7 +362,7 @@ class ScheduleForwardMatrixTest {
 
     @Test
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    @DisplayName("state ② real chain: forwarding to a dead master address yields UNAVAILABLE terminal failure")
+    @DisplayName("real transport: connection refused retains its ConnectException cause")
     void guardDeadMasterAddressYieldsUnavailableFailure() throws Exception {
         try (RealForwarderFixture fixture = newRealForwarderFixture(DEAD_MASTER)) {
             FlexlbGrpcForwarder.MasterForwardResult result =
@@ -380,6 +374,11 @@ class ScheduleForwardMatrixTest {
             assertEquals("UNAVAILABLE", result.failure(),
                     "transport failure to the dead master must surface as UNAVAILABLE");
             assertEquals(DEAD_MASTER, result.masterHost());
+            Throwable cause = result.error();
+            while (cause != null && !(cause instanceof java.net.ConnectException)) {
+                cause = cause.getCause();
+            }
+            assertTrue(cause instanceof java.net.ConnectException, "connection failure type must be preserved");
             verify(fixture.engineHealthReporter).reportForwardToMasterResult(
                     "127.0.0.1", "GRPC_FAILED");
         }
@@ -457,14 +456,6 @@ class ScheduleForwardMatrixTest {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = capturedResponse(observer);
         assertTrue(response.getSuccess());
         assertEquals(200, response.getCode());
-    }
-
-    private FlexlbScheduleProtocol.FlexlbCancelRequestPB capturedCancel() {
-        org.mockito.ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelRequestPB> captor =
-                org.mockito.ArgumentCaptor.forClass(
-                        FlexlbScheduleProtocol.FlexlbCancelRequestPB.class);
-        verify(grpcForwarder, times(1)).forwardCancelToMaster(captor.capture());
-        return captor.getValue();
     }
 
     private void assertSinglePvContains(String expected) {
