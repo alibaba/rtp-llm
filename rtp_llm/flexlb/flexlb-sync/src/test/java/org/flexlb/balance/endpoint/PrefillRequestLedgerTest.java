@@ -600,7 +600,7 @@ class PrefillRequestLedgerTest {
         return new DecisionGroupHandler() {
             @Override public void onExpired(BatchItem head) {}
             @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {}
-            @Override public void onOfferFailure(BatchItem item, Throwable error) {}
+
             @Override public void onDeliveryFailure(BatchItem item, Throwable error) {}
         };
     }

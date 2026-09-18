@@ -48,9 +48,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -283,7 +285,12 @@ class AcceptedCancelSchedulerTest {
 
     @Test
     void notFoundReplaysDispatchTimeoutWithoutEarlyAccountingRelease() throws Exception {
-        BatchItem victim = registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
+        BatchItem victim = registerDispatchedShadowVictim(1L, 30);
+        TaskInfo running = new TaskInfo();
+        running.setRequestId(1L);
+        running.setPhase(TaskPhase.RUNNING);
+        running.setInputLength(128);
+        updateDecode(Map.of("1", running), null);
         AtomicBoolean retainedDuringRpc = new AtomicBoolean();
         cancelChannel.handler = (ignored, requestId) -> {
             scheduler.onTimeout(victim, new java.util.concurrent.TimeoutException("late stage2"));
@@ -300,9 +307,9 @@ class AcceptedCancelSchedulerTest {
                 "dispatch timeout must defer while the preemption claim owns cleanup");
         assertEquals(DecodePreemptionCoordinator.ResultCode.REPLAN_NOT_FOUND, result.code());
         Response response = victim.future().get(1, TimeUnit.SECONDS);
-        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
                 response.getCode());
-        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+        assertEquals(AdmissionRejectReason.UNSPECIFIED,
                 response.getAdmissionRejectReason());
         assertFalse(decodeEndpoint.isConfirmedTracked(1L));
     }
@@ -360,10 +367,10 @@ class AcceptedCancelSchedulerTest {
     }
 
     @Test
-    void acceptedCancelIgnoresYieldedTerminalUntilTypedCanceled() throws Exception {
+    void acceptedCancelDefersLocalPreemptionUntilTypedCanceled() throws Exception {
         BatchItem victim = registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) -> {
-            scheduler.finishYielded(victim, "ordinary yielded race");
+            scheduler.finishPreempted(victim, "preempted by higher-priority request 2");
             assertTrue(decodeEndpoint.isConfirmedTracked(requestId));
             assertFalse(victim.future().isDone());
             return CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted());
@@ -677,6 +684,70 @@ class AcceptedCancelSchedulerTest {
     }
 
     @Test
+    void asyncDecodeHandoffPublishesPrefillReofferCauseWithoutWaitingForDeadline() throws Exception {
+        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.PREFILL_QUEUED);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
+        BatchItem victim = registerConfirmedVictim(801L, 30, TaskPhase.RUNNING);
+        var batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
+        assertNull(batcher.tryOffer(dummyItem(802L, 10, null)));
+        cancelChannel.handler = (ignored, requestId) ->
+                CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted());
+        when(router.route(org.mockito.ArgumentMatchers.any(BalanceContext.class)))
+                .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
+        doAnswer(invocation -> {
+            batcher.queueManager().tryRemove(802L, "selected victim left");
+            assertNull(batcher.tryOffer(dummyItem(803L, 90, null)));
+            return null;
+        }).when(priorityReporter).reportEvictionPlan(eq(70), eq("prefill_queue_full"), eq("feasible"));
+
+        CompletableFuture<Response> incoming = scheduler.submit(context(804L, 70));
+        await(() -> cancelChannel.cancelCount.get() == 1);
+        scheduler.onWorkerStatusUpdate(prefillCanceled(801L));
+
+        Response response = incoming.get(1, TimeUnit.SECONDS);
+        assertEquals(8430, response.getCode());
+        assertEquals(AdmissionRejectReason.HIGHER_PRIORITY_AHEAD, response.getAdmissionRejectReason());
+        assertEquals("higher-priority requests are ahead", response.getErrorMessage());
+        assertEquals(8429, victim.future().get(1, TimeUnit.SECONDS).getCode());
+        assertFalse(decodeEndpoint.reservedView().containsKey(804L));
+        assertEquals(0, priorityScheduler.activeAdmissionCount());
+        assertTrue(batcher.queueManager().snapshot().items().stream()
+                .noneMatch(item -> item.requestId() == 804L));
+    }
+
+    @Test
+    void exceptionalCancelCoordinatorIsNotReportedAsCapacityRejection() throws Exception {
+        BatchItem victim = registerConfirmedVictim(811L, 30, TaskPhase.RUNNING);
+        when(router.route(org.mockito.ArgumentMatchers.any(BalanceContext.class)))
+                .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
+        DecodePreemptionCoordinator failingCoordinator = mock(DecodePreemptionCoordinator.class);
+        when(failingCoordinator.execute(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("coordinator failed")));
+        PriorityAdmissionScheduler admission = new PriorityAdmissionScheduler(
+                configService, router, endpointRegistry, new PlanCommitter(), priorityReporter,
+                mock(BatchSchedulerReporter.class), cancelChannel, failingCoordinator);
+        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        when(registrar.isAdmissionOpen(eq(812L), org.mockito.ArgumentMatchers.any())).thenReturn(true);
+        when(registrar.claimAdmissionMutation(eq(812L), org.mockito.ArgumentMatchers.any())).thenReturn(true);
+        try {
+            CompletableFuture<Response> incoming = new CompletableFuture<>();
+            admission.schedule(context(812L, 70), incoming, registrar);
+
+            Response response = incoming.get(1, TimeUnit.SECONDS);
+            assertEquals(8510, response.getCode());
+            assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
+            assertTrue(response.getErrorMessage().contains("priority cancel coordinator failed"));
+            assertFalse(victim.future().isDone());
+            assertTrue(decodeEndpoint.isConfirmedTracked(811L));
+            assertFalse(decodeEndpoint.reservedView().containsKey(812L));
+            assertEquals(0, admission.activeAdmissionCount());
+            verify(registrar, times(2)).completeAdmissionMutation(812L, incoming);
+        } finally {
+            admission.shutdown();
+        }
+    }
+
+    @Test
     void admissionDeadlineClosesAsyncCancelBeforeInflightRegistration() throws Exception {
         BatchItem victim = registerConfirmedVictim(51L, 30, TaskPhase.RUNNING);
         CompletableFuture<EngineCancelChannel.CancelOutcome> ack = new CompletableFuture<>();
@@ -705,7 +776,8 @@ class AcceptedCancelSchedulerTest {
         scheduler.onWorkerStatusUpdate(prefillCanceled(51L));
 
         Response response = responseFuture.get(2, TimeUnit.SECONDS);
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED, response.getAdmissionRejectReason());
         assertEquals(RequestLifecycleState.TIMED_OUT,
                 scheduler.getRequestState(52L, 0).state());
 
@@ -745,7 +817,7 @@ class AcceptedCancelSchedulerTest {
                 "a committed delivery remains live until the admission deadline reducer runs");
 
         Response response = responseFuture.get(2, TimeUnit.SECONDS);
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
         assertEquals(RequestLifecycleState.TIMED_OUT,
                 scheduler.getRequestState(62L, 0).state());
         assertFalse(decodeEndpoint.reservedView().containsKey(62L));

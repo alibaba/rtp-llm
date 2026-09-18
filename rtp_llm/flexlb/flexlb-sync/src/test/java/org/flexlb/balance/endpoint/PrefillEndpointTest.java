@@ -38,7 +38,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -375,7 +374,7 @@ class PrefillEndpointTest {
             @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
                 dispatched.countDown();
             }
-            @Override public void onOfferFailure(BatchItem item, Throwable error) {}
+
             @Override public void onDeliveryFailure(BatchItem item, Throwable error) {}
         };
         PrefillEndpoint limited = new PrefillEndpoint(
@@ -384,7 +383,7 @@ class PrefillEndpointTest {
             limited.commitBatch(700L, 2_000, List.of(
                     createBatchItem(limited, 101L, 500, 200),
                     createBatchItem(limited, 102L, 10_000, 0)));
-            limited.getBatcher().offer(createBatchItem(limited, 103L, 500, 0));
+            limited.getBatcher().tryOffer(createBatchItem(limited, 103L, 500, 0));
 
             assertFalse(dispatched.await(50, TimeUnit.MILLISECONDS));
 
@@ -625,7 +624,7 @@ class PrefillEndpointTest {
             @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
                 dispatched.countDown();
             }
-            @Override public void onOfferFailure(BatchItem item, Throwable error) {}
+
             @Override public void onDeliveryFailure(BatchItem item, Throwable error) {}
         };
         PrefillEndpoint limited = new PrefillEndpoint(
@@ -633,7 +632,7 @@ class PrefillEndpointTest {
         try {
             limited.commitBatch(700L, 100,
                     List.of(createBatchItem(limited, 101L, 500, 200)));
-            limited.getBatcher().offer(createBatchItem(limited, 102L, 300, 100));
+            limited.getBatcher().tryOffer(createBatchItem(limited, 102L, 300, 100));
 
             assertFalse(dispatched.await(50, TimeUnit.MILLISECONDS),
                     "maxInflight=1 must hold the next batch while the ledger is occupied");
@@ -896,7 +895,7 @@ class PrefillEndpointTest {
         assertEquals(0, endpoint.realPendingCount());
 
         BatchItem item = createBatchItem(1L, 500, 200);
-        endpoint.getBatcher().offer(item);
+        endpoint.getBatcher().tryOffer(item);
 
         long deadlineMs = System.currentTimeMillis() + 100;
         while (endpoint.realPendingCount() == 0 && System.currentTimeMillis() < deadlineMs) {
@@ -912,8 +911,8 @@ class PrefillEndpointTest {
         // Long fixed window so offered items stay queued during the assertions
         PrefillEndpoint slowEndpoint = newFixedWindowEndpoint(60_000);
         try {
-            slowEndpoint.getBatcher().offer(createPriorityBatchItem(1L, 70));
-            slowEndpoint.getBatcher().offer(createBatchItem(2L, 300, 0)); // legacy: budget=null -> priority 0
+            slowEndpoint.getBatcher().tryOffer(createPriorityBatchItem(1L, 70));
+            slowEndpoint.getBatcher().tryOffer(createBatchItem(2L, 300, 0)); // legacy: budget=null -> priority 0
 
             BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
             slowEndpoint.reportBatchMetrics(reporter);
@@ -962,7 +961,7 @@ class PrefillEndpointTest {
         endpoint.close();
         // After close, offering should fail (batcher is stopped)
         BatchItem item = createBatchItem(1L, 500, 200);
-        endpoint.getBatcher().offer(item);
+        endpoint.getBatcher().tryOffer(item);
         // Should not throw — batcher handles stopped state
     }
 
@@ -1077,7 +1076,7 @@ class PrefillEndpointTest {
         return new DecisionGroupHandler() {
             @Override public void onExpired(BatchItem head) {}
             @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {}
-            @Override public void onOfferFailure(BatchItem item, Throwable error) {}
+
             @Override public void onDeliveryFailure(BatchItem item, Throwable error) {}
         };
     }

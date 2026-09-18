@@ -1,39 +1,34 @@
 package org.flexlb.balance.scheduler.priority;
 
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.util.PriorityNormalizer;
 
 import java.util.ArrayList;
 import java.util.List;
 
-/** Pure causal classification over the same decode snapshot used to plan. */
+/** Classify Decode admission rejection from the capacity snapshot used by the decision. */
 public final class AdmissionFailureClassifier {
 
     private AdmissionFailureClassifier() {
     }
 
-    public static AdmissionFailure classifyDecode(PriorityRequestEnvelope incoming,
-                                                  List<DecodeEndpointSnapshot> endpoints) {
+    public static Response classifyDecode(PriorityRequestEnvelope incoming,
+                                          List<DecodeEndpointSnapshot> endpoints) {
         if (endpoints == null || endpoints.isEmpty()) {
-            return AdmissionFailure.resourceExhausted();
+            return Response.error(StrategyErrorType.NO_AVAILABLE_WORKER,
+                    AdmissionRejectReason.UNSPECIFIED, "no Decode endpoints available for admission");
         }
-        // A known hard-capacity miss on every endpoint is the one cluster-wide
-        // resource fact that does not depend on victim ownership or policy.
-        boolean allKnownTooSmall = endpoints.stream().allMatch(endpoint ->
-                endpoint.realKvTotal() > 0
-                        && incoming.hardKvTokens() > endpoint.realKvTotal());
-        if (allKnownTooSmall) {
-            return AdmissionFailure.resourceExhausted();
-        }
-
-        List<EndpointFailure> failures = new ArrayList<>();
+        List<Response> failures = new ArrayList<>();
         for (DecodeEndpointSnapshot endpoint : endpoints) {
             if (endpoint.realKvTotal() > 0
                     && incoming.hardKvTokens() > endpoint.realKvTotal()) {
                 // This request can never fit on this endpoint, irrespective
                 // of occupant priority.  Consequently an unattributed
                 // occupant on this endpoint is not causally relevant.
-                failures.add(new EndpointFailure(AdmissionFailure.resourceExhausted()));
+                failures.add(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
+                        AdmissionRejectReason.RESOURCE_EXHAUSTED));
                 continue;
             }
             long slotDeficit = EvictionPlanner.slotDeficit(endpoint);
@@ -41,7 +36,8 @@ public final class AdmissionFailureClassifier {
             if (slotDeficit <= 0 && kvDeficit <= 0) {
                 // The route failed while this endpoint snapshot has capacity;
                 // the snapshot cannot prove a causal blocker.
-                failures.add(new EndpointFailure(AdmissionFailure.resourceExhausted()));
+                failures.add(Response.error(StrategyErrorType.BATCH_DISPATCH_FAILED, AdmissionRejectReason.UNSPECIFIED,
+                        "Decode placement failed without a slot or KV capacity deficit"));
                 continue;
             }
             failures.add(classifyEndpoint(incoming, endpoint, slotDeficit, kvDeficit));
@@ -50,112 +46,28 @@ public final class AdmissionFailureClassifier {
         // cluster attribution unavailable. Folding it into 8431 would claim a
         // fully attributed resource failure that the aggregate snapshot cannot
         // prove, even when other endpoints have typed or resource causes.
-        for (EndpointFailure endpoint : failures) {
-            if (endpoint.failure().errorType() ==
-                    StrategyErrorType.ADMISSION_UNAVAILABLE) {
-                return endpoint.failure();
+        for (Response failure : failures) {
+            if (failure.getCode() == StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode()) {
+                return failure;
             }
         }
-        AdmissionFailure common = failures.get(0).failure();
-        boolean unanimous = failures.stream().allMatch(endpoint ->
-                endpoint.failure().errorType() == common.errorType()
-                        && endpoint.failure().reason() == common.reason());
-        return unanimous ? common : AdmissionFailure.resourceExhausted();
+        for (Response failure : failures) {
+            if (failure.getCode() == StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode()) {
+                return failure;
+            }
+        }
+        Response common = failures.get(0);
+        boolean unanimous = failures.stream().allMatch(failure ->
+                failure.getCode() == common.getCode()
+                        && failure.getAdmissionRejectReason() == common.getAdmissionRejectReason());
+        return unanimous ? common : Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED);
     }
 
-    public static AdmissionFailure classifyPrefill(PriorityRequestEnvelope incoming,
-                                                   PrefillQueueSnapshot queue) {
-        int deficit = queue.queueCapacity() > 0
-                ? Math.max(0, queue.items().size() + 1 - queue.queueCapacity()) : 0;
-        int lower = 0;
-        int higher = 0;
-        int same = 0;
-        boolean hasUnattributedOccupant = false;
-        for (QueuedRequestSnapshot occupant : queue.items()) {
-            if (!QueuedRequestSnapshot.PREFILL_QUEUED.equals(occupant.state())) {
-                continue;
-            }
-            if (!PriorityNormalizer.hasPriority(occupant.priority())) {
-                hasUnattributedOccupant = true;
-            } else if (occupant.priority() < incoming.priority()) {
-                lower++;
-            } else if (occupant.priority() > incoming.priority()) {
-                higher++;
-            } else {
-                same++;
-            }
-        }
-        int residual = Math.max(0, deficit - lower);
-        if (deficit <= 0 || residual <= 0) {
-            return AdmissionFailure.resourceExhausted();
-        }
-        // An unprioritized occupant is causal only when the known
-        // higher/same-priority occupants cannot already cover the residual
-        // queue deficit.  Merely being present must not erase a proven typed
-        // blocker.
-        int knownProtected = higher + same;
-        if (hasUnattributedOccupant && knownProtected < residual) {
-            return AdmissionFailure.priorityAttributionUnavailable();
-        }
-        if (higher > 0) {
-            return AdmissionFailure.higherPriorityAhead();
-        }
-        if (same > 0) {
-            return AdmissionFailure.samePriorityAhead();
-        }
-        return AdmissionFailure.resourceExhausted();
-    }
-
-    /**
-     * Classify a priority-admitted request that timed out after it had already
-     * entered the selected Prefill queue.
-     *
-     * <p>{@code itemsAhead} is the exact queue prefix from the timeout
-     * decision snapshot. A higher-priority request is the primary blocker
-     * whenever one exists. Otherwise an earlier request with the same priority
-     * proves FIFO blocking. If the causal prefix only contains an occupant
-     * without priority provenance, attribution is unavailable. If none of
-     * those cases applies, the selected route failed to provide dispatch or
-     * engine-admission capacity before expiration and is classified as
-     * resource exhaustion. Lower-priority items and items behind the request
-     * cannot explain its wait.
-     */
-    public static AdmissionFailure classifyQueuedTimeout(
-            int incomingPriority,
-            List<QueuedRequestSnapshot> itemsAhead) {
-        boolean higher = false;
-        boolean same = false;
-        boolean hasUnattributedOccupant = false;
-        if (itemsAhead != null) {
-            for (QueuedRequestSnapshot occupant : itemsAhead) {
-                if (!QueuedRequestSnapshot.PREFILL_QUEUED.equals(occupant.state())) {
-                    continue;
-                }
-                if (!PriorityNormalizer.hasPriority(occupant.priority())) {
-                    hasUnattributedOccupant = true;
-                } else if (occupant.priority() > incomingPriority) {
-                    higher = true;
-                } else if (occupant.priority() == incomingPriority) {
-                    same = true;
-                }
-            }
-        }
-        if (higher) {
-            return AdmissionFailure.higherPriorityAhead();
-        }
-        if (same) {
-            return AdmissionFailure.samePriorityAhead();
-        }
-        if (hasUnattributedOccupant) {
-            return AdmissionFailure.priorityAttributionUnavailable();
-        }
-        return AdmissionFailure.resourceExhausted();
-    }
-
-    private static EndpointFailure classifyEndpoint(PriorityRequestEnvelope incoming,
-                                                     DecodeEndpointSnapshot endpoint,
-                                                     long slotDeficit,
-                                                     long kvDeficit) {
+    private static Response classifyEndpoint(PriorityRequestEnvelope incoming,
+                                             DecodeEndpointSnapshot endpoint,
+                                             long slotDeficit,
+                                             long kvDeficit) {
         List<DecodeRequestSnapshot> occupants = new ArrayList<>(endpoint.reserved());
         occupants.addAll(endpoint.accepted());
         occupants.addAll(endpoint.running());
@@ -179,7 +91,7 @@ public final class AdmissionFailureClassifier {
                 continue;
             }
             if (!occupant.priorityKnown()
-                    || !PriorityNormalizer.hasPriority(occupant.priority())) {
+                    || !PriorityNormalizer.isValid(occupant.priority())) {
                 if (contributesSlot) {
                     unattributedSlot++;
                 }
@@ -216,7 +128,6 @@ public final class AdmissionFailureClassifier {
 
         long residualSlot = Math.max(0, slotDeficit - lowerSlot);
         long residualKv = Math.max(0, kvDeficit - lowerKv);
-        AdmissionFailure failure;
         long knownProtectedSlot = higherSlot + sameSlot;
         long knownProtectedKv = higherKv + sameKv;
         boolean slotAttributionComplete = residualSlot <= 0
@@ -235,25 +146,19 @@ public final class AdmissionFailureClassifier {
                 && ((residualSlot > 0 && sameSlot > 0)
                 || (residualKv > 0 && sameKv > 0));
         if (unattributedBlocksResidual) {
-            failure = AdmissionFailure.priorityAttributionUnavailable();
-        } else if (higherBlocksResidual) {
-            failure = AdmissionFailure.higherPriorityAhead();
-        } else if (sameBlocksResidual) {
-            failure = AdmissionFailure.samePriorityAhead();
-        } else if ((slotDeficit > 0 && lowerSlot >= slotDeficit)
-                || (kvDeficit > 0 && lowerKv >= kvDeficit)) {
-            // Lower-priority occupancy appears sufficient numerically, but
-            // this snapshot cannot prove ownership homogeneity, cancel support
-            // or policy gates. With no proven higher/same cause, fold the
-            // control limitation into the broadened resource result rather
-            // than claiming a physical allocation failure.
-            failure = AdmissionFailure.resourceExhausted();
-        } else {
-            failure = AdmissionFailure.resourceExhausted();
+            return Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
         }
-        return new EndpointFailure(failure);
-    }
-
-    private record EndpointFailure(AdmissionFailure failure) {
+        if (higherBlocksResidual) {
+            return Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                    AdmissionRejectReason.HIGHER_PRIORITY_AHEAD);
+        }
+        if (sameBlocksResidual) {
+            return Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                    AdmissionRejectReason.SAME_PRIORITY_AHEAD);
+        }
+        // Lower-priority occupancy alone does not prove that ownership and
+        // cancellation policy allow reclaiming it. Without a proven priority
+        // blocker, retain the capacity rejection.
+        return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED, AdmissionRejectReason.RESOURCE_EXHAUSTED);
     }
 }

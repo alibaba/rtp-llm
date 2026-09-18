@@ -61,7 +61,7 @@ import static org.mockito.Mockito.when;
  *       MAX_FORWARD_HOPS=1 negative guards.</li>
  * </ol></p>
  *
- * <p>Unresolved delivery uses the existing terminal error (8511). Proven unsent
+ * <p>Unresolved delivery uses the existing terminal error (8510). Proven unsent
  * requests may route locally; ambiguous delivery is terminal.</p>
  */
 class ScheduleForwardMatrixTest {
@@ -83,7 +83,7 @@ class ScheduleForwardMatrixTest {
      */
     private static final String DEAD_MASTER = "127.0.0.1:1";
     private static final int TERMINAL_FORWARD_CODE =
-            StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode();
+            StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode();
 
     // ---- shared mocks for the schedule() matrix ----
     private RouteService routeService;
@@ -162,7 +162,7 @@ class ScheduleForwardMatrixTest {
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    @DisplayName("state ② attempted forward with unresolved owner: terminal 8511, no local dispatch")
+    @DisplayName("state ② attempted forward with unresolved owner: terminal 8510, no local dispatch")
     void state2AmbiguousForwardRemainsTerminalWithoutCancel() {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(false);
@@ -181,14 +181,14 @@ class ScheduleForwardMatrixTest {
         assertFalse(response.getSuccess());
         assertEquals(TERMINAL_FORWARD_CODE, response.getCode());
         assertEquals(DEAD_MASTER, response.getRealMasterHost());
-        assertEquals(8511, TERMINAL_FORWARD_CODE);
+        assertEquals(8510, TERMINAL_FORWARD_CODE);
 
         // Ambiguous delivery must neither cancel the owner nor replay the request.
         verify(grpcForwarder, never()).forwardCancelToMaster(any());
 
         // The failed forward is terminal: no local routing attempt at all.
         verify(routeService, never()).route(any());
-        assertSinglePvContains("\"code\":8511");
+        assertSinglePvContains("\"code\":8510");
         assertSinglePvContains("\"scheduleOrigin\":\"FORWARD_FAILED\"");
     }
 

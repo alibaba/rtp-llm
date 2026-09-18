@@ -13,6 +13,7 @@ final class ImmediateNonBatchAlgorithm implements BatcherAlgorithm {
     public void processQueue(BatcherContext ctx) {
         BatchItem head = ctx.peek();
         if (head == null) {
+            ctx.setWaitReason(null);
             return;
         }
         long nowMs = ctx.now();

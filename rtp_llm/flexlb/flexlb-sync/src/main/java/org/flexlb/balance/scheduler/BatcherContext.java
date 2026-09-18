@@ -1,6 +1,10 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.util.PriorityNormalizer;
 import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
@@ -12,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.PriorityQueue;
@@ -40,6 +45,8 @@ public class BatcherContext {
     private final DecisionGroupHandler decisionHandler;
     private final PriorityBlockingQueue<BatchItem> queue;
     private final AtomicInteger queueDepth;
+    /** Charged slots by priority (0 = unknown), including pending deliveries; guarded by queueLock. */
+    private final int[] occupiedSlotsByPriority = new int[101];
     private final AtomicLong queueVersion;
     private final ReentrantLock queueLock;
     private final Comparator<BatchItem> queueOrder;
@@ -109,6 +116,17 @@ public class BatcherContext {
     private volatile long lastDecisionAtMs;
     private volatile double decisionIntervalEmaMs;
 
+    /** Last wait observed by queue scheduling or delivery gates. Diagnostic only; never used to control scheduling. */
+    private volatile String waitReason;
+
+    void setWaitReason(String reason) {
+        waitReason = reason;
+    }
+
+    String getWaitReason() {
+        return waitReason;
+    }
+
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
                    DecisionGroupHandler decisionHandler,
                    PriorityBlockingQueue<BatchItem> queue,
@@ -144,6 +162,13 @@ public class BatcherContext {
         this.queueOrder = queueOrder;
         this.reporter = reporter;
         this.readyDeliveryQueue = new PriorityQueue<>(11, queueOrder);
+        // Production starts empty; initialize once for a supplied pre-populated queue.
+        if (!queue.isEmpty()) {
+            for (BatchItem item : queue) {
+                int priority = item.priority();
+                occupiedSlotsByPriority[PriorityNormalizer.isValid(priority) ? priority : 0]++;
+            }
+        }
     }
 
     // ---- accessors ----
@@ -231,6 +256,94 @@ public class BatcherContext {
 
     // ---- queue mutation ----
 
+    /** Update the capacity charge and its attribution together while holding queueLock. */
+    void updateQueueDepth(BatchItem item, int delta) {
+        int priority = item.priority();
+        occupiedSlotsByPriority[PriorityNormalizer.isValid(priority) ? priority : 0] += delta;
+        queueDepth.addAndGet(delta);
+    }
+
+    /** Caller holds queueLock and has observed a full queue. Reads only 100 priority counters. */
+    Response queueFullResponse(int incomingPriority, int capacity) {
+        int lower = 0;
+        int same = 0;
+        int higher = 0;
+        for (int priority = 1; priority < occupiedSlotsByPriority.length; priority++) {
+            int count = occupiedSlotsByPriority[priority];
+            if (priority < incomingPriority) {
+                lower += count;
+            } else if (priority == incomingPriority) {
+                same += count;
+            } else {
+                higher += count;
+            }
+        }
+        int residual = queueDepth.get() + 1 - capacity - lower;
+        if (residual > 0) {
+            if (occupiedSlotsByPriority[0] > 0 && higher + same < residual) {
+                return Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
+            }
+            if (higher > 0) {
+                return Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                        AdmissionRejectReason.HIGHER_PRIORITY_AHEAD);
+            }
+            if (same > 0) {
+                return Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                        AdmissionRejectReason.SAME_PRIORITY_AHEAD);
+            }
+        }
+        return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED, AdmissionRejectReason.RESOURCE_EXHAUSTED);
+    }
+
+    /** Fixed-size counter snapshot; no request traversal or position lookup. */
+    Map<String, Object> queueDiagnostics(int incomingPriority) {
+        queueLock.lock();
+        try {
+            int higher = 0;
+            int same = 0;
+            int lower = 0;
+            for (int priority = 1; priority < occupiedSlotsByPriority.length; priority++) {
+                int count = occupiedSlotsByPriority[priority];
+                if (priority > incomingPriority) {
+                    higher += count;
+                } else if (priority == incomingPriority) {
+                    same += count;
+                } else {
+                    lower += count;
+                }
+            }
+            int depth = queueDepth.get();
+            int unknown = occupiedSlotsByPriority[0];
+            int pending = pendingDeliveries.size();
+            Map<String, Object> values = new LinkedHashMap<>();
+            values.put("endpoint", key);
+            values.put("queueDepth", depth);
+            values.put("queueCapacity", maxQueueCapacity());
+            values.put("queueVersion", queueVersion.get());
+            values.put("ordering", cfg.isPriorityOrdering() ? "PRIORITY" : "FIFO");
+            values.put("higherPriorityCount", higher);
+            values.put("samePriorityCount", same);
+            values.put("lowerPriorityCount", lower);
+            values.put("unknownPriorityCount", unknown);
+            values.put("readyCount", readyDeliveryCount);
+            values.put("pendingCount", pending);
+            // Counts include any still-charged subject. Later same-priority arrivals
+            // cannot be separated without a request scan, so never claim an exact position.
+            values.put("aheadCountUpperBound", cfg.isPriorityOrdering()
+                    ? Math.min(depth, higher + same + unknown + readyDeliveryCount + pending) : depth);
+            if (waitReason != null) {
+                values.put("waitReason", waitReason);
+            }
+            if (prefillEp != null) {
+                values.put("inflightRequests", prefillEp.getInflightRequestCount());
+                values.put("inflightBatches", prefillEp.getInflightBatchCount());
+            }
+            return Map.copyOf(values);
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
     boolean remove(BatchItem item) {
         queueLock.lock();
         try {
@@ -241,8 +354,7 @@ public class BatcherContext {
                 removed = true;
             }
             if (removed) {
-                item.clearParkTrace();
-                queueDepth.decrementAndGet();
+                updateQueueDepth(item, -1);
                 queueVersion.incrementAndGet();
             }
             return removed;
@@ -255,19 +367,17 @@ public class BatcherContext {
         queueLock.lock();
         try {
             int drained = queue.drainTo(dst);
-            for (int i = dst.size() - drained; i < dst.size(); i++) {
-                dst.get(i).clearParkTrace();
-            }
             while (!readyDeliveryQueue.isEmpty()) {
                 BatchItem ready = readyDeliveryQueue.poll();
                 ready.clearRouteDecisionReady();
-                ready.clearParkTrace();
                 dst.add(ready);
                 drained++;
             }
             readyDeliveryCount = 0;
             if (drained > 0) {
-                queueDepth.addAndGet(-drained);
+                for (int i = dst.size() - drained; i < dst.size(); i++) {
+                    updateQueueDepth(dst.get(i), -1);
+                }
                 queueVersion.incrementAndGet();
             }
         } finally {
@@ -392,21 +502,6 @@ public class BatcherContext {
         return prefillEp.availableRequestSlots(maximum == null ? 0 : maximum);
     }
 
-    /** Delivery-unit inflight count used only for decision diagnostics. */
-    int deliveryInflightCount(BatchItem head) {
-        return head != null && head.deliveryMode() == DeliveryMode.ROUTE_DECISION
-                ? prefillEp.getInflightRouteRequestCount()
-                : prefillEp.getInflightBatchCount();
-    }
-
-    void rejectForBatchTokenCapacity(BatchItem item, long capacity) {
-        if (remove(item)) {
-            decisionHandler.onOfferFailure(item, new BatchTokenCapacityExceededException(
-                    "request seq_len=" + item.seqLen()
-                            + " cannot fit strict padded batch token capacity=" + capacity));
-        }
-    }
-
     private static long positiveOrUnlimited(long value) {
         return value > 0 ? value : Long.MAX_VALUE;
     }
@@ -469,6 +564,7 @@ public class BatcherContext {
         }
         int availableSlots = availableDeliverySlots();
         if (availableSlots == 0) {
+            setWaitReason("prefill request slots exhausted");
             return ReadyDeliveryResult.CAPACITY_BLOCKED;
         }
         int maxDelivery = 1;
@@ -618,6 +714,7 @@ public class BatcherContext {
                 } else {
                     readyDeliveryQueue.add(item);
                     readyDeliveryCount++;
+                    setWaitReason("prefill request slots exhausted");
                 }
                 // Active -> ready/pending changes the actionable queue state,
                 // but the original capacity charge remains held.
@@ -726,7 +823,7 @@ public class BatcherContext {
             if (pending.restoresToReadyQueue()) {
                 item.clearRouteDecisionReady();
             }
-            queueDepth.decrementAndGet();
+            updateQueueDepth(item, -1);
             queueVersion.incrementAndGet();
             return true;
         } finally {
@@ -746,7 +843,7 @@ public class BatcherContext {
             if (pending.restoresToReadyQueue()) {
                 item.clearRouteDecisionReady();
             }
-            queueDepth.decrementAndGet();
+            updateQueueDepth(item, -1);
             queueVersion.incrementAndGet();
             return true;
         } finally {
@@ -766,7 +863,7 @@ public class BatcherContext {
             if (pending.restoresToReadyQueue()) {
                 item.clearRouteDecisionReady();
             }
-            queueDepth.decrementAndGet();
+            updateQueueDepth(item, -1);
             queueVersion.incrementAndGet();
             return true;
         } finally {
@@ -801,7 +898,7 @@ public class BatcherContext {
                 if (pending.restoresToReadyQueue()) {
                     item.clearRouteDecisionReady();
                 }
-                queueDepth.decrementAndGet();
+                updateQueueDepth(item, -1);
                 queueVersion.incrementAndGet();
                 return PendingRestoreResult.STOPPED;
             }
@@ -828,19 +925,17 @@ public class BatcherContext {
         try {
             stopped = true;
             int drained = queue.drainTo(dst);
-            for (int i = dst.size() - drained; i < dst.size(); i++) {
-                dst.get(i).clearParkTrace();
-            }
             while (!readyDeliveryQueue.isEmpty()) {
                 BatchItem ready = readyDeliveryQueue.poll();
                 ready.clearRouteDecisionReady();
-                ready.clearParkTrace();
                 dst.add(ready);
                 drained++;
             }
             readyDeliveryCount = 0;
             if (drained > 0) {
-                queueDepth.addAndGet(-drained);
+                for (int i = dst.size() - drained; i < dst.size(); i++) {
+                    updateQueueDepth(dst.get(i), -1);
+                }
             }
             boolean stagedDrained = false;
             java.util.Iterator<Map.Entry<BatchItem, PendingDelivery>> iterator =
@@ -853,10 +948,9 @@ public class BatcherContext {
                     if (pending.restoresToReadyQueue()) {
                         item.clearRouteDecisionReady();
                     }
-                    item.clearParkTrace();
                     dst.add(item);
                     iterator.remove();
-                    queueDepth.decrementAndGet();
+                    updateQueueDepth(item, -1);
                     stagedDrained = true;
                 }
             }
@@ -883,8 +977,9 @@ public class BatcherContext {
      * Caller is responsible for algorithm-specific logging and state cleanup.
      */
     void dropHead(BatchItem head) {
-        remove(head);
-        decisionHandler.onExpired(head);
+        if (remove(head)) {
+            decisionHandler.onExpired(head);
+        }
     }
 
     // ---- decision interval estimation (design doc 8.4) ----

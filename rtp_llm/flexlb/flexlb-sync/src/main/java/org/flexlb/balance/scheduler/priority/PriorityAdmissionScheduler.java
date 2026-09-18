@@ -52,25 +52,23 @@ import java.util.function.Supplier;
 /**
  * Priority admission scheduler for {@code QUEUE + PRIORITY}.
  *
- * <p>Per attempt (up to {@link #MAX_PLAN_RETRIES}):
+ * <p>Each placement attempt:
  * <ol>
  *   <li>Capture a read-only {@link ClusterSnapshot}</li>
  *   <li>Build a {@link NormalPlacementPlan} by reusing the existing
  *       {@link Router#route} (which also performs the decode reservation),
  *       guaranteeing consistent placement behavior</li>
- *   <li>Commit via {@link PlanCommitter}; on {@code OFFER_FAILED} the decode
- *       reservation is released and the attempt is retried</li>
+ *   <li>Commit via {@link PlanCommitter}; release the decode reservation on
+ *       rejection and retry only for capacity or victim-presence conflicts</li>
  *   <li>When prefill-queue preemption is allowed and the
  *       offer fails because the prefill queue is full, plan the cheapest
  *       strictly-lower-priority eviction ({@link EvictionPlanner}) and commit
  *       it atomically via {@link PrefillQueueManager#tryReplaceVictimsPresent};
- *       queued victims yield with the retryable {@code NO_AVAILABLE_WORKER}
- *       (contract 5.3 — only engine-accepted victims terminate with
- *       {@code PRIORITY_PREEMPTED})</li>
+ *       all evicted victims terminate with {@code PRIORITY_PREEMPTED}</li>
  * </ol>
- * When no placement is feasible or retries are exhausted, the scheduler returns a
- * typed admission failure: proven priority blocker (8430), or admission
- * capacity unavailable before request expiration (8431). Prefill and decode
+ * A queue-capacity rejection permits one fallback placement. Victim-presence
+ * conflicts have a separate budget of {@link #MAX_EVICTION_REPLANS} replans.
+ * Rejections retain the decision's error code and admission reason. Prefill and decode
  * victims are considered only when their exact lifecycle stages are listed in
  * {@link org.flexlb.config.PreemptionConfig#getAllowedVictimStages()}.
  */
@@ -78,9 +76,9 @@ import java.util.function.Supplier;
 public class PriorityAdmissionScheduler {
 
     /**
-     * Internal safety valve: maximum placement-plan attempts per request.
+     * Maximum replans after victim-presence conflicts, independent of offer retries.
      */
-    private static final int MAX_PLAN_RETRIES = 3;
+    private static final int MAX_EVICTION_REPLANS = 3;
     /** Sentinel stored in {@link #activeAdmissionCount} after shutdown. */
     private static final int ADMISSION_CLOSED = -1;
 
@@ -392,8 +390,7 @@ public class PriorityAdmissionScheduler {
             Logger.debug("[priority-scheduler] backpressure limit exceeded, reject request_id={} "
                             + "active_admissions={} limit={}",
                     ctx.getRequestId(), activePermits, backpressureLimit);
-            AdmissionFailure failure = AdmissionFailure.resourceExhausted();
-            completeAdmissionError(future, failure.errorType(), failure.reason(),
+            completeAdmissionError(future, StrategyErrorType.RESOURCE_EXHAUSTED, AdmissionRejectReason.RESOURCE_EXHAUSTED,
                     "post-success backpressure: active_admissions=" + activePermits
                             + " limit=" + backpressureLimit);
             return;
@@ -417,38 +414,17 @@ public class PriorityAdmissionScheduler {
                                     InflightRegistrar registrar,
                                     FlexlbConfig config,
                                     AdmissionPermit permit) {
-        int maxRetries = MAX_PLAN_RETRIES;
-        long nowMs = System.currentTimeMillis();
-        if (ctx.requestExpired(nowMs)) {
-            Logger.debug("[priority-scheduler] request expired, reject request_id={} expires_at_ms={} now_ms={}",
-                    ctx.getRequestId(), ctx.getRequestExpiresAtMs(), nowMs);
-            AdmissionFailure failure = AdmissionFailure.resourceExhausted();
-            completeAdmissionError(future, failure.errorType(), failure.reason(),
-                    "request expired: expires_at_ms="
-                            + ctx.getRequestExpiresAtMs() + " now_ms=" + nowMs);
+        if (ctx.requestExpired(System.currentTimeMillis())) {
+            future.complete(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
+                    AdmissionRejectReason.RESOURCE_EXHAUSTED, "Master placement did not complete within budget"));
             return;
         }
-
-        // Capacity failures retain the typed causal classification from their
-        // own snapshot instead of inferring a cause from retry diagnostics.
-        // Diagnostic tag for retry exhaustion; causal attribution is carried
-        // independently by lastCapacityFailure, never inferred from this text.
-        String lastFailureReason = null;
-        AdmissionFailure lastCapacityFailure = null;
-        // One primary offer plus one fallback re-route: a second capacity
-        // failure rejects fast instead of burning the whole retry budget.
+        // Capacity offers and victim-presence replans have separate bounded budgets.
         int offerFailures = 0;
-        // P2-1: victims-gone eviction replans spend their own budget (same
-        // size as the capacity retry budget) — capacity churn must neither
-        // consume the capacity retries nor feed the fast-reject counter.
         int evictionReplans = 0;
-
-        for (int attempt = 1; attempt <= maxRetries; attempt++) {
-            if (!registrar.isAdmissionOpen(ctx.getRequestId(), future)) {
-                return;
-            }
-            // §19.1 schedule_attempt: final value = attempts consumed.
-            ctx.setScheduleAttempt(attempt);
+        while (registrar.isAdmissionOpen(ctx.getRequestId(), future)) {
+            ctx.setSchedulingDiagnostics(null);
+            ctx.setScheduleAttempt(ctx.getScheduleAttempt() + 1);
             if (!registrar.claimAdmissionMutation(ctx.getRequestId(), future)) {
                 return;
             }
@@ -462,215 +438,101 @@ public class PriorityAdmissionScheduler {
                 throw routeFailure;
             }
 
+            EvictionOutcome eviction;
             if (outcome.plan == null) {
-                // A failed route owns no reservation. End its mutation before
-                // entering Decode eviction, whose asynchronous coordinator
-                // takes a distinct mutation claim for its own request-id
-                // keyed side effects.
+                // Failed routing owns no reservation. Engine-Cancel coordination
+                // claims its own mutation, independently of this route attempt.
                 registrar.completeAdmissionMutation(ctx.getRequestId(), future);
                 if (!registrar.isAdmissionOpen(ctx.getRequestId(), future)) {
                     return;
                 }
-                // Decode eviction (gated, default off): the route failed
-                // specifically for Decode capacity. Either victim domain may
-                // independently open this planning entry point; the planner
-                // applies each switch to its own ownership domain.
-                // This method is only reached via the priority scheduling priority path,
-                // so every request here already carries a normalized priority.
-                if ((preemptionAllows(config, VictimStage.DECODE_RESERVED)
-                        || preemptionAllows(config, VictimStage.DECODE_ENGINE_OWNED))
-                        && isDecodeCapacityFailure(outcome.failureResponse)) {
-                    DecodeEvictionOutcome eviction =
-                            tryDecodeEviction(ctx, future, snapshot, config, registrar, permit);
-                    if (eviction == DecodeEvictionOutcome.CONFLICT) {
-                        Logger.debug("[priority-scheduler] decode eviction conflict (attempt {}/{}), request_id={}",
-                                attempt, maxRetries, ctx.getRequestId());
-                        // A missing victim means capacity changed while the
-                        // plan was being committed. Replan with jittered
-                        // backoff and charge the dedicated eviction budget.
-                        lastFailureReason = "victims_gone";
-                        backoffBeforeEvictionReplan();
-                        if (++evictionReplans <= maxRetries) {
-                            attempt--;
-                            continue;
-                        }
-                        AdmissionFailure failure = AdmissionFailure.resourceExhausted();
-                        completeAdmissionError(future, failure.errorType(), failure.reason(),
-                                "priority-scheduler eviction replans exhausted, reason=victims_gone");
-                        return;
-                    }
-                    if (eviction == DecodeEvictionOutcome.INFEASIBLE) {
-                        // Redesign C-2: no evictable candidates is an ordinary
-                        // capacity failure, not a first-attempt terminal state
-                        // — the reservations racing us may drain, so retry
-                        // with a fresh plan and only fail on exhaustion.
-                        lastFailureReason = "capacity_no_evict_candidates";
-                        Logger.debug("[priority-scheduler] no feasible eviction plan (attempt {}/{}), request_id={} priority={}",
-                                attempt, maxRetries, ctx.getRequestId(), ctx.getPriority());
-                        continue;
-                    }
-                    // COMMITTED, or FAILED with the future already completed.
+                if (!isDecodeCapacityFailure(outcome.failureResponse) || snapshot.decodes().isEmpty()) {
+                    recordPlacementDiagnostics(ctx, snapshot, outcome.failureResponse == null
+                            ? "placement returned no route or failure decision"
+                            : outcome.failureResponse.getErrorMessage());
+                    onInfeasible(ctx, future, outcome.failureResponse);
                     return;
                 }
-                if (isDecodeCapacityFailure(outcome.failureResponse)) {
+                if (!preemptionAllows(config, VictimStage.DECODE_RESERVED)
+                        && !preemptionAllows(config, VictimStage.DECODE_ENGINE_OWNED)) {
                     PriorityRequestEnvelope envelope = new PriorityRequestEnvelope(
                             ctx.getRequestId(), ctx.getPriority(),
                             ctx.getRequest().getSeqLen(), ctx.getRequest().getMaxNewTokens(),
-                            ctx.getStartTime(),
-                            ctx.getRequest().getSeqLen(),
+                            ctx.getStartTime(), ctx.getRequest().getSeqLen(),
                             config.decodeKvReservationTokens(
-                                    ctx.getRequest().getSeqLen(),
-                                    ctx.getRequest().getMaxNewTokens(), 0L));
-                    AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
-                            envelope, new ArrayList<>(snapshot.decodes().values()));
-                    completeAdmissionError(future, failure.errorType(),
-                            failure.reason(), failure.message());
+                                    ctx.getRequest().getSeqLen(), ctx.getRequest().getMaxNewTokens(), 0L));
+                    recordPlacementDiagnostics(ctx, snapshot, "decode admission capacity exhausted; preemption disabled");
+                    future.complete(AdmissionFailureClassifier.classifyDecode(
+                            envelope, new ArrayList<>(snapshot.decodes().values())));
                     return;
                 }
-                onInfeasible(ctx, future, outcome.failureResponse);
-                return;
-            }
-
-            try {
-                // P1-1: flip the reservation into the queued phase BEFORE the
-                // commit can publish the item to the batcher — marking after the
-                // commit (in onCommitted) races the dispatch side's
-                // the dispatch ownership claim and can leave a stale queued mark that hides
-                // the request from the engine concurrency gate. Every failure path
-                // below runs releaseDecodeReservation() (and a retry re-reserves),
-                // both of which clear the mark.
-                if (outcome.plan.decodeEp() != null) {
-                    outcome.plan.decodeEp().markQueuedPhase(ctx.getRequestId());
-                }
-                PlanCommitter.CommitResult result =
-                        planCommitter.commit(outcome.plan, registrar);
-                if (result == PlanCommitter.CommitResult.SUCCESS) {
-                    onCommitted(ctx, outcome.plan);
-                    bindAdmissionLease(outcome.plan, registrar, permit);
-                    return;
-                }
-
-                if (result == PlanCommitter.CommitResult.OFFER_FAILED) {
-                    // Capacity-rooted failure (typically a full prefill queue).
-                    // P1-4 (design §B.3 deviation): the fallback re-route would
-                    // deterministically re-pick the worker whose queue just
-                    // rejected the offer (same cost view) — steer the next route
-                    // away from it instead of reordering candidates (N4).
+                eviction = tryDecodeEviction(ctx, future, snapshot, config, registrar, permit);
+            } else {
+                try {
+                    // Publish the queued phase before a worker can claim delivery.
+                    if (outcome.plan.decodeEp() != null) {
+                        outcome.plan.decodeEp().markQueuedPhase(ctx.getRequestId());
+                    }
+                    PlanCommitter.CommitResult commit = planCommitter.commit(outcome.plan, registrar);
+                    if (commit.committed()) {
+                        onCommitted(ctx, outcome.plan);
+                        bindAdmissionLease(outcome.plan, registrar, permit);
+                        return;
+                    }
+                    if (commit.failure() == null || !registrar.isAdmissionOpen(ctx.getRequestId(), future)) {
+                        releaseDecodeReservation(outcome.plan);
+                        return;
+                    }
+                    Response failure = commit.failure();
+                    if (!StrategyErrorType.fromErrorCode(failure.getCode()).isCapacityRejection()) {
+                        releaseDecodeReservation(outcome.plan);
+                        future.complete(failure);
+                        return;
+                    }
                     ctx.setExcludedPrefillIpPort(outcome.plan.prefillEp().ipPort());
-                    lastCapacityFailure = AdmissionFailureClassifier.classifyPrefill(
-                            outcome.plan.envelope(),
-                            outcome.plan.prefillEp().getBatcher().queueManager().snapshot());
-                }
-
-                // Phase 3: the offer failed — typically a full prefill queue.
-                // Try to free queue slots by evicting strictly lower-priority
-                // queued requests (gated, default off). This method is only
-                // reached via the priority scheduling priority path, so every request here
-                // already carries a normalized priority.
-                if (result == PlanCommitter.CommitResult.OFFER_FAILED
-                        && preemptionAllows(config, VictimStage.PREFILL_QUEUED)) {
-                    EvictionOutcome eviction = tryPrefillQueueEviction(outcome.plan, config, registrar);
-                    switch (eviction) {
-                        case COMMITTED -> {
-                            onCommitted(ctx, outcome.plan);
-                            bindAdmissionLease(outcome.plan, registrar, permit);
-                            return;
-                        }
-                        case INFEASIBLE -> {
-                            // Redesign C-2: same fall-back as the decode-eviction
-                            // INFEASIBLE — capacity failure, retry with a fresh plan.
-                            releaseDecodeReservation(outcome.plan);
-                            // P2-1: a genuine queue-full failure (nothing evictable)
-                            // — counts toward the two-offer fast-reject.
-                            offerFailures++;
-                            lastFailureReason = "capacity_no_evict_candidates";
-                            Logger.debug("[priority-scheduler] no feasible eviction plan (attempt {}/{}), request_id={} priority={}",
-                                    attempt, maxRetries, ctx.getRequestId(), ctx.getPriority());
+                    if (!preemptionAllows(config, VictimStage.PREFILL_QUEUED)) {
+                        releaseDecodeReservation(outcome.plan);
+                        if (++offerFailures < 2) {
                             continue;
                         }
-                        case PARTIAL_FAILURE -> {
-                            releaseDecodeReservation(outcome.plan);
-                            AdmissionFailure failure = AdmissionFailure.resourceExhausted();
-                            completeAdmissionError(future, failure.errorType(), failure.reason(),
-                                    "eviction commit partial failure");
-                            return;
-                        }
-                        case REJECTED -> {
-                            releaseDecodeReservation(outcome.plan);
-                            return;
-                        }
-                        case CONFLICT -> {
-                            // fall through: release the decode reservation and retry
-                            // A queued victim left before commit. Release the
-                            // incoming reservation and replan from fresh state.
-                            lastFailureReason = "victims_gone";
-                            releaseDecodeReservation(outcome.plan);
-                            backoffBeforeEvictionReplan();
-                            if (++evictionReplans <= maxRetries) {
-                                attempt--;
-                                continue;
-                            }
-                            AdmissionFailure failure = AdmissionFailure.resourceExhausted();
-                            completeAdmissionError(future, failure.errorType(), failure.reason(),
-                                    "priority-scheduler eviction replans exhausted, reason=victims_gone");
-                            return;
-                        }
+                        future.complete(failure);
+                        return;
                     }
+                    eviction = tryPrefillQueueEviction(outcome.plan, config, registrar);
+                    if (eviction.committed()) {
+                        onCommitted(ctx, outcome.plan);
+                        bindAdmissionLease(outcome.plan, registrar, permit);
+                        return;
+                    }
+                    releaseDecodeReservation(outcome.plan);
+                } finally {
+                    // Rollback or handoff precedes pending cancellation publication.
+                    registrar.completeAdmissionMutation(ctx.getRequestId(), future);
                 }
-
-                // OFFER_FAILED: nothing was queued. Release the decode
-                // reservation taken by route() and retry with a fresh plan.
-                releaseDecodeReservation(outcome.plan);
-                Logger.debug("[priority-scheduler] plan commit {} (attempt {}/{}), request_id={}",
-                        result, attempt, maxRetries, ctx.getRequestId());
-
-                // P2-1: only genuine capacity-rooted offer failures reach this
-                // point (victims_gone replans continue above) — count them here.
-                if (result == PlanCommitter.CommitResult.OFFER_FAILED) {
-                    offerFailures++;
-                }
-                if (result == PlanCommitter.CommitResult.OFFER_FAILED
-                        && offerFailures >= 2) {
-                    // Primary + one fallback offer both hit a capacity
-                    // failure — fast reject with queue-full semantics instead of
-                    // exhausting the full re-route budget.
-                    // P2-1: the reason is the current attempt's own failure cause,
-                    // never a stale lastFailureReason from an earlier attempt.
-                    AdmissionFailure failure = lastCapacityFailure != null
-                            ? lastCapacityFailure : AdmissionFailure.resourceExhausted();
-                    completeAdmissionError(future, failure.errorType(), failure.reason(),
-                            failure.message());
-                    return;
-                }
-            } finally {
-                // Publish a pending cancellation/expiration only after every reservation
-                // acquired by route() is committed to an inflight owner or
-                // released by the failure path above.
-                registrar.completeAdmissionMutation(ctx.getRequestId(), future);
             }
-        }
 
-        AdmissionFailure finalFailure = lastCapacityFailure != null
-                ? lastCapacityFailure : AdmissionFailure.resourceExhausted();
-        completeAdmissionError(future, finalFailure.errorType(), finalFailure.reason(),
-                lastFailureReason != null
-                        ? "priority-scheduler plan retries exhausted, reason=" + lastFailureReason
-                        : finalFailure.message());
+            // Both eviction paths have released their provisional resources before retrying.
+            if (eviction.retryFailure() == null) {
+                return;
+            }
+            if (++evictionReplans > MAX_EVICTION_REPLANS) {
+                future.complete(eviction.retryFailure());
+                return;
+            }
+            backoffBeforeEvictionReplan();
+        }
     }
 
     // ==================== Phase 3: prefill queue eviction ====================
 
-    private enum EvictionOutcome {
-        /** Incoming committed in place of the victims. */
-        COMMITTED,
-        /** No feasible plan (no/insufficient strictly-lower-priority candidates). */
-        INFEASIBLE,
-        /** A planned victim disappeared — retry with a fresh plan. */
-        CONFLICT,
-        /** Defensive: victims removed but incoming not enqueued (should be unreachable). */
-        PARTIAL_FAILURE,
-        /** Typed incoming rejection already completed on the item future. */
-        REJECTED
+    /** One eviction attempt: committed, handled by an owner, or retry with its actual cause. */
+    private record EvictionOutcome(boolean committed, Response retryFailure) {
+        static final EvictionOutcome COMMITTED = new EvictionOutcome(true, null);
+        static final EvictionOutcome FINISHED = new EvictionOutcome(false, null);
+
+        static EvictionOutcome retry(Response failure) {
+            return new EvictionOutcome(false, java.util.Objects.requireNonNull(failure));
+        }
     }
 
     /**
@@ -696,11 +558,17 @@ public class PriorityAdmissionScheduler {
                             + "phase=prefill_queue candidates_seen={} reasons={}",
                     envelope.requestId(), envelope.priority(),
                     queueSnapshot.items().size(), failures);
-            AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
-                    envelope, queueSnapshot);
-            completeAdmissionError(item.future(), failure.errorType(),
-                    failure.reason(), failure.message());
-            return EvictionOutcome.REJECTED;
+            // The victim view excludes charged pending deliveries. A real offer
+            // determines admission, including slots freed since the first offer.
+            PlanCommitter.CommitResult direct = planCommitter.commit(plan, registrar);
+            if (direct.committed()) {
+                return EvictionOutcome.COMMITTED;
+            }
+            Response failure = direct.failure();
+            if (failure != null) {
+                item.future().complete(failure);
+            }
+            return EvictionOutcome.FINISHED;
         }
         reportEvictionPlan(envelope.priority(), envelope.requestId(),
                 "prefill_queue_full", "feasible");
@@ -716,11 +584,13 @@ public class PriorityAdmissionScheduler {
         // registration and the queue replacement/direct-offer edge are one
         // request-local unit with respect to Cancel and deadline.
         synchronized (item.future()) {
-            if (!registrar.isAdmissionOpen(item.requestId(), item.future())
-                    || !registrar.registerInflight(item)) {
-                Logger.warn("[priority-scheduler] eviction commit rejected: request_id={}",
-                        envelope.requestId());
-                return EvictionOutcome.CONFLICT;
+            PlanCommitter.CommitResult registration = PlanCommitter.register(item, registrar);
+            if (!registration.committed()) {
+                Response failure = registration.failure();
+                if (failure != null) {
+                    item.future().complete(failure);
+                }
+                return EvictionOutcome.FINISHED;
             }
             // Only the selected victims are guarded; unrelated queue mutations
             // do not abort the commit.
@@ -732,7 +602,8 @@ public class PriorityAdmissionScheduler {
                 // replanning. The item is already inflight-registered.
                 reportEvictionCommit(envelope.priority(), envelope.requestId(),
                         "prefill_queue_full", "victim_gone");
-                if (plan.prefillEp().getBatcher().tryOffer(item)) {
+                Response offerFailure = plan.prefillEp().getBatcher().tryOffer(item);
+                if (offerFailure == null) {
                     Logger.debug("[priority-scheduler] eviction victims gone, direct offer succeeded: "
                                     + "request_id={} missing_victims={} worker={}",
                             envelope.requestId(), replace.missingVictimIds(),
@@ -740,19 +611,21 @@ public class PriorityAdmissionScheduler {
                     return EvictionOutcome.COMMITTED;
                 }
                 registrar.unregisterInflight(item);
+                if (!StrategyErrorType.fromErrorCode(offerFailure.getCode()).isCapacityRejection()) {
+                    item.future().complete(offerFailure);
+                    return EvictionOutcome.FINISHED;
+                }
                 Logger.debug("[priority-scheduler] eviction victims gone, replan: request_id={} "
                                 + "missing_victims={} worker={}",
                         envelope.requestId(), replace.missingVictimIds(), proposal.endpointId());
-                return EvictionOutcome.CONFLICT;
+                return EvictionOutcome.retry(offerFailure);
             }
         }
 
         // Victims removed from the queue are never re-inserted (design doc
         // 9.5): drive each to its terminal state, releasing its decode
-        // reservation. The engine never saw a queued victim, so the
-        // client-visible terminal is the retryable NO_AVAILABLE_WORKER
-        // (yielded, contract 5.3); metrics still count it as preempted.
-        // Idempotent via the inflight lifecycle.
+        // reservation and publishing PRIORITY_PREEMPTED. Settlement is
+        // idempotent via the inflight lifecycle.
         for (BatchItem victim : replace.removed()) {
             settlePrefillVictim(envelope, registrar, victim, proposal.endpointId());
         }
@@ -765,7 +638,8 @@ public class PriorityAdmissionScheduler {
                     "prefill_queue_full", "partial_failure");
             Logger.error("[priority-scheduler] eviction commit partial failure, request_id={} victims_removed={}",
                     envelope.requestId(), replace.removed().size());
-            return EvictionOutcome.PARTIAL_FAILURE;
+            item.future().complete(replace.failure());
+            return EvictionOutcome.FINISHED;
         }
 
         reportEvictionCommit(envelope.priority(), envelope.requestId(),
@@ -795,9 +669,9 @@ public class PriorityAdmissionScheduler {
                                      InflightRegistrar registrar,
                                      BatchItem victim,
                                      String endpointId) {
-        String detail = "yielded to higher-priority request " + incoming.requestId();
+        String detail = "preempted by higher-priority request " + incoming.requestId();
         try {
-            registrar.finishYielded(victim, detail);
+            registrar.finishPreempted(victim, detail);
         } catch (RuntimeException firstFailure) {
             // Continue draining even when one reducer invocation fails. The
             // reducer is idempotent, so one immediate retry closes transient
@@ -807,7 +681,7 @@ public class PriorityAdmissionScheduler {
                     victim.requestId(), incoming.requestId(), endpointId,
                     firstFailure);
             try {
-                registrar.finishYielded(victim, detail);
+                registrar.finishPreempted(victim, detail);
             } catch (RuntimeException retryFailure) {
                 Logger.error("[priority-scheduler] failed to settle removed prefill victim after retry: "
                                 + "victim_id={} incoming_id={} worker={}",
@@ -826,7 +700,7 @@ public class PriorityAdmissionScheduler {
                     telemetryFailure);
         }
         Logger.debug("[priority-scheduler] victim preempted: victim_id={} victim_priority={} "
-                        + "terminal=yielded_8400 incoming_id={} incoming_priority={} worker={}",
+                        + "terminal=preempted_8429 incoming_id={} incoming_priority={} worker={}",
                 victim.requestId(), victim.priority(), incoming.requestId(),
                 incoming.priority(), endpointId);
     }
@@ -883,32 +757,19 @@ public class PriorityAdmissionScheduler {
 
     // ==================== Decode eviction ====================
 
-    private enum DecodeEvictionOutcome {
-        /** Eviction applied and the incoming request committed. */
-        COMMITTED,
-        /** No feasible plan (no/insufficient strictly-lower-priority enabled victims). */
-        INFEASIBLE,
-        /** Optimistic-concurrency conflict — retry with a fresh plan. */
-        CONFLICT,
-        /** Eviction applied but placement failed; future already completed. */
-        FAILED,
-        /** Engine Cancel transaction continues asynchronously. */
-        PENDING
-    }
-
     /**
      * Plan and atomically commit a Decode eviction (design doc 11-13, 17.2),
      * then place the incoming request on the freed endpoint. Master-local and
      * Engine-owned victim domains are enabled independently by configuration.
-     * Uses the pre-route {@link ClusterSnapshot} decode views so the
-     * admission-version check detects any interference since plan build.
+     * Uses the pre-route {@link ClusterSnapshot}; commit checks the selected
+     * victims' reservation presence, not unrelated endpoint mutations.
      */
-    private DecodeEvictionOutcome tryDecodeEviction(BalanceContext ctx,
-                                                    CompletableFuture<Response> future,
-                                                    ClusterSnapshot snapshot,
-                                                    FlexlbConfig config,
-                                                    InflightRegistrar registrar,
-                                                    AdmissionPermit permit) {
+    private EvictionOutcome tryDecodeEviction(BalanceContext ctx,
+                                               CompletableFuture<Response> future,
+                                               ClusterSnapshot snapshot,
+                                               FlexlbConfig config,
+                                               InflightRegistrar registrar,
+                                               AdmissionPermit permit) {
         long seqLen = ctx.getRequest().getSeqLen();
         long maxNewTokens = ctx.getRequest().getMaxNewTokens();
         // Planning envelope contains only placement demand and priority.
@@ -969,10 +830,11 @@ public class PriorityAdmissionScheduler {
                             + "phase={} candidates_seen={} candidates_eligible={} reasons={}",
                     ctx.getRequestId(), ctx.getPriority(), phase,
                     candidatesSeen, candidatesEligible, failures);
-            AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+            recordPlacementDiagnostics(ctx, snapshot, "decode eviction infeasible; reasons=" + failures);
+            Response failure = AdmissionFailureClassifier.classifyDecode(
                     planEnvelope, decodes);
-            completeAdmissionError(future, failure.errorType(), failure.reason(), failure.message());
-            return DecodeEvictionOutcome.FAILED;
+            future.complete(failure);
+            return EvictionOutcome.FINISHED;
         }
         reportEvictionPlan(ctx.getPriority(), ctx.getRequestId(),
                 proposal.evictionCase(), "feasible");
@@ -988,7 +850,7 @@ public class PriorityAdmissionScheduler {
         if (proposal.requiresEngineCancel()) {
             startEngineCancelPreemption(ctx, future, config, registrar, proposal,
                     target, decodeEp, seqLen, expectedKvTokens, permit);
-            return DecodeEvictionOutcome.PENDING;
+            return EvictionOutcome.FINISHED;
         }
 
         List<Long> reservedVictimIds = new ArrayList<>(proposal.victims().size());
@@ -1001,7 +863,7 @@ public class PriorityAdmissionScheduler {
         // or observe the incoming request after the complete handoff.
         synchronized (future) {
           if (!registrar.isAdmissionOpen(ctx.getRequestId(), future)) {
-            return DecodeEvictionOutcome.FAILED;
+            return EvictionOutcome.FINISHED;
           }
           // Presence-guarded commit conditionally releases each victim still
           // holding its reservation; unrelated endpoint churn cannot abort it.
@@ -1023,15 +885,20 @@ public class PriorityAdmissionScheduler {
                               + "freed={} planned={} worker={}",
                       ctx.getRequestId(), presence.freedVictimIds().size(),
                       reservedVictimIds.size(), proposal.endpointId());
-              return DecodeEvictionOutcome.CONFLICT;
+              // Retry the changed reservation set. If the budget is exhausted,
+              // admission capacity was not acquired; the conflict stays diagnostic.
+              ctx.setSchedulingDiagnostics(Map.of("cause", "decode victim reservations changed",
+                      "endpoint", proposal.endpointId(), "plannedVictims", reservedVictimIds.size(),
+                      "freedVictims", presence.freedVictimIds().size()));
+              return EvictionOutcome.retry(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
+                      AdmissionRejectReason.RESOURCE_EXHAUSTED));
           }
 
           return completeDecodeReservationHandoff(
                   ctx, future, registrar, decodeEp, () -> {
                       // Shadow accounting already reversed atomically; drive
                       // each victim terminal before publishing the incoming
-                      // item. Reserved-only victims were never seen by the
-                      // engine — retryable 8400.
+                      // item. All evicted requests receive the same preemption outcome.
                       for (DecodeRequestSnapshot victim : proposal.victims()) {
                           finishDecodeVictim(ctx, registrar, victim,
                                   "decode_reserved", proposal);
@@ -1047,20 +914,14 @@ public class PriorityAdmissionScheduler {
     /**
      * Drive one decode eviction victim to its terminal state and emit the
      * per-victim metrics ({@code stage} distinguishes reserved vs accepted
-     * victims). Terminal split per contract 5.3: a reserved-only victim was
-     * never seen by the engine — retryable NO_AVAILABLE_WORKER (yielded);
-     * an engine-accepted victim keeps PRIORITY_PREEMPTED.
+     * victims). Delivery stage changes cleanup, not the public preemption outcome.
      */
     private void finishDecodeVictim(BalanceContext ctx, InflightRegistrar registrar,
                                     DecodeRequestSnapshot victim, String stage,
                                     DecodeEvictionProposal proposal) {
-        boolean accepted = victim.phase().isEngineConfirmed();
-        String terminal = accepted ? "preempted_8429" : "yielded_8400";
-        String detail = accepted
-                ? "preempted by higher-priority request " + ctx.getRequestId()
-                : "yielded to higher-priority request " + ctx.getRequestId();
+        String detail = "preempted by higher-priority request " + ctx.getRequestId();
         try {
-            finishDecodeVictim(registrar, victim.requestId(), accepted, detail);
+            registrar.finishPreemptedById(victim.requestId(), detail);
         } catch (RuntimeException firstFailure) {
             // The Decode shadow swap already removed every victim. Keep one
             // faulty reducer invocation from stranding the rest, and use the
@@ -1070,7 +931,7 @@ public class PriorityAdmissionScheduler {
                     victim.requestId(), ctx.getRequestId(), proposal.endpointId(),
                     firstFailure);
             try {
-                finishDecodeVictim(registrar, victim.requestId(), accepted, detail);
+                registrar.finishPreemptedById(victim.requestId(), detail);
             } catch (RuntimeException retryFailure) {
                 Logger.error("[priority-scheduler] failed to settle removed decode victim after retry: "
                                 + "victim_id={} incoming_id={} worker={}",
@@ -1090,20 +951,9 @@ public class PriorityAdmissionScheduler {
                     victim.requestId(), ctx.getRequestId(), telemetryFailure);
         }
         Logger.debug("[priority-scheduler] decode victim preempted: victim_id={} victim_priority={} "
-                        + "stage={} terminal={} kv_tokens={} incoming_id={} incoming_priority={} worker={}",
-                victim.requestId(), victim.priority(), stage, terminal, victim.kvTokens(),
+                        + "stage={} terminal=preempted_8429 kv_tokens={} incoming_id={} incoming_priority={} worker={}",
+                victim.requestId(), victim.priority(), stage, victim.kvTokens(),
                 ctx.getRequestId(), ctx.getPriority(), proposal.endpointId());
-    }
-
-    private static void finishDecodeVictim(InflightRegistrar registrar,
-                                           long requestId,
-                                           boolean accepted,
-                                           String detail) {
-        if (accepted) {
-            registrar.finishPreemptedById(requestId, detail);
-        } else {
-            registrar.finishYieldedById(requestId, detail);
-        }
     }
 
     /** §19.1 plan observability for the decode eviction path. */
@@ -1169,8 +1019,8 @@ public class PriorityAdmissionScheduler {
                     // publishing failure; release is exact-idempotent.
                     decodeEp.release(ctx.getRequestId());
                     reportCancelTimeout(ctx, proposal.endpointId());
-                    completeAdmissionError(future, StrategyErrorType.RESOURCE_EXHAUSTED,
-                            AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                    completeAdmissionError(future, StrategyErrorType.BATCH_DISPATCH_FAILED,
+                            AdmissionRejectReason.UNSPECIFIED,
                             "priority cancel coordinator failed");
                     return;
                 }
@@ -1185,7 +1035,7 @@ public class PriorityAdmissionScheduler {
                             return;
                         }
                         reportCommittedEnginePreemption(ctx, proposal);
-                        completeDecodeReservationHandoff(
+                        EvictionOutcome handoff = completeDecodeReservationHandoff(
                                 ctx, future, registrar, decodeEp, () -> {
                                     recordDecodePlanObservability(ctx, proposal);
                                     // PriorityScheduler.registerInflight owns the
@@ -1197,6 +1047,9 @@ public class PriorityAdmissionScheduler {
                                             ctx, future, config, registrar,
                                             decodeEp, permit);
                                 });
+                        if (handoff.retryFailure() != null) {
+                            future.complete(handoff.retryFailure());
+                        }
                     }
                     case REPLAN_NOT_FOUND, CONFLICT -> {
                         int replans = cancelNotFoundReplans
@@ -1232,8 +1085,8 @@ public class PriorityAdmissionScheduler {
                 cancelNotFoundReplans.remove(ctx.getRequestId());
                 Logger.error("[priority-scheduler] cancel completion failed: request_id={} error={}",
                         ctx.getRequestId(), callbackError.getMessage(), callbackError);
-                completeAdmissionError(future, StrategyErrorType.RESOURCE_EXHAUSTED,
-                        AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                completeAdmissionError(future, StrategyErrorType.BATCH_DISPATCH_FAILED,
+                        AdmissionRejectReason.UNSPECIFIED,
                         "priority cancel completion failed");
             } finally {
                 if (!mutationCompleted) {
@@ -1315,12 +1168,12 @@ public class PriorityAdmissionScheduler {
      * generation. Before register/offer succeeds this method is the sole
      * owner; afterwards the scheduler terminal reducer owns every cleanup.
      */
-    private DecodeEvictionOutcome completeDecodeReservationHandoff(
+    private EvictionOutcome completeDecodeReservationHandoff(
             BalanceContext ctx,
             CompletableFuture<Response> future,
             InflightRegistrar registrar,
             DecodeEndpoint decodeEp,
-            Supplier<DecodeEvictionOutcome> handoff) {
+            Supplier<EvictionOutcome> handoff) {
         RequestInflight expectedReservation =
                 decodeEp.reservationFor(ctx.getRequestId());
         try {
@@ -1342,29 +1195,29 @@ public class PriorityAdmissionScheduler {
      * decode {@link ServerStatus} is built manually and only prefill goes
      * through its selection strategy.
      */
-    private DecodeEvictionOutcome placeAfterDecodeEviction(BalanceContext ctx,
-                                                           CompletableFuture<Response> future,
-                                                           FlexlbConfig config,
-                                                           InflightRegistrar registrar,
-                                                           DecodeEndpoint decodeEp,
-                                                           AdmissionPermit permit) {
+    private EvictionOutcome placeAfterDecodeEviction(BalanceContext ctx,
+                                                      CompletableFuture<Response> future,
+                                                      FlexlbConfig config,
+                                                      InflightRegistrar registrar,
+                                                      DecodeEndpoint decodeEp,
+                                                      AdmissionPermit permit) {
         ServerStatus prefill = selectPrefillForDecodeEviction(
                 ctx, config, decodeEp.getStatus().getGroup());
         if (prefill == null || !prefill.isSuccess()) {
             decodeEp.release(ctx.getRequestId());
-            completeAdmissionError(future, StrategyErrorType.RESOURCE_EXHAUSTED,
-                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
+            completeAdmissionError(future, StrategyErrorType.NO_PREFILL_WORKER,
+                    AdmissionRejectReason.UNSPECIFIED,
                     "no prefill worker after decode eviction");
-            return DecodeEvictionOutcome.FAILED;
+            return EvictionOutcome.FINISHED;
         }
         PrefillEndpoint prefillEp = endpointRegistry.getPrefill(
                 prefill.getServerIp() + ":" + prefill.getHttpPort());
         if (prefillEp == null) {
             decodeEp.release(ctx.getRequestId());
-            completeAdmissionError(future, StrategyErrorType.RESOURCE_EXHAUSTED,
-                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
+            completeAdmissionError(future, StrategyErrorType.NO_PREFILL_WORKER,
+                    AdmissionRejectReason.UNSPECIFIED,
                     "prefill endpoint not registered after decode eviction");
-            return DecodeEvictionOutcome.FAILED;
+            return EvictionOutcome.FINISHED;
         }
 
         ServerStatus decode = buildDecodeServerStatus(ctx, decodeEp);
@@ -1384,48 +1237,36 @@ public class PriorityAdmissionScheduler {
         // normal path); every failure path below releases the reservation,
         // which clears the mark.
         decodeEp.markQueuedPhase(ctx.getRequestId());
-        PlanCommitter.CommitResult result = planCommitter.commit(plan, registrar);
-        if (result == PlanCommitter.CommitResult.SUCCESS) {
+        PlanCommitter.CommitResult commit = planCommitter.commit(plan, registrar);
+        if (commit.committed()) {
             onCommitted(ctx, plan);
             bindAdmissionLease(plan, registrar, permit);
-            return DecodeEvictionOutcome.COMMITTED;
+            return EvictionOutcome.COMMITTED;
         }
-        // OFFER_FAILED — combine with Phase 3: try a prefill-queue eviction
-        // before giving up (design doc 13.5).
+        if (commit.failure() == null || !registrar.isAdmissionOpen(ctx.getRequestId(), future)) {
+            releaseDecodeReservation(plan);
+            return EvictionOutcome.FINISHED;
+        }
+        Response result = commit.failure();
+        if (!StrategyErrorType.fromErrorCode(result.getCode()).isCapacityRejection()) {
+            releaseDecodeReservation(plan);
+            future.complete(result);
+            return EvictionOutcome.FINISHED;
+        }
+        // A capacity rejection may still be resolved by prefill-queue eviction.
         if (preemptionAllows(config, VictimStage.PREFILL_QUEUED)) {
             EvictionOutcome eviction = tryPrefillQueueEviction(plan, config, registrar);
-            switch (eviction) {
-                case COMMITTED -> {
-                    onCommitted(ctx, plan);
-                    bindAdmissionLease(plan, registrar, permit);
-                    return DecodeEvictionOutcome.COMMITTED;
-                }
-                case CONFLICT -> {
-                    releaseDecodeReservation(plan);
-                    return DecodeEvictionOutcome.CONFLICT;
-                }
-                case PARTIAL_FAILURE -> {
-                    releaseDecodeReservation(plan);
-                    AdmissionFailure failure = AdmissionFailure.resourceExhausted();
-                    completeAdmissionError(future, failure.errorType(), failure.reason(),
-                            "eviction commit partial failure");
-                    return DecodeEvictionOutcome.FAILED;
-                }
-                case REJECTED -> {
-                    // tryPrefillQueueEviction already completed the typed error.
-                    releaseDecodeReservation(plan);
-                    return DecodeEvictionOutcome.FAILED;
-                }
-                case INFEASIBLE -> {
-                    // Fall through to classify the unchanged current queue.
-                }
+            if (eviction.committed()) {
+                onCommitted(ctx, plan);
+                bindAdmissionLease(plan, registrar, permit);
+            } else {
+                releaseDecodeReservation(plan);
             }
+            return eviction;
         }
         releaseDecodeReservation(plan);
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
-                envelope, prefillEp.getBatcher().queueManager().snapshot());
-        completeAdmissionError(future, failure.errorType(), failure.reason(), failure.message());
-        return DecodeEvictionOutcome.FAILED;
+        future.complete(result);
+        return EvictionOutcome.FINISHED;
     }
 
     /**
@@ -1627,36 +1468,24 @@ public class PriorityAdmissionScheduler {
         }
     }
 
-    /**
-     * No feasible normal placement. Eviction-based rescue is Phase 2+; the
-     * MVP fails the request (never a silent drop — the caller gets an
-     * explicit retryable error, or the router's own failure response).
-     */
+    private static void recordPlacementDiagnostics(BalanceContext ctx, ClusterSnapshot snapshot, String cause) {
+        ctx.setSchedulingDiagnostics(Map.of("cause", cause == null ? "placement failed" : cause,
+                "prefillEndpointCount", snapshot.prefills().size(),
+                "decodeEndpointCount", snapshot.decodes().size()));
+    }
+
+    /** Preserve the router's rejection; a missing decision is a scheduling failure. */
     private void onInfeasible(BalanceContext ctx,
                               CompletableFuture<Response> future,
                               Response failureResponse) {
         if (failureResponse != null) {
-            if (isCapacityFailure(failureResponse)) {
-                AdmissionFailure failure = AdmissionFailure.resourceExhausted();
-                completeAdmissionError(future, failure.errorType(), failure.reason(),
-                        failure.message());
-            } else {
-                future.complete(failureResponse);
-            }
+            future.complete(failureResponse);
             return;
         }
         Logger.debug("[priority-scheduler] no feasible placement, request_id={} priority={}",
                 ctx.getRequestId(), ctx.getPriority());
-        AdmissionFailure failure = AdmissionFailure.resourceExhausted();
-        completeAdmissionError(future, failure.errorType(), failure.reason(), failure.message());
-    }
-
-    private static boolean isCapacityFailure(Response response) {
-        int code = response.getCode();
-        return code == StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode()
-                || code == StrategyErrorType.NO_PREFILL_WORKER.getErrorCode()
-                || code == StrategyErrorType.NO_DECODE_WORKER.getErrorCode()
-                || code == StrategyErrorType.QUEUE_FULL.getErrorCode();
+        future.complete(Response.error(StrategyErrorType.BATCH_DISPATCH_FAILED,
+                AdmissionRejectReason.UNSPECIFIED, "placement returned no route or failure decision"));
     }
 
     // ==================== Rollback helpers ====================
@@ -1688,7 +1517,7 @@ public class PriorityAdmissionScheduler {
     }
 
     /**
-     * N1/P2-2: a victim settle (finishYielded/PreemptedById) that found no
+     * N1/P2-2: a victim settle (finishPreemptedById) that found no
      * inflight entry — harmless in isolation, but a burst points at a
      * registration/cleanup race, so it is surfaced as a metric, not only a
      * warn log.
@@ -1705,8 +1534,7 @@ public class PriorityAdmissionScheduler {
     /**
      * Eviction replan backoff: full jitter in [10, 30] ms (N3 §3.6), damping
      * planning storms over the same shifting victim set. The replan count is
-     * bounded by the dedicated eviction-replan budget (P2-1: sized like
-     * {@link #MAX_PLAN_RETRIES}, spent independently of capacity retries).
+     * bounded by {@link #MAX_EVICTION_REPLANS}, independently of offer retries.
      */
     private static void backoffBeforeEvictionReplan() {
         try {
@@ -1744,12 +1572,7 @@ public class PriorityAdmissionScheduler {
                                                StrategyErrorType errorType,
                                                AdmissionRejectReason reason,
                                                String message) {
-        if (future.isDone()) {
-            return;
-        }
-        Response errorResp = Response.error(errorType, reason);
-        errorResp.setErrorMessage(errorType.buildErrorMessage(message));
-        future.complete(errorResp);
+        future.complete(Response.error(errorType, reason, message));
     }
 
     // ==================== Internal ====================

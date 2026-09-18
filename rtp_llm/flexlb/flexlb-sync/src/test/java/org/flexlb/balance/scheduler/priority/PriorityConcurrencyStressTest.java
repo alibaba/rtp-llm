@@ -4,7 +4,7 @@ import org.flexlb.balance.scheduler.SchedulingTestConfig;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
@@ -61,8 +61,7 @@ import static org.mockito.Mockito.when;
  *   <li>账目守恒：全部终结后 decode inflightCount=0、inflightHardKvReserved=0、
  *       totalLoad 回落 0，且任意采样时刻 shadow KV ≥ 0；</li>
  *   <li>版本冲突只导致重试或明确失败（终态码在合法集合内，绝不出现未知码）；</li>
- *   <li>victim 终态码分离：8429 只能来自注入的 accepted-preempt
- *       （queued/reserved victim 只允许 8400）。</li>
+ *   <li>只有经过抢占结算的 victim 可以返回 8429，包含 queued/reserved victim。</li>
  * </ol>
  */
 class PriorityConcurrencyStressTest {
@@ -96,7 +95,6 @@ class PriorityConcurrencyStressTest {
     private void runRound(Harness h, int round, long seed) throws Exception {
         long idBase = (round + 1) * 1_000_000L;
         Map<Long, CompletableFuture<Response>> futures = new ConcurrentHashMap<>();
-        Set<Long> injectedPreempts = ConcurrentHashMap.newKeySet();
         Set<Long> settled = ConcurrentHashMap.newKeySet();
         ConcurrentLinkedQueue<String> violations = new ConcurrentLinkedQueue<>();
         DecodeEndpoint decodeEp = h.endpointRegistry.getDecode(DECODE_IP_PORT);
@@ -169,10 +167,9 @@ class PriorityConcurrencyStressTest {
                         // timeout path by settling successfully-dispatched requests.
                         decodeEp.evictExpiredRequests(300_000);
                     } else if (op == 3) {
-                        // 随机注入 accepted-preempt（8429 的唯一合法来源）
+                        // 随机注入抢占结算，与正常 queued/reserved 抢占并发
                         long id = idBase + rnd.nextInt(THREADS) * 1_000L
                                 + rnd.nextInt(REQUESTS_PER_THREAD);
-                        injectedPreempts.add(id);
                         h.scheduler.finishPreemptedById(id,
                                 "preempted by higher-priority request 999999");
                     }
@@ -226,7 +223,7 @@ class PriorityConcurrencyStressTest {
                 StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
                 StrategyErrorType.NO_DECODE_WORKER.getErrorCode(),
                 StrategyErrorType.QUEUE_FULL.getErrorCode(),
-                StrategyErrorType.SCHEDULER_PLAN_CONFLICT.getErrorCode(),
+                StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(),
                 StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(),
                 StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                 StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode());
@@ -247,12 +244,11 @@ class PriorityConcurrencyStressTest {
             } else {
                 failureCount++;
             }
-            // 不变式④：8429 只允许来自注入的 engine-owned preempt；
-            // incoming 准入拒绝仅使用 8430/8431 分类。
+            // 不变式④：8429 必须来自 victim 抢占结算，不能用于 incoming 准入拒绝。
             if (code == StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode()) {
-                assertTrue(injectedPreempts.contains(e.getKey()),
+                assertTrue(h.preemptedVictims.contains(e.getKey()),
                         "8429 for request " + e.getKey()
-                                + " was not an injected accepted-preempt, seed=" + seed);
+                                + " did not pass through victim settlement, seed=" + seed);
             }
         }
         assertEquals(TOTAL, successCount + failureCount, "terminal count mismatch, seed=" + seed);
@@ -273,6 +269,7 @@ class PriorityConcurrencyStressTest {
 
     /** 每轮独立的调度器 + 双 prefill/单 decode endpoint 环境。 */
     private static final class Harness {
+        final Set<Long> preemptedVictims = ConcurrentHashMap.newKeySet();
         final ConfigService configService = mock(ConfigService.class);
         final Router router = mock(Router.class);
         final FlexlbConfig config = new FlexlbConfig();
@@ -319,7 +316,13 @@ class PriorityConcurrencyStressTest {
             };
             scheduler = new PriorityScheduler(configService, router,
                     endpointRegistry, dispatcher, reporter, priorityScheduler, null,
-                    new UnsupportedEngineCancelChannel());
+                    new UnsupportedEngineCancelChannel()) {
+                @Override
+                public void finishPreempted(BatchItem victim, String detail) {
+                    preemptedVictims.add(victim.requestId());
+                    super.finishPreempted(victim, detail);
+                }
+            };
 
             registerPrefill(PREFILL_IP_PORT, "10.0.0.1");
             registerPrefill(PREFILL2_IP_PORT, "10.0.0.3");

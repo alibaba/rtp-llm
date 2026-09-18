@@ -21,12 +21,86 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class FixedWindowBatcherAlgorithmTest {
+
+    @Test
+    void loopRecordsPrefillCapacityAndCollectionWaitWithoutAnnotatingRequests() throws Exception {
+        FlexlbConfig config = batchConfig();
+        config.batchDispatcher().setMaxInflightBatchesPerPrefillWorker(1);
+        config.batchDispatcher().setEarlyDispatchPredictedExecutionMs(0L);
+        config.batchDispatcher().setMaxCollectionWaitMs(3_600_000);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getInflightBatchCount()).thenReturn(1);
+        PriorityBlockingQueue<BatchItem> queue = spy(queueWith(enqueuedItem(1, System.currentTimeMillis())));
+        BatcherContext ctx = context("test", endpoint, config, mock(DecisionGroupHandler.class),
+                queue, mock(BatchSchedulerReporter.class));
+        // Count loop accesses separately from initializing this pre-populated test queue.
+        org.mockito.Mockito.clearInvocations(queue);
+        FixedWindowBatcherAlgorithm algorithm = new FixedWindowBatcherAlgorithm();
+
+        algorithm.processQueue(ctx);
+        assertEquals("prefill batch slots exhausted", ctx.getWaitReason());
+        when(endpoint.getInflightBatchCount()).thenReturn(0);
+        algorithm.processQueue(ctx);
+        assertEquals("batch collection window exceeded request scheduling budget", ctx.getWaitReason());
+        verify(queue, never()).toArray();
+        verify(endpoint, never()).getPredictor();
+    }
+
+    @Test
+    void capacityBlockedPollingDoesNotSnapshotQueueForDiagnostics() throws Exception {
+        FlexlbConfig config = batchConfig();
+        config.batchDispatcher().setMaxInflightBatchesPerPrefillWorker(1);
+        config.batchDispatcher().setEarlyDispatchPredictedExecutionMs(0L);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getInflightBatchCount()).thenReturn(1);
+        PriorityBlockingQueue<BatchItem> queue = spy(queueWith(enqueuedItem(1, System.currentTimeMillis())));
+        BatcherContext ctx = context("test", endpoint, config, mock(DecisionGroupHandler.class),
+                queue, mock(BatchSchedulerReporter.class));
+        // Count loop accesses separately from initializing this pre-populated test queue.
+        org.mockito.Mockito.clearInvocations(queue);
+        FixedWindowBatcherAlgorithm algorithm = new FixedWindowBatcherAlgorithm();
+        for (int i = 0; i < 5; i++) {
+            algorithm.processQueue(ctx);
+        }
+        verify(queue, never()).toArray();
+    }
+
+    @Test
+    void expiredHeadReadsQueueStateWithoutSnapshotAndCallsHandlerOutsideLock() throws Exception {
+        FlexlbConfig config = batchConfig();
+        config.batchDispatcher().setMaxInflightBatchesPerPrefillWorker(1);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getInflightBatchCount()).thenReturn(1);
+        BatchItem head = enqueuedItem(1, System.currentTimeMillis());
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
+        PriorityBlockingQueue<BatchItem> queue = spy(queueWith(head));
+        BatcherContext ctx = context("test", endpoint, config, handler,
+                queue, mock(BatchSchedulerReporter.class));
+        new FixedWindowBatcherAlgorithm().processQueue(ctx);
+        org.mockito.Mockito.clearInvocations(endpoint, queue);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            assertTrue(ctx.isEmpty());
+            org.junit.jupiter.api.Assertions.assertFalse(ctx.queueLock().isHeldByCurrentThread());
+            assertEquals("prefill batch slots exhausted", ctx.getWaitReason());
+            return null;
+        }).when(handler).onExpired(head);
+
+        ctx.dropHead(head);
+        ctx.dropHead(head);
+        verify(handler, times(1)).onExpired(head);
+        verify(queue, never()).contains(any());
+        verify(queue, never()).toArray();
+        verify(queue, never()).toArray(any(BatchItem[].class));
+        verify(queue, never()).iterator();
+        org.mockito.Mockito.verifyNoInteractions(endpoint);
+    }
 
     @Test
     void contextQueueDepthTracksMutationsWithoutQueueSizeReads() {
@@ -324,7 +398,7 @@ class FixedWindowBatcherAlgorithmTest {
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
         verify(handler, times(2)).onDecisionGroupReady(
                 dispatched.capture(), any(DecisionGroupMetadata.class));
-        verify(handler, never()).onOfferFailure(any(), any());
+
         assertEquals(List.of(List.of(longHead), List.of(next)), dispatched.getAllValues());
         assertEquals(0, context.size());
     }

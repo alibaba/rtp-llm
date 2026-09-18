@@ -4,10 +4,16 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.List;
 import java.util.Map;
@@ -20,7 +26,10 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
+import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -54,14 +63,204 @@ class WorkerBatcherTest {
     }
 
     @Test
+    void enqueuePreservesQueueWaitReasonUntilQueueBecomesEmpty() {
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        WorkerBatcher batcher = new WorkerBatcher("test", endpoint, config,
+                mock(DecisionGroupHandler.class), mock(BatchSchedulerReporter.class));
+        assertNull(batcher.tryOffer(item(1, 50, System.currentTimeMillis())));
+        batcher.setWaitReason("decode engine slots exhausted");
+        assertNull(batcher.tryOffer(item(2, 70, System.currentTimeMillis())));
+        assertEquals("decode engine slots exhausted", batcher.getWaitReason());
+        org.mockito.Mockito.verifyNoInteractions(endpoint);
+
+        batcher.tryRemove(List.of(1L, 2L), "test drained");
+        assertNull(batcher.tryOffer(item(3, 50, System.currentTimeMillis())));
+        assertNull(batcher.getWaitReason(), "a new queue episode must not inherit the previous wait");
+    }
+
+    @ParameterizedTest
+    @MethodSource("fullQueueCases")
+    void fullOfferUsesMaintainedPriorityCounts(int[] priorities, int capacity,
+                                               StrategyErrorType code, AdmissionRejectReason reason) {
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(priorities.length);
+        WorkerBatcher batcher = newBatcher();
+        BatchItem[] occupants = new BatchItem[priorities.length];
+        for (int i = 0; i < priorities.length; i++) {
+            occupants[i] = org.mockito.Mockito.spy(priorities[i] == 0
+                    ? legacyItem(i + 1, 100) : item(i + 1, priorities[i], 100));
+            assertNull(batcher.tryOffer(occupants[i]));
+        }
+        config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(capacity);
+        org.mockito.Mockito.clearInvocations((Object[]) occupants);
+        BatchItem incoming = item(1000, 50, 200);
+        for (int attempt = 0; attempt < 100; attempt++) {
+            Response failure = batcher.tryOffer(incoming);
+            assertEquals(code.getErrorCode(), failure.getCode());
+            assertEquals(reason, failure.getAdmissionRejectReason());
+        }
+        org.mockito.Mockito.verifyNoInteractions((Object[]) occupants);
+        assertEquals(priorities.length, batcher.queueSize());
+    }
+
+    static Stream<Arguments> fullQueueCases() {
+        return Stream.of(
+                Arguments.of(new int[]{70}, 1, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                        AdmissionRejectReason.HIGHER_PRIORITY_AHEAD),
+                Arguments.of(new int[]{50}, 1, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                        AdmissionRejectReason.SAME_PRIORITY_AHEAD),
+                Arguments.of(new int[]{30}, 1, StrategyErrorType.RESOURCE_EXHAUSTED,
+                        AdmissionRejectReason.RESOURCE_EXHAUSTED),
+                Arguments.of(new int[]{0}, 1, StrategyErrorType.ADMISSION_UNAVAILABLE,
+                        AdmissionRejectReason.UNSPECIFIED),
+                Arguments.of(new int[]{70, 0}, 2, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                        AdmissionRejectReason.HIGHER_PRIORITY_AHEAD),
+                Arguments.of(new int[]{70, 0}, 1, StrategyErrorType.ADMISSION_UNAVAILABLE,
+                        AdmissionRejectReason.UNSPECIFIED),
+                Arguments.of(new int[]{30, 0}, 2, StrategyErrorType.RESOURCE_EXHAUSTED,
+                        AdmissionRejectReason.RESOURCE_EXHAUSTED));
+    }
+
+    @Test
+    void repeatedFullQueueRejectionDoesNotTraverseOrCopyRequests() {
+        PriorityBlockingQueue<BatchItem> queue = org.mockito.Mockito.spy(new PriorityBlockingQueue<BatchItem>(
+                11, WorkerBatcher.PRIORITY_QUEUE_ORDER));
+        queue.add(item(1, 70, 100));
+        BatcherContext ctx = context(queue, new AtomicInteger(1), mock(DecisionGroupHandler.class));
+        org.mockito.Mockito.clearInvocations(queue);
+
+        ctx.queueLock().lock();
+        try {
+            for (int attempt = 0; attempt < 100; attempt++) {
+                assertEquals(AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+                        ctx.queueFullResponse(50, 1).getAdmissionRejectReason());
+                assertEquals(1, ctx.queueDiagnostics(50).get("higherPriorityCount"));
+            }
+        } finally {
+            ctx.queueLock().unlock();
+        }
+
+        org.mockito.Mockito.verifyNoInteractions(queue);
+    }
+
+    @Test
+    void removingOccupantsDoesNotLeaveStalePriorityCounts() {
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
+        WorkerBatcher batcher = newBatcher();
+        for (int priority : new int[]{70, 50, 30}) {
+            assertNull(batcher.tryOffer(item(priority, priority, 100)));
+            assertEquals(1, batcher.tryRemove(List.of((long) priority), "removed").size());
+        }
+        assertNull(batcher.tryOffer(legacyItem(1, 100)));
+        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(),
+                batcher.tryOffer(item(2, 50, 200)).getCode());
+    }
+
+    @Test
+    void fullOfferCapturesCauseBeforeQueueChanges() {
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
+        WorkerBatcher batcher = newBatcher();
+        long now = System.currentTimeMillis();
+        assertNull(batcher.tryOffer(item(1, 70, now)));
+
+        BatchItem incoming = item(2, 50, now);
+        Response failure = batcher.tryOffer(incoming);
+        batcher.tryRemove(List.of(1L), "test capacity released");
+
+        assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(), failure.getCode());
+        assertEquals(AdmissionRejectReason.HIGHER_PRIORITY_AHEAD, failure.getAdmissionRejectReason());
+        assertEquals(0, batcher.queueSize());
+        Map<String, Object> diagnostics = incoming.ctx().getSchedulingDiagnostics();
+        assertEquals("prefill queue capacity exhausted", diagnostics.get("cause"));
+        Map<?, ?> prefill = (Map<?, ?>) diagnostics.get("prefill");
+        assertEquals(1, prefill.get("queueDepth"), "PV must retain the failure-time occupancy");
+        assertEquals(1, prefill.get("higherPriorityCount"));
+        assertEquals(1, prefill.get("aheadCountUpperBound"));
+        assertThrows(UnsupportedOperationException.class, () -> diagnostics.clear());
+        assertThrows(UnsupportedOperationException.class, () -> prefill.clear());
+        assertNull(batcher.tryOffer(incoming));
+        assertNull(incoming.ctx().getSchedulingDiagnostics(), "successful retry clears the rejected offer");
+    }
+
+    @Test
+    void samePriorityOccupancyIsNotReportedAsAnExactQueuePosition() {
+        WorkerBatcher batcher = newBatcher();
+        BatchItem head = item(1, 50, 100);
+        assertNull(batcher.tryOffer(head));
+        assertNull(batcher.tryOffer(item(2, 50, 200)));
+        batcher.recordFailureDiagnostics(head, "decode engine slots exhausted");
+        Map<?, ?> prefill = (Map<?, ?>) head.ctx().getSchedulingDiagnostics().get("prefill");
+        assertEquals(2, prefill.get("samePriorityCount"));
+        assertEquals(2, prefill.get("aheadCountUpperBound"));
+        assertFalse(prefill.containsKey("aheadCount"), "later arrivals are not known predecessors");
+    }
+
+    @Test
+    void fullOfferIncludesChargedPendingDeliveryButDoesNotMakeItEvictable() {
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
+        BatchItem occupant = item(1, 70, System.currentTimeMillis());
+        BatchItem incoming = item(2, 50, System.currentTimeMillis());
+        PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
+                11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
+        queue.add(occupant);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
+        BatcherContext ctx = context(queue, new AtomicInteger(1), handler);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            assertTrue(ctx.sortedQueuedItems().isEmpty(), "pending member is not an eviction candidate");
+            assertEquals(1, ctx.size(), "pending member still owns its capacity slot");
+            Map<String, Object> diagnostics = ctx.queueDiagnostics(incoming.priority());
+            assertEquals(1, diagnostics.get("queueDepth"));
+            assertEquals(1, diagnostics.get("pendingCount"));
+            assertEquals(1, diagnostics.get("higherPriorityCount"));
+            Response failure = ctx.queueFullResponse(incoming.priority(), 1);
+            assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(), failure.getCode());
+            assertEquals(AdmissionRejectReason.HIGHER_PRIORITY_AHEAD, failure.getAdmissionRejectReason());
+            return null;
+        }).when(handler).onDecisionGroupReady(org.mockito.ArgumentMatchers.anyList(),
+                org.mockito.ArgumentMatchers.any());
+
+        ctx.stageForDelivery(List.of(occupant), new DecisionGroupMetadata("test", 0));
+
+        assertEquals(0, ctx.size());
+        assertOccupiedPriorities(ctx, Map.of());
+    }
+
+    @Test
+    void stoppedOfferIsNotACapacityOrVictimConflict() {
+        WorkerBatcher batcher = newBatcher();
+        batcher.shutdown();
+        Response failure = batcher.tryOffer(item(2, 50, System.currentTimeMillis()));
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), failure.getCode());
+        assertFalse(StrategyErrorType.fromErrorCode(failure.getCode()).isCapacityRejection());
+        PrefillQueueManager.ReplaceOutcome replacement = batcher.tryReplaceVictimsPresent(
+                List.of(1L), item(3, 70, System.currentTimeMillis()));
+        assertFalse(replacement.isVictimGone());
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), replacement.failure().getCode());
+        assertTrue(replacement.removed().isEmpty());
+    }
+
+    @Test
+    void replacementExceptionRetainsRemovedVictimsForSettlement() {
+        WorkerBatcher batcher = newBatcher();
+        BatchItem victim = item(1, 30, System.currentTimeMillis());
+        assertNull(batcher.tryOffer(victim));
+
+        PrefillQueueManager.ReplaceOutcome result = batcher.tryReplaceVictimsPresent(List.of(1L), null);
+
+        assertTrue(result.isPartialFailure());
+        assertEquals(List.of(victim), result.removed());
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), result.failure().getCode());
+        assertEquals(0, batcher.queueSize());
+    }
+
+    @Test
     void queue_size_by_priority_buckets_multiple_priorities() {
         WorkerBatcher batcher = newBatcher();
         long now = System.currentTimeMillis();
 
-        assertTrue(batcher.tryOffer(item(1, 70, now)));
-        assertTrue(batcher.tryOffer(item(2, 50, now)));
-        assertTrue(batcher.tryOffer(item(3, 50, now)));
-        assertTrue(batcher.tryOffer(item(4, 30, now)));
+        assertNull(batcher.tryOffer(item(1, 70, now)));
+        assertNull(batcher.tryOffer(item(2, 50, now)));
+        assertNull(batcher.tryOffer(item(3, 50, now)));
+        assertNull(batcher.tryOffer(item(4, 30, now)));
 
         Map<Integer, Integer> buckets = batcher.queueSizeByPriority();
         assertEquals(Map.of(70, 1, 50, 2, 30, 1), buckets);
@@ -75,8 +274,8 @@ class WorkerBatcherTest {
         WorkerBatcher batcher = newBatcher();
         long now = System.currentTimeMillis();
 
-        assertTrue(batcher.tryOffer(legacyItem(1, now)));
-        assertTrue(batcher.tryOffer(legacyItem(2, now)));
+        assertNull(batcher.tryOffer(legacyItem(1, now)));
+        assertNull(batcher.tryOffer(legacyItem(2, now)));
 
         assertEquals(Map.of(0, 2), batcher.queueSizeByPriority());
     }
@@ -91,8 +290,8 @@ class WorkerBatcherTest {
         WorkerBatcher batcher = newBatcher();
         long now = System.currentTimeMillis();
 
-        assertTrue(batcher.tryOffer(item(1, 70, now)));
-        assertTrue(batcher.tryOffer(item(2, 50, now)));
+        assertNull(batcher.tryOffer(item(1, 70, now)));
+        assertNull(batcher.tryOffer(item(2, 50, now)));
 
         // Drain the P70 item: its bucket drops out (present-only, no zero-fill
         // — same empty-bucket behavior as wait-time-by-priority)
@@ -126,10 +325,6 @@ class WorkerBatcherTest {
             }
 
             @Override
-            public void onOfferFailure(BatchItem item, Throwable error) {
-            }
-
-            @Override
             public void onDeliveryFailure(BatchItem item, Throwable error) {
             }
         });
@@ -138,6 +333,7 @@ class WorkerBatcherTest {
                 () -> ctx.stageForDelivery(List.of(first, second), new DecisionGroupMetadata("test", 0)));
 
         assertEquals(2, depth.get());
+        assertOccupiedPriorities(ctx, Map.of(50, 2));
         assertEquals(0, ctx.pendingDeliveryCount());
         List<BatchItem> restored = ctx.sortedItems();
         assertEquals(List.of(1L, 2L), restored.stream().map(BatchItem::requestId).toList());
@@ -168,10 +364,6 @@ class WorkerBatcherTest {
             }
 
             @Override
-            public void onOfferFailure(BatchItem item, Throwable error) {
-            }
-
-            @Override
             public void onDeliveryFailure(BatchItem item, Throwable error) {
             }
         });
@@ -181,7 +373,10 @@ class WorkerBatcherTest {
 
         assertTrue(ctx.isActiveEmpty());
         assertEquals(2, ctx.readyDeliveryCount());
+        assertEquals(2, ctx.queueDiagnostics(70).get("aheadCountUpperBound"),
+                "already-decided lower-priority requests may be ahead of the active queue");
         assertEquals(2, depth.get());
+        assertOccupiedPriorities(ctx, Map.of(50, 2));
         assertEquals(0, ctx.pendingDeliveryCount());
         assertEquals(List.of(1L, 2L), ctx.sortedQueuedItems().stream()
                 .map(BatchItem::requestId).toList());
@@ -190,12 +385,14 @@ class WorkerBatcherTest {
         assertTrue(ctx.remove(first));
         assertEquals(1, depth.get());
         assertEquals(1, ctx.readyDeliveryCount());
+        assertOccupiedPriorities(ctx, Map.of(50, 1));
 
         // Shutdown owns and drains the final ready member exactly once.
         List<BatchItem> drained = new java.util.ArrayList<>();
         ctx.stopAndDrainTo(drained);
         assertEquals(List.of(second), drained);
         assertEquals(0, depth.get());
+        assertOccupiedPriorities(ctx, Map.of());
         assertEquals(0, ctx.readyDeliveryCount());
         assertEquals(0, ctx.pendingDeliveryCount());
         assertTrue(ctx.sortedQueuedItems().isEmpty());
@@ -220,17 +417,13 @@ class WorkerBatcherTest {
                     }
 
                     @Override
-                    public void onOfferFailure(BatchItem item, Throwable error) {
-                        shutdownFailure.set(item);
-                    }
-
-                    @Override
                     public void onDeliveryFailure(BatchItem item, Throwable error) {
+                        shutdownFailure.set(item);
                     }
                 }, mock(BatchSchedulerReporter.class));
 
-        assertTrue(batcher.tryOffer(routeItem(1, 70, 100)));
-        assertTrue(batcher.tryOffer(routeItem(2, 50, 200)));
+        assertNull(batcher.tryOffer(routeItem(1, 70, 100)));
+        assertNull(batcher.tryOffer(routeItem(2, 50, 200)));
         long offeredVersion = batcher.queueVersion();
         batcher.start();
         try {
@@ -270,7 +463,7 @@ class WorkerBatcherTest {
                     @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
                         delivered.countDown();
                     }
-                    @Override public void onOfferFailure(BatchItem item, Throwable error) { }
+
                     @Override public void onDeliveryFailure(BatchItem item, Throwable error) { }
                 }, mock(BatchSchedulerReporter.class));
 
@@ -281,7 +474,7 @@ class WorkerBatcherTest {
             assertTrue(batcher.isWaitingForSignal(),
                     "an empty AutoTPM worker must block, not wake on a 1ms poll");
 
-            assertTrue(batcher.tryOffer(item(1, 50, System.currentTimeMillis())));
+            assertNull(batcher.tryOffer(item(1, 50, System.currentTimeMillis())));
             assertTrue(delivered.await(2, TimeUnit.SECONDS));
         } finally {
             batcher.shutdown();
@@ -303,11 +496,11 @@ class WorkerBatcherTest {
                     @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
                         delivered.countDown();
                     }
-                    @Override public void onOfferFailure(BatchItem item, Throwable error) { }
+
                     @Override public void onDeliveryFailure(BatchItem item, Throwable error) { }
                 }, mock(BatchSchedulerReporter.class));
 
-        assertTrue(batcher.tryOffer(routeItem(1, 50, System.currentTimeMillis())));
+        assertNull(batcher.tryOffer(routeItem(1, 50, System.currentTimeMillis())));
         long offeredVersion = batcher.queueVersion();
         batcher.start();
         try {
@@ -345,21 +538,23 @@ class WorkerBatcherTest {
                             routeDeliveries.incrementAndGet();
                         }
                     }
-                    @Override public void onOfferFailure(BatchItem item, Throwable error) { }
+
                     @Override public void onDeliveryFailure(BatchItem item, Throwable error) { }
                 }, mock(BatchSchedulerReporter.class));
 
-        assertTrue(batcher.tryOffer(routeItem(1, 70, System.currentTimeMillis())));
+        assertNull(batcher.tryOffer(routeItem(1, 70, System.currentTimeMillis())));
         long routeOfferVersion = batcher.queueVersion();
         batcher.start();
         try {
             awaitTrue(() -> batcher.queueVersion() > routeOfferVersion
                     && batcher.isWaitingForSignal());
 
-            assertTrue(batcher.tryOffer(item(2, 50, System.currentTimeMillis())));
+            assertNull(batcher.tryOffer(item(2, 50, System.currentTimeMillis())));
             assertTrue(batchDelivered.await(2, TimeUnit.SECONDS),
                     "BATCH_ENQUEUE work must pass a capacity-blocked route backlog");
             assertEquals(0, routeDeliveries.get());
+            // The callback signals before deliverStaged's finally releases its queue slot.
+            awaitTrue(() -> batcher.queueSize() == 1);
             assertEquals(1, batcher.queueSize(),
                     "only the capacity-blocked route request remains charged");
         } finally {
@@ -385,10 +580,6 @@ class WorkerBatcherTest {
             @Override
             public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
                 callbackMembers.set(items.size());
-            }
-
-            @Override
-            public void onOfferFailure(BatchItem item, Throwable error) {
             }
 
             @Override
@@ -434,10 +625,6 @@ class WorkerBatcherTest {
             }
 
             @Override
-            public void onOfferFailure(BatchItem item, Throwable error) {
-            }
-
-            @Override
             public void onDeliveryFailure(BatchItem item, Throwable error) {
             }
         });
@@ -448,6 +635,7 @@ class WorkerBatcherTest {
 
         assertEquals(1, dispatchCalls.get(), "a claimed member must not be dispatched twice");
         assertEquals(0, depth.get());
+        assertOccupiedPriorities(ctx, Map.of());
         assertEquals(0, ctx.pendingDeliveryCount());
         assertTrue(ctx.sortedItems().isEmpty());
     }
@@ -459,7 +647,6 @@ class WorkerBatcherTest {
         BatchItem item = item(8, 50, 100);
         queue.add(item);
         AtomicInteger depth = new AtomicInteger(1);
-        AtomicInteger offerFailures = new AtomicInteger();
         AtomicInteger deliveryFailures = new AtomicInteger();
         AtomicReference<BatcherContext> owner = new AtomicReference<>();
         BatcherContext ctx = context(queue, depth, new DecisionGroupHandler() {
@@ -475,11 +662,6 @@ class WorkerBatcherTest {
             }
 
             @Override
-            public void onOfferFailure(BatchItem failed, Throwable error) {
-                offerFailures.incrementAndGet();
-            }
-
-            @Override
             public void onDeliveryFailure(BatchItem failed, Throwable error) {
                 assertSame(item, failed);
                 assertEquals("failed after claim", error.getMessage());
@@ -490,9 +672,9 @@ class WorkerBatcherTest {
 
         assertThrows(IllegalStateException.class,
                 () -> ctx.stageForDelivery(List.of(item), new DecisionGroupMetadata("test", 0)));
-        assertEquals(0, offerFailures.get());
         assertEquals(1, deliveryFailures.get());
         assertEquals(0, depth.get());
+        assertOccupiedPriorities(ctx, Map.of());
         assertEquals(0, ctx.pendingDeliveryCount());
         assertTrue(ctx.sortedItems().isEmpty());
     }
@@ -504,7 +686,6 @@ class WorkerBatcherTest {
         BatchItem item = item(9, 50, 100);
         queue.add(item);
         AtomicInteger depth = new AtomicInteger(1);
-        AtomicInteger offerFailures = new AtomicInteger();
         CountDownLatch callbackEntered = new CountDownLatch(1);
         CountDownLatch callbackMayReturn = new CountDownLatch(1);
         BatcherContext ctx = context(queue, depth, new DecisionGroupHandler() {
@@ -520,12 +701,6 @@ class WorkerBatcherTest {
                 } catch (InterruptedException e) {
                     throw new IllegalStateException(e);
                 }
-            }
-
-            @Override
-            public void onOfferFailure(BatchItem failed, Throwable error) {
-                assertSame(item, failed);
-                offerFailures.incrementAndGet();
             }
 
             @Override
@@ -547,10 +722,21 @@ class WorkerBatcherTest {
         dispatch.get(2, TimeUnit.SECONDS);
 
         assertEquals(0, depth.get());
+        assertOccupiedPriorities(ctx, Map.of());
         assertEquals(0, ctx.pendingDeliveryCount());
         assertTrue(ctx.sortedItems().isEmpty());
-        assertEquals(0, offerFailures.get(),
-                "shutdown owns the drained item; callback finally must not deliver it twice");
+    }
+
+    private static void assertOccupiedPriorities(BatcherContext ctx, Map<Integer, Integer> expected) {
+        int[] counts = (int[]) org.springframework.test.util.ReflectionTestUtils.getField(
+                ctx, "occupiedSlotsByPriority");
+        Map<Integer, Integer> actual = new java.util.HashMap<>();
+        for (int priority = 0; priority < counts.length; priority++) {
+            if (counts[priority] != 0) {
+                actual.put(priority, counts[priority]);
+            }
+        }
+        assertEquals(expected, actual, "capacity attribution must follow ownership through delivery and cleanup");
     }
 
     // ==================== helpers ====================

@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.scheduler.priority.PrefillQueueSnapshot;
 import org.flexlb.balance.scheduler.priority.QueuedRequestSnapshot;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.util.PriorityOrdering;
 
 import java.util.ArrayList;
@@ -179,23 +180,31 @@ public final class PrefillQueueManager {
         private final Status status;
         private final List<BatchItem> removed;
         private final List<Long> missingVictimIds;
+        private final Response failure;
 
-        private ReplaceOutcome(Status status, List<BatchItem> removed, List<Long> missingVictimIds) {
+        private ReplaceOutcome(Status status, List<BatchItem> removed, List<Long> missingVictimIds,
+                               Response failure) {
             this.status = status;
             this.removed = List.copyOf(removed);
             this.missingVictimIds = List.copyOf(missingVictimIds);
+            this.failure = failure;
         }
 
         static ReplaceOutcome success(List<BatchItem> removed) {
-            return new ReplaceOutcome(Status.SUCCESS, removed, List.of());
+            return new ReplaceOutcome(Status.SUCCESS, removed, List.of(), null);
         }
 
-        static ReplaceOutcome partialFailure(List<BatchItem> removed) {
-            return new ReplaceOutcome(Status.PARTIAL_FAILURE, removed, List.of());
+        static ReplaceOutcome partialFailure(List<BatchItem> removed, Response failure) {
+            return new ReplaceOutcome(Status.PARTIAL_FAILURE, removed, List.of(),
+                    java.util.Objects.requireNonNull(failure));
         }
 
         static ReplaceOutcome victimGone(List<Long> missingVictimIds) {
-            return new ReplaceOutcome(Status.VICTIM_GONE, List.of(), missingVictimIds);
+            return new ReplaceOutcome(Status.VICTIM_GONE, List.of(), missingVictimIds, null);
+        }
+
+        public Response failure() {
+            return failure;
         }
 
         public Status status() {

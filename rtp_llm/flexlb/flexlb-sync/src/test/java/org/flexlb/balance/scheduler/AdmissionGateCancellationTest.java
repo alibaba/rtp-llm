@@ -18,6 +18,7 @@ import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -138,7 +139,7 @@ class AdmissionGateCancellationTest {
         scheduler.onRequestExpired(requestId, scheduleResult);
 
         Response response = scheduleResult.get(1, TimeUnit.SECONDS);
-        assertEquals(8511, response.getCode());
+        assertEquals(8431, response.getCode());
         assertEquals(RequestLifecycleState.TIMED_OUT,
                 scheduler.getRequestState(requestId, 0).state());
         assertEquals(0, scheduler.generationGateCount());
@@ -165,7 +166,7 @@ class AdmissionGateCancellationTest {
                 scheduler.getRequestState(requestId, 0).state());
     }
 
-    @Test
+    @RepeatedTest(20)
     void activeGenerationCannotBeOverlaidByDuplicateSubmit() throws Exception {
         long requestId = 20_005L;
         BalanceContext context = context(requestId);
@@ -180,6 +181,12 @@ class AdmissionGateCancellationTest {
                 scheduler.cancelRequest(
                         requestId, 0, CancelReason.CLIENT_CANCELLED).state());
         assertEquals(8504, original.get(1, TimeUnit.SECONDS).getCode());
+        // get() observes the result before CompletableFuture finishes its
+        // whenComplete cleanup on the publication executor.
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        while (scheduler.generationGateCount() != 0 && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
         assertEquals(0, scheduler.generationGateCount());
     }
 
@@ -290,7 +297,7 @@ class AdmissionGateCancellationTest {
         when(registry.getDecode("10.0.0.2:8081")).thenReturn(decode);
         when(prefill.getBatcher()).thenReturn(batcher);
         when(batcher.queueManager()).thenReturn(queueManager);
-        when(batcher.tryOffer(any())).thenReturn(true);
+        when(batcher.tryOffer(any())).thenReturn(null);
         scheduler = new PriorityScheduler(
                 configService, router, registry, mock(BatchDispatcher.class),
                 mock(BatchSchedulerReporter.class), admissionScheduler, null, cancelChannel);

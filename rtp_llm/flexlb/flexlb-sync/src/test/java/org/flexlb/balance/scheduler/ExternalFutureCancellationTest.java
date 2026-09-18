@@ -266,7 +266,7 @@ class ExternalFutureCancellationTest {
         assertEquals(RequestLifecycleState.TIMED_OUT, timedOut.state());
         Response response = item.future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
-        assertEquals(8511, response.getCode());
+        assertEquals(8431, response.getCode());
         assertEquals(0, scheduler.getInflightSize());
         verify(cancelChannel, never()).cancel(any(), anyLong(), anyLong());
     }
@@ -597,7 +597,7 @@ class ExternalFutureCancellationTest {
                     requestId, attemptToken),
                     "deadline first-cause must prevent a later priority RPC");
             assertTrue(scheduler.releasePreemptionClaim(requestId, attemptToken));
-            assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+            assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                     item.future().get(1, TimeUnit.SECONDS).getCode());
             assertEquals(RequestLifecycleState.TIMED_OUT,
                     scheduler.getRequestState(requestId, 0).state());
@@ -608,6 +608,7 @@ class ExternalFutureCancellationTest {
     void admissionDeadlineTakesOwnershipFromPriorityNotFound() throws Exception {
         long requestId = 10_118L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
+        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("dispatch before preemption", 0));
         long attemptToken = 507L;
         prepareNotFoundPreemption(item, attemptToken, 90_003L);
 

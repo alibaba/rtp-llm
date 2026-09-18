@@ -45,15 +45,6 @@ public final class BatchItem implements Prioritized {
      */
     private String readyDeliveryReason;
 
-    /**
-     * Last batching-park diagnostics are owned by the request itself. Keeping the
-     * lazily-created mutable holder here makes repeated parks allocation-free
-     * while adding only one reference to requests that never park. Unlike a
-     * scheduler-wide request-id map, it cannot retain externally removed
-     * items. Access is serialized by the owning worker thread / queue lock.
-     */
-    private ParkTrace parkTrace;
-
     public BatchItem(BalanceContext ctx,
                      CompletableFuture<Response> future,
                      Response routeResponse,
@@ -98,62 +89,6 @@ public final class BatchItem implements Prioritized {
     }
 
     void clearRouteDecisionReady() { readyDeliveryReason = null; }
-
-    void recordParkTrace(String reason, long budgetMs, long waitMs,
-                         int queueSize, int inflightCount) {
-        ParkTrace trace = parkTrace;
-        if (trace == null) {
-            trace = new ParkTrace();
-            parkTrace = trace;
-        }
-        trace.update(reason, budgetMs, waitMs, queueSize, inflightCount);
-    }
-
-    ParkTrace consumeParkTrace() {
-        ParkTrace trace = parkTrace;
-        parkTrace = null;
-        return trace == null ? ParkTrace.EMPTY : trace;
-    }
-
-    void clearParkTrace() {
-        parkTrace = null;
-    }
-
-    boolean hasParkTrace() { return parkTrace != null; }
-
-    static final class ParkTrace {
-        private static final ParkTrace EMPTY =
-                new ParkTrace("none", -1, -1, -1, -1);
-
-        private String reason;
-        private long budgetMs;
-        private long waitMs;
-        private int queueSize;
-        private int inflightCount;
-
-        private ParkTrace() {
-        }
-
-        private ParkTrace(String reason, long budgetMs, long waitMs,
-                          int queueSize, int inflightCount) {
-            update(reason, budgetMs, waitMs, queueSize, inflightCount);
-        }
-
-        private void update(String reason, long budgetMs, long waitMs,
-                            int queueSize, int inflightCount) {
-            this.reason = reason;
-            this.budgetMs = budgetMs;
-            this.waitMs = waitMs;
-            this.queueSize = queueSize;
-            this.inflightCount = inflightCount;
-        }
-
-        String reason() { return reason; }
-        long budgetMs() { return budgetMs; }
-        long waitMs() { return waitMs; }
-        int queueSize() { return queueSize; }
-        int inflightCount() { return inflightCount; }
-    }
 
     /**
      * Normalized request priority. Satisfies {@link Prioritized#priority()}

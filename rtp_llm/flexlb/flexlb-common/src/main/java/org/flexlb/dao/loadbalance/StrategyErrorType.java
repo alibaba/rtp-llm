@@ -35,9 +35,7 @@ public enum StrategyErrorType {
     // Auto-TPM: request seq_len can never fit one batch's hard token capacity.
     // Explicit failure instead of a silent batcher drop (design doc 8.3).
     BATCH_TOKEN_CAPACITY_EXCEEDED(8514, false),
-    // Auto-TPM: plan retries exhausted purely by optimistic-concurrency conflicts
-    // (VERSION_MISMATCH / eviction CONFLICT on every attempt, design doc 16.3).
-    // Distinct from NO_AVAILABLE_WORKER, which still covers capacity shortage.
+    // Legacy wire value. Admission retries no longer publish internal plan conflicts.
     SCHEDULER_PLAN_CONFLICT(8515, false),
     // Returned only before scheduler admission; the same request may run on another node.
     NOT_MASTER(8517, false),
@@ -112,6 +110,20 @@ public enum StrategyErrorType {
      */
     public static StrategyErrorType fromErrorCode(int errorCode) {
         return ERROR_CODE_MAP.get(errorCode);
+    }
+
+    public boolean acceptsAdmissionRejectReason(AdmissionRejectReason reason) {
+        return switch (this) {
+            case PRIORITY_ADMISSION_REJECTED -> reason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
+                    || reason == AdmissionRejectReason.SAME_PRIORITY_AHEAD;
+            case RESOURCE_EXHAUSTED -> reason == AdmissionRejectReason.RESOURCE_EXHAUSTED;
+            default -> reason == AdmissionRejectReason.UNSPECIFIED;
+        };
+    }
+
+    /** Only capacity decisions may enter eviction or capacity retry. */
+    public boolean isCapacityRejection() {
+        return this == PRIORITY_ADMISSION_REJECTED || this == RESOURCE_EXHAUSTED || this == ADMISSION_UNAVAILABLE;
     }
 
     @Override

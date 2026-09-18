@@ -33,8 +33,8 @@ import static org.mockito.Mockito.verify;
  * Task35 场景 A：分阶段抢占在真实调度器栈 + 进程内 mock 引擎上的 E2E 验证。
  *
  * <ul>
- *   <li>A1 队列驱逐 — victim 8400 + "yielded"，高优入队成功；</li>
- *   <li>A2 decode reserved 驱逐 — victim 8400，影子账目正确移交；</li>
+ *   <li>A1 队列驱逐 — victim 8429 + "preempted"，高优入队成功；</li>
+ *   <li>A2 decode reserved 驱逐 — victim 8429，影子账目正确移交；</li>
  *   <li>A3 accepted 让位 — 真实 MockEngineCancelChannel，victim 8429，
  *       cancel→确认→派发顺序 + cancel 超时不泄漏（铁律4）；</li>
  *   <li>A5 同优不抢占 — 同优请求满载时绝不驱逐同优 victim。</li>
@@ -48,7 +48,7 @@ class PreemptionPhasesE2ETest {
 
     @Test
     @Timeout(30)
-    void a1_queue_full_evicts_lowest_priority_victim_with_8400_yielded() throws Exception {
+    void a1_queue_full_evicts_lowest_priority_victim_with_8429_preempted() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "50", 1.0, false)) {
             h.allowPreemption(VictimStage.PREFILL_QUEUED);
             h.config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(2);
@@ -64,15 +64,12 @@ class PreemptionPhasesE2ETest {
 
             CompletableFuture<Response> high = h.scheduler.submit(h.context(103, 70));
 
-            // victim = 队列内最低优 P30：8400 + yielded 消息
+            // victim = 队列内最低优 P30：8429 + preempted 消息
             Response victim = low1.get(2, TimeUnit.SECONDS);
             assertFalse(victim.isSuccess());
-            assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), victim.getCode());
-            assertNotNull(victim.getErrorMessage());
-            assertTrue(victim.getErrorMessage().contains("yielded"),
-                    "queue victim must carry the yielded attribution: " + victim.getErrorMessage());
-            assertTrue(victim.getErrorMessage().contains("103"),
-                    "yielded message must name the incoming request: " + victim.getErrorMessage());
+            assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), victim.getCode());
+            assertEquals("preempted by higher-priority request 103", victim.getErrorMessage());
+            assertEquals(AdmissionRejectReason.UNSPECIFIED, victim.getAdmissionRejectReason());
 
             // 高优与 P40 留在队列，未被驱逐
             assertFalse(high.isDone());
@@ -85,7 +82,7 @@ class PreemptionPhasesE2ETest {
 
     @Test
     @Timeout(30)
-    void a2_decode_reserved_eviction_victim_8400_and_shadow_accounting_transfers() throws Exception {
+    void a2_decode_reserved_eviction_victim_8429_and_shadow_accounting_transfers() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "50", 1.0, false)) {
             h.allowPreemption(VictimStage.DECODE_RESERVED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
@@ -106,8 +103,9 @@ class PreemptionPhasesE2ETest {
 
             Response victim = low.get(2, TimeUnit.SECONDS);
             assertFalse(victim.isSuccess());
-            assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), victim.getCode(),
-                    "reserved victim terminal must be 8400 (never 8429): " + victim.getErrorMessage());
+            assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), victim.getCode());
+            assertEquals("preempted by higher-priority request 202", victim.getErrorMessage());
+            assertEquals(AdmissionRejectReason.UNSPECIFIED, victim.getAdmissionRejectReason());
 
             // 账目正确：victim 影子预留释放，高优恰好占据一份
             assertFalse(high.isDone(), "high-priority request should sit in the queue after eviction");

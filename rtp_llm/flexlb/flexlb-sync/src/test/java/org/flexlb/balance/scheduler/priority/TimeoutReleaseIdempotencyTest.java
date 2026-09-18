@@ -86,7 +86,7 @@ class TimeoutReleaseIdempotencyTest {
         // Race: orTimeout fires first
         future.completeExceptionally(new TimeoutException("admission timeout"));
         // Dispatch pipeline also tries to fail the future (no-op — already completed)
-        future.complete(Response.error(StrategyErrorType.SCHEDULER_PLAN_CONFLICT));
+        future.complete(Response.error(StrategyErrorType.BATCH_DISPATCH_FAILED));
 
         awaitCallback(future);
 

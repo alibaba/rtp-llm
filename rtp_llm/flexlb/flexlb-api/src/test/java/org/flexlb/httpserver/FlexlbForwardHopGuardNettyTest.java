@@ -157,7 +157,7 @@ class FlexlbForwardHopGuardNettyTest {
             assertTrue(admitted.await(3, TimeUnit.SECONDS));
             master.server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
             var response = pending.get(8, TimeUnit.SECONDS);
-            assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
+            assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode());
             verify(master.routeService, times(1)).route(any());
             verify(sender.routeService, never()).route(any());
         }
@@ -191,7 +191,9 @@ class FlexlbForwardHopGuardNettyTest {
                         + (master.getPort() - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET));
                 var response = client.stub.schedule(request(77_001L));
                 assertFalse(response.getSuccess());
-                assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
+                assertEquals(status.getCode() == io.grpc.Status.Code.DEADLINE_EXCEEDED
+                        ? StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode()
+                        : StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode());
                 assertEquals(1, scheduleCalls.get());
                 assertEquals(0, cancelCalls.get());
                 verify(sender.routeService, never()).route(any());

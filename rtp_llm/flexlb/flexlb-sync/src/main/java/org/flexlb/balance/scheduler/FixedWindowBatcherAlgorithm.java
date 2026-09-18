@@ -100,24 +100,17 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
     @Override
     public void processQueue(BatcherContext ctx) throws InterruptedException {
         if (ctx.isActiveEmpty()) {
+            ctx.setWaitReason(null);
             return;
         }
 
         BatchItem head = ctx.peek();
         if (head == null) {
+            ctx.setWaitReason(null);
             return;
         }
 
         long nowMs = ctx.now();
-        long elapsedMs = nowMs - head.enqueuedAtMs();
-        BatchDispatcherConfig batch = ctx.cfg().batchDispatcher();
-        long fixedWaitMs = batch.getMaxCollectionWaitMs();
-        int batchMaxCount = Math.max(1, batch.getMaxRequests());
-        Long configuredPredictThresholdMs = batch.getEarlyDispatchPredictedExecutionMs();
-        long predictThresholdMs = configuredPredictThresholdMs == null
-                ? 0 : configuredPredictThresholdMs;
-        long batchMaxTokens = ctx.batchTokenCapacity();
-
         // The caller's absolute request expiry is the only queue-age limit.
         // It is created once at admission and is never reset by retries.
         if (head.ctx().requestExpired(nowMs)) {
@@ -128,14 +121,24 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             return;
         }
 
+        long elapsedMs = nowMs - head.enqueuedAtMs();
+        BatchDispatcherConfig batch = ctx.cfg().batchDispatcher();
+        long fixedWaitMs = batch.getMaxCollectionWaitMs();
+        int batchMaxCount = Math.max(1, batch.getMaxRequests());
+        Long configuredPredictThresholdMs = batch.getEarlyDispatchPredictedExecutionMs();
+        long predictThresholdMs = configuredPredictThresholdMs == null
+                ? 0 : configuredPredictThresholdMs;
+        long batchMaxTokens = ctx.batchTokenCapacity();
+
         // 1. Engine backpressure: park if the prefill worker already has too
         //    many batches inflight, to prevent overloading the engine.
         if (head.deliveryMode() == DeliveryMode.BATCH_ENQUEUE) {
             Integer configuredMaxInflight = batch.getMaxInflightBatchesPerPrefillWorker();
             int maxInflightBatches = configuredMaxInflight == null
                     ? 0 : configuredMaxInflight;
-            if (maxInflightBatches > 0
+            if (maxInflightBatches > 0 && ctx.prefillEp() != null
                     && ctx.prefillEp().getInflightBatchCount() >= maxInflightBatches) {
+                ctx.setWaitReason("prefill batch slots exhausted");
                 TimeUnit.MILLISECONDS.sleep(1);
                 return;
             }
@@ -181,6 +184,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         }
 
         // 5. Park
+        ctx.setWaitReason("batch collection window exceeded request scheduling budget");
         TimeUnit.MILLISECONDS.sleep(1);
     }
 

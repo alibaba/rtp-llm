@@ -633,8 +633,8 @@ public class MetricConstant {
     public static final String AUTO_TPM_DECODE_ENGINE_LOAD = "auto_tpm.decode.engine_load";
 
     /**
-     * Auto-TPM inflight settle misses (QPS): a finishYielded/PreemptedById
-     * found no inflight entry (review P2-2), tags: kind (yielded/preempted).
+     * Auto-TPM inflight settle misses (QPS): a finishPreemptedById
+     * found no inflight entry (review P2-2), tags: kind (preempted).
      * Harmless in isolation, but a burst points at a registration/cleanup
      * race — alert-worthy where a warn log is not.
      */

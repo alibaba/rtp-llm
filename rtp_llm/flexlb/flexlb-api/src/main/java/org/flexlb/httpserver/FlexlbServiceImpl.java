@@ -35,6 +35,7 @@ import java.net.UnknownHostException;
 import java.nio.channels.UnresolvedAddressException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -124,7 +125,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         RequestLifecycleSnapshot owned = routeService.getRequestState(requestId, 0);
         if (owned != null) {
             // A repeated request must not be advertised as unaccepted after leadership changes.
-            return buildMasterForwardFailureResponse("REQUEST_ALREADY_OWNED", "")
+            return buildMasterForwardFailureResponse(
+                    FlexlbGrpcForwarder.MasterForwardResult.failed("REQUEST_ALREADY_OWNED", ""))
                     .toBuilder().setLifecycle(toLifecycleProto(owned)).build();
         }
         return FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
@@ -158,7 +160,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
 
         // No usable master response and local scheduling is not allowed: return the failure.
-        var failureResponse = buildMasterForwardFailureResponse(forwardResult.failure(), forwardResult.masterHost());
+        var failureResponse = buildMasterForwardFailureResponse(forwardResult);
         if (!requestActive(context)) {
             Context callerContext = Context.current();
             boolean expired = context.requestExpired(System.currentTimeMillis())
@@ -259,11 +261,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private static String failureName(Throwable error) {
-        Throwable cause = error;
-        while (cause instanceof CompletionException && cause.getCause() != null) {
-            cause = cause.getCause();
-        }
-        return cause.getClass().getSimpleName();
+        Throwable cause = unwrapCompletion(error);
+        Status status = Status.fromThrowable(cause);
+        return status.getCode() == Status.Code.UNKNOWN
+                ? cause.getClass().getSimpleName() : status.getCode().name();
     }
 
     @Override
@@ -629,16 +630,31 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
     }
 
+    private static Throwable unwrapCompletion(Throwable error) {
+        while ((error instanceof CompletionException || error instanceof ExecutionException)
+                && error.getCause() != null) {
+            error = error.getCause();
+        }
+        return error;
+    }
+
+    private static StrategyErrorType schedulingErrorType(Throwable error) {
+        Throwable cause = unwrapCompletion(error);
+        if (cause instanceof TimeoutException
+                || (cause != null && Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED)) {
+            return StrategyErrorType.BATCH_SLO_EXPIRED;
+        }
+        return StrategyErrorType.BATCH_DISPATCH_FAILED;
+    }
+
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB buildErrorResponse(Throwable error) {
-        Throwable cause = error;
-        while (cause instanceof CompletionException && cause.getCause() != null) {
-            cause = cause.getCause();
+        Throwable cause = unwrapCompletion(error);
+        StrategyErrorType type = schedulingErrorType(cause);
+        if (type == StrategyErrorType.BATCH_SLO_EXPIRED) {
+            return buildErrorResponse(type.getErrorCode(), "request scheduling deadline exceeded");
         }
-        if (cause instanceof TimeoutException) {
-            return buildErrorResponse(8402, "NO_AVAILABLE_WORKER: schedule timeout");
-        }
-        return buildErrorResponse(500,
-                error.getMessage() != null ? error.getMessage() : "internal error");
+        return buildErrorResponse(type.getErrorCode(),
+                cause.getMessage() != null ? cause.getMessage() : "internal scheduling error");
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB buildErrorResponse(int code, String message) {
@@ -650,9 +666,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB
-    buildMasterForwardFailureResponse(String failure, String masterHost) {
-        StrategyErrorType errorType = StrategyErrorType.BATCH_SLO_EXPIRED;
-        String detail = "Master scheduling failed (" + failure
+    buildMasterForwardFailureResponse(FlexlbGrpcForwarder.MasterForwardResult result) {
+        StrategyErrorType errorType = schedulingErrorType(result.cause());
+        String masterHost = result.masterHost();
+        String detail = "Master scheduling failed (" + result.failure()
                 + "); do not retry or route locally";
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
                 FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
@@ -727,7 +744,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
                 FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder();
         if (response == null) {
-            return builder.setSuccess(false).setCode(500).setErrorMessage("null response").build();
+            return buildErrorResponse(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(),
+                    "null schedule response");
         }
         builder.setSuccess(response.isSuccess());
         builder.setCode(response.getCode());

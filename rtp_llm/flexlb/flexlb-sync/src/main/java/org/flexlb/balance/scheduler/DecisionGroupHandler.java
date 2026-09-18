@@ -5,12 +5,11 @@ import java.util.List;
 /**
  * Receives request-group decisions from a worker's scheduling queue.
  * <p>
- * Each method corresponds to a decision made during the queue's run loop:
+ * Reports expiration, grouping, and delivery failure for admitted requests:
  * <ul>
  *   <li>{@link #onExpired} — head item's deadline has passed, must be dropped</li>
  *   <li>{@link #onDecisionGroupReady} — a logical group is ready for its configured delivery mode</li>
- *   <li>{@link #onOfferFailure} — a new item could not be enqueued (batcher stopped or queue full)</li>
- *   <li>{@link #onDeliveryFailure} — a staged item could not complete delivery</li>
+ *   <li>{@link #onDeliveryFailure} — an admitted item could not complete delivery</li>
  * </ul>
  */
 public interface DecisionGroupHandler {
@@ -30,19 +29,11 @@ public interface DecisionGroupHandler {
     void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata metadata);
 
     /**
-     * Called when {@link WorkerBatcher#offer} fails — batcher is stopped or queue is full.
+     * Called when an admitted request cannot complete delivery, including queued
+     * work drained during shutdown. Releases any ownership acquired by the request.
+     * Immediate admission rejection is returned by {@link WorkerBatcher#tryOffer}.
      *
-     * @param item  the item that could not be enqueued
-     * @param error non-null if the batcher is stopped; null if the queue is full
-     */
-    void onOfferFailure(BatchItem item, Throwable error);
-
-    /**
-     * Called after an item has left the scheduling queue but delivery cannot
-     * complete. Unlike {@link #onOfferFailure}, the handler must treat this as
-     * a delivery failure and release any ownership already acquired for it.
-     *
-     * @param item  the staged or claimed item whose delivery failed
+     * @param item  the queued, staged, or claimed item whose delivery failed
      * @param error the failure that prevented delivery from completing
      */
     void onDeliveryFailure(BatchItem item, Throwable error);
