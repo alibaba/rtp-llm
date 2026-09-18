@@ -21,6 +21,7 @@ from rtp_llm.models.multimodal.deepseek_v41_processor import (
     TEXT,
     prepare_vl_inputs,
 )
+from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderers.deepseekv41_renderer import DeepseekV41Renderer
 
@@ -213,6 +214,90 @@ class V41PixelPipelineTest(TestCase):
         self.assertEqual(request.model_dump(), original)
         with sdpa_kernel(SDPBackend.MATH):
             self.compare_pipeline("user-tool", prompt, media["images"], prepared)
+
+
+class V41SyntheticImageRowInjectionTest(TestCase):
+    """Row-mapping and injection glue on synthetic features (no weights).
+
+    Exercises ``_image_row_indices``/``_inject_image_rows`` with fabricated CP
+    metadata so the rank-local derivation (including image spans straddling
+    the CP chunk boundary and decode-prefix rows) stays covered independently
+    of the weight-backed pipeline cases above.
+    """
+
+    @staticmethod
+    def bare_model():
+        model = object.__new__(DeepSeekV41Model)
+        model._image_plan = None
+        return model
+
+    @staticmethod
+    def fake_inputs(features, locs, cp=None):
+        return SimpleNamespace(
+            multimodal_features=features,
+            mm_features_locs=torch.tensor(locs, dtype=torch.int32),
+            attention_inputs=SimpleNamespace(context_parallel_info=cp),
+        )
+
+    def test_global_rows_and_injection_without_cp(self):
+        model = self.bare_model()
+        first = torch.arange(6, dtype=torch.float32)[:, None].expand(-1, 8).contiguous() + 100.0
+        second = torch.arange(4, dtype=torch.float32)[:, None].expand(-1, 8).contiguous() + 200.0
+        model._prepare_image_features(
+            self.fake_inputs([first, second], [3, 10])
+        )
+        rows = model._image_row_indices(16, torch.device("cpu"))
+        expected = torch.full((16,), -1, dtype=torch.int64)
+        expected[3:9] = torch.arange(6)
+        expected[10:14] = torch.arange(6, 10)
+        self.assertTrue(torch.equal(rows, expected))
+
+        hidden = torch.arange(16, dtype=torch.float32)[:, None].expand(-1, 8).contiguous()
+        injected = model._inject_image_rows(hidden.clone(), torch.zeros(16, dtype=torch.long))
+        self.assertTrue(torch.equal(injected[3:9], first))
+        self.assertTrue(torch.equal(injected[10:14], second))
+        self.assertTrue(torch.equal(injected[:3], hidden[:3]))
+        self.assertTrue(torch.equal(injected[9:10], hidden[9:10]))
+        self.assertTrue(torch.equal(injected[14:], hidden[14:]))
+
+    def test_cp_shuffle_maps_rank_local_rows_across_straddling_image(self):
+        model = self.bare_model()
+        features = torch.arange(4, dtype=torch.float32)[:, None].expand(-1, 8).contiguous() + 50.0
+        # One prefill request of 12 tokens; the image occupies [4, 8), which
+        # straddles the CP chunk boundary at 7. This rank keeps local tokens
+        # {0, 5, pad, 6, 7, 11} of the request.
+        cp = SimpleNamespace(
+            prefill_shuffle_indices=torch.tensor([0, 5, -1, 6, 7, 11], dtype=torch.int64),
+            prefill_actual_input_lengths_cpu=torch.tensor([12]),
+            prefill_cp_chunk_lengths=torch.tensor([7, 5], dtype=torch.int64),
+        )
+        model._prepare_image_features(self.fake_inputs([features], [4], cp=cp))
+        rows = model._image_row_indices(6, torch.device("cpu"))
+        self.assertEqual(rows.tolist(), [-1, 1, -1, 2, 3, -1])
+
+        hidden = torch.zeros(6, 8)
+        injected = model._inject_image_rows(hidden, torch.zeros(6, dtype=torch.long))
+        self.assertTrue(torch.equal(injected[1], features[1]))
+        self.assertTrue(torch.equal(injected[3], features[2]))
+        self.assertTrue(torch.equal(injected[4], features[3]))
+        self.assertTrue(torch.equal(injected[:1], hidden[:1]))
+        self.assertTrue(torch.equal(injected[2:3], hidden[2:3]))
+        self.assertTrue(torch.equal(injected[5], hidden[5]))
+
+    def test_decode_prefix_rows_stay_text(self):
+        model = self.bare_model()
+        features = torch.ones(2, 8)
+        # Two decode rows precede one prefill request of 4 tokens (global
+        # positions 2..5); the image occupies global [4, 6). This rank's
+        # prefill tokens are request positions 2 and 3 (global 4 and 5).
+        cp = SimpleNamespace(
+            prefill_shuffle_indices=torch.tensor([2, 3], dtype=torch.int64),
+            prefill_actual_input_lengths_cpu=torch.tensor([1, 1, 4]),
+            prefill_cp_chunk_lengths=torch.tensor([2, 2], dtype=torch.int64),
+        )
+        model._prepare_image_features(self.fake_inputs([features], [4], cp=cp))
+        rows = model._image_row_indices(4, torch.device("cpu"))
+        self.assertEqual(rows.tolist(), [-1, -1, 0, 1])
 
 
 if __name__ == "__main__":

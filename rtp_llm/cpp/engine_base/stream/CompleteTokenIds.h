@@ -51,6 +51,11 @@ public:
 
     std::string toString(int batch_id) const;
 
+    // Content identity of the V4.1 image spans overlapping [begin, begin+count)
+    // in canonical coordinates. Mixed into the block-cache hash so that the
+    // same prompt with different image content cannot hit the same prefix.
+    std::vector<int32_t> imageCacheIdentity(int begin, int count) const;
+
     int32_t* data(int batch_id);
 
     // Number of columns (max token capacity per batch row)
@@ -74,6 +79,9 @@ private:
     int64_t first_token_latency_us_ = 0;
 
     torch::Tensor complete_token_ids_;
+
+    std::shared_ptr<const V41RequestInputs> v41_inputs_;
+    int                                     canonical_offset_ = 0;
 };
 
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
