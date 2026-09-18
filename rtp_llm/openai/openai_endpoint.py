@@ -241,6 +241,14 @@ class OpenaiEndpoint(object):
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
         config = request.extra_configs or GenerateConfig()
+        content_state_stops = getattr(
+            self.chat_renderer, "parses_user_stop_sequences", False
+        )
+        if content_state_stops:
+            config = config.model_copy(deep=True)
+            # Parse every backend delta so content-only stops also cancel
+            # non-streaming HTTP requests before the backend reaches EOS.
+            config.is_streaming = True
         if request.trace_id != None:
             config.trace_id = request.trace_id
         if request.stream == True:
@@ -254,6 +262,10 @@ class OpenaiEndpoint(object):
         if request.n != None:
             config.num_return_sequences = request.n
         request_stop_words_list = request.stop if request.stop != None else []
+        if content_state_stops:
+            # V4.1 stops are content-state constraints. Sending them to the
+            # engine would also truncate reasoning and DSML argument strings.
+            request_stop_words_list = []
         if isinstance(request_stop_words_list, str):
             request_stop_words_list = [request_stop_words_list]
         config.stop_words_str = list(
@@ -292,11 +304,16 @@ class OpenaiEndpoint(object):
         if request.thinking_budget is not None:
             budget = int(request.thinking_budget)
             config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
-        if request.enable_thinking_requested() and config.max_thinking_tokens != 0:
-            config.in_think_mode = True
-        if request.disable_thinking():
-            config.in_think_mode = False
-            config.max_thinking_tokens = 0
+        if content_state_stops:
+            config.in_think_mode = self.chat_renderer.in_think_mode(request)
+            if not config.in_think_mode:
+                config.max_thinking_tokens = 0
+        else:
+            if request.enable_thinking_requested() and config.max_thinking_tokens != 0:
+                config.in_think_mode = True
+            if request.disable_thinking():
+                config.in_think_mode = False
+                config.max_thinking_tokens = 0
         if config.in_think_mode:
             self._ensure_think_begin_token_ids(config)
             self._ensure_think_end_token_ids(config)
@@ -575,6 +592,11 @@ class OpenaiEndpoint(object):
             chat_request.messages.pop()
         rendered_input = renderer.render_chat(chat_request)
         if prepopulate_str != "":
+            v41_inputs = getattr(rendered_input, "v41_inputs", None)
+            if v41_inputs is not None:
+                rendered_input.v41_inputs = v41_inputs.append_text(
+                    prepopulate_str, self.tokenizer.encode(prepopulate_str)
+                )
             rendered_input.rendered_prompt += prepopulate_str
             rendered_input.input_ids += self.tokenizer.encode(prepopulate_str)
         return rendered_input
@@ -613,6 +635,9 @@ class OpenaiEndpoint(object):
             except (TypeError, ValueError):
                 pass
 
+        typed_inputs = {}
+        if getattr(rendered_input, "v41_inputs", None) is not None:
+            typed_inputs["v41_inputs"] = rendered_input.v41_inputs
         choice_generator = renderer.generate_choice(
             request_id,
             rendered_input.input_ids,
@@ -621,6 +646,7 @@ class OpenaiEndpoint(object):
             self.backend_rpc_server_visitor,
             chat_request,
             headers=request_headers,
+            **typed_inputs,
         )
 
         return self._complete_stream_response(

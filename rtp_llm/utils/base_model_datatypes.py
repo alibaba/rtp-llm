@@ -49,6 +49,7 @@ class GenerateInput:
     enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
+    v41_inputs: Optional[Any] = field(default=None, repr=False)
 
     class Config:
         arbitrary_types_allowed = True
