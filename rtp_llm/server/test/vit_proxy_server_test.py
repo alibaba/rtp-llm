@@ -1,3 +1,4 @@
+import asyncio
 import queue
 import threading
 import time
@@ -35,14 +36,14 @@ from rtp_llm.server.vit_proxy_server import (
     VIT_WORKER_RPC_TIMEOUT_MARGIN_SECONDS,
     LoadBalancer,
     VitProxyRpcServer,
+    VitProxyServer,
     WorkerConnectionPool,
     _resolve_forwarding_deadline_seconds,
     _resolve_rpc_timeout_seconds,
     resolve_default_rpc_timeout_seconds,
+    resolve_min_healthy_workers,
 )
-from rtp_llm.server.vit_rpc_server import (
-    MultimodalRpcServer,
-)
+from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
 
 
 class FakeContext:
@@ -442,11 +443,308 @@ class VitProxyRpcServerStatusTest(TestCase):
         )
         return stub
 
-    def _make_server(self, stubs):
+    def _make_server(self, stubs, min_healthy_workers=0):
         load_balancer = LoadBalancer(list(stubs.keys()))
         connection_pool = MagicMock()
         connection_pool.get_stub.side_effect = lambda addr: stubs[addr]
-        return VitProxyRpcServer(load_balancer, connection_pool)
+        return VitProxyRpcServer(
+            load_balancer, connection_pool, min_healthy_workers=min_healthy_workers
+        )
+
+    def test_recovery_refresh_restores_forwarding_after_all_workers_fail(self):
+        stubs = {
+            addr: self._make_status_stub(WorkerStatusPB(role="VIT", alive=True))
+            for addr in ("a", "b")
+        }
+        for stub in stubs.values():
+            stub.RemoteMultimodalEmbedding.side_effect = RpcUnavailable()
+        server = self._make_server(stubs)
+        with self.assertRaises(RuntimeError):
+            server.RemoteMultimodalEmbedding(MultimodalInputsPB(), FakeContext())
+        self.assertEqual(server.load_balancer.get_alive_worker_addresses(), [])
+        for stub in stubs.values():
+            stub.RemoteMultimodalEmbedding.side_effect = None
+            stub.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB()
+        self.assertEqual(
+            server.refresh_worker_health(only_unhealthy=True), {"a": True, "b": True}
+        )
+        self.assertIsInstance(
+            server.RemoteMultimodalEmbedding(MultimodalInputsPB(), FakeContext()),
+            MultimodalOutputPB,
+        )
+
+    def test_background_recovery_probes_only_unhealthy_workers(self):
+        healthy = self._make_status_stub(WorkerStatusPB(role="VIT", alive=True))
+        recovered = self._make_status_stub(WorkerStatusPB(role="VIT", alive=True))
+        server = self._make_server({"healthy": healthy, "recovered": recovered})
+        server.load_balancer.set_worker_alive("recovered", False)
+        proxy = VitProxyServer(["healthy", "recovered"], 0)
+        proxy.proxy_servicer = server
+        with patch.object(proxy._recovery_stop, "wait", return_value=True):
+            proxy._recover_unhealthy_workers()
+        healthy.GetWorkerStatus.future.assert_not_called()
+        recovered.GetWorkerStatus.future.assert_called_once()
+        self.assertEqual(
+            server.load_balancer.get_alive_worker_addresses(), ["healthy", "recovered"]
+        )
+
+    def test_proxy_starts_with_no_worker_assumed_ready(self):
+        proxy = VitProxyServer(["a", "b"], 0)
+        self.assertEqual(proxy.load_balancer.get_alive_worker_addresses(), [])
+
+    def test_http_health_recovers_lb_and_uses_threshold(self):
+        from rtp_llm.multimodal.vit_proxy_start_server import create_proxy_app
+
+        stubs = {
+            addr: self._make_status_stub(WorkerStatusPB(role="VIT", alive=True))
+            for addr in ("a", "b")
+        }
+        server = self._make_server(stubs)
+        for addr in stubs:
+            server.load_balancer.set_worker_alive(addr, False)
+        proxy = MagicMock()
+        proxy.proxy_servicer = server
+        proxy.min_healthy_workers = server.min_healthy_workers
+        app = create_proxy_app(proxy, list(stubs), [])
+        endpoint = next(
+            route.endpoint for route in app.routes if route.path == "/health"
+        )
+        self.assertEqual(asyncio.run(endpoint()), {"status": "ok"})
+        self.assertEqual(server.load_balancer.get_alive_worker_addresses(), ["a", "b"])
+        stubs["b"].GetWorkerStatus.future.return_value = FakeGrpcFuture(
+            error=RpcUnavailable()
+        )
+        # N=2, default ceil(N/2)=1: one healthy worker is sufficient.
+        self.assertEqual(asyncio.run(endpoint()), {"status": "ok"})
+        self.assertEqual(server.load_balancer.get_alive_worker_addresses(), ["a"])
+        stubs["a"].GetWorkerStatus.future.return_value = FakeGrpcFuture(
+            error=RpcUnavailable()
+        )
+        self.assertEqual(asyncio.run(endpoint()).status_code, 503)
+
+    def test_late_probe_success_does_not_erase_new_forwarding_failure(self):
+        stub = self._make_status_stub(done=False)
+        future = stub.GetWorkerStatus.future.return_value
+        server = self._make_server({"worker": stub})
+        results = queue.Queue()
+        server._subscribe_status_probe("worker", StatusVersionPB(), 1.0, results)
+        stub.RemoteMultimodalEmbedding.side_effect = RpcUnavailable()
+        with self.assertRaises(RuntimeError):
+            server.RemoteMultimodalEmbedding(MultimodalInputsPB(), FakeContext())
+        future.complete(response=WorkerStatusPB(role="VIT", alive=True))
+        self.assertEqual(server.load_balancer.get_alive_worker_addresses(), [])
+        self.assertIsNone(results.get_nowait().worker_status)
+
+    def test_late_probe_failure_does_not_erase_new_forwarding_success(self):
+        stub = self._make_status_stub(done=False)
+        future = stub.GetWorkerStatus.future.return_value
+        stub.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB()
+        server = self._make_server({"worker": stub})
+        server._subscribe_status_probe("worker", StatusVersionPB(), 1.0, queue.Queue())
+        server.RemoteMultimodalEmbedding(MultimodalInputsPB(), FakeContext())
+        future.complete(error=RpcUnavailable())
+        self.assertEqual(server.load_balancer.get_alive_worker_addresses(), ["worker"])
+
+    def test_shutdown_cancels_probe_and_prevents_new_probe_or_late_revival(self):
+        stub = self._make_status_stub(done=False)
+        future = stub.GetWorkerStatus.future.return_value
+        server = self._make_server({"worker": stub})
+        server.load_balancer.set_worker_alive("worker", False)
+        server._subscribe_status_probe("worker", StatusVersionPB(), 1.0, queue.Queue())
+        server.cancel_status_probes()
+        self.assertTrue(future.cancelled)
+        future.complete(response=WorkerStatusPB(role="VIT", alive=True))
+        self.assertEqual(server.refresh_worker_health(), {"worker": False})
+        self.assertEqual(server.load_balancer.get_alive_worker_addresses(), [])
+        stub.GetWorkerStatus.future.assert_called_once()
+
+    def test_http_and_grpc_use_the_same_default_or_explicit_threshold(self):
+        from rtp_llm.multimodal.vit_proxy_start_server import create_proxy_app
+
+        for configured, healthy, expected in (
+            (0, 2, False),
+            (0, 3, True),
+            (1, 1, True),
+            (6, 5, False),
+            (6, 6, True),
+        ):
+            with self.subTest(configured=configured, healthy=healthy):
+                stubs = {
+                    str(i): self._make_status_stub(
+                        WorkerStatusPB(role="VIT", alive=i < healthy)
+                    )
+                    for i in range(6)
+                }
+                server = self._make_server(stubs, min_healthy_workers=configured)
+                proxy = MagicMock()
+                proxy.proxy_servicer = server
+                proxy.min_healthy_workers = server.min_healthy_workers
+                app = create_proxy_app(proxy, list(stubs), [])
+                endpoint = next(r.endpoint for r in app.routes if r.path == "/health")
+                response = asyncio.run(endpoint())
+                if expected:
+                    self.assertEqual(response, {"status": "ok"})
+                else:
+                    self.assertEqual(response.status_code, 503)
+                context = FakeContext()
+                status = server.GetWorkerStatus(StatusVersionPB(), context)
+                self.assertEqual(status.alive, expected)
+                self.assertEqual(
+                    context.code, None if expected else grpc.StatusCode.UNAVAILABLE
+                )
+                cache_context = FakeContext()
+                server.GetCacheStatus(CacheVersionPB(), cache_context)
+                self.assertEqual(cache_context.code, context.code)
+
+    def test_odd_worker_count_requires_rounded_up_half(self):
+        for count, healthy, expected in (
+            (5, 2, False),
+            (5, 3, True),
+            (9, 4, False),
+            (9, 5, True),
+        ):
+            with self.subTest(count=count, healthy=healthy):
+                stubs = {
+                    str(i): self._make_status_stub(
+                        WorkerStatusPB(role="VIT", alive=i < healthy)
+                    )
+                    for i in range(count)
+                }
+                server = self._make_server(stubs)
+                self.assertEqual(server.min_healthy_workers, (count + 1) // 2)
+                self.assertEqual(
+                    server.GetWorkerStatus(StatusVersionPB(), FakeContext()).alive,
+                    expected,
+                )
+
+    def test_http_empty_worker_list_is_unhealthy(self):
+        from rtp_llm.multimodal.vit_proxy_start_server import create_proxy_app
+
+        app = create_proxy_app(MagicMock(), [], [])
+        endpoint = next(r.endpoint for r in app.routes if r.path == "/health")
+        self.assertEqual(asyncio.run(endpoint()).status_code, 503)
+
+    def test_http_recovery_and_grpc_share_first_probe_deadline(self):
+        from rtp_llm.multimodal.vit_proxy_start_server import create_proxy_app
+
+        for http_first in (False, True):
+            with self.subTest(http_first=http_first):
+                stub = self._make_status_stub(done=False)
+                pending = stub.GetWorkerStatus.future.return_value
+                server = self._make_server({"worker": stub})
+                server.load_balancer.set_worker_alive("worker", False)
+                proxy = MagicMock(proxy_servicer=server, min_healthy_workers=1)
+                app = create_proxy_app(proxy, ["worker"], [])
+                endpoint = next(r.endpoint for r in app.routes if r.path == "/health")
+                first_subscribed = threading.Event()
+                all_subscribed = threading.Event()
+                subscribe_lock = threading.Lock()
+                subscriber_count = 0
+                original_subscribe = server._subscribe_status_probe
+
+                def subscribe(*args, **kwargs):
+                    nonlocal subscriber_count
+                    original_subscribe(*args, **kwargs)
+                    with subscribe_lock:
+                        subscriber_count += 1
+                        first_subscribed.set()
+                        if subscriber_count == 4:
+                            all_subscribed.set()
+
+                calls = [
+                    lambda: server.refresh_worker_health(only_unhealthy=True),
+                    lambda: asyncio.run(endpoint()),
+                    lambda: server.GetWorkerStatus(StatusVersionPB(), FakeContext()),
+                    lambda: server.GetCacheStatus(CacheVersionPB(), FakeContext()),
+                ]
+                if http_first:
+                    calls[0], calls[1] = calls[1], calls[0]
+                with patch.object(
+                    server, "_subscribe_status_probe", side_effect=subscribe
+                ):
+                    with futures.ThreadPoolExecutor(max_workers=4) as executor:
+                        results = [executor.submit(calls[0])]
+                        try:
+                            self.assertTrue(first_subscribed.wait(1))
+                            results.extend(executor.submit(call) for call in calls[1:])
+                            self.assertTrue(all_subscribed.wait(1))
+                            stub.GetWorkerStatus.future.assert_called_once()
+                            timeout = stub.GetWorkerStatus.future.call_args.kwargs[
+                                "timeout"
+                            ]
+                            expected = 2.0 if http_first else 1.0
+                            self.assertGreater(timeout, expected - 0.2)
+                            self.assertLessEqual(timeout, expected)
+                        finally:
+                            pending.complete(
+                                response=WorkerStatusPB(role="VIT", alive=True)
+                            )
+                        for result in results:
+                            result.result(timeout=1)
+                self.assertEqual(
+                    server.load_balancer.get_alive_worker_addresses(), ["worker"]
+                )
+
+    def test_http_health_has_one_total_deadline_for_all_workers(self):
+        from rtp_llm.multimodal.vit_proxy_start_server import create_proxy_app
+
+        stubs = {str(i): self._make_status_stub(done=False) for i in range(6)}
+        server = self._make_server(stubs)
+        proxy = MagicMock(proxy_servicer=server, min_healthy_workers=3)
+        app = create_proxy_app(proxy, list(stubs), [])
+        endpoint = next(r.endpoint for r in app.routes if r.path == "/health")
+        start = time.monotonic()
+        try:
+            response = asyncio.run(endpoint())
+            elapsed = time.monotonic() - start
+            self.assertEqual(response.status_code, 503)
+            self.assertGreaterEqual(elapsed, 1.8)
+            self.assertLess(elapsed, 3.0)
+            for stub in stubs.values():
+                stub.GetWorkerStatus.future.assert_called_once()
+                self.assertLessEqual(
+                    stub.GetWorkerStatus.future.call_args.kwargs["timeout"], 2
+                )
+        finally:
+            server.cancel_status_probes()
+
+    def test_stop_wakes_recovery_before_closing_pool_without_cancel_callback(self):
+        stub = self._make_status_stub(done=False)
+        pending = stub.GetWorkerStatus.future.return_value
+        # Transport cancellation may finish asynchronously; shutdown must not
+        # rely on the completion callback to wake health subscribers.
+        pending.cancel = MagicMock(return_value=True)
+        server = self._make_server({"worker": stub})
+        server.load_balancer.set_worker_alive("worker", False)
+        proxy = VitProxyServer(["worker"], 0)
+        proxy.proxy_servicer = server
+        proxy.connection_pool = server.connection_pool
+        entered = threading.Event()
+        original_subscribe = server._subscribe_status_probe
+
+        def subscribe(*args, **kwargs):
+            original_subscribe(*args, **kwargs)
+            entered.set()
+
+        proxy.connection_pool.close_all.side_effect = lambda: self.assertFalse(
+            proxy._recovery_thread.is_alive()
+        )
+        with patch.object(server, "_subscribe_status_probe", side_effect=subscribe):
+            proxy._recovery_thread = threading.Thread(
+                target=proxy._recover_unhealthy_workers
+            )
+            proxy._recovery_thread.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                start = time.monotonic()
+                proxy.stop()
+                self.assertLess(time.monotonic() - start, 0.5)
+                proxy.connection_pool.close_all.assert_called_once()
+                pending.cancel.assert_called_once()
+                pending.complete(response=WorkerStatusPB(role="VIT", alive=True))
+                self.assertEqual(server.load_balancer.get_alive_worker_addresses(), [])
+            finally:
+                proxy.stop()
 
     def test_callback_registration_failure_removes_probe_and_allows_retry(self):
         failed_future = FakeGrpcFuture(done=False)
@@ -499,7 +797,7 @@ class VitProxyRpcServerStatusTest(TestCase):
         self.assertNotIn("worker", server._status_probes)
         self.assertTrue(failed_future.cancelled)
 
-    def test_worker_status_is_alive_when_any_worker_is_alive(self):
+    def test_worker_status_is_alive_when_default_half_is_met(self):
         dead_stub = self._make_status_stub(
             WorkerStatusPB(role="VIT", alive=False, status_version=1)
         )
@@ -565,7 +863,7 @@ class VitProxyRpcServerStatusTest(TestCase):
             WorkerStatusPB(role="", alive=True, status_version=3)
         )
         stubs["live"] = live_stub
-        server = self._make_server(stubs)
+        server = self._make_server(stubs, min_healthy_workers=1)
         context = FakeContext(time_remaining_values=[1.0])
 
         response = server.GetWorkerStatus(StatusVersionPB(), context)
@@ -716,7 +1014,7 @@ class VitProxyRpcServerStatusTest(TestCase):
         pending_future.complete(error=RpcDeadlineExceeded())
         self.assertEqual(server.load_balancer.get_alive_worker_addresses(), [])
 
-    def test_cache_status_is_ok_when_any_worker_is_alive(self):
+    def test_cache_status_is_ok_when_threshold_is_met(self):
         stub = self._make_status_stub(
             WorkerStatusPB(role="VIT", alive=True, status_version=1)
         )
@@ -778,6 +1076,63 @@ class VitProxyRpcServerStatusTest(TestCase):
         self.assertEqual(worker.requests[0].latest_cache_version, 11)
 
 
+class VitProxyRecoveryIntegrationTest(TestCase):
+    def test_background_recovers_real_grpc_worker_without_external_health_calls(self):
+        available = threading.Event()
+        available.set()
+
+        class Worker(MultimodalRpcServiceServicer):
+            def GetWorkerStatus(self, request, context):
+                return WorkerStatusPB(role="VIT", alive=available.is_set())
+
+            def RemoteMultimodalEmbedding(self, request, context):
+                if not available.is_set():
+                    context.abort(grpc.StatusCode.UNAVAILABLE, "worker restarting")
+                return MultimodalOutputPB()
+
+        worker_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+        add_MultimodalRpcServiceServicer_to_server(Worker(), worker_server)
+        port = worker_server.add_insecure_port("127.0.0.1:0")
+        worker_server.start()
+        address = f"127.0.0.1:{port}"
+        proxy = VitProxyServer([address], 0)
+
+        def wait_until_ready():
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if proxy.load_balancer.get_alive_worker_addresses() == [address]:
+                    return
+                time.sleep(0.01)
+            self.fail("background recovery did not restore the worker")
+
+        with patch(
+            "rtp_llm.server.vit_proxy_server.WORKER_RECOVERY_INTERVAL_SEC", 0.05
+        ):
+            try:
+                proxy.start()
+                wait_until_ready()
+                available.clear()
+                with self.assertRaises(RuntimeError):
+                    proxy.proxy_servicer.RemoteMultimodalEmbedding(
+                        MultimodalInputsPB(), FakeContext()
+                    )
+                self.assertEqual(proxy.load_balancer.get_alive_worker_addresses(), [])
+                available.set()
+                # No HTTP or aggregate gRPC status request triggers this recovery.
+                wait_until_ready()
+                self.assertIsInstance(
+                    proxy.proxy_servicer.RemoteMultimodalEmbedding(
+                        MultimodalInputsPB(), FakeContext()
+                    ),
+                    MultimodalOutputPB,
+                )
+            finally:
+                proxy.stop()
+                worker_server.stop(0).wait(timeout=2)
+        self.assertFalse(proxy._recovery_thread.is_alive())
+        self.assertEqual(proxy.connection_pool.channels, {})
+
+
 class VitProxyRpcServerForwardingTest(TestCase):
     def _make_status_stub(self, worker_status=None, error=None, done=True):
         stub = MagicMock()
@@ -786,11 +1141,13 @@ class VitProxyRpcServerForwardingTest(TestCase):
         )
         return stub
 
-    def _make_server(self, stubs):
+    def _make_server(self, stubs, min_healthy_workers=0):
         load_balancer = LoadBalancer(list(stubs.keys()))
         connection_pool = MagicMock()
         connection_pool.get_stub.side_effect = lambda addr: stubs[addr]
-        return VitProxyRpcServer(load_balancer, connection_pool)
+        return VitProxyRpcServer(
+            load_balancer, connection_pool, min_healthy_workers=min_healthy_workers
+        )
 
     def test_status_health_is_used_by_forwarding(self):
         dead_stub = self._make_status_stub(
@@ -1104,7 +1461,11 @@ class MMOutputProxyRouterTest(TestCase):
         router.release(ReleaseLeasePB(lease_id=["same"]), FakeContext([1.0]))
 
         connection_pool.get_stub.assert_not_called()
-        reasons = [call.args[2].get("reason") for call in report.call_args_list if len(call.args) > 2]
+        reasons = [
+            call.args[2].get("reason")
+            for call in report.call_args_list
+            if len(call.args) > 2
+        ]
         self.assertIn("rdma_handle_collision", reasons)
         self.assertIn("release_handle_collision", reasons)
 
@@ -1119,7 +1480,11 @@ class MMOutputProxyRouterTest(TestCase):
         router.release(ReleaseLeasePB(lease_id=["handle"]), FakeContext([0.0]))
 
         connection_pool.get_stub.assert_not_called()
-        reasons = [call.args[2].get("reason") for call in report.call_args_list if len(call.args) > 2]
+        reasons = [
+            call.args[2].get("reason")
+            for call in report.call_args_list
+            if len(call.args) > 2
+        ]
         self.assertIn("release_deadline_exhausted", reasons)
 
     def test_unknown_expired_and_repeated_handles_are_idempotent(self):
@@ -1158,9 +1523,7 @@ class MMOutputProxyRouterTest(TestCase):
             MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle-b")]),
         )
 
-        router.release(
-            ReleaseLeasePB(lease_id=["handle-a", "handle-b"]), MagicMock()
-        )
+        router.release(ReleaseLeasePB(lease_id=["handle-a", "handle-b"]), MagicMock())
 
         forwarded = stub_b.ReleaseRdmaLease.call_args.args[0]
         self.assertEqual(list(forwarded.lease_id), ["handle-b"])
@@ -1220,6 +1583,59 @@ class MMOutputProxyRouterTest(TestCase):
 
         self.assertFalse(first.is_alive())
         self.assertEqual(stub.calls, 1)
+
+
+class VitHealthThresholdTest(TestCase):
+    def test_auto_rounding_and_explicit_boundaries(self):
+        for n, expected in (
+            (1, 1),
+            (2, 1),
+            (3, 2),
+            (4, 2),
+            (5, 3),
+            (6, 3),
+            (7, 4),
+            (8, 4),
+            (9, 5),
+        ):
+            with self.subTest(n=n):
+                self.assertEqual(resolve_min_healthy_workers(n), expected)
+                self.assertEqual(resolve_min_healthy_workers(n, 1), 1)
+                self.assertEqual(resolve_min_healthy_workers(n, n), n)
+
+    def test_invalid_counts_fail_instead_of_silently_clamping(self):
+        for n, configured in ((0, 0), (-1, 0), (6, -1), (6, 7), (6, 1.5), (6, True)):
+            with self.subTest(n=n, configured=configured), self.assertRaises(
+                ValueError
+            ):
+                resolve_min_healthy_workers(n, configured)
+        with self.assertRaises(ValueError):
+            VitProxyServer([], 0)
+
+
+class VitBindFailureTest(TestCase):
+    @patch("rtp_llm.server.vit_proxy_server.add_MultimodalRpcServiceServicer_to_server")
+    @patch("rtp_llm.server.vit_proxy_server.grpc.server")
+    def test_proxy_bind_failure_does_not_start_grpc_or_recovery(self, make_server, _):
+        grpc_server = make_server.return_value
+        grpc_server.add_insecure_port.return_value = 0
+        proxy = VitProxyServer(["worker"], 31000)
+        self.addCleanup(proxy.stop)
+        with self.assertRaisesRegex(RuntimeError, "Failed to bind VIT proxy"):
+            proxy.start()
+        grpc_server.start.assert_not_called()
+        self.assertIsNone(proxy._recovery_thread)
+
+    def test_worker_bind_failure_does_not_start_grpc(self):
+        from rtp_llm.server.vit_app import VitEndpointServer
+
+        worker = VitEndpointServer.__new__(VitEndpointServer)
+        worker.mm_process_engine = MagicMock()
+        worker.rpc_server = MagicMock()
+        worker.rpc_server.add_insecure_port.return_value = 0
+        with self.assertRaisesRegex(RuntimeError, "Failed to bind VIT worker"):
+            worker.start(31000)
+        worker.rpc_server.start.assert_not_called()
 
 
 if __name__ == "__main__":
