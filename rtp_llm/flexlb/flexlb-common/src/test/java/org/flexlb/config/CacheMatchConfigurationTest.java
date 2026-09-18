@@ -10,6 +10,7 @@ import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -113,6 +114,8 @@ class CacheMatchConfigurationTest {
         updated.kvcmCacheMatching().setMedium(List.of("kvs"));
         listener.getValue().accept(updated);
 
+        assertNotSame(initial.kvcmCacheMatching(), configuration.getKvcmRuntimeConfig());
+        assertSame(updated.kvcmCacheMatching(), configuration.getKvcmRuntimeConfig());
         assertEquals(7, configuration.getKvcmRuntimeConfig().getGlobalKvsHostCount());
         assertTrue(configuration.getKvcmRuntimeConfig().isEnableP2p());
         assertEquals(List.of("kvs"), configuration.getKvcmRuntimeConfig().getMedium());
