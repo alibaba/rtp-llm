@@ -89,6 +89,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
     void workerOffline_unsentDispatchReleasesOwnership() throws Exception {
         Response first = submitRequest(20011).get(5, TimeUnit.SECONDS);
         assertTrue(first.isSuccess());
+        assertTrue(first.isEnqueuedByMaster(), "Should be enqueued by master");
         int existingBatches = getPrefillEndpoint().getInflightBatchCount();
         mockPrefillWorker.stop();
         Thread.sleep(500);
@@ -97,6 +98,8 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
 
         assertFalse(rejected.isSuccess());
         assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), rejected.getCode());
+        String errMsg = rejected.getErrorMessage();
+        assertTrue(errMsg != null && !errMsg.isEmpty(), "Error message should not be empty");
         assertEquals(existingBatches, getPrefillEndpoint().getInflightBatchCount());
         assertEquals(1, mockPrefillWorker.getEnqueueCount(), "Unsent request must never reach the worker");
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
