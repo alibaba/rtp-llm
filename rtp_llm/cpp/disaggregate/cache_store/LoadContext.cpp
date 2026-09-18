@@ -104,6 +104,11 @@ void SyncContext::waitDone() {
     }
 }
 
+void SyncContext::waitForCompletion() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cond_.wait(lock, [this] { return done_layer_cnt_ == expect_layer_cnt_; });
+}
+
 bool SyncContext::success() const {
     std::unique_lock<std::mutex> lock(mutex_);
     return error_info_.ok();

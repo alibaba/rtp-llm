@@ -255,6 +255,19 @@ class _DevicePlannerProbeModel:
         )
 
 
+class _ValidRowMaskProbeModel:
+    def __init__(self):
+        self.captured_outputs = {}
+
+    def prepare_fmha_impl(self, inputs, _is_cuda_graph):
+        return SimpleNamespace(prepare_cuda_graph=lambda attention: None)
+
+    def forward(self, inputs, _fmha_impl=None):
+        output = inputs.input_hiddens + inputs.ktp_valid_row_mask[:, None]
+        self.captured_outputs[inputs.input_ids.numel()] = output
+        return PyModelOutputs(output)
+
+
 class _SequenceHostProbeModel:
     def __init__(self) -> None:
         self.capture_sequence_lengths = []
@@ -828,6 +841,41 @@ class CudaGraphTargetVerifyMetadataTest(unittest.TestCase):
             outputs.hidden_states,
             torch.ones_like(outputs.hidden_states),
         )
+
+    def test_tp_sp_replay_refreshes_real_idle_and_padding_rows(self):
+        # No weights or attention kernel: consume the same captured mask used
+        # by K3 expert routing, through the real C++ graph preparation path.
+        for width in (1, 4):
+            model = _ValidRowMaskProbeModel()
+            runner = CudaGraphRunner()
+            runner.init_decode(
+                model,
+                hidden_size=16,
+                max_seq_len=384,
+                tokens_per_block=64,
+                kernel_tokens_per_block=64,
+                decode_capture_batch_sizes=[2],
+                num_tokens_per_bs=width,
+                is_target_verify=width == 4,
+                max_context_batch_size=2,
+            )
+            for batch, idle in ((2, False), (1, False), (1, True), (2, False)):
+                with self.subTest(width=width, batch=batch, idle=idle):
+                    inputs = (
+                        self._build_replay_inputs(batch_size=batch, q_len=width)
+                        if width == 4
+                        else self._build_decode_replay_inputs([126, 255][:batch])
+                    )
+                    inputs.attention_inputs.is_fake_stream = idle
+                    self.assertTrue(runner.canRun(inputs))
+                    runner.forward(inputs)
+                    torch.cuda.synchronize()
+                    expected = torch.zeros_like(model.captured_outputs[2 * width])
+                    if not idle:
+                        expected[:batch * width] = 1
+                    torch.testing.assert_close(
+                        model.captured_outputs[2 * width], expected, rtol=0, atol=0
+                    )
 
     def test_ktp_idle_rank_keeps_target_verify_physical_rows(self):
         model = _MetadataProbeModel()

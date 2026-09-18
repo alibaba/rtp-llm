@@ -649,7 +649,7 @@ verify_smoke_runtime_coverage() {
     python3 "${repo_root}/example/k3/kimi_k3_smoke_runtime_evidence.py" \
         --role "${role}" --root "${role_dir}" \
         --decode-page-rr 1 --proposal-tokens "${smoke_proposal_tokens}" \
-        --tp-size "${smoke_tp_size}" --dp-size "${smoke_dp_size}" --block-size "${smoke_block_size}"
+        --tp-size "${smoke_tp_size}" --dp-size "${smoke_dp_size}" --block-size "${smoke_block_size}" --source-tp-size "${smoke_prefill_tp_size}"
 }
 
 verify_fp8_log() {

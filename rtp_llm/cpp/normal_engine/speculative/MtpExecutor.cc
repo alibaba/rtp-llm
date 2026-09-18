@@ -743,6 +743,13 @@ void MtpExecutor::runChunkPrefillRound(ChunkPrefillContext& hook, const PrefillC
     draft_model_->forward(chunk_input);
     *hook.model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - draft_start_us;
     advanceDraftCacheStorePublishFrontier(chunk_input, draft_round, hook.draft_publish_frontier);
+    // Internal draft outputs have no later consumer: the next Prefill round
+    // receives new target hidden states, and terminal recurrent h is computed
+    // separately after target sampling. Do not retain a full chunk across the
+    // next target forward. This does not touch the final terminal pass below.
+    if (auto* python_draft = dynamic_cast<PyWrappedModel*>(draft_model_.get())) {
+        python_draft->releaseConsumedPrefillHidden();
+    }
 }
 
 bool MtpExecutor::isTpRank0() const {

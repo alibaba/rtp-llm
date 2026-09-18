@@ -28,7 +28,7 @@ DP1跳过owner轮转、last-owner-only和不均匀DP batch；这些定义及断�
 
 ## 运行时证据与失败处理
 
-每个all-suite必须同时通过答案检查和两端的smoke-runtime-coverage.json。Prefill检查chunk round、padding算术和真实padding1/7；Decode检查各DP组全部rank的DCP A2A communicator、Page-RR物理block与TP×block checkpoint跨度、Graph捕获桶及KTP未启用。TP4/MTP3的捕获桶为1/2/4/8，TP8为2/4/8；capture不等于每一步replay。
+每个all-suite必须同时通过答案检查和两端的smoke-runtime-coverage.json。Prefill检查chunk round、padding算术和真实padding1/7；Decode检查各DP组全部rank的DCP A2A communicator、Page-RR物理block与max(P TP,D TP)×block checkpoint跨度、Graph捕获桶及KTP未启用。TP4/MTP3的捕获桶为1/2/4/8，TP8为2/4/8；capture不等于每一步replay。
 
 所有正式请求不重试。输入、原始响应及精确构造的token IDs均保存，失败不会抹去同批已完成记录。RDMA预热只重试连接异常和HTTP408/429/502/503/504；语义、PD metadata、owner、格式、cache错误直接失败。预热前等待各rank的RDMA transport和gRPC listener就绪。
 

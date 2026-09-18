@@ -342,6 +342,23 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
         }
 #endif
     }
+    else if (py_model_inputs_.ktp_valid_row_mask.defined()) {
+        // TP-SP also captures this mask. Rebuild it for every replay, including
+        // an idle DP's dummy request and a smaller batch reusing a larger graph.
+        // Python keeps a view of this storage; changing host counts alone cannot
+        // update the expert routing kernels already captured in the graph.
+        const auto& attention = inputs.attention_inputs;
+        const int64_t valid_rows = attention.is_fake_stream ? 0 :
+            (attention.physical_request_count > 0 ? attention.logical_token_count : token_num);
+        RTP_LLM_CHECK_WITH_INFO(valid_rows >= 0 && valid_rows <= token_num
+                                   && token_num <= py_model_inputs_.ktp_valid_row_mask.numel(),
+                               "invalid TP-SP graph row counts: valid=%ld input=%d capacity=%ld",
+                               valid_rows, token_num, py_model_inputs_.ktp_valid_row_mask.numel());
+        py_model_inputs_.ktp_valid_row_mask.zero_();
+        if (valid_rows > 0) {
+            py_model_inputs_.ktp_valid_row_mask.narrow(0, 0, valid_rows).fill_(1);
+        }
+    }
     py_model_inputs_.ktp_local_real_batch      = inputs.ktp_local_real_batch;
     py_model_inputs_.ktp_common_physical_batch = inputs.ktp_common_physical_batch;
     py_model_inputs_.ktp_use_cuda_graph        = inputs.ktp_use_cuda_graph;

@@ -496,16 +496,19 @@ def _register_process_groups_to_cpp():
 
         Args:
             tensors: Tensors to broadcast, each is broadcast in-place from root.
-            root: Source rank that holds the data.
+            root: Group-local source rank, as used by the C++/NCCL contract.
             mode: ParallelMode int (0=TP, 1=DP, 2=DP_AND_TP) selecting process group.
         """
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             return
+        # torch.distributed's src argument is a WORLD rank. In the second
+        # TP4 group, C++ root=0 therefore means WORLD rank 4, not rank 0.
+        global_root = torch.distributed.get_global_rank(pg, root)
         device_id = torch.cuda.current_device()
         for t in tensors:
             gpu_t, was_cpu = _ensure_cuda(t, device_id)
-            torch.distributed.broadcast(gpu_t, root, group=pg)
+            torch.distributed.broadcast(gpu_t, global_root, group=pg)
             if was_cpu:
                 t.copy_(gpu_t)
 

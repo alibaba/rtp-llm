@@ -146,6 +146,10 @@ class KimiK3MtpLayer(nn.Module):
             sp_layout=sp_layout,
             projected_qkv_a=projected_qkv_a,
         )
+        if attention_inputs.is_prefill:
+            # The returned tensor owns its output storage independently of
+            # the KV/merge scratch; retain only that result for o_proj.
+            fmha_impl.release_forward_workspace()
         output_weight = self.attention.output_projection_weight()
         attention_output = (
             self._local_projection(attention_projection_input, output_weight)
@@ -159,9 +163,6 @@ class KimiK3MtpLayer(nn.Module):
         )
         a = x + attention_output
         del x, attention_output, normalized, projected_qkv_a, attention_projection_input
-        if attention_inputs.is_prefill:
-            # The output projection consumed MLA scratch before MoE allocates.
-            fmha_impl.release_forward_workspace()
         local_valid_tokens = (
             sp_layout.tokens.local_valid_tokens
             if sp_layout.tokens.local_valid_tokens < sp_layout.tokens.local_tokens
@@ -289,6 +290,13 @@ class KimiK3MtpModel(GptModelBase):
             if count > 0:
                 ids.narrow(0, offset, count).fill_(self.media_token_id)
         return self.embedding(ids)
+
+    def release_consumed_prefill_hidden(self):
+        """Release an internal draft round after its executor consumer finishes."""
+        if self._decode_role:
+            return
+        self._recurrent = None
+        self._recurrent_valid_tokens = 0
 
     def get_mtp_target_hidden_states(self, num_tokens):
         if self._recurrent is None:

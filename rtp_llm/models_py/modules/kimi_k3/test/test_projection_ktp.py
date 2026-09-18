@@ -1,4 +1,5 @@
 import unittest
+import weakref
 from types import SimpleNamespace
 from unittest import mock
 
@@ -717,6 +718,76 @@ class MixedTpDpInputPreparationTest(unittest.TestCase):
                         # CUDA Graph metadata must retain the live mask view.
                         mask.fill_(1)
                         torch.testing.assert_close(local_mask, torch.ones(4, dtype=torch.int32))
+
+
+class PrefillAttentionWorkspaceLifetimeTest(unittest.TestCase):
+    def test_mla_scratch_is_released_before_projection_output_stays_alive(self):
+        from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3DecoderLayer
+        from rtp_llm.models_py.modules.kimi_k3.parallel_mode import KimiK3ParallelMode
+
+        for prefill, kda in ((True, False), (False, False), (True, True)):
+            with self.subTest(prefill=prefill, kda=kda):
+                order = []
+                fmha = SimpleNamespace(scratch=torch.arange(8.0).reshape(2, 4).clone())
+                scratch_ref = weakref.ref(fmha.scratch)
+                fmha.kv_staging = torch.ones(32)
+                staging_ref = weakref.ref(fmha.kv_staging)
+
+                def release():
+                    order.append("release")
+                    fmha.scratch = None
+                    fmha.kv_staging = None
+
+                fmha.release_forward_workspace = release
+
+                class Attention:
+                    def __call__(self, *args, **kwargs):
+                        order.append("attention")
+                        return fmha.scratch.view(2, 4)
+
+                    def output_projection_weight(self):
+                        return None
+
+                def project(value, weight):
+                    self.assertIsNotNone(scratch_ref(), "attention output storage freed early")
+                    if prefill and not kda:
+                        self.assertIsNone(staging_ref(), "KV scratch still overlaps output projection")
+                    order.append("projection")
+                    return value * 2
+
+                def mlp(value, **kwargs):
+                    order.append("mlp")
+                    if prefill and not kda:
+                        self.assertIsNone(scratch_ref(), "MLA workspace still overlaps MLP")
+                    else:
+                        self.assertIsNotNone(scratch_ref())
+                    return torch.zeros_like(value)
+
+                layer = SimpleNamespace(
+                    _previous_blocks=0, _writes_block=False,
+                    parallel_mode=KimiK3ParallelMode.PROJECTION_KTP,
+                    is_kda=kda, attention_norm=lambda x: x,
+                    self_attn=Attention(), _project_parallel_output=project,
+                    mlp_residual=lambda x, *args, **kwargs: x,
+                    mlp_norm=SimpleNamespace(weight=None, variance_epsilon=1e-5),
+                    mlp=mlp,
+                )
+                meta = SimpleNamespace(
+                    cu_seqlens=None, mode=None,
+                    sp_layout=SimpleNamespace(tokens=SimpleNamespace(local_valid_tokens=2, local_tokens=2)),
+                    kda_prefill_metadata=None, kda_current_state_registry=None,
+                    valid_token_mask=None,
+                )
+                result = KimiK3DecoderLayer.forward(
+                    layer, torch.ones(2, 4), torch.empty(2, 0, 4),
+                    attn_meta=meta, attention_inputs=SimpleNamespace(is_prefill=prefill), fmha_impl=fmha,
+                )
+                expected_order = ["attention"]
+                if prefill and not kda:
+                    expected_order.append("release")
+                expected_order.append("projection")
+                self.assertEqual(order, expected_order + ["mlp"])
+                torch.testing.assert_close(result.hidden_states, 1 + 2 * torch.arange(8.0).reshape(2, 4))
 
 
 if __name__ == "__main__":

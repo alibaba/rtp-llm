@@ -27,6 +27,11 @@ public:
 
     void waitDone();
 
+    // Unlike waitDone(), cancellation/deadline does not release the caller.
+    // Raw destination cache addresses must stay reserved until the transport
+    // has completed every callback (including its timeout/connection teardown).
+    void waitForCompletion();
+
     bool             success() const;
     const ErrorInfo& getErrorInfo() const;
     std::string      getErrorInfoString() const;

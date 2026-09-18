@@ -391,6 +391,49 @@ CacheStoreInputs makeSingleBlockWriteInputs(const std::string& cache_key_string,
 
 }  // namespace
 
+TEST(DecodeRpcServerTest, CancelledOrExpiredLoadDrainsEveryTransportCallback) {
+    for (bool cancelled : {false, true}) {
+        SCOPED_TRACE(cancelled ? "cancelled" : "expired");
+        auto store = std::make_shared<MemoryBackedCacheStore>();
+        std::vector<CacheStoreLoadDoneCallback> callbacks;
+        store->defer_load_callback_ = [&](CacheStoreLoadDoneCallback callback, bool, const std::string&) {
+            callbacks.push_back(std::move(callback));
+        };
+        std::vector<std::shared_ptr<RequestBlockBuffer>> requests;
+        std::vector<std::shared_ptr<uint32_t>> destinations;
+        for (int i = 0; i < 2; ++i) {
+            auto key = "delayed-" + std::to_string(i);
+            auto destination = std::make_shared<uint32_t>(0);
+            auto request = std::make_shared<RequestBlockBuffer>(key);
+            request->addBlock(key, destination, sizeof(uint32_t), false, true);
+            store->load_patterns_["peer"][key] = 0x5A;
+            destinations.push_back(destination);
+            requests.push_back(request);
+        }
+        auto context = store->loadBuffers(requests, "peer", 1, 2, cancelled ? 5000 : 0,
+                                           [cancelled] { return cancelled; }, 1, 0);
+        ASSERT_EQ(callbacks.size(), 2u);
+        std::promise<ErrorCode> early_result;
+        auto early = early_result.get_future();
+        auto completion = std::async(std::launch::async, [&] {
+            context->waitDone();
+            early_result.set_value(context->getErrorInfo().code());
+            context->waitForCompletion();
+        });
+        EXPECT_EQ(early.get(), cancelled ? ErrorCode::CANCELLED : ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT);
+        EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+        callbacks[0](true, CacheStoreErrorCode::None);
+        EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+        // Model the final in-flight destination write before its completion.
+        *destinations[1] = 0x12345678;
+        callbacks[1](false, CacheStoreErrorCode::LoadErrorUnknown);
+        EXPECT_EQ(completion.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        completion.get();
+        EXPECT_FALSE(context->success());
+        EXPECT_EQ(*destinations[1], 0x12345678u);
+    }
+}
+
 TEST(DecodeRpcServerTest, MtpPhysicalGroupUsesGlobalLayerLayout) {
     CacheLayerLayout layout;
     layout.layer_to_groups          = {2};
@@ -1929,6 +1972,58 @@ TEST_F(PdSepKVCacheReleaseTest, testDcpDestinationPagesAndKdaHeadPartitions) {
         grpc::ServerContext rpc;
         DecodeRpcServer::LoadKVCacheContext route(request_id, request_key, peers, keys, groups,
                                                   0, 5000, 1, 0, &rpc, layout.source, false);
+        if (layout.source == 8 && layout.tp == 4 && rank == 0) {
+            class DelayedWorker final: public RpcService::Service {
+            public:
+                grpc::Status RemoteLoad(grpc::ServerContext*, const BroadcastLoadRequestPB*,
+                                        BroadcastLoadResponsePB* response) override {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    ++arrived;
+                    changed.notify_all();
+                    changed.wait_for(lock, std::chrono::seconds(3), [&] { return release; });
+                    ++completed;
+                    response->mutable_error_info()->set_error_code(ErrorCodePB::NONE_ERROR);
+                    response->set_done_time_us(1);
+                    return grpc::Status::OK;
+                }
+                std::mutex mutex;
+                std::condition_variable changed;
+                int arrived = 0, completed = 0;
+                bool release = false;
+            } worker;
+            grpc::ServerBuilder builder;
+            int port = 0;
+            builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+            builder.RegisterService(&worker);
+            auto rpc_server = builder.BuildAndStart();
+            ASSERT_NE(rpc_server, nullptr);
+            server.resource_.grpc_workers.assign(layout.tp, "127.0.0.1:" + std::to_string(port));
+            server.maga_init_params_.pd_sep_config.decode_polling_kv_cache_step_ms = 5;
+            DecodeRpcContext stream_context{};
+            kmonitor::MetricsReporterPtr metrics;
+            DecodeGenerateContext generate_context(stream_context, 5000, &rpc, metrics, nullptr);
+            generate_context.peer_addrs = peers;
+            auto timed_route = route;
+            timed_route.timeout_ms = 0; // outer deadline includes its 100 ms grace
+            auto pending_rpc = std::async(std::launch::async, [&] {
+                return server.loadCacheAsyncForTp(generate_context, timed_route);
+            });
+            {
+                std::unique_lock<std::mutex> lock(worker.mutex);
+                EXPECT_TRUE(worker.changed.wait_for(lock, std::chrono::seconds(2), [&] { return worker.arrived > 0; }));
+            }
+            EXPECT_EQ(pending_rpc.wait_for(std::chrono::milliseconds(200)), std::future_status::timeout)
+                << "caller timeout must not release buffers before all worker acknowledgements";
+            {
+                std::lock_guard<std::mutex> lock(worker.mutex);
+                worker.release = true;
+            }
+            worker.changed.notify_all();
+            EXPECT_EQ(pending_rpc.get().code(), ErrorCode::LOAD_CACHE_TIMEOUT);
+            EXPECT_EQ(worker.completed, layout.tp);
+            rpc_server->Shutdown();
+            server.resource_.grpc_workers.assign(layout.tp, "decode-worker");
+        }
         auto request = server.constructRemoteLoadRequestForMla(route, rank, peers);
         EXPECT_EQ(request.dp_rank(), layout.dp - 1);
         std::vector<std::string> selected(request.peer_addrs().begin(), request.peer_addrs().end());

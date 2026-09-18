@@ -49,7 +49,7 @@ def adjacent_unique(values):
     ]
 
 
-def _dcp_checks(markers: dict, replay_seen: bool, events: list[dict], proposal_tokens: int = 3, expected_tp: int | None = None, dp_size: int = 1, expected_block_size: int | None = None) -> dict:
+def _dcp_checks(markers: dict, replay_seen: bool, events: list[dict], proposal_tokens: int = 3, expected_tp: int | None = None, dp_size: int = 1, expected_block_size: int | None = None, source_tp: int | None = None) -> dict:
     """Prove the Decode Page-RR path ran on every rank of a KTP1 topology."""
     backends = markers.get("dcp_backends", set())
     sizes = {tp for tp, _ in backends}
@@ -75,7 +75,7 @@ def _dcp_checks(markers: dict, replay_seen: bool, events: list[dict], proposal_t
         and len(decode_targets) == 1
         and all(
             pages > 0 and checkpoints > 0 and {tp} == sizes
-            and (expected_block_size is None or (pages == expected_block_size and checkpoints == tp * pages))
+            and (expected_block_size is None or (pages == expected_block_size and checkpoints == max(tp, source_tp or tp) * pages))
             for tp, pages, checkpoints in decode_targets
         )
     )
@@ -122,6 +122,7 @@ def _verify(
     expected_tp: int | None = None,
     dp_size: int = 1,
     expected_block_size: int | None = None,
+    source_tp: int | None = None,
 ) -> dict:
     checks = {}
     observations = {}
@@ -141,7 +142,7 @@ def _verify(
                 e["physical_tokens"] - e["logical_tokens"] == padding for e in rounds
             )
     elif decode_page_rr:
-        report = _dcp_checks(markers or {}, replay_seen, events, proposal_tokens, expected_tp, dp_size, expected_block_size)
+        report = _dcp_checks(markers or {}, replay_seen, events, proposal_tokens, expected_tp, dp_size, expected_block_size, source_tp)
         checks.update(report["checks"])
         observations.update(report["observations"])
     else:
@@ -227,9 +228,10 @@ def verify(
     expected_tp: int | None = None,
     dp_size: int = 1,
     expected_block_size: int | None = None,
+    source_tp: int | None = None,
 ) -> dict:
     try:
-        return _verify(events, role, replay_seen, markers, decode_page_rr, proposal_tokens, expected_tp, dp_size, expected_block_size)
+        return _verify(events, role, replay_seen, markers, decode_page_rr, proposal_tokens, expected_tp, dp_size, expected_block_size, source_tp)
     except (KeyError, TypeError, ValueError, IndexError) as exc:
         return {
             "role": role,
@@ -310,11 +312,12 @@ def main():
     parser.add_argument("--tp-size", type=int)
     parser.add_argument("--dp-size", type=int, default=1)
     parser.add_argument("--block-size", type=int)
+    parser.add_argument("--source-tp-size", type=int)
     args = parser.parse_args()
     try:
         events, replay, markers = collect(args.root)
         report = verify(
-            events, args.role, replay, markers, args.decode_page_rr == "1", args.proposal_tokens, args.tp_size, args.dp_size, args.block_size
+            events, args.role, replay, markers, args.decode_page_rr == "1", args.proposal_tokens, args.tp_size, args.dp_size, args.block_size, args.source_tp_size
         )
     except (ValueError, OSError) as exc:
         report = {

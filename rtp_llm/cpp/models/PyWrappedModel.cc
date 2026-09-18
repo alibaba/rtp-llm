@@ -239,6 +239,16 @@ void PyWrappedModel::releaseBuffers() {
     buffer_holder_.release();
 }
 
+void PyWrappedModel::releaseConsumedPrefillHidden() {
+    if (!py_model_) {
+        return;
+    }
+    py::gil_scoped_acquire gil;
+    if (py::hasattr(py_model_, "release_consumed_prefill_hidden")) {
+        py_model_.attr("release_consumed_prefill_hidden")();
+    }
+}
+
 torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
     if (!py_model_) {
         return torch::Tensor();
@@ -545,6 +555,12 @@ void PyWrappedModel::padTensorParallelInputs(torch_ext::PyModelInputs& inputs) {
     attention.logical_token_count    = plan.logical_tokens;
     attention.physical_token_count   = plan.physical_tokens;
     attention.is_s_padded               = plan.physical_tokens > plan.logical_tokens;
+    if (attention.is_fake_stream) {
+        // The executor retains one physical dummy request on an idle DP so it
+        // can participate in EP collectives. None of its rows may route experts.
+        inputs.ktp_valid_row_mask = torch::zeros(
+            {plan.physical_tokens}, inputs.input_ids.options().dtype(torch::kInt32));
+    }
     if (plan.padding_tokens == 0) {
         return;
     }

@@ -1,4 +1,5 @@
 import unittest
+import weakref
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -31,6 +32,108 @@ class _Moe(nn.Linear):
 
 
 class KimiK3MtpContractTest(unittest.TestCase):
+
+    def test_prefill_attention_releases_staging_before_output_projection(self):
+        for prefill in (True, False):
+            fmha = SimpleNamespace(
+                output=torch.arange(8.0).reshape(2, 4).clone(), staging=torch.ones(32)
+            )
+            output_ref, staging_ref = weakref.ref(fmha.output), weakref.ref(
+                fmha.staging
+            )
+
+            def release():
+                fmha.output = fmha.staging = None
+
+            fmha.release_forward_workspace = release
+
+            class Attention:
+                def tp_input_projection_weights(self):
+                    return []
+
+                def output_projection_weight(self):
+                    return None
+
+                def __call__(self, *args, **kwargs):
+                    return fmha.output.view(2, 4)
+
+            def project(value, weight):
+                self.assertIsNotNone(output_ref())
+                if prefill:
+                    self.assertIsNone(staging_ref())
+                else:
+                    self.assertIsNotNone(staging_ref())
+                return value * 2
+
+            def moe(value, **kwargs):
+                if prefill:
+                    self.assertIsNone(output_ref())
+                return torch.zeros_like(value)
+
+            layer = SimpleNamespace(
+                enorm=lambda x: x,
+                hnorm=lambda x: x,
+                eh_proj=lambda x: x[:, :4],
+                input_norm=lambda x: x,
+                attention=Attention(),
+                attn_tp_size=1,
+                _local_projection=project,
+                post_norm=lambda x: x,
+                moe=moe,
+            )
+            layout = SimpleNamespace(
+                tokens=SimpleNamespace(
+                    local_valid_tokens=2, local_tokens=2, physical_tokens=2
+                )
+            )
+            actual = KimiK3MtpLayer.forward(
+                layer,
+                torch.ones(2, 4),
+                torch.ones(2, 4),
+                torch.tensor([1, 2]),
+                fmha,
+                None,
+                SimpleNamespace(is_prefill=prefill),
+                sp_layout=layout,
+            )
+            torch.testing.assert_close(actual, 1 + 2 * torch.arange(8.0).reshape(2, 4))
+
+    def test_consumed_prefill_hidden_is_released_before_next_round(self):
+        model = KimiK3MtpModel.__new__(KimiK3MtpModel)
+        nn.Module.__init__(model)
+        model._decode_role = False
+        # An executor consumes every internal round before starting the next
+        # target round. The final one-token recurrent state remains for PD.
+        for rows in (16, 16, 1):
+            model._recurrent = torch.arange(rows * 4).reshape(rows, 4).float()
+            model._recurrent_valid_tokens = rows
+            expected = model._recurrent.clone()
+            owner = weakref.ref(model._recurrent)
+            torch.testing.assert_close(model.get_mtp_target_hidden_states(-1), expected)
+            if rows > 1:
+                model.release_consumed_prefill_hidden()
+                self.assertIsNone(owner())
+                self.assertIsNone(model.get_mtp_target_hidden_states(-1))
+                self.assertEqual(model._recurrent_valid_tokens, 0)
+                model.release_consumed_prefill_hidden()  # idempotent cleanup
+            else:
+                self.assertIsNotNone(owner())
+                torch.testing.assert_close(model.get_mtp_target_hidden_states(-1), expected)
+
+    def test_prefill_cleanup_preserves_decode_graph_recurrent_buffer(self):
+        model = KimiK3MtpModel.__new__(KimiK3MtpModel)
+        nn.Module.__init__(model)
+        model._decode_role = True
+        model._recurrent = torch.arange(32).reshape(8, 4).float()
+        model._recurrent_valid_tokens = 3
+        address = model._recurrent.data_ptr()
+        expected = model._recurrent.clone()
+        model.release_consumed_prefill_hidden()
+        self.assertEqual(model._recurrent.data_ptr(), address)
+        self.assertEqual(model._recurrent_valid_tokens, 3)
+        torch.testing.assert_close(model._recurrent, expected)
+        torch.testing.assert_close(model.get_mtp_target_hidden_states(-1), expected[:3])
+
     def test_weight_manifest_uses_config_source_layer_for_every_tp_rank(self):
         from rtp_llm.config.kv_cache_config import KVCacheConfig
         from rtp_llm.model_loader.weight_module import CompositeWeight
@@ -559,7 +662,6 @@ class KimiK3MtpContractTest(unittest.TestCase):
         torch.testing.assert_close(model.get_mtp_target_hidden_states(-1), h)
         self.assertEqual(model._recurrent.data_ptr(), address)
         self.assertFalse(torch.allclose(z, model.get_mtp_target_hidden_states(3)))
-
 
     def test_prefill_sp_preserves_fusion_positions_padding_and_recurrent_output(self):
         class Moe(nn.Module):

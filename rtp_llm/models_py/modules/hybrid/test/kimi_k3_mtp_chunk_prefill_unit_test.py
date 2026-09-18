@@ -75,6 +75,8 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
                 tp_size=8,
                 tp_rank=3,
                 kv_page_rr_enabled=lambda: True,
+                local_kv_page_rr_shard_count=lambda: 8,
+                upstream_kv_page_rr_shard_count=lambda: 8,
                 prefill_cp_config=SimpleNamespace(prefill_cp_size=8),
             ),
         )

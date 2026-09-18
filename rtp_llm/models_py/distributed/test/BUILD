@@ -1,6 +1,16 @@
 load("@rules_python//python:defs.bzl", "py_test")
 
 py_test(
+    name = "collective_torch_cpp_broadcast_test",
+    srcs = ["collective_torch_cpp_broadcast_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "fused_all_gather_matmul_unit_test",
     srcs = ["fused_all_gather_matmul_unit_test.py"],
     deps = [

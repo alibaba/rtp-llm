@@ -1076,6 +1076,10 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
+    // Startup configuration remains stable even if Python initialization later
+    // edits the process environment while engine/status threads are running.
+    ScopedEnvVar changed_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "0");
+    EXPECT_TRUE(kv_cache_manager->isCacheStatusSnapshotEnabled());
 
     auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
     ASSERT_NE(shared_cache, nullptr);

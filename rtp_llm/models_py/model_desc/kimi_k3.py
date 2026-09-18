@@ -385,10 +385,16 @@ class KimiK3DecoderLayer(nn.Module):
                 projected_qkv_a=projected_attention_input,
                 prepared_context=attention_context,
             )
+        if not self.is_kda and attention_inputs is not None and attention_inputs.is_prefill:
+            # This tensor keeps the aliased result storage alive. Historical
+            # KV and merge scratch have no remaining consumer and need not
+            # overlap the output projection's full-token intermediate.
+            fmha_impl.release_forward_workspace()
         attention_output = self._project_parallel_output(
             attention_projection_input,
             self.self_attn.output_projection_weight(),
         )
+        del attention_projection_input, attention_input, projected_attention_input
         attention_delta: Optional[torch.Tensor] = None
         if prefix_sum is None:
             prefix_sum = attention_output

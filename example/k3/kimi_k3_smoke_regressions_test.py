@@ -602,9 +602,9 @@ class RuntimeEvidenceTest(unittest.TestCase):
             "dcp_workers": {(rank, rank // 4, rank % 4) for rank in range(8)},
             "graph_captures": {(rank, bucket) for rank in range(8) for bucket in physical_graph_buckets(4)},
         }
-        for block, span, passed in ((1024, 4096, True), (128, 512, False), (1024, 8192, False)):
+        for block, span, passed in ((1024, 8192, True), (128, 1024, False), (1024, 4096, False)):
             markers["page_rr_targets"] = {("Decode", 4, block, span)}
-            report = verify([], "decode", False, markers, True, 3, 4, 2, 1024)
+            report = verify([], "decode", False, markers, True, 3, 4, 2, 1024, 8)
             self.assertEqual(report["passed"], passed, report)
 
     def test_dcp_round_rejects_projection_ktp_markers(self):

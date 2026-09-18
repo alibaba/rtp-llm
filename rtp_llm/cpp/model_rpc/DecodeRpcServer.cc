@@ -700,8 +700,11 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
                             cq_size);
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "worker size or cq size is 0");
     }
-    auto worker_size_per_queue = worker_size / completion_queues.size();
+    vector<BroadcastLoadRequestPB> load_requests(worker_size);
+    vector<uint32_t> expected_per_queue(cq_size, 0);
     RTP_LLM_LOG_DEBUG("request:[%s] start to async remote load for all rank", decode_context.request_key.c_str());
+    // Resolve every peer and validate every request before starting any write.
+    // A connection failure must not abandon RPCs already using these buffers.
     for (int i = 0; i < worker_size; i++) {
         auto& worker         = resource_.grpc_workers[i];
         auto  connect_status = resource_.rpc_pool.getConnection(worker);
@@ -711,15 +714,17 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         }
         auto& rpc_context = all_context[i];
         rpc_context.stub  = connect_status.value().stub;
-        BroadcastLoadRequestPB load_request;
-
         if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
-            load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
+            load_requests[i] = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
         } else {
-            load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
+            load_requests[i] = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
         }
+    }
+    for (int i = 0; i < worker_size; i++) {
+        auto& rpc_context = all_context[i];
+        ++expected_per_queue[i % cq_size];
         std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(rpc_context.stub->AsyncRemoteLoad(
-            rpc_context.client_context.get(), load_request, &completion_queues[i % completion_queues.size()]));
+            rpc_context.client_context.get(), load_requests[i], &completion_queues[i % completion_queues.size()]));
         reader->Finish(&rpc_context.response, &rpc_context.status, reinterpret_cast<void*>(i));
     }
 
@@ -730,20 +735,23 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
     std::string error_msg                 = "failed to load kv cache in rank: ";
     int64_t     min_response_done_time_us = 1lu << 60;
     int64_t     max_response_done_time_us = 0;
+    ErrorInfo   caller_error = ErrorInfo::OkStatus();
     while (true) {
         RTP_LLM_LOG_DEBUG("request [%s] load cache loop step", decode_context.request_key.c_str());
         auto cost_time_ms = (currentTimeUs() - load_cache_begin_time_us) / 1000;
-        if (cost_time_ms > total_timeout_ms) {
-            error_msg = "load cache timeout : cost time is " + std::to_string(cost_time_ms)
+        if (caller_error.ok() && cost_time_ms > total_timeout_ms) {
+            auto timeout_message = "load cache timeout : cost time is " + std::to_string(cost_time_ms)
                         + "ms, "
                           "total timeout for load cache is "
                         + std::to_string(total_timeout_ms) + "ms";
-            return ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, error_msg);
+            caller_error = ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, timeout_message);
         }
-        if (load_context.server_context->IsCancelled()) {
-            string error_msg = "request is cancelled";
-            return ErrorInfo(ErrorCode::CANCELLED, error_msg);
+        if (caller_error.ok() && load_context.server_context->IsCancelled()) {
+            caller_error = ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");
         }
+        // Do not cancel the worker RPCs: a cancelled gRPC completion does not
+        // acknowledge that the remote RDMA writes have stopped. RemoteLoad
+        // drains its transport callbacks under the original load deadline.
         auto once_deadline =
             std::chrono::system_clock::now()
             + std::chrono::milliseconds(maga_init_params_.pd_sep_config.decode_polling_kv_cache_step_ms);
@@ -753,7 +761,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         void* got_tag;
         bool  ok = false;
         for (uint32_t i = 0; i < completion_queues.size(); i++) {
-            if (each_finished_count[i] == worker_size_per_queue) {
+            if (each_finished_count[i] == expected_per_queue[i]) {
                 continue;
             }
             if (completion_queues[i].AsyncNext(&got_tag, &ok, once_deadline)
@@ -763,8 +771,11 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             }
             each_finished_count[i]++;
             if (!ok) {
-                string error_msg = "async get next event from grpc completion queue failed";
-                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error_msg);
+                all_success = false;
+                error_code = ErrorCode::LOAD_KV_CACHE_FAILED;
+                error_msg += "async get next event from grpc completion queue failed, ";
+                ++finished_count;
+                continue;
             }
             auto        rank             = reinterpret_cast<uintptr_t>(got_tag);
             const auto& status           = all_context[rank].status;
@@ -795,6 +806,10 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
 
     for (auto& completion_queue : completion_queues) {
         completion_queue.Shutdown();
+    }
+
+    if (!caller_error.ok()) {
+        return caller_error;
     }
 
     if (finished_count != worker_size) {
@@ -1441,6 +1456,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
     for (auto& layer_cache_load_context : load_contexts) {
         layer_cache_load_context->waitDone();
+        // waitDone reports cancellation/deadline before the transport callback.
+        // The destination blocks have non-owning addresses, so drain outstanding
+        // writes before this request can release them or retry the same buffers.
+        layer_cache_load_context->waitForCompletion();
         if (layer_cache_load_context->success()) {
             RTP_LLM_LOG_DEBUG("request [%s] load kv cache success", request_key.c_str());
         } else {

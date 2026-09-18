@@ -73,6 +73,9 @@ public:
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
 
+    // Called only after the executor has consumed an internal draft round.
+    void releaseConsumedPrefillHidden();
+
     // Model-neutral chunk Prefill hook: invoked by a supporting Python model
     // after each planned target round with (round_plan, is_last_round). Kimi K3
     // is the only caller today; the bridge itself does not encode that model.
