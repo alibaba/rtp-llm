@@ -52,6 +52,7 @@ private:
 
     std::shared_ptr<TransferServerMetricsCollector> collector_;
     int64_t                                         start_time_us_ = 0;
+    int64_t                                         deadline_ms_ = 0;
 
     std::shared_ptr<TransferTask> task_;
 };

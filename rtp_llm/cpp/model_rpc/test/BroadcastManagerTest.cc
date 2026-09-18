@@ -585,6 +585,42 @@ TEST_F(BroadcastManagerTest, WorkerNum) {
     EXPECT_EQ(manager_->workerNum(), 2u);
 }
 
+TEST(BroadcastFirstErrorTest, FirstRankFailureIsAvailableBeforeOtherRanksFinish) {
+    using Result   = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    auto a         = std::make_shared<Result::WorkerRpcContext>();
+    auto b         = std::make_shared<Result::WorkerRpcContext>();
+    a->server_addr = "worker-0:9000";
+    b->server_addr = "worker-1:9000";
+    b->status      = grpc::Status(grpc::StatusCode::UNAVAILABLE, "connection reset by peer");
+    Result result({a, b});
+    result.finishRank(1, true);
+    EXPECT_FALSE(result.done());
+    const auto first = result.firstError();
+    EXPECT_EQ(first.error.code(), ErrorCode::CONNECT_FAILED);
+    EXPECT_NE(first.error.ToString().find("rank=1 peer=worker-1:9000"), std::string::npos);
+    EXPECT_NE(first.error.ToString().find("connection reset by peer"), std::string::npos);
+    a->status = grpc::Status(grpc::StatusCode::CANCELLED, "cleanup");
+    result.finishRank(0, true);
+    EXPECT_TRUE(result.done());
+    EXPECT_EQ(result.firstError().order, first.order);
+    EXPECT_EQ(result.firstError().error.ToString(), first.error.ToString());
+}
+
+TEST(BroadcastFirstErrorTest, ApplicationFailurePrecedesLaterTransportFailure) {
+    using Result = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    auto a       = std::make_shared<Result::WorkerRpcContext>();
+    auto b       = std::make_shared<Result::WorkerRpcContext>();
+    b->request.mutable_p2p_request()->set_unique_key("key");
+    b->response.mutable_p2p_response()->set_error_code(ErrorCodePB::MM_PROCESS_ERROR);
+    b->response.mutable_p2p_response()->set_error_message("first worker error");
+    Result result({a, b});
+    result.finishRank(1, true);
+    a->status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "later timeout");
+    result.finishRank(0, true);
+    EXPECT_EQ(result.firstError().error.code(), ErrorCode::MM_PROCESS_ERROR);
+    EXPECT_NE(result.firstError().error.ToString().find("first worker error"), std::string::npos);
+}
+
 }  // namespace rtp_llm::test
 
 int main(int argc, char** argv) {

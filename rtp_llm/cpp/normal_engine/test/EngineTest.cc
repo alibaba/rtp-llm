@@ -22,6 +22,32 @@ class NormalEngineTest: public DeviceTestBase {
 public:
 };
 
+TEST_F(NormalEngineTest, testEnqueueMultiplePreservesSpeculativeReserve) {
+    auto engine = createMockEngine(CustomConfig{});
+    // Exercise admission without model execution racing the assertions.
+    ASSERT_TRUE(engine->stop().ok());
+    for (const int reserve : {3, 9}) {
+        engine->reserve_step_ = reserve;
+        std::vector<std::shared_ptr<GenerateInput>> inputs;
+        for (int i = 0; i < 2; ++i) {
+            auto input = std::make_shared<GenerateInput>();
+            input->request_id = i;
+            input->input_ids = torch::tensor({1, 2}, torch::kInt32);
+            input->generate_config = std::make_shared<GenerateConfig>();
+            input->generate_config->max_new_tokens = 2;
+            inputs.push_back(input);
+        }
+        const auto [accepted, streams] = engine->enqueueMultiple(inputs);
+        ASSERT_EQ(streams.size(), inputs.size());
+        ASSERT_EQ(accepted.size(), inputs.size());
+        for (size_t i = 0; i < streams.size(); ++i) {
+            EXPECT_TRUE(accepted[i]);
+            EXPECT_EQ(streams[i]->reserveStep(), reserve);
+            EXPECT_EQ(streams[i]->getCompleteTokenIds()->totalSeqLength(), streams[i]->seqLength() + reserve);
+        }
+    }
+}
+
 TEST_F(NormalEngineTest, testDecodeWarmupReserveTokensAreConvertedToBlocksAfterAddition) {
     EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 1u);
     EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/8, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 2u);

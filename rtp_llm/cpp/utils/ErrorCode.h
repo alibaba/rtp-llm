@@ -2,6 +2,9 @@
 
 #include <string>
 #include <utility>
+#include <atomic>
+#include <cstdint>
+#include <mutex>
 
 namespace rtp_llm {
 
@@ -290,6 +293,37 @@ public:
 private:
     ErrorCode   code_ = ErrorCode::NONE_ERROR;
     std::string message_;
+};
+
+// Captures one failure. Ordering is local to this process, never a remote timestamp.
+class FirstError {
+public:
+    struct Snapshot {
+        ErrorInfo error;
+        uint64_t  order{0};
+    };
+
+    bool record(const ErrorInfo& error) {
+        if (error.ok())
+            return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (value_.order != 0)
+            return false;
+        value_ = {error, next_order_.fetch_add(1, std::memory_order_relaxed)};
+        return true;
+    }
+    Snapshot snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return value_;
+    }
+    static Snapshot earlier(const Snapshot& a, const Snapshot& b) {
+        return a.order != 0 && (b.order == 0 || a.order < b.order) ? a : b;
+    }
+
+private:
+    inline static std::atomic<uint64_t> next_order_{1};
+    mutable std::mutex                  mutex_;
+    Snapshot                            value_;
 };
 
 template<typename T>

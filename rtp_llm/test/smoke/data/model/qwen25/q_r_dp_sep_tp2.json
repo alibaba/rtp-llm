@@ -1,0 +1,23 @@
+// Test: qwen25/q_r_dp_sep_tp2.json
+// Description: minimal non-stream dp separation smoke
+// Model: qwen_2 @ /mnt/nas1/hf/Qwen2.5-0.5B-Instruct
+{
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": " Flask is a lightweight web framework for Python, and"
+            }
+        }
+    ]
+}

@@ -156,6 +156,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->frequency_penalty  = config_proto->frequency_penalty();
     generate_config->do_sample          = config_proto->do_sample();
     TRANS_OPTIONAL(no_repeat_ngram_size);
+    TRANS_OPTIONAL(logits_index);
     TRANS_OPTIONAL(random_seed);
     TRANS_OPTIONAL(top_p_decay);
     TRANS_OPTIONAL(top_p_min);
@@ -200,6 +201,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->enable_memory_cache = config_proto->enable_memory_cache();
     generate_config->enable_remote_cache = config_proto->enable_remote_cache();
     generate_config->enable_disk_cache   = config_proto->enable_disk_cache();
+    generate_config->unique_key          = config_proto->unique_key();
     TRANS_OPTIONAL(trace_id);
     TRANS_OPTIONAL(group_timeout);
 
