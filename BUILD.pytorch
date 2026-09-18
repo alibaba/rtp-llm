@@ -47,6 +47,13 @@ cc_library(
             # "torch/lib/lib*amd*.so*",
         ]),
         "//conditions:default": [],
+    }) + select({
+        # aarch64 CUDA-13 wheels bundle libtorch_nvshmem.so in torch/lib;
+        # libtorch_python.so has undefined refs to it on this platform.
+        "@//:using_cuda13_arm": [
+            "torch/lib/libtorch_nvshmem.so",
+        ],
+        "//conditions:default": [],
     }),
     hdrs = glob([
         "torch/include/*.h",
@@ -81,6 +88,12 @@ cc_library(
         "torch.libs/libgfortran*.so*",
         "torch.libs/libgomp*.so*",
         "torch.libs/libopenblasp*.so",
+        # aarch64 wheels bundle these under torch/lib instead of torch.libs
+        # (libgomp is already provided by the ``torch`` target's glob).
+        "torch/lib/libarm_compute*.so",
+        "torch/lib/libgfortran*.so*",
+        "torch/lib/libnvpl_blas*.so*",
+        "torch/lib/libnvpl_lapack*.so*",
     ]),
     linkopts = select({
         "@//:cuda_pre_12_9": [

@@ -14,15 +14,16 @@ import torch
 from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score as score_backend
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_indexer as indexer
 from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (
-    fp8_roundtrip,
     mask_candidate_logits,
     select_candidate_blocks,
 )
 
 
 def _reference_logits(q, weights, k, visible):
-    """The original V4.1 FP32 scoring path, including FP8 round trips."""
-    scores = torch.einsum("mhd,kd->mhk", fp8_roundtrip(q), fp8_roundtrip(k))
+    """The V4.1 FP32 scoring path over FP4 fake-quantized Q and K."""
+    q_fake = indexer._fp4_rows_torch(q)[2].view(q.shape)
+    k_fake = indexer._fp4_rows_torch(k)[2]
+    scores = torch.einsum("mhd,kd->mhk", q_fake, k_fake)
     scores = (scores.relu_() * weights[:, :, None]).sum(1)
     columns = torch.arange(k.shape[0], device=k.device)
     return scores.masked_fill(columns[None] >= visible[:, None], -torch.inf)
@@ -31,13 +32,13 @@ def _reference_logits(q, weights, k, visible):
 class V41PrefillIndexerCPU(unittest.TestCase):
     def test_default_enable_and_supported_device_contract(self):
         with patch.dict(os.environ), patch.object(
-            score_backend, "has_fp8_mqa_logits", return_value=True
+            score_backend, "has_fp8_fp4_mqa_logits", return_value=True
         ), patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)):
             os.environ.pop("DSV41_FUSED_PREFILL_INDEXER", None)
             self.assertTrue(indexer.is_supported(torch.device("cuda"), 32, 128))
 
         with patch.dict(os.environ, {"DSV41_FUSED_PREFILL_INDEXER": "1"}), patch.object(
-            score_backend, "has_fp8_mqa_logits", return_value=True
+            score_backend, "has_fp8_fp4_mqa_logits", return_value=True
         ):
             for major in (8, 9, 10, 11):
                 for heads, dim in ((32, 128), (64, 128), (16, 128), (32, 64)):
@@ -51,7 +52,7 @@ class V41PrefillIndexerCPU(unittest.TestCase):
 
     def test_missing_deepgemm_api_falls_back(self):
         with patch.dict(os.environ, {"DSV41_FUSED_PREFILL_INDEXER": "1"}), patch.object(
-            score_backend, "has_fp8_mqa_logits", return_value=False
+            score_backend, "has_fp8_fp4_mqa_logits", return_value=False
         ), patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)):
             self.assertFalse(indexer.is_supported(torch.device("cuda"), 32, 128))
 
@@ -71,23 +72,31 @@ class V41PrefillIndexerCPU(unittest.TestCase):
         ):
             self.assertFalse(indexer.is_supported(torch.device("cuda"), 32, 128))
 
-    def test_k_quantization_preserves_continuous_scale_and_zero_rows(self):
+    def test_k_quantization_uses_power_of_two_scales_and_exact_six(self):
         torch.manual_seed(41)
         k = torch.randn(9, 128, dtype=torch.bfloat16)
         k[0].zero_()
-        # This row distinguishes continuous scales from power-of-two scaling.
+        # 1.5 / (1.5/6 rounded up to a power of two) == 6.0 exactly.
         k[1].fill_(1.5)
-        quantized, scales = indexer.quantize_indexer_k_reference(k)
-        expected_scales = (k.float().abs().amax(-1) / 448.0).clamp_min(1e-12)
-        self.assertEqual(quantized.shape, k.shape)
-        self.assertEqual(quantized.dtype, torch.float8_e4m3fn)
-        self.assertEqual(scales.shape, (k.shape[0],))
-        self.assertEqual(scales.dtype, torch.float32)
-        torch.testing.assert_close(scales, expected_scales, rtol=0, atol=0)
+        payload, sf = indexer.quantize_indexer_k_reference(k)
+        _, _, values = indexer._fp4_rows_torch(k)
+        self.assertEqual(tuple(payload.shape), (9, 64))
+        self.assertEqual(payload.dtype, torch.int8)
+        self.assertEqual(tuple(sf.shape), (9,))
+        self.assertEqual(sf.dtype, torch.int32)
+        # Zero rows encode zero payload; the floor scale keeps every group
+        # representable (packed exponents stay in the normal UE8M0 range).
+        self.assertTrue((payload[0] == 0).all())
+        exponent = sf.view(torch.uint8).view(9, 4)
+        self.assertTrue(((exponent > 0) & (exponent < 255)).all())
         torch.testing.assert_close(
-            quantized.float() * scales[:, None], fp8_roundtrip(k), rtol=0, atol=0
+            values[1], torch.full((128,), 1.5), rtol=0, atol=0
         )
-        self.assertTrue(torch.isfinite(scales).all())
+        # Round-trip error stays bounded by the coarsest e2m1 grid step
+        # (one full scale in the [4, 6] magnitude band, half elsewhere).
+        error = (values - k.float()).abs().reshape(9, 4, 32)
+        scale = torch.exp2(exponent.float() - 127.0)
+        self.assertTrue((error <= scale[:, :, None] + 1e-9).all())
 
     def test_logit_chunks_bound_long_context_workspace(self):
         cap = 256 * 1024 * 1024
@@ -102,19 +111,21 @@ class V41PrefillIndexerCPU(unittest.TestCase):
                     self.assertEqual(rows, 1)
 
     def test_score_clamps_bounds_and_masks_zero_visible_rows(self):
-        q = torch.zeros(3, 32, 128).to(torch.float8_e4m3fn)
-        k = torch.zeros(5, 128).to(torch.float8_e4m3fn)
+        q_payload = torch.zeros(3, 32, 64, dtype=torch.int8)
+        q_sf = torch.ones(3, 32, dtype=torch.int32)
+        k_payload = torch.zeros(5, 64, dtype=torch.int8)
+        k_sf = torch.ones(5, dtype=torch.int32)
         visible = torch.tensor([-2, 3, 8], dtype=torch.int32)
         raw_logits = torch.arange(15, dtype=torch.float32).reshape(3, 5)
         with patch.object(
-            score_backend, "fp8_mqa_indexer_score", return_value=raw_logits.clone()
+            score_backend, "fp8_fp4_mqa_indexer_score", return_value=raw_logits.clone()
         ) as fused:
             actual = indexer.score_indexer_chunk(
-                q, torch.ones(3, 32), k, torch.ones(5), visible
+                q_payload, q_sf, k_payload, k_sf, torch.ones(3, 32), visible
             )
         self.assertTrue(fused.call_args.kwargs["clean_logits"])
         self.assertEqual(fused.call_args.kwargs["max_seqlen_k"], 0)
-        starts, ends = fused.call_args.args[4:6]
+        starts, ends = fused.call_args.args[5:7]
         torch.testing.assert_close(starts, torch.zeros(3, dtype=torch.int32))
         torch.testing.assert_close(ends, torch.tensor([0, 3, 5], dtype=torch.int32))
         expected = raw_logits.masked_fill(
@@ -125,14 +136,15 @@ class V41PrefillIndexerCPU(unittest.TestCase):
     def test_kernel_failure_is_not_silently_replaced_by_reference(self):
         with patch.object(
             score_backend,
-            "fp8_mqa_indexer_score",
+            "fp8_fp4_mqa_indexer_score",
             side_effect=RuntimeError("injected CUDA launch failure"),
         ), self.assertRaisesRegex(RuntimeError, "injected CUDA launch failure"):
             indexer.score_indexer_chunk(
-                torch.zeros(1, 32, 128).to(torch.float8_e4m3fn),
+                torch.zeros(1, 32, 64, dtype=torch.int8),
+                torch.ones(1, 32, dtype=torch.int32),
+                torch.zeros(5, 64, dtype=torch.int8),
+                torch.ones(5, dtype=torch.int32),
                 torch.ones(1, 32),
-                torch.zeros(5, 128).to(torch.float8_e4m3fn),
-                torch.ones(5),
                 torch.tensor([5], dtype=torch.int32),
             )
 
@@ -140,9 +152,7 @@ class V41PrefillIndexerCPU(unittest.TestCase):
         from rtp_llm.models_py.modules.dsv4.fp8 import (
             _indexer_cp_assembler as assembler,
         )
-        from rtp_llm.models_py.modules.dsv4.fp8 import (
-            _indexer_cp_gather_triton as gather_backend,
-        )
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_fp4_triton as codec
         from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
             cp_kv_slot_mapping,
         )
@@ -153,9 +163,15 @@ class V41PrefillIndexerCPU(unittest.TestCase):
             for count in (5, owner_entries + 3, 4 * owner_entries + 3):
                 with self.subTest(ratio=ratio, count=count):
                     expected_q = (
-                        torch.arange(count * 128).remainder(120).byte().view(count, 128)
+                        torch.arange(count * 64).remainder(120).byte().view(count, 64)
                     )
-                    expected_s = torch.arange(count, dtype=torch.float32) + 1.25
+                    expected_s = (
+                        (torch.arange(count * 4).remainder(120) + 1)
+                        .byte()
+                        .view(count, 4)
+                        .view(torch.int32)
+                        .flatten()
+                    )
                     local_count = (
                         (count + 4 * owner_entries - 1) // (4 * owner_entries)
                     ) * owner_entries
@@ -165,7 +181,7 @@ class V41PrefillIndexerCPU(unittest.TestCase):
                         owned = [
                             i for i in range(count) if (i * ratio // 1024) % 4 == rank
                         ]
-                        local_q = torch.zeros(local_count, 128, dtype=torch.uint8)
+                        local_q = torch.zeros(local_count, 64, dtype=torch.uint8)
                         local_s = torch.zeros(local_count, 4, dtype=torch.uint8)
                         local_q[: len(owned)] = expected_q[owned]
                         local_s[: len(owned)] = (
@@ -180,17 +196,17 @@ class V41PrefillIndexerCPU(unittest.TestCase):
                                 torch.arange(2 * pages, pages, -1),
                             )
                         )
-                        pool = torch.zeros(2 * pages + 1, page, 132, dtype=torch.uint8)
+                        pool = torch.zeros(2 * pages + 1, page, 68, dtype=torch.uint8)
                         raw = pool.view(2 * pages + 1, -1)
                         local_ids = torch.arange(len(owned))
                         blocks = table[1, local_ids // page]
                         offsets = local_ids % page
                         raw[
-                            blocks[:, None], offsets[:, None] * 128 + torch.arange(128)
+                            blocks[:, None], offsets[:, None] * 64 + torch.arange(64)
                         ] = local_q[: len(owned)]
                         raw[
                             blocks[:, None],
-                            page * 128 + offsets[:, None] * 4 + torch.arange(4),
+                            page * 64 + offsets[:, None] * 4 + torch.arange(4),
                         ] = local_s[: len(owned)]
                         pools.append(pool)
                         tables.append(table)
@@ -199,18 +215,18 @@ class V41PrefillIndexerCPU(unittest.TestCase):
                         valid = slots >= 0
                         blocks, offsets = slots[valid] // page, slots[valid] % page
                         raw = pool.view(pool.shape[0], -1)
-                        q = torch.zeros(len(slots), 128, dtype=torch.uint8)
+                        q = torch.zeros(len(slots), 64, dtype=torch.uint8)
                         s = torch.zeros(len(slots), 4, dtype=torch.uint8)
                         q[valid] = raw[
-                            blocks[:, None], offsets[:, None] * 128 + torch.arange(128)
+                            blocks[:, None], offsets[:, None] * 64 + torch.arange(64)
                         ]
                         s[valid] = raw[
                             blocks[:, None],
-                            page * 128 + offsets[:, None] * 4 + torch.arange(4),
+                            page * 64 + offsets[:, None] * 4 + torch.arange(4),
                         ]
                         return (
-                            q.view(torch.float8_e4m3fn),
-                            s.view(torch.float32).flatten(),
+                            q.view(torch.int8),
+                            s.contiguous().view(torch.int32).flatten(),
                         )
 
                     for rank in range(4):
@@ -231,15 +247,15 @@ class V41PrefillIndexerCPU(unittest.TestCase):
                             )
 
                         def gather_peers(local, group):
-                            peers = peers_q if local.shape[1] == 128 else peers_s
+                            peers = peers_q if local.shape[1] == 64 else peers_s
                             torch.testing.assert_close(
                                 local, peers[rank], rtol=0, atol=0
                             )
                             return torch.cat(peers)
 
                         with patch.object(
-                            gather_backend,
-                            "gather_indexer_k_for_prefill",
+                            codec,
+                            "gather_indexer_k_fp4",
                             side_effect=read_packed_cache,
                         ), patch.object(
                             assembler, "all_gather", side_effect=gather_peers
@@ -267,7 +283,7 @@ class V41PrefillIndexerCPU(unittest.TestCase):
             self.fail("Empty K gather must not resolve cache slots")
 
         result = indexer.gather_indexer_keys(
-            torch.empty(1, 64, 132, dtype=torch.uint8),
+            torch.empty(1, 64, 68, dtype=torch.uint8),
             unexpected_slots,
             0,
             0,
@@ -275,7 +291,7 @@ class V41PrefillIndexerCPU(unittest.TestCase):
             SimpleNamespace(cp_size=4, cp_rank=3, kv_cache_sharded=True),
             owner_tokens_per_block=1024,
         )
-        self.assertEqual(result.quant.shape, (0, 128))
+        self.assertEqual(result.quant.shape, (0, 64))
         self.assertEqual(result.scale.shape, (0,))
 
 
@@ -316,9 +332,11 @@ class V41PrefillIndexerCUDA(unittest.TestCase):
         return q, weights, k
 
     def _score(self, q, weights, k, visible):
-        q_fp8, w_fold = indexer.quantize_indexer_q(q, weights)
-        k_fp8, k_scale = indexer.quantize_indexer_k_reference(k)
-        return indexer.score_indexer_chunk(q_fp8, w_fold, k_fp8, k_scale, visible)
+        q_payload, q_sf = indexer.quantize_indexer_q(q)
+        k_payload, k_sf = indexer.quantize_indexer_k_reference(k)
+        return indexer.score_indexer_chunk(
+            q_payload, q_sf, k_payload, k_sf, weights, visible
+        )
 
     def _assert_scores_and_topk(self, actual, expected, topk=512):
         finite = torch.isfinite(expected)
@@ -375,23 +393,23 @@ class V41PrefillIndexerCUDA(unittest.TestCase):
                         )
                         self._assert_scores_and_topk(chunked, expected)
 
-    def test_q_quantization_folds_signed_weights_and_keeps_zero_rows_finite(self):
+    def test_q_quantization_packs_mx_scales_and_keeps_zero_rows_finite(self):
         q, weights, _ = self._inputs(7, 32, 1, 42)
         q[0].zero_()
-        weights[1].zero_()
-        quantized, folded = indexer.quantize_indexer_q(q, weights)
-        scale = (q.float().abs().amax(-1) / 448.0).clamp_min(1e-12)
-        self.assertEqual(quantized.dtype, torch.float8_e4m3fn)
-        self.assertEqual(quantized.shape, q.shape)
-        self.assertEqual(folded.dtype, torch.float32)
-        self.assertTrue(torch.isfinite(folded).all())
-        torch.testing.assert_close(folded, weights * scale, rtol=1e-6, atol=1e-9)
-        torch.testing.assert_close(
-            quantized.float() * scale[:, :, None],
-            fp8_roundtrip(q),
-            rtol=1e-6,
-            atol=1e-6,
+        payload, sf = indexer.quantize_indexer_q(q)
+        expected_payload, expected_sf, values = indexer._fp4_rows_torch(
+            q.reshape(-1, 128)
         )
+        self.assertEqual(payload.dtype, torch.int8)
+        self.assertEqual(tuple(payload.shape), (7, 32, 64))
+        self.assertEqual(sf.dtype, torch.int32)
+        self.assertEqual(tuple(sf.shape), (7, 32))
+        torch.testing.assert_close(
+            payload.reshape(-1, 64), expected_payload, rtol=0, atol=0
+        )
+        torch.testing.assert_close(sf.reshape(-1), expected_sf, rtol=0, atol=0)
+        self.assertTrue(torch.isfinite(values).all())
+        self.assertTrue((payload.reshape(7, 32, 64)[0] == 0).all())
 
     def test_candidate_source_and_consumers_use_causal_compressed_positions(self):
         # Real V4.1 candidate geometry; the final block is only partly visible

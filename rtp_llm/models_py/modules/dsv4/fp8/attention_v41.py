@@ -29,6 +29,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
+from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
+    FP4_GLOBAL_ENTRY_BYTES,
+    FP4_INDEXER_ENTRY_BYTES,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     _ATTN_TYPE_ENUM_BY_INT,
     AttentionFP8,
@@ -149,6 +153,11 @@ class AttentionV41FP8(AttentionFP8):
             )
             self.index_weights = w[W.v4_indexer_weights_proj_w]
         self._pool_spec[CSA_STATE] = (torch.float32, 2 * self.head_dim)
+        # V4.1-Flash FP4 pools: GLOBAL regions 288B/entry, INDEX_K 68B/entry
+        # (fixed layouts; see _v41_fp4_triton and DSV4CacheConfigHelper).
+        self._pool_spec[CSA_KV] = (torch.uint8, FP4_GLOBAL_ENTRY_BYTES)
+        self._pool_spec[HCA_KV] = (torch.uint8, FP4_GLOBAL_ENTRY_BYTES)
+        self._pool_spec[INDEXER_KV] = (torch.uint8, FP4_INDEXER_ENTRY_BYTES)
         self._wo_a_groups_v41 = torch.nn.ModuleList()
         scale_block = self.wo_a_w.shape[1] // self.wo_a_s.shape[1]
         for group in range(self.n_groups):
@@ -391,19 +400,17 @@ class AttentionV41FP8(AttentionFP8):
         main_pool = self._source_pool(self._global_region())
         index_pool = self._source_pool(INDEXER_KV)
         if main_pool is not None:
-            from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
-                quantize_indexer_k,
-            )
-            from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
-                quantize_and_insert_k_cache,
+            from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
+                quantize_and_insert_k_cache_fp4,
+                quantize_indexer_k_fp4,
             )
 
-            quantize_and_insert_k_cache(
+            quantize_and_insert_k_cache_fp4(
                 global_keys.contiguous(),
                 main_pool,
                 self._slots(self._global_region(), boundary_pos, boundary_req),
             )
-            quantize_indexer_k(
+            quantize_indexer_k_fp4(
                 index_keys.contiguous(),
                 self._slots(INDEXER_KV, boundary_pos, boundary_req),
                 index_pool,
@@ -453,20 +460,20 @@ class AttentionV41FP8(AttentionFP8):
                         self._kv_cache.seq_size_per_block,
                     )
                 else:
-                    from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
-                        dequantize_indexer_k,
+                    from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
+                        dequantize_indexer_k_fp4,
                     )
 
-                    k = dequantize_indexer_k(
+                    k = dequantize_indexer_k_fp4(
                         index_pool, self._slots(INDEXER_KV, pos, req)
                     )
                     self._gather_shards(k)
                 if prefill:
-                    from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
-                        dequantize_slots_to_bf16,
+                    from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
+                        dequantize_k_cache_slots_fp4,
                     )
 
-                    g = dequantize_slots_to_bf16(
+                    g = dequantize_k_cache_slots_fp4(
                         main_pool, self._slots(self._global_region(), pos, req)
                     )
                     self._gather_shards(g)
@@ -536,7 +543,7 @@ class AttentionV41FP8(AttentionFP8):
                 globals_by_req[0][1], prefill_indexer.PrefillIndexerKeys
             )
             if fused_indexer:
-                q_fp8, weights_folded = prefill_indexer.quantize_indexer_q(q, weights)
+                q_fp4, q_sf = prefill_indexer.quantize_indexer_q(q)
             else:
                 q = fp8_roundtrip(q)
             single_request = len(globals_by_req) == 1
@@ -566,12 +573,11 @@ class AttentionV41FP8(AttentionFP8):
                             "dsv41.prefill.indexer.fused_logits"
                         ):
                             logits = prefill_indexer.score_indexer_chunk(
-                                q_fp8.view(torch.uint8)[chunk].view(
-                                    torch.float8_e4m3fn
-                                ),
-                                weights_folded[chunk],
+                                q_fp4[chunk],
+                                q_sf[chunk],
                                 keys.quant,
                                 keys.scale,
+                                weights[chunk],
                                 visible,
                             )
                     else:

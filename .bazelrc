@@ -134,6 +134,7 @@ build:cuda13_arm --copt=-Wno-array-bounds
 build:cuda13_arm --copt=-Wno-unused-result
 build:cuda13_arm --copt=-Wno-array-parameter
 build:cuda13_arm --copt=-Wno-narrowing
+build:cuda13_arm --copt=-Wno-dangling-pointer # boringssl (gcc>=12 false positive on pinned cbb.c)
 build:cuda13_arm --define=using_cuda12_arm=true
 build:cuda13_arm --define=using_cuda13_arm=true
 build:cuda13_arm --define=using_cuda12_9_x86=false
@@ -304,6 +305,7 @@ build:arm --copt=-Wno-tautological-compare
 build:arm --copt=-Wno-array-bounds # aios
 build:arm --copt=-Wno-unused-result # grpc
 build:arm --copt=-Wno-array-parameter # boringssl
+build:arm --copt=-Wno-dangling-pointer # boringssl (gcc>=12 false positive on pinned cbb.c)
 
 # remote_kv_cache
 build:remote_kv_cache --define=use_remote_kv_cache=true
