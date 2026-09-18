@@ -87,6 +87,9 @@ message FlexlbServerStatusPB {
     int64 worker_generation = 8;
     // Present only for a multi-engine frontend; zero is a valid selected index.
     optional int32 engine_index = 9;
+    // Requests on this Decode engine that must finish cancellation and resource
+    // release before the incoming request executes. Empty means no preemption.
+    repeated string preempt_request_ids = 10;
 }
 
 // Why an incoming request was rejected by the admission decision.  This is

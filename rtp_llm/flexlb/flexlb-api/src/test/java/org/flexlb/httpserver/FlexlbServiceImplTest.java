@@ -15,7 +15,9 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -31,6 +33,7 @@ import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -46,6 +49,7 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -116,7 +120,7 @@ class FlexlbServiceImplTest {
         CompletableFuture<Response> pending = new CompletableFuture<>();
         when(routeService.route(any())).thenReturn(pending);
         var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(12345L)
+                .setRequestId("12345")
                 .addCacheAffinityKeys("image")
                 .setVitRouteOnly(true)
                 .build();
@@ -132,9 +136,48 @@ class FlexlbServiceImplTest {
         response.setSuccess(true);
         response.setCode(200);
         pending.complete(response);
-        verify(routeService, never()).cancelRequest(anyLong(), anyLong(), any());
-        verify(routeService, never()).getRequestState(anyLong(), anyLong());
+        verify(routeService, never()).cancelRequest(anyString(), anyLong(), any());
+        verify(routeService, never()).getRequestState(anyString(), anyLong());
         verifyNoInteractions(observer);
+    }
+
+    @Test
+    void scheduleReturnsStringPreemptionIdsOnTheirDecodeRoute() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("10.0.0.11");
+        ServerStatus decode = new ServerStatus();
+        decode.setRole(RoleType.DECODE);
+        decode.setServerIp("10.0.0.21");
+        decode.setGrpcPort(8001);
+        decode.setSelectedEngineIndex(0, 2);
+        decode.setPreemptRequestIds(List.of("request-a", "9007199254740993"));
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(List.of(prefill, decode));
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId("incoming-2002").build(),
+                observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(captor.capture());
+        var result = captor.getValue();
+        assertEquals(List.of(), result.getServerStatus(0).getPreemptRequestIdsList());
+        assertEquals("10.0.0.21", result.getServerStatus(1).getServerIp());
+        assertEquals(8001, result.getServerStatus(1).getGrpcPort());
+        assertEquals(List.of("request-a", "9007199254740993"),
+                result.getServerStatus(1).getPreemptRequestIdsList());
+        assertFalse(result.getServerStatus(0).hasEngineIndex());
+        assertTrue(result.getServerStatus(1).hasEngineIndex());
+        assertEquals(0, result.getServerStatus(1).getEngineIndex());
+        assertEquals(9, FlexlbScheduleProtocol.FlexlbServerStatusPB.ENGINE_INDEX_FIELD_NUMBER);
+        assertEquals(10, FlexlbScheduleProtocol.FlexlbServerStatusPB.PREEMPT_REQUEST_IDS_FIELD_NUMBER);
+        assertFalse(result.getEnqueuedByMaster());
     }
 
     @Test

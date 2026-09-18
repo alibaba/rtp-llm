@@ -262,6 +262,9 @@ final class DecodeState {
         long requestId = reservation.requestId();
         DecodeRequestState current = requestState(requestId);
         boolean exact = isExactReservation(current, reservation);
+        if (exact && current.returnedPreemptionToken != 0L) {
+            rollbackReturnedPreemptionLocked(current);
+        }
         boolean protectedOwner = hasExactIncomingAttemptLocked(reservation)
                 || exact && (current.confirmed() || current.engineLifecycleOwned || current.hasProtocolOwner());
         if (protectedOwner) {
@@ -376,7 +379,7 @@ final class DecodeState {
         boolean exactState = isExactReservation(state, reservation);
 
         PreemptionClaim claim = state == null ? null : state.preemptionClaim;
-        if (claim != null && exactState) {
+        if (claim != null && exactState && !claim.returnedInstruction) {
             throw terminalInvariant(reservation,
                     "priority claim must settle before generic terminal ownership");
         }
@@ -386,6 +389,10 @@ final class DecodeState {
         }
 
         boolean changed = false;
+        if (claim != null && exactState && claim.returnedInstruction) {
+            return settlePriorityClaimTerminalLocked(
+                    claim.attemptToken, reservation, claim);
+        }
         DecodeRequestState request = state != null && state.ownsRequest()
                 ? state : null;
         DispatchLease dispatchPermit = request == null
@@ -641,6 +648,11 @@ final class DecodeState {
                 // same lock. Transfer only changes ownership; it never re-reads the cap.
                 removeQueuedPhaseLocked(permit.requestId, permit.reservation);
                 permit.reservation.engineLifecycleOwned = true;
+                if (permit.reservation.returnedPreemptionToken != 0L) {
+                    preemptionAttempts.remove(
+                            permit.reservation.returnedPreemptionToken);
+                    permit.reservation.returnedPreemptionToken = 0L;
+                }
                 admissionVersion.incrementAndGet();
                 transferStatus = EngineDispatchPermitTransferStatus.TRANSFERRED;
             }
@@ -699,6 +711,9 @@ final class DecodeState {
             DecodeRequestState candidate,
             AdmissionCapacity capacity,
             WorkerStatus.EngineObservation fields) {
+        if (candidate.returnedPreemptionToken != 0L) {
+            return false;
+        }
         return !capacity.evaluate(dispatchCapacityUsage(fields), candidate.kvTokens(), candidate.expectedKvTokens()).fits();
     }
 
@@ -967,6 +982,53 @@ final class DecodeState {
         } finally {
             admissionLock.unlock();
         }
+    }
+
+    PreemptionBeginResult beginReturnedPreemption(
+            long attemptToken,
+            List<ReservationHandle> victims,
+            long incomingRequestId,
+            long incomingKvTokens,
+            long incomingExpectedKvTokens,
+            int incomingPriority,
+            AdmissionCapacity capacity) {
+        admissionLock.lock();
+        try {
+            PreemptionBeginResult result = beginPreemption(
+                    attemptToken, victims, incomingRequestId,
+                    incomingKvTokens, incomingExpectedKvTokens,
+                    incomingPriority, capacity);
+            if (result == PreemptionBeginResult.SUCCESS) {
+                shadowReservation(incomingRequestId).returnedPreemptionToken = attemptToken;
+                for (ReservationHandle victim : victims) {
+                    preemptionClaim(victim.requestId()).returnedInstruction = true;
+                }
+            }
+            return result;
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
+    private void rollbackReturnedPreemptionLocked(DecodeRequestState incoming) {
+        long token = incoming.returnedPreemptionToken;
+        if (token == 0L) {
+            return;
+        }
+        EndpointPreemptionAttempt attempt = preemptionAttempts.remove(token);
+        incoming.returnedPreemptionToken = 0L;
+        if (attempt == null) {
+            return;
+        }
+        for (ReservationHandle victim : attempt.remainingVictims.values()) {
+            PreemptionClaim claim = exactPreemptionClaimLocked(token, victim);
+            if (claim == null) {
+                continue;
+            }
+            releaseHeldKv(claim);
+            removePreemptionClaimLocked(victim.requestId(), claim);
+        }
+        admissionVersion.incrementAndGet();
     }
 
     boolean updatePreemption(long attemptToken, PreemptionUpdate update) {
@@ -1243,6 +1305,7 @@ final class DecodeState {
         private final long hardKvTokens;
         private final long expectedKvTokens;
         private PreemptionCancelPhase phase = PreemptionCancelPhase.CLAIMED;
+        private boolean returnedInstruction;
         private boolean kvHeldAfterWorkerRelease;
 
         private PreemptionClaim(long attemptToken, ClaimOwner owner,
@@ -1981,6 +2044,8 @@ final class DecodeState {
         /** True after dispatch crosses the Master rollback boundary. */
         private boolean engineLifecycleOwned;
         private DispatchLease dispatchPermit;
+        /** Incoming instruction owner until dispatch crosses the rollback boundary. */
+        private volatile long returnedPreemptionToken;
         /** Current protocol owners for this exact request generation. */
         private PreemptionClaim preemptionClaim;
         /** Non-zero while stale WorkerStatus must not resurrect this request id. */
