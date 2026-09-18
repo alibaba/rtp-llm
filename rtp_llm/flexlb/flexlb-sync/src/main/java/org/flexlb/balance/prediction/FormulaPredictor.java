@@ -69,7 +69,7 @@ public class FormulaPredictor
         }
         PrefillTimeVariableBindings.EvaluationVariables vars =
                 PrefillTimeVariableBindings.batchVariables(features);
-        return (double) formula.evaluate(
+        return formula.evaluateAsDouble(
                 vars.topLevelVars(), vars.itemVars());
     }
 

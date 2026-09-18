@@ -13,14 +13,16 @@ import lombok.Setter;
 @Setter
 public final class FlexlbConfig {
 
-    public static final int CURRENT_SCHEMA_VERSION = 2;
+    public static final int CURRENT_SCHEMA_VERSION = 3;
 
     private int schemaVersion = CURRENT_SCHEMA_VERSION;
     private SchedulerConfig scheduler = new SchedulerConfig();
     private DispatcherConfig dispatcher = new DispatcherConfig();
+    private RequestLifecycleConfig requestLifecycle = new RequestLifecycleConfig();
     private RoutingConfig router = new RoutingConfig();
     private WorkerRegistryConfig workerRegistry = new WorkerRegistryConfig();
     private ObservabilityConfig observability = new ObservabilityConfig();
+    private GrpcServerConfig grpcServer = new GrpcServerConfig();
 
     @JsonIgnore
     private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();
@@ -42,26 +44,10 @@ public final class FlexlbConfig {
                 == QueueOrderingConfig.Type.PRIORITY;
     }
 
-    /**
-     * Whether transient Decode capacity belongs to the delivery boundary.
-     *
-     * <p>A queue without a preemption policy cannot make a useful placement-time
-     * decision when Decode is temporarily full. It should retain the request on
-     * its selected Prefill queue and let the exact pre-delivery permit wait for
-     * Decode capacity. Only a policy which can replace Decode victims needs a
-     * placement-time miss; Prefill-only preemption must not change this
-     * boundary.
-     */
     @JsonIgnore
-    public boolean defersDecodeCapacityUntilDispatch() {
-        if (!isQueue()) {
-            return false;
-        }
-        return queueScheduler().getOrdering().preemptionPolicy()
-                .map(preemption ->
-                        !preemption.allows(VictimStage.DECODE_RESERVED)
-                        && !preemption.allows(VictimStage.DECODE_ENGINE_OWNED))
-                .orElse(true);
+    public boolean allowsPreemption(VictimStage stage) {
+        return isPriorityOrdering() && scheduler.getOrdering().getPreemption() != null
+                && scheduler.getOrdering().getPreemption().allows(stage);
     }
 
     /** Resolve the QUEUE decision policy from its single configuration owner. */
@@ -109,47 +95,12 @@ public final class FlexlbConfig {
         throw new IllegalStateException("priority ordering configuration is not active");
     }
 
-    @JsonIgnore
-    public long effectiveMaxOutputTokensForReservation(long declared) {
-        Long maximum = router.getRoles().getDecode().getKvReservation()
-                .getMaxOutputTokensForEstimate();
-        return maximum == null ? declared : Math.min(declared, maximum);
+    @Getter
+    @Setter
+    public static final class GrpcServerConfig {
+        private int executorCoreSize = 1000;
+        private int executorMaxSize = 1000;
+        private int executorQueueSize = 1000;
     }
 
-    /**
-     * Resolve one decode reservation estimate without allowing malformed or
-     * extreme token counts to wrap negative. A positive endpoint capacity is
-     * a final physical cap; zero means the endpoint has not reported a usable
-     * capacity yet.
-     */
-    @JsonIgnore
-    public long decodeKvReservationTokens(long inputTokens,
-                                          long declaredOutputTokens,
-                                          long totalKvCapacity) {
-        long normalizedInput = Math.max(0L, inputTokens);
-        long normalizedOutput = Math.max(0L, declaredOutputTokens);
-        long effectiveOutput = Math.max(0L,
-                effectiveMaxOutputTokensForReservation(normalizedOutput));
-        long estimated = normalizedInput > Long.MAX_VALUE - effectiveOutput
-                ? Long.MAX_VALUE : normalizedInput + effectiveOutput;
-        return totalKvCapacity > 0L
-                ? Math.min(estimated, totalKvCapacity) : estimated;
-    }
-
-    @JsonIgnore
-    public int shortestTtftCandidateCount(int workerCount) {
-        RoutingConfig.CandidateChoiceConfig choice =
-                router.getRoles().getPrefill().getCandidateChoice();
-        if (choice.getType()
-                != RoutingConfig.CandidateChoiceType.LEAST_RECENTLY_USED_IN_POOL) {
-            return 1;
-        }
-        RoutingConfig.CandidatePoolConfig pool =
-                choice.getPool();
-        if (pool.getType() == RoutingConfig.CandidatePoolType.FIXED) {
-            return Math.max(1, Math.min(pool.getWorkers(), workerCount));
-        }
-        return Math.max(1, Math.max(pool.getMinimumWorkers(),
-                (int) Math.floor(workerCount * pool.getRatio())));
-    }
 }

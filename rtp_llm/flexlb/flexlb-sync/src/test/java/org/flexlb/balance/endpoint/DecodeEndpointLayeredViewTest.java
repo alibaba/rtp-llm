@@ -180,7 +180,7 @@ class DecodeEndpointLayeredViewTest {
     }
 
     @Test
-    void evictExpiredRequests_boundsPriorityCanceledTombstones() throws InterruptedException {
+    void evictExpiredRequests_boundsPriorityCanceledTerminalRecords() throws InterruptedException {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
         long version = endpoint.routingView().admissionVersion();
@@ -206,7 +206,7 @@ class DecodeEndpointLayeredViewTest {
     }
 
     @Test
-    void priorityTombstoneIsAuthoritativeWithoutAcceptedOrWorkerCanceled() {
+    void priorityTerminalRecordIsAuthoritativeWithoutAcceptedOrWorkerCanceled() {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
         long version = endpoint.routingView().admissionVersion();
@@ -215,7 +215,7 @@ class DecodeEndpointLayeredViewTest {
                         9L, 128, 136, 70));
         assertTrue(endpoint.markPriorityCancelInFlight(102L));
 
-        assertTrue(endpoint.settlePriorityTombstoned(
+        assertTrue(endpoint.settlePriorityRequestFenced(
                 102L, reservations.get(1L)));
         assertTrue(endpoint.commitPriorityPreemption(102L));
 
@@ -223,7 +223,7 @@ class DecodeEndpointLayeredViewTest {
         assertTrue(endpoint.layeredAdmissionView().reserved().containsKey(9L));
         assertEquals(1, endpoint.routingView().totalLoad());
         // The same late Decode sample rejected by typed-CANCELED fencing must
-        // also be rejected after the stronger absent+tombstone proof.
+        // also be rejected after the stronger absent+terminal record proof.
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
         assertFalse(isConfirmed(1L));
     }
@@ -294,6 +294,42 @@ class DecodeEndpointLayeredViewTest {
                 101L, 2L, PreemptionCancelPhase.CANCEL_REQUESTED));
         assertTrue(isConfirmed(2L));
         assertTrue(endpoint.routingView().admissionVersion() > version);
+    }
+
+    @Test
+    void cancelAckAndUnknownKeepVictimCapacityUntilItsOwnInactivityExpiry() {
+        var victim = reserve(2L, 400L, 408L, 30);
+        updateStatus(Map.of("2", runningTask(2L, TaskPhase.RUNNING, 256)), null, 10_000);
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                beginPreemption(101L, List.of(2L), 9L, 700L, 708L, 70));
+        var incoming = endpoint.reservationHandle(9L);
+        assertTrue(incoming != null);
+        var before = endpoint.layeredAdmissionView();
+        assertEquals(1, before.runningCount());
+        assertEquals(700L, before.routing().inflightHardKv());
+        assertEquals(708L, before.routing().inflightExpectedKv());
+        assertTrue(endpoint.markPriorityCancelInFlight(101L));
+        assertTrue(endpoint.recordPriorityCancelPhase(101L, 2L, PreemptionCancelPhase.CANCEL_REQUESTED));
+        assertEquals(before.engineCapacityUsed(), endpoint.layeredAdmissionView().engineCapacityUsed());
+        assertEquals(before.routing().inflightExpectedKv(), endpoint.routingView().inflightExpectedKv());
+        assertTrue(endpoint.recordPriorityCancelPhase(101L, 2L, PreemptionCancelPhase.CANCEL_UNKNOWN));
+        assertEquals(1, endpoint.layeredAdmissionView().runningCount());
+
+        // Expiring the incoming request must not release a victim whose Cancel outcome is unknown.
+        assertTrue(endpoint.expireReservationExact(incoming));
+        assertEquals(0L, endpoint.routingView().inflightHardKv());
+        assertEquals(0L, endpoint.routingView().inflightExpectedKv());
+        assertEquals(1, endpoint.layeredAdmissionView().runningCount());
+        assertEquals(1, endpoint.routingView().engineCapacityUsed());
+        assertTrue(endpoint.expireReservationExact(victim));
+        assertFalse(endpoint.expireReservationExact(victim));
+        var after = endpoint.layeredAdmissionView();
+        assertEquals(0, after.runningCount());
+        assertEquals(0, after.acceptedCount());
+        assertEquals(0, after.activeDispatchPermits());
+        assertEquals(0, after.engineCapacityUsed());
+        assertTrue(after.reserved().isEmpty());
+        assertTrue(after.confirmed().isEmpty());
     }
 
     @Test
@@ -406,7 +442,7 @@ class DecodeEndpointLayeredViewTest {
     }
 
     @Test
-    void notFoundTransferRetainsSyntheticKvUntilExactEngineFenceSettlement() {
+    void notFoundRetainsSyntheticKvUntilExactLeaseExpiration() {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 500)), null, 10_000);
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
@@ -424,32 +460,20 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(2, endpoint.routingView().totalLoad(),
                 "victim and provisional incoming must both remain charged before abort");
         assertEquals(8_800, endpoint.realKvAvailable());
-        assertTrue(endpoint.transferPriorityNotFoundClaimToEngineFence(104L, 1L));
-        assertFalse(endpoint.reconcilePriorityVictimActive(
-                104L, reservations.get(1L)),
-                "a transferred fence cannot return to ordinary active reconciliation");
-        assertFalse(endpoint.reconcilePriorityVictimFinished(
-                104L, reservations.get(1L)),
-                "a transferred fence requires its exact fence settlement");
-        assertFalse(endpoint.settlePriorityTombstoned(
-                104L, reservations.get(1L)),
-                "the original attempt cannot settle a transferred fence");
         endpoint.abortPriorityPreemption(104L);
 
         assertEquals(0, endpoint.routingView().inflightHardKv(),
                 "aborting the attempt releases only its provisional incoming reservation");
         assertEquals(9_500, endpoint.realKvAvailable(),
-                "control-owner transfer must not release the synthetic KV hold");
+                "aborting incoming work must not release the victim KV hold");
         assertEquals(1, endpoint.routingView().totalLoad(),
                 "the disappeared confirmed victim remains a synthetic slot");
 
-        assertTrue(endpoint.settleEngineFenceClaim(
-                104L, reservations.get(1L)));
+        assertTrue(endpoint.expireReservationExact(reservations.get(1L)));
         assertEquals(10_000, endpoint.realKvAvailable());
         assertEquals(0, endpoint.routingView().totalLoad());
-        assertFalse(endpoint.settleEngineFenceClaim(
-                104L, reservations.get(1L)),
-                "the exact fence generation settles accounting at most once");
+        assertFalse(endpoint.expireReservationExact(reservations.get(1L)),
+                "the exact local lease expires at most once");
         assertEquals(10_000, endpoint.realKvAvailable());
     }
 
@@ -463,7 +487,7 @@ class DecodeEndpointLayeredViewTest {
         updateStatus(Map.of("2", runningTask(2L, TaskPhase.KV_ALLOCATED, 256),
                 "3", runningTask(3L, TaskPhase.RUNNING, 512)), null, 10_000);
 
-        DecodeEndpointSnapshot snapshot = DecodeEndpointSnapshot.capture(endpoint, 4);
+        DecodeEndpointSnapshot snapshot = DecodeEndpointSnapshot.capture(endpoint, new DecodeEndpoint.AdmissionCapacity(4L, 90L));
         assertEquals(List.of(1L), ids(snapshot.reserved()));
         assertEquals(List.of(2L), ids(snapshot.accepted()));
         assertEquals(List.of(3L), ids(snapshot.running()));
@@ -477,7 +501,7 @@ class DecodeEndpointLayeredViewTest {
                 20L, 64, 72, 70);
         beginPreemption(102L, List.of(3L),
                 30L, 64, 72, 70);
-        DecodeEndpointSnapshot after = DecodeEndpointSnapshot.capture(endpoint, 4);
+        DecodeEndpointSnapshot after = DecodeEndpointSnapshot.capture(endpoint, new DecodeEndpoint.AdmissionCapacity(4L, 90L));
         assertTrue(after.accepted().isEmpty());
         assertTrue(after.running().isEmpty());
     }

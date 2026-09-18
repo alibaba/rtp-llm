@@ -35,6 +35,7 @@ import java.util.function.BiConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -75,7 +76,7 @@ class FlexlbServiceImplTest {
         serverLatencyRecorder = mock(ServerScheduleLatencyRecorder.class);
 
         configService = mock(ConfigService.class);
-        FlexlbConfig flexlbConfig = new FlexlbConfig();
+        FlexlbConfig flexlbConfig = org.flexlb.mock.TestFlexlbConfigs.create();
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
 
         requestToken = mock(ActiveRequestCounter.RequestToken.class);
@@ -108,6 +109,9 @@ class FlexlbServiceImplTest {
 
     @Test
     void testSchedule_localRouting() {
+        FlexlbConfig requestConfig = org.flexlb.mock.TestFlexlbConfigs.create();
+        when(configService.loadBalanceConfig()).thenReturn(requestConfig)
+                .thenThrow(new IllegalStateException("configuration must only be read once"));
         // Given: not master, no consistency needed
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
 
@@ -137,6 +141,10 @@ class FlexlbServiceImplTest {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
         assertTrue(resp.getSuccess());
         assertEquals(200, resp.getCode());
+        ArgumentCaptor<BalanceContext> contextCaptor = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(contextCaptor.capture());
+        assertSame(requestConfig, contextCaptor.getValue().getConfig());
+        verify(configService).loadBalanceConfig();
         assertPvContains("\"scheduleOrigin\":\"LOCAL_STANDALONE\"");
         verify(serverLatencyRecorder).recordArrival(anyLong());
         verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());
@@ -897,7 +905,8 @@ class FlexlbServiceImplTest {
                 {
                   "scheduler":{"type":"QUEUE","queueTimeoutMs":7777,
                     "ordering":{"type":"FIFO"}},
-                  "dispatcher":{"type":"NON_BATCH"}
+                  "dispatcher":{"type":"NON_BATCH"},
+                  "requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2}}
                 }
                 """);
         when(configService.loadBalanceConfig()).thenReturn(queueConfig);
@@ -924,7 +933,8 @@ class FlexlbServiceImplTest {
         FlexlbConfig directConfig = ConfigService.parse("""
                 {
                   "scheduler":{"type":"DIRECT"},
-                  "dispatcher":{"type":"NON_BATCH"}
+                  "dispatcher":{"type":"NON_BATCH"},
+                  "requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2}}
                 }
                 """);
         when(configService.loadBalanceConfig()).thenReturn(directConfig);

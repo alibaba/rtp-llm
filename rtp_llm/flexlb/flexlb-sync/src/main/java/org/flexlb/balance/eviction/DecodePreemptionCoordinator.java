@@ -52,7 +52,7 @@ public final class DecodePreemptionCoordinator {
             DecodeEndpoint.AdmissionCapacity capacity,
             List<DecodeRequestView> victims,
             long cancelAckTimeoutMs,
-            long cancelCompletionTimeoutMs,
+            long preemptionTimeoutMs,
             BooleanSupplier admissionOpen,
             String detail) {
         public PreemptionCommand {
@@ -167,9 +167,7 @@ public final class DecodePreemptionCoordinator {
                         "endpoint_cancel_linearization_failed"));
             }
             for (ClaimedVictim owned : capability.claims) {
-                if (!requests.tryApplyPreemptionPhase(
-                        owned.claim(),
-                        PreemptionCancelPhase.CANCEL_IN_FLIGHT)) {
+                if (!owned.claim().applyPhase(PreemptionCancelPhase.CANCEL_IN_FLIGHT)) {
                     return CompletableFuture.completedFuture(capability.abort(
                             true,
                             "inflight_cancel_linearization_failed:"
@@ -255,9 +253,7 @@ public final class DecodePreemptionCoordinator {
                             command.endpoint().recordPriorityCancelPhase(
                                     capability.token, victim.requestId(),
                                     PreemptionCancelPhase.CANCEL_REQUESTED)
-                            && requests.tryApplyPreemptionPhase(
-                                    owned.claim(),
-                                    PreemptionCancelPhase.CANCEL_REQUESTED);
+                            && owned.claim().applyPhase(PreemptionCancelPhase.CANCEL_REQUESTED);
                     if (transitioned) {
                         capability.transferred(owned);
                         owned.acceptedAcknowledgement = true;
@@ -271,20 +267,18 @@ public final class DecodePreemptionCoordinator {
                     command.endpoint().recordPriorityCancelPhase(
                             capability.token, victim.requestId(),
                             PreemptionCancelPhase.NOT_FOUND_STALE);
-                    requests.tryApplyPreemptionPhase(
-                            owned.claim(),
-                            PreemptionCancelPhase.NOT_FOUND_STALE);
+                    owned.claim().applyPhase(PreemptionCancelPhase.NOT_FOUND_STALE);
                     capability.transferred(owned);
                     if (!capability.isTerminal(owned)) {
                         hasNotFound = true;
                     }
                 }
-                case TOMBSTONED -> {
-                    // Unlike NOT_FOUND, TOMBSTONED atomically proves absence
+                case REQUEST_FENCED -> {
+                    // Unlike NOT_FOUND, REQUEST_FENCED atomically proves absence
                     // and prevents every racing late Enqueue. It is therefore
                     // a terminal victim proof and contributes freed capacity
                     // to this same transaction.
-                    settleTombstoned(capability, owned);
+                    settleRequestFenced(capability, owned);
                 }
                 case FAILED, UNSUPPORTED -> {
                     capability.transferUnknown(owned);
@@ -302,7 +296,7 @@ public final class DecodePreemptionCoordinator {
         // window rather than sharing one 50ms deadline.
         long completionDeadlineNanos = System.nanoTime()
                 + TimeUnit.MILLISECONDS.toNanos(
-                        Math.max(1, command.cancelCompletionTimeoutMs()));
+                        Math.max(1, command.preemptionTimeoutMs()));
         List<CompletableFuture<Boolean>> boundedSettlements =
                 new ArrayList<>(pendingTerminals.size());
         for (ClaimedVictim pending : pendingTerminals) {
@@ -328,7 +322,7 @@ public final class DecodePreemptionCoordinator {
                 });
     }
 
-    private static boolean settleTombstoned(
+    private static boolean settleRequestFenced(
             AttemptCapability capability,
             ClaimedVictim owned) {
         PreemptionCommand command = capability.command;
@@ -337,11 +331,10 @@ public final class DecodePreemptionCoordinator {
         // Endpoint accounting remains the resource-owning CAS. The remaining
         // transitions are exact-token followers, but no WorkerStatus future
         // is required for this stronger proof.
-        boolean endpointSettled = command.endpoint().settlePriorityTombstoned(
+        boolean endpointSettled = command.endpoint().settlePriorityRequestFenced(
                 capability.token, reservation(command.endpoint(), victim));
         boolean inflightSettled = endpointSettled
-                && requests.trySettlePreemptionTombstone(
-                        owned.claim(), command.detail());
+                && owned.claim().completePreemption(command.detail());
         boolean attemptSettled = inflightSettled
                 && capability.recordTerminal(owned);
         return endpointSettled && inflightSettled && attemptSettled;
@@ -555,8 +548,7 @@ public final class DecodePreemptionCoordinator {
             command.endpoint().recordPriorityCancelPhase(
                     token, owned.requestId(),
                     PreemptionCancelPhase.CANCEL_UNKNOWN);
-            requests.tryApplyPreemptionPhase(
-                    owned.claim(), PreemptionCancelPhase.CANCEL_UNKNOWN);
+            owned.claim().applyPhase(PreemptionCancelPhase.CANCEL_UNKNOWN);
             transferred(owned);
         }
 
@@ -624,7 +616,7 @@ public final class DecodePreemptionCoordinator {
             for (ClaimedVictim owned : claims) {
                 if (owned.disposition == ClaimDisposition.RELEASABLE) {
                     try {
-                        requests.tryReleasePreemption(owned.claim());
+                        owned.claim().release();
                     } catch (RuntimeException | Error failure) {
                         recordCleanupFailure(
                                 "release_claim:" + owned.requestId(),

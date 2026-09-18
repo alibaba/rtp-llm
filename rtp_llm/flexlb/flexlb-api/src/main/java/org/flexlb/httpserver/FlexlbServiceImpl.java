@@ -790,7 +790,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             String selectedDecode = "";
             if (ctx.getResponse() != null && ctx.getResponse().getServerStatus() != null) {
                 for (ServerStatus ss : ctx.getResponse().getServerStatus()) {
-                    if (ss.getRole() == RoleType.PREFILL || ss.getRole() == RoleType.PDFUSION) {
+                    if (ss.getRole() != null && ss.getRole().supportsPrefill()) {
                         selectedPrefill = ss.getServerIp() != null ? ss.getServerIp() : "";
                     } else if (ss.getRole() == RoleType.DECODE) {
                         selectedDecode = ss.getServerIp() != null ? ss.getServerIp() : "";
@@ -855,7 +855,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private BalanceContext buildContext(FlexlbScheduleProtocol.FlexlbScheduleRequestPB pb) {
-        BalanceContext ctx = new BalanceContext();
+        var config = configService.loadBalanceConfig();
+        BalanceContext ctx = new BalanceContext(config);
         ctx.setTraceContext(entryTraceContext());
         Span span = Span.fromContext(ctx.getTraceContext());
         FlexlbTrace.setRequestAttributes(span, pb.getRequestId());
@@ -879,10 +880,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
 
-        var config = configService.loadBalanceConfig();
         // QUEUE owns one absolute scheduling deadline, measured from FlexLB
         // admission through delivery acknowledgement. DIRECT never queues and
-        // therefore has no scheduling timeout.
+        // therefore has no scheduling timeout. RequestRegistry separately installs
+        // inactivity tracking from requestLifecycle.request.timeoutMs in both modes.
         long requestExpiresAtMs = config.isQueue()
                 ? config.queueScheduler().resolveExpiresAtMs(ctx.getStartTime())
                 : Long.MAX_VALUE;

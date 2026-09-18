@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li>{@code addEngine} creates a brand-new {@code FastRpcService} on a fresh
  *       gRPC port (explicit or auto = current max + 1), registers it in the
  *       services map, starts the gRPC server, and appends it to the discovery
- *       file so a master running {@code FileServiceDiscovery} picks it up
+ *       file so a master running {@code LocalServiceDiscovery} picks it up
  *       within one sync interval.</li>
  *   <li>{@code removeEngine} PERMANENTLY detaches the engine, in two modes
  *       (user ruling 2026-09: a PLANNED scale-in under load must not lose or
@@ -143,10 +143,6 @@ final class DynamicEngineManager {
         // services.size() == nPrefill + nDecode — the first dynamic engine takes
         // the next global index.
         this.nextEngineIndex = new AtomicInteger(services.size());
-    }
-
-    boolean isFileDiscoveryEnabled() {
-        return discoveryFileStore != null;
     }
 
     /**

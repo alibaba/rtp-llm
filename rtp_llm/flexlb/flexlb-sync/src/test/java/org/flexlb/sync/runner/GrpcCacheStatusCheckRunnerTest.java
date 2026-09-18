@@ -3,7 +3,6 @@ package org.flexlb.sync.runner;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -25,9 +24,12 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class GrpcCacheStatusCheckRunnerTest {
+    private final org.flexlb.cache.service.DynamicCacheIntervalService cacheIntervalService =
+            Mockito.mock(org.flexlb.cache.service.DynamicCacheIntervalService.class);
 
     private final EngineGrpcService engineGrpcService = Mockito.mock(EngineGrpcService.class);
 
@@ -35,8 +37,30 @@ class GrpcCacheStatusCheckRunnerTest {
 
     private final CacheAwareService localKvCacheAwareManager = Mockito.mock(CacheAwareService.class);
 
-    private final DynamicCacheIntervalService cacheIntervalService =
-            Mockito.mock(DynamicCacheIntervalService.class);
+    @Test
+    void decodeCacheResponseUpdatesCapacityWithoutBuildingDetailedIndex() {
+        WorkerStatus status = RunnerTestSupport.discovered(
+                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
+        EngineRpcService.CacheStatusPB response = EngineRpcService.CacheStatusPB.newBuilder()
+                .setVersion(1)
+                .setAvailableKvCache(1000)
+                .setTotalKvCache(2000)
+                .setBlockSize(128)
+                .build();
+        when(engineGrpcService.getCacheStatusAsync(
+                anyString(), anyInt(), eq(status), anyLong(), anyLong(), eq(RoleType.DECODE)))
+                .thenReturn(CompletableFuture.completedFuture(response));
+
+        new GrpcCacheStatusCheckRunner(
+                "test-model", status.getIpPort(), "test-site", RoleType.DECODE,
+                status, status.tryBeginCachePoll(), directory(status),
+                engineHealthReporter, engineGrpcService, localKvCacheAwareManager, cacheIntervalService,
+                20, new LongAdder(), 50L, true, Runnable::run).run();
+
+        assertEquals(1000, status.getCacheStatus().getAvailableKvCache());
+        assertEquals(2000, status.getCacheStatus().getTotalKvCache());
+        verifyNoInteractions(localKvCacheAwareManager);
+    }
 
     @Test
     void testGrpcCacheStatusCheckRunner() {

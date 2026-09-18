@@ -66,7 +66,7 @@ payload = json.load(open(path, "r", encoding="utf-8"))
 envs = payload["zone_process_setting"]["process_info"]["envs"]
 document = next(value for key, value in envs if key == "FLEXLB_CONFIG")
 config = json.loads(document)
-config["dispatcher"]["maxInflightBatchesPerPrefillWorker"] = int(max_batches)
+config["dispatcher"]["maxInflightPerPrefillWorker"] = int(max_batches)
 config["scheduler"]["decision"]["maxCollectionWaitMs"] = int(wait_ms)
 config["scheduler"]["decision"]["maxPredictedExecutionMs"] = int(max_predicted_ms)
 config["router"]["roles"]["decode"]["availability"]["maxEngineRequests"] = int(decode_limit)

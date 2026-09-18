@@ -1,33 +1,26 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.dao.loadbalance.Response;
-
 import java.util.ArrayDeque;
-import java.util.Objects;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BooleanSupplier;
-import java.util.function.Function;
-import java.util.function.Supplier;
 
 /**
  * Publishes frontend completions without running user continuations on a
  * scheduler, endpoint, or transport critical path.
  *
- * <p>The publisher never decides request ownership. External callers first
- * cross the synchronous lifecycle-owner boundary; only an exact
- * lifecycle-owned publication permit may mutate its public future. Internal
- * Delivery and terminal reducers call the kind-specific submit method only
- * after releasing the exact slot lock.
+ * <p>RequestSlot selects a concrete publication before calling this executor.
+ * The publisher manages execution, in-flight accounting and shutdown only;
+ * it never invokes a request transition or arbitrates between responses.
+ * External Future operations execute synchronously; internal responses are
+ * queued so user continuations run outside scheduler and endpoint locks.
  */
 final class RequestCompletionPublisher implements AutoCloseable {
 
     private static final int DEFAULT_PUBLISHER_WORKERS = 8;
 
-    private final RequestRegistry lifecycle;
     private final ThreadPoolExecutor executor;
     private final Object lifecycleMonitor = new Object();
     private final ThreadLocal<ArrayDeque<Runnable>> localDrain =
@@ -38,8 +31,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
     private int inFlightPublications;
     private Throwable closeFailure;
 
-    RequestCompletionPublisher(RequestRegistry lifecycle, int configuredWorkers) {
-        this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
+    RequestCompletionPublisher(int configuredWorkers) {
         int workers = configuredWorkers > 0
                 ? configuredWorkers : DEFAULT_PUBLISHER_WORKERS;
         AtomicInteger workerSequence = new AtomicInteger();
@@ -48,11 +40,9 @@ final class RequestCompletionPublisher implements AutoCloseable {
                 workers,
                 0L,
                 TimeUnit.MILLISECONDS,
-                // Accepted requests are already bounded by RequestRegistry's
-                // outstanding-admission permit. An unbounded handoff queue
-                // therefore cannot grow independently of admitted work, and
-                // guarantees that a decision thread never runs a completion
-                // inline merely because the publisher is busy.
+                // Queue completions so a busy publisher never runs client callbacks
+                // inline on a decision thread. Slot owns request lifetime; the
+                // publisher owns only these in-flight frontend completions.
                 new LinkedBlockingQueue<>(),
                 runnable -> {
                     Thread thread = new Thread(
@@ -79,95 +69,26 @@ final class RequestCompletionPublisher implements AutoCloseable {
         }
     }
 
-    /** Queue an exact delivery-owned response publication. */
-    void submitDeliveryResponse(
-            RequestSlot.PublicationPermit exactPermit,
-            Response response) {
-        submit(exactPermit, "delivery response submission",
-                permit -> permit.claimDeliveryResponse(response));
-    }
-
-    /** Queue an exact terminal-owned response publication. */
-    void submitTerminalResponse(
-            RequestSlot.PublicationPermit exactPermit,
-            Response response) {
-        submit(exactPermit, "terminal response submission",
-                permit -> permit.claimTerminalResponse(response));
-    }
-
-    boolean publishResponse(
-            RequestSlot exactSlot,
-            Response response) {
-        return publish(exactSlot, "external response publication",
-                () -> lifecycle.publishExternalResponse(exactSlot, response),
-                permit -> permit.claimTerminalResponse(response));
-    }
-
-    boolean publishFailure(
-            RequestSlot exactSlot,
-            Throwable error) {
-        return publish(exactSlot, "external failure publication",
-                () -> lifecycle.publishExternalFailure(exactSlot, error),
-                permit -> permit.claimFailure(error));
-    }
-
-    boolean publishCancellation(
-            RequestSlot exactSlot,
-            boolean mayInterruptIfRunning) {
-        return publish(exactSlot, "external cancellation publication",
-                () -> lifecycle.publishExternalCancellation(exactSlot),
-                permit -> permit.claimCancellation(mayInterruptIfRunning));
-    }
-
-    private void submit(
-            RequestSlot.PublicationPermit permit,
-            String operation,
-            Function<RequestSlot.PublicationPermit, BooleanSupplier> claim) {
-        requireOutsideSlotLock(permit.slot(), operation);
-        BooleanSupplier publication = claim(permit, claim);
+    /** Queue an already-selected result; all request arbitration has finished. */
+    void submit(RequestSlot.SelectedPublication publication) {
+        RequestSlot.PublicationPermit permit = publication.permit();
+        requireOutsideSlotLock(permit.slot(), "response submission");
         try {
-            enqueue(() -> executePublication(permit, publication));
+            enqueue(() -> executePublication(publication));
         } catch (RuntimeException | Error enqueueFailure) {
             permit.abortClaimedPublication();
             throw enqueueFailure;
         }
     }
 
-    private boolean publish(
-            RequestSlot exactSlot,
-            String operation,
-            Supplier<RequestSlot.PublicationPermit> acquire,
-            Function<RequestSlot.PublicationPermit, BooleanSupplier> claim) {
-        requireOutsideSlotLock(exactSlot, operation);
-        RequestSlot.PublicationPermit permit = acquire.get();
-        if (permit == null) {
-            return false;
-        }
-        RequestSlot.PublicationPermit exact =
-                requireExactSlot(permit, exactSlot);
-        BooleanSupplier publication = claim(exact, claim);
+    /** External Future operations preserve their synchronous completion semantics. */
+    boolean publishNow(RequestSlot.SelectedPublication publication) {
         try {
-            return executePublication(exact, publication);
+            return executePublication(publication);
         } catch (RuntimeException | Error executionFailure) {
-            exact.abortClaimedPublication();
+            publication.permit().abortClaimedPublication();
             throw executionFailure;
         }
-    }
-
-    private static BooleanSupplier claim(
-            RequestSlot.PublicationPermit permit,
-            Function<RequestSlot.PublicationPermit, BooleanSupplier> claim) {
-        try {
-            return claim.apply(permit);
-        } catch (RuntimeException | Error claimFailure) {
-            permit.abandonIfUnclaimed();
-            throw claimFailure;
-        }
-    }
-
-    boolean awaitTermination(long timeout, TimeUnit unit)
-            throws InterruptedException {
-        return executor.awaitTermination(timeout, unit);
     }
 
     @Override
@@ -321,25 +242,14 @@ final class RequestCompletionPublisher implements AutoCloseable {
         }
     }
 
-    private static RequestSlot.PublicationPermit requireExactSlot(
-            RequestSlot.PublicationPermit permit,
-            RequestSlot exactSlot) {
-        if (permit.slot() != exactSlot) {
-            permit.abandonIfUnclaimed();
-            throw new IllegalStateException(
-                    "terminalizer returned a publication for another slot");
-        }
-        return permit;
-    }
-
-    private boolean executePublication(
-            RequestSlot.PublicationPermit permit,
-            BooleanSupplier publication) {
+    private boolean executePublication(RequestSlot.SelectedPublication publication) {
+        RequestSlot.PublicationPermit permit = publication.permit();
+        requireOutsideSlotLock(permit.slot(), "response completion");
         requireOwnedPermit(permit);
         Integer currentDepth = publicationDepth.get();
         publicationDepth.set(currentDepth == null ? 1 : currentDepth + 1);
         try {
-            return publication.getAsBoolean();
+            return publication.complete();
         } finally {
             if (currentDepth == null) {
                 publicationDepth.remove();

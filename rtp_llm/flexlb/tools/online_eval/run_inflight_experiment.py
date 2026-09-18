@@ -50,7 +50,11 @@ PREFILL_EXECUTION_TIME_EXPRESSION = (
 
 DEFAULT_FLEXLB_CONFIG = json.dumps(
     {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
+        "requestLifecycle": {
+            "request": {"timeoutMs": 3600000},
+            "decision": {"lifetime": 2.0},
+        },
         "scheduler": {
             "type": "QUEUE",
             "ordering": {"type": "PRIORITY", "defaultPriority": 50},
@@ -60,15 +64,10 @@ DEFAULT_FLEXLB_CONFIG = json.dumps(
                 "maxCollectionWaitMs": 220,
                 "maxPredictedExecutionMs": 550,
             },
-            "capacity": {
-                "maxOutstandingRequestsGlobal": 1000000,
-                "maxWaitingRequestsPerPrefillWorker": 1024,
-            },
         },
         "dispatcher": {
             "type": "BATCH",
-            "maxInflightBatchesPerPrefillWorker": 2,
-            "enqueueRpcTimeoutMs": 5000,
+            "maxInflightPerPrefillWorker": 2,
         },
         "router": {
             "roles": {
@@ -77,14 +76,12 @@ DEFAULT_FLEXLB_CONFIG = json.dumps(
                         "type": "FORMULA",
                         "expression": PREFILL_EXECUTION_TIME_EXPRESSION,
                     },
-                    "candidateChoice": {"type": "RANDOM_WITHIN_TOLERANCE"},
                 },
                 "decode": {
                     "availability": {
                         "maxKvUsagePercent": 90,
                         "maxEngineRequests": 132,
                     },
-                    "kvReservation": {"maxOutputTokensForEstimate": 1000},
                 },
             },
         },

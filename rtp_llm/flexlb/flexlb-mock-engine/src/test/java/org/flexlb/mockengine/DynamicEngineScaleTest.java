@@ -305,6 +305,11 @@ class DynamicEngineScaleTest {
         JsonNode added = postOk("/add_engine", "{\"role\":\"decode\"}");
         int victimPort = added.path("port").asInt();
 
+        StreamCollector<EngineRpcService.GenerateOutputsPB> collector = new StreamCollector<>();
+        services.get(victimPort).generateStreamCall(input(6005, 10), collector);
+        awaitCondition(() -> services.get(victimPort).getRunningCount() >= 1, 2_000,
+                "decode request must keep the graceful drain in progress for both removals");
+
         CountDownLatch startGate = new CountDownLatch(1);
         ExecutorService pool = Executors.newFixedThreadPool(2);
         List<Future<HttpResponse<String>>> outcomes = new ArrayList<>();

@@ -22,8 +22,8 @@ public enum StrategyErrorType {
     QUEUE_TIMEOUT(8503, false, "GatewayTimeout"),
     REQUEST_CANCELLED(8504, false),
 
-    // batch dispatch error
-    BATCH_DISPATCH_FAILED(8510, true),
+    // routing and dispatch error
+    DISPATCH_FAILED(8510, true),
     BATCH_SLO_EXPIRED(8511, false),
     BATCH_BUILD_FAILED(8512, false),
     // worker (decode engine) execution failure — non-retryable to prevent retry storms

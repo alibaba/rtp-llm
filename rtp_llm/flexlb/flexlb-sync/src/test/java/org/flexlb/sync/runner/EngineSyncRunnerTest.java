@@ -3,9 +3,7 @@ package org.flexlb.sync.runner;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -65,9 +63,6 @@ class EngineSyncRunnerTest {
     @Mock
     private CacheAwareService localKvCacheAwareManager;
 
-    @Mock
-    private DynamicCacheIntervalService cacheIntervalService;
-
     private final long syncRequestTimeoutMs = 5000L;
 
     @Mock
@@ -89,8 +84,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
-                localKvCacheAwareManager,
-                cacheIntervalService,
+                localKvCacheAwareManager, org.mockito.Mockito.mock(org.flexlb.cache.service.DynamicCacheIntervalService.class),
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
@@ -118,8 +112,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
-                localKvCacheAwareManager,
-                cacheIntervalService,
+                localKvCacheAwareManager, org.mockito.Mockito.mock(org.flexlb.cache.service.DynamicCacheIntervalService.class),
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
@@ -142,8 +135,7 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runner = new EngineSyncRunner(
                 modelName, workerDirectory, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.VIT,
-                localKvCacheAwareManager,
-                cacheIntervalService,
+                localKvCacheAwareManager, org.mockito.Mockito.mock(org.flexlb.cache.service.DynamicCacheIntervalService.class),
                 syncRequestTimeoutMs, syncCount,
                 syncEngineStatusInterval, false, STATUS_STALE_AFTER_US);
 
@@ -164,8 +156,8 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runner = new EngineSyncRunner(
                 modelName, workerDirectory, workerAddressService,
                 statusCheckExecutor, engineHealthReporter, engineGrpcService,
-                RoleType.PREFILL, localKvCacheAwareManager,
-                cacheIntervalService, syncRequestTimeoutMs, syncCount,
+                RoleType.PREFILL, localKvCacheAwareManager, org.mockito.Mockito.mock(org.flexlb.cache.service.DynamicCacheIntervalService.class),
+                syncRequestTimeoutMs, syncCount,
                 syncEngineStatusInterval, false, STATUS_STALE_AFTER_US);
 
         runner.run();
@@ -183,7 +175,7 @@ class EngineSyncRunnerTest {
     @Test
     void should_remove_status_and_endpoint_when_service_discovery_is_empty() {
         ConfigService configService = Mockito.mock(ConfigService.class);
-        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         WorkerDirectory directory = new WorkerDirectory(registry);
         String ipPort = "127.0.0.1:8080";
@@ -202,8 +194,7 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runner = new EngineSyncRunner(
                 modelName, directory, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.PREFILL,
-                localKvCacheAwareManager,
-                cacheIntervalService,
+                localKvCacheAwareManager, org.mockito.Mockito.mock(org.flexlb.cache.service.DynamicCacheIntervalService.class),
                 syncRequestTimeoutMs, syncCount,
                 syncEngineStatusInterval, false,
                 1_000_000L);
@@ -223,7 +214,7 @@ class EngineSyncRunnerTest {
         // resolves the load-balance config in this scenario. Keep the stub
         // lenient so strict stubbing does not flag it as unnecessary.
         Mockito.lenient().when(configService.loadBalanceConfig())
-                .thenReturn(new FlexlbConfig());
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         WorkerDirectory directory = new WorkerDirectory(registry);
         EngineSyncRunner runner = new EngineSyncRunner(
@@ -234,8 +225,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 RoleType.PREFILL,
-                localKvCacheAwareManager,
-                cacheIntervalService,
+                localKvCacheAwareManager, org.mockito.Mockito.mock(org.flexlb.cache.service.DynamicCacheIntervalService.class),
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
@@ -335,8 +325,7 @@ class EngineSyncRunnerTest {
         return new EngineSyncRunner(
                 modelName, directory, workerAddressService,
                 statusCheckExecutor, engineHealthReporter, engineGrpcService,
-                RoleType.PREFILL, localKvCacheAwareManager,
-                cacheIntervalService,
+                RoleType.PREFILL, localKvCacheAwareManager, org.mockito.Mockito.mock(org.flexlb.cache.service.DynamicCacheIntervalService.class),
                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                 false, STATUS_STALE_AFTER_US);
     }
@@ -345,7 +334,7 @@ class EngineSyncRunnerTest {
             String oldGroup, String newGroup) {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig())
-                .thenReturn(new FlexlbConfig());
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         WorkerDirectory directory = new WorkerDirectory(registry);
         String ipPort = "127.0.0.1:61000";
@@ -375,8 +364,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 RoleType.PREFILL,
-                localKvCacheAwareManager,
-                cacheIntervalService,
+                localKvCacheAwareManager, org.mockito.Mockito.mock(org.flexlb.cache.service.DynamicCacheIntervalService.class),
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,

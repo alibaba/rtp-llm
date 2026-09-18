@@ -338,10 +338,8 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
             raised.exception.code(),
         )
         details = self.pb2.ErrorDetailsPB()
-        metadata = dict(raised.exception.trailing_metadata() or ())
-        self.assertTrue(
-            details.ParseFromString(metadata["grpc-status-details-bin"])
-        )
+        metadata = dict(list(raised.exception.trailing_metadata() or ()))
+        self.assertTrue(details.ParseFromString(metadata["grpc-status-details-bin"]))
         self.assertEqual(8429, details.error_code)
 
     def _input_pb(self, request_id: int):

@@ -229,7 +229,7 @@ public class EndpointRegistry {
      * remains linearized by the address key's remapping critical section.</p>
      */
     public List<String> endpointAddressSnapshot(RoleType roleType) {
-        if (isPrefillRole(roleType)) {
+        if (roleType != null && roleType.supportsPrefill()) {
             List<PrefillRoutingEntry> directory = prefillRoutingSnapshot(roleType);
             return new AbstractList<>() {
                 @Override
@@ -478,7 +478,7 @@ public class EndpointRegistry {
             ConcurrentHashMap<String, WorkerEndpoint> endpoints,
             String address,
             BiFunction<String, WorkerEndpoint, WorkerEndpoint> mutation) {
-        boolean updatesPrefillDirectory = isPrefillRole(role);
+        boolean updatesPrefillDirectory = role != null && role.supportsPrefill();
         boolean updatesDecodeDirectory = role == RoleType.DECODE;
         if (!updatesPrefillDirectory && !updatesDecodeDirectory) {
             return endpoints.compute(address, mutation);
@@ -544,10 +544,6 @@ public class EndpointRegistry {
             updated.add(new PrefillRoutingEntry(address, next));
         }
         return List.copyOf(updated);
-    }
-
-    private static boolean isPrefillRole(RoleType role) {
-        return role == RoleType.PREFILL || role == RoleType.PDFUSION;
     }
 
     private List<PrefillRoutingEntry> prefillDirectory(RoleType role) {
@@ -973,29 +969,6 @@ public class EndpointRegistry {
     public int getEndpointCount(RoleType roleType) {
         Map<String, WorkerEndpoint> endpoints = endpoints(roleType);
         return endpoints == null ? 0 : endpoints.size();
-    }
-
-    /**
-     * Sum the currently available delivery credits across one endpoint role.
-     * Endpoint-local admission remains authoritative; this aggregate is only
-     * an advisory budget for deciding how many independent requests to release
-     * from the model-wide queue in one pass.
-     */
-    public long availablePrefillDeliveryCredits(RoleType role) {
-        if (role != RoleType.PREFILL && role != RoleType.PDFUSION) {
-            return 0L;
-        }
-        long total = 0L;
-        for (WorkerEndpoint worker : endpoints(role).values()) {
-            if (worker instanceof PrefillEndpoint prefill) {
-                long available = prefill.availableDeliveryCredits();
-                if (Long.MAX_VALUE - total < available) {
-                    return Long.MAX_VALUE;
-                }
-                total += available;
-            }
-        }
-        return total;
     }
 
     /**

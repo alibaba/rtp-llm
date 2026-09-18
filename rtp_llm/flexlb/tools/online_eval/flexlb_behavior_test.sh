@@ -64,7 +64,11 @@ import sys
 
 stale_ms, max_batches, status_rpc_ms = map(int, sys.argv[1:])
 print(json.dumps({
-    "schemaVersion": 2,
+    "schemaVersion": 3,
+    "requestLifecycle": {
+        "request": {"timeoutMs": stale_ms},
+        "decision": {"lifetime": 2.0},
+    },
     "scheduler": {
         "type": "QUEUE",
         "ordering": {"type": "PRIORITY"},
@@ -74,28 +78,14 @@ print(json.dumps({
             "maxCollectionWaitMs": 10,
             "maxPredictedExecutionMs": 550,
         },
-        "capacity": {"maxOutstandingRequestsGlobal": 5000},
-        "lifecycle": {
-            "staleInflightTimeoutMs": stale_ms,
-            "deliveredNotAcceptedTimeoutMs": 30000,
-            "maxDeliveredNotAcceptedRequestsGlobal": 200,
-        },
     },
     "dispatcher": {
         "type": "BATCH",
-        "maxInflightBatchesPerPrefillWorker": max_batches,
+        "maxInflightPerPrefillWorker": max_batches,
     },
     "router": {
         "roles": {
-            "prefill": {
-                "candidateChoice": {
-                    "type": "RANDOM_WITHIN_TOLERANCE",
-                    "outlierRejection": {
-                        "maxPendingVsAverageMultiplier": 1.5,
-                        "maxProjectedDrainVsAverageMultiplier": 3.0,
-                    },
-                },
-            },
+            "prefill": {},
             "decode": {"availability": {"maxEngineRequests": 132}},
         },
     },

@@ -40,12 +40,11 @@ class PriorityLatencyE2ETest {
             // hold：批次上限大于总量 + 长 fixedWait → 零派发，队列稳定吸收提交
             h.fixedWindowDecision().setMaxRequests(200);
             h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
-            h.config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(1024);
             // This case measures Prefill priority ordering, not Decode KV
-            // admission. Keep the independent Decode expected-KV gate out of
-            // the fixture so every request reaches the queue under test.
+            // admission. Use the large fixture KV pool without a percentage
+            // reserve so every request reaches the queue under test.
             h.config.getRouter().getRoles().getDecode().getAvailability()
-                    .setMaxKvUsagePercent(0);
+                    .setMaxKvUsagePercent(100);
 
             Map<Long, Long> submitNanos = new HashMap<>();
             Map<Long, Integer> priorityByRid = new HashMap<>();
@@ -76,14 +75,21 @@ class PriorityLatencyE2ETest {
             h.startAutoPump(10);
 
             AutoTpmE2EHarness.await(
-                    () -> futures.stream().allMatch(CompletableFuture::isDone), 60_000,
+                    () -> {
+                        h.assertAutoPumpHealthy();
+                        return futures.stream().allMatch(CompletableFuture::isDone);
+                    }, 60_000,
                     "all " + total + " requests must reach a terminal state");
 
             for (CompletableFuture<Response> future : futures) {
                 Response response = future.get(1, TimeUnit.SECONDS);
                 assertTrue(response.isSuccess(),
                         "no eviction switches on — every request must succeed, got "
-                                + response.getCode() + ": " + response.getErrorMessage());
+                                + response.getCode() + ": " + response.getErrorMessage()
+                                + ", arrivals=" + h.engineArrivalOrder.size()
+                                + ", queued=" + h.scheduler.getQueuedRequestCount()
+                                + ", prefillWork=" + h.prefillEndpoint(0).captureRouteProjectionInputs().work()
+                                + ", decode=" + h.decodeEndpoint(0).layeredAdmissionView());
             }
             assertEquals(total, h.engineArrivalOrder.size(),
                     "every request must have reached the engine exactly once");
