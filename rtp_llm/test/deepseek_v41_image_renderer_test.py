@@ -86,6 +86,49 @@ class V41ImageRendererTest(TestCase):
             {"image_start", "image_newline", "image_end"},
         )
 
+    def test_vision_weights_register_tp_split_strategy_for_tp_gt_1(self):
+        # Regression: plain AtomicWeight falls through to
+        # W.gpt_style_tp_strategy[name] (weight_module.py _get_split_func),
+        # which has no v41.* entries, so every TP>1 startup dies in weight
+        # loading with KeyError 'v41.image_start'; tp=1 bypasses _split and
+        # masks the defect. Exercise the exact TP>1 split path here.
+        from types import SimpleNamespace
+
+        config = V41Config.from_path(os.environ["DSV41_MODEL_PATH"])
+        descriptor = SimpleNamespace(
+            model_config=SimpleNamespace(
+                deepseek_v41_config={"vision_config": config.vision}
+            )
+        )
+        weights = DeepSeekV41Weight._build_vision_weights(descriptor)
+        self.assertEqual(len(weights), 266)
+        tensor = torch.randn(2, 3)
+        for weight in weights:
+            split_func = weight._get_split_func()
+            message = f"{weight.name} has no TP split strategy"
+            self.assertTrue(callable(split_func), message)
+            for tp_rank in range(4):
+                shard = split_func(
+                    t=tensor,
+                    tp=4,
+                    tp_rank=tp_rank,
+                    ep=1,
+                    ep_rank=0,
+                    dp=1,
+                    dp_rank=0,
+                    ffn_tp_rank=tp_rank,
+                    ffn_tp_size=4,
+                    hidden_size=16,
+                    head_num=2,
+                    head_num_kv=2,
+                    size_per_head=8,
+                    moe_pure_tp_mode=False,
+                    bits=8,
+                )
+                # The vision stack is replicated: every rank keeps the full
+                # tensor, so sp_id semantics must be identity under TP>1.
+                self.assertTrue(torch.equal(shard, tensor), message)
+
     def test_user_and_tool_images_keep_prompt_order(self):
         first, second = data_url((17, 23, 42)), data_url((73, 19, 2))
         request = ChatCompletionRequest.model_validate(

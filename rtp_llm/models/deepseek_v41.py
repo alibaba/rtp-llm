@@ -7,14 +7,14 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.model_loader.weight_module import AtomicWeight
+from rtp_llm.model_loader.weight_module import AtomicWeight, MMAtomicWeight
 from rtp_llm.models.deepseek_v4 import (
     DeepSeekV4,
     DeepSeekV4DSpark,
     DeepSeekV4DSparkWeight,
     DeepSeekV4Weight,
 )
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, sp_id
 
 
 class DeepSeekV41Weight(DeepSeekV4Weight):
@@ -28,12 +28,18 @@ class DeepSeekV41Weight(DeepSeekV4Weight):
         weights = []
 
         def add(name, dtype=torch.bfloat16):
+            # MMAtomicWeight + sp_id: the ViT/aligner stack runs replicated on
+            # every TP rank (encode_image computes the full image features and
+            # splices rank-local rows), so each rank keeps the full tensor.
+            # Plain AtomicWeight falls through to W.gpt_style_tp_strategy[name]
+            # and KeyError under TP>1.
             weights.append(
-                AtomicWeight(
+                MMAtomicWeight(
                     "v41." + name,
                     [CkptWeightInfo(name, identity)],
                     identity,
                     data_type=dtype,
+                    split_func=sp_id,
                 )
             )
 
