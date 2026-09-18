@@ -866,6 +866,10 @@ class PrefillQKV(NamedTuple):
 
 
 class AttentionFP8(nn.Module):
+    # Subclass hook: V4.1 hard-enables the CP-overlap prefill path; the
+    # ``DSV4_PREFILL_CP_OVERLAP`` env stays a V4.0-shared-baseline toggle.
+    _prefill_cp_overlap_hard_on: bool = False
+
     def __init__(
         self,
         layer_id: int,
@@ -2695,7 +2699,8 @@ class AttentionFP8(nn.Module):
         """Per-call gate for the CP-overlap orchestrator.
 
         All conditions must hold:
-          * ``DSV4_PREFILL_CP_OVERLAP=1`` (default off — baseline path);
+          * overlap enabled — env ``DSV4_PREFILL_CP_OVERLAP=1`` or a
+            subclass hard-on (``_prefill_cp_overlap_hard_on``);
           * CP is actually active (``cp_size > 1``); no NCCL gather to
             overlap with otherwise;
           * prefill tensors are CUDA-backed — CPU / sync-reference CP
@@ -2706,7 +2711,7 @@ class AttentionFP8(nn.Module):
           * the layer has a compressor (``compress_ratio > 0``) —
             SWA-only layers (ratio == 0) have nothing to overlap.
         """
-        if not _prefill_cp_overlap_enabled():
+        if not (self._prefill_cp_overlap_hard_on or _prefill_cp_overlap_enabled()):
             return False
         if not common.cp_on or common.cp_ctx is None or common.cp_ctx.cp_size <= 1:
             return False
