@@ -55,6 +55,10 @@ std::optional<BlockIdxType> IBlockPool::malloc() {
 
 std::optional<BlockIdList> IBlockPool::malloc(size_t n) {
     std::lock_guard<std::mutex> lock(mutex_);
+    return mallocNoLock(n);
+}
+
+std::optional<BlockIdList> IBlockPool::mallocNoLock(size_t n) {
     checkInitializedNoLock();
     if (n == 0) {
         return BlockIdList{};
