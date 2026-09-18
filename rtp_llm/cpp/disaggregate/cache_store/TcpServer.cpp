@@ -53,7 +53,9 @@ bool TcpServer::init(uint32_t io_thread_count,
 
 bool TcpServer::start(uint32_t listen_port) {
     std::string listen_spec = "tcp:0.0.0.0:" + std::to_string(listen_port);
-    if (!rpc_server_->Listen(listen_spec)) {
+    // LOAD can wait for prefill longer than ANet's default 15-minute idle limit.
+    // Keep its control connection alive; per-request deadlines bound the wait.
+    if (!rpc_server_->Listen(listen_spec, 5000, -1)) {
         RTP_LLM_LOG_WARNING("tcp server init failed, listen %s failed", listen_spec.c_str());
         return false;
     }
