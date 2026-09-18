@@ -41,6 +41,14 @@ inline std::string safeRpcErrorMessage(const std::string& message, size_t max_by
     return "[invalid UTF-8; hex=" + rpcErrorDetailsHex(message) + "]";
 }
 
+// A grpc::Status carries the text twice: percent-encoded grpc-message (up to
+// 3x) and base64-encoded ErrorDetailsPB (about 4/3x). Keep both plus the other
+// trailers comfortably below the default 8 KiB metadata limit. Protobuf body
+// fields/history keep the larger safeRpcErrorMessage budget above.
+inline std::string safeGrpcErrorMessage(const std::string& message) {
+    return safeRpcErrorMessage(message, 1024);
+}
+
 template<typename ErrorMessagePB>
 inline void setSafeRpcErrorMessage(ErrorMessagePB* error, const std::string& message) {
     error->set_error_message(safeRpcErrorMessage(message));

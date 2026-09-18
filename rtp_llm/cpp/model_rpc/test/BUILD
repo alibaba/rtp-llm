@@ -99,11 +99,23 @@ cc_test(
 )
 
 cc_test(
+    name = "rpc_error_status_test",
+    srcs = ["RpcErrorStatusTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:rpc_error_status",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "rpc_error_message_regression_test",
     srcs = ["RpcErrorMessageRegressionTest.cc"],
     copts = test_copts,
     deps = test_deps + [
         "//rtp_llm/cpp/model_rpc:rpc_error_message",
+        "//rtp_llm/cpp/model_rpc:rpc_error_status",
     ],
     env = {},
 )

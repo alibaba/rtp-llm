@@ -107,10 +107,11 @@ grpc::Status statusFromErrorInfo(const ErrorInfo& error_info) {
     if (!error_info.hasError()) {
         return grpc::Status::OK;
     }
-    const auto     error_msg       = safeRpcErrorMessage(error_info.ToString());
+    const auto     error_msg       = safeGrpcErrorMessage(error_info.ToString());
     auto           grpc_error_code = transErrorCodeToGrpc(error_info.code());
     ErrorDetailsPB error_details;
     error_details.set_error_code(static_cast<int>(error_info.code()));
+    error_details.set_error_code_str(ErrorCodeToString(error_info.code()));
     error_details.set_error_message(error_msg);
     std::string error_details_serialized;
     if (error_details.SerializeToString(&error_details_serialized)) {

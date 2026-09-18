@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorMessage.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorStatus.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
@@ -514,7 +515,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
     size_t      finished_count            = 0;
     auto        total_timeout_ms          = load_context.timeout_ms + EXTRA_TIMEOUT_MS;
     ErrorCode   error_code                = ErrorCode::NONE_ERROR;
-    std::string error_msg                 = "failed to load kv cache in rank: ";
+    std::string error_msg                 = "stage=load_cache, failed to load kv cache in rank: ";
     int64_t     min_response_done_time_us = 1lu << 60;
     int64_t     max_response_done_time_us = 0;
     while (true) {
@@ -578,10 +579,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
                                               decode_context.peer_addrs[rank] :
                                               "<missing>";
                 error_msg += "rank=" + std::to_string(rank) + ", worker=" + worker_addr + ", peer=" + peer_addr
-                             + ", cq=" + std::to_string(i) + ", grpc_code="
-                             + std::to_string(static_cast<int>(status.error_code())) + ", grpc_message="
-                             + status.error_message() + ", grpc_details_hex="
-                             + rpcErrorDetailsHex(status.error_details()) + "; ";
+                             + ", cq=" + std::to_string(i) + ", " + formatGrpcErrorStatus(status) + "; ";
             } else if (pb_error_code != ErrorCodePB::NONE_ERROR) {
                 all_success = false;
                 error_code  = transRPCErrorCode(pb_error_code);

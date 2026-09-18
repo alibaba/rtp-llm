@@ -598,7 +598,7 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
 
 grpc::Status
 LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& request_info, ErrorInfo error_info) {
-    const auto  error_msg       = safeRpcErrorMessage(error_info.ToString());
+    const auto  error_msg       = safeGrpcErrorMessage(error_info.ToString());
     const auto  request_log_tag = formatRequestLogTag(request_key, request_info);
     RTP_LLM_LOG_WARNING("%s, error code [%s], error message [%s]",
                         request_log_tag.c_str(),
@@ -607,6 +607,7 @@ LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& 
     auto           grpc_error_code = transErrorCodeToGrpc(error_info.code());
     ErrorDetailsPB error_details;
     error_details.set_error_code(static_cast<int>(error_info.code()));
+    error_details.set_error_code_str(ErrorCodeToString(error_info.code()));
     error_details.set_error_message(error_msg);
     std::string error_details_serialized;
     if (error_details.SerializeToString(&error_details_serialized)) {
