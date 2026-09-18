@@ -12,7 +12,13 @@ inline bool writeKVBlockForTest(KVCacheManager&      manager,
                                 const torch::Tensor& k_buffer,
                                 const torch::Tensor& v_buffer) {
     // Basic size/type validation to prevent out-of-bounds copy
-    const auto& spec             = manager.cacheConfig().topology().soleGroupForLayer(layer_id).spec;
+    const auto& group = manager.cacheConfig().topology().soleGroupForLayer(layer_id);
+    if (block_index < 0 || static_cast<uint32_t>(block_index) >= group.block_num) {
+        RTP_LLM_LOG_WARNING(
+            "Invalid block_index: %d, group=%s valid range: [0, %u)", block_index, group.tag.c_str(), group.block_num);
+        return false;
+    }
+    const auto& spec             = group.spec;
     size_t      expected_k_bytes = spec->k_block_size_bytes();
     size_t      expected_v_bytes = spec->v_block_size_bytes();
     size_t      src_k_bytes      = k_buffer.nbytes();
@@ -77,12 +83,6 @@ inline bool writeKVBlockForTest(KVCacheManager&      manager,
                                 int                  block_index,
                                 const torch::Tensor& k_buffer,
                                 const torch::Tensor& v_buffer) {
-    if (block_index < 0 || block_index >= manager.cacheConfig().block_num) {
-        RTP_LLM_LOG_WARNING(
-            "Invalid block_index: %d, valid range: [0, %d)", block_index, manager.cacheConfig().block_num);
-        return false;
-    }
-
     bool all_success = true;
     for (int layer_id = 0; layer_id < manager.cacheConfig().layer_num; ++layer_id) {
         all_success = writeKVBlockForTest(manager, block_index, layer_id, k_buffer, v_buffer) && all_success;

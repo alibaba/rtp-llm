@@ -205,15 +205,16 @@ static rtp_llm::CacheConfig makeMtpCacheConfigByCreateSpConfig(uint32_t main_lay
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = mtp_module_num;
 
-    return rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
-                                                       propose_model_config,
-                                                       parallelism_config,
-                                                       runtime_config,
-                                                       kv_cache_config,
-                                                       sp_config,
-                                                       /*warm_up_result=*/std::nullopt,
-                                                       /*is_mtp=*/true,
-                                                       /*is_eagle=*/false);
+    auto       config              = CacheConfigCreator::createConfig(score_model_config,
+                                                   parallelism_config,
+                                                   kv_cache_config,
+                                                   sp_config,
+                                                   &propose_model_config,
+                                                   /*is_mtp=*/true,
+                                                   /*is_eagle=*/false);
+    const auto candidate_block_num = CacheConfigCreator::computeLocalBlockNum(
+        config, score_model_config, runtime_config, kv_cache_config, parallelism_config, std::nullopt, sp_config);
+    return rtp_llm::test::finalizeCacheConfig(std::move(config), candidate_block_num);
 }
 
 CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block = 8) {
@@ -350,13 +351,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConstructorAndInit) {
     bool init_result = allocator_->init();
     EXPECT_TRUE(init_result);
 
-    EXPECT_EQ(allocator_->totalBlocksNum(), config.block_num - 1);
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->totalBlocksNum(), config.group("default").block_num - 1);
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.group("default").block_num - 1);  // reserve 1 block
 
     const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator_->poolMetricsSnapshots();
     ASSERT_EQ(snapshots.size(), 1u);
-    EXPECT_EQ(snapshots[0].total_blocks, config.block_num - 1);
-    EXPECT_EQ(snapshots[0].free_blocks, config.block_num - 1);
+    EXPECT_EQ(snapshots[0].total_blocks, config.group("default").block_num - 1);
+    EXPECT_EQ(snapshots[0].free_blocks, config.group("default").block_num - 1);
     EXPECT_EQ(snapshots[0].used_blocks, 0u);
 }
 
@@ -413,7 +414,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocSingleBatch) {
 
     EXPECT_TRUE(result.success);
     EXPECT_EQ(batch_resource->blocksNum(0, 0), 2);
-    EXPECT_LT(allocator_->freeBlocksNum(), config.block_num);
+    EXPECT_LT(allocator_->freeBlocksNum(), config.group("default").block_num);
 
     const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator_->poolMetricsSnapshots();
     ASSERT_EQ(snapshots.size(), 1u);
@@ -617,7 +618,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
     for (int i = 0; i < batch_size; ++i) {
         EXPECT_EQ(batch_resource->blocksNum(i, 0), 3);
     }
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
+    EXPECT_EQ(allocator_->freeBlocksNum(),
+              config.group("default").block_num - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
 }
 
 // TEST_F(SingleTypeKVCacheAllocatorTest, MallocWithInsufficientBlocks) {
@@ -671,7 +673,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeMultipleBatches) {
 
     FreeInfo free_info{batch_resource, complete_token_ids};
     allocator_->free(free_info);
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.group("default").block_num - 1);  // reserve 1 block
 }
 
 // Test malloc free cycle
@@ -692,7 +694,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocFreeCycle) {
         FreeInfo free_info{batch_resource, complete_token_ids};
         allocator_->free(free_info);
 
-        EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+        EXPECT_EQ(allocator_->freeBlocksNum(), config.group("default").block_num - 1);  // reserve 1 block
     }
 }
 
@@ -1630,9 +1632,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteQuantizedMhaS
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
-    auto config                = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
-    config.block_num           = 5;
-    config.setGroupBlockLayout({5}, {config.kvBlockStrideBytesForGroup(0)}, {config.kvScaleStrideBytesForGroup(0)});
+    auto config                = CacheConfigCreator::createWarmupConfig(model_config, parallelism_config, 0);
+    config.finalizeBlockNums(/*global_block_num=*/5, RuntimeConfig{});
 
     ASSERT_FALSE(config.is_sparse);
     ASSERT_GT(config.kvScaleStrideBytesForGroup(0), 0u);
@@ -1800,7 +1801,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeBlocksNums) {
     allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     allocator_->init();
 
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.group("default").block_num - 1);  // reserve 1 block
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly) {

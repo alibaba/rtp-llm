@@ -172,7 +172,6 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
                                    bool               opaque_store         = false) {
     CacheConfig config;
     config.layer_num                 = static_cast<uint32_t>(layer_id + 1);
-    config.block_num                 = static_cast<uint32_t>(block_num);
     config.seq_size_per_block        = tokens_per_block;
     config.use_opaque_kv_cache_store = opaque_store;
 
@@ -1248,7 +1247,6 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSameLayerRoutesByTag) {
 
     CacheConfig config;
     config.layer_num          = 1;
-    config.block_num          = block_num;
     config.seq_size_per_block = tokens_per_block;
 
     auto make_group = [](const std::string& tag, CacheGroupType type) {

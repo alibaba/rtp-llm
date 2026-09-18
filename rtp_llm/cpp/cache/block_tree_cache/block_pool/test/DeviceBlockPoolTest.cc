@@ -73,6 +73,7 @@ CacheConfig makeMtpCacheConfig() {
         std::make_shared<CacheConfig>(rtp_llm::test::makeSimpleMhaCacheConfig(
             /*layer_num=*/1, /*block_num=*/5, /*seq_size_per_block=*/1, TYPE_FP16, /*local_head_num_kv=*/1, 64)),
     };
+    main.finalizeBlockNums(/*baseline_block_num=*/3, rtp_llm::RuntimeConfig{});
     return main;
 }
 
@@ -140,10 +141,10 @@ TEST(DeviceBlockPoolTest, ConstructorRejectsInvalidConfigMatrix) {
 
 TEST(DeviceBlockPoolTest, MultiLayoutMtpConfigUsesMainBlockCountAndGlobalLayerMapping) {
     CacheConfig cache_config = makeMtpCacheConfig();
-    ASSERT_EQ(cache_config.block_num, 3u);
+    ASSERT_EQ(cache_config.group("default").block_num, 3u);
     ASSERT_EQ(cache_config.mtp_sub_configs.size(), 2u);
-    ASSERT_EQ(cache_config.mtp_sub_configs[0]->block_num, 4u);
-    ASSERT_EQ(cache_config.mtp_sub_configs[1]->block_num, 5u);
+    ASSERT_EQ(cache_config.mtp_sub_configs[0]->group("default").block_num, 3u);
+    ASSERT_EQ(cache_config.mtp_sub_configs[1]->group("default").block_num, 3u);
 
     auto config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(cache_config));
     config->use_device_malloc_backing = true;

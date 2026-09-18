@@ -158,7 +158,6 @@ public:
     }
 
 private:
-    void                  allocateAndSync();
     std::function<void()> allocationChangeCallback() const;
     void                  reportMetricsLoop();
     bool collectCacheHitRates(std::chrono::steady_clock::time_point now, RtpLLMCacheReuseMetricsCollector& metrics);

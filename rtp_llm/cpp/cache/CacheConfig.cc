@@ -160,9 +160,6 @@ void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<Lay
                                 static_cast<int>(group.spec->type));
 
         group.spec = group.spec->clone();
-        if (group.block_num == 0) {
-            group.block_num = block_num;
-        }
         RTP_LLM_CHECK_WITH_INFO(group.spec->seq_size_per_block > 0,
                                 "CacheConfig::setTopology tag=%s has zero seq_size_per_block",
                                 group.tag.c_str());
@@ -207,12 +204,26 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     RTP_LLM_CHECK_WITH_INFO(propose_config.groupNums() > 0, "CacheConfig::mergeMTPModule requires propose topology");
     RTP_LLM_CHECK_WITH_INFO(module_index >= 0, "CacheConfig::mergeMTPModule invalid module_index=%d", module_index);
 
-    auto sub_cfg       = std::make_shared<CacheConfig>(propose_config);
-    sub_cfg->block_num = block_num;
+    const auto default_alias_target_gid = resolveDefaultMTPGroupAlias(*this, propose_config);
+    for (size_t gid = 0; gid < static_cast<size_t>(propose_config.groupNums()); ++gid) {
+        const auto& tag              = propose_config.tagForGroup(gid);
+        const bool  has_exact_target = std::any_of(topology().groups().begin(),
+                                                  topology().groups().end(),
+                                                  [&tag](const auto& group) { return group.tag == tag; });
+        // Every declared draft segment needs backing in an existing target
+        // pool. Dropping an unmatched tag would also omit its memory budget.
+        RTP_LLM_CHECK_WITH_INFO(has_exact_target || (gid == 0 && default_alias_target_gid.has_value()),
+                                "CacheConfig::mergeMTPModule unmapped draft cache group tag=%s",
+                                tag.c_str());
+    }
+    auto sub_cfg = std::make_shared<CacheConfig>(propose_config);
 
     const auto mtp_layer_num = propose_config.layer_num;
+    RTP_LLM_CHECK_WITH_INFO(mtp_layer_num > 0, "CacheConfig::mergeMTPModule requires module layers");
     const auto total_layers =
-        static_cast<size_t>(main_layer_num) + static_cast<size_t>(module_index + 1) * mtp_layer_num;
+        static_cast<uint64_t>(main_layer_num) + (static_cast<uint64_t>(module_index) + 1) * mtp_layer_num;
+    RTP_LLM_CHECK_WITH_INFO(total_layers <= static_cast<uint64_t>(std::numeric_limits<int>::max()),
+                            "CacheConfig::mergeMTPModule layer count exceeds int range");
     auto target_groups = topology().groups();
     auto target_layers = topology().layers();
     target_layers.resize(total_layers);
@@ -224,8 +235,6 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     for (size_t gid = 0; gid < propose_config.topology().groups().size(); ++gid) {
         propose_gid_by_tag.emplace(propose_config.tagForGroup(gid), gid);
     }
-    const auto default_alias_target_gid = resolveDefaultMTPGroupAlias(*this, propose_config);
-
     std::vector<GroupBase> sub_groups;
     std::vector<LayerBase> sub_layers(static_cast<size_t>(mtp_layer_num));
     sub_groups.reserve(target_group_num);
@@ -251,6 +260,17 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
         const auto  source_layer_ids  = source_config->layerIdsForGroup(source_gid);
 
         if (has_propose_group) {
+            RTP_LLM_CHECK_WITH_INFO(samePolicy(target_groups[target_gid].policy, source_group.policy),
+                                    "CacheConfig::mergeMTPModule incompatible pool policy for tag=%s",
+                                    tag.c_str());
+            // MTP reuses the target stream's physical/kernel block tables. Its
+            // own backing may have different byte strides, but table entries
+            // must address the same token spans in both model segments.
+            RTP_LLM_CHECK_WITH_INFO(target_groups[target_gid].seqSizePerBlock() == source_group.seqSizePerBlock()
+                                        && target_groups[target_gid].kernelSeqSizePerBlock()
+                                               == source_group.kernelSeqSizePerBlock(),
+                                    "CacheConfig::mergeMTPModule incompatible block token spans for tag=%s",
+                                    tag.c_str());
             RTP_LLM_CHECK_WITH_INFO(
                 source_layer_ids.size() == static_cast<size_t>(mtp_layer_num),
                 "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s must cover every module layer, "
@@ -427,14 +447,12 @@ void CacheConfig::fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
 }
 
 void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
+    RTP_LLM_CHECK_WITH_INFO(global_block_num > 0, "cache configuration requires positive baseline block count");
     // TODO: use RuntimeConfig when group-level block sizing needs runtime parallelism context.
     (void)runtime_config;
-    if (global_block_num > 0) {
-        block_num = global_block_num;
-        for (auto& sub_cfg : mtp_sub_configs) {
-            if (sub_cfg != nullptr) {
-                sub_cfg->finalizeBlockNums(global_block_num, runtime_config);
-            }
+    for (auto& sub_cfg : mtp_sub_configs) {
+        if (sub_cfg != nullptr) {
+            sub_cfg->finalizeBlockNums(global_block_num, runtime_config);
         }
     }
 
@@ -454,7 +472,9 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         }
         groups[gid].block_num = rule_blocks;
     }
-    setTopology(std::move(groups), topology().layers());
+    // The published topology already owns frozen Specs; changing capacity does
+    // not require cloning their immutable byte layouts again.
+    cache_topology = CacheTopology::create(std::move(groups), topology().layers());
 }
 
 std::string CacheConfig::debugString(size_t indent) const {
@@ -475,7 +495,6 @@ std::string CacheConfig::debugString(size_t indent) const {
     os << "\n";
 
     os << indent1 << "# Block Configuration:\n";
-    OUTPUT_FIELD(block_num);
     OUTPUT_FIELD(seq_size_per_block);
     os << "\n";
 

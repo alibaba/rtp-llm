@@ -286,7 +286,6 @@ T await(std::future<T>& future) {
     const size_t       group_count         = full_group_count + linear_group_count;
     result.cache_config.dtype              = DataType::TYPE_FP16;
     result.cache_config.layer_num          = static_cast<uint32_t>(group_count);
-    result.cache_config.block_num          = 8;
     result.cache_config.seq_size_per_block = 8;
     result.cache_config.linear_step        = linear_step;
 
@@ -309,6 +308,7 @@ T await(std::future<T>& future) {
         tags.push_back(tag);
     }
     result.cache_config.fromGroupedSpecs(specs, layers_by_group, types, tags);
+    result.cache_config.finalizeBlockNums(/*baseline_block_num=*/8, RuntimeConfig{});
 
     std::vector<block_tree_cache_test::DeviceLayerBufferSpec> layer_specs;
     layer_specs.reserve(group_count);

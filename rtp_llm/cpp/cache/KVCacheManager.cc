@@ -213,10 +213,14 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     use_device_malloc_block_pool_(use_device_malloc_block_pool),
     warmup_(warmup),
     allocation_wait_state_(std::make_shared<KVCacheAllocationWaitState>()) {
-    if (warmup) {
-        config_.finalizeBlockNums(/*global_block_num=*/2, runtime_config_);
-    } else {
-        allocateAndSync();
+    for (const auto& group : config_.topology().groups()) {
+        RTP_LLM_CHECK_WITH_INFO(group.block_num > 0, "cache manager requires capacity-complete cache groups");
+    }
+    for (const auto& child : config_.mtp_sub_configs) {
+        RTP_LLM_CHECK_WITH_INFO(child != nullptr, "null MTP cache configuration");
+        for (const auto& group : child->topology().groups()) {
+            RTP_LLM_CHECK_WITH_INFO(group.block_num > 0, "cache manager requires capacity-complete MTP cache groups");
+        }
     }
 
     const auto& cp_cfg = parallelism_config_.prefill_cp_config;
@@ -240,9 +244,8 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
         }
     }
 
-    RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_num=%d, block_size=%dB, seq_size_per_block=%zu",
+    RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_size=%dB, seq_size_per_block=%zu",
                      config_.layer_num,
-                     config_.block_num,
                      config_.totalGroupBlockSizeBytes(),
                      config_.seq_size_per_block);
 }
@@ -908,28 +911,6 @@ void KVCacheManager::stopCacheEventPublisher() {
         block_tree_cache_->setEventPublisher(nullptr, {});
     }
     cache_event_publisher_.reset();
-}
-
-void KVCacheManager::allocateAndSync() {
-    RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%d", config_.block_num);
-    size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
-    if (world_size > 1) {
-        size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
-        auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
-        auto   block_num_ptr = block_num_t.data_ptr<int>();
-        block_num_ptr[local_rank] = config_.block_num;
-        execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});
-        execSyncCommunication(false);
-        cudaSyncAndCheck();
-
-        if (parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
-            config_.block_num = 1;
-        } else {
-            config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
-        }
-    }
-    config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
-    RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
 }
 
 void KVCacheManager::recordCacheHitTokens(int64_t input_length, const RtpLLMCacheReuseMetricsCollector& metrics) {

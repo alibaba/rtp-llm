@@ -93,7 +93,6 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
     CacheConfig config;
     config.dtype                     = DataType::TYPE_INT8;
     config.layer_num                 = 1;
-    config.block_num                 = kPhysicalBlocks;
     config.seq_size_per_block        = groups.front().tokens_per_block;
     config.use_opaque_kv_cache_store = true;
 

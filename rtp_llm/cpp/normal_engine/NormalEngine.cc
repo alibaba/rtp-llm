@@ -113,15 +113,15 @@ private:
 };
 
 std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManager(const EngineInitParams& params) {
-    auto cache_config = CacheConfigCreator::createBasicConfig(
-        params.model_config_, params.parallelism_config, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    auto cache_config = CacheConfigCreator::createWarmupConfig(
+        params.model_config_, params.parallelism_config, params.kv_cache_config, /*gen_num_per_cycle=*/0);
 
     RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0,
                             "generation prefill CUDA graph warmup requires a positive KV block size");
 
     // This temporary pool only supplies the KV tensor bound into the captured
-    // model. Reuse the same warmup mode as decode: KVCacheManager finalizes
-    // both the global count and every group to the sole reserved block 0.
+    // model. The warmup config publishes complete per-group capacities before
+    // KVCacheManager allocates the reserved block 0, as in decode warmup.
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
     RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init generation prefill CUDA graph warmup KV cache manager failed");
     return cache_manager;
@@ -528,10 +528,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
 
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-    // Warmup uses the same descriptor and physical/kernel geometry as normal creation.
-    auto cache_config = CacheConfigCreator::createBasicConfig(
-        model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
-    cache_config.finalizeBlockNums(5, runtime_config);
+    auto cache_config = CacheConfigCreator::createWarmupConfig(
+        model_config_, parallelism_config, kv_cache_config, cache_gen_num_per_cycle);
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(
@@ -598,62 +596,53 @@ void NormalEngine::normalizeSystemPromptCacheConfig() {
     kv_cache_config.enable_device_cache = true;
 }
 
+void NormalEngine::initializeAndPublishCacheManager(ResourceContext&                            resource_context,
+                                                    int&                                        kv_cache_group_num,
+                                                    RoleType                                    role_type,
+                                                    std::shared_ptr<KVCacheManager>             cache_manager,
+                                                    const std::function<bool(KVCacheManager&)>& initializer) {
+    RTP_LLM_CHECK_WITH_INFO(cache_manager != nullptr, "cache manager candidate must not be null");
+    RTP_LLM_CHECK_WITH_INFO(initializer != nullptr, "cache manager initializer must not be null");
+    if (!initializer(*cache_manager)) {
+        RTP_LLM_FAIL("init kv cache manager failed");
+    }
+    const auto& cache_config = cache_manager->cacheConfig();
+    RTP_LLM_LOG_INFO("cache manager initialized with config %s", cache_config.debugString().c_str());
+
+    // Publish the cache state only after allocation, BlockTree/backend setup,
+    // and callback registration have all completed successfully.
+    kv_cache_group_num             = cache_config.groupNums();
+    resource_context.cache_manager = std::move(cache_manager);
+    resource_context.role_type     = role_type;
+}
+
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     normalizeSystemPromptCacheConfig();
     const bool use_device_malloc_block_pool = shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
-    if (propose_params_ && propose_params_->draftModel()) {
-        auto config = CacheConfigCreator::createSpConfig(model_config_,
-                                                         propose_params_->getEngineInitParams().model_config_,
-                                                         parallelism_config,
-                                                         runtime_config,
-                                                         kv_cache_config,
-                                                         sp_config,
-                                                         warm_up_result,
-                                                         isMTPEagle(),
-                                                         isEagle());
-
-        resource_context_.cache_manager = make_shared<KVCacheManager>(config,
-                                                                      false,
-                                                                      metrics_reporter_,
-                                                                      kv_cache_config,
-                                                                      parallelism_config,
-                                                                      runtime_config,
-                                                                      sp_config,
-                                                                      pd_sep_config,
-                                                                      cache_store_config,
-                                                                      use_device_malloc_block_pool);
-        resource_context_.role_type     = pd_sep_config.role_type;
-        if (!resource_context_.cache_manager->init()) {
-            RTP_LLM_FAIL("init kv cache manager failed");
-        }
-
-        const auto& cache_cfg = resource_context_.cache_manager->cacheConfig();
-        kv_cache_group_num_   = cache_cfg.groupNums();
-    } else {
-        auto result = CacheConfigCreator::createConfig(
-            model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
-        RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
-        RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
-                         result.block_num,
-                         result.totalGroupBlockSizeBytes() / 1024);
-        RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
-        resource_context_.cache_manager = make_shared<KVCacheManager>(result,
-                                                                      false,
-                                                                      metrics_reporter_,
-                                                                      kv_cache_config,
-                                                                      parallelism_config,
-                                                                      runtime_config,
-                                                                      SpeculativeExecutionConfig{},
-                                                                      pd_sep_config,
-                                                                      cache_store_config,
-                                                                      use_device_malloc_block_pool);
-        resource_context_.role_type     = pd_sep_config.role_type;
-        if (!resource_context_.cache_manager->init()) {
-            RTP_LLM_FAIL("init kv cache manager failed");
-        }
-        const auto& cache_cfg = resource_context_.cache_manager->cacheConfig();
-        kv_cache_group_num_   = cache_cfg.groupNums();
-    }
+    const ModelConfig* draft_model_config   = propose_params_ && propose_params_->draftModel() ?
+                                                  &propose_params_->getEngineInitParams().model_config_ :
+                                                  nullptr;
+    auto               config               = CacheConfigCreator::createConfig(
+        model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
+    const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
+        config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
+    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
+    config.finalizeBlockNums(confirmed_block_num, runtime_config);
+    auto cache_manager = make_shared<KVCacheManager>(config,
+                                                     false,
+                                                     metrics_reporter_,
+                                                     kv_cache_config,
+                                                     parallelism_config,
+                                                     runtime_config,
+                                                     draft_model_config ? sp_config : SpeculativeExecutionConfig{},
+                                                     pd_sep_config,
+                                                     cache_store_config,
+                                                     use_device_malloc_block_pool);
+    initializeAndPublishCacheManager(resource_context_,
+                                     kv_cache_group_num_,
+                                     pd_sep_config.role_type,
+                                     std::move(cache_manager),
+                                     [](KVCacheManager& manager) { return manager.init(); });
 }
 
 absl::Status NormalEngine::initSystemPrompt() {

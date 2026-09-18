@@ -26,10 +26,11 @@ public:
         DeviceBlockPoolConfig config;
         config.pool_type            = BlockPoolType::DEVICE;
         config.pool_name            = "default";
-        config.physical_block_count = cache_config.block_num;
-        const bool  is_hybrid       = false;
-        const auto  layer_num       = static_cast<uint32_t>(cache_config.layerIdsForGroup(0).size());
-        const auto& main_spec       = cache_config.specForGroup(0);
+        config.physical_block_count = cache_config.blockNumForGroup(0);
+        RTP_LLM_CHECK_WITH_INFO(config.physical_block_count > 0, "single group requires positive pool capacity");
+        const bool  is_hybrid = false;
+        const auto  layer_num = static_cast<uint32_t>(cache_config.layerIdsForGroup(0).size());
+        const auto& main_spec = cache_config.specForGroup(0);
         // linear block size is same with full block block size
         MemoryLayoutConfig main_layout = createMemoryLayoutConfig(is_hybrid,
                                                                   layer_num,
@@ -37,6 +38,7 @@ public:
                                                                   cache_config.kvScaleStrideBytesForGroup(0),
                                                                   main_spec,
                                                                   cache_config,
+                                                                  static_cast<uint32_t>(config.physical_block_count),
                                                                   cache_config.localKvHeadNumForGroup(0),
                                                                   cache_config.seqSizePerBlockForGroup(0),
                                                                   cache_config.kernelBlocksPerKvBlockForGroup(0));
@@ -76,6 +78,7 @@ public:
                                          mtp_spec->scale_block_size_bytes(),
                                          mtp_spec,
                                          cache_config,
+                                         static_cast<uint32_t>(config.physical_block_count),
                                          mtp_sub_config->localKvHeadNumForGroup(real_mtp_gid),
                                          mtp_sub_config->seqSizePerBlockForGroup(real_mtp_gid),
                                          mtp_sub_config->kernelBlocksPerKvBlockForGroup(real_mtp_gid));
@@ -119,18 +122,12 @@ public:
             config.pool_name = tag;
         }
         config.physical_block_count = cache_config.blockNumForGroup(group_id);
-        const bool has_group_blocks = config.physical_block_count != cache_config.block_num;
-        RTP_LLM_LOG_INFO("createConfigForGroup: pool_name=%s gid=%zu block_num=%zu (has_group_blocks=%d, "
-                         "groupNums=%d, global_block_num=%d)",
+        RTP_LLM_CHECK_WITH_INFO(config.physical_block_count > 0, "group %zu requires positive pool capacity", group_id);
+        RTP_LLM_LOG_INFO("createConfigForGroup: pool_name=%s gid=%zu block_num=%zu groupNums=%d",
                          config.pool_name.c_str(),
                          group_id,
                          config.physical_block_count,
-                         has_group_blocks,
-                         cache_config.groupNums(),
-                         cache_config.block_num);
-
-        CacheConfig group_cache_config = cache_config;
-        group_cache_config.block_num   = static_cast<uint32_t>(config.physical_block_count);
+                         cache_config.groupNums());
 
         size_t     total_layout_layers = 0;
         size_t     current_offset      = 0;
@@ -145,7 +142,8 @@ public:
                                                    source_config.kvBlockStrideBytesForGroup(source_gid),
                                                    source_config.kvScaleStrideBytesForGroup(source_gid),
                                                    layout_spec,
-                                                   group_cache_config,
+                                                   cache_config,
+                                                   static_cast<uint32_t>(config.physical_block_count),
                                                    source_config.localKvHeadNumForGroup(source_gid),
                                                    source_config.seqSizePerBlockForGroup(source_gid),
                                                    source_config.kernelBlocksPerKvBlockForGroup(source_gid));
@@ -192,13 +190,14 @@ private:
                                                        size_t                             kv_block_stride_bytes,
                                                        size_t                             kv_scale_stride_bytes,
                                                        std::shared_ptr<const KVCacheSpec> spec,
-                                                       CacheConfig                        cache_config,
+                                                       const CacheConfig&                 cache_config,
+                                                       uint32_t                           physical_block_count,
                                                        uint32_t                           local_kv_head_num,
                                                        size_t                             seq_size_per_block,
                                                        size_t                             kernel_blocks_per_kv_block) {
         MemoryLayoutConfig cfg;
         cfg.layer_num             = layer_num;
-        cfg.block_num             = cache_config.block_num;
+        cfg.block_num             = physical_block_count;
         cfg.kv_block_stride_bytes = kv_block_stride_bytes;
         cfg.k_block_stride_bytes  = spec->k_block_size_bytes();
         cfg.v_block_stride_bytes  = spec->v_block_size_bytes();

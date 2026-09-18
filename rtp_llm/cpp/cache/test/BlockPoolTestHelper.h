@@ -84,7 +84,6 @@ inline DeviceBlockPoolConfig createTestConfig(size_t   k_block_stride_bytes = 51
         kLayerNum, dtype, local_head_num_kv, seq_size_per_block, k_block_stride_bytes, v_block_stride_bytes);
     CacheConfig cache_config;
     cache_config.layer_num          = kLayerNum;
-    cache_config.block_num          = kBlockNum;
     cache_config.dtype              = dtype;
     cache_config.seq_size_per_block = seq_size_per_block;
     std::vector<int> layer_ids(kLayerNum);

@@ -90,6 +90,7 @@ cc_test(
     copts = test_copts,
     deps =  [
         ":mock_engine",
+        "//rtp_llm/cpp/cache:cache",
     ] + cuda13_torch_link_deps,
     env = device_test_envs(),
     exec_properties = {'gpu':'A10'},

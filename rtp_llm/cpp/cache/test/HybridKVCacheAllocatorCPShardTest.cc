@@ -32,7 +32,6 @@ CacheConfig makeCPHybridConfig() {
     CacheConfig config;
     config.dtype              = rtp_llm::DataType::TYPE_FP16;
     config.layer_num          = 4;
-    config.block_num          = 32;  // headroom for cp_size=2 expansion
     config.seq_size_per_block = 4;
     config.linear_step        = 2;
 
@@ -52,6 +51,7 @@ CacheConfig makeCPHybridConfig() {
     config.fromGroupedSpecs(
         {linear_spec, full_spec}, {{0, 1}, {2, 3}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
 
+    config.finalizeBlockNums(32, RuntimeConfig{});  // headroom for cp_size=2 expansion
     return config;
 }
 

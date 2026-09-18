@@ -67,7 +67,7 @@ TEST(MtpExecutorPolicyTest, DSparkPrefillRoleDisablesDraftGraphCapture) {
 }
 
 TEST(MtpExecutorPolicyTest, CpRestoreSnapshotOwnsMutableHostInput) {
-    auto input_lengths = torch::tensor({3683}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    auto         input_lengths = torch::tensor({3683}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
     TensorHolder holder;
     auto         snapshot = MtpExecutor::snapshotMutableHostInputToCuda(input_lengths, holder);
 
@@ -101,8 +101,8 @@ TEST(MtpExecutorPolicyTest, HybridCacheWaitsBeforeReadingNextRoundHostState) {
 }
 
 TEST(MtpExecutorPolicyTest, MtpSequenceUpperBoundChainsUntilBookkeepingCatchesUp) {
-    constexpr int width = 8;
-    const int first_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+    constexpr int width      = 8;
+    const int     first_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
                                /*pending=*/false, /*previous_next_bound=*/-1, /*host_seq_len=*/96)
                            + width;
     const int second_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
@@ -114,10 +114,12 @@ TEST(MtpExecutorPolicyTest, MtpSequenceUpperBoundChainsUntilBookkeepingCatchesUp
     EXPECT_EQ(104, first_next);
     EXPECT_EQ(112, second_next);
     EXPECT_EQ(120, third_next);
-    EXPECT_EQ(96, MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                      /*pending=*/false, /*previous_next_bound=*/third_next, /*host_seq_len=*/96));
-    EXPECT_EQ(96, MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                      /*pending=*/true, /*previous_next_bound=*/-1, /*host_seq_len=*/96));
+    EXPECT_EQ(96,
+              MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                  /*pending=*/false, /*previous_next_bound=*/third_next, /*host_seq_len=*/96));
+    EXPECT_EQ(96,
+              MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                  /*pending=*/true, /*previous_next_bound=*/-1, /*host_seq_len=*/96));
 }
 
 TEST(MtpExecutorPolicyTest, DSparkPositionStateAdvancesByAcceptedLength) {
@@ -348,12 +350,12 @@ private:
         }
     }
 
-    TestDataHolder<GptModelInputs>           input_holder;
-    TestDataHolder<GptModelInputs>           prepare_input_holder;
-    TestDataHolder<GptModelOutputs>          output_holder;
-    torch::Tensor                            mtp_target_hidden_rows_;
-    size_t                                   forward_count_ = 0;
-    std::optional<bool>                      expected_is_target_verify_;
+    TestDataHolder<GptModelInputs>            input_holder;
+    TestDataHolder<GptModelInputs>            prepare_input_holder;
+    TestDataHolder<GptModelOutputs>           output_holder;
+    torch::Tensor                             mtp_target_hidden_rows_;
+    size_t                                    forward_count_ = 0;
+    std::optional<bool>                       expected_is_target_verify_;
     std::string                               publication_error_;
     std::exception_ptr                        publication_exception_;
     std::function<void()>                     publication_observer_;
@@ -619,9 +621,9 @@ public:
                                                                             /*local_head_num_kv=*/128,
                                                                             /*size_per_head=*/256));
 
-        EngineInitParams params            = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
-        params.sp_config                   = sp_config;
-        params.pd_sep_config.role_type     = test_config.role_type;
+        EngineInitParams params        = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+        params.sp_config               = sp_config;
+        params.pd_sep_config.role_type = test_config.role_type;
         params.parallelism_config.role_type = test_config.role_type;
         if (test_config.vocab_size_override > 0) {
             params.model_config_.vocab_size = test_config.vocab_size_override;
@@ -651,15 +653,21 @@ public:
 
         auto cache_sp_config              = sp_config;
         cache_sp_config.gen_num_per_cycle = 1;
-        auto cache_config                 = CacheConfigCreator::createSpConfig(score_cache_model_config,
-                                                               propose_cache_model_config,
-                                                               params.parallelism_config,
-                                                               params.runtime_config,
-                                                               test_kv_cache_config,
-                                                               cache_sp_config,
-                                                               /*warm_up_result=*/std::nullopt,
-                                                               /*is_mtp=*/true,
-                                                               /*is_eagle=*/false);
+        auto           cache_config       = CacheConfigCreator::createConfig(score_cache_model_config,
+                                                             params.parallelism_config,
+                                                             test_kv_cache_config,
+                                                             cache_sp_config,
+                                                             &propose_cache_model_config,
+                                                             /*is_mtp=*/true,
+                                                             /*is_eagle=*/false);
+        const uint32_t local_block_num    = CacheConfigCreator::computeLocalBlockNum(cache_config,
+                                                                                  score_cache_model_config,
+                                                                                  params.runtime_config,
+                                                                                  test_kv_cache_config,
+                                                                                  params.parallelism_config,
+                                                                                  /*warm_up_result=*/std::nullopt,
+                                                                                  cache_sp_config);
+        cache_config.finalizeBlockNums(local_block_num, params.runtime_config);
 
         // Create propose model engine init params
         auto mtp_model_params   = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
@@ -874,10 +882,8 @@ TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
 
     auto status = components.executor->process({stream});
     ASSERT_TRUE(status.ok()) << status.ToString();
-    EXPECT_EQ((std::vector<std::string>{"target.forward",
-                                        "draft.forward",
-                                        "target.wait_publication",
-                                        "draft.wait_publication"}),
+    EXPECT_EQ((std::vector<std::string>{
+                  "target.forward", "draft.forward", "target.wait_publication", "draft.wait_publication"}),
               *publication_events);
     EXPECT_EQ((std::vector<int>{0, 1, 2, 3, 1}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
     EXPECT_TRUE(stream->getProposeToken().empty());
@@ -913,7 +919,7 @@ TEST_F(MtpExecutorTest, testDSparkPublicationFailurePreventsPrefillDispatch) {
     bool draft_waited = false;
     components.fake_draft_prefill_model->setPublicationObserver([&draft_waited]() { draft_waited = true; });
     components.fake_draft_prefill_model->setPublicationResult("draft store failed");
-    size_t reduction_count = 0;
+    size_t reduction_count                                           = 0;
     components.executor->dspark_cache_store_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
         ++reduction_count;
         EXPECT_FALSE(local_ok);
@@ -980,14 +986,14 @@ TEST_F(MtpExecutorTest, testDSparkRemoteTpRankFailurePreventsPrefillDispatch) {
     components.fake_draft_prefill_model->setOutputs({GptModelOutputs{}});
     components.fake_draft_prefill_model->expectTargetVerify(false);
 
-    bool   observed_local_ok = false;
-    size_t reduction_count   = 0;
-    components.executor->dspark_cache_store_status_reducer_for_test_ =
-        [&observed_local_ok, &reduction_count](bool local_ok) {
-            observed_local_ok = local_ok;
-            ++reduction_count;
-            return false;  // Simulate one different TP rank publishing a failure.
-        };
+    bool   observed_local_ok                                         = false;
+    size_t reduction_count                                           = 0;
+    components.executor->dspark_cache_store_status_reducer_for_test_ = [&observed_local_ok,
+                                                                        &reduction_count](bool local_ok) {
+        observed_local_ok = local_ok;
+        ++reduction_count;
+        return false;  // Simulate one different TP rank publishing a failure.
+    };
 
     auto sampler_input  = SamplerInputs{target_output.logits};
     auto sampler_output = SamplerOutput{torch::tensor({1}, torch::kInt32).reshape({1, 1})};

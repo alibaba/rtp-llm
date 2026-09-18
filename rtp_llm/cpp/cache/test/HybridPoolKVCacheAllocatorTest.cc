@@ -54,7 +54,6 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
     CacheConfig config;
     config.dtype              = rtp_llm::DataType::TYPE_FP16;
     config.layer_num          = 4;
-    config.block_num          = std::max(linear_block_num, full_block_num);
     config.seq_size_per_block = 4;
     config.linear_step        = 2;
 
@@ -89,7 +88,6 @@ static CacheConfig makeTinyFullSwaMultiPoolHybridConfig(uint32_t full_block_num 
     CacheConfig config;
     config.dtype              = DataType::TYPE_FP16;
     config.layer_num          = 4;
-    config.block_num          = std::max(full_block_num, swa_block_num);
     config.seq_size_per_block = 4;
     config.linear_step        = 2;
 
@@ -315,7 +313,7 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     auto mc                                            = makeProModelConfig();
     mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
@@ -323,7 +321,7 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
 static CacheConfig makeTinyDSV4HybridPoolConfig(uint32_t block_num = 8) {
     auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
@@ -2005,7 +2003,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigUsesGroupOwnedBytesForPagedBlockSize) {
     auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
 
     ASSERT_EQ(config.groupNums(), 7);
 
@@ -2130,7 +2128,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksSca
     mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
-    auto config        = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    auto config        = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     config.linear_step = 4;
 
     RuntimeConfig rt;

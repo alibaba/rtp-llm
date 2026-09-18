@@ -70,8 +70,8 @@ public:
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
-    virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int group_id, int block_id) const;
+                          convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
+    virtual BlockAddrInfo convertIndexToAddr(int layer_id, int group_id, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int group_id, int block_id, int partition_count, int partition_id) const;

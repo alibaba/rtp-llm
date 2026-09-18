@@ -6,6 +6,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -19,6 +20,12 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::test {
+
+// Single-rank acceptance tests confirm the local candidate without collectives.
+inline CacheConfig finalizeCacheConfig(CacheConfig config, uint32_t candidate_block_num) {
+    config.finalizeBlockNums(candidate_block_num, RuntimeConfig{});
+    return config;
+}
 
 inline constexpr uint32_t DSV4_FP8_KV_ENTRY_BYTES            = 584;
 inline constexpr uint32_t DSV4_FP8_INDEXER_ENTRY_BYTES       = 132;
@@ -510,12 +517,12 @@ makeSingleGroupCacheConfig(KVCacheSpecPtr spec, CacheGroupType group_type, int l
     config.dtype     = spec->memoryLayoutDType();
     config.layer_num = static_cast<uint32_t>(layer_num);
 
-    config.block_num          = static_cast<uint32_t>(block_num);
     config.seq_size_per_block = spec->seq_size_per_block;
 
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     config.fromGroupedSpecs({spec}, {layer_ids}, {group_type}, {spec->tag});
+    config.finalizeBlockNums(static_cast<uint32_t>(block_num), RuntimeConfig{});
 
     return config;
 }
@@ -555,7 +562,6 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     config.dtype     = dtype;
     config.layer_num = static_cast<uint32_t>(layer_num);
 
-    config.block_num                     = static_cast<uint32_t>(block_num);
     config.seq_size_per_block            = tokens_per_block;
     config.linear_step                   = 2;
     const int normalized_group_layer_num = std::max(group_layer_num, 1);
@@ -598,6 +604,7 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
         layers_by_group.push_back(std::move(group_layers));
     }
     config.fromGroupedSpecs(specs, layers_by_group, types, tags);
+    config.finalizeBlockNums(static_cast<uint32_t>(block_num), RuntimeConfig{});
 
     return config;
 }

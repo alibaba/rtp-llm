@@ -324,21 +324,21 @@ inline bool waitForConditionFor(Predicate&& predicate, std::chrono::milliseconds
 
 inline ModelConfig makeCompactDsv4ModelConfig() {
     ModelConfig config;
-    config.num_layers                                                = 5;
-    config.hidden_size                                               = 64;
-    config.attn_config.head_num                                      = 4;
-    config.attn_config.kv_head_num                                   = 1;
-    config.attn_config.size_per_head                                 = 16;
-    config.attn_config.rope_head_dim                                 = 4;
-    config.attn_config.sliding_window                                = 128;
-    config.attn_config.indexer_head_dim                              = 8;
-    config.attn_config.indexer_head_num                              = 4;
-    config.attn_config.indexer_topk                                  = 16;
-    config.attn_config.o_groups                                      = 2;
-    config.attn_config.o_lora_rank                                   = 8;
-    config.attn_config.tokens_per_block                              = 128;
-    config.attn_config.layer_compress_ratios                         = {0, 4, 128, 4, 0};
-    config.hybrid_attention_config.enable_hybrid_attention           = true;
+    config.num_layers                                      = 5;
+    config.hidden_size                                     = 64;
+    config.attn_config.head_num                            = 4;
+    config.attn_config.kv_head_num                         = 1;
+    config.attn_config.size_per_head                       = 16;
+    config.attn_config.rope_head_dim                       = 4;
+    config.attn_config.sliding_window                      = 128;
+    config.attn_config.indexer_head_dim                    = 8;
+    config.attn_config.indexer_head_num                    = 4;
+    config.attn_config.indexer_topk                        = 16;
+    config.attn_config.o_groups                            = 2;
+    config.attn_config.o_lora_rank                         = 8;
+    config.attn_config.tokens_per_block                    = 128;
+    config.attn_config.layer_compress_ratios               = {0, 4, 128, 4, 0};
+    config.hybrid_attention_config.enable_hybrid_attention = true;
     setDsv4KvCacheSpecs(config, config.attn_config.layer_compress_ratios);
     setDsv4ExplicitPoolBlocks(config, "hca_state", 0);
     return config;
@@ -359,13 +359,9 @@ inline void setGroupBlockNums(CacheConfig& config, uint32_t block_num) {
 
 inline CacheConfig makeCompactDsv4CacheConfig(uint32_t block_num) {
     ParallelismConfig parallelism;
-    auto              config = CacheConfigCreator::createBasicConfig(makeCompactDsv4ModelConfig(),
-                                                        parallelism,
-                                                        /*is_mtp=*/false,
-                                                        /*mtp_module_num=*/0);
-    config.block_num         = block_num;
+    auto              config = CacheConfigCreator::createWarmupConfig(makeCompactDsv4ModelConfig(), parallelism, 0);
     config.linear_step       = 1;
-    setGroupBlockNums(config, block_num);
+    config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
 

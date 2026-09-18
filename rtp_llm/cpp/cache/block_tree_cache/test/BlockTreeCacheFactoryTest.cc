@@ -74,7 +74,6 @@ CacheConfig makeSwaConfig(int block_size = 4) {
     CacheConfig config;
     config.dtype              = DataType::TYPE_FP16;
     config.layer_num          = 2;
-    config.block_num          = 8;
     config.seq_size_per_block = block_size;
 
     auto spec = test::makeResolvedMhaSpec(
@@ -92,7 +91,6 @@ CacheConfig makeHybridConfig(bool disable_linear_reuse = false) {
     CacheConfig config;
     config.dtype              = DataType::TYPE_FP16;
     config.layer_num          = 4;
-    config.block_num          = 8;
     config.seq_size_per_block = 4;
     config.linear_step        = 2;
 
@@ -152,7 +150,6 @@ CacheConfig makeDifferentFullGroupsConfig(uint32_t second_seq_size_per_block, Cp
     CacheConfig config;
     config.dtype              = DataType::TYPE_FP16;
     config.layer_num          = 2;
-    config.block_num          = 9;
     config.seq_size_per_block = 4;
 
     std::shared_ptr<MHAKVCacheSpec> first = test::makeResolvedMhaSpec(
@@ -190,7 +187,6 @@ CacheConfig makeCompatibleFullGroupsConfig() {
     CacheConfig config;
     config.dtype              = DataType::TYPE_FP16;
     config.layer_num          = 2;
-    config.block_num          = 8;
     config.seq_size_per_block = 4;
 
     auto first = test::makeResolvedMhaSpec(
@@ -234,7 +230,10 @@ CacheConfig makeSparseMlaIndexerConfig() {
 
     KVCacheConfig kv_cache_config;
     kv_cache_config.test_block_num = 8;
-    return CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
+    auto           config = CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, kv_cache_config);
+    const uint32_t candidate_block_num = CacheConfigCreator::computeLocalBlockNum(
+        config, model_config, RuntimeConfig{}, kv_cache_config, ParallelismConfig{});
+    return test::finalizeCacheConfig(std::move(config), candidate_block_num);
 }
 
 CacheConfig makeCompatibleSwaGroupsConfig(int                second_window,
@@ -243,7 +242,6 @@ CacheConfig makeCompatibleSwaGroupsConfig(int                second_window,
     CacheConfig config;
     config.dtype              = DataType::TYPE_FP16;
     config.layer_num          = 2;
-    config.block_num          = 8;
     config.seq_size_per_block = 4;
 
     auto first = test::makeResolvedMhaSpec(
@@ -270,7 +268,6 @@ CacheConfig makeCompatibleLinearGroupsConfig(uint32_t second_active_tail_blocks)
     CacheConfig config;
     config.dtype              = DataType::TYPE_FP16;
     config.layer_num          = 2;
-    config.block_num          = 8;
     config.seq_size_per_block = 4;
     config.linear_step        = 2;
 
@@ -310,7 +307,6 @@ CacheConfig makeReusableGroupsAroundDisabledConfig() {
     CacheConfig config;
     config.dtype              = DataType::TYPE_FP16;
     config.layer_num          = 3;
-    config.block_num          = 8;
     config.seq_size_per_block = 4;
 
     std::vector<std::shared_ptr<KVCacheSpec>> specs;
@@ -1962,7 +1958,10 @@ TEST_F(BlockTreeCacheFactoryTest, UnifiedCreatorPreservesRuntimeTierConfiguratio
     runtime.block_tree_memory_evict_high_watermark_ratio = 0.72;
     runtime.block_tree_disk_evict_low_watermark_ratio    = 0.63;
     runtime.block_tree_disk_evict_high_watermark_ratio   = 0.73;
-    auto config    = CacheConfigCreator::createConfig(model, ParallelismConfig{}, RuntimeConfig{}, runtime);
+    auto           config = CacheConfigCreator::createConfig(model, ParallelismConfig{}, runtime);
+    const uint32_t candidate_block_num =
+        CacheConfigCreator::computeLocalBlockNum(config, model, RuntimeConfig{}, runtime, ParallelismConfig{});
+    config         = test::finalizeCacheConfig(std::move(config), candidate_block_num);
     auto allocator = initAllocator<KVCacheAllocator>(config);
     auto cache     = createBlockTreeCache(config, runtime, allocator);
     ASSERT_NE(cache, nullptr);
@@ -2175,7 +2174,6 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     CacheConfig cache_config;
     cache_config.dtype              = TYPE_FP16;
     cache_config.layer_num          = 3;
-    cache_config.block_num          = 8;
     cache_config.seq_size_per_block = 1;
 
     std::vector<KVCacheSpecPtr> specs;

@@ -254,15 +254,16 @@ static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig(SpeculativeType    sp
     sp_cfg.type              = sp_type;
     sp_cfg.gen_num_per_cycle = gen_num;
 
-    return CacheConfigCreator::createSpConfig(score_model_cfg,
-                                              propose_model_cfg,
-                                              parallelism_cfg,
-                                              runtime_cfg,
-                                              kv_cache_cfg,
-                                              sp_cfg,
-                                              /*warm_up_result=*/std::nullopt,
-                                              /*is_mtp=*/true,
-                                              /*is_eagle=*/sp_type == SP_TYPE_EAGLE);
+    auto       config              = CacheConfigCreator::createConfig(score_model_cfg,
+                                                   parallelism_cfg,
+                                                   kv_cache_cfg,
+                                                   sp_cfg,
+                                                   &propose_model_cfg,
+                                                   /*is_mtp=*/true,
+                                                   /*is_eagle=*/sp_type == SP_TYPE_EAGLE);
+    const auto candidate_block_num = CacheConfigCreator::computeLocalBlockNum(
+        config, score_model_cfg, runtime_cfg, kv_cache_cfg, parallelism_cfg, std::nullopt, sp_cfg);
+    return rtp_llm::test::finalizeCacheConfig(std::move(config), candidate_block_num);
 }
 
 static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block) {
@@ -329,8 +330,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigAllowsOnlyFullGroups) {
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
-    auto cache_config =
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    auto cache_config       = CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
     ASSERT_EQ(cache_config.groupNums(), 1);
     EXPECT_EQ(cache_config.groupTypesSnapshot()[0], CacheGroupType::FULL);
     EXPECT_EQ(cache_config.groupTagsSnapshot()[0], "full");
@@ -343,7 +343,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigRejectsMultipleFullGrou
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
     try {
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+        CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
         FAIL() << "expected multiple full groups to be rejected";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("multiple FULL MHA/MLA cache groups"), std::string::npos);
@@ -357,8 +357,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigKeepsModelTokensPerBloc
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
 
-    auto cache_config =
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    auto cache_config = CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
     EXPECT_EQ(cache_config.seq_size_per_block, 4);
     ASSERT_EQ(cache_config.groupNums(), 1);
     EXPECT_EQ(cache_config.specForGroup(0)->seq_size_per_block, 4);
@@ -418,7 +417,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateConfigSupportsOneLinearIndependentP
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
-    const auto config       = CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, false, 0);
+    const auto config       = CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, 0);
     ASSERT_EQ(config.groupNums(), 1);
     EXPECT_EQ(config.tagForGroup(0), "linear");
     EXPECT_EQ(config.typeForGroup(0), CacheGroupType::LINEAR);
@@ -438,7 +437,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateConfigRejectsLinearDescriptorWithou
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
     try {
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+        CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
         FAIL() << "expected a linear-only single config to be rejected";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("hybrid_attention_types size"), std::string::npos);
@@ -452,6 +451,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitSupportsOnlyLinearGroupsWithIndepende
     auto linear1 = makeLinearSpec("linear1", /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16, 1, 1);
     cache_config.fromGroupedSpecs(
         {linear0, linear1}, {{0}, {1}}, {CacheGroupType::LINEAR, CacheGroupType::LINEAR}, {"linear0", "linear1"});
+    cache_config.finalizeBlockNums(/*baseline_block_num=*/4, RuntimeConfig{});
     ASSERT_EQ(cache_config.groupNums(), 2);
 
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(cache_config, AllocationType::DEVICE);
@@ -507,8 +507,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigUsesFirstSeenTagsWithFu
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
-    auto cache_config =
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    auto cache_config       = CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
 
     std::vector<std::string>    expected_tags{"linear0", "linear1", "full", "linear2"};
     std::vector<CacheGroupType> expected_types{
@@ -544,8 +543,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigKeepsExplicitPhysically
     cfg.kv_cache_spec_descs[1][0].dtype                = DataType::TYPE_FP32;
 
     ParallelismConfig parallelism_cfg;
-    auto              config =
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    auto              config = CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
 
     ASSERT_EQ(config.groupNums(), 3);
     EXPECT_EQ(config.groupTagsSnapshot(), (std::vector<std::string>{"recurrent_state", "convolution_state", "full"}));
@@ -572,9 +570,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigRejectsDifferentLayouts
     cfg.kv_cache_spec_descs[1][0].dtype                = DataType::TYPE_BF16;
 
     ParallelismConfig parallelism_cfg;
-    EXPECT_THROW(
-        (void)CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0),
-        std::runtime_error);
+    EXPECT_THROW((void)CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0),
+                 std::runtime_error);
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
@@ -583,8 +580,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
     ASSERT_TRUE(allocator->init());
 
     EXPECT_EQ(allocator->seqSizePerBlock(), 4);
-    EXPECT_EQ(allocator->totalBlocksNum(), 2 * (config.block_num - 1));
-    EXPECT_EQ(allocator->freeBlocksNum(), 2 * (config.block_num - 1));
+    EXPECT_EQ(allocator->totalBlocksNum(),
+              (config.group("linear").block_num - 1) + (config.group("full1").block_num - 1));
+    EXPECT_EQ(allocator->freeBlocksNum(),
+              (config.group("linear").block_num - 1) + (config.group("full1").block_num - 1));
 
     const std::vector<KVCacheGroupPtr> groups = allocator->cacheGroups();
     ASSERT_GT(groups.size(), 1u);
@@ -593,7 +592,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
     EXPECT_NE(poolForTag(*allocator, "linear"), poolForTag(*allocator, "full1"));
     for (const auto& snapshot : snapshots) {
         EXPECT_EQ(snapshot.used_blocks, snapshot.total_blocks - snapshot.free_blocks);
-        EXPECT_EQ(snapshot.free_blocks, config.block_num - 1);
+        EXPECT_EQ(snapshot.free_blocks, config.group(snapshot.pool_name).block_num - 1);
     }
 
     // Should be able to fetch address for any global layer and non-zero block id.
@@ -714,15 +713,18 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateSpConfigPreservesQwenPackingAlignme
     sp_cfg.gen_num_per_cycle = 2;
 
     CacheConfig config;
-    ASSERT_NO_THROW(config = CacheConfigCreator::createSpConfig(score_model_cfg,
-                                                                propose_model_cfg,
-                                                                parallelism_cfg,
-                                                                runtime_cfg,
-                                                                kv_cache_cfg,
-                                                                sp_cfg,
-                                                                /*warm_up_result=*/std::nullopt,
-                                                                /*is_mtp=*/true,
-                                                                /*is_eagle=*/false));
+    ASSERT_NO_THROW({
+        config                         = CacheConfigCreator::createConfig(score_model_cfg,
+                                                  parallelism_cfg,
+                                                  kv_cache_cfg,
+                                                  sp_cfg,
+                                                  &propose_model_cfg,
+                                                  /*is_mtp=*/true,
+                                                  /*is_eagle=*/false);
+        const auto candidate_block_num = CacheConfigCreator::computeLocalBlockNum(
+            config, score_model_cfg, runtime_cfg, kv_cache_cfg, parallelism_cfg, std::nullopt, sp_cfg);
+        config = rtp_llm::test::finalizeCacheConfig(std::move(config), candidate_block_num);
+    });
 
     EXPECT_EQ(config.groupTagsSnapshot(), std::vector<std::string>({"linear", "full"}));
     EXPECT_EQ(config.layerIdsForGroup(config.groupIdForTag("full")).size(), 4u);
@@ -921,7 +923,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasDefaultLinearProposeG
         main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1);
         FAIL() << "expected a default Linear propose group not to use the FULL alias";
     } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("missing group mapping for sub layer 0"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("unmapped draft cache group tag=default"), std::string::npos);
     }
 }
 
@@ -962,7 +964,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasMultiGroupProposeConf
         main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1);
         FAIL() << "expected a multi-group propose config not to use the default alias";
     } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("missing group mapping for sub layer 0"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("unmapped draft cache group tag=default"), std::string::npos);
     }
 }
 

@@ -94,7 +94,6 @@ static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_s
     CacheConfig config;
     config.dtype              = DataType::TYPE_BF16;
     config.layer_num          = 1;
-    config.block_num          = block_num;
     config.seq_size_per_block = 1;
 
     AttentionConfigs attn_config;
