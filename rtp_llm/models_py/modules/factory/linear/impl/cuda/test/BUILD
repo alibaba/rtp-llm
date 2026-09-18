@@ -32,7 +32,8 @@ py_test(
     name = "fp8_deepgemm_linear_sm100_test",
     srcs = [
         "fp8_deepgemm_linear_sm100_test.py",
-        "fp8_linear_test.py"
+        "fp8_linear_test.py",
+        "fp8_deepgemm_linear_sm120_test.py",
     ],
     deps = py_test_deps,
     tags = ["SM100"],
@@ -43,11 +44,23 @@ py_test(
     name = "fp8_deepgemm_linear_sm100_arm_test",
     srcs = [
         "fp8_deepgemm_linear_sm100_arm_test.py",
-        "fp8_linear_test.py"
+        "fp8_linear_test.py",
+        "fp8_deepgemm_linear_sm120_test.py",
     ],
     deps = py_test_deps,
     tags = ["SM100_ARM"],
     exec_properties = {'gpu':'SM100_ARM'},
+)
+
+py_test(
+    name = "fp8_deepgemm_linear_sm120_test",
+    srcs = [
+        "fp8_deepgemm_linear_sm120_test.py",
+        "fp8_linear_test.py",
+    ],
+    deps = py_test_deps,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {'gpu':'RTX_5000_PRO_CU13'},
 )
 
 py_test(

@@ -1,0 +1,100 @@
+{
+    "model_type": "qwen_3",
+    "model_path": "/mnt/nas1/hf/models--Qwen--Qwen3-1.7B/snapshots/0060bc56d46589041c1048efd1a397421b1142b5",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "<|im_start|>user\n用两句话解释什么是数据库的 CAP 定理。<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                "generate_config": {
+                    "max_new_tokens": 128,
+                    "top_k": 1,
+                    "return_output_ids": true
+                }
+            },
+            "result": {
+                "response": "数据库的 CAP 定理指出，任何数据库系统不能同时满足**一致性（Consistency）、可用性（Availability）**和**分区容忍性（Partition Tolerance）**这三个属性。  \n换句话说，一个数据库系统只能在这些属性之间做出妥协。",
+                "output_ids": [
+                    [
+                        74393,
+                        9370,
+                        26101,
+                        41479,
+                        248,
+                        21887,
+                        103988,
+                        3837,
+                        99885,
+                        74393,
+                        72448,
+                        53153,
+                        91572,
+                        101929,
+                        334,
+                        118661,
+                        9909,
+                        15220,
+                        47094,
+                        64359,
+                        107769,
+                        33071,
+                        9909,
+                        51703,
+                        7552,
+                        334,
+                        33108,
+                        334,
+                        113609,
+                        115261,
+                        33071,
+                        9909,
+                        49978,
+                        350,
+                        31661,
+                        7552,
+                        334,
+                        112935,
+                        79256,
+                        1773,
+                        2303,
+                        118229,
+                        3837,
+                        46944,
+                        74393,
+                        72448,
+                        101097,
+                        18493,
+                        100001,
+                        79256,
+                        101920,
+                        104086,
+                        115798,
+                        1773,
+                        151645
+                    ]
+                ]
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "<|im_start|>user\nWhat is the capital of France? Answer in one sentence.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                    "<|im_start|>user\nWhat is 17 + 25? Answer with only the number.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 64,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "The capital of France is Paris."
+                    },
+                    {
+                        "response": "17 + 25 = 42"
+                    }
+                ]
+            }
+        }
+    ]
+}

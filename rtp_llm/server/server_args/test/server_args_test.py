@@ -15,6 +15,28 @@ from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
+class CustomAllReduceArgumentsTest(TestCase):
+    def test_explicit_cli_value_is_preserved_for_python_collectives(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            disabled = server_args.setup_args(["--ft_disable_custom_ar", "1"])
+            enabled = server_args.setup_args(["--ft_disable_custom_ar", "0"])
+            unspecified = server_args.setup_args([])
+
+        self.assertIs(disabled.ft_disable_custom_ar_override, True)
+        self.assertIs(enabled.ft_disable_custom_ar_override, False)
+        self.assertIsNone(unspecified.ft_disable_custom_ar_override)
+
+    def test_environment_value_is_preserved_for_python_collectives(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": "1"}, clear=True):
+            configs = server_args.setup_args([])
+
+        self.assertIs(configs.ft_disable_custom_ar_override, True)
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {
