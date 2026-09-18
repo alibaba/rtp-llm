@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -117,6 +118,26 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
 
+        executor = self.fused_moe.fused_experts
+        if os.getenv("RTP_QWEN35_FUSED_MEGAMOE_GATED_SE", "0") == "1" and not getattr(
+            executor, "gated_shared_expert_requested", False
+        ):
+            raise RuntimeError(
+                "Requested gated shared-expert fusion requires the FP8 MegaMoE executor"
+            )
+        if getattr(executor, "gated_shared_expert_requested", False):
+            if (
+                self.shared_expert is None
+                or self.shared_expert_gate is None
+                or self.ffn_tp_size != 1
+            ):
+                raise ValueError(
+                    "Gated MegaMoE fusion requires a gated shared expert and FFN TP1"
+                )
+            executor.configure_gated_shared_expert(self.shared_expert)
+            self.shared_expert = None
+            self.add_shared_expert = False
+
         self.use_ep_shared_allreduce = (
             self.shared_expert is not None and self.ffn_tp_size > 1 and self.ep_size > 1
         )
@@ -212,11 +233,20 @@ class GenericMoeLayer(nn.Module):
         # path separately.  This is especially important for decode, where the
         # hidden dimension is small enough that collective launch latency
         # dominates the payload transfer.
+        expert_args = None
+        if getattr(self.fused_moe.fused_experts, "uses_shared_expert_gates", False):
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_inputs import (
+                shared_expert_sigmoid,
+            )
+
+            gate_logits = self.shared_expert_gate(hidden_states)
+            expert_args = {"shared_expert_gates": shared_expert_sigmoid(gate_logits)}
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
+            extra_expert_args=expert_args,
             skip_tp_allreduce=self.use_unified_tp_allreduce,
         )
         if self.shared_expert is not None:

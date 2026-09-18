@@ -56,3 +56,21 @@ py_test(
     tags = ["L20"],
     exec_properties = {"gpu": "L20", "gpu_count": "1"},
 )
+
+py_test(
+    name = "test_shared_inputs",
+    srcs = ["test_shared_inputs.py"],
+    deps = _TEST_DEPS,
+    env = _GPU_ENV,
+    tags = ["manual", "cuda13", "sm10x"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_mega_shared_production",
+    srcs = ["test_mega_shared_production.py"],
+    deps = _TEST_DEPS,
+    env = {"GPU_COUNT": "4"},
+    tags = ["manual", "cuda13", "sm10x"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "4"},
+)
