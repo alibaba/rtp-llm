@@ -1053,18 +1053,29 @@ TEST(HybridPoolConfigCreatorTest, LinearValueHeadsMustDivideAttentionTp) {
     EXPECT_NO_THROW((void)CacheConfigCreator::createBasicConfig(mc, pc, false, 0));
 }
 
-TEST(HybridPoolConfigCreatorTest, HybridAttentionWithoutIndependentPoolKeepsSharedHybridConfig) {
+TEST(HybridPoolConfigCreatorTest, HybridAttentionUsesIndependentPerGroupBlockCounts) {
     ParallelismConfig pc;
     auto config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc, false, 0);
 
-    EXPECT_FALSE(config.use_independent_block_pools);
+    EXPECT_TRUE(config.use_independent_block_pools);
     ASSERT_EQ(config.groupNums(), 2);
-    EXPECT_TRUE(config.groupBlockNumsSnapshot().empty());
+    EXPECT_EQ(config.groupBlockNumsSnapshot(), std::vector<uint32_t>({0, 0}));
 }
 
 TEST(HybridConfigCreatorTest, HybridAttentionTypesMustCoverAllLayers) {
     auto mc = makeHybridAttentionModelConfig(false);
     mc.hybrid_attention_config.hybrid_attention_types.pop_back();
+
+    ParallelismConfig pc;
+    EXPECT_THROW((void)CacheConfigCreator::createBasicConfig(mc, pc, false, 0), std::exception);
+}
+
+TEST(HybridConfigCreatorTest, CanonicalLinearTagRejectsIncompatibleGeometry) {
+    auto mc = makeHybridAttentionModelConfig(false);
+    ASSERT_EQ(mc.kv_cache_spec_descs[0][0].tag, "linear");
+    ASSERT_EQ(mc.kv_cache_spec_descs[2][0].tag, "linear");
+    mc.kv_cache_spec_descs[0][0].dtype = DataType::TYPE_FP16;
+    mc.kv_cache_spec_descs[2][0].dtype = DataType::TYPE_BF16;
 
     ParallelismConfig pc;
     EXPECT_THROW((void)CacheConfigCreator::createBasicConfig(mc, pc, false, 0), std::exception);
@@ -1700,7 +1711,7 @@ TEST(CacheConfigTest, ExactBlockBudgetHandlesStepAndRoundingBoundaries) {
     EXPECT_EQ(maxKVCacheBlockNumForBudget(/*total_budget_bytes=*/34, budget, /*linear_step=*/0), 3u);
 }
 
-TEST(CacheConfigTest, FinalizeBlockNumsUpdatesGlobalBlockNumForSharedPools) {
+TEST(CacheConfigTest, FinalizeBlockNumsUpdatesHybridPerGroupBlockNums) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                      = 8;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 4;
@@ -1721,8 +1732,8 @@ TEST(CacheConfigTest, FinalizeBlockNumsUpdatesGlobalBlockNumForSharedPools) {
     auto hybrid_config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc, false, 0);
     hybrid_config.finalizeBlockNums(123, runtime_config);
     EXPECT_EQ(hybrid_config.block_num, 123u);
-    EXPECT_FALSE(hybrid_config.use_independent_block_pools);
-    EXPECT_TRUE(hybrid_config.groupBlockNumsSnapshot().empty());
+    EXPECT_TRUE(hybrid_config.use_independent_block_pools);
+    EXPECT_EQ(hybrid_config.groupBlockNumsSnapshot(), std::vector<uint32_t>({123, 123}));
     EXPECT_EQ(hybrid_config.explicitly_sized_pool_reserve_bytes, 0u);
 }
 
