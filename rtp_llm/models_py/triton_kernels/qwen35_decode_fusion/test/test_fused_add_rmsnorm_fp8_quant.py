@@ -123,13 +123,25 @@ class FusedAddRmsNormFp8QuantTest(unittest.TestCase):
         delta = (ref_bytes.to(torch.int16) - got_bytes.to(torch.int16)).abs()
         self.assertLessEqual(int(delta.max().item()), 1)
 
-    def _assert_scale_layout(self, ref_s: torch.Tensor, got_s: torch.Tensor) -> None:
+    def _assert_scale_layout(
+        self, ref_s: torch.Tensor, got_s: torch.Tensor, valid_groups=None
+    ) -> None:
         self.assertEqual(got_s.shape, ref_s.shape)
         self.assertEqual(got_s.dtype, torch.int32)
         self.assertEqual(ref_s.dtype, torch.int32)
         self.assertEqual(got_s.stride(), ref_s.stride())
         if ref_s.numel() == 0:
             return
+        if valid_groups is not None and valid_groups % 4:
+            # The CUDA reference leaves bytes beyond the final real UE8M0
+            # group uninitialized. Compare every defined scale byte exactly.
+            shifts = torch.arange(4, device=ref_s.device, dtype=torch.int32) * 8
+            ref_s = ((ref_s.unsqueeze(-1) >> shifts) & 255).flatten(-2)[
+                ..., :valid_groups
+            ]
+            got_s = ((got_s.unsqueeze(-1) >> shifts) & 255).flatten(-2)[
+                ..., :valid_groups
+            ]
         torch.testing.assert_close(got_s, ref_s, rtol=0, atol=0)
 
     def _assert_match(
@@ -155,7 +167,7 @@ class FusedAddRmsNormFp8QuantTest(unittest.TestCase):
         torch.testing.assert_close(got_res, ref_res, rtol=0, atol=0)
         torch.testing.assert_close(got_norm, ref_norm, rtol=NORM_RTOL, atol=NORM_ATOL)
         self._assert_fp8_ulp(ref_q, got_q)
-        self._assert_scale_layout(ref_s, got_s)
+        self._assert_scale_layout(ref_s, got_s, hidden.shape[-1] // group_size)
         self.assertEqual(got_norm.data_ptr(), hidden_in.data_ptr())
         self.assertEqual(got_res.data_ptr(), residual_in.data_ptr())
 
@@ -197,17 +209,23 @@ class FusedAddRmsNormFp8QuantTest(unittest.TestCase):
         hidden_nc = wide[:, :4096]
         self.assertFalse(hidden_nc.is_contiguous())
         self.assertFalse(is_supported(hidden_nc, residual, weight))
-        self.assertIsNone(maybe_fused_add_rmsnorm_fp8_quant(hidden_nc, residual, weight))
+        self.assertIsNone(
+            maybe_fused_add_rmsnorm_fp8_quant(hidden_nc, residual, weight)
+        )
 
         residual_wide = torch.randn(8, 4104, dtype=torch.bfloat16, device=hidden.device)
         residual_nc = residual_wide[:, :4096]
-        self.assertIsNone(maybe_fused_add_rmsnorm_fp8_quant(hidden, residual_nc, weight))
+        self.assertIsNone(
+            maybe_fused_add_rmsnorm_fp8_quant(hidden, residual_nc, weight)
+        )
 
     def test_unsupported_dtype_returns_none(self) -> None:
         hidden, residual, weight = _make_inputs(4, 4096)
         hidden_f32 = hidden.float()
         self.assertFalse(is_supported(hidden_f32, residual, weight))
-        self.assertIsNone(maybe_fused_add_rmsnorm_fp8_quant(hidden_f32, residual, weight))
+        self.assertIsNone(
+            maybe_fused_add_rmsnorm_fp8_quant(hidden_f32, residual, weight)
+        )
 
     def test_env_opt_in(self) -> None:
         hidden, residual, weight = _make_inputs(4, 4096)
