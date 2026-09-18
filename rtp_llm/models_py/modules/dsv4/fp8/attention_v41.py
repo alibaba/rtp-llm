@@ -215,6 +215,10 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention["global"] = {}
             self._shared_attention["topk"] = {}
             self._shared_attention["candidates"] = None
+            # ``_prefill_chunk_meta`` caches per-source-group chunk offsets for
+            # the duration of one forward; drop them with the rest of the
+            # per-forward shared state.
+            self._shared_attention.pop("prefill_chunk_meta", None)
 
     def _owner(self):
         return self._shared_attention["layers"][self.kv_source_layer_id]
@@ -311,10 +315,14 @@ class AttentionV41FP8(AttentionFP8):
     def _write_states(self, values, scores, positions, req_ids, seq_ends):
         slots = self._slots(CSA_STATE, positions, req_ids, state_end=seq_ends)
         if slots is not None:
-            valid = slots >= 0
-            self._source_pool(CSA_STATE)[slots[valid]] = torch.cat(
-                (values, scores), -1
-            ).float()[valid]
+            pool = self._source_pool(CSA_STATE)
+            data = torch.cat((values, scores), -1).float()
+            # Scatter without a boolean-mask compact (``pool[slots[valid]]``
+            # forces a device->host ``nonzero`` sync to size the gather).
+            # Invalid slots (-1) clamp to the sentinel slot 0 and are re-written
+            # with their existing value, i.e. a no-op.
+            idx = slots.clamp_min(0)
+            pool[idx] = torch.where((slots >= 0)[:, None], data, pool[idx])
 
     def _produce_global(self, x_full, positions, req_ids, starts, lengths, *, prefill):
         """Publish this owner's main/index pools, and materialize source keys."""
@@ -333,24 +341,42 @@ class AttentionV41FP8(AttentionFP8):
             value_prev = torch.cat((values[:1], values[:-1]), 0)
             score_prev = torch.cat((scores[:1], scores[:-1]), 0)
             first = positions == starts[req_ids]
-            value_prev[first] = previous[req_ids[first], : self.head_dim].to(
-                values.dtype
+            # Replace the boolean-mask index ``previous[req_ids[first]]`` (a
+            # device->host ``nonzero`` sync) with an integer gather on the full
+            # ``req_ids`` + a ``torch.where`` select. Same result, no sync.
+            value_prev = torch.where(
+                first[:, None],
+                previous[req_ids, : self.head_dim].to(values.dtype),
+                value_prev,
             )
-            score_prev[first] = previous[req_ids[first], self.head_dim :].to(
-                scores.dtype
+            score_prev = torch.where(
+                first[:, None],
+                previous[req_ids, self.head_dim :].to(scores.dtype),
+                score_prev,
             )
             boundary = (positions + 1).remainder(2) == 0
+            # Every ``tensor[boundary]`` below is a boolean-mask index, and each
+            # one independently runs ``nonzero`` to size its output — a
+            # device->host sync per use, six times over for a single mask.
+            # Compact once into integer indices and reuse them.
+            boundary_idx = torch.nonzero(boundary, as_tuple=True)[0]
             latent = compress_pairs(
-                torch.stack((value_prev[boundary], values[boundary]), 1),
-                torch.stack((score_prev[boundary], scores[boundary]), 1),
+                torch.stack((value_prev[boundary_idx], values[boundary_idx]), 1),
+                torch.stack((score_prev[boundary_idx], scores[boundary_idx]), 1),
                 owner.global_norm,
                 self.eps,
             )
             self._write_states(values, scores, positions, req_ids, starts + lengths)
+            boundary_pos, boundary_req = (
+                positions[boundary_idx],
+                req_ids[boundary_idx],
+            )
         else:
-            boundary = torch.ones_like(positions, dtype=torch.bool)
             latent = rms_norm(values, owner.global_norm, self.eps).to(torch.bfloat16)
-        boundary_pos, boundary_req = positions[boundary], req_ids[boundary]
+            # ratio == 1: every position is a boundary — skip the all-True
+            # boolean-mask compaction (``positions[torch.ones_like(...)]`` is a
+            # pure device->host ``nonzero`` sync that selects everything).
+            boundary_pos, boundary_req = positions, req_ids
         freqs = self.freqs_cis[(boundary_pos // ratio) * ratio]
         global_keys = rope_only(latent.clone(), freqs, self.rope_head_dim)
         index_keys = rope_only(
@@ -382,7 +408,21 @@ class AttentionV41FP8(AttentionFP8):
         fused_indexer = prefill and prefill_indexer.is_supported(
             x_full.device, getattr(self, "index_n_heads", 0), index_keys.shape[-1]
         )
-        for b, end in enumerate((starts + lengths).tolist()):
+        # Per-request compressed end positions. Prefer the host copies already
+        # held on CPContext (``prefix_lengths_host`` / ``input_lengths_global_host``)
+        # so we don't force a GPU->CPU sync on the GPU ``starts``/``lengths``.
+        cp = getattr(self, "_cp_ctx", None)
+        if cp is not None and cp.input_lengths_global_host is not None:
+            lengths_host = cp.input_lengths_global_host
+            prefixes_host = (
+                cp.prefix_lengths_host
+                if cp.prefix_lengths_host is not None
+                else (0,) * len(lengths_host)
+            )
+            ends = [s + l for s, l in zip(prefixes_host, lengths_host)]
+        else:
+            ends = (starts + lengths).tolist()
+        for b, end in enumerate(ends):
             count = int(end) // ratio
             idx = torch.arange(count, device=x_full.device, dtype=torch.long)
             pos = (idx + 1) * ratio - 1
@@ -430,6 +470,9 @@ class AttentionV41FP8(AttentionFP8):
                     g = None
             result.append((g, k))
         self._shared_attention["global"] = {self.layer_id: result}
+        # ``_prefill_chunk_meta`` caches per-request chunk offsets derived from
+        # these globals; republishing them invalidates that cache.
+        self._shared_attention.pop("prefill_chunk_meta", None)
 
     def _select_indices(self, x, qr, positions, req_ids):
         shared = self._shared_attention
@@ -492,8 +535,16 @@ class AttentionV41FP8(AttentionFP8):
                 q_fp8, weights_folded = prefill_indexer.quantize_indexer_q(q, weights)
             else:
                 q = fp8_roundtrip(q)
+            single_request = len(globals_by_req) == 1
             for b, (_, keys) in enumerate(globals_by_req):
-                rows = torch.where(req_ids == b)[0]
+                # One-argument ``torch.where`` is ``nonzero``: it syncs to size
+                # its output. With a single request every token belongs to
+                # request 0, so the row selection is just the full range.
+                rows = (
+                    torch.arange(positions.shape[0], device=positions.device)
+                    if single_request
+                    else torch.where(req_ids == b)[0]
+                )
                 key_count = len(keys)
                 chunk_rows = (
                     prefill_indexer.logits_chunk_rows(key_count)
@@ -546,18 +597,36 @@ class AttentionV41FP8(AttentionFP8):
         shared["topk"] = {self.layer_id: out}
         return out
 
+    def _host_prefill_lengths(self, common) -> list:
+        """Per-request new-token counts as host ints, without a GPU->CPU sync.
+
+        Under CP the authoritative host copy already lives on
+        ``CPContext.input_lengths_global_host`` (derived from the framework's
+        CPU ``prefill_actual_input_lengths_cpu``); reading it avoids the
+        stream-synchronizing ``.tolist()`` on the GPU tensor. Fall back to
+        ``.tolist()`` only when that host copy is unavailable (non-CP warmup).
+        """
+        cp = common.cp_ctx
+        if cp is not None and cp.input_lengths_global_host is not None:
+            return list(cp.input_lengths_global_host)
+        t = common.cp_ctx.input_lengths_global if common.cp_on else common.input_lengths
+        return t.detach().tolist()
+
+    def _host_prefill_prefixes(self, common) -> list:
+        """Per-request KV prefix lengths as host ints (no GPU->CPU sync)."""
+        cp = common.cp_ctx
+        if cp is not None and cp.prefix_lengths_host is not None:
+            return list(cp.prefix_lengths_host)
+        return common.prefix_lengths.detach().tolist()
+
     def _swa_prefill_workspace(self, qkv, common):
         """Return BF16 [request, prefix tail + new tokens] for sparse prefill."""
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as dq
 
         meta = common.swa_meta
+        lengths_host = self._host_prefill_lengths(common)
         if not common.any_cont:
-            lengths = (
-                common.cp_ctx.input_lengths_global
-                if common.cp_on
-                else common.input_lengths
-            ).tolist()
-            return list(qkv.kv_full.split(lengths)), [0] * len(lengths)
+            return list(qkv.kv_full.split(lengths_host)), [0] * len(lengths_host)
         B, D = common.batch_size, self.head_dim
         buf = torch.zeros(B, meta.M, D, dtype=torch.bfloat16, device=qkv.kv_full.device)
         if meta.prefix_len_max > 0:
@@ -582,14 +651,49 @@ class AttentionV41FP8(AttentionFP8):
                     offset=0,
                 )
         buf.view(-1, D).index_copy_(0, meta.slot_in_flat, qkv.kv_full)
-        prefixes = common.prefix_lengths.tolist()
-        lengths = (
-            common.cp_ctx.input_lengths_global if common.cp_on else common.input_lengths
-        ).tolist()
-        tails = [min(int(p), self.window_size - 1) for p in prefixes]
-        return [buf[b, : tails[b] + int(lengths[b])] for b in range(B)], [
-            int(p) - t for p, t in zip(prefixes, tails)
+        prefixes_host = self._host_prefill_prefixes(common)
+        tails = [min(int(p), self.window_size - 1) for p in prefixes_host]
+        return [buf[b, : tails[b] + int(lengths_host[b])] for b in range(B)], [
+            int(p) - t for p, t in zip(prefixes_host, tails)
         ]
+
+    def _prefill_chunk_meta(self, globals_by_req, swa, swa_starts, req_ids, device):
+        """Per-request chunk offsets for the sparse-prefill index build.
+
+        ``offsets``/``ns``/``swstart`` are pure functions of the KV-source
+        globals' shapes and of the SWA window shape, and both are fixed for a
+        whole ``kv_source_layer_id`` group: ``globals_by_req`` is that group's
+        shared KV-source tensor, while the SWA window is ``window_size`` wide on
+        every layer (``args.window_size`` is a single model-wide value). The
+        previous per-layer rebuild therefore recomputed byte-identical host
+        lists and re-uploaded them with a pageable — hence synchronous — H2D
+        copy on every compress-ratio layer. Compute and upload once per group
+        instead; ``_produce_global`` drops the entry whenever it republishes
+        ``shared["global"]``, so the cache never outlives its inputs.
+        """
+        shared = self._shared_attention
+        cached = shared.get("prefill_chunk_meta")
+        if cached is not None:
+            return cached
+        offsets, global_sizes = [], []
+        offset = 0
+        for (g, _), sw in zip(globals_by_req, swa):
+            offsets.append(offset)
+            global_sizes.append(g.shape[0])
+            offset += g.shape[0] + sw.shape[0]
+        if len(offsets) == 1:
+            # Single-request prefill: ``req_ids`` is all zeros, so indexing a
+            # one-element tensor by it is a pure broadcast. Use the host scalars
+            # directly and skip the device tensors (and their H2D copy) entirely.
+            meta = (offsets[0], global_sizes[0], swa_starts[0])
+        else:
+            meta = (
+                torch.tensor(offsets, device=device)[req_ids, None],
+                torch.tensor(global_sizes, device=device)[req_ids, None],
+                torch.tensor(swa_starts, device=device)[req_ids, None],
+            )
+        shared["prefill_chunk_meta"] = meta
+        return meta
 
     def _forward_prefill(self, x, positions, shared_input_quant=None):
         self._begin_forward()
@@ -618,8 +722,14 @@ class AttentionV41FP8(AttentionFP8):
         ).long()
         if self.is_kv_source:
             x_full = cp_all_gather_full_varlen(x, common.cp_ctx) if common.cp_on else x
+            # ``repeat_interleave`` with a CUDA ``lengths`` tensor computes the
+            # output size via a host-side ``.item()`` sync unless ``output_size``
+            # is supplied. ``x_full.shape[0]`` is already known on host and equals
+            # ``lengths.sum()`` (gathered sequence length), so pass it explicitly.
             ids_full = torch.repeat_interleave(
-                torch.arange(common.batch_size, device=x.device), lengths
+                torch.arange(common.batch_size, device=x.device),
+                lengths,
+                output_size=int(x_full.shape[0]),
             )
             cu = torch.cat(
                 (torch.zeros(1, device=x.device, dtype=torch.long), lengths.cumsum(0))
@@ -634,16 +744,12 @@ class AttentionV41FP8(AttentionFP8):
             )
         selected = self._select_indices(x, qkv.qr, positions, req_ids)
         globals_by_req = self._shared_attention["global"][self.kv_source_layer_id]
-        chunks, offsets, global_sizes = [], [], []
-        offset = 0
+        offsets, ns, swstart = self._prefill_chunk_meta(
+            globals_by_req, swa, swa_starts, req_ids, x.device
+        )
+        chunks = []
         for (g, _), sw in zip(globals_by_req, swa):
-            offsets.append(offset)
-            global_sizes.append(g.shape[0])
             chunks.extend((g, sw))
-            offset += g.shape[0] + sw.shape[0]
-        offsets = torch.tensor(offsets, device=x.device)[req_ids, None]
-        ns = torch.tensor(global_sizes, device=x.device)[req_ids, None]
-        swstart = torch.tensor(swa_starts, device=x.device)[req_ids, None]
         swpos = (
             positions[:, None]
             - self.window_size
