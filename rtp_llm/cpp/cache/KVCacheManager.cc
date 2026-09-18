@@ -738,6 +738,12 @@ KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteC
     return coordinator_->asyncWrite(connector_context);
 }
 
+bool KVCacheManager::stageDsv41Checkpoint(const KVCacheResource&       resource,
+                                          const std::function<void()>& wait_for_producer,
+                                          const std::shared_ptr<Meta>& meta) {
+    return coordinator_ && coordinator_->stageDsv41Checkpoint(resource, wait_for_producer, meta);
+}
+
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     return coordinator_->executeFunction(request, response);
 }

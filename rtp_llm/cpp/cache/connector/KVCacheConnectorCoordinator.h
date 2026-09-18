@@ -55,6 +55,10 @@ public:
     std::vector<CacheKeyType> memoryCacheKeys() const;
     std::vector<CacheKeyType> memoryCacheKeysForStatus() const;
 
+    bool stageDsv41Checkpoint(const KVCacheResource&       resource,
+                              const std::function<void()>& wait_for_producer,
+                              const std::shared_ptr<Meta>& meta);
+
     uint32_t convertToGlobalLayerId(int model_id, int layer_id) const override {
         return allocator_->convertToGlobalLayerId(model_id, layer_id);
     }

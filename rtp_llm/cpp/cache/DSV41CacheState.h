@@ -3,8 +3,10 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <tuple>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -104,6 +106,47 @@ struct DSV41CheckpointMetadata {
                                   rhs.history_ready,
                                   rhs.draft_committed,
                                   rhs.pair_empty);
+    }
+};
+
+// Model-side execution facts for one bounded checkpoint publication. The engine
+// owns the identity, layout and policy boundary; the model only reports the
+// materialized state it produced at that boundary.
+struct DSV41CheckpointPublication {
+    int64_t              request_id{0};
+    int64_t              materialized_end{0};
+    std::vector<int64_t> global_entries;
+    std::vector<int64_t> index_entries;
+    std::vector<int64_t> swa_valid_start;
+    std::vector<int64_t> swa_valid_end;
+    std::vector<int64_t> swa_replay_floor;
+    std::vector<int64_t> history_token_ids;
+    std::vector<uint8_t> history_image_mask;
+    int64_t              aux_valid_start{0};
+    int64_t              aux_valid_end{0};
+    bool                 draft_committed{false};
+};
+
+// The scheduling rank hands this narrow seam to the model for a real in-flight
+// prefill. Storage and copy completion remain owned by the memory connector;
+// no progress reports or protection ring are carried here.
+struct DSV41CheckpointPublisher {
+    int64_t                            request_id{-1};
+    int64_t                            protected_prefix_end{0};
+    int64_t                            final_handoff_end{0};
+    std::vector<std::vector<int32_t>>  block_ids_by_group;
+    using WorkerBlockIds = std::vector<std::vector<std::vector<int32_t>>>;
+    std::function<bool(const DSV41CheckpointPublication&,
+                       const std::vector<std::vector<int32_t>>&,
+                       const WorkerBlockIds&)>
+        publish;
+
+    bool publishCheckpoint(const DSV41CheckpointPublication&             publication,
+                           const std::vector<std::vector<int32_t>>&      actual_block_ids,
+                           const WorkerBlockIds&                         worker_block_ids = {}) const {
+        if (publication.request_id != request_id || !publish)
+            throw std::invalid_argument("V4.1 checkpoint publisher belongs to another request");
+        return publish(publication, actual_block_ids, worker_block_ids);
     }
 };
 

@@ -363,6 +363,26 @@ KVCacheConnectorCoordinator::asyncWriteByLayer(int                              
     return p2p_connector_->asyncWriteByLayer(layer_id, layer_context);
 }
 
+bool KVCacheConnectorCoordinator::stageDsv41Checkpoint(const KVCacheResource&       source,
+                                                       const std::function<void()>& wait_for_producer,
+                                                       const std::shared_ptr<Meta>& meta) {
+    if (stop_.load() || !memory_connector_ || !meta || !meta->enableMemoryCache()
+        || parallelism_config_.tp_rank != 0 || cache_config_.dsv41_cache_layout_version != 1)
+        return false;
+    auto selected = source;
+    auto keys     = source.cacheKeys();
+    const int cp  = cpSize();
+    if (cp > 1 && !source.cacheKeysAreCpCanonical()) {
+        keys = source.localCacheKeys(cp - 1, cp);
+        if (keys.empty())
+            return false;
+        selected = makeCpShardedConnectorResource(source, cache_config_, keys, cp);
+        keys     = selected.cacheKeys();
+    }
+    auto reference = allocator_->incrKVCacheRef(selected, keys, true);
+    return reference && memory_connector_->stageDsv41Checkpoint(reference, wait_for_producer, meta);
+}
+
 std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
     auto memory_connector = std::make_shared<KVCacheMemoryConnector>(cache_config_,
                                                                      kv_cache_config_,

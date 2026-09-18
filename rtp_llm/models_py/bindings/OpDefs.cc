@@ -209,6 +209,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("v41_is_fake", &PyModelInputs::v41_is_fake)
         .def_readwrite("v41_execution_context", &PyModelInputs::v41_execution_context)
         .def_readwrite("v41_swa_ranges", &PyModelInputs::v41_swa_ranges)
+        .def_readwrite("v41_checkpoint_publishers", &PyModelInputs::v41_checkpoint_publishers)
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
@@ -221,6 +222,35 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("v41_token_valid", &PyModelInputs::v41_token_valid, "Valid V4.1 canonical rows")
         .def_readwrite("engram_history_ids", &PyModelInputs::engram_history_ids, "Three canonical Engram predecessors")
         .def_readwrite("engram_history_valid", &PyModelInputs::engram_history_valid, "Canonical predecessor validity");
+
+    using rtp_llm::DSV41CheckpointPublication;
+    using rtp_llm::DSV41CheckpointPublisher;
+    pybind11::class_<DSV41CheckpointPublication>(m, "V41CheckpointPublication")
+        .def(pybind11::init<>())
+        .def_readwrite("request_id", &DSV41CheckpointPublication::request_id)
+        .def_readwrite("materialized_end", &DSV41CheckpointPublication::materialized_end)
+        .def_readwrite("global_entries", &DSV41CheckpointPublication::global_entries)
+        .def_readwrite("index_entries", &DSV41CheckpointPublication::index_entries)
+        .def_readwrite("swa_valid_start", &DSV41CheckpointPublication::swa_valid_start)
+        .def_readwrite("swa_valid_end", &DSV41CheckpointPublication::swa_valid_end)
+        .def_readwrite("swa_replay_floor", &DSV41CheckpointPublication::swa_replay_floor)
+        .def_readwrite("history_token_ids", &DSV41CheckpointPublication::history_token_ids)
+        .def_readwrite("history_image_mask", &DSV41CheckpointPublication::history_image_mask)
+        .def_readwrite("aux_valid_start", &DSV41CheckpointPublication::aux_valid_start)
+        .def_readwrite("aux_valid_end", &DSV41CheckpointPublication::aux_valid_end)
+        .def_readwrite("draft_committed", &DSV41CheckpointPublication::draft_committed);
+    pybind11::class_<DSV41CheckpointPublisher, std::shared_ptr<DSV41CheckpointPublisher>>(
+        m, "V41CheckpointPublisher")
+        .def_readonly("request_id", &DSV41CheckpointPublisher::request_id)
+        .def_readonly("protected_prefix_end", &DSV41CheckpointPublisher::protected_prefix_end)
+        .def_readonly("final_handoff_end", &DSV41CheckpointPublisher::final_handoff_end)
+        .def_readonly("block_ids_by_group", &DSV41CheckpointPublisher::block_ids_by_group)
+        .def("publish",
+             &DSV41CheckpointPublisher::publishCheckpoint,
+             pybind11::arg("publication"),
+             pybind11::arg("actual_block_ids_by_group"),
+             pybind11::arg("block_ids_by_rank") = DSV41CheckpointPublisher::WorkerBlockIds{},
+             pybind11::call_guard<pybind11::gil_scoped_release>());
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

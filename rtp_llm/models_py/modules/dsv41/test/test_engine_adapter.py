@@ -593,6 +593,50 @@ class EngineAdapterContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fixed decode buffer"):
             model.get_mtp_target_hidden_states(7)
 
+    def test_cp_publication_reports_materialized_boundary_facts(self):
+        cache = SimpleNamespace(
+            request_id="101",
+            layout=SimpleNamespace(draft_enabled=True),
+            swa_ends={layer: 1024 for layer in range(43)},
+            owners={
+                layer: SimpleNamespace(materialized_end=1024)
+                for layer in GLOBAL_OWNERS
+            },
+            swa={
+                layer: SimpleNamespace(valid_starts=[896], valid_ends=[1024])
+                for layer in range(43)
+            },
+        )
+        decoder = SimpleNamespace(cache=cache, end=1024, replay_floor=896)
+        history = SimpleNamespace(token_ids=(31, 129264, 37), image_mask=(False, True, False))
+        publication = DeepSeekV41Model._cp_publication(decoder, history)
+        self.assertEqual(publication.request_id, 101)
+        self.assertEqual(publication.materialized_end, 1024)
+        self.assertEqual(len(publication.global_entries), 4)
+        self.assertEqual(list(publication.swa_valid_end), [1024] * 43)
+        self.assertEqual(list(publication.swa_replay_floor), [0] * 21 + [896] * 22)
+        self.assertEqual((publication.aux_valid_start, publication.aux_valid_end), (896, 1024))
+        self.assertEqual(list(publication.history_token_ids), [31, 129264, 37])
+        self.assertEqual(list(publication.history_image_mask), [0, 1, 0])
+        self.assertTrue(publication.draft_committed)
+
+    def test_cp_publication_rejects_swa_not_at_the_boundary(self):
+        cache = SimpleNamespace(
+            request_id="101",
+            layout=SimpleNamespace(draft_enabled=True),
+            swa_ends={layer: 1024 for layer in range(43)},
+            owners={layer: SimpleNamespace(materialized_end=1024) for layer in GLOBAL_OWNERS},
+            swa={
+                layer: SimpleNamespace(valid_starts=[896], valid_ends=[1024])
+                for layer in range(43)
+            },
+        )
+        cache.swa_ends[20] = 896
+        decoder = SimpleNamespace(cache=cache, end=1024, replay_floor=896)
+        history = SimpleNamespace(token_ids=(31, 129264, 37), image_mask=(False, True, False))
+        with self.assertRaisesRegex(RuntimeError, "actual boundary"):
+            DeepSeekV41Model._cp_publication(decoder, history)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -123,6 +123,8 @@ std::array<int64_t, 2> decodeMtpHiddenStatesShape(int64_t total_numel, int64_t r
 }
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
+    if (parallelism_config.tp_rank != 0)
+        inputs.v41_checkpoint_publishers.clear();
     if (parallelism_config.tp_size <= 1) {
         return;
     }

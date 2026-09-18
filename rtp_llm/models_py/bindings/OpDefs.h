@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <utility>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -350,6 +351,7 @@ struct PyModelInputs {
     torch::Tensor                             v41_is_fake;
     torch::Tensor                             v41_execution_context;
     torch::Tensor                             v41_swa_ranges;
+    std::vector<std::shared_ptr<rtp_llm::DSV41CheckpointPublisher>> v41_checkpoint_publishers;
     torch::Tensor                             input_ids;
     torch::Tensor                             input_hiddens;
     PyAttentionInputs                         attention_inputs;
