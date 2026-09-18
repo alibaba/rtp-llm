@@ -117,3 +117,12 @@ py_test(
     tags = ["H20"],
     exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
 )
+
+py_test(
+    name = "test_hy4_mxfp8_qc_reuse",
+    srcs = ["test_hy4_mxfp8_qc_reuse.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:testlib",
+    ],
+    tags = ["open_skip"],
+)

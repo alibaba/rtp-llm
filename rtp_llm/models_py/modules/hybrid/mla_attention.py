@@ -279,10 +279,13 @@ class MlaAttention(nn.Module):
                 self._fuse_q_a_norm_mode = "mxfp8"
             elif (
                 self._reuse_mxfp8_q_c_quant
-                and fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output
-                is not None
+                and fused_strided_rmsnorm_per_token_fp8_quant is not None
             ):
-                self._fuse_q_a_norm_mode = "mxfp8_dual"
+                # HY4 Indexer WQ-B consumes q_c_fp8 directly when supplied.
+                # The BF16 q_c output from the former dual-output path has no
+                # consumer in this all-MXFP8 configuration, so avoid writing
+                # it and retain only the exact packed MXFP8 representation.
+                self._fuse_q_a_norm_mode = "mxfp8_indexer"
 
         # HY4 Gated MLA epilogue: fuse elementwise sigmoid, multiply, and the
         # activation quantization consumed by the quantized output projection.
@@ -400,10 +403,19 @@ class MlaAttention(nn.Module):
                 ],
                 dim=-1,
             )
-            # F1a/F1b: fused strided RMSNorm (skip .contiguous() copy). When
-            # q_b_proj is fp8 we additionally emit fp8+scale (F1b dual output)
-            # so q_b_proj can use input_scales= and skip its internal quant.
-            if self._fuse_q_a_norm_mode == "mxfp8_dual":
+            # F1a/F1b: fused strided RMSNorm (skip .contiguous() copy). The
+            # FP8 variants emit the exact FP8+scale pair consumed by q_b_proj;
+            # HY4's all-MXFP8 Indexer path does not need a BF16 q_c copy.
+            if self._fuse_q_a_norm_mode == "mxfp8_indexer":
+                q_c_fp8, q_c_scale = fused_strided_rmsnorm_per_token_fp8_quant(
+                    q,
+                    self.q_a_layernorm.weight.data,
+                    self.q_a_layernorm.variance_epsilon,
+                    group_size=32,
+                    scale_ue8m0=True,
+                    mxfp8_semantics=True,
+                )
+            elif self._fuse_q_a_norm_mode == "mxfp8_dual":
                 q_c, q_c_fp8, q_c_scale = (
                     fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
                         q,
@@ -414,9 +426,8 @@ class MlaAttention(nn.Module):
                         mxfp8_semantics=True,
                     )
                 )
-                q = self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
             elif self._fuse_q_a_norm_mode == "mxfp8":
-                q_fp8, q_scale = fused_strided_rmsnorm_per_token_fp8_quant(
+                q_c_fp8, q_c_scale = fused_strided_rmsnorm_per_token_fp8_quant(
                     q,
                     self.q_a_layernorm.weight.data,
                     self.q_a_layernorm.variance_epsilon,
@@ -424,7 +435,6 @@ class MlaAttention(nn.Module):
                     scale_ue8m0=True,
                     mxfp8_semantics=True,
                 )
-                q = self.q_b_proj(q_fp8, input_scales=q_scale)
             elif self._fuse_q_a_norm_mode == "fp8_dual":
                 q_c, q_c_fp8, q_c_scale = (
                     fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
