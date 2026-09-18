@@ -135,10 +135,15 @@ class ConstraintTreeMappedE2ETest {
     }
 
     private Process bootstrapPython(Path path, int masterPort, int workerPort, String service) throws Exception {
-        String script = "import importlib.util,sys; "
+        String script = "import importlib.util,sys,os,json; from types import SimpleNamespace; "
                 + "s=importlib.util.spec_from_file_location('bootstrap',sys.argv[1]); "
                 + "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
-                + "b=m.ConstraintTreeBootstrap(lambda:sys.argv[2],sys.argv[3],int(sys.argv[4]),'PDFUSION',0.05); "
+                + "os.environ['CONSTRAINT_TREE_REQUIRED']='true'; "
+                + "os.environ['CONSTRAINT_TREE_MASTER_ENDPOINT']='tree.master.vip'; "
+                + "os.environ['MODEL_SERVICE_CONFIG']=json.dumps({'service_id':sys.argv[3]}); "
+                + "sys.modules['rtp_llm.vipserver']=SimpleNamespace(get_host_list_by_domain_now="
+                + "lambda domain:[SimpleNamespace(ip='127.0.0.1',port=int(sys.argv[2].split(':')[1]))]); "
+                + "b=m.ConstraintTreeBootstrap.from_env(None,int(sys.argv[4]),'PDFUSION'); b.interval=0.05; "
                 + "b.start(); b._thread.join(40); sys.exit(1 if b._thread.is_alive() else 0)";
         return new ProcessBuilder("python3", "-c", script, path.toString(), "127.0.0.1:" + masterPort,
                 service, Integer.toString(workerPort)).redirectErrorStream(true)

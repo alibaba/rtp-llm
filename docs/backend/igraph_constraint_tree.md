@@ -200,8 +200,33 @@ registered instances including unready ones (`VIPClient.getAllHosts`), while
 normal inference discovery continues using `srvHosts`. Instances must be
 registered during initialization and reachable on the tree management port;
 if the platform only registers healthy instances, readiness cannot bootstrap
-through this discovery path alone. Existing reconciliation pushes the current
-tree to restarted instances without rebuilding it manually.
+through this discovery path alone. Worker bootstrap therefore registers its native
+HTTP port directly with Master before readiness, renewing until both native health
+and ordinary discovery are ready. Existing reconciliation pushes the current tree
+to restarted instances without rebuilding it manually.
+
+For colocated inference that does **not** use FlexLB scheduling, configure the
+Worker with a tree-only Master VIP and an identity-only inference configuration:
+
+```text
+CONSTRAINT_TREE_MASTER_ENDPOINT=com.aicheng.whale.prod.<biz>.master.<deployment>
+MODEL_SERVICE_CONFIG={"service_id":"aigc.text-generation.generation.engine_service"}
+CONSTRAINT_TREE_REQUIRED=true
+```
+
+`CONSTRAINT_TREE_MASTER_ENDPOINT` is a VIPServer domain, not a URL. It is resolved
+by the background bootstrap thread and never enables inference routing. The
+registration endpoint already redirects to the active Master. Do not add a
+`master_endpoint` to `MODEL_SERVICE_CONFIG` just for tree delivery: that field
+enables `/rtp_llm/schedule` calls on the inference request path. Also do not retain
+role endpoints in this identity-only override unless remote inference is intended.
+
+Actual FlexLB/PD deployments must keep their existing inference route configuration.
+They may use a separate tree VIP; without it, bootstrap remains backward-compatible
+with `MODEL_SERVICE_CONFIG.master_endpoint`. Install the supporting Worker image
+before changing existing configurations. Changing only the environment on an old
+Worker image would prevent cold-start bootstrap. Stage the image and configuration
+together, verify one canary's tree/readiness and request errors, then expand.
 
 This fixes the missing-tree startup window, not all rollout errors. Tokenizer
 mapping changes still require a coordinated rollout: old-tree fingerprints
