@@ -753,7 +753,9 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto top_k_t = params.top_k.to(params.logits.device(), /*non_blocking=*/true).contiguous();
     auto top_p_t = params.top_p.to(params.logits.device(), /*non_blocking=*/true).contiguous();
 
-    // 6. Sample
+    // 6. Sample. Kernels write the per-row status directly, without a comparison launch.
+    auto success =
+        all_top_k_one ? torch::Tensor() : torch::empty({(int64_t)batch_size}, probs_t.options().dtype(torch::kBool));
     if (all_top_k_one) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
@@ -797,7 +799,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                                       deterministic,
                                       seed_t,
                                       offset_t,
-                                      reinterpret_cast<uintptr_t>(cur_stream));
+                                      reinterpret_cast<uintptr_t>(cur_stream),
+                                      success);
             if (need_renorm_probs) {
                 top_p_renorm_probs(probs_t, sampling_probs_t, top_p_t, 1.0, reinterpret_cast<uintptr_t>(cur_stream));
             }
@@ -810,7 +813,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                                       deterministic,
                                       seed_t,
                                       offset_t,
-                                      reinterpret_cast<uintptr_t>(cur_stream));
+                                      reinterpret_cast<uintptr_t>(cur_stream),
+                                      success);
             if (need_renorm_probs) {
                 top_k_renorm_probs(probs_t, sampling_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(cur_stream));
             }
@@ -827,7 +831,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                                             deterministic,
                                             seed_t,
                                             offset_t,
-                                            reinterpret_cast<uintptr_t>(cur_stream));
+                                            reinterpret_cast<uintptr_t>(cur_stream),
+                                            success);
             if (need_renorm_probs) {
                 auto top_k_probs_t = torch::zeros_like(sampling_probs_t);
                 top_k_renorm_probs(probs_t, top_k_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(cur_stream));
@@ -838,6 +843,20 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         }
     }
 
+    torch::Tensor selected_log_probs;
+    if (success.defined() && sampling_probs_t.defined()) {
+        if (params.cum_log_probs.has_value()) {
+            selected_log_probs = torch::empty({(int64_t)batch_size}, probs_t.options());
+        }
+        // Healthy rows skip the vocabulary entirely unless a selected log probability
+        // is needed. Failed rows are zeroed and never gathered through their -1 token.
+        finalize_sampling_probs(sampling_probs_t,
+                                samples_t,
+                                success,
+                                selected_log_probs.defined() ? std::make_optional(selected_log_probs) : std::nullopt,
+                                reinterpret_cast<uintptr_t>(cur_stream));
+    }
+
     if (need_full_sampling_probs) {
         output_all_probs_t.copy_(sampling_probs_t.slice(1, 0, output_width));
     }
@@ -845,14 +864,16 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // 7. Update cum_log_probs
     if (params.cum_log_probs.has_value()) {
         auto cum_log_probs_t = params.cum_log_probs.value();
-        auto token_probs_t   = sampling_probs_t.gather(1, samples_t.to(torch::kLong).unsqueeze(1)).squeeze(1);
-        cum_log_probs_t.add_(token_probs_t.log().to(cum_log_probs_t.device()));
+        if (!selected_log_probs.defined()) {
+            selected_log_probs = sampling_probs_t.gather(1, samples_t.to(torch::kLong).unsqueeze(1)).squeeze(1).log();
+        }
+        cum_log_probs_t.add_(selected_log_probs.to(cum_log_probs_t.device()));
     }
 
     // 8. Copy results back
     auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
     params.token_ids.copy_(output_tokens);
-    return GreedyOutput{};
+    return {success};
 }
 
 torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {

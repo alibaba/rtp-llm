@@ -1,9 +1,11 @@
 #include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/hip/HIPContext.h>
 #include <gtest/gtest.h>
 #include <hip/hip_runtime.h>
 #include <torch/torch.h>
 
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <tuple>
 #include <vector>
@@ -11,6 +13,7 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/rocm/kernels/sampling/sampling.h"
 
 using namespace rtp_llm;
 
@@ -117,6 +120,155 @@ TEST(RocmSamplerOpTest, ProductionSamplerCoversAllDispatchesAndReusesSlots) {
         expectSampleMatchesReturnedProbability(output);
     }
 }
+
+class RocmSamplerInvalidProbTest: public ::testing::TestWithParam<std::pair<int32_t, float>> {};
+
+TEST_P(RocmSamplerInvalidProbTest, ReportsInvalidRowsWithoutAffectingHealthyRows) {
+    const auto [top_k, top_p] = GetParam();
+    const float nan           = std::numeric_limits<float>::quiet_NaN();
+    const float inf           = std::numeric_limits<float>::infinity();
+    Sampler     sampler(SamplerInitParams{/*max_batch_size=*/5, /*fixed_max_batch_size=*/true});
+
+    // Exercise no probability outputs, normalized outputs, and original outputs.
+    for (int output_mode = 0; output_mode < 3; ++output_mode) {
+        auto reference = sampler.forward(makeSamplerInputs(5, top_k, top_p, /*seed=*/12000));
+        auto inputs    = makeSamplerInputs(5, top_k, top_p, /*seed=*/12000);
+        inputs.logits[1][0].fill_(nan);
+        inputs.logits[2].fill_(-inf);
+        inputs.logits[3][0].fill_(inf);
+        if (output_mode == 0) {
+            inputs.all_probs     = torch::Tensor();
+            inputs.cum_log_probs = torch::Tensor();
+        }
+        inputs.return_original_all_probs = output_mode == 2;
+        auto output                      = sampler.forward(inputs);
+        runtimeSyncAndCheck();
+
+        auto success          = output.success.cpu();
+        auto tokens           = output.token_ids.flatten().cpu();
+        auto reference_tokens = reference.token_ids.flatten().cpu();
+        for (int64_t row = 0; row < 5; ++row) {
+            const bool valid = row == 0 || row == 4;
+            EXPECT_EQ(success[row].item<bool>(), valid);
+            if (valid) {
+                EXPECT_EQ(tokens[row].item<int32_t>(), reference_tokens[row].item<int32_t>());
+            } else {
+                EXPECT_EQ(tokens[row].item<int32_t>(), -1);
+            }
+            if (output_mode != 0) {
+                auto        probs = output.all_probs[row].cpu();
+                const float cum   = output.cum_log_probs[row].item<float>();
+                if (valid) {
+                    EXPECT_TRUE(torch::isfinite(probs).all().item<bool>());
+                    EXPECT_NEAR(probs.sum().item<float>(), 1.0f, 1e-5f);
+                    EXPECT_NEAR(cum, std::log(probs[tokens[row].item<int32_t>()].item<float>()), 1e-5f);
+                    if (output_mode == 1) {
+                        EXPECT_TRUE(torch::allclose(probs, reference.all_probs[row].cpu()));
+                    }
+                } else {
+                    EXPECT_TRUE(probs.eq(0).all().item<bool>());
+                    EXPECT_EQ(cum, -inf);
+                }
+            }
+        }
+    }
+}
+
+TEST_P(RocmSamplerInvalidProbTest, RejectsSingleInvalidRow) {
+    const auto [top_k, top_p] = GetParam();
+    Sampler sampler(SamplerInitParams{/*max_batch_size=*/1, /*fixed_max_batch_size=*/true});
+    for (float invalid : {std::numeric_limits<float>::quiet_NaN(),
+                          -std::numeric_limits<float>::infinity(),
+                          std::numeric_limits<float>::infinity()}) {
+        auto inputs = makeSamplerInputs(1, top_k, top_p, /*seed=*/13000);
+        inputs.logits.fill_(invalid);
+        // Also exercise the internal probability buffer allocated for cum_log_probs.
+        inputs.all_probs = torch::Tensor();
+        auto output      = sampler.forward(inputs);
+        runtimeSyncAndCheck();
+        EXPECT_FALSE(output.success.cpu()[0].item<bool>());
+        EXPECT_EQ(output.token_ids[0][0].item<int32_t>(), -1);
+        EXPECT_EQ(output.cum_log_probs[0].item<float>(), -std::numeric_limits<float>::infinity());
+    }
+}
+
+TEST_P(RocmSamplerInvalidProbTest, ValidatesTailAfterEarlySampleAndFinalizesOnlyFailedRows) {
+    const auto [top_k, top_p] = GetParam();
+    const float nan           = std::numeric_limits<float>::quiet_NaN();
+    const float inf           = std::numeric_limits<float>::infinity();
+    const auto  gpu           = torch::TensorOptions().device(torch::kCUDA);
+    const auto  stream        = reinterpret_cast<uintptr_t>(at::hip::getCurrentHIPStream().stream());
+    for (int64_t vocab : {1025, 32768, 248320}) {
+        SCOPED_TRACE(vocab);
+        auto host_probs = torch::zeros({8, vocab}, torch::kFloat32);
+        host_probs[0][0].fill_(1.0f);
+        host_probs[1][vocab - 1].fill_(1.0f);
+        // Row 2 has no positive mass. Rows 3-5 sample from the first tile, but
+        // must still reject an invalid probability in the last tile.
+        for (int64_t row = 3; row < 6; ++row) {
+            host_probs[row][0].fill_(1.0f);
+        }
+        host_probs[3][vocab - 1].fill_(nan);
+        host_probs[4][vocab - 1].fill_(inf);
+        host_probs[5][vocab - 1].fill_(-0.1f);
+        host_probs[6].fill_(nan);
+        host_probs[7].fill_(-inf);
+        auto probs   = host_probs.to(torch::kCUDA);
+        auto samples = torch::empty({8}, gpu.dtype(torch::kInt32));
+        auto success = torch::empty({8}, gpu.dtype(torch::kBool));
+        auto seeds   = torch::arange(8, gpu.dtype(torch::kInt64)) + 14000;
+        for (int round = 0; round < 3; ++round) {
+            auto offsets = torch::full({8}, round * 32, gpu.dtype(torch::kInt64));
+            samples.fill_(17);
+            success.fill_(true);
+            if (top_k == 0) {
+                top_p_sampling_from_probs(
+                    probs, samples, std::nullopt, std::nullopt, top_p, true, seeds, offsets, stream, success);
+            } else if (top_p == 1.0f) {
+                top_k_sampling_from_probs(
+                    probs, samples, std::nullopt, std::nullopt, top_k, true, seeds, offsets, stream, success);
+            } else {
+                top_k_top_p_sampling_from_probs(probs,
+                                                samples,
+                                                std::nullopt,
+                                                std::nullopt,
+                                                top_k,
+                                                std::nullopt,
+                                                top_p,
+                                                true,
+                                                seeds,
+                                                offsets,
+                                                stream,
+                                                success);
+            }
+            auto final_probs = probs.clone();
+            auto logs        = torch::empty({8}, gpu.dtype(torch::kFloat32));
+            finalize_sampling_probs(final_probs, samples, success, logs, stream);
+            runtimeSyncAndCheck();
+            auto tokens     = samples.cpu();
+            auto status     = success.cpu();
+            auto final_host = final_probs.cpu();
+            auto log_host   = logs.cpu();
+            for (int64_t row = 0; row < 8; ++row) {
+                const bool valid = row < 2;
+                EXPECT_EQ(status[row].item<bool>(), valid);
+                EXPECT_EQ(tokens[row].item<int32_t>(), valid ? (row == 0 ? 0 : vocab - 1) : -1);
+                EXPECT_EQ(log_host[row].item<float>(), valid ? 0.0f : -inf);
+                if (valid) {
+                    EXPECT_TRUE(torch::equal(final_host[row], host_probs[row]));
+                } else {
+                    EXPECT_TRUE(final_host[row].eq(0).all().item<bool>());
+                }
+            }
+        }
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(AllDispatches,
+                         RocmSamplerInvalidProbTest,
+                         ::testing::Values(std::make_pair(0, 0.75f),
+                                           std::make_pair(4, 1.0f),
+                                           std::make_pair(4, 0.75f)));
 
 TEST(RocmSamplerOpTest, CombinedSamplingMatchesReturnedDistribution) {
     constexpr int64_t batch_size = 2048;
