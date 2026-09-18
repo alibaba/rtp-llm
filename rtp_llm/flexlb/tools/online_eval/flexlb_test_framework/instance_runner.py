@@ -541,8 +541,9 @@ def run_structured(args: argparse.Namespace, ports) -> int:
         sources = {"run": out}
         if target.parent != out:
             sources["aggregate"] = target
+        archive_kind = "scenario" if args.suite == "workload" else "case"
         create_archive(
-            Path(args.archive), sources, kind="case",
+            Path(args.archive), sources, kind=archive_kind,
             status="incomplete" if interrupted else "complete",
             metadata={"profile": args.profile, "grade": args.grade,
                       "exit_code": payload["summary"]["exit_code"],

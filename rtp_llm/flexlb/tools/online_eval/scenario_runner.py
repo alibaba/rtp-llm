@@ -101,6 +101,8 @@ def main(argv=None):
     parser.add_argument("--instances", help="comma separated exact instance IDs")
     parser.add_argument("--list-json", action="store_true")
     parser.add_argument("--out-dir", type=Path)
+    parser.add_argument("--archive", type=Path,
+                        help="optional single-file scenario experiment archive")
     parser.add_argument("--lease-json", type=Path)
     args = parser.parse_args(argv)
     if args.master_mode:
@@ -186,6 +188,16 @@ def main(argv=None):
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
+        if args.archive:
+            from experiment_archive import create_archive
+
+            create_archive(
+                args.archive, {"run": args.out_dir}, kind="scenario",
+                status="incomplete" if cancelled.is_set() or len(rows) != len(plans)
+                       else "complete",
+                metadata={"profile": args.profile, "grade": args.grade,
+                          "instance_count": len(rows), "planned_count": len(plans)},
+            )
     return summarize(rows)["exit_code"]
 
 

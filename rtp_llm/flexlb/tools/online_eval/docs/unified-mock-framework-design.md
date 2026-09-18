@@ -35,7 +35,7 @@
 - A/B 比较继续由 `stress/compare_ab.py` 负责门禁。`--html` 现在输出原指标表及 `ab_curves.html`；两次运行按相对秒对齐，缺失采样保留空值，稳态窗在每图说明中标明。曲线覆盖 QPS、TTFT、P/D TPS、在飞请求、KV 可用量/驱逐及局部差值，由现有通用 Chart.js 报告渲染器生成。
 - 图表交互由 `stress/legend_interaction.js` 封装，只改变图例行为，不定主题：单击切换一条，双击隔离；只剩一条时再双击恢复全显，也提供“全选”按钮。
 - `compare_case_runs.py` 比较功能/场景跑批的相同实例 ID、状态、失败断言与耗时，保留 `FINDING-CONFIRMED` 的独立语义；输出 JSON、离线表格、耗时曲线和可选档案，不擅自将发现探针判成普通失败。
-- `experiment_archive.py` 可把 case、场景、压测、A/B 的运行目录和汇总打成一个 ZIP。`manifest.json` 记录执行状态、来源元信息、每个文件的大小、SHA-256 和完整度；结构化结果完整保存，超 2 MiB 的原始日志保留头尾并显式记录，疑似密钥文件名跳过。`parallel_runner.py --archive FILE`、压测 `EXPERIMENT_ARCHIVE_PATH`、`compare_ab.py --archive FILE` 均可生成档案。中断或聚合缺失的执行标为 `incomplete`。单档案是交接与阅读入口，不把原始日志的省略伪装成完整数据。
+- `experiment_archive.py` 可把 case、场景、压测、A/B 的运行目录和汇总打成一个 ZIP。`manifest.json` 记录执行状态、来源元信息、每个文件的大小、SHA-256 和完整度；结构化结果完整保存，超 2 MiB 的原始日志保留头尾并显式记录，疑似密钥文件名跳过。`parallel_runner.py --archive FILE`、`scenario_runner.py --archive FILE`、压测 `EXPERIMENT_ARCHIVE_PATH`、`compare_ab.py --archive FILE` 均可生成档案。中断或聚合缺失的执行标为 `incomplete`。单档案是交接与阅读入口，不把原始日志的省略伪装成完整数据。
 
 `remote_compare.py` 接受两个版本化 KMonitor 导出文件（real、mock），先核对流量指纹、master 模式、Fetch、P/D 规模、采样粒度及每条指标的名称、角色、单位、时空聚合口径；只比较共同采样时刻，缺口留空，产出离线 HTML、JSON 和可选单档案。它明确标为 `descriptive_only`，不把 KMonitor 聚合曲线当成请求级回归门禁。导出文件应包含 `schema_version=1`、`provenance` 和 `series`；每条 `series` 包含 `metric`、`role`、`unit`、`spatial_aggregation`、`temporal_aggregation`、`points[{t_ms,value}]`。平台查询及鉴权属于独立只读采集适配器，目前没有在本仓库内嵌凭据或特定部署地址。
 
