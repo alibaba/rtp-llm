@@ -1409,7 +1409,7 @@ class EnvManager:
     def _master_env(self, env: FlexEnv, mspec: Optional[MasterSpec] = None) -> dict:
         """Build master configuration documents and the existing HA deployment identity."""
         spec = env.spec
-        menv = {}
+        menv = dict(BASE_MASTER_ENV)
         if spec.master_profile != "none":
             menv["FLEXLB_CONFIG"] = flexlb_config_for_profile(spec.master_profile)
         if spec.discovery == "file":
