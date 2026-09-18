@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/testing/KVCacheTestUtils.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -297,8 +298,8 @@ protected:
                     }
                     // std::cout << "index: " << k << " start: " << block_start << " end: " << block_end << std::endl;
                     // std::cout << "block index: " << k_indexs[k] << std::endl;
-                    if (!cache_manager_->setKVBlockValue(k_indexs[k], kblock, vblock)) {
-                        std::cout << "setKVBlockValue failed for block index: " << k_indexs[k] << std::endl;
+                    if (!rtp_llm::test::writeKVBlockForTest(*cache_manager_, k_indexs[k], kblock, vblock)) {
+                        std::cout << "writeKVBlockForTest failed for block index: " << k_indexs[k] << std::endl;
                         return torch::Tensor();
                     }
                 }

@@ -60,7 +60,6 @@ CacheConfig makeSwaConfig(int block_size = 4) {
     config.seq_size_per_block          = block_size;
     config.kernel_seq_size_per_block   = block_size;
     config.group_layer_num             = 2;
-    config.use_independent_block_pools = true;
 
     auto spec = test::makeResolvedMhaSpec(
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/block_size);
@@ -77,7 +76,7 @@ CacheConfig makeSwaConfig(int block_size = 4) {
     return config;
 }
 
-CacheConfig makeHybridConfig(bool independent_pools, bool disable_linear_reuse = false) {
+CacheConfig makeHybridConfig(bool disable_linear_reuse = false) {
     CacheConfig config;
     config.dtype                       = DataType::TYPE_FP16;
     config.layer_num                   = 4;
@@ -87,7 +86,6 @@ CacheConfig makeHybridConfig(bool independent_pools, bool disable_linear_reuse =
     config.kernel_seq_size_per_block   = 4;
     config.linear_step                 = 2;
     config.group_layer_num             = 2;
-    config.use_independent_block_pools = independent_pools;
 
     auto linear_spec = test::makeResolvedLinearSpec(DataType::TYPE_FP16,
                                                     /*local_num_k_heads=*/1,
@@ -123,7 +121,7 @@ CacheConfig makeHybridConfig(bool independent_pools, bool disable_linear_reuse =
 }
 
 CacheConfig makeIndependentWatermarkConfig() {
-    CacheConfig config = makeHybridConfig(/*independent_pools=*/false);
+    CacheConfig config = makeHybridConfig();
 
     const std::shared_ptr<const KVCacheSpec>& linear_spec     = config.specForGroup(0);
     const std::shared_ptr<const KVCacheSpec>& full_spec       = config.specForGroup(1);
@@ -156,7 +154,6 @@ CacheConfig makeDifferentFullGroupsConfig(uint32_t second_seq_size_per_block, Cp
     config.seq_size_per_block          = 4;
     config.kernel_seq_size_per_block   = 2;
     config.group_layer_num             = 1;
-    config.use_independent_block_pools = true;
 
     std::shared_ptr<MHAKVCacheSpec> first = test::makeResolvedMhaSpec(
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/4, /*seq_size_per_block=*/4);
@@ -200,7 +197,6 @@ CacheConfig makeCompatibleFullGroupsConfig() {
     config.seq_size_per_block          = 4;
     config.kernel_seq_size_per_block   = 4;
     config.group_layer_num             = 1;
-    config.use_independent_block_pools = true;
 
     auto first = test::makeResolvedMhaSpec(
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
@@ -231,7 +227,6 @@ CacheConfig makeSparseMlaIndexerConfig() {
     model_config.attn_config.rope_head_dim           = 4;
     model_config.attn_config.tokens_per_block        = 128;
     model_config.attn_config.kernel_tokens_per_block = 128;
-    model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
 
     KVCacheSpecDesc default_desc;
     default_desc.tag        = "default";
@@ -262,7 +257,6 @@ CacheConfig makeCompatibleSwaGroupsConfig(int                second_window,
     config.seq_size_per_block          = 4;
     config.kernel_seq_size_per_block   = 4;
     config.group_layer_num             = 1;
-    config.use_independent_block_pools = true;
 
     auto first = test::makeResolvedMhaSpec(
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
@@ -298,7 +292,6 @@ CacheConfig makeCompatibleLinearGroupsConfig(uint32_t second_active_tail_blocks)
     config.kernel_seq_size_per_block   = 4;
     config.linear_step                 = 2;
     config.group_layer_num             = 1;
-    config.use_independent_block_pools = true;
 
     std::shared_ptr<LinearKVCacheSpec> first         = test::makeResolvedLinearSpec(DataType::TYPE_FP16,
                                                                             /*local_num_k_heads=*/1,
@@ -345,7 +338,6 @@ CacheConfig makeReusableGroupsAroundDisabledConfig() {
     config.seq_size_per_block          = 4;
     config.kernel_seq_size_per_block   = 4;
     config.group_layer_num             = 1;
-    config.use_independent_block_pools = true;
 
     std::vector<std::shared_ptr<KVCacheSpec>> specs;
     std::vector<CacheGroupPolicy>             policies;
@@ -674,15 +666,9 @@ TEST_F(BlockTreeCacheFactoryTest, SingleTypeBindsExistingTargetGroupAndPool) {
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteResolverMatchesAllocatorForNonContiguousGlobalLayers) {
-    for (bool independent : {false, true}) {
-        SCOPED_TRACE(independent);
-        const auto                        config = makeHybridConfig(independent);
-        std::shared_ptr<KVCacheAllocator> allocator;
-        if (independent) {
-            allocator = initAllocator<KVCacheAllocator>(config);
-        } else {
-            allocator = initAllocator<KVCacheAllocator>(config);
-        }
+    {
+        const auto    config    = makeHybridConfig();
+        auto          allocator = initAllocator<KVCacheAllocator>(config);
         auto          backend = std::make_shared<CountingStorageBackend>();
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache = true;
@@ -883,7 +869,7 @@ TEST_F(BlockTreeCacheFactoryTest, SwaGroupSetUsesDeclaredPolicyWindow) {
 }
 
 TEST_F(BlockTreeCacheFactoryTest, HybridTypeBindsExistingTargetGroupsById) {
-    const auto config    = makeHybridConfig(/*independent_pools=*/false);
+    const auto config    = makeHybridConfig();
     auto       allocator = initAllocator<KVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
@@ -892,7 +878,7 @@ TEST_F(BlockTreeCacheFactoryTest, HybridTypeBindsExistingTargetGroupsById) {
 }
 
 TEST_F(BlockTreeCacheFactoryTest, HybridPoolBindsIndependentPoolsAndNonContiguousLayerViews) {
-    const auto config    = makeHybridConfig(/*independent_pools=*/true);
+    const auto config    = makeHybridConfig();
     auto       allocator = initAllocator<KVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
@@ -916,7 +902,7 @@ TEST_F(BlockTreeCacheFactoryTest, HybridPoolBindsIndependentPoolsAndNonContiguou
 }
 
 TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguousGlobalLayerProjectionRoundTrip) {
-    const auto    config    = makeHybridConfig(/*independent_pools=*/true);
+    const auto    config    = makeHybridConfig();
     auto          allocator = initAllocator<KVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache  = true;
@@ -974,7 +960,7 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
 }
 
 TEST_F(BlockTreeCacheFactoryTest, ReorderedAllocatorGroupsAndPoolsBindByTag) {
-    const auto config    = makeHybridConfig(/*independent_pools=*/true);
+    const auto config    = makeHybridConfig();
     auto       allocator = initViewAllocator(config);
     auto       groups    = allocator->KVCacheAllocator::cacheGroups();
     ASSERT_EQ(groups.size(), 2u);
@@ -1012,7 +998,7 @@ TEST_F(BlockTreeCacheFactoryTest, FactoryBindingIgnoresAllocatorLocalGroupIds) {
 }
 
 TEST_F(BlockTreeCacheFactoryTest, DuplicateMissingAndUnknownGroupTagsFailClosed) {
-    const auto config = makeHybridConfig(/*independent_pools=*/true);
+    const auto config = makeHybridConfig();
 
     {
         auto allocator = initViewAllocator(config);
@@ -1047,7 +1033,7 @@ TEST_F(BlockTreeCacheFactoryTest, DuplicateMissingAndUnknownGroupTagsFailClosed)
 }
 
 TEST_F(BlockTreeCacheFactoryTest, AllocatorConfigAndDirectPoolMismatchesFailClosed) {
-    const auto config = makeHybridConfig(/*independent_pools=*/true);
+    const auto config = makeHybridConfig();
 
     {
         auto allocator = initViewAllocator(config);
@@ -1066,7 +1052,7 @@ TEST_F(BlockTreeCacheFactoryTest, AllocatorConfigAndDirectPoolMismatchesFailClos
 }
 
 TEST_F(BlockTreeCacheFactoryTest, PrefixReuseDisabledGroupStaysAllocatorOwnedButIsExcludedFromTree) {
-    const auto config    = makeHybridConfig(/*independent_pools=*/true, /*disable_linear_reuse=*/true);
+    const auto config    = makeHybridConfig(/*disable_linear_reuse=*/true);
     auto       allocator = initAllocator<KVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
@@ -1516,7 +1502,7 @@ TEST_F(BlockTreeCacheFactoryTest, PhysicallyDifferentGroupsShareGroupSetResource
 }
 
 TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) {
-    const CacheConfig config    = makeHybridConfig(/*independent_pools=*/true);
+    const CacheConfig config    = makeHybridConfig();
     auto              allocator = initAllocator<KVCacheAllocator>(config);
     KVCacheConfig     kv_cache_config;
     kv_cache_config.enable_memory_cache  = true;
@@ -1711,7 +1697,7 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
 }
 
 TEST_F(BlockTreeCacheFactoryTest, IndependentPoolGroupSetPayloadUsesTopologyLogicalStrides) {
-    auto config = makeHybridConfig(/*independent_pools=*/false);
+    auto config = makeHybridConfig();
     ASSERT_EQ(config.layer_to_block_stride_bytes.size(), 4u);
     auto allocator = initAllocator<KVCacheAllocator>(config);
     auto cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
@@ -1736,7 +1722,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentPoolGroupSetPayloadUsesTopologyLogi
 TEST_F(BlockTreeCacheFactoryTest, IndependentPoolGroupSetDoesNotDependOnPhysicalStrideTable) {
     for (int malformed_case = 0; malformed_case < 3; ++malformed_case) {
         SCOPED_TRACE(malformed_case);
-        auto config = makeHybridConfig(/*independent_pools=*/false);
+        auto config = makeHybridConfig();
         if (malformed_case == 0) {
             config.layer_to_block_stride_bytes.resize(3);
         } else if (malformed_case == 1) {
@@ -1802,7 +1788,7 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutHostCache) {
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheForReusableLinearGroupSet) {
-    const auto    config    = makeHybridConfig(/*independent_pools=*/false);
+    const auto    config    = makeHybridConfig();
     auto          allocator = initAllocator<KVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_disk_cache  = true;
@@ -1813,7 +1799,7 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheForReusableLinearGroupSet) {
 }
 
 TEST_F(BlockTreeCacheFactoryTest, DiskCacheAllowsDisabledLinearReuse) {
-    const auto config    = makeHybridConfig(/*independent_pools=*/false, /*disable_linear_reuse=*/true);
+    const auto                               config    = makeHybridConfig(/*disable_linear_reuse=*/true);
     auto       allocator = initAllocator<KVCacheAllocator>(config);
     block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_disabled_linear_l3");
     KVCacheConfig                            kv_cache_config;
@@ -1923,6 +1909,46 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
         }
         expectFactoryRejects(config, allocator, kv_cache_config);
     }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, UnifiedCreatorPreservesRuntimeTierConfiguration) {
+    ModelConfig model;
+    model.num_layers                   = 2;
+    model.attn_config.kv_head_num      = 1;
+    model.attn_config.size_per_head    = 8;
+    model.attn_config.tokens_per_block = 4;
+    model.kv_cache_spec_descs.assign(2, {KVCacheSpecDesc{"default", KVCacheSpecType::MultiHeadAttention}});
+    KVCacheConfig runtime;
+    runtime.test_block_num       = 8;
+    runtime.enable_memory_cache  = true;
+    runtime.memory_cache_size_mb = 1;
+    runtime.enable_disk_cache    = true;
+    runtime.disk_cache_size_mb   = 1;
+    block_transfer_engine_test::TempDirGuard disk_dir("unified_creator_tiers");
+    runtime.disk_cache_paths                             = disk_dir.path;
+    runtime.block_tree_transfer_worker_count             = 3;
+    runtime.block_tree_business_queue_max_size           = 29;
+    runtime.block_tree_transfer_queue_max_size           = 31;
+    runtime.block_tree_device_evict_low_watermark_ratio  = 0.61;
+    runtime.block_tree_device_evict_high_watermark_ratio = 0.71;
+    runtime.block_tree_memory_evict_low_watermark_ratio  = 0.62;
+    runtime.block_tree_memory_evict_high_watermark_ratio = 0.72;
+    runtime.block_tree_disk_evict_low_watermark_ratio    = 0.63;
+    runtime.block_tree_disk_evict_high_watermark_ratio   = 0.73;
+    auto config    = CacheConfigCreator::createConfig(model, ParallelismConfig{}, RuntimeConfig{}, runtime);
+    auto allocator = initAllocator<KVCacheAllocator>(config);
+    auto cache     = createBlockTreeCache(config, runtime, allocator);
+    ASSERT_NE(cache, nullptr);
+    EXPECT_EQ(cache->config().transfer_worker_count, 3u);
+    EXPECT_EQ(cache->config().business_queue_max_size, 29u);
+    EXPECT_EQ(cache->config().transfer_queue_max_size, 31u);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_device.low_ratio, 0.61);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_device.high_ratio, 0.71);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_host.low_ratio, 0.62);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_host.high_ratio, 0.72);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_disk.low_ratio, 0.63);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_disk.high_ratio, 0.73);
+    EXPECT_EQ(config.blockNumForGroup(0), 8u);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, TierWatermarksPropagateAndInvalidCombinationsAreRejected) {
@@ -2126,7 +2152,6 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     cache_config.block_num                   = 8;
     cache_config.seq_size_per_block          = 1;
     cache_config.kernel_seq_size_per_block   = 1;
-    cache_config.use_independent_block_pools = true;
 
     std::vector<KVCacheSpecPtr> specs;
     for (size_t group_id = 0; group_id < 3; ++group_id) {

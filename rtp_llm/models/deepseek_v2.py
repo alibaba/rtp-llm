@@ -586,7 +586,6 @@ class DeepSeekV2(BaseModel):
         descs = model_config.kv_cache_spec_descs
         for layer_descs in descs:
             layer_descs.append(indexer_desc)
-        model_config.hybrid_attention_config.enable_independent_kv_cache_pools = True
         model_config.kv_cache_spec_descs = descs
 
     @classmethod

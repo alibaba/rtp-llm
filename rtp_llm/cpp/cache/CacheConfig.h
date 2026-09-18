@@ -41,7 +41,6 @@ private:
 public:
     std::vector<int> layer_to_block_stride_bytes;
     bool             group_block_layout_initialized           = false;
-    bool             use_independent_block_pools              = false;
     bool             use_typed_cache_regions                  = false;
     bool             use_opaque_kv_cache_store                = false;
     bool             disable_decode_first_malloc_device_reuse = false;

@@ -97,7 +97,6 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
     config.seq_size_per_block             = groups.front().tokens_per_block;
     config.kernel_seq_size_per_block      = groups.front().tokens_per_block;
     config.kv_block_stride_bytes          = groups.front().stride_bytes;
-    config.use_independent_block_pools    = true;
     config.use_opaque_kv_cache_store      = true;
     config.group_block_layout_initialized = true;
 

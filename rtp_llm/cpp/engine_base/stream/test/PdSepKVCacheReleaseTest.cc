@@ -5,7 +5,7 @@
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -240,8 +240,6 @@ CacheConfig makeSingleBlockWriteConfig(const std::string& tag,
                                                    /*layer_num=*/1,
                                                    /*block_num=*/static_cast<int>(kBlockNum));
     config.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
-    config.kv_block_stride_bytes     = kv_stride;
-    config.kv_scale_stride_bytes     = kv_scale_stride;
     config.setGroupBlockLayout({kBlockNum}, {kv_stride}, {kv_scale_stride});
     return config;
 }
@@ -310,7 +308,9 @@ protected:
             ratios.push_back((i % 2 == 0) ? 4 : 128);
         }
         ratios.push_back(0);  // MTP tail marker.
-        mc.attn_config.layer_compress_ratios = ratios;
+        mc.attn_config.layer_compress_ratios   = ratios;
+        mc.attn_config.tokens_per_block        = seq_size_per_block;
+        mc.attn_config.kernel_tokens_per_block = kernel_seq_size_per_blk;
         // The 7 DSV4 pools are now declared as per-layer specs keyed by tag
         // (csa_kv / hca_kv / indexer_kv / indexer_state / csa_state / hca_state / swa_kv).
         test::setDsv4KvCacheSpecs(mc, ratios);
@@ -322,7 +322,7 @@ protected:
         KVCacheConfig     kv_config;
         kv_config.seq_size_per_block        = seq_size_per_block;
         kv_config.kernel_seq_size_per_block = kernel_seq_size_per_blk;
-        auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
+        auto config                         = CacheConfigCreator::createBasicConfig(mc, pc, kv_config, false, 0);
         // KVCacheManager::init() calls finalizeBlockNums(block_num), which fans the
         // global block count out to every group according to its capacity policy.
         config.block_num = block_num;
@@ -1392,7 +1392,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
         ASSERT_TRUE(buf.defined());
         for (int b = 0; b < block_num; ++b) {
             auto bid       = resource->blocks(0, 0)[b];
-            auto kv_stride = config.kv_block_stride_bytes;
+            auto kv_stride = config.kvBlockStrideBytesForGroup(0);
             ASSERT_FALSE(isNullBlockIdx(bid));
             auto device_slice = torch::from_blob((uint8_t*)buf.data_ptr() + bid * kv_stride,
                                                  {(int64_t)kv_stride},

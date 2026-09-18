@@ -43,10 +43,7 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
             cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             size_t                              expected_prefix_length = kv_cache.cacheKeys(0).size();
             const std::shared_ptr<CPSlotMapper> mapper                 = cache_manager->cpSlotMapper();
-            const CacheConfig&                  config                 = cache_manager->cacheConfig();
-            if (mapper && mapper->isSharded()
-                && (config.use_independent_block_pools || config.groupNums() > 1
-                    || mapper->usesCpCanonicalKeys(config, 0))) {
+            if (mapper && mapper->isSharded()) {
                 expected_prefix_length /= static_cast<size_t>(mapper->cpSize());
             }
             if (resident_prefix_length != expected_prefix_length) {

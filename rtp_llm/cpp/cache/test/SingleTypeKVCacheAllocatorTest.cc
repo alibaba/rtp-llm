@@ -14,7 +14,6 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -1348,7 +1347,6 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSlicesDescriptorAndAt
 TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSupportsDescriptorDrivenIndependentPools) {
     auto config                                                      = makeTestModelConfig(/*num_layers=*/2);
     config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     config.hybrid_attention_config.hybrid_attention_types            = {};
     auto second_desc                                                 = config.kv_cache_spec_descs[1][0];
     second_desc.tag                                                  = "layer1_state";
@@ -1363,12 +1361,35 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSupportsDescriptorDri
     EXPECT_TRUE(single_layer.hybrid_attention_config.hybrid_attention_types.empty());
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigRejectsLegacyHybridWithoutAttentionTypes) {
+TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigRejectsLinearModelWithoutAttentionTypes) {
     auto config                                            = makeTestModelConfig(/*num_layers=*/2);
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {};
+    config.linear_attention_config.linear_num_value_heads  = 2;
 
     EXPECT_THROW(makeSingleLayerMTPModelConfig(config, /*source_layer=*/0), std::runtime_error);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigRejectsLinearDescriptorWithoutMetadataOrDimensions) {
+    auto config                                 = makeTestModelConfig(/*num_layers=*/2);
+    config.kv_cache_spec_descs[1][0].cache_type = KVCacheSpecType::LinearAttention;
+    EXPECT_THROW(makeSingleLayerMTPModelConfig(config, /*source_layer=*/0), std::runtime_error);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigRejectsMissingSourceAttentionType) {
+    auto config                                           = makeTestModelConfig(/*num_layers=*/2);
+    config.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
+    EXPECT_THROW(makeSingleLayerMTPModelConfig(config, /*source_layer=*/1), std::runtime_error);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpFullDescriptorRetainsLinearModelMetadata) {
+    auto config                                           = makeTestModelConfig(/*num_layers=*/2);
+    config.linear_attention_config.linear_num_value_heads = 2;
+    config.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::LINEAR, HybridAttentionType::NONE};
+    const auto single_layer                               = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
+    EXPECT_EQ(single_layer.hybrid_attention_config.hybrid_attention_types,
+              std::vector<HybridAttentionType>({HybridAttentionType::NONE}));
+    EXPECT_EQ(single_layer.linear_attention_config.linear_num_value_heads, 2);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, ActiveMtpCacheLayoutValidationOnlyChecksModule0) {
@@ -1604,18 +1625,16 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyEmpty) {
     EXPECT_NO_THROW(allocator_->blockBatchCopy(empty_mapping));
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexerStride) {
-    auto model_config                         = makeTestModelConfig(/*num_layers=*/1);
-    model_config.attn_config.is_sparse        = true;
-    model_config.attn_config.indexer_head_dim = 256;
+TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteQuantizedMhaScaleStride) {
+    auto model_config = makeTestModelConfig(/*num_layers=*/1);
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
-    auto config                = SingleConfigCreator::createSingleConfig(model_config, parallelism_config);
+    auto config                = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
     config.block_num           = 5;
     config.setGroupBlockLayout({5}, {config.kv_block_stride_bytes}, {config.kv_scale_stride_bytes});
 
-    ASSERT_TRUE(config.is_sparse);
+    ASSERT_FALSE(config.is_sparse);
     ASSERT_GT(config.kv_scale_stride_bytes, 0u);
     ASSERT_EQ(config.kv_scale_stride_bytes, config.kvScaleStrideBytesForGroup(0));
 
@@ -1644,7 +1663,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexer
         for (size_t index = 0; index < allocated->size(); ++index) {
             auto addr = allocator_->convertIndexToAddr(/*layer_id=*/0, (*allocated)[index]);
             EXPECT_EQ(readDeviceBytes(addr.kv_scale_addr, stride), expected[index])
-                << "sparse indexer mismatch at block " << (*allocated)[index];
+                << "quantized MHA scale mismatch at block " << (*allocated)[index];
         }
     };
 
