@@ -557,8 +557,9 @@ class _ThinkRuntime:
 
     Fields:
       ``bos_tokens``         encode(think_start_tag), e.g. ``<think>\\n``
-      ``eos_tokens``         encode(think_end_tag),   e.g. ``</think>\\n\\n``
-      ``empty_tokens``       encode(start + body + end); used as phase-2 prompt body
+      ``eos_tokens``         explicit think_end_token_id, or encode(think_end_tag)
+                             including padding (e.g. ``</think>\\n\\n``)
+      ``empty_tokens``       encoded empty-think phase-2 prompt with the same EOS
       ``close_token_id``     first id of ``eos_tokens`` (the ``</think>`` token);
                              ``None`` when ``eos_tokens`` is empty
       ``terminate_token_id`` token id that signals "stop thinking immediately" mid-
@@ -630,6 +631,20 @@ def build_think_runtime(
     empty_tokens = tuple(
         _encode_tag(tokenizer, think_start_tag + _EMPTY_THINK_BODY + think_end_tag)
     )
+    configured_end_id = generate_env_config.think_end_token_id
+    if configured_end_id is not None and int(configured_end_id) != -1:
+        # The grammar and streaming parser must use the same explicit boundary.
+        # Keep phase-2 empty-think prompts on that protocol as well.
+        explicit_eos = (int(configured_end_id),)
+        if eos_tokens and empty_tokens[-len(eos_tokens) :] == eos_tokens:
+            empty_tokens = empty_tokens[: -len(eos_tokens)] + explicit_eos
+        else:
+            empty_tokens = (
+                bos_tokens
+                + tuple(_encode_tag(tokenizer, _EMPTY_THINK_BODY))
+                + explicit_eos
+            )
+        eos_tokens = explicit_eos
     close_token_id = int(eos_tokens[0]) if eos_tokens else None
     phase2_enabled = _uses_dash_sc_empty_think_phase2(model_type) and bool(empty_tokens)
     return _ThinkRuntime(
@@ -905,6 +920,8 @@ async def iter_real_model_stream_infer(
         # them available even when this request disables thinking.
         if begin_think_tokens:
             generate_config.begin_think_token_ids = begin_think_tokens
+        if runtime.eos_tokens and not generate_config.end_think_token_ids:
+            generate_config.end_think_token_ids = list(runtime.eos_tokens)
         reasoning_format = None
         if generate_env_config is not None and configured_thinking_mode in (
             ThinkingMode.ENABLED,
@@ -942,8 +959,6 @@ async def iter_real_model_stream_infer(
                 ),
                 reasoning_format=reasoning_format,
             )
-        if runtime.eos_tokens and not generate_config.end_think_token_ids:
-            generate_config.end_think_token_ids = list(runtime.eos_tokens)
         # All these are pre-resolved at servicer init via ``build_think_runtime``;
         # reading them here is O(1) and avoids per-request tokenizer.encode.
         eos_id = runtime.eos_token_id

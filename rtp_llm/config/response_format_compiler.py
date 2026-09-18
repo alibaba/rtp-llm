@@ -1,5 +1,5 @@
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -18,6 +18,25 @@ class ReasoningFormat:
     tag_end: Union[str, List[str], Dict[str, Any]]
     suffix: str = ""
     no_think_excludes: Tuple[str, ...] = ()
+    end_token_suffix: Tuple[int, ...] = ()
+
+    def with_end_token_ids(self, token_ids: List[int]) -> "ReasoningFormat":
+        """Share the frontend close sequence, including trailing padding.
+
+        XGrammar tag ends accept one token; the rest must follow as exact
+        token nodes before the final response can begin.
+        """
+        if not token_ids:
+            return self
+        excludes = self.no_think_excludes
+        if isinstance(self.tag_end, str) and self.tag_end:
+            excludes = tuple(dict.fromkeys((*excludes, self.tag_end)))
+        return replace(
+            self,
+            tag_end={"type": "token", "token": token_ids[0]},
+            end_token_suffix=tuple(token_ids[1:]),
+            no_think_excludes=excludes,
+        )
 
     @classmethod
     def from_generate_env_config(cls, generate_env_config: Any) -> "ReasoningFormat":
@@ -46,20 +65,26 @@ class ReasoningFormat:
             "type": "tag",
             "begin": self.tag_begin,
             "content": {
-                "type": "any_text",
+                # Token regions exclude the tag's end token automatically. A
+                # text region can consume it as text and keep thinking open.
+                "type": (
+                    "any_tokens"
+                    if isinstance(self.tag_end, dict)
+                    and self.tag_end.get("type") == "token"
+                    else "any_text"
+                ),
                 "max_tokens": max_thinking_tokens,
             },
             "end": self.tag_end,
         }
-        if not self.suffix:
+        if not self.suffix and not self.end_token_suffix:
             return think_tag
-        return {
-            "type": "sequence",
-            "elements": [
-                think_tag,
-                {"type": "const_string", "value": self.suffix},
-            ],
-        }
+        elements = [think_tag] + [
+            {"type": "token", "token": token_id} for token_id in self.end_token_suffix
+        ]
+        if self.suffix:
+            elements.append({"type": "const_string", "value": self.suffix})
+        return {"type": "sequence", "elements": elements}
 
 
 @dataclass(frozen=True)
