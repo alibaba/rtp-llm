@@ -9,6 +9,7 @@
 namespace rtp_llm {
 
 class LogitsProcessorStates;
+class RecordedBatch;
 typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
 struct SamplerInitParams {};
@@ -98,6 +99,7 @@ struct MergedOutput {
 public:
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
+    std::shared_ptr<RecordedBatch> recorded_batch;
 };
 
 }  // namespace rtp_llm

@@ -477,6 +477,16 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     const int32_t logprobs_offset =
         stream->generateConfig()->return_logprobs ? stream->logprobsContentOffset(new_tokens, 1) : 0;
+    RecordedTokenTiming* recorded_timings = nullptr;
+    if (merge_outputs.recorded_batch) {
+        auto& timings = merge_outputs.recorded_batch->timings;
+        if (batch_idx_in >= 0 && static_cast<size_t>(batch_idx_in) + cur_batch_size <= timings.size()) {
+            recorded_timings = timings.data() + batch_idx_in;
+        } else {
+            ExecutionRecorder::instance().markError();
+            RTP_LLM_LOG_WARNING("batch TTFT snapshot slot count mismatch");
+        }
+    }
     stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
                     1,
                     batch_hidden_states,
@@ -493,7 +503,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                     top_logprob_token_ids,
                     top_logprobs,
                     -1,
-                    logprobs_offset});
+                    logprobs_offset}, recorded_timings, cur_batch_size);
 }
 
 }  // namespace rtp_llm
