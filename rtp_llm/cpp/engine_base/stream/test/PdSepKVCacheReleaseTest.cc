@@ -264,6 +264,18 @@ torch_ext::PyCacheStoreInputs makeDsv4WriteInputs(int64_t                       
     return inputs;
 }
 
+// Mirrors DecodeRpcServer::loadCacheForAllRank: RPC load rows are keyed by
+// topology tag, never by the resource-local group index.
+DecodeRpcServer::LoadKVCacheContext::TaggedBlockIds
+makeTaggedBlockIds(const KVCacheManager& manager, const BatchKVCacheResource& resource) {
+    DecodeRpcServer::LoadKVCacheContext::TaggedBlockIds block_ids_by_tag;
+    for (const auto& group : manager.cacheConfig().topology().groups()) {
+        const auto group_id = manager.cacheConfig().topology().groupIdForTag(group.tag);
+        block_ids_by_tag.emplace(group.tag, resource.groupBlocks().at(group_id));
+    }
+    return block_ids_by_tag;
+}
+
 }  // namespace
 
 // =============================================================================
@@ -881,7 +893,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                                                      "cp-sharded-cache-store-pd",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     makeTaggedBlockIds(*decode_manager, *decode_resource),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1035,7 +1047,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                                                      "dsv4-cache-store-pd",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     makeTaggedBlockIds(*decode_manager, *decode_resource),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1179,7 +1191,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
                                                      "dsv4-decoupled-cache-store-pd",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     makeTaggedBlockIds(*decode_manager, *decode_resource),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1327,7 +1339,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                                                      "dsv4-cache-store-pd-prefix-reuse",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     makeTaggedBlockIds(*decode_manager, *decode_resource),
                                                      reuse_num,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,

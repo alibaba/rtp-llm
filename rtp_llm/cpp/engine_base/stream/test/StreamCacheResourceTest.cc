@@ -1200,7 +1200,7 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
             return true;
         },
         [counts](LoadAsyncContext&) { ++counts->aborts; });
-    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setMatchCallback([](LoadAsyncContext&, size_t) {
@@ -1261,7 +1261,7 @@ TEST_F(StreamCacheResourceTest, testPrefillPermanentMaterializationFailureTermin
 
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
-    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{5678}), {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{5678}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setMatchCallback([](LoadAsyncContext&, size_t) {
@@ -1289,7 +1289,7 @@ TEST_F(StreamCacheResourceTest, testPrefillCoordinatorCommitFailureTerminates) {
 
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return false; }, [](LoadAsyncContext&) {});
-    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{9012}), {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{9012}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setMatchCallback([](LoadAsyncContext& current, size_t) { return current.commit(); });
@@ -1383,7 +1383,7 @@ TEST_F(StreamCacheResourceTest, PollAllocatorLoadPreservesRetryableMaterializati
     auto& resource    = stream_->streamCacheResource();
     auto  coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
-    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{0, NULL_BLOCK_IDX}}}};
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, 0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setMatchCallback([](LoadAsyncContext&, size_t) {
