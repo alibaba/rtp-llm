@@ -356,11 +356,15 @@ class DeepEPWrapper:
             return cls._instance
 
     @staticmethod
-    def create(config: DeepepWrapperConfig) -> None:
+    def create(
+        config: DeepepWrapperConfig, *, group: Optional[ProcessGroup] = None
+    ) -> None:
         """Create a new DeepEPWrapper instance.
 
         Args:
             config: DeepepWrapperConfig
+            group: Expert communication group. Defaults to WORLD without
+                requiring the RTP process-group registry.
 
         Returns:
             None
@@ -371,6 +375,8 @@ class DeepEPWrapper:
         try:
             if not torch.distributed.is_initialized():
                 raise RuntimeError("Distributed environment is not initialized")
+            if group is None:
+                group = torch.distributed.group.WORLD
             with DeepEPWrapper._lock:
                 if DeepEPWrapper._initialized:
                     if DeepEPWrapper._instance is None:
@@ -393,9 +399,7 @@ class DeepEPWrapper:
                             "DeepEP state is inconsistent, _initialized is False but _instance is not None"
                         )
                     logging.info("Start initialize DeepEP wrapper")
-                    DeepEPWrapper._instance = DeepEPWrapper(
-                        torch.distributed.group.WORLD, config
-                    )
+                    DeepEPWrapper._instance = DeepEPWrapper(group, config)
                     DeepEPWrapper._initialized = True
                     logging.info("Finish initialize DeepEP wrapper")
         except Exception as e:
@@ -658,7 +662,8 @@ def init_deepep_wrapper(
 
     Performs full initialization internally. Call this before any
     DeepEPWrapper.get_instance(). Thread-safe. Requires torch.distributed
-    to be initialized; group is taken from torch.distributed.group.WORLD.
+    to be initialized. Non-PP uses WORLD; PP uses the STAGE group already
+    created by init_distributed_environment().
 
     Args:
         engine_config: EngineConfig
@@ -705,4 +710,9 @@ def init_deepep_wrapper(
         deepep_config_adapter, ll_num_max_token_per_rank
     )
 
-    DeepEPWrapper.create(deepep_config)
+    if engine_config.parallelism_config.pp_size > 1:
+        from rtp_llm.models_py.distributed.collective_torch import Group, _get_group
+
+        DeepEPWrapper.create(deepep_config, group=_get_group(Group.STAGE))
+    else:
+        DeepEPWrapper.create(deepep_config)

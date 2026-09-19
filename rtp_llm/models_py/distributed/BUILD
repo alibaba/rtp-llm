@@ -27,6 +27,7 @@ py_library(
     name = "deepep_wrapper",
     srcs = ["deepep_wrapper.py"],
     deps = [
+        ":collective_torch",
         "//rtp_llm:torch",
     ] + select({
         "@//:using_cuda12":["deep_ep_py"],

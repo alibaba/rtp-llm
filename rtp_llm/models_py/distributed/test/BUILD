@@ -1,3 +1,15 @@
+py_test(
+    name = "deepep_group_test",
+    srcs = ["deepep_group_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/distributed:deepep_wrapper",
+    ],
+    timeout = "short",
+)
+
 py_test (
     name = "deepep_test",
     srcs = ["deepep_test.py"],

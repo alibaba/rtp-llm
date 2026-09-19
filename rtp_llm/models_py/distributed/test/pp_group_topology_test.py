@@ -39,6 +39,8 @@ def _worker(rank, world_size, pp_size, dp_size, tp_size, master_port, queue):
         ct._group_map.clear()
         ct._group_map[ct.Group.WORLD] = torch.distributed.group.WORLD
         ct._create_process_groups(cfg, "gloo", None)
+        if pp_size == 1:
+            assert ct._get_group(ct.Group.STAGE) is torch.distributed.group.WORLD
 
         callbacks = {}
         cpp_ops = SimpleNamespace(

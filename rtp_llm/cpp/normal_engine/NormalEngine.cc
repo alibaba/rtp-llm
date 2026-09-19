@@ -118,10 +118,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         RTP_LLM_CHECK_WITH_INFO(!eplb_config.enable_eplb(), "pipeline parallelism does not support EPLB");
         RTP_LLM_CHECK_WITH_INFO(!ffn_disaggregate_config.enable_ffn_disaggregate,
                                 "pipeline parallelism does not support FFN disaggregation");
-        RTP_LLM_CHECK_WITH_INFO(parallelism_config.dp_size == 1,
-                                "pipeline parallelism does not support data parallelism");
-        RTP_LLM_CHECK_WITH_INFO(parallelism_config.ep_size == 1,
-                                "pipeline parallelism does not support expert parallelism");
 
         RTP_LLM_CHECK_WITH_INFO(!parallelism_config.enable_sp && parallelism_config.ffn_sp_size == 1,
                                 "pipeline parallelism does not support sequence parallelism");

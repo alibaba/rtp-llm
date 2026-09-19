@@ -131,6 +131,7 @@ def auto_configure_deepep(
             world_size=parallelism_config.world_size,
             local_world_size=parallelism_config.local_world_size,
             role_type=role_type,
+            pp_size=parallelism_config.pp_size,
         )
     else:
         # User has set at least one value, copy them to moe_config
@@ -170,6 +171,8 @@ def _apply_auto_deepep_config(
     world_size: int,
     local_world_size: int,
     role_type: RoleType,
+    *,
+    pp_size: int = 1,
 ):
     """
     Internal function to apply automatic DeepEP configuration based on deployment scenario.
@@ -182,9 +185,21 @@ def _apply_auto_deepep_config(
     is_decode = role_type == RoleType.DECODE
 
     # Determine GPU configuration
-    is_single_gpu = world_size == 1
-    is_multi_gpu = world_size > 1
-    is_multi_node = world_size > local_world_size
+    if pp_size > 1:
+        stage_size = world_size // pp_size
+        is_single_gpu = stage_size == 1
+        is_multi_gpu = stage_size > 1
+        # STAGE and node ranks occupy contiguous blocks. The parent config is
+        # shared by workers, so retain internode if any stage crosses a node.
+        is_multi_node = any(
+            (stage * stage_size) // local_world_size
+            != ((stage + 1) * stage_size - 1) // local_world_size
+            for stage in range(pp_size)
+        )
+    else:
+        is_single_gpu = world_size == 1
+        is_multi_gpu = world_size > 1
+        is_multi_node = world_size > local_world_size
 
     # Apply configuration rules
     use_deepep_moe = False

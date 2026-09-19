@@ -119,8 +119,10 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             tp_expert_input = tp_expert_a1
 
         # pre dispatch
-        tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size).to(
-            torch.int64
+        # Convert before slicing so empty TP shards retain backing storage,
+        # just like topk_weights; DeepEP requires both pointers to be null or not.
+        tp_expert_ids = torch.narrow(
+            topk_ids.to(torch.int64), 0, slice_begin, slice_size
         )
         tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
 
