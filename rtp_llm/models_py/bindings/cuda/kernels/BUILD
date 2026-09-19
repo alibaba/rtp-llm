@@ -123,10 +123,12 @@ cc_library(
 cc_library(
     name = "cuda_quantization",
     srcs = [
+        "fast_bf16_int8.cu",
         "per_token_group_quant_8bit.cu",
         "per_token_group_quant_8bit_v2.cu",
     ],
     hdrs = [
+        "fast_bf16_int8.h",
         "per_token_group_quant_8bit.h",
         "per_token_group_quant_8bit_v2.h",
     ],

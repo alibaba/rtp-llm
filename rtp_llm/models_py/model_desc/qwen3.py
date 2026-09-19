@@ -1,10 +1,16 @@
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.distributed.collective_torch import Group, _get_group, all_reduce
+from rtp_llm.models_py.kernels.cuda.fast_bf16_int8 import (
+    dequantize_reduce,
+    quantize,
+    support,
+)
 from rtp_llm.models_py.model_desc.block_map import (
     get_primary_attention_inputs,
     select_fmha_impl_for_layer,
@@ -21,6 +27,47 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+
+def _quantized_all_reduce(
+    hidden_states: torch.Tensor,
+    quant: Optional[Callable[..., None]],
+    dequant: Optional[Callable[..., None]],
+) -> torch.Tensor:
+    """Gather per-rank INT8 codes/BF16 scales and reduce decoded sources in rank order."""
+    group_size = 16
+    if (
+        quant is None
+        or dequant is None
+        or not support(hidden_states, group_size)
+        or hidden_states.numel() == 0
+    ):
+        return all_reduce(hidden_states, group=Group.TP)
+    pg = _get_group(Group.TP)
+    tp_size = pg.size()
+    if tp_size == 1:
+        return hidden_states
+    m, k = hidden_states.shape
+    q = torch.empty_like(hidden_states, dtype=torch.int8)
+    s = torch.empty(
+        (m, k // group_size), dtype=torch.bfloat16, device=hidden_states.device
+    )
+    q_all = torch.empty((tp_size * m, k), dtype=torch.int8, device=hidden_states.device)
+    s_all = torch.empty(
+        (tp_size * m, k // group_size),
+        dtype=torch.bfloat16,
+        device=hidden_states.device,
+    )
+    quant(hidden_states, q, s, group_size=group_size)
+    torch.distributed.all_gather_into_tensor(q_all, q, group=pg)
+    torch.distributed.all_gather_into_tensor(s_all, s, group=pg)
+    dequant(
+        q_all.view(tp_size, m, k),
+        s_all.view(tp_size, m, k // group_size),
+        hidden_states,
+        group_size=group_size,
+    )
+    return hidden_states
 
 
 class Qwen3DecoderLayer(nn.Module):
@@ -57,6 +104,17 @@ class Qwen3DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
+        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
+        self.quant = None
+        self.dequant = None
+        device = weights[W.pre_ln_gamma].device
+        if (
+            device.type == "cuda"
+            and torch.version.hip is None
+            and "RTX PRO 5000" in torch.cuda.get_device_name(device).upper()
+        ):
+            self.quant = quantize
+            self.dequant = dequantize_reduce
 
     def forward(
         self,
@@ -64,6 +122,8 @@ class Qwen3DecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> torch.Tensor:
+        quant_attn = self.quant is not None and self.self_attn.tp_size > 1
+        quant_ffn = self.quant is not None and self.ffn_tp_size > 1
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
@@ -71,13 +131,22 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
+            skip_allreduce=quant_attn,
         )
+        if quant_attn:
+            hidden_states = _quantized_all_reduce(
+                hidden_states, self.quant, self.dequant
+            )
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, skip_allreduce=quant_ffn)
+        if quant_ffn:
+            hidden_states = _quantized_all_reduce(
+                hidden_states, self.quant, self.dequant
+            )
         hidden_states = residual + hidden_states
 
         return hidden_states
