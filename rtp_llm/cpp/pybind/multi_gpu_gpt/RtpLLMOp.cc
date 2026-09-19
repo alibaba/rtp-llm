@@ -485,7 +485,12 @@ void RtpLLMOp::prepareRPCService(const EngineInitParams&                       m
     }
     is_server_ready_ = true;
     setKmonServiceServing(true);
-    grpc_server_->Wait();
+    {
+        // initRPCServer holds the GIL for Python-owned init params. Do not
+        // hold it while waiting for shutdown: the engine loop needs Python.
+        pybind11::gil_scoped_release release;
+        grpc_server_->Wait();
+    }
     RTP_LLM_LOG_INFO("Server exit on %s", server_address.c_str());
 }
 
