@@ -516,3 +516,16 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     # Set local ip if not already set (e.g. for world_info / distributed_server)
     if not py_env_configs.server_config.ip:
         py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+
+    # Fail-closed release validation, last in this function on purpose: every default and
+    # auto-configuration pass above has run, so this sees the values the process will actually launch
+    # with, and it runs before start_server() spawns the model processes -- a misconfigured rank must
+    # refuse to start rather than leave its peers entering collectives alone. It validates and emits
+    # the manifest from this same resolved object, so validation cannot drift from execution.
+    #
+    # A no-op unless a release profile is selected, which keeps developer modes and unrelated
+    # models/topologies untouched. Artifact identifiers (source SHAs, image digest, compiled-library
+    # hashes) are supplied by the packaging step, not derived here.
+    from rtp_llm.config.release_profile import enforce_release_profile
+
+    enforce_release_profile(py_env_configs)
