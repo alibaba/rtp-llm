@@ -578,8 +578,27 @@ def gated_engram_residual(
     k_weight: torch.Tensor,
     eps: float,
     token_mask: Optional[torch.Tensor] = None,
+    *,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Exact normalized signed-square-root gate used by the reference."""
+    if out is not None and (
+        out.shape != hidden.shape
+        or out.dtype != hidden.dtype
+        or out.device != hidden.device
+        or not out.is_contiguous()
+    ):
+        raise ValueError("Engram output must be contiguous and match hidden states")
+    if (
+        out is not None
+        and out.numel()
+        and any(
+            value is not None
+            and out.untyped_storage().data_ptr() == value.untyped_storage().data_ptr()
+            for value in (hidden, kv, q_weight, k_weight, token_mask)
+        )
+    ):
+        raise ValueError("Engram output must not share storage with its inputs")
     if (
         not torch.is_grad_enabled()
         and hidden.is_cuda
@@ -608,7 +627,8 @@ def gated_engram_residual(
             engram_inject_kernel,
         )
 
-        out = torch.empty_like(hidden)
+        if out is None:
+            out = torch.empty_like(hidden)
         engram_inject_kernel[(hidden.numel() // (4 * 5120), 4)](
             hidden,
             kv,
@@ -636,7 +656,8 @@ def gated_engram_residual(
     gate = torch.sigmoid(gate_input)
     if token_mask is not None:
         gate = torch.where(token_mask.to(device=hidden.device)[:, None], gate, 0.0)
-    return (h + gate[..., None] * value).to(hidden.dtype)
+    result = (h + gate[..., None] * value).to(hidden.dtype)
+    return result if out is None else out.copy_(result)
 
 
 class Engram(nn.Module):
@@ -729,10 +750,27 @@ class Engram(nn.Module):
             )
         if hidden.shape[0] == 0:
             return hidden
+        # Engram is token-local after hashing. Bound lookup/projection/gate
+        # temporaries for packed long prompts without changing the decode path.
+        chunk_rows = 32768
+        if hidden.shape[0] > chunk_rows:
+            output = torch.empty_like(hidden, memory_format=torch.contiguous_format)
+            for begin in range(0, hidden.shape[0], chunk_rows):
+                end = min(begin + chunk_rows, hidden.shape[0])
+                self._forward_rows(
+                    hidden[begin:end],
+                    hash_ids[begin:end],
+                    None if token_mask is None else token_mask[begin:end],
+                    out=output[begin:end],
+                )
+            return output
+        return self._forward_rows(hidden, hash_ids, token_mask)
+
+    def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None):
         rows = self.embed_tokens(hash_ids, hidden.device).flatten(-2)
         kv = self.wkv(rows)
         return gated_engram_residual(
-            hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask
+            hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out
         )
 
 

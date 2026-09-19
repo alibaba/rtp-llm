@@ -142,6 +142,70 @@ class EngramTest(unittest.TestCase):
             output, torch.full_like(hidden, torch.sigmoid(torch.tensor(0.001)))
         )
 
+    def test_long_packed_forward_bounds_temporaries_and_preserves_mask(self):
+        torch.manual_seed(7)
+        table = torch.randn(1000, 32).to(torch.float8_e4m3fn)
+        lookup = engram.HostEngramEmbedding(
+            table, torch.full((1000, 1), 127, dtype=torch.uint8)
+        )
+        projection = torch.nn.Linear(
+            self.layout.n_hash_cols * 32, 3 * 32, bias=False
+        ).bfloat16()
+        q = torch.randn(2, 32).bfloat16()
+        k = torch.randn(2, 32).bfloat16()
+        for count in (32768, 32769, 65539):
+            with self.subTest(count=count), torch.inference_mode():
+                hidden = (
+                    torch.randn(count, 32, 2).bfloat16().transpose(1, 2)
+                    if count == 32769
+                    else torch.randn(count, 2, 32).bfloat16()
+                )
+                original = hidden.clone()
+                hashes = torch.randint(-1, 1000, (count, self.layout.n_hash_cols))
+                mask = torch.arange(count) % 3 != 0
+                expected = engram.gated_engram_residual(
+                    hidden,
+                    projection(lookup(hashes, "cpu").flatten(-2)),
+                    q,
+                    k,
+                    1e-20,
+                    mask,
+                )
+                batch_rows = []
+
+                def bounded_lookup(ids, device):
+                    batch_rows.append(ids.shape[0])
+                    self.assertLessEqual(ids.shape[0], 32768)
+                    return lookup(ids, device)
+
+                model = engram.Engram(
+                    self.layout, 0, bounded_lookup, projection, q, k, 1e-20
+                )
+                actual = model(hidden, hashes, mask)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                torch.testing.assert_close(hidden, original, rtol=0, atol=0)
+                torch.testing.assert_close(actual[~mask], hidden[~mask], rtol=0, atol=0)
+                self.assertEqual(sum(batch_rows), count)
+
+    def test_gate_output_buffer_rejects_aliases_and_invalid_layouts(self):
+        hidden = torch.randn(3, 4, 32).bfloat16()
+        kv = torch.randn(3, 5 * 32).bfloat16()
+        q = k = torch.ones(4, 32).bfloat16()
+        expected = engram.gated_engram_residual(hidden, kv, q, k, 1e-20)
+        output = torch.empty_like(hidden)
+        actual = engram.gated_engram_residual(hidden, kv, q, k, 1e-20, out=output)
+        self.assertEqual(actual.data_ptr(), output.data_ptr())
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        for invalid in (
+            hidden,
+            kv.flatten()[: hidden.numel()].view_as(hidden),
+            torch.empty(4, 4, 32, dtype=hidden.dtype),
+            torch.empty_like(hidden, dtype=torch.float32),
+            torch.empty(3, 32, 4, dtype=hidden.dtype).transpose(1, 2),
+        ):
+            with self.assertRaises(ValueError):
+                engram.gated_engram_residual(hidden, kv, q, k, 1e-20, out=invalid)
+
     def test_mxfp8_reference_matches_independent_numpy_rounding(self):
         torch.manual_seed(7)
         x = torch.randn(7, 64).bfloat16()
