@@ -62,6 +62,42 @@ python3 generate_replay.py html \
   --output-html /path/to/replay.html
 ```
 
+## Whale deployments
+
+`generate_replay.py` resolves instances with `dashctl`, which cannot enumerate a Whale
+deployment: a Whale zone is a carbon role behind a Spectrum dep shell, so `dashctl get inst`
+reports no instances for a role that is serving. Use the Whale entry point instead. It resolves
+the role's pods with `whale` and reads their logs with `asicli`:
+
+```bash
+python3 generate_replay_whale.py all \
+  --service dash_pd \
+  --deployment beijing_RTX_PRO_5000_72GB_p4tp_d2tp \
+  --role master \
+  --start '2026-09-19 19:55:00' \
+  --end   '2026-09-19 20:21:00'
+```
+
+Defaults are `--role master`, `--container load-balancer`, `--log-dir /home/admin/ai-whale/logs`
+and an output directory under `outputs/` (override with `--output-dir` or
+`FLEXLB_REPLAY_OUTPUT_ROOT`). `--deployment-id` skips service and deployment name resolution,
+and `--instance` repeats to restrict the run to specific pods. Both CLIs must be authenticated
+first (`whale config current-context`, `asicli auth status`).
+
+`asicli console exec` truncates stdout at 1048576 bytes, so reads are chunked by `--page-lines`
+(default 300) and every chunk is md5-verified against a remote digest. A chunk that reaches the
+cap fails the run rather than returning partial data; lower `--page-lines` when that happens.
+All remote commands are read-only. Keep `--end` at or before the current time, because `pv.log`
+keeps growing and lines appended after the count step would change the digest mid-collection.
+
+`build` and `html` are source-agnostic, so rebuild from a Whale collection with the original
+entry point:
+
+```bash
+python3 generate_replay.py build --input outputs/<run> \
+  --start '2026-09-19 19:55:00' --end '2026-09-19 20:21:00'
+```
+
 ## Output layout
 
 ```text
@@ -71,9 +107,11 @@ output/
   raw/<flexlb-instance>/pv.log.snapshot
   analysis.xlsx
   replay.html
+  whale_manifest.json          # generate_replay_whale.py only
+  whale_raw/<pod>/pv.log       # generate_replay_whale.py only
 ```
 
-`collect_manifest.json` records the requested window, collection grace period, resolved instances, files and line counts read, actual parsed log coverage, and warnings. `manifest.json` adds join/output summaries.
+`collect_manifest.json` records the requested window, collection grace period, resolved instances, files and line counts read, actual parsed log coverage, and warnings. `manifest.json` adds join/output summaries. `whale_manifest.json` records the resolved pods with their ASI coordinates and health, plus per-file window line counts and status (`complete`, `empty`, `outside_window`, `no_matching_lines`); `whale_raw/` keeps the lines exactly as read from the container before the collector re-filters them into `raw/`.
 
 The request window is applied to the routing record's `requestTimeMs`. Collection continues beyond the requested end by a configurable completion grace so that delayed `cache_hit_comparison` and `prefill_worker_status` records can still join to requests inside the window.
 
