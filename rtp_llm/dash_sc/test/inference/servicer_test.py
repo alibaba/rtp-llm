@@ -10,13 +10,18 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 import logging
 import struct
+import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from PIL import Image
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -55,6 +60,7 @@ from rtp_llm.dash_sc.inference.servicer import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.metrics import AccMetrics
+from rtp_llm.models.multimodal.deepseek_v41_processor import V41ImageProcessorConfig
 from rtp_llm.ops import RoleType
 from rtp_llm.server.master_client import MasterClient
 from rtp_llm.utils.base_model_datatypes import (
@@ -338,7 +344,8 @@ def _assert_parameter_error_response(
         expected_message_part,
         infer.parameters["status_message"].string_param,
     )
-    testcase.assertEqual(_finish_reason(resp), LLMFinishReason.STOP_ENGINE_PARAM)
+    # error_no stays 8; finish_reason selects the explicit HTTP 400 status above.
+    testcase.assertEqual(_finish_reason(resp), LLMFinishReason.USE_PARAMETER_STATUS)
     testcase.assertEqual(_gen_ids(resp), [])
 
 
@@ -3259,6 +3266,724 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             headers={},
         )
         self.assertEqual(MasterClient._extract_priority(input_no_priority), 50)
+
+
+class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.config = V41ImageProcessorConfig(
+            vision_patch_size=2,
+            vision_downsample_ratio=1,
+            vision_min_pixels=0,
+            vision_max_n_token=32,
+        )
+        self.ids = [0, self.config.image_token_id, 129260, 1]
+        self.data = self._png((255, 0, 0))
+        self.url = "data:image/png;base64," + base64.b64encode(self.data).decode()
+
+    @staticmethod
+    def _png(color):
+        buf = io.BytesIO()
+        Image.new("RGB", (3, 5), color).save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _request(self, urls=None):
+        req = predict_v2_pb2.ModelInferRequest(id="image-request", model_name="default")
+        req.parameters["rawtoken"].string_param = ""
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"image": url}
+                                for url in (urls if urls is not None else [self.url])
+                            ],
+                        }
+                    ]
+                },
+                "parameters": {},
+            }
+        )
+        return req
+
+    @staticmethod
+    def _visitor():
+        return _FakeVisitor(
+            _FakeAsyncStream(
+                [
+                    GenerateOutputs(
+                        generate_outputs=[
+                            GenerateOutput(
+                                output_ids=torch.tensor([7], dtype=torch.int32),
+                                finished=True,
+                            )
+                        ]
+                    )
+                ]
+            )
+        )
+
+    async def _run(self, req, ids=None, visitor=None, **kwargs):
+        visitor = visitor if visitor is not None else self._visitor()
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                ids if ids is not None else _parsed_input_ids(self.ids),
+                SamplingParams(max_new_tokens=1000),
+                OtherParams(return_input_ids=True),
+                visitor,
+                rtp_llm_request_id=42,
+                v41_processor_config=self.config,
+                **kwargs,
+            )
+        )
+        return visitor, chunks
+
+    async def test_expanded_metadata_rpc_and_original_id_echo(self):
+        from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateInputPB
+
+        req = self._request()
+        req.parameters["header"].string_param = "untouched header"
+        visitor, chunks = await self._run(req, max_seq_len=100)
+        submitted = visitor.last_generate_input
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(submitted.mm_inputs, [])
+        prepared = submitted.v41_inputs
+        self.assertEqual(submitted.token_ids.tolist(), list(prepared.token_ids))
+        self.assertEqual(submitted.token_ids.device.type, "cpu")
+        self.assertEqual(submitted.headers, {})
+        self.assertEqual(req.parameters["header"].string_param, "untouched header")
+        self.assertEqual(prepared.token_ids[0], 0)
+        self.assertEqual(prepared.token_ids[-2:], (129260, 1))
+        self.assertEqual(submitted.generate_config.max_new_tokens, 1000)
+        wire = GenerateInputPB.FromString(trans_input(submitted).SerializeToString())
+        self.assertEqual(wire.v41_inputs.schema_version, 1)
+        self.assertEqual(list(wire.token_ids), list(prepared.token_ids))
+        self.assertEqual(list(wire.v41_inputs.token_types), list(prepared.token_types))
+        self.assertEqual(list(wire.v41_inputs.image_mask), prepared.image_mask.tolist())
+        self.assertEqual(
+            wire.v41_inputs.images[0].content_sha256, prepared.images[0].content_sha256
+        )
+        self.assertEqual(
+            wire.v41_inputs.images[0].patches.bf16_data,
+            prepared.images[0].patches.view(torch.int16).numpy().tobytes(),
+        )
+        infer = chunks[0].infer_response
+        by_name = {
+            out.name: raw for out, raw in zip(infer.outputs, infer.raw_output_contents)
+        }
+        self.assertEqual(_unpack_int32_le(by_name["prompt_token_ids"]), self.ids)
+        self.assertEqual(
+            infer.parameters["prompt_token_num"].int64_param, len(prepared.token_ids)
+        )
+        self.assertEqual(
+            infer.parameters["image_tokens"].int64_param, len(prepared.token_ids) - 3
+        )
+
+    async def test_image_usage_survives_stream_template_and_preserves_backend_usage(
+        self,
+    ):
+        ids = _parsed_input_ids(
+            [0, self.config.image_token_id, 9, self.config.image_token_id, 1]
+        )
+        req = self._request()
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "input": {
+                    "messages": [
+                        {"role": "user", "content": [{"image": self.url}]},
+                        {"role": "tool", "content": [{"image": self.url}]},
+                    ]
+                },
+                "parameters": {},
+            }
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream(
+                [
+                    GenerateOutputs(
+                        generate_outputs=[
+                            GenerateOutput(
+                                output_ids=torch.tensor([token], dtype=torch.int32),
+                                finished=finished,
+                                aux_info=AuxInfo(input_len=123, reuse_len=17),
+                            )
+                        ]
+                    )
+                    for token, finished in ((7, False), (8, True))
+                ]
+            )
+        )
+        visitor, chunks = await self._run(req, ids, visitor)
+        prepared = visitor.last_generate_input.v41_inputs
+        self.assertEqual(len(prepared.images), 2)
+        self.assertEqual(
+            prepared.images[0].content_sha256, prepared.images[1].content_sha256
+        )
+        self.assertEqual(len(chunks), 2)
+        for chunk in chunks:
+            params = chunk.infer_response.parameters
+            self.assertTrue(params["image_tokens"].HasField("int64_param"))
+            self.assertEqual(
+                params["image_tokens"].int64_param, len(prepared.token_ids) - 3
+            )
+            self.assertEqual(params["prompt_token_num"].int64_param, 123)
+            self.assertEqual(params["prompt_cached_token_num"].int64_param, 17)
+            self.assertNotIn("audio_tokens", params)
+            self.assertNotIn("video_tokens", params)
+
+    async def _run_image_two_phase(self, max_seq_len=100, think_prefix=(128821,)):
+        second_url = (
+            "data:image/png;base64," + base64.b64encode(self._png((0, 0, 255))).decode()
+        )
+        req = self._request([self.url, second_url])
+        ids = _parsed_input_ids(
+            [7, self.config.image_token_id, 8, self.config.image_token_id]
+            + list(think_prefix)
+        )
+        phase1 = _FakeAsyncStream(
+            [
+                GenerateOutputs(
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor([10, 11, 1, 99], dtype=torch.int32),
+                            finished=False,
+                        )
+                    ]
+                )
+            ]
+        )
+        phase2 = _FakeAsyncStream(
+            [
+                GenerateOutputs(
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor([20], dtype=torch.int32),
+                            finished=True,
+                        )
+                    ]
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor([phase1, phase2])
+        tokenizer = _dsv4_tokenizer()
+        env = _GenerateEnvCfg()
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                ids,
+                SamplingParams(
+                    max_new_tokens=10,
+                    max_new_tokens_from_completion_alias=True,
+                    max_total_tokens=12,
+                ),
+                OtherParams(enable_thinking=True, return_input_ids=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tokenizer,
+                generate_env_config=env,
+                think_runtime=build_think_runtime(tokenizer, env, "deepseek_v41"),
+                phase2_request_id_factory=lambda: 200,
+                v41_processor_config=self.config,
+                max_seq_len=max_seq_len,
+            )
+        )
+        return visitor, phase1, chunks, ids
+
+    async def test_two_phase_images_keep_expanded_ids_metadata_and_usage(self):
+        from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
+        from rtp_llm.dash_sc.inference.servicer import _prepare_v41_image_request
+
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer._prepare_v41_image_request",
+            wraps=_prepare_v41_image_request,
+        ) as prepare:
+            visitor, phase1_stream, chunks, upstream_ids = (
+                await self._run_image_two_phase()
+            )
+        prepare.assert_called_once()
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertTrue(phase1_stream.aclose_called)
+        first, second = visitor.generate_inputs
+        self.assertIsNotNone(second.v41_inputs)
+        expected = first.token_ids.tolist()[:-1] + [128821, 271, 128822, 271]
+        self.assertEqual(second.token_ids.tolist(), expected)
+        self.assertEqual(second.v41_inputs.token_ids, tuple(expected))
+        self.assertEqual(
+            second.v41_inputs.token_types, first.v41_inputs.token_types[:-1] + (-1,) * 4
+        )
+        self.assertIs(second.v41_inputs.images, first.v41_inputs.images)
+        self.assertNotEqual(*first.v41_inputs.image_content_hashes)
+        self.assertEqual(
+            second.v41_inputs.image_content_hashes,
+            first.v41_inputs.image_content_hashes,
+        )
+        self.assertEqual(first.request_id, 100)
+        self.assertEqual(second.request_id, 200)
+        self.assertTrue(first.generate_config.in_think_mode)
+        self.assertFalse(second.generate_config.in_think_mode)
+        self.assertEqual(second.generate_config.max_new_tokens, 9)
+        self.assertEqual(
+            upstream_ids.values,
+            [7, self.config.image_token_id, 8, self.config.image_token_id, 128821],
+        )
+        wire = trans_input(second)
+        self.assertEqual(list(wire.token_ids), expected)
+        self.assertEqual(
+            list(wire.v41_inputs.token_types), list(second.v41_inputs.token_types)
+        )
+        self.assertEqual(
+            [image.start for image in wire.v41_inputs.images],
+            [image.start for image in first.v41_inputs.images],
+        )
+        self.assertEqual(len(wire.v41_inputs.image_mask), len(expected))
+        self.assertEqual(
+            [_gen_ids(chunk) for chunk in chunks],
+            [[128821, 10, 11], [128822, 271], [20]],
+        )
+        for chunk in chunks:
+            infer = chunk.infer_response
+            is_phase2 = infer.id.endswith("-2")
+            self.assertEqual(
+                infer.parameters["image_tokens"].int64_param, first.prompt_length - 3
+            )
+            self.assertEqual(
+                infer.parameters["prompt_token_num"].int64_param,
+                len(expected) if is_phase2 else first.prompt_length,
+            )
+            outputs = {
+                out.name: raw
+                for out, raw in zip(infer.outputs, infer.raw_output_contents)
+            }
+            echo_ids = (
+                upstream_ids.values[:-1] + [128821, 271, 128822, 271]
+                if is_phase2
+                else upstream_ids.values
+            )
+            self.assertEqual(_unpack_int32_le(outputs["prompt_token_ids"]), echo_ids)
+
+    async def test_two_phase_full_think_prefix_keeps_image_metadata(self):
+        visitor, _, chunks, _ = await self._run_image_two_phase(
+            think_prefix=(128821, 198)
+        )
+        first, second = visitor.generate_inputs
+        self.assertEqual(
+            second.token_ids.tolist(),
+            first.token_ids.tolist()[:-2] + [128821, 271, 128822, 271],
+        )
+        self.assertEqual(
+            second.v41_inputs.token_types, first.v41_inputs.token_types[:-2] + (-1,) * 4
+        )
+        self.assertIs(second.v41_inputs.images, first.v41_inputs.images)
+        self.assertEqual(second.generate_config.max_new_tokens, 8)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 198, 10, 11])
+        self.assertEqual(
+            chunks[-1].infer_response.parameters["image_tokens"].int64_param,
+            first.prompt_length - 4,
+        )
+
+    async def test_two_phase_budget_checks_expanded_length(self):
+        # Each 3x5 image becomes a 3x2 grid plus delimiters/newlines: 11 IDs.
+        # Phase 1 has 25 IDs; replacing its one-token think prefix gives 28.
+        for limit, enqueues in ((29, 2), (28, 1), (27, 1)):
+            with self.subTest(limit=limit):
+                visitor, stream, chunks, _ = await self._run_image_two_phase(limit)
+                self.assertEqual(visitor.enqueue_called, enqueues)
+                self.assertTrue(stream.aclose_called)
+                if enqueues == 1:
+                    self.assertEqual(
+                        _dash_error_payload(chunks[-1])[1]["status_code"], 413
+                    )
+                    self.assertEqual(
+                        _finish_reason(chunks[-1]), LLMFinishReason.USE_PARAMETER_STATUS
+                    )
+
+    async def test_v41_text_servicer_transitions_from_thinking_to_answer(self):
+        model_type = "deepseek_v41"
+        tokenizer = _dsv4_tokenizer()
+        env = _GenerateEnvCfg()
+        req = self._request([])
+        req.parameters["payload"].string_param = (
+            '{"input":{"messages":[]},"parameters":{}}'
+        )
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"x-ds-llm-thinking": True}
+        )
+        req.parameters["max_completion_tokens"].int64_param = 10
+        req.parameters["max_tokens"].int64_param = 12
+        _add_input_tensor(
+            req, "input_ids", "INT32", [3], struct.pack("<3i", 7, 8, 128821)
+        )
+        phase1 = _FakeAsyncStream(
+            [
+                GenerateOutputs(
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor([10, 11, 1, 99], dtype=torch.int32),
+                            finished=False,
+                        )
+                    ]
+                )
+            ]
+        )
+        phase2 = _FakeAsyncStream(
+            [
+                GenerateOutputs(
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor([20, 21], dtype=torch.int32),
+                            finished=True,
+                        )
+                    ]
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor([phase1, phase2])
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            model_type=model_type,
+            ip="127.0.0.1",
+            port=26818,
+            server_id="1",
+            tokenizer=tokenizer,
+            generate_env_config=env,
+            think_runtime=build_think_runtime(tokenizer, env, model_type),
+            echo_prefix_ids=[128821, 198],
+            v41_processor_config=self.config,
+            max_seq_len=100,
+        )
+        chunks = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), _FakeGrpcContext())
+        )
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertTrue(phase1.aclose_called)
+        first, second = visitor.generate_inputs
+        self.assertEqual(first.token_ids.tolist(), [7, 8, 128821])
+        self.assertEqual(second.token_ids.tolist(), [7, 8, 128821, 271, 128822, 271])
+        self.assertTrue(first.generate_config.in_think_mode)
+        self.assertFalse(second.generate_config.in_think_mode)
+        self.assertEqual(second.generate_config.max_new_tokens, 9)
+        self.assertIsNone(first.v41_inputs)
+        self.assertIsNone(second.v41_inputs)
+        self.assertEqual(
+            [_gen_ids(chunk) for chunk in chunks],
+            [[128821, 10, 11], [128822, 271], [20, 21]],
+        )
+        self.assertEqual(chunks[-1].infer_response.id, f"{req.id}-2")
+        self.assertEqual(_finish_reason(chunks[-1]), LLMFinishReason.STOP)
+        for chunk in chunks:
+            self.assertNotIn("image_tokens", chunk.infer_response.parameters)
+        self.assertEqual(
+            chunks[-1].infer_response.parameters["prompt_token_num"].int64_param, 6
+        )
+
+    async def test_text_ignores_envelope_without_copy_or_worker(self):
+        class NoScanList(list):
+            def __contains__(self, value):
+                raise AssertionError("text token IDs must not be scanned")
+
+        ids = _parsed_input_ids([0, 129260, 1])
+        ids = ParsedInputIds(values=NoScanList(ids.values), tensor=ids.tensor)
+        req = self._request()
+        del req.parameters["payload"]
+        req.parameters["header"].string_param = "ignored text header"
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer.parse_v41_image_request",
+            side_effect=AssertionError,
+        ), patch(
+            "rtp_llm.dash_sc.inference.servicer.asyncio.to_thread",
+            side_effect=AssertionError,
+        ):
+            visitor, chunks = await self._run(req, ids)
+        self.assertIs(visitor.last_generate_input.token_ids, ids.tensor)
+        self.assertIsNone(visitor.last_generate_input.v41_inputs)
+        self.assertNotIn("image_tokens", chunks[0].infer_response.parameters)
+
+    async def test_servicer_wires_images_and_rejects_empty_ids(self):
+        for ids in (self.ids, []):
+            with self.subTest(ids=ids):
+                req = self._request()
+                _add_input_tensor(
+                    req,
+                    "input_ids",
+                    "INT32",
+                    [len(ids)],
+                    struct.pack(f"<{len(ids)}i", *ids),
+                )
+                visitor = self._visitor()
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor,
+                    model_type="deepseek_v41",
+                    v41_processor_config=self.config,
+                    max_seq_len=100,
+                )
+                chunks = await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([req]), _FakeGrpcContext())
+                )
+                if ids:
+                    self.assertEqual(visitor.enqueue_called, 1)
+                    self.assertIsNotNone(visitor.last_generate_input.v41_inputs)
+                else:
+                    self.assertEqual(visitor.enqueue_called, 0)
+                    self.assertEqual(
+                        _dash_error_payload(chunks[0])[1]["status_code"], 400
+                    )
+
+    async def test_download_retains_internal_ssrf_check_and_timeout(self):
+        try:
+            from internal_source.rtp_llm.utils import ssrf_check
+        except ImportError:
+            self.skipTest("internal image download policy is not installed")
+
+        url = "https://example.test/image.png"
+        response = MagicMock()
+        response.__enter__.return_value = SimpleNamespace(
+            status_code=200, content=self.data
+        )
+        with patch("rtp_llm.utils.multimodal_util.REQUEST_GET", None), patch.object(
+            ssrf_check, "check_ssrf", return_value=True
+        ) as check, patch.object(
+            ssrf_check, "get_host", return_value="example.test"
+        ), patch.object(
+            ssrf_check.requests, "get", return_value=response
+        ) as get:
+            visitor, _ = await self._run(self._request([url]))
+            self.assertEqual(visitor.enqueue_called, 1)
+            check.assert_called_once_with(url)
+            self.assertEqual(get.call_args.kwargs["timeout"], 10)
+            self.assertTrue(get.call_args.kwargs["stream"])
+            check.return_value = False
+            rejected, chunks = await self._run(self._request([url]))
+            self.assertEqual(rejected.enqueue_called, 0)
+            self.assertEqual(_dash_error_payload(chunks[0])[1]["status_code"], 400)
+            self.assertEqual(get.call_count, 1)
+
+    async def test_bad_images_and_envelopes_return_400_before_enqueue(self):
+        requests = [
+            self._request([url])
+            for url in (
+                "data:image/png;base64,!invalid!",
+                "data:image/png;base64," + base64.b64encode(b"not an image").decode(),
+                "data:image/png;base64," + base64.b64encode(self.data[:40]).decode(),
+                "file:///unavailable.png",
+            )
+        ]
+        requests.append(self._request([self.url, self.url]))
+        bad_json = self._request()
+        bad_json.parameters["payload"].string_param = "{"
+        requests.append(bad_json)
+        for req in requests:
+            with self.subTest(payload=req.parameters.get("payload")):
+                visitor, chunks = await self._run(req)
+                self.assertEqual(visitor.enqueue_called, 0)
+                self.assertEqual(len(chunks), 1)
+                self.assertEqual(_dash_error_payload(chunks[0])[1]["status_code"], 400)
+                self.assertEqual(
+                    _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+                )
+
+    async def test_payload_image_without_marker_returns_400(self):
+        visitor, chunks = await self._run(self._request(), _parsed_input_ids([0, 1]))
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(_dash_error_payload(chunks[0])[1]["status_code"], 400)
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
+
+    async def test_empty_media_envelope_preserves_text_tensor(self):
+        class NoScanList(list):
+            def __contains__(self, value):
+                raise AssertionError("text IDs must not be scanned")
+
+        ids = _parsed_input_ids([0, 129260, 1])
+        ids = ParsedInputIds(values=NoScanList(ids.values), tensor=ids.tensor)
+        req = self._request([])
+        req.parameters["payload"].string_param = (
+            '{"input":{"messages":[]},"parameters":{}}'
+        )
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer.asyncio.to_thread",
+            side_effect=AssertionError,
+        ):
+            visitor, chunks = await self._run(req, ids)
+        self.assertIs(visitor.last_generate_input.token_ids, ids.tensor)
+        self.assertIsNone(visitor.last_generate_input.v41_inputs)
+        self.assertNotIn("image_tokens", chunks[0].infer_response.parameters)
+
+    async def test_large_text_and_image_payloads_parse_off_loop(self):
+        from rtp_llm.dash_sc.codec import parse_v41_image_request
+
+        owner_thread = threading.get_ident()
+        parse_threads = []
+
+        def parse(request):
+            parse_threads.append(threading.get_ident())
+            return parse_v41_image_request(request)
+
+        for images in ([], [{"image": self.url}]):
+            with self.subTest(images=bool(images)):
+                req = self._request()
+                req.parameters["payload"].string_param = json.dumps(
+                    {
+                        "input": {
+                            "messages": (
+                                [{"role": "user", "content": images}] if images else []
+                            )
+                        },
+                        "parameters": {"tool_schema": "x" * (256 * 1024)},
+                    }
+                )
+                ids = _parsed_input_ids(self.ids if images else [0, 1])
+                with patch(
+                    "rtp_llm.dash_sc.inference.servicer.parse_v41_image_request",
+                    side_effect=parse,
+                ):
+                    visitor, _ = await self._run(req, ids)
+                self.assertEqual(visitor.enqueue_called, 1)
+                if not images:
+                    self.assertIs(visitor.last_generate_input.token_ids, ids.tensor)
+                    self.assertIsNone(visitor.last_generate_input.v41_inputs)
+        self.assertEqual(len(parse_threads), 2)
+        self.assertTrue(all(thread != owner_thread for thread in parse_threads))
+
+    async def test_no_envelope_legacy_rawtoken_keeps_special_ids(self):
+        req = self._request()
+        del req.parameters["payload"]
+        ids = _parsed_input_ids(self.ids)
+        visitor, _ = await self._run(req, ids)
+        self.assertIs(visitor.last_generate_input.token_ids, ids.tensor)
+        self.assertIsNone(visitor.last_generate_input.v41_inputs)
+
+    async def test_expanded_length_boundary(self):
+        visitor, _ = await self._run(self._request())
+        length = visitor.last_generate_input.prompt_length
+        for limit, expected in ((length + 1, 1), (length, 0), (length - 1, 0)):
+            with self.subTest(limit=limit):
+                visitor, chunks = await self._run(self._request(), max_seq_len=limit)
+                self.assertEqual(visitor.enqueue_called, expected)
+                if not expected:
+                    self.assertEqual(
+                        _dash_error_payload(chunks[0])[1]["status_code"], 413
+                    )
+                    self.assertEqual(
+                        _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+                    )
+
+    async def test_request_local_download_cache_preserves_occurrences_and_freshness(
+        self,
+    ):
+        url = "https://example.test/image.png"
+        ids = _parsed_input_ids(
+            [0, self.config.image_token_id, 7, self.config.image_token_id]
+        )
+        response = MagicMock()
+        with patch(
+            "rtp_llm.utils.multimodal_util.request_get", return_value=response
+        ) as get, patch(
+            "rtp_llm.utils.multimodal_util.get_bytes_io_from_url",
+            side_effect=AssertionError("global cache"),
+        ):
+            hashes = []
+            for data in (self.data, self._png((0, 0, 255))):
+                response.__enter__.return_value = SimpleNamespace(
+                    status_code=200, content=data
+                )
+                visitor, _ = await self._run(self._request([url, url]), ids)
+                images = visitor.last_generate_input.v41_inputs.images
+                self.assertEqual(len(images), 2)
+                self.assertLess(images[0].start, images[1].start)
+                self.assertEqual(images[0].content_sha256, images[1].content_sha256)
+                hashes.append(images[0].content_sha256)
+            self.assertEqual(get.call_count, 2)
+            self.assertEqual(response.__exit__.call_count, 2)
+            self.assertNotEqual(*hashes)
+
+    async def test_download_failure_is_sanitized_400(self):
+        with patch(
+            "rtp_llm.utils.multimodal_util.request_get",
+            side_effect=RuntimeError("sensitive URL"),
+        ):
+            visitor, chunks = await self._run(
+                self._request(["https://example.test/image"])
+            )
+        self.assertEqual(visitor.enqueue_called, 0)
+        payload = _dash_error_payload(chunks[0])[1]
+        self.assertEqual(payload["status_code"], 400)
+        self.assertEqual(payload["status_name"], "InvalidParameter")
+        self.assertEqual(
+            payload["status_message"], "Failed to download multimodal content"
+        )
+        self.assertNotIn("sensitive", payload["status_message"])
+        infer = chunks[0].infer_response
+        self.assertEqual(infer.parameters["status_code"].int64_param, 400)
+        self.assertEqual(
+            infer.parameters["status_name"].string_param, "InvalidParameter"
+        )
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
+        by_name = {
+            out.name: raw for out, raw in zip(infer.outputs, infer.raw_output_contents)
+        }
+        self.assertEqual(by_name["finished"], b"\x01")
+        self.assertNotIn("generated_ids", by_name)
+
+    async def test_http_download_error_returns_same_public_error(self):
+        response = MagicMock()
+        response.__enter__.return_value = SimpleNamespace(status_code=404)
+        with patch("rtp_llm.utils.multimodal_util.request_get", return_value=response):
+            visitor, chunks = await self._run(
+                self._request(["https://example.test/missing"])
+            )
+        self.assertEqual(visitor.enqueue_called, 0)
+        payload = _dash_error_payload(chunks[0])[1]
+        self.assertEqual(payload["status_code"], 400)
+        self.assertEqual(payload["status_name"], "InvalidParameter")
+        self.assertEqual(
+            payload["status_message"], "Failed to download multimodal content"
+        )
+        response.__exit__.assert_called_once()
+
+    async def test_blocked_download_does_not_block_text_and_cancel_never_enqueues(self):
+        entered = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+        visitor = self._visitor()
+        response = MagicMock()
+        response.__enter__.return_value = SimpleNamespace(
+            status_code=200, content=self.data
+        )
+
+        def download(url, headers):
+            loop.call_soon_threadsafe(entered.set)
+            if not release.wait(5):
+                raise RuntimeError("test download was not released")
+            return response
+
+        with patch("rtp_llm.utils.multimodal_util.request_get", side_effect=download):
+            task = asyncio.create_task(
+                self._run(self._request(["https://example.test/slow"]), visitor=visitor)
+            )
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                text_req = self._request()
+                del text_req.parameters["payload"]
+                text, _ = await asyncio.wait_for(
+                    self._run(text_req, _parsed_input_ids([7])), 1
+                )
+                self.assertEqual(text.enqueue_called, 1)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            finally:
+                release.set()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual(visitor.enqueue_called, 0)
 
 
 if __name__ == "__main__":

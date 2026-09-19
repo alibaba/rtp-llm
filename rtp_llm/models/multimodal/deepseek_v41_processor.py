@@ -214,7 +214,20 @@ def prepare_vl_inputs(
     output_budget: int = 0,
 ) -> V41PreparedInputs:
     # output_budget is retained for callers; the generation layer applies limits.
-    prompt_tokens = tokenizer.encode(prompt)
+    return prepare_vl_inputs_from_token_ids(
+        tokenizer.encode(prompt), images, config, prompt=prompt, url_loader=url_loader
+    )
+
+
+def prepare_vl_inputs_from_token_ids(
+    prompt_tokens: Sequence[int],
+    images: Sequence[Mapping[str, Any]],
+    config: V41ImageProcessorConfig,
+    *,
+    prompt: str = "",
+    url_loader=None,
+) -> V41PreparedInputs:
+    """Expand upstream image markers without re-tokenizing any text or special IDs."""
     if sum(token == config.image_token_id for token in prompt_tokens) != len(images):
         raise ValueError(
             "image placeholder count does not match the supplied image records"

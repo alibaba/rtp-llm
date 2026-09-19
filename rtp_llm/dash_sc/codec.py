@@ -339,6 +339,40 @@ def parse_ds_header_attributes(request) -> dict[str, Any]:
     return {str(k).lower(): v for k, v in attrs.items()}
 
 
+def parse_v41_image_request(request) -> list[dict[str, str]]:
+    """Extract ordered images from Spectrum's media-only payload."""
+    raw = _parse_optional_parameter_string(request, "payload")
+    try:
+        payload = json.loads(raw) if raw is not None else None
+    except ValueError as error:
+        raise DashScParameterError("invalid V4.1 payload JSON") from error
+    if not isinstance(payload, dict):
+        raise DashScParameterError("V4.1 payload must be a JSON object")
+    input_value = payload.get("input")
+    messages = input_value.get("messages") if isinstance(input_value, dict) else None
+    if not isinstance(messages, list):
+        raise DashScParameterError("V4.1 payload.input.messages must be an array")
+    images = []
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            raise DashScParameterError("V4.1 media content must be an array")
+        for item in content:
+            if not isinstance(item, dict):
+                raise DashScParameterError("V4.1 media item must be an object")
+            if "image" in item:
+                url = item["image"]
+            elif item.get("type") == "image_url":
+                source = item.get("image_url")
+                url = source.get("url") if isinstance(source, dict) else None
+            else:
+                raise DashScParameterError("V4.1 payload supports images only")
+            if not isinstance(url, str) or not url:
+                raise DashScParameterError("V4.1 image URL must be non-empty")
+            images.append({"url": url})
+    return images
+
+
 def _dict_get_case_insensitive(value: Any, key: str) -> Any:
     if not isinstance(value, dict):
         return None
@@ -1259,6 +1293,8 @@ class StreamResponseBuilder:
         "_model_name",
         "_request_log_tag",
         "_request_input_ids",
+        "_prompt_token_fallback",
+        "_image_tokens",
         "_return_input_ids",
         "_is_streaming",
         "_generate_config",
@@ -1289,11 +1325,19 @@ class StreamResponseBuilder:
         generate_config: Any = None,
         eos_token_id: int | None = None,
         max_token_id: int | None = None,
+        prompt_token_fallback: int | None = None,
+        image_tokens: int | None = None,
     ) -> None:
         self._dash_sc_request_id = dash_sc_request_id
         self._model_name = model_name
         self._request_log_tag = request_log_tag
         self._request_input_ids = request_input_ids
+        self._prompt_token_fallback = (
+            len(request_input_ids or [])
+            if prompt_token_fallback is None
+            else prompt_token_fallback
+        )
+        self._image_tokens = image_tokens
         self._return_input_ids = return_input_ids
         self._is_streaming = is_streaming
         self._generate_config = generate_config
@@ -1338,7 +1382,7 @@ class StreamResponseBuilder:
         prompt_tokens = (
             int(aux_info.input_len)
             if aux_info is not None
-            else len(self._request_input_ids or [])
+            else self._prompt_token_fallback
         )
         cached_tokens = int(aux_info.reuse_len) if aux_info is not None else 0
 
@@ -1355,8 +1399,10 @@ class StreamResponseBuilder:
             _append_aux_info_metrics_outputs(
                 infer,
                 out_py,
-                prompt_token_fallback=len(self._request_input_ids or []),
+                prompt_token_fallback=self._prompt_token_fallback,
             )
+            if self._image_tokens is not None:
+                infer.parameters["image_tokens"].int64_param = self._image_tokens
             infer.parameters["incremental_output"].int64_param = (
                 1 if self._is_streaming else 0
             )

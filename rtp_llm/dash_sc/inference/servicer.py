@@ -17,8 +17,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, Optional
+from dataclasses import dataclass, replace
+from typing import Any, AsyncIterator, Callable, Optional, Sequence
 
 import torch
 
@@ -55,6 +55,7 @@ from rtp_llm.dash_sc.codec import (
     build_dash_error_response,
     iter_fake_model_stream_infer,
     parse_dash_sc_grpc_request,
+    parse_v41_image_request,
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
@@ -92,6 +93,7 @@ _EMPTY_THINK_BODY = "\n"
 _DEFAULT_TERMINATE_TOKEN_ID = 1
 _INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
+_V41_INLINE_PAYLOAD_MAX_BYTES = 64 * 1024
 
 
 def _exception_metric_code(error_code: Any) -> str:
@@ -360,7 +362,10 @@ def _encode_tag(tokenizer: Any, text: str) -> list[int]:
 
 
 def _is_deepseek_v4(model_type: Optional[str]) -> bool:
-    return str(model_type or "").replace("-", "_").lower() == "deepseek_v4"
+    return str(model_type or "").replace("-", "_").lower() in (
+        "deepseek_v4",
+        "deepseek_v41",
+    )
 
 
 def _matched_echo_prefix_ids(
@@ -397,10 +402,9 @@ class _ThinkRuntime:
       ``terminate_token_id`` token id that signals "stop thinking immediately" mid-
                              stream (DSV4: 1). ``None`` disables the token-terminate
                              branch (the regular ``</think>`` path keeps working).
-      ``phase2_enabled``     ``is_dsv4 and bool(empty_tokens)``. ``terminate_token_id``
-                             is intentionally *not* part of this gate — even with the
-                             token-terminate branch off, dsv4 still needs the
-                             phase-2-on-close machinery.
+      ``phase2_enabled``     V4/V4.1 with non-empty ``empty_tokens``. The transition
+                             also requires request thinking and a terminate token;
+                             natural think-close remains single-phase.
       ``eos_token_id``       tokenizer.eos_token_id; written to dashllm
                              ``stop_token_id`` response param
       ``max_token_id``       ``len(tokenizer) - 1``; written to dashllm
@@ -480,7 +484,7 @@ def build_think_runtime(
 
 
 def _phase2_input_ids_for_deepseek_v4(
-    input_ids_list: list[int],
+    input_ids_list: Sequence[int],
     matched_bos_ids: list[int],
     empty_think_tokens: list[int],
 ) -> list[int]:
@@ -497,6 +501,7 @@ def _make_generate_input(
     generate_config: Any,
     invocation_metadata: Optional[Any],
     request_headers: Optional[dict[str, str]] = None,
+    v41_inputs: Any = None,
 ) -> GenerateInput:
     headers = dict(request_headers or {})
     headers.update(_headers_from_invocation_metadata(invocation_metadata))
@@ -507,6 +512,7 @@ def _make_generate_input(
         request_id=request_id,
         token_ids=input_ids_tensor,
         mm_inputs=[],
+        v41_inputs=v41_inputs,
         generate_config=generate_config,
         headers=headers,
         request_info=RequestInfo(
@@ -515,6 +521,40 @@ def _make_generate_input(
             source_role="dash",
         ),
     )
+
+
+def _prepare_v41_image_request(request, input_ids, processor_config, images=None):
+    from rtp_llm.models.multimodal.deepseek_v41_processor import (
+        prepare_vl_inputs_from_token_ids,
+    )
+    from rtp_llm.utils.multimodal_util import _get_http_heads, request_get
+
+    # Cache bytes only for this request; a URL may change between requests.
+    downloaded = {}
+
+    def load_url(url):
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("unsupported V4.1 image URL scheme")
+        if url not in downloaded:
+            try:
+                with request_get(url, _get_http_heads()) as response:
+                    if response.status_code != 200:
+                        raise ValueError("image download failed")
+                    downloaded[url] = response.content
+            except Exception as error:
+                raise ValueError("Failed to download multimodal content") from error
+        return downloaded[url]
+
+    try:
+        if images is None:
+            images = parse_v41_image_request(request)
+        if not images:
+            return None
+        return prepare_vl_inputs_from_token_ids(
+            input_ids, images, processor_config, url_loader=load_url
+        )
+    except (TypeError, ValueError) as error:
+        raise FtRuntimeException(ExceptionType.INVALID_PARAMS, str(error)) from error
 
 
 async def _close_async_stream_if_possible(stream: Any, tag: str) -> None:
@@ -639,6 +679,8 @@ async def iter_real_model_stream_infer(
     phase2_request_id_factory: Optional[Callable[[], int]] = None,
     access_agg: Any = None,
     yield_access_stats: bool = False,
+    v41_processor_config: Any = None,
+    max_seq_len: Optional[int] = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -669,6 +711,9 @@ async def iter_real_model_stream_infer(
     sets ``stop_words_list`` on the request.
     """
     input_ids_list = input_ids.values
+    prompt_length = len(input_ids_list)
+    v41_inputs = None
+    image_tokens = None
     trace_str = str(request.id)
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
     runtime = think_runtime if think_runtime is not None else _ThinkRuntime()
@@ -683,6 +728,40 @@ async def iter_real_model_stream_infer(
     should_echo = bool(matched_echo_ids)
     echoed = False
     try:
+        input_ids_tensor = input_ids.tensor
+        # Small text payloads contain messages=[]; avoid scanning long token IDs.
+        # Large tool schemas and inline images must not parse on the event loop.
+        if v41_processor_config is not None and "payload" in request.parameters:
+            images = None
+            if (
+                request.parameters["payload"].ByteSize()
+                <= _V41_INLINE_PAYLOAD_MAX_BYTES
+            ):
+                try:
+                    images = parse_v41_image_request(request)
+                except DashScParameterError as error:
+                    raise FtRuntimeException(
+                        ExceptionType.INVALID_PARAMS, str(error)
+                    ) from error
+            if images is None or images:
+                v41_inputs = await asyncio.to_thread(
+                    _prepare_v41_image_request,
+                    request,
+                    input_ids_list,
+                    v41_processor_config,
+                    images,
+                )
+            if v41_inputs is not None:
+                prompt_length = len(v41_inputs.token_ids)
+                if max_seq_len is not None and prompt_length >= max_seq_len:
+                    raise FtRuntimeException(
+                        ExceptionType.LONG_PROMPT_ERROR,
+                        f"expanded image input length {prompt_length} must be less than {max_seq_len}",
+                    )
+                input_ids_tensor = torch.tensor(
+                    v41_inputs.token_ids, dtype=torch.int32, device="cpu"
+                )
+                image_tokens = sum(image.length for image in v41_inputs.images)
         generate_config = sampling.to_generate_config(other=other)
         generate_config.trace_id = trace_str
         if generate_env_config is not None:
@@ -745,10 +824,11 @@ async def iter_real_model_stream_infer(
         generate_think_token_num: Optional[int] = None
         generate_input = _make_generate_input(
             request_id=rtp_llm_request_id,
-            input_ids_tensor=input_ids.tensor,
+            input_ids_tensor=input_ids_tensor,
             generate_config=generate_config,
             invocation_metadata=invocation_metadata,
             request_headers=other.request_headers,
+            v41_inputs=v41_inputs,
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
@@ -762,6 +842,8 @@ async def iter_real_model_stream_infer(
             generate_config=generate_config,
             eos_token_id=eos_id,
             max_token_id=max_id,
+            prompt_token_fallback=prompt_length,
+            image_tokens=image_tokens,
         )
         chunk_idx = 0
         phase2_needed = False
@@ -783,7 +865,7 @@ async def iter_real_model_stream_infer(
             generated_ids = _token_ids_list_from_generate_output(out_py)
             aux_info = getattr(out_py, "aux_info", None)
             prompt_token_num = (
-                int(aux_info.input_len) if aux_info is not None else len(input_ids_list)
+                int(aux_info.input_len) if aux_info is not None else prompt_length
             )
             prompt_cached_token_num = (
                 int(aux_info.reuse_len) if aux_info is not None else 0
@@ -963,7 +1045,7 @@ async def iter_real_model_stream_infer(
                 error_spec=error_spec,
                 status_message="empty outputs_list from backend",
             )
-            stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
+            stats = (0, True, error_spec.finish_reason, prompt_length, 0, ())
             yield (response, stats) if yield_access_stats else response
             return
         # No implicit natural-finish phase-2 trigger here. DashLLM-aligned
@@ -1015,6 +1097,36 @@ async def iter_real_model_stream_infer(
             phase2_input_ids = _phase2_input_ids_for_deepseek_v4(
                 input_ids_list, matched_think_bos_ids, list(runtime.empty_tokens)
             )
+            phase2_request_input_ids = phase2_input_ids
+            phase2_v41_inputs = None
+            if v41_inputs is not None:
+                from rtp_llm.models.multimodal.deepseek_v41_processor import TEXT
+
+                phase2_input_ids = _phase2_input_ids_for_deepseek_v4(
+                    v41_inputs.token_ids,
+                    matched_think_bos_ids,
+                    list(runtime.empty_tokens),
+                )
+                prefix_length = len(phase2_input_ids) - len(runtime.empty_tokens)
+                if any(kind != TEXT for kind in v41_inputs.token_types[prefix_length:]):
+                    raise FtRuntimeException(
+                        ExceptionType.INVALID_PARAMS,
+                        "phase-2 thinking prefix overlaps an image span",
+                    )
+                prompt_length = len(phase2_input_ids)
+                if max_seq_len is not None and prompt_length >= max_seq_len:
+                    raise FtRuntimeException(
+                        ExceptionType.LONG_PROMPT_ERROR,
+                        f"expanded phase-2 image input length {prompt_length} must be less than {max_seq_len}",
+                    )
+                # Only the trailing text changes; image locations, patches and
+                # content hashes remain request-owned and are reused unchanged.
+                phase2_v41_inputs = replace(
+                    v41_inputs,
+                    token_ids=tuple(phase2_input_ids),
+                    token_types=v41_inputs.token_types[:prefix_length]
+                    + (TEXT,) * len(runtime.empty_tokens),
+                )
             phase2_request_id = (
                 phase2_request_id_factory()
                 if phase2_request_id_factory is not None
@@ -1025,10 +1137,13 @@ async def iter_real_model_stream_infer(
             )
             phase2_generate_input = _make_generate_input(
                 request_id=phase2_request_id,
-                input_ids_tensor=torch.tensor(phase2_input_ids, dtype=torch.int),
+                input_ids_tensor=torch.tensor(
+                    phase2_input_ids, dtype=torch.int, device="cpu"
+                ),
                 generate_config=phase2_config,
                 invocation_metadata=invocation_metadata,
                 request_headers=other.request_headers,
+                v41_inputs=phase2_v41_inputs,
             )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
@@ -1039,12 +1154,14 @@ async def iter_real_model_stream_infer(
                 dash_sc_request_id=f"{request.id}{_PHASE2_SUFFIX}",
                 model_name=request.model_name,
                 request_log_tag=phase2_tag,
-                request_input_ids=phase2_input_ids,
+                request_input_ids=phase2_request_input_ids,
                 return_input_ids=other.return_input_ids,
                 is_streaming=is_streaming,
                 generate_config=phase2_config,
                 eos_token_id=eos_id,
                 max_token_id=max_id,
+                prompt_token_fallback=len(phase2_input_ids),
+                image_tokens=image_tokens,
             )
             phase2_stream = await backend_visitor.enqueue(phase2_generate_input)
             phase2_sent_len = 0
@@ -1123,6 +1240,10 @@ async def iter_real_model_stream_infer(
             qos_level=_request_qos_level(other, invocation_metadata),
         )
         error_spec = error_mapping.error_spec
+        if v41_inputs is not None and error_spec == DASH_ERROR_TOO_LONG:
+            error_spec = error_spec._replace(
+                finish_reason=LLMFinishReason.USE_PARAMETER_STATUS
+            )
         status_message = error_mapping.public_message or str(e)
         if error_mapping.protocol_error:
             logging.error(
@@ -1144,7 +1265,7 @@ async def iter_real_model_stream_infer(
             error_spec=error_spec,
             status_message=status_message,
         )
-        stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
+        stats = (0, True, error_spec.finish_reason, prompt_length, 0, ())
         yield (response, stats) if yield_access_stats else response
     except Exception as e:
         _capture_access_exception(access_agg, e)
@@ -1157,7 +1278,7 @@ async def iter_real_model_stream_infer(
             error_spec=error_spec,
             status_message=fallback_status_message,
         )
-        stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
+        stats = (0, True, error_spec.finish_reason, prompt_length, 0, ())
         yield (response, stats) if yield_access_stats else response
 
 
@@ -1192,6 +1313,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
         grammar_validator: Optional[GrammarValidator] = None,
         model_type: str = "",
+        v41_processor_config: Any = None,
+        max_seq_len: Optional[int] = None,
     ):
         self._backend_visitor = backend_visitor
         self._ip = ip
@@ -1229,6 +1352,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._rep_cfg = repetition_monitor_config or RequestRepetitionMonitorConfig()
         self._grammar_validator = grammar_validator
         self._model_type = model_type
+        self._v41_processor_config = v41_processor_config
+        self._max_seq_len = max_seq_len
 
     async def _validate_request_grammar(
         self, sampling: SamplingParams, request_id: str
@@ -1528,6 +1653,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         phase2_request_id_factory=self._next_rtp_llm_request_id,
                         access_agg=record,
                         yield_access_stats=True,
+                        v41_processor_config=self._v41_processor_config,
+                        max_seq_len=self._max_seq_len,
                     ):
                         (
                             delta_len,
