@@ -5383,7 +5383,10 @@ public final class JavaMockEngineCluster {
                 cache.release(lease);
                 return false;
             }
-            boolean changed = cache.admit(lease, shape.blockKeys());
+            List<Long> retainedKeys = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
+                    ? performance.decodeCompletionBlockKeys(shape)
+                    : shape.blockKeys();
+            boolean changed = cache.admit(lease, retainedKeys);
             wakeFifoOnCapacityRelease();
             return changed;
         }
