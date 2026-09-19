@@ -225,6 +225,7 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_MTP_CHUNK_MAX_TOKENS",
         "SMOKE_LONG_PREFIX_TARGET_TOKENS",
         "SMOKE_LONG_PREFIX_TP_SIZE",
+        "SMOKE_PREFILL_PAGE_RR_MULTI_LAUNCH",
         "SMOKE_PREFILL_KV_CACHE_MEM_MB",
         "SMOKE_DECODE_KV_CACHE_MEM_MB",
         "SMOKE_DECODE_KDA_POOL_BLOCKS",

@@ -885,6 +885,51 @@ class Runner:
                     return prompt, tokens
         raise SmokeFailure(f"cannot construct exact chat input length {target}")
 
+    def fit_cache_prompt(self, case_name: str, value: int, target: int) -> str:
+        head = (
+            f"缓存测试标识：{self.args.namespace}/{case_name}。"
+            "以下 x 是用于跨越完整缓存复用粒度的无关材料。"
+        )
+        tail = f"\n只回答数字：{value} 的平方是多少？"
+        prompt, _ = self.fit_prompt(head, tail, target)
+        return prompt
+
+    def fit_partial_cache_prompts(
+        self,
+        common_name: str,
+        seed_name: str,
+        seed_value: int,
+        query_name: str,
+        query_value: int,
+        target: int,
+    ) -> tuple[str, str]:
+        head = (
+            f"部分命中测试标识：{self.args.namespace}/{common_name}。"
+            "以下 x 是两次请求共同拥有的无关前缀材料。"
+        )
+        seed_tail = f"\n分支标识：{seed_name}。只回答数字：{seed_value} 的平方是多少？"
+        query_tail = (
+            f"\n分支标识：{query_name}。只回答数字：{query_value} 的平方是多少？"
+        )
+        seed_prompt, seed_tokens = self.fit_prompt(head, seed_tail, target)
+        query_prompt = seed_prompt[: -len(seed_tail)] + query_tail
+        query_tokens = self.tokenize(query_prompt)
+        self.save_token_fixture(query_prompt, query_tokens)
+        common_tokens = next(
+            (
+                index
+                for index, pair in enumerate(zip(seed_tokens, query_tokens))
+                if pair[0] != pair[1]
+            ),
+            min(len(seed_tokens), len(query_tokens)),
+        )
+        if common_tokens < self.reuse_unit_tokens:
+            raise SmokeFailure(
+                f"partial cache prompt common prefix {common_tokens} is shorter than "
+                f"reuse unit {self.reuse_unit_tokens}"
+            )
+        return seed_prompt, query_prompt
+
     def record_case(self, name: str, owner: int, *, words: int = 1) -> Case:
         # Expected answers derive only from these records, with no external
         # knowledge or second model acting as judge.
@@ -1208,15 +1253,26 @@ class Runner:
             rank % max(1, len(self.decode_role_addrs))
             for rank in [0, 0] + list(range(1, self.args.batch_size - 1))
         ]
-        cold_prompts = [
-            make_cache_prompt(
-                self.args.namespace,
-                f"batch-cold-{idx}",
-                40 + idx,
-                repeats=300 + idx * 200,
-            )
-            for idx in range(self.args.batch_size)
-        ]
+        shard_span_reuse = self.reuse_unit_tokens > self.args.block_size
+        if shard_span_reuse:
+            cold_prompts = [
+                self.fit_cache_prompt(
+                    f"batch-cold-{idx}",
+                    40 + idx,
+                    self.reuse_unit_tokens + self.args.block_size * (idx + 1),
+                )
+                for idx in range(self.args.batch_size)
+            ]
+        else:
+            cold_prompts = [
+                make_cache_prompt(
+                    self.args.namespace,
+                    f"batch-cold-{idx}",
+                    40 + idx,
+                    repeats=300 + idx * 200,
+                )
+                for idx in range(self.args.batch_size)
+            ]
         self.run_stage(
             "batch_all_miss",
             [
@@ -1249,30 +1305,51 @@ class Runner:
         exact_hit_count = max(1, self.args.batch_size // 2)
         partial_idx = exact_hit_count
         mixed_prompts = []
-        for idx in range(self.args.batch_size):
-            if idx == partial_idx:
-                prompt = make_partial_prompt(
-                    self.args.namespace,
-                    "batch-mixed-partial-common",
-                    "query",
-                    50 + idx,
-                    repeats=350 + idx * 150,
-                )
-            else:
-                prompt = make_cache_prompt(
-                    self.args.namespace,
-                    f"batch-mixed-{idx}",
-                    50 + idx,
-                    repeats=350 + idx * 150,
-                )
-            mixed_prompts.append(prompt)
-        mixed_partial_seed = make_partial_prompt(
-            self.args.namespace,
-            "batch-mixed-partial-common",
-            "seed",
-            67,
-            repeats=350 + partial_idx * 150,
-        )
+        if shard_span_reuse:
+            mixed_partial_seed, mixed_partial_query = self.fit_partial_cache_prompts(
+                "batch-mixed-partial-common",
+                "seed",
+                67,
+                "query",
+                50 + partial_idx,
+                self.reuse_unit_tokens + self.args.block_size * (partial_idx + 1),
+            )
+            for idx in range(self.args.batch_size):
+                if idx == partial_idx:
+                    prompt = mixed_partial_query
+                else:
+                    prompt = self.fit_cache_prompt(
+                        f"batch-mixed-{idx}",
+                        50 + idx,
+                        self.reuse_unit_tokens
+                        + self.args.block_size * (idx + 1),
+                    )
+                mixed_prompts.append(prompt)
+        else:
+            for idx in range(self.args.batch_size):
+                if idx == partial_idx:
+                    prompt = make_partial_prompt(
+                        self.args.namespace,
+                        "batch-mixed-partial-common",
+                        "query",
+                        50 + idx,
+                        repeats=350 + idx * 150,
+                    )
+                else:
+                    prompt = make_cache_prompt(
+                        self.args.namespace,
+                        f"batch-mixed-{idx}",
+                        50 + idx,
+                        repeats=350 + idx * 150,
+                    )
+                mixed_prompts.append(prompt)
+            mixed_partial_seed = make_partial_prompt(
+                self.args.namespace,
+                "batch-mixed-partial-common",
+                "seed",
+                67,
+                repeats=350 + partial_idx * 150,
+            )
         self.run_stage(
             "mixed_seed_hits",
             [

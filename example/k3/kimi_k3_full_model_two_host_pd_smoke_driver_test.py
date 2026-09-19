@@ -68,6 +68,20 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
                     "1",
                 )
 
+    def test_forwards_prefill_page_rr_multi_launch_profile_to_both_roles(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"SMOKE_PREFILL_PAGE_RR_MULTI_LAUNCH": "1"},
+            clear=True,
+        ):
+            for role in ("prefill", "decode"):
+                self.assertEqual(
+                    driver.forwarded_optional_environment(role)[
+                        "SMOKE_PREFILL_PAGE_RR_MULTI_LAUNCH"
+                    ],
+                    "1",
+                )
+
     def test_removed_page_rr_switches_are_not_forwarded(self) -> None:
         for value in ("0", "1"):
             settings = {"SMOKE_PAGE_RR": value, "SMOKE_DECODE_PAGE_RR": value}
@@ -324,6 +338,7 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             "smoke_mega_tokens": "8192",
             "smoke_shared_expert_shard": "1",
             "smoke_decode_topology": "legacy",
+            "smoke_decode_q_replicated": "0",
             "smoke_prefill_kv_cache_mem_mb": "56000",
             "smoke_decode_kv_cache_mem_mb": "29000",
             "smoke_decode_kda_pool_blocks": "32",

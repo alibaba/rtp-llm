@@ -123,6 +123,7 @@ def _verify(
     dp_size: int = 1,
     expected_block_size: int | None = None,
     source_tp: int | None = None,
+    prefill_page_rr: bool = False,
 ) -> dict:
     checks = {}
     observations = {}
@@ -140,6 +141,44 @@ def _verify(
         for padding in (1, 7):
             checks[f"actual_padding_{padding}"] = any(
                 e["physical_tokens"] - e["logical_tokens"] == padding for e in rounds
+            )
+        if prefill_page_rr:
+            prefix_plans = [
+                event
+                for event in events
+                if event.get("kind") == "mla_prefix"
+                and event.get("backend") == "page_rr"
+                and event.get("route") == "hybrid"
+                and event.get("tp") == 8
+            ]
+
+            def valid_multi_launch(event: dict) -> bool:
+                launches = event["launch_tokens"]
+                capacity = event["capacity_tokens"]
+                alignment = event["alignment_tokens"]
+                return (
+                    isinstance(launches, list)
+                    and len(launches) >= 2
+                    and isinstance(capacity, int)
+                    and capacity > 0
+                    and isinstance(alignment, int)
+                    and alignment > 0
+                    and all(
+                        isinstance(tokens, int)
+                        and 0 < tokens <= capacity
+                        and tokens % alignment == 0
+                        for tokens in launches
+                    )
+                    and sum(launches) == event["prefix_tokens"]
+                )
+
+            valid_prefix_plans = [
+                event for event in prefix_plans if valid_multi_launch(event)
+            ]
+            checks["page_rr_prefix_multi_launch"] = bool(valid_prefix_plans)
+            observations["page_rr_max_launch_count"] = max(
+                (len(event["launch_tokens"]) for event in valid_prefix_plans),
+                default=0,
             )
     elif decode_page_rr:
         report = _dcp_checks(markers or {}, replay_seen, events, proposal_tokens, expected_tp, dp_size, expected_block_size, source_tp)
@@ -229,9 +268,22 @@ def verify(
     dp_size: int = 1,
     expected_block_size: int | None = None,
     source_tp: int | None = None,
+    prefill_page_rr: bool = False,
 ) -> dict:
     try:
-        return _verify(events, role, replay_seen, markers, decode_page_rr, proposal_tokens, expected_tp, dp_size, expected_block_size, source_tp)
+        return _verify(
+            events,
+            role,
+            replay_seen,
+            markers,
+            decode_page_rr,
+            proposal_tokens,
+            expected_tp,
+            dp_size,
+            expected_block_size,
+            source_tp,
+            prefill_page_rr,
+        )
     except (KeyError, TypeError, ValueError, IndexError) as exc:
         return {
             "role": role,
@@ -313,11 +365,27 @@ def main():
     parser.add_argument("--dp-size", type=int, default=1)
     parser.add_argument("--block-size", type=int)
     parser.add_argument("--source-tp-size", type=int)
+    parser.add_argument(
+        "--prefill-page-rr",
+        choices=("0", "1"),
+        default="0",
+        help="Require a real TP8 Page-RR multi-launch prefix plan on Prefill",
+    )
     args = parser.parse_args()
     try:
         events, replay, markers = collect(args.root)
         report = verify(
-            events, args.role, replay, markers, args.decode_page_rr == "1", args.proposal_tokens, args.tp_size, args.dp_size, args.block_size, args.source_tp_size
+            events,
+            args.role,
+            replay,
+            markers,
+            args.decode_page_rr == "1",
+            args.proposal_tokens,
+            args.tp_size,
+            args.dp_size,
+            args.block_size,
+            args.source_tp_size,
+            args.prefill_page_rr == "1",
         )
     except (ValueError, OSError) as exc:
         report = {

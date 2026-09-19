@@ -103,6 +103,9 @@ The all suite also seeds a configurable long conversation (default ~110K tokens)
 question. It checks the answer, PD metadata and substantial prefix reuse across
 Prefill chunks. Larger lengths remain opt-in via SMOKE_LONG_PREFIX_TARGET_TOKENS. This correctness case runs by default without profiling;
 its request, token IDs and results are saved under prefill/long-prefix/.
+Set SMOKE_PREFILL_PAGE_RR_MULTI_LAUNCH=1 together with a sufficiently long
+prefix to require runtime evidence for chunked Page-RR prefix gathering. This
+profile requires 2048-token physical pages and 128-token kernel pages.
 Both roles use TP8/EP8, DP1/KTP1 and Page-RR KV caches (P8D8).
 Decode uses DCP and CUDA Graph. Native MTP attention and cache remain BF16.
 
@@ -380,6 +383,7 @@ smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-29000}"
 smoke_decode_kda_pool_blocks="${SMOKE_DECODE_KDA_POOL_BLOCKS:-32}"
 smoke_long_prefix_target_tokens="${SMOKE_LONG_PREFIX_TARGET_TOKENS:-110000}"
 smoke_long_prefix_tp_size="${SMOKE_LONG_PREFIX_TP_SIZE:-${smoke_prefill_tp_size}}"
+smoke_prefill_page_rr_multi_launch="${SMOKE_PREFILL_PAGE_RR_MULTI_LAUNCH:-0}"
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
 smoke_keep_services="${SMOKE_KEEP_SERVICES:-0}"
@@ -405,6 +409,12 @@ for size_value in \
 done
 [[ "${smoke_long_prefix_target_tokens}" -gt 65536 ]] \
     || die "SMOKE_LONG_PREFIX_TARGET_TOKENS must exceed 65536"
+[[ "${smoke_prefill_page_rr_multi_launch}" == "0" || "${smoke_prefill_page_rr_multi_launch}" == "1" ]] \
+    || die "SMOKE_PREFILL_PAGE_RR_MULTI_LAUNCH must be 0 or 1"
+if [[ "${smoke_prefill_page_rr_multi_launch}" == "1" ]]; then
+    [[ "${smoke_block_size}:${smoke_kernel_block_size}" == "2048:128" ]] \
+        || die "SMOKE_PREFILL_PAGE_RR_MULTI_LAUNCH requires physical/kernel pages 2048/128"
+fi
 smoke_mega_tokens=$(( (smoke_chunk_tokens + smoke_tp_size - 1) / smoke_tp_size ))
 ((smoke_block_size % 64 == 0)) \
     || die "SMOKE_BLOCK_SIZE must be divisible by the cuLA checkpoint step 64"
@@ -654,7 +664,8 @@ verify_smoke_runtime_coverage() {
     python3 "${repo_root}/example/k3/kimi_k3_smoke_runtime_evidence.py" \
         --role "${role}" --root "${role_dir}" \
         --decode-page-rr 1 --proposal-tokens "${smoke_proposal_tokens}" \
-        --tp-size "${smoke_tp_size}" --dp-size "${smoke_dp_size}" --block-size "${smoke_block_size}" --source-tp-size "${smoke_prefill_tp_size}"
+        --tp-size "${smoke_tp_size}" --dp-size "${smoke_dp_size}" --block-size "${smoke_block_size}" --source-tp-size "${smoke_prefill_tp_size}" \
+        --prefill-page-rr "${smoke_prefill_page_rr_multi_launch}"
 }
 
 verify_fp8_log() {

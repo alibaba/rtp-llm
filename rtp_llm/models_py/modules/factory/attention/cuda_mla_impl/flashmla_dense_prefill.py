@@ -5,7 +5,10 @@ write and output projection unchanged; only the dense causal attention core is
 replaced.
 """
 
+import json
+import logging
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, cast
 
@@ -33,6 +36,57 @@ from rtp_llm.utils.model_weight import W
 
 _FLASHMLA_WORKSPACES: Dict[int, torch.Tensor] = {}
 _K3_PACKED_KV_HEAD_SPLITS = (128, 64, 128)
+logger = logging.getLogger(__name__)
+_LOGGED_SMOKE_PREFIX_PLANS: set[tuple[object, ...]] = set()
+
+
+def _log_page_rr_prefix_plan_once(
+    plan: FlashMLAForwardPlan,
+    adapter: Optional[MlaPageRRCacheAdapter],
+    *,
+    q_lens: Iterable[int],
+    prefix_lens: Iterable[int],
+    alignment_tokens: int,
+) -> None:
+    """Emit host-only evidence that Page-RR used the chunked prefix path."""
+    if (
+        os.environ.get("KIMI_K3_SMOKE_EVIDENCE") != "1"
+        or adapter is None
+        or adapter.shard_rank != 0
+        or plan.route is not FlashMLAForwardRoute.HYBRID
+    ):
+        return
+    launch_tokens = tuple(launch.expanded_kv_tokens for launch in plan.prefix_launches)
+    q_lens = tuple(q_lens)
+    prefix_lens = tuple(prefix_lens)
+    key = (
+        adapter.shard_size,
+        q_lens,
+        prefix_lens,
+        plan.capacity_tokens,
+        alignment_tokens,
+        launch_tokens,
+    )
+    if key in _LOGGED_SMOKE_PREFIX_PLANS:
+        return
+    _LOGGED_SMOKE_PREFIX_PLANS.add(key)
+    logger.info(
+        "[K3_SMOKE_EVENT] %s",
+        json.dumps(
+            {
+                "kind": "mla_prefix",
+                "backend": "page_rr",
+                "route": plan.route.value,
+                "tp": adapter.shard_size,
+                "query_tokens": sum(q_lens),
+                "prefix_tokens": sum(prefix_lens),
+                "capacity_tokens": plan.capacity_tokens,
+                "alignment_tokens": alignment_tokens,
+                "launch_tokens": list(launch_tokens),
+            },
+            sort_keys=True,
+        ),
+    )
 
 
 def _workspace(device: torch.device) -> torch.Tensor:
@@ -467,6 +521,13 @@ class MlaFlashMLAPrefillOp:
             prefix_chunk_alignment_tokens=self.prefix_chunk_alignment_tokens,
             expanded_kv_budget_gib=self.expanded_kv_budget_gib,
             expanded_kv_bytes_per_token=self._expanded_kv_bytes_per_token(),
+        )
+        _log_page_rr_prefix_plan_once(
+            self._forward_plan,
+            self.page_rr_cache_adapter,
+            q_lens=self.q_lens,
+            prefix_lens=prefix_lens,
+            alignment_tokens=self.prefix_chunk_alignment_tokens,
         )
         self._q_offsets = ()
         self._prefix_runtime_launches = ()

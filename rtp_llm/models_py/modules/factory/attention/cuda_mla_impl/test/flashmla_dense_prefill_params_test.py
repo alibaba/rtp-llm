@@ -41,6 +41,57 @@ CUDA_AVAILABLE = torch.cuda.is_available()
 GIB = 1024**3
 
 
+class FlashMlaPrefixSmokeEvidenceTest(TestCase):
+    def test_logs_page_rr_multi_launch_shape_once_and_only_on_rank_zero(self) -> None:
+        plan = SimpleNamespace(
+            route=FlashMLAForwardRoute.HYBRID,
+            capacity_tokens=4096,
+            prefix_launches=(
+                SimpleNamespace(expanded_kv_tokens=4096),
+                SimpleNamespace(expanded_kv_tokens=4096),
+            ),
+        )
+        adapter = SimpleNamespace(shard_size=8, shard_rank=0)
+        with patch.dict(os.environ, {"KIMI_K3_SMOKE_EVIDENCE": "1"}), patch.object(
+            flashmla_dense_prefill.logger, "info"
+        ) as info:
+            flashmla_dense_prefill._LOGGED_SMOKE_PREFIX_PLANS.clear()
+            for _ in range(2):
+                flashmla_dense_prefill._log_page_rr_prefix_plan_once(
+                    plan,
+                    adapter,
+                    q_lens=(1,),
+                    prefix_lens=(8192,),
+                    alignment_tokens=2048,
+                )
+            adapter.shard_rank = 1
+            flashmla_dense_prefill._log_page_rr_prefix_plan_once(
+                plan,
+                adapter,
+                q_lens=(1,),
+                prefix_lens=(8192,),
+                alignment_tokens=2048,
+            )
+
+        info.assert_called_once()
+        self.assertEqual(info.call_args.args[0], "[K3_SMOKE_EVENT] %s")
+        event = __import__("json").loads(info.call_args.args[1])
+        self.assertEqual(
+            event,
+            {
+                "alignment_tokens": 2048,
+                "backend": "page_rr",
+                "capacity_tokens": 4096,
+                "kind": "mla_prefix",
+                "launch_tokens": [4096, 4096],
+                "prefix_tokens": 8192,
+                "query_tokens": 1,
+                "route": "hybrid",
+                "tp": 8,
+            },
+        )
+
+
 class FlashMlaWorkspaceLifetimeTest(TestCase):
     def test_release_drops_scratch_but_keeps_plan_and_consumed_output(self) -> None:
         op = object.__new__(MlaFlashMLAPrefillOp)

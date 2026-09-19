@@ -50,6 +50,19 @@ def response_for(runner, content, *, owner=0, reuse=0, input_len=8193):
 
 
 class RegressionTest(unittest.TestCase):
+    def test_page_rr_multi_launch_profile_requires_2k_physical_pages(self):
+        script = (
+            pathlib.Path(__file__)
+            .with_name("kimi_k3_full_model_two_host_pd_smoke.sh")
+            .read_text()
+        )
+        profile = re.search(
+            r'if \[\[ "\$\{smoke_prefill_page_rr_multi_launch\}" == "1" \]\]; then(.*?)fi',
+            script,
+            re.S,
+        ).group(1)
+        self.assertIn('"2048:128"', profile)
+
     def test_keep_services_reaches_both_roles(self):
         from example.k3.kimi_k3_full_model_two_host_pd_smoke_driver import forwarded_optional_environment
         with mock.patch.dict(os.environ, {"SMOKE_KEEP_SERVICES": "1"}, clear=True):
@@ -332,6 +345,61 @@ class RegressionTest(unittest.TestCase):
             self.assertEqual(hit.expected_reuse_len, 65536)
             self.assertNotEqual(cold.decode_owner_rank, hit.decode_owner_rank)
 
+    def test_page_rr_batch_hit_prompts_cross_the_full_shard_span(self):
+        args = make_args()
+        args.block_size = 2048
+        args.reuse_unit_tokens = 2048 * 8
+        runner = Runner(args)
+        stages = {}
+
+        def fit_prompt(head, tail, target):
+            return f"{head}<target={target}>{tail}", [1] * target
+
+        with ExitStack() as patches:
+            for method in (
+                "prewarm_rdma_pool",
+                "run_owner_regressions",
+                "run_prefix_branches",
+                "run_padding_boundaries",
+                "run_page_rr_boundaries",
+                "run_long_prefix_case",
+            ):
+                patches.enter_context(mock.patch.object(runner, method))
+            patches.enter_context(
+                mock.patch.object(runner, "fit_prompt", side_effect=fit_prompt)
+            )
+            patches.enter_context(
+                mock.patch.object(runner, "tokenize", return_value=[1] * 22528)
+            )
+            patches.enter_context(
+                mock.patch.object(
+                    runner,
+                    "run_stage",
+                    side_effect=lambda name, cases, **kw: stages.update({name: cases}),
+                )
+            )
+            runner.run_all()
+
+        expected_targets = [18432, 20480, 22528, 24576]
+        for stage_name in ("batch_all_miss", "batch_all_hit"):
+            self.assertEqual(
+                [
+                    int(re.search(r"<target=(\d+)>", case.prompt).group(1))
+                    for case in stages[stage_name]
+                ],
+                expected_targets,
+            )
+        self.assertEqual(
+            [case.prompt for case in stages["batch_all_miss"]],
+            [case.prompt for case in stages["batch_all_hit"]],
+        )
+        self.assertTrue(
+            all(
+                f"<target={expected_targets[index]}>" in case.prompt
+                for index, case in enumerate(stages["batch_mixed_then_all_hit"])
+            )
+        )
+
     def test_token_fixture_saves_exact_chat_input_and_token_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = make_args()
@@ -523,6 +591,89 @@ class RuntimeEvidenceTest(unittest.TestCase):
         self.assertFalse(verify(events[:1], "prefill")["passed"])
         events[0]["physical_tokens"] = 9
         self.assertFalse(verify(events, "prefill")["passed"])
+
+    def test_page_rr_prefill_requires_a_real_tp8_multi_launch_plan(self):
+        events = [
+            dict(
+                kind="chunk",
+                tp=8,
+                logical_tokens=n,
+                physical_tokens=8,
+                logical_requests=1,
+                physical_requests=2,
+            )
+            for n in (1, 7)
+        ]
+        self.assertFalse(
+            verify(events, "prefill", prefill_page_rr=True)["passed"]
+        )
+        events.append(
+            dict(
+                kind="mla_prefix",
+                backend="page_rr",
+                route="hybrid",
+                tp=8,
+                prefix_tokens=950_272,
+                query_tokens=1_587,
+                capacity_tokens=559_104,
+                alignment_tokens=2_048,
+                launch_tokens=[559_104, 391_168],
+            )
+        )
+        report = verify(events, "prefill", prefill_page_rr=True)
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["observations"]["page_rr_max_launch_count"], 2)
+
+    def test_page_rr_prefill_rejects_invalid_multi_launch_evidence(self):
+        base = [
+            dict(
+                kind="chunk",
+                tp=8,
+                logical_tokens=n,
+                physical_tokens=8,
+                logical_requests=1,
+                physical_requests=2,
+            )
+            for n in (1, 7)
+        ]
+        plan = dict(
+            kind="mla_prefix",
+            backend="page_rr",
+            route="hybrid",
+            tp=8,
+            prefix_tokens=4096,
+            query_tokens=1,
+            capacity_tokens=2048,
+            alignment_tokens=2048,
+            launch_tokens=[2048, 2048],
+        )
+        for broken in (
+            dict(plan, backend="replicated"),
+            dict(plan, tp=4),
+            dict(plan, route="full"),
+            dict(plan, launch_tokens=[2048]),
+            dict(plan, launch_tokens=[1152, 896]),
+        ):
+            with self.subTest(broken=broken):
+                self.assertFalse(
+                    verify(base + [broken], "prefill", prefill_page_rr=True)[
+                        "passed"
+                    ]
+                )
+
+    def test_replicated_prefill_does_not_require_page_rr_plan_evidence(self):
+        events = [
+            dict(
+                kind="chunk",
+                tp=8,
+                logical_tokens=n,
+                physical_tokens=8,
+                logical_requests=1,
+                physical_requests=2,
+            )
+            for n in (1, 7)
+        ]
+        self.assertTrue(verify(events, "prefill", prefill_page_rr=False)["passed"])
 
     def test_collect_reads_only_current_role_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
