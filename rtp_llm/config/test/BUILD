@@ -1,5 +1,11 @@
 
 py_test(
+    name = "dsv41_config_test",
+    srcs = ["dsv41_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "grammar_compile_threads_test",
     srcs = [
         "grammar_compile_threads_test.py",

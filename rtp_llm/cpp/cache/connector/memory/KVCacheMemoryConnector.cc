@@ -794,7 +794,11 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
             if (!ok || !matched_any) {
                 break;
             }
-            matched_num = i + 1;
+            // Illegal image boundaries can still be part of a longer legal prefix.
+            // Keep scanning and checking all required state/SWA entries.
+            if (meta->isValidReuseBlockCount(i + 1)) {
+                matched_num = i + 1;
+            }
         }
         if (matched_num <= already_reuse_num) {
             reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
@@ -837,7 +841,7 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         }
         matched_disk                    = matched_disk || match_result.backing_type == CacheBackingType::DISK;
         const bool gpu_blocks_all_valid = gpuBlocksAllValid(layer_attn_block_ids, slots, i);
-        if (match_result.is_complete && gpu_blocks_all_valid) {
+        if (match_result.is_complete && gpu_blocks_all_valid && meta->isValidReuseBlockCount(i + 1)) {
             matched_num = i + 1;
         }
     }

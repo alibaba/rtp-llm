@@ -56,6 +56,9 @@ public:
     // same prompt with different image content cannot hit the same prefix.
     std::vector<int32_t> imageCacheIdentity(int begin, int count) const;
 
+    // A reused prefix must not split an image in this token view.
+    bool isValidReuseLength(int reuse_length) const;
+
     int32_t* data(int batch_id);
 
     // Number of columns (max token capacity per batch row)

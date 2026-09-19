@@ -67,6 +67,15 @@ public:
         return generate_stream_;
     }
 
+    bool isValidReuseBlockCount(size_t block_count) const override {
+        if (!generate_stream_ || !generate_stream_->isContextStream()) {
+            return true;
+        }
+        const int block_tokens = generate_stream_->streamCacheResource().reuseBlockTokens();
+        return generate_stream_->completeTokenIdsPtr()->isValidReuseLength(static_cast<int>(block_count)
+                                                                           * block_tokens);
+    }
+
     // P2P routing context: cached at construction time, read-only access thereafter
     std::optional<P2PRoutingContext> p2pRouting() const override {
         if (!routing_ctx_.has_value()) {

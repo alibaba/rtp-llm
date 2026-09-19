@@ -562,6 +562,47 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_CoordinatorReturnsNull_Return
     ASSERT_FALSE(resource.asyncLoadCache());
 }
 
+TEST_F(StreamCacheResourceTest, testMemoryMatchMetaUsesCpVirtualImageBoundariesOnlyForContext) {
+    auto cfg = test::makeSimpleMhaCacheConfig(3, 9, 128, rtp_llm::DataType::TYPE_INT8);
+    prepareResourceWithCacheConfig(cfg, std::vector<int>(2048, 1), true, RoleType::PREFILL);
+    cache_manager_->cp_slot_mapper_ = std::make_shared<CPSlotMapper>(0, 4, 128);
+    auto          images            = std::make_shared<V41RequestInputs>();
+    V41ImageInput image;
+    image.start = 730;
+    image.types = torch::zeros({994}, torch::kInt32);
+    images->images.push_back(image);
+    stream_->generate_input_->v41_inputs = images;
+    stream_->completeTokenIdsPtr()->init(stream_->generate_input_);
+    auto& resource                                                 = stream_->streamCacheResource();
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
+    cache_manager_->coordinator_ = mock_coord;
+    std::shared_ptr<Meta> meta;
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_))
+        .WillOnce(testing::Invoke([&](const std::shared_ptr<KVCacheConnectorReadWriteContext>& ctx) {
+            meta = ctx->meta();
+            return std::shared_ptr<AsyncContext>{};
+        }));
+    EXPECT_FALSE(resource.asyncLoadCache());
+    ASSERT_NE(meta, nullptr);
+    EXPECT_EQ(meta->generateStream(), stream_.get());
+    EXPECT_TRUE(meta->isValidReuseBlockCount(1));   // 512, before the image.
+    EXPECT_FALSE(meta->isValidReuseBlockCount(2));  // 1024, inside the image.
+    EXPECT_FALSE(meta->isValidReuseBlockCount(3));  // 1536, inside the image.
+    EXPECT_TRUE(meta->isValidReuseBlockCount(4));   // 2048, after the image.
+    cache_manager_->cp_slot_mapper_.reset();
+    EXPECT_TRUE(meta->isValidReuseBlockCount(5));   // 640, physical-block coordinates.
+    EXPECT_FALSE(meta->isValidReuseBlockCount(6));  // 768, inside the image.
+    stream_->setIsContextStream(false);
+    EXPECT_TRUE(meta->isValidReuseBlockCount(6));
+}
+
 TEST_F(StreamCacheResourceTest, testLoadCacheDone_NoContext_ReturnsTrue) {
     prepareResource(/*reuse_cache=*/false);
     auto& resource = stream_->streamCacheResource();

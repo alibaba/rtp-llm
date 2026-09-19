@@ -1,9 +1,10 @@
 import asyncio
+import inspect
 import json
 import logging
 import threading
 import time
-from typing import Any, Callable, Dict, Union
+from typing import Any, Awaitable, Callable, Dict, Union
 
 from fastapi import Request
 from fastapi import Request as RawRequest
@@ -38,6 +39,9 @@ from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import check_with_info
 
 USAGE_HEADER = "USAGE"
+GenerateCall = Callable[
+    [], Union[CompleteResponseAsyncGenerator, Awaitable[CompleteResponseAsyncGenerator]]
+]
 
 
 class FrontendServer(object):
@@ -287,7 +291,7 @@ class FrontendServer(object):
         self,
         req: Dict[str, Any],
         raw_request: RawRequest,
-        generate_call: Callable[[], CompleteResponseAsyncGenerator],
+        generate_call: GenerateCall,
     ):
         try:
             rep = await self._infer_impl(req, raw_request, generate_call)
@@ -306,9 +310,9 @@ class FrontendServer(object):
             sequence,
         )
 
-        def generate_call():
+        async def generate_call():
             assert self._openai_endpoint != None
-            response = self._openai_endpoint.chat_completion(
+            response = await self._openai_endpoint.chat_completion_async(
                 request_id, request, raw_request
             )
             assert isinstance(
@@ -332,7 +336,7 @@ class FrontendServer(object):
     async def chat_render(self, request: ChatCompletionRequest, raw_request: Request):
         try:
             assert self._openai_endpoint != None
-            return self._openai_endpoint.chat_render(request)
+            return await self._openai_endpoint.chat_render_async(request)
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
 
@@ -376,9 +380,7 @@ class FrontendServer(object):
         rep = ORJSONResponse(exception_json, status_code=status_code)
         return rep
 
-    async def _call_generate_with_report(
-        self, generate_call: Callable[[], CompleteResponseAsyncGenerator]
-    ):
+    async def _call_generate_with_report(self, generate_call: GenerateCall):
         async def __gen_response_with_report(start_time: float, response_generator):
             last_iterate_time = current_time_ms()
             first_token = True
@@ -435,6 +437,8 @@ class FrontendServer(object):
         assert self._frontend_worker is not None
         start_time = current_time_ms()
         response_generator = generate_call()
+        if inspect.isawaitable(response_generator):
+            response_generator = await response_generator
         return CompleteResponseAsyncGenerator(
             __gen_response_with_report(start_time, response_generator),
             response_generator._collect_complete_response_func,
@@ -457,7 +461,7 @@ class FrontendServer(object):
         self,
         req: Dict[Any, Any],
         raw_request: RawRequest,
-        generate_call: Callable[[], CompleteResponseAsyncGenerator],
+        generate_call: GenerateCall,
     ):
         assert self._frontend_worker is not None
         kmonitor.report(
@@ -489,6 +493,19 @@ class FrontendServer(object):
             req, res
         )
         return ORJSONResponse(content=complete_response)
+
+    async def tokenize_async(self, req: str | Dict[str, Any]):
+        try:
+            if isinstance(req, str):
+                req = json.loads(req)
+            if not ChatCompletionRequest.is_openai_request(req):
+                return self.tokenize(req)
+            rendered = await self._openai_endpoint.render_chat_async(
+                ChatCompletionRequest(**req)
+            )
+            return ORJSONResponse({"token_ids": rendered.input_ids})
+        except Exception as e:
+            return ORJSONResponse(format_exception(e), status_code=500)
 
     def tokenize(self, req: str | Dict[str, Any]):
         try:

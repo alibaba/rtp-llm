@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import cp_kv_slot_mapping
 from rtp_llm.models_py.modules.dsv4.fp8 import attention_v41 as attention_v41_module
+from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import cp_kv_slot_mapping
 from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (
     AttentionV41FP8,
     compress_pairs,
@@ -19,6 +19,39 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (
 
 
 class AttentionV41Test(unittest.TestCase):
+    def test_cp_hidden_tiles_restore_padded_multiple_requests(self):
+        for cp_size in (2, 4):
+            lengths = (5, 19, 1, 32)
+            chunks = tuple(
+                2 * ((n + 2 * cp_size - 1) // (2 * cp_size)) for n in lengths
+            )
+            local = [[] for _ in range(cp_size)]
+            expected = []
+            for request, (length, chunk) in enumerate(zip(lengths, chunks)):
+                values = torch.arange(length) + request * 100
+                padded = torch.full((cp_size * chunk,), -1)
+                padded[:length] = values
+                halves = padded.reshape(2 * cp_size, chunk // 2)
+                for rank in range(cp_size):
+                    local[rank].extend((halves[rank], halves[-rank - 1]))
+                expected.append(values)
+            local = [torch.cat(parts) for parts in local]
+            context = SimpleNamespace(
+                cp_size=cp_size,
+                chunk_lengths_per_req=chunks,
+                input_lengths_global_host=lengths,
+            )
+            for tile_rows in (1, 3, 7, 32768):
+                with patch.object(
+                    attention_v41_module, "_PRODUCE_GLOBAL_TILE_ROWS", tile_rows
+                ):
+                    plan = list(attention_v41_module._prefill_x_tile_plan(context))
+                actual = torch.cat(
+                    [local[rank][start : start + count] for rank, start, count in plan]
+                )
+                torch.testing.assert_close(actual, torch.cat(expected))
+                self.assertTrue(all(0 < count <= tile_rows for _, _, count in plan))
+
     def test_cp_gather_updates_input_with_symm_memory_wrapper(self):
         from rtp_llm.models_py.distributed import collective_torch as collectives
 
@@ -254,9 +287,7 @@ class AttentionV41Test(unittest.TestCase):
         attn._read_state = lambda positions, req_ids: previous
 
         def record_writes(values, scores, positions, req_ids, seq_ends):
-            state_writes.append(
-                (positions.clone(), values.clone(), scores.clone())
-            )
+            state_writes.append((positions.clone(), values.clone(), scores.clone()))
 
         attn._write_states = record_writes
         return attn
@@ -274,30 +305,43 @@ class AttentionV41Test(unittest.TestCase):
         starts = torch.tensor([3, 7], dtype=torch.long)
         lengths = torch.tensor([4, 5], dtype=torch.long)
 
-        def run(tile_rows):
+        def run(tile_rows, streamed=False):
             state_writes = []
             attn = self._kv_source_fixture(state_writes)
+            projected = torch.cat((x_full.float(), x_full.float() * 0.125), -1)
             with patch(
                 "rtp_llm.models_py.modules.dsv4.fp8.compressor._linear_bf16_bf16_fp32",
-                side_effect=lambda x, w: torch.nn.functional.linear(x.float(), w.float()),
+                side_effect=lambda x, w: torch.nn.functional.linear(
+                    x.float(), w.float()
+                ),
             ), patch.object(
                 attention_v41_module, "_PRODUCE_GLOBAL_TILE_ROWS", tile_rows
             ):
                 attn._produce_global(
-                    x_full,
+                    x_full[:1] if streamed else x_full,
                     positions,
                     req_ids,
                     starts,
                     lengths,
                     prefill=True,
+                    projected_tiles=(
+                        (
+                            (start, projected[start : start + tile_rows])
+                            for start in range(0, rows, tile_rows)
+                        )
+                        if streamed
+                        else None
+                    ),
                 )
             return attn._shared_attention["global"][2], state_writes
 
         reference_globals, reference_writes = run(4096)
         self.assertEqual(len(reference_writes), 1)
-        for tile_rows in (1, 2, 3, 4, 5, 8):
-            with self.subTest(tile_rows=tile_rows):
-                tiled_globals, tiled_writes = run(tile_rows)
+        for tile_rows, streamed in [
+            (n, streamed) for n in (1, 2, 3, 4, 5, 8) for streamed in (False, True)
+        ]:
+            with self.subTest(tile_rows=tile_rows, streamed=streamed):
+                tiled_globals, tiled_writes = run(tile_rows, streamed)
                 self.assertEqual(len(tiled_globals), len(reference_globals))
                 for (g_ref, k_ref), (g_tile, k_tile) in zip(
                     reference_globals, tiled_globals
@@ -320,7 +364,10 @@ class AttentionV41Test(unittest.TestCase):
         # Blackwell CUDA device the bf16 sites run the framework
         # ``rtp_llm_ops.rmsnorm`` kernel; the result stays within one BF16
         # ulp of this reference formula with a >=99.9% bit-exact rate.
-        if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 10:
+        if (
+            not torch.cuda.is_available()
+            or torch.cuda.get_device_capability(0)[0] != 10
+        ):
             self.skipTest("native rmsnorm requires a Blackwell CUDA device")
         device = torch.device("cuda")
         shapes = [(2, 5120), (7, 1280), (2048, 512), (3, 128), (1, 5120)]

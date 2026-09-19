@@ -53,6 +53,8 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
     detector_class = DeepSeekV41Detector
     dsml_tool_calls_marker = "<\uff5cDSML\uff5c calls>"
     parses_user_stop_sequences = True
+    # Rendering downloads and preprocesses images using only request-local state.
+    render_chat_in_thread = True
 
     def _load_encoding_module(self, ckpt_path: str):
         script = os.path.join(ckpt_path, "encoding", "encoding.py")

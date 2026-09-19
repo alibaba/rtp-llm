@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -28,6 +29,11 @@ public:
     // Non-P2P scenarios can return nullptr by default.
     virtual GenerateStream* generateStream() const {
         return nullptr;
+    }
+
+    // Connector block counts use the request's CP-remapped key namespace.
+    virtual bool isValidReuseBlockCount(size_t block_count) const {
+        return true;
     }
 
     // Set stream to stop with error code and message (delegates to GenerateStream::setStop)

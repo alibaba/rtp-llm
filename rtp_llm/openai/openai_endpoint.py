@@ -1,3 +1,4 @@
+import asyncio
 import itertools
 import json
 import logging
@@ -236,14 +237,16 @@ class OpenaiEndpoint(object):
             think_start_tag, add_special_tokens=False
         )
 
+    def _get_renderer(self, request: ChatCompletionRequest) -> CustomChatRenderer:
+        return self.template_renderer if request.user_template else self.chat_renderer
+
     def _extract_generation_config(
         self, request: ChatCompletionRequest
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
+        renderer = self._get_renderer(request)
         config = request.extra_configs or GenerateConfig()
-        content_state_stops = getattr(
-            self.chat_renderer, "parses_user_stop_sequences", False
-        )
+        content_state_stops = getattr(renderer, "parses_user_stop_sequences", False)
         if content_state_stops:
             config = config.model_copy(deep=True)
             # Parse every backend delta so content-only stops also cancel
@@ -277,7 +280,7 @@ class OpenaiEndpoint(object):
         )
         config.stop_words_list = self._dedup_stop_words_list(
             self.stop_words_id_list
-            + self.chat_renderer.tokenize_words(config.stop_words_str)
+            + renderer.tokenize_words(config.stop_words_str)
             + config.stop_words_list
         )
         if request.chat_id != None:
@@ -305,7 +308,7 @@ class OpenaiEndpoint(object):
             budget = int(request.thinking_budget)
             config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
         if content_state_stops:
-            config.in_think_mode = self.chat_renderer.in_think_mode(request)
+            config.in_think_mode = renderer.in_think_mode(request)
             if not config.in_think_mode:
                 config.max_thinking_tokens = 0
         else:
@@ -583,9 +586,7 @@ class OpenaiEndpoint(object):
         )
 
     def render_chat(self, chat_request: ChatCompletionRequest):
-        renderer = (
-            self.template_renderer if chat_request.user_template else self.chat_renderer
-        )
+        renderer = self._get_renderer(chat_request)
         prepopulate_str = ""
         if len(chat_request.messages) > 0 and chat_request.messages[-1].partial:
             prepopulate_str = str(chat_request.messages[-1].content)
@@ -601,13 +602,37 @@ class OpenaiEndpoint(object):
             rendered_input.input_ids += self.tokenizer.encode(prepopulate_str)
         return rendered_input
 
+    async def render_chat_async(self, chat_request: ChatCompletionRequest):
+        renderer = self._get_renderer(chat_request)
+        if getattr(renderer, "render_chat_in_thread", False):
+            return await asyncio.to_thread(self.render_chat, chat_request)
+        return self.render_chat(chat_request)
+
+    async def chat_completion_async(
+        self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
+    ) -> CompleteResponseAsyncGenerator:
+        rendered_input = await self.render_chat_async(chat_request)
+        # Backend visitors and response generators must stay on the HTTP loop.
+        return self._chat_completion_from_inputs(
+            request_id, chat_request, raw_request, rendered_input
+        )
+
     def chat_completion(
         self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
     ) -> CompleteResponseAsyncGenerator:
-        renderer = (
-            self.template_renderer if chat_request.user_template else self.chat_renderer
-        )
         rendered_input = self.render_chat(chat_request)
+        return self._chat_completion_from_inputs(
+            request_id, chat_request, raw_request, rendered_input
+        )
+
+    def _chat_completion_from_inputs(
+        self,
+        request_id: int,
+        chat_request: ChatCompletionRequest,
+        raw_request: Request,
+        rendered_input: RenderedInputs,
+    ) -> CompleteResponseAsyncGenerator:
+        renderer = self._get_renderer(chat_request)
         generate_config = self._extract_generation_config(chat_request)
         self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
 
@@ -653,10 +678,14 @@ class OpenaiEndpoint(object):
             choice_generator, debug_info, self.tokenizer
         )
 
+    async def chat_render_async(self, chat_request: ChatCompletionRequest) -> DebugInfo:
+        renderer = self._get_renderer(chat_request)
+        if getattr(renderer, "render_chat_in_thread", False):
+            return await asyncio.to_thread(self.chat_render, chat_request)
+        return self.chat_render(chat_request)
+
     def chat_render(self, chat_request: ChatCompletionRequest) -> DebugInfo:
-        renderer = (
-            self.template_renderer if chat_request.user_template else self.chat_renderer
-        )
+        renderer = self._get_renderer(chat_request)
         rendered_input = renderer.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
         self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)

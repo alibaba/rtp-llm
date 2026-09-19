@@ -13,6 +13,7 @@ import os
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.attn_type import (
     CSA_KV,
     CSA_STATE,
@@ -20,11 +21,7 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     INDEXER_KV,
     SWA_KV,
 )
-from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.models_py.modules.dsv4.cp import (
-    _cp_restore_gathered_full_2d,
-    cp_all_gather_full_varlen,
-)
+from rtp_llm.models_py.modules.dsv4.cp import _cp_restore_gathered_full_2d
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_indexer as prefill_indexer
 from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
     cp_kv_slot_mapping,
@@ -39,73 +36,114 @@ from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     _ATTN_TYPE_ENUM_BY_INT,
-    _get_cp_comm_stream,
     AttentionFP8,
+    _get_cp_comm_stream,
 )
-from rtp_llm.ops.compute_ops import rtp_llm_ops
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
 from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-# Chunked gather-project tile: the KV-source projection's full-sequence
-# intermediates (values/scores/latent/keys) stay bounded to this many rows at
-# a time. Seams carry the ratio-2 pair state, so results are bit-identical to
-# the single-shot projection at any tile size.
+# Bound both CP hidden-state transfers and the subsequent projections.
 _PRODUCE_GLOBAL_TILE_ROWS = 32768
 
 
 class _V41AsyncXGather:
-    """In-flight KV-source hidden-state CP all-gather (CP communication stream).
+    """One in-flight, globally ordered hidden-state tile."""
 
-    The V4.1 CP-overlap wiring: the gather is launched at layer entry and
-    drains on the serialized CP stream while the default stream runs the
-    layer's QKV projections and SWA write. The handle keeps the send and
-    receive buffers alive until ``wait`` joins on the default stream, which
-    replaces allocator ``record_stream`` calls (same lifetime contract as
-    ``cp.CudaAsyncCPGatherImpl``).
-    """
+    __slots__ = ("work", "completion_event", "gathered")
 
-    __slots__ = ("work", "completion_event", "stream", "gathered", "local_2d")
-
-    def __init__(self, work, completion_event, stream, gathered, local_2d):
+    def __init__(self, work, completion_event, gathered):
         self.work = work
         self.completion_event = completion_event
-        self.stream = stream
         self.gathered = gathered
-        self.local_2d = local_2d
 
 
-def _start_prefill_x_gather_async(x: torch.Tensor, cp_ctx):
-    """Start the KV-source ``x`` all-gather on the CP communication stream."""
+def _prefill_x_tile_plan(cp_ctx):
+    """Visit each request's zigzag halves in global order, excluding padding."""
+    lengths = cp_ctx.input_lengths_global_host
+    if lengths is None:
+        lengths = cp_ctx.input_lengths_global.tolist()
+    local_base = 0
+    for length, chunk in zip(lengths, cp_ctx.chunk_lengths_per_req):
+        half = chunk // 2
+        for segment in range(2 * cp_ctx.cp_size):
+            rows = min(half, max(0, length - segment * half))
+            front = segment < cp_ctx.cp_size
+            owner = segment if front else 2 * cp_ctx.cp_size - segment - 1
+            local_start = local_base + (0 if front else half)
+            for offset in range(0, rows, _PRODUCE_GLOBAL_TILE_ROWS):
+                yield owner, local_start + offset, min(
+                    _PRODUCE_GLOBAL_TILE_ROWS, rows - offset
+                )
+        local_base += chunk
+
+
+def _start_prefill_x_gather_async(x: torch.Tensor, cp_ctx, tile, buffer, weights=()):
+    """Transfer a bounded hidden-state batch or owner-projected zigzag tile."""
     from rtp_llm.models_py.distributed import collective_torch
     from rtp_llm.models_py.distributed.collective_torch import Group
 
-    local_2d = x.reshape(cp_ctx.chunk_length, -1).contiguous()
+    owner, start, rows = tile
     process_group = collective_torch._get_group(Group.TP)
-    world_size = torch.distributed.get_world_size(process_group)
-    gather_rows = world_size * local_2d.size(0)
-    gathered = torch.empty(
-        (gather_rows, local_2d.size(1)),
-        dtype=local_2d.dtype,
-        device=local_2d.device,
-    )
-    current = torch.cuda.current_stream(local_2d.device)
-    stream = _get_cp_comm_stream(local_2d.device)
+    gathered = buffer[:rows]
+    if owner == cp_ctx.cp_rank:
+        if weights:
+            from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
+                _linear_bf16_bf16_fp32,
+            )
+
+            head = weights[0].shape[0]
+            for i, weight in enumerate(weights):
+                gathered[:, i * head : (i + 1) * head].copy_(
+                    _linear_bf16_bf16_fp32(x[start : start + rows], weight)
+                )
+        else:
+            gathered.copy_(x[start : start + rows])
+    current = torch.cuda.current_stream(x.device)
+    stream = _get_cp_comm_stream(x.device)
     stream.wait_stream(current)
     with torch.cuda.stream(stream):
-        work = torch.distributed.all_gather_into_tensor(
-            gathered, local_2d, group=process_group, async_op=True
+        work = (
+            torch.distributed.all_gather_into_tensor(
+                gathered, x.contiguous(), group=process_group, async_op=True
+            )
+            if owner is None
+            else torch.distributed.broadcast(
+                gathered,
+                src=torch.distributed.get_global_rank(process_group, owner),
+                group=process_group,
+                async_op=True,
+            )
         )
         completion_event = torch.cuda.Event()
         completion_event.record(stream)
-    return _V41AsyncXGather(work, completion_event, stream, gathered, local_2d)
+    return _V41AsyncXGather(work, completion_event, gathered)
 
 
-def _wait_prefill_x_gather(handle: _V41AsyncXGather, cp_ctx) -> torch.Tensor:
-    """Join the async gather on the default stream and restore real order."""
+def _wait_prefill_x_gather(handle: _V41AsyncXGather) -> torch.Tensor:
     current = torch.cuda.current_stream(handle.gathered.device)
     current.wait_event(handle.completion_event)
     handle.work.wait()
-    return _cp_restore_gathered_full_2d(handle.gathered, cp_ctx)
+    return handle.gathered
+
+
+def _prefill_x_tiles(x, cp_ctx, plan, pending, buffers, weights=()):
+    offset = 0
+    next_buffer = 1
+    while pending is not None:
+        tile = _wait_prefill_x_gather(pending)
+        next_tile = next(plan, None)
+        pending = (
+            _start_prefill_x_gather_async(
+                x, cp_ctx, next_tile, buffers[next_buffer], weights
+            )
+            if next_tile is not None
+            else None
+        )
+        yield offset, tile
+        offset += tile.shape[0]
+        next_buffer = 1 - next_buffer
+        del tile
 
 
 def rms_norm(x, weight, eps):
@@ -163,9 +201,7 @@ def fp4_roundtrip(x):
     Keeps the non-paged decode fallback numerically identical to the
     DeepGEMM paged scorer (same group-32 UE8M0 quantization of Q).
     """
-    from rtp_llm.models_py.modules.dsv4.fp8._v41_prefill_indexer import (
-        _fp4_rows_torch,
-    )
+    from rtp_llm.models_py.modules.dsv4.fp8._v41_prefill_indexer import _fp4_rows_torch
 
     shape = x.shape
     values = _fp4_rows_torch(x.reshape(-1, shape[-1]).float().contiguous())[2]
@@ -443,22 +479,37 @@ class AttentionV41FP8(AttentionFP8):
             idx = slots.clamp_min(0)
             pool[idx] = torch.where((slots >= 0)[:, None], data, pool[idx])
 
-    def _produce_global(self, x_full, positions, req_ids, starts, lengths, *, prefill):
-        """Publish this owner's main/index pools, and materialize source keys.
-
-        The projection runs in ``_PRODUCE_GLOBAL_TILE_ROWS`` row tiles (chunked
-        gather-project): each tile's values/scores/latent/keys live only until
-        its pool writes land, so the full-sequence intermediates never
-        coexist. The ratio-2 pair state is carried across tile seams, keeping
-        the pooled results bit-identical to a single-shot projection.
-        """
+    def _produce_global(
+        self,
+        x_full,
+        positions,
+        req_ids,
+        starts,
+        lengths,
+        *,
+        prefill,
+        projected_tiles=None,
+    ):
+        """Publish global pools in sequence order, carrying pairs across tiles."""
         owner = self._owner()
         ratio = self.compress_ratio
         from rtp_llm.models_py.modules.dsv4.fp8.compressor import _linear_bf16_bf16_fp32
 
         main_pool = self._source_pool(self._global_region())
         index_pool = self._source_pool(INDEXER_KV)
-        rows = int(x_full.shape[0])
+        rows = int(positions.shape[0])
+        cp = getattr(self, "_cp_ctx", None)
+        if cp is not None and cp.input_lengths_global_host is not None:
+            lengths_host = cp.input_lengths_global_host
+            prefixes_host = cp.prefix_lengths_host or (0,) * len(lengths_host)
+        else:
+            prefixes_host, lengths_host = torch.stack((starts, lengths)).tolist()
+        ends = [s + l for s, l in zip(prefixes_host, lengths_host)]
+        pair_ranges = []
+        base = 0
+        for start, length in zip(prefixes_host, lengths_host):
+            pair_ranges.append((base + (1 - start % 2), base + length))
+            base += length
         previous = None
         if ratio == 2:
             # Read the previous token before tail writes can reuse its ring slot.
@@ -471,16 +522,27 @@ class AttentionV41FP8(AttentionFP8):
         # them right after quantization.
         warm_keys = [] if main_pool is None else None
         carry = None
-        # ``max(rows, 1)`` keeps the degenerate empty forward on the same path
-        # (one zero-row tile) instead of forking a second code shape.
-        for t0 in range(0, max(rows, 1), _PRODUCE_GLOBAL_TILE_ROWS):
-            t1 = min(t0 + _PRODUCE_GLOBAL_TILE_ROWS, rows)
-            x_tile = x_full[t0:t1]
+        tiles = projected_tiles
+        if tiles is None:
+            tiles = (
+                (t0, x_full[t0 : t0 + _PRODUCE_GLOBAL_TILE_ROWS])
+                for t0 in range(0, max(rows, 1), _PRODUCE_GLOBAL_TILE_ROWS)
+            )
+        for t0, x_tile in tiles:
+            t1 = t0 + x_tile.shape[0]
             pos_tile = positions[t0:t1]
             req_tile = req_ids[t0:t1]
-            values = _linear_bf16_bf16_fp32(x_tile, owner.global_wkv)
+            values = (
+                x_tile[:, : self.head_dim]
+                if projected_tiles is not None
+                else _linear_bf16_bf16_fp32(x_tile, owner.global_wkv)
+            )
             if ratio == 2:
-                scores = _linear_bf16_bf16_fp32(x_tile, owner.global_wgate)
+                scores = (
+                    x_tile[:, self.head_dim :]
+                    if projected_tiles is not None
+                    else _linear_bf16_bf16_fp32(x_tile, owner.global_wgate)
+                )
                 # The seam row's previous value/score is the last row of the
                 # previous tile; the first tile's head is replaced by the
                 # per-request state read below, exactly as the single-shot
@@ -505,28 +567,38 @@ class AttentionV41FP8(AttentionFP8):
                     previous[req_tile, self.head_dim :].to(scores.dtype),
                     score_prev,
                 )
-                boundary = (pos_tile + 1).remainder(2) == 0
-                # Every ``tensor[boundary]`` below is a boolean-mask index, and each
-                # one independently runs ``nonzero`` to size its output — a
-                # device->host sync per use, six times over for a single mask.
-                # Compact once into integer indices and reuse them.
-                boundary_idx = torch.nonzero(boundary, as_tuple=True)[0]
+                # Host request metadata gives fixed-size pair boundaries without
+                # a CUDA nonzero synchronization for every projection tile.
+                pair_indices = []
+                for first, end in pair_ranges:
+                    begin = max(first, t0 + (first - t0) % 2)
+                    if begin < min(end, t1):
+                        pair_indices.append(
+                            torch.arange(
+                                begin - t0, min(end, t1) - t0, 2, device=x_full.device
+                            )
+                        )
+                boundary_idx = (
+                    torch.cat(pair_indices)
+                    if pair_indices
+                    else torch.empty(0, dtype=torch.long, device=x_full.device)
+                )
                 latent = compress_pairs(
                     torch.stack((value_prev[boundary_idx], values[boundary_idx]), 1),
                     torch.stack((score_prev[boundary_idx], scores[boundary_idx]), 1),
                     owner.global_norm,
                     self.eps,
                 )
-                self._write_states(
-                    values, scores, pos_tile, req_tile, starts + lengths
-                )
+                self._write_states(values, scores, pos_tile, req_tile, starts + lengths)
                 boundary_pos, boundary_req = (
                     pos_tile[boundary_idx],
                     req_tile[boundary_idx],
                 )
                 carry = (values[-1:].clone(), scores[-1:].clone())
             else:
-                latent = rms_norm(values, owner.global_norm, self.eps).to(torch.bfloat16)
+                latent = rms_norm(values, owner.global_norm, self.eps).to(
+                    torch.bfloat16
+                )
                 # ratio == 1: every position is a boundary — skip the all-True
                 # boolean-mask compaction (``positions[torch.ones_like(...)]`` is a
                 # pure device->host ``nonzero`` sync that selects everything).
@@ -534,7 +606,9 @@ class AttentionV41FP8(AttentionFP8):
             freqs = self.freqs_cis[(boundary_pos // ratio) * ratio]
             global_keys = rope_only(latent.clone(), freqs, self.rope_head_dim)
             index_keys = rope_only(
-                rms_norm(F.linear(latent, owner.index_wk), owner.index_k_norm, self.eps),
+                rms_norm(
+                    F.linear(latent, owner.index_wk), owner.index_k_norm, self.eps
+                ),
                 freqs,
                 self.rope_head_dim,
             )
@@ -565,20 +639,6 @@ class AttentionV41FP8(AttentionFP8):
         fused_indexer = prefill and prefill_indexer.is_supported(
             x_full.device, getattr(self, "index_n_heads", 0), index_keys.shape[-1]
         )
-        # Per-request compressed end positions. Prefer the host copies already
-        # held on CPContext (``prefix_lengths_host`` / ``input_lengths_global_host``)
-        # so we don't force a GPU->CPU sync on the GPU ``starts``/``lengths``.
-        cp = getattr(self, "_cp_ctx", None)
-        if cp is not None and cp.input_lengths_global_host is not None:
-            lengths_host = cp.input_lengths_global_host
-            prefixes_host = (
-                cp.prefix_lengths_host
-                if cp.prefix_lengths_host is not None
-                else (0,) * len(lengths_host)
-            )
-            ends = [s + l for s, l in zip(prefixes_host, lengths_host)]
-        else:
-            ends = (starts + lengths).tolist()
         for b, end in enumerate(ends):
             count = int(end) // ratio
             idx = torch.arange(count, device=x_full.device, dtype=torch.long)
@@ -864,26 +924,41 @@ class AttentionV41FP8(AttentionFP8):
         qkv = self._prefill_compute_qkv(
             x, common, shared_input_quant=shared_input_quant
         )
-        # V4.1 CP overlap (kv-source layers): launch the hidden-state
-        # all-gather on the CP communication stream after the QKV path has
-        # enqueued its own (earlier-needed) kv gather, so the NCCL channel
-        # order matches the consumption order. The x gather then drains
-        # behind the SWA workspace read and pool write on the default
-        # stream instead of blocking the layer between the SWA write and
-        # the global projection. Same collective sequence on every rank, so
-        # NCCL ordering is preserved.
+        # Launch the first bounded hidden-state transfer after the QKV gather.
+        # It overlaps SWA work; subsequent transfers overlap global projection.
         x_gather = None
-        if (
-            self.is_kv_source
-            and common.cp_on
-            and common.device.type == "cuda"
-            and not (
-                torch.cuda.is_available()
-                and torch.cuda.is_current_stream_capturing()
-            )
-        ):
+        small_cp = (
+            common.cp_on and common.cp_ctx.padded_seq_len <= _PRODUCE_GLOBAL_TILE_ROWS
+        )
+        if self.is_kv_source and common.cp_on:
+            if small_cp:
+                # One bounded all-gather avoids per-half launches on short requests.
+                first_tile = (None, 0, common.cp_ctx.padded_seq_len)
+                weights = ()
+                x_buffers = [x.new_empty((first_tile[2], x.shape[-1]))]
+            else:
+                owner = self._owner()
+                weights = (
+                    (owner.global_wkv, owner.global_wgate)
+                    if self.compress_ratio == 2
+                    else (owner.global_wkv,)
+                )
+                x_plan = iter(_prefill_x_tile_plan(common.cp_ctx))
+                first_tile = next(x_plan)
+                # Replicated projection weights let only the owner compute each
+                # row. Transfer FP32 values/scores, preserving their pool boundary.
+                x_buffers = [
+                    torch.empty(
+                        (_PRODUCE_GLOBAL_TILE_ROWS, len(weights) * self.head_dim),
+                        device=x.device,
+                        dtype=torch.float32,
+                    )
+                    for _ in range(2)
+                ]
             with record_function_range("dsv41.prefill.x_gather.async_start"):
-                x_gather = _start_prefill_x_gather_async(x, common.cp_ctx)
+                x_gather = _start_prefill_x_gather_async(
+                    x, common.cp_ctx, first_tile, x_buffers[0], weights
+                )
         # Read old SWA tails before writes wrap over them in long prefill chunks.
         swa, swa_starts = (
             self._swa_prefill_workspace(qkv, common)
@@ -904,31 +979,40 @@ class AttentionV41FP8(AttentionFP8):
             common.cp_ctx.input_lengths_global if common.cp_on else common.input_lengths
         ).long()
         if self.is_kv_source:
-            if x_gather is not None:
-                with record_function_range("dsv41.prefill.x_gather.wait_restore"):
-                    x_full = _wait_prefill_x_gather(x_gather, common.cp_ctx)
-            else:
-                x_full = cp_all_gather_full_varlen(x, common.cp_ctx) if common.cp_on else x
-            # ``repeat_interleave`` with a CUDA ``lengths`` tensor computes the
-            # output size via a host-side ``.item()`` sync unless ``output_size``
-            # is supplied. ``x_full.shape[0]`` is already known on host and equals
-            # ``lengths.sum()`` (gathered sequence length), so pass it explicitly.
+            rows = common.cp_ctx.seq_len_full if common.cp_on else x.shape[0]
+            x_full, projected_tiles = x, None
+            if small_cp:
+                x_full = _cp_restore_gathered_full_2d(
+                    _wait_prefill_x_gather(x_gather), common.cp_ctx
+                )
+            elif common.cp_on:
+                projected_tiles = _prefill_x_tiles(
+                    x, common.cp_ctx, x_plan, x_gather, x_buffers, weights
+                )
+            x_gather = None
+            if common.cp_on:
+                del x_buffers
             ids_full = torch.repeat_interleave(
                 torch.arange(common.batch_size, device=x.device),
                 lengths,
-                output_size=int(x_full.shape[0]),
+                output_size=rows,
             )
             cu = torch.cat(
                 (torch.zeros(1, device=x.device, dtype=torch.long), lengths.cumsum(0))
             )
             pos_full = (
-                torch.arange(x_full.shape[0], device=x.device)
-                - cu[ids_full]
-                + starts[ids_full]
+                torch.arange(rows, device=x.device) - cu[ids_full] + starts[ids_full]
             )
             self._produce_global(
-                x_full, pos_full, ids_full, starts, lengths, prefill=True
+                x_full,
+                pos_full,
+                ids_full,
+                starts,
+                lengths,
+                prefill=True,
+                projected_tiles=projected_tiles,
             )
+            del x_full
         selected = self._select_indices(x, qkv.qr, positions, req_ids)
         globals_by_req = self._shared_attention["global"][self.kv_source_layer_id]
         offsets, ns, swstart = self._prefill_chunk_meta(
@@ -959,9 +1043,7 @@ class AttentionV41FP8(AttentionFP8):
             global_idx = torch.where(selected >= 0, offsets + selected, -1)
             indices = torch.cat((global_idx, swidx), -1).int()
             # FlashMLA's length bounds count a compact valid prefix.
-            indices = indices.gather(
-                1, torch.argsort(indices < 0, dim=-1, stable=True)
-            )
+            indices = indices.gather(1, torch.argsort(indices < 0, dim=-1, stable=True))
             lens = (indices >= 0).sum(-1).int()
             if indices.shape[1] % 64:
                 indices = F.pad(indices, (0, 64 - indices.shape[1] % 64), value=-1)

@@ -1,15 +1,24 @@
 import asyncio
 import json
+import threading
+from types import SimpleNamespace
 from typing import Any
 from unittest import TestCase, main
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.frontend.frontend_app import FrontendApp
 from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
+from rtp_llm.openai.renderers.custom_renderer import RenderedInputs
+from rtp_llm.openai.renderers.deepseekv41_renderer import DeepseekV41Renderer
 from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
@@ -105,6 +114,137 @@ class FrontendServerTest(TestCase):
         visitor = self.frontend_server._frontend_worker.backend_rpc_server_visitor
         self.assertEqual(visitor.refresh_calls, [False])
 
+    def test_tokenize_route_offloads_v41_and_preserves_native_and_legacy_dispatch(self):
+        async def run():
+            server = self.frontend_server
+            owner = FrontendApp.__new__(FrontendApp)
+            owner.frontend_server = server
+            owner.shutdown_manager = FrontendShutdownManager()
+            owner.separated_frontend = True
+            owner.server_config = SimpleNamespace(http_port=0)
+            owner.grpc_client = None
+            endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
+            renderer = DeepseekV41Renderer.__new__(DeepseekV41Renderer)
+            legacy = BasicRenderer.__new__(BasicRenderer)
+            endpoint.chat_renderer = renderer
+            endpoint.template_renderer = legacy
+            server._openai_endpoint = endpoint
+            loop = asyncio.get_running_loop()
+            loop_thread = threading.get_ident()
+            started = asyncio.Event()
+            release = threading.Event()
+            render_threads = []
+            native_prompts = []
+
+            def slow_render(req):
+                render_threads.append(threading.get_ident())
+                loop.call_soon_threadsafe(started.set)
+                if not release.wait(10):
+                    raise TimeoutError("test did not release image preparation")
+                return RenderedInputs(input_ids=[129264, 129264])
+
+            def native_encode(prompt):
+                self.assertEqual(threading.get_ident(), loop_thread)
+                native_prompts.append(prompt)
+                return [1, 2, 3]
+
+            def legacy_render(req):
+                self.assertEqual(threading.get_ident(), loop_thread)
+                return RenderedInputs(input_ids=[7, 8])
+
+            image_request = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "https://image.invalid/slow.png"},
+                            }
+                        ],
+                    }
+                ]
+            }
+            with patch.object(
+                renderer, "render_chat", side_effect=slow_render
+            ), patch.object(
+                legacy, "render_chat", side_effect=legacy_render
+            ), patch.object(
+                server._frontend_worker,
+                "pipeline",
+                SimpleNamespace(encode=native_encode),
+                create=True,
+            ):
+                async with AsyncClient(
+                    transport=ASGITransport(app=owner.create_app()),
+                    base_url="http://test",
+                ) as client:
+                    slow = asyncio.create_task(
+                        client.post("/tokenize", json=image_request)
+                    )
+                    try:
+                        await asyncio.wait_for(started.wait(), timeout=5)
+                        for payload in (
+                            {"prompt": "hello"},
+                            json.dumps({"prompt": "hello"}),
+                        ):
+                            response = await asyncio.wait_for(
+                                client.post("/tokenize", json=payload), timeout=5
+                            )
+                            self.assertEqual(response.status_code, 200)
+                            self.assertEqual(response.json(), {"token_ids": [1, 2, 3]})
+                        response = await asyncio.wait_for(
+                            client.post(
+                                "/tokenize",
+                                json={
+                                    "messages": [{"role": "user", "content": "hello"}],
+                                    "user_template": "{{ messages[0].content }}",
+                                },
+                            ),
+                            timeout=5,
+                        )
+                        self.assertEqual(response.status_code, 200)
+                        self.assertEqual(response.json(), {"token_ids": [7, 8]})
+                        self.assertFalse(slow.done())
+                    finally:
+                        release.set()
+                        image_response = await asyncio.wait_for(slow, timeout=5)
+
+                    self.assertEqual(image_response.status_code, 200)
+                    self.assertEqual(
+                        image_response.json(), {"token_ids": [129264, 129264]}
+                    )
+                    self.assertNotIn(loop_thread, render_threads)
+                    self.assertEqual(native_prompts, ["hello", "hello"])
+
+                    endpoint.chat_renderer = legacy
+                    for payload in (
+                        {"messages": [{"role": "user", "content": "hello"}]},
+                        json.dumps(
+                            {"messages": [{"role": "user", "content": "hello"}]}
+                        ),
+                    ):
+                        response = await client.post("/tokenize", json=payload)
+                        self.assertEqual(response.status_code, 200)
+                        self.assertEqual(response.json(), {"token_ids": [7, 8]})
+                        self.assertEqual(
+                            json.loads(server.tokenize(payload).body), response.json()
+                        )
+
+                    self.assertEqual(
+                        json.loads(server.tokenize({"prompt": "hello"}).body),
+                        {"token_ids": [1, 2, 3]},
+                    )
+                    for payload in ({"text": "missing prompt"}, "{"):
+                        response = await client.post("/tokenize", json=payload)
+                        self.assertEqual(response.status_code, 500)
+                        self.assertIn("error_code", response.json())
+                    owner.shutdown_manager.start_draining("tokenize test")
+                    response = await client.post("/tokenize", json={"prompt": "hello"})
+                    self.assertEqual(response.status_code, 503)
+
+        asyncio.run(run())
+
     def test_engine_unavailable_http_contract(self):
         for openai in (False, True):
             for streaming in (False, True):
@@ -130,8 +270,8 @@ class FrontendServerTest(TestCase):
                         ), patch.object(worker, "is_streaming", return_value=streaming):
                             if openai:
                                 self.frontend_server._openai_endpoint = MagicMock()
-                                self.frontend_server._openai_endpoint.chat_completion.side_effect = (
-                                    response
+                                self.frontend_server._openai_endpoint.chat_completion_async = AsyncMock(
+                                    side_effect=response
                                 )
                                 result = await self.frontend_server.chat_completion(
                                     ChatCompletionRequest(
