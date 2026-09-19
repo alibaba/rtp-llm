@@ -533,7 +533,9 @@ class MMProcessEngine:
 
         # Embedding scheduler: always an MMScheduler; gpu-batch vs serial is
         # resolved by VitConfig (serial = one request per forward, no batching).
-        scheduler_args = vit_config.embedding_scheduler_args()
+        scheduler_args = vit_config.embedding_scheduler_args(
+            default_gpu_batch=getattr(mm_part, "default_gpu_batch", False) is True
+        )
         self._scheduler = MMScheduler(mm_part=mm_part, **scheduler_args)
         logging.info(
             f"MMProcessEngine: MMScheduler "

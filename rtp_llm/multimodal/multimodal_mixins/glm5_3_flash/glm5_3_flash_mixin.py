@@ -22,6 +22,7 @@ from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     VitParameters,
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    MMWorkEstimate,
     MultiModalEmbeddingInterface,
     get_bytes_io_from_url,
 )
@@ -191,6 +192,17 @@ class Glm53FlashRMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if (
+            x.is_cuda
+            and not torch.is_grad_enabled()
+            and x.dtype == self.weight.dtype
+            and x.dtype in (torch.float32, torch.float16, torch.bfloat16)
+            and 0 < x.shape[-1] <= 16384
+            and x.numel() > 0
+        ):
+            from .vision_kernels import rms_norm
+
+            return rms_norm(x, self.weight, self.eps)
         dtype = x.dtype
         x = x.float()
         return (x * torch.rsqrt(x.square().mean(-1, keepdim=True) + self.eps)).to(
@@ -275,19 +287,40 @@ class Glm53FlashVisionAttention(nn.Module):
         x: torch.Tensor,
         sequence_lengths: List[int],
         rotary_freqs: torch.Tensor,
+        rotary_emb=None,
+        sequence_groups=None,
     ) -> torch.Tensor:
-        q, k, v = self.qkv(x).view(-1, 3, self.num_heads, self.head_dim).unbind(1)
-        q, k = self._apply_rope(self.q_norm(q), self.k_norm(k), rotary_freqs)
+        qkv = self.qkv(x).view(-1, 3, self.num_heads, self.head_dim)
+        q, k, v = qkv.unbind(1)
+        if qkv.is_cuda and not torch.is_grad_enabled() and rotary_emb is not None:
+            from .vision_kernels import qk_norm_rope
+
+            q, k = qk_norm_rope(
+                qkv, self.q_norm.weight, self.k_norm.weight, *rotary_emb
+            )
+        else:
+            q, k = self._apply_rope(self.q_norm(q), self.k_norm(k), rotary_freqs)
+        if sequence_groups is None:
+            sequence_groups = []
+            for length in sequence_lengths:
+                if sequence_groups and sequence_groups[-1][0] == length:
+                    sequence_groups[-1] = (length, sequence_groups[-1][1] + 1)
+                else:
+                    sequence_groups.append((length, 1))
         outputs = []
         offset = 0
-        for length in sequence_lengths:
-            next_offset = offset + length
+        for length, count in sequence_groups:
+            next_offset = offset + length * count
             q_i, k_i, v_i = (
-                value[offset:next_offset].transpose(0, 1).unsqueeze(0)
+                value[offset:next_offset]
+                .reshape(count, length, self.num_heads, self.head_dim)
+                .transpose(1, 2)
                 for value in (q, k, v)
             )
             out = F.scaled_dot_product_attention(q_i, k_i, v_i)
-            outputs.append(out.squeeze(0).transpose(0, 1))
+            outputs.append(
+                out.transpose(1, 2).reshape(-1, self.num_heads, self.head_dim)
+            )
             offset = next_offset
         return self.proj(torch.cat(outputs).reshape(x.shape))
 
@@ -314,8 +347,12 @@ class Glm53FlashVisionBlock(nn.Module):
         self.attn = Glm53FlashVisionAttention(config)
         self.mlp = Glm53FlashVisionMLP(config)
 
-    def forward(self, x, sequence_lengths, rotary_freqs):
-        x = x + self.attn(self.norm1(x), sequence_lengths, rotary_freqs)
+    def forward(
+        self, x, sequence_lengths, rotary_freqs, rotary_emb=None, sequence_groups=None
+    ):
+        x = x + self.attn(
+            self.norm1(x), sequence_lengths, rotary_freqs, rotary_emb, sequence_groups
+        )
         return x + self.mlp(self.norm2(x))
 
 
@@ -381,21 +418,42 @@ class Glm53FlashVisionModel(nn.Module):
         return (position_ids[..., None] * self.rotary_inv_freq).flatten(1)
 
     def forward(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor):
+        # Preprocessing provides CPU metadata. Do not upload it just to call
+        # tolist()/item(), which would synchronize the shared CUDA stream.
+        grid_thw = grid_thw.cpu()
         x = self.patch_embed(pixel_values)
         rotary_freqs = self._rotary_freqs(grid_thw)
+        emb = torch.cat((rotary_freqs.float(), rotary_freqs.float()), dim=-1)
+        rotary_emb = (emb.cos(), emb.sin())
         sequence_lengths = torch.repeat_interleave(
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
         ).tolist()
+        sequence_groups = []
+        for length in sequence_lengths:
+            if sequence_groups and sequence_groups[-1][0] == length:
+                sequence_groups[-1] = (length, sequence_groups[-1][1] + 1)
+            else:
+                sequence_groups.append((length, 1))
         for block in self.blocks:
-            x = block(x, sequence_lengths, rotary_freqs)
+            x = block(x, sequence_lengths, rotary_freqs, rotary_emb, sequence_groups)
         x = self.post_layernorm(x)
         merge = self.spatial_merge_size
         x = x.view(-1, merge, merge, x.shape[-1]).permute(0, 3, 1, 2)
-        x = self.downsample(x).flatten(1)
+        if len(grid_thw) > 1:
+            # cuDNN can change the convolution's rounding with the packed
+            # batch size. Keep each media's original downsample shape while
+            # retaining packed attention/MLP and merger projections.
+            sizes = (grid_thw.prod(-1) // (merge * merge)).tolist()
+            x = torch.cat([self.downsample(part) for part in x.split(sizes)])
+        else:
+            x = self.downsample(x)
+        x = x.flatten(1)
         return self.merger(x)
 
 
 class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
+    default_gpu_batch = True
+
     def __init__(self, mm_related_params: VitParameters):
         config = dict(mm_related_params.config["vision_config"])
         config["swiglu_limit"] = mm_related_params.config["swiglu_limit"]
@@ -617,14 +675,86 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
     @torch.inference_mode()
     def embedding(self, data, **kwargs):
         pixel_values = data[0].to(self._device, dtype=self._data_type)
-        grid_thw = data[1].to(self._device)
+        grid_thw = data[1].cpu()
         embeddings = self.visual(pixel_values, grid_thw)
+        return self._format_embeddings(embeddings, data)
+
+    def estimate_work(self, data, mm_type=None):
+        patches = int(data[0].shape[0])
+        config = self.visual.config
+        # Live activations, QKV, MLP, RoPE and output plus allocator headroom.
+        per_patch = 4 * (
+            12 * config.hidden_size
+            + 3 * config.intermediate_size
+            + config.out_hidden_size
+        )
+        return MMWorkEstimate(
+            input_patches=patches,
+            output_tokens=patches // self.visual.spatial_merge_size**2,
+            estimated_workspace_bytes=patches * per_patch,
+        )
+
+    def get_batch_work_budget(self, max_batch_media):
+        # One long video can exceed this budget and is processed alone. The
+        # scheduler's existing OOM isolation handles pressure from other users.
+        workspace = 8 * 1024**3
+        if self._device.type == "cuda":
+            free, _ = torch.cuda.mem_get_info(self._device)
+            workspace = min(workspace, max(1, free // 4))
+        return MMWorkEstimate(input_patches=65536, estimated_workspace_bytes=workspace)
+
+    @torch.inference_mode()
+    def batched_embedding(self, data_list, mm_types, **kwargs):
+        if len(data_list) != len(mm_types):
+            raise ValueError("GLM53 media and type counts differ")
+        if not data_list:
+            return []
+        if len(data_list) == 1:
+            return [self.embedding(data_list[0], mm_type=mm_types[0], **kwargs)]
+        # Group equal spatial lengths so all their time groups share one SDPA.
+        order = sorted(
+            range(len(data_list)),
+            key=lambda i: int(data_list[i][1][0, 1]) * int(data_list[i][1][0, 2]),
+        )
+        result = [None] * len(data_list)
+        budget = self.get_batch_work_budget(len(data_list))
+        current, work = [], MMWorkEstimate()
+
+        def run(indices):
+            if len(indices) == 1:
+                i = indices[0]
+                result[i] = self.embedding(data_list[i], mm_type=mm_types[i], **kwargs)
+                return
+            pixels = torch.cat([data_list[i][0] for i in indices]).to(
+                self._device, dtype=self._data_type
+            )
+            grids = torch.cat([data_list[i][1].cpu() for i in indices])
+            encoded = self.visual(pixels, grids)
+            counts = [
+                int(data_list[i][0].shape[0]) // self.visual.spatial_merge_size**2
+                for i in indices
+            ]
+            for i, value in zip(indices, encoded.split(counts)):
+                result[i] = self._format_embeddings(value, data_list[i])
+
+        for i in order:
+            estimate = self.estimate_work(data_list[i], mm_types[i])
+            if current and not (work + estimate).fits_within(budget):
+                run(current)
+                current, work = [], MMWorkEstimate()
+            current.append(i)
+            work = work + estimate
+        if current:
+            run(current)
+        return result
+
+    def _format_embeddings(self, embeddings, data):
         if len(data) == 2:
             layout = self._layout_tensor(group_start=True, prefix_ids=[], suffix_ids=[])
             return [embeddings], None, [layout]
 
         timestamps = data[2]
-        grid_t = int(grid_thw[0, 0].item())
+        grid_t = int(data[1][0, 0].item())
         if grid_t <= 0 or embeddings.shape[0] % grid_t != 0:
             raise ValueError(
                 "GLM-5.3-Flash video embedding count is not divisible by grid_t"

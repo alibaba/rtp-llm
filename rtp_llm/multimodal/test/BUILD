@@ -87,3 +87,10 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "glm53_vision_batch_test",
+    srcs = ["glm53_vision_batch_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)

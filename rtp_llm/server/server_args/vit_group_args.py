@@ -262,8 +262,8 @@ def init_vit_group_args(parser, vit_config):
         env_name="VIT_USE_GPU_BATCH",
         bind_to=(vit_config, "use_gpu_batch"),
         type=str2bool,
-        default=False,
-        help="是否开启GPU embedding batch调度",
+        default=None,
+        help="是否开启GPU embedding batch调度；未设置时采用模型默认值",
     )
     vit_group.add_argument(
         "--gpu_batch_wait_ms",

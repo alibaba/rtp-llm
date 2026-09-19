@@ -280,14 +280,17 @@ class VitConfig:
         self.use_local_preprocess: bool = False
         self.vit_proxy_load_balance_strategy: str = "round_robin"
         # ---- GPU embedding batch scheduler (MMScheduler) ----
-        self.use_gpu_batch: bool = False
+        self.use_gpu_batch: Optional[bool] = None
         self.gpu_batch_wait_ms: int = 10
         self.gpu_max_batch_size: int = 8
         self.gpu_max_batch_images: int = 32
 
-    def embedding_scheduler_args(self) -> Dict[str, int]:
+    def embedding_scheduler_args(
+        self, default_gpu_batch: bool = False
+    ) -> Dict[str, int]:
         """Resolved MMScheduler kwargs.
 
+        Unset uses the embedding model default (serial for legacy models).
         use_gpu_batch on  -> cross-request GPU batching with the gpu_* limits;
         gpu_max_batch_images caps each forward. Models that provide a work
         budget may split a multi-work-item request across bounded forwards;
@@ -296,7 +299,10 @@ class VitConfig:
         and no image cap (sys.maxsize) — matches the old inline path, which never
         bounded a single request's image count.
         """
-        if self.use_gpu_batch:
+        enabled = (
+            default_gpu_batch if self.use_gpu_batch is None else self.use_gpu_batch
+        )
+        if enabled:
             return {
                 "batch_wait_ms": self.gpu_batch_wait_ms,
                 "max_batch_size": self.gpu_max_batch_size,

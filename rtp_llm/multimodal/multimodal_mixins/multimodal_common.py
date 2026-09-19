@@ -140,6 +140,9 @@ class MMWorkEstimate:
 
 
 class MultiModalEmbeddingInterface:
+    # Models with a real packed forward can opt into batching by default.
+    default_gpu_batch = False
+
     @property
     def _data_type(self):
         raise NotImplementedError
