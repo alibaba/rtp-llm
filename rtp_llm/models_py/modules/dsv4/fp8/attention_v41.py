@@ -1096,6 +1096,7 @@ class AttentionV41FP8(AttentionFP8):
         from rtp_llm.models_py.modules.dsv4.fp8 import (
             _v41_decode_indexer as decode_indexer,
         )
+        from rtp_llm.models_py.modules.dsv4.fp8.indexer import _run_topk_v3
 
         paged = isinstance(keys, decode_indexer.DecodeIndexerKeys)
         capacity = keys.capacity if paged else keys.shape[1]
@@ -1150,6 +1151,7 @@ class AttentionV41FP8(AttentionFP8):
             (T, self.index_topk), -1, dtype=torch.int32, device=x.device
         )
         columns = None if paged else torch.arange(capacity, device=x.device)
+        visible_i32 = visible_per_token.to(torch.int32)
         for b in range(B):
             for start in range(b * S, (b + 1) * S, 16):
                 end = min(start + 16, (b + 1) * S)
@@ -1172,18 +1174,36 @@ class AttentionV41FP8(AttentionFP8):
                             logits, candidates[start:end], candidate_size
                         )
                 count = min(self.index_topk, capacity)
-                scores, selected = logits.topk(count, dim=-1)
-                selected = torch.where(scores.isfinite(), selected, -1)
+                # Radix-select TopK (the shared V4 indexer kernel) serves the
+                # production paged decode shape; the per-row lengths subsume
+                # the -inf/isfinite masking. Output order is unspecified (the
+                # op contract); the branch below pins short rows ascending.
+                if not (
+                    paged
+                    and logits.is_cuda
+                    and count == self.index_topk
+                    and _run_topk_v3(
+                        logits,
+                        visible_i32[start:end],
+                        output[start:end],
+                        count,
+                        capacity,
+                    )
+                ):
+                    scores, selected = logits.topk(count, dim=-1)
+                    selected = torch.where(scores.isfinite(), selected, -1)
+                    output[start:end, :count] = selected.int()
                 # Preserve the short-context ascending-order shortcut without
                 # a CPU branch; it also avoids unstable ties between zero keys.
                 dense = torch.arange(count, device=x.device)[None].expand(
                     end - start, -1
                 )
                 dense = torch.where(dense < visible[:, None], dense, -1)
-                selected = torch.where(
-                    (visible <= self.index_topk)[:, None], dense, selected
+                output[start:end, :count] = torch.where(
+                    (visible <= self.index_topk)[:, None],
+                    dense,
+                    output[start:end, :count],
                 )
-                output[start:end, :count] = selected.int()
         shared["topk"] = {self.layer_id: output}
         return output
 
