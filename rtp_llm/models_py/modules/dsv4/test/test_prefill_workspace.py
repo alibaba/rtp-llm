@@ -16,9 +16,19 @@ disjointness. ``align_bytes=1`` is passed throughout to avoid the production
 1 GiB alignment forcing a 1 GiB CPU allocation.
 """
 
+import importlib.util
+from pathlib import Path
+
 import torch
 
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+# This module only needs Torch; keep the CPU tests independent of compiled ops.
+_SPEC = importlib.util.spec_from_file_location(
+    "_prefill_workspace_test",
+    Path(__file__).resolve().parents[1] / "prefill_workspace.py",
+)
+_WORKSPACE = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_WORKSPACE)
+PrefillWorkspace = _WORKSPACE.PrefillWorkspace
 
 
 def _expect_runtime_error(fn):
@@ -50,6 +60,7 @@ def test_prefill_q_capacity_boundaries():
     assert tuple(ws.prefill_q(5).shape) == (5, 4)
     assert tuple(ws.prefill_q(0).shape) == (0, 4)
 
+
 def test_prefill_q_storage_is_stable_across_gets():
     ws = PrefillWorkspace(
         torch.device("cpu"), q_rows=5, q_dim=4, reserve_cp=False, align_bytes=1
@@ -73,6 +84,7 @@ def test_cp_region_not_reserved_when_reserve_cp_false():
         ws.cp_restore_idx,
     ):
         _expect_runtime_error(lambda g=getter: g(1, 1, torch.float32))
+
 
 def test_cp_main_idx_are_separately_sized_and_distinct():
     # main sub-region: cp_rows*main_w*4 B (fp32);
@@ -266,6 +278,82 @@ def test_cp_views_cannot_cross_role_boundaries():
     _expect_runtime_error(lambda: ws.cp_restore_idx(5, 3, torch.float32))
 
 
+def test_live_padded_batch_gather_restore_and_q_aliases():
+    for cp_size in (2, 4, 8):
+        for lengths in ([1], [7], [8], [9], [1, 9, 6, 17]):
+            local_rows = sum(
+                ((length + 2 * cp_size - 1) // (2 * cp_size)) * 2 for length in lengths
+            )
+            padded_rows = local_rows * cp_size
+            real_rows = sum(lengths)
+            ws = PrefillWorkspace(
+                torch.device("cpu"),
+                q_rows=32,
+                q_dim=16,
+                reserve_cp=True,
+                cp_rows=128,
+                main_w=8,
+                idx_w=4,
+                align_bytes=1,
+            )
+            # V4 keeps fixed capacity; its async consumers request live rows:
+            # start() gathers padded rows; wait() restores only real new tokens.
+            for dtype in (torch.float32, torch.bfloat16):
+                views = [
+                    ws.cp_gather_main(padded_rows, 8, dtype),
+                    ws.cp_restore_main(real_rows, 8, dtype),
+                    ws.cp_gather_idx(padded_rows, 4, dtype),
+                    ws.cp_restore_idx(real_rows, 4, dtype),
+                ]
+                for sentinel, view in enumerate(views, 1):
+                    view.fill_(sentinel)
+                for sentinel, view in enumerate(views, 1):
+                    assert torch.equal(view, torch.full_like(view, sentinel))
+                for gather, restore in ((views[0], views[1]), (views[2], views[3])):
+                    indices = torch.arange(real_rows - 1, -1, -1)
+                    torch.index_select(gather, 0, indices, out=restore)
+                    assert torch.equal(restore, gather.index_select(0, indices))
+            q = ws.prefill_q(local_rows)
+            assert q.shape == (local_rows, 16)
+            assert (
+                q.data_ptr()
+                == ws.cp_gather_main(padded_rows, 8, torch.float32).data_ptr()
+            )
+            q.fill_(9)
+            assert ws.cp_gather_main(padded_rows, 16, torch.bfloat16)[0, 0] == 9
+
+
+def test_production_bucket_boundaries_on_meta_device():
+    gib = 1 << 30
+    # Meta tensors exercise the real byte layout without allocating GiB of RAM.
+    for rows, expected in ((0, 0), (1, gib), (gib // 2, gib), (gib // 2 + 1, 2 * gib)):
+        ws = PrefillWorkspace(
+            torch.device("meta"), q_rows=rows, q_dim=1, reserve_cp=False
+        )
+        assert ws._union.numel() == expected
+        assert ws.prefill_q(rows).shape == (rows, 1)
+    for local_rows, expected_gib in (
+        (0, 0),
+        (26770, 2),
+        (40588, 3),
+        (28800, 2),
+        (50468, 4),
+        (262144, 16),
+    ):
+        ws = PrefillWorkspace(
+            torch.device("meta"),
+            q_rows=local_rows,
+            q_dim=64 * 512,
+            reserve_cp=False,
+            cp_rows=1048576,
+            main_w=2048,
+            idx_w=512,
+        )
+        assert ws._union.numel() == expected_gib * gib
+        assert ws.prefill_q(local_rows).shape == (local_rows, 64 * 512)
+        assert ws._main_bytes == ws._idx_bytes == 0
+
+
 if __name__ == "__main__":
     test_prefill_q_eager_alloc_shape_and_dtype()
     print("PASS test_prefill_q_eager_alloc_shape_and_dtype")
@@ -291,4 +379,8 @@ if __name__ == "__main__":
     print("PASS test_cp_restore_region_does_not_alias_gather_region")
     test_cp_views_cannot_cross_role_boundaries()
     print("PASS test_cp_views_cannot_cross_role_boundaries")
+    test_live_padded_batch_gather_restore_and_q_aliases()
+    print("PASS test_live_padded_batch_gather_restore_and_q_aliases")
+    test_production_bucket_boundaries_on_meta_device()
+    print("PASS test_production_bucket_boundaries_on_meta_device")
     print("ALL TESTS PASSED")

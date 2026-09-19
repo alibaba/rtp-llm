@@ -106,6 +106,109 @@ class _FakeV4:
 
 
 class PrefillFastPathTest(unittest.TestCase):
+    def test_workspace_capacity_is_dynamic_only_for_v41_without_tensor_reads(self):
+        class AllocationCaptured(Exception):
+            pass
+
+        cases = (
+            # V4 keeps its bound capacities, independent of the live batch.
+            (4, True, [107074], [0], 20, False),
+            (4, True, [100930], [6144], 20, False),
+            (4, True, [162350], [0], 20, False),
+            (4, True, [536, 3202, 5400, 106050], [0, 0, 0, 1024], 20, False),
+            (4, True, [100930, 100930], [6144, 6144], 20, False),
+            (4, True, [1048575], [0], 20, False),
+            (4, True, [1, 7, 8, 9], [100, 200, 0, 6144], 20, False),
+            (2, True, [7, 9], [0, 100], 20, False),
+            (8, True, [7, 9], [0, 100], 20, False),
+            (4, True, [0], [0], 20, False),
+            (1, False, [536, 3202, 5400, 106050], [0, 0, 0, 1024], 16, False),
+            (4, False, [17], [99], 16, False),
+            # V4.1 reserves only Q, including padding and all uncached rows.
+            (4, True, [107074], [0], 2, True),
+            (4, True, [100930], [6144], 2, True),
+            (4, True, [162350], [0], 3, True),
+            (4, True, [536, 3202, 5400, 106050], [0, 0, 0, 1024], 2, True),
+            (4, True, [100930, 100930], [6144, 6144], 4, True),
+            (4, True, [1048575], [0], 16, True),
+            (1, False, [17], [99], 1, True),
+            (1, False, [536, 3202, 5400, 106050], [0, 0, 0, 1024], 8, True),
+            (1, False, [1048576], [0], 64, True),
+            (2, True, [7, 9], [0, 100], 1, True),
+            (8, True, [7, 9], [0, 100], 1, True),
+            (4, True, [0], [0], 0, True),
+        )
+        workspace_type = prefill_forward.PrefillWorkspace
+        for cp_size, cp_active, lengths, prefixes, expected_gib, v41 in cases:
+            with self.subTest(
+                cp_size=cp_size, cp_active=cp_active, lengths=lengths, v41=v41
+            ):
+                rows = (
+                    sum(((n + 2 * cp_size - 1) // (2 * cp_size)) * 2 for n in lengths)
+                    if cp_active
+                    else sum(lengths)
+                )
+                v4 = _FakeV4()
+                v4.args = SimpleNamespace(v41_config={} if v41 else None)
+                v4._cp_size = cp_size
+                v4._cp_info = object() if cp_active else None
+                v4._prefill_ws_q_rows = 262144
+                v4._prefill_ws_q_dim = 64 * 512
+                v4._prefill_ws_full_rows = 1048576
+                v4._prefill_ws_main_w = 2048
+                v4._prefill_ws_idx_w = 512
+                inputs = torch.empty(rows, dtype=torch.int32, device="meta")
+                attn = SimpleNamespace(
+                    prefix_lengths=torch.tensor(prefixes, device="meta")
+                )
+                captured = []
+
+                def capture_workspace(*args, **kwargs):
+                    captured.append(workspace_type(*args, **kwargs))
+                    raise AllocationCaptured
+
+                with patch.object(
+                    prefill_forward, "PrefillWorkspace", side_effect=capture_workspace
+                ), patch.object(
+                    prefill_forward, "build_cp_context_for_forward"
+                ) as build_cp, patch.object(
+                    v4, "embed"
+                ) as embed, patch.object(
+                    torch.Tensor,
+                    "item",
+                    side_effect=AssertionError("unexpected tensor read"),
+                ), patch.object(
+                    torch.Tensor,
+                    "cpu",
+                    side_effect=AssertionError("unexpected device copy"),
+                ), patch.object(
+                    torch.Tensor,
+                    "tolist",
+                    side_effect=AssertionError("unexpected tensor read"),
+                ), patch.object(
+                    torch.cuda,
+                    "synchronize",
+                    side_effect=AssertionError("unexpected synchronization"),
+                ):
+                    with self.assertRaises(AllocationCaptured):
+                        prefill_forward.forward_layers(
+                            v4, None, inputs, None, None, None, attn_inputs=attn
+                        )
+                    build_cp.assert_not_called()
+                    embed.assert_not_called()
+                ws = captured[0]
+                self.assertEqual(ws._q_rows, rows if v41 else v4._prefill_ws_q_rows)
+                self.assertEqual(ws._union.numel(), expected_gib * (1 << 30))
+                self.assertEqual(
+                    ws._main_bytes,
+                    v4._prefill_ws_full_rows * 2048 * 4 if cp_active and not v41 else 0,
+                )
+                self.assertEqual(
+                    ws._idx_bytes,
+                    v4._prefill_ws_full_rows * 512 * 4 if cp_active and not v41 else 0,
+                )
+                self.assertEqual(ws.prefill_q(rows).shape, (rows, 64 * 512))
+
     def test_workspace_is_allocated_before_cp_setup_and_embedding(self):
         v4 = _FakeV4()
         events = []
