@@ -397,6 +397,20 @@ def h20_oss_suites():
                 },
             ),
             smoke_test(
+                name="p2p_tp2_to_tp2_bf16_decode_writeback",
+                task_info="data/model/qwen25/q_r_dp_sep_p2p_writeback.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                    "decode": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                },
+                enable_decode_entrance=True,
+                smoke_args={
+                    "prefill": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --dp_size 1 --world_size 2 --p2p_writeback_enable 1 --p2p_writeback_timeout_ms 30000 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 32768",
+                    "decode": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --dp_size 1 --world_size 2 --p2p_writeback_enable 1 --p2p_writeback_timeout_ms 30000 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 32768",
+                },
+            ),
+            smoke_test(
                 name="p2p_tp2_to_dp2_decode_entrance",
                 task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse_dp2.json",
                 gpu_type=["H20"],

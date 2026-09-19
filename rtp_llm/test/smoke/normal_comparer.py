@@ -563,10 +563,13 @@ class NormalComparer(BaseComparer):
                         diffs.append(f"{prefix}prompt_logits target_logprobs not close")
 
         # aux_info: skip comparison when expected auxinfo is null
-        if expect.aux_info is not None and actual.aux_info is not None:
-            self._compare_aux_info(
-                expect.aux_info, actual.aux_info, diffs, prefix=prefix
-            )
+        if expect.aux_info is not None:
+            if actual.aux_info is None:
+                diffs.append(f"{prefix}aux_info: expected but missing in actual")
+            else:
+                self._compare_aux_info(
+                    expect.aux_info, actual.aux_info, diffs, prefix=prefix
+                )
 
     def _rewrite_images(self, images: Union[List[str], str]) -> Union[List[str], str]:
         # iter rewrite

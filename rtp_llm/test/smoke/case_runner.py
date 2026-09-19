@@ -98,6 +98,7 @@ class CaseRunner(object):
         self.sleep_time_qr = sleep_time_qr
         self.kill_remote = kill_remote
         self.concurrency_test = concurrency_test
+        self.server_managers: Dict[str, MagaServerManager] = {}
 
     @staticmethod
     def _extract_bool_arg(args_str: str, arg_name: str, default: bool = False) -> bool:
@@ -376,6 +377,16 @@ class CaseRunner(object):
             return "/batch_infer"
         return task_endpoint or "/"
 
+    def _resolve_server(
+        self, q_r: Dict[str, Any], default_server: MagaServerManager
+    ) -> MagaServerManager:
+        role = q_r.get("server_role")
+        if role is None:
+            return default_server
+        if role not in self.server_managers:
+            raise SmokeException(QueryStatus.VALID_FAILED, f"Unknown server_role: {role}")
+        return self.server_managers[role]
+
     @staticmethod
     def _get_comparer_cls(q_r: Dict[str, Any], request_endpoint: str) -> Type:
         if q_r.get("tau2_bench", False):
@@ -435,7 +446,8 @@ class CaseRunner(object):
                 request_endpoint = self._resolve_endpoint(q_r, task_endpoint)
                 comparer_cls = self._get_comparer_cls(q_r, request_endpoint)
                 try:
-                    comparer_cls(server_manager, request_endpoint, q_r, Tracer(), self.batch_infer).run()
+                    query_server = self._resolve_server(q_r, server_manager)
+                    comparer_cls(query_server, request_endpoint, q_r, Tracer(), self.batch_infer).run()
                     per_query_pass[q_idx] += 1
                     logging.info(f"[STABILITY_TEST iter={iter_idx+1}/{repeat_count} query={q_idx}] PASS")
                 except Exception as e:
@@ -495,7 +507,8 @@ class CaseRunner(object):
             request_endpoint = self._resolve_endpoint(q_r, task_endpoint)
             try:
                 comparer_cls = self._get_comparer_cls(q_r, request_endpoint)
-                comparer_cls(server_manager, request_endpoint, q_r, tracer, self.batch_infer).run()
+                query_server = self._resolve_server(q_r, server_manager)
+                comparer_cls(query_server, request_endpoint, q_r, tracer, self.batch_infer).run()
                 task_states.query_status.append((QueryStatus.OK, f"", tracer))
             except SmokeException as e:
                 task_states.ret = False

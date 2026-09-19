@@ -344,6 +344,10 @@ class DpSeperationCaseRunner(CaseRunner):
             if frontend_server_manager is None
             else frontend_server_manager
         )
+        self.server_managers = {
+            "prefill": prefill_server_manager,
+            "decode": decode_server_manager,
+        }
 
         if keepalive_before_curl:
             servers = {
