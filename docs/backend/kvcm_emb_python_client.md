@@ -135,8 +135,12 @@ with RtpKvMetaObjectClient() as client:
 In a separated deployment, E and P construct their own client using the same
 `RECO_*` values. E calls `save`; the control receipt carries the generated key,
 shape, dtype, and exact byte size; P allocates a matching tensor and calls
-`load`. Object ownership, receipt format, release routing, retry policy, and GC
-remain responsibilities of RTP's transport implementation.
+`load`. RTP's transport owns the object key/receipt contract, successful-use
+release routing, request-level retry, and reconciliation of unknown client
+outcomes. KVCM's dedicated KVMeta Reclaimer independently owns cache-capacity
+watermarks, LRU retirement, metadata-first deletion, and physical backend
+reclamation; it must be enabled and healthy even when RTP normally calls
+`remove` after consumption.
 
 ### Error handling
 
@@ -171,7 +175,9 @@ once so cleanup can make maximum progress. No mutation is automatically
 retried or rolled back. In particular, if `unknown_outcome` is true, do not
 blindly repeat `save` under the same key. Retain the UUID key in a bounded
 cleanup queue and reconcile or remove it after the write session converges.
-RTP owns any higher-level retry and GC policy.
+RTP owns that application-lifecycle cleanup and any higher-level retry policy;
+KVCM's KVMeta Reclaimer remains the independent capacity and physical-GC
+safety net.
 
 A load into a destination with the wrong byte size fails with
 `ER_SERVICE_SIZE_MISMATCH`; a missing or already released object fails with
