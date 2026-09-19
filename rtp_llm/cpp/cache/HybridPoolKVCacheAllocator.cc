@@ -158,6 +158,7 @@ bool HybridPoolKVCacheAllocator::doInit() {
                                                                      metrics_reporter_,
                                                                      config_.linear_fixed_cap);
             linear_group->setRequestCacheMode(config_.enable_linear_attention_request_cache);
+            linear_group->setDiskCheckpointMode(config_.linear_disk_checkpoint_blocks > 0);
             linear_group->setRequestCacheAlignmentBlocks(linear_request_cache_alignment_blocks_);
             group = std::move(linear_group);
             linear_group_ids_.push_back(gid);

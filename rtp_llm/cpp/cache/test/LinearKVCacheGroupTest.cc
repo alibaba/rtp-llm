@@ -546,6 +546,57 @@ TEST_F(LinearKVCacheGroupTest, RequestCacheKeepsOnlyLatestAlignedCandidateAndTwo
     }
 }
 
+TEST_F(LinearKVCacheGroupTest, DiskCheckpointsRespectStepAndPreserveOffStepTail) {
+    for (int step : {1, 2, 3, 8}) {
+        auto pool = createBlockPool();
+        ASSERT_TRUE(pool->init());
+        auto               spec = makeLinearSpec(4);
+        LinearKVCacheGroup group({}, spec, pool, 0, step);
+        group.setRequestCacheMode(true);
+        group.setDiskCheckpointMode(true);
+        ASSERT_TRUE(group.init());
+        BlockIds blocks;
+        ASSERT_TRUE(group.malloc(blocks, 30, true));
+        int expected_blocks = 0;
+        for (int pos = 0; pos < 8; ++pos) {
+            const bool expected = pos >= 6 || (pos + 1) % step == 0;
+            EXPECT_EQ(!isNullBlockIdx(blocks.blocks()[pos]), expected) << step << ":" << pos;
+            expected_blocks += expected;
+        }
+        const auto need = group.getNeedBlocks(30, 30, 0, 0, true);
+        EXPECT_EQ(need.common_blocks + need.extra_blocks, expected_blocks);
+        group.free(blocks.blocks());
+        EXPECT_EQ(pool->freeBlocksNum(), 9u);
+    }
+}
+
+TEST_F(LinearKVCacheGroupTest, DiskCheckpointsRespectContextParallelAlignment) {
+    auto pool = createBlockPool();
+    ASSERT_TRUE(pool->init());
+    auto               spec = makeLinearSpec(4);
+    LinearKVCacheGroup group({}, spec, pool, 0, /*linear_step=*/3);
+    group.setRequestCacheMode(true);
+    group.setDiskCheckpointMode(true);
+    group.setRequestCacheAlignmentBlocks(2);
+    ASSERT_TRUE(group.init());
+    BlockIds blocks;
+    ASSERT_TRUE(group.malloc(blocks, 30, true));
+    ASSERT_EQ(blocks.blocksNum(), 8u);
+    // The 12-token step is not CP aligned. Keep the 24-token checkpoint,
+    // followed by the two working tail slots.
+    for (int pos = 0; pos < 8; ++pos) {
+        EXPECT_EQ(!isNullBlockIdx(blocks.blocks()[pos]), pos == 5 || pos == 6 || pos == 7);
+    }
+    ASSERT_TRUE(group.malloc(blocks, 33, true));
+    ASSERT_EQ(blocks.blocksNum(), 9u);
+    // The 32-token aligned tail remains reusable off the 24-token disk cadence.
+    for (int pos = 0; pos < 9; ++pos) {
+        EXPECT_EQ(!isNullBlockIdx(blocks.blocks()[pos]), pos == 5 || pos == 7 || pos == 8);
+    }
+    group.free(blocks.blocks());
+    EXPECT_EQ(pool->freeBlocksNum(), 9u);
+}
+
 TEST_F(LinearKVCacheGroupTest, RequestCacheKeepsOldPrefillReadStateAcrossAlignmentBoundary) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());

@@ -296,9 +296,8 @@ void KVCacheMemoryConnector::initBlockPool() {
     const bool prefix_tree_requested = kv_cache_config_.enable_prefix_tree_memory_cache;
     const bool whole_request_cache   = wholeStateRequestCache();
     const bool prefix_tree_supported = isDsv4TypedCacheLayout(slots) || whole_request_cache;
-    // Whole-request Linear states must be split from paged MLA/Indexer blocks:
-    // one state checkpoint is stored only at a completed request boundary,
-    // while compressed KV remains a normal block chain.
+    // Linear checkpoints are independent of the paged MLA/Indexer block chain.
+    // Disk mode retains intermediate checkpoints; device cache keeps only tails.
     use_prefix_tree_memory_cache_ = whole_request_cache || (prefix_tree_requested && prefix_tree_supported);
     RTP_LLM_CHECK_WITH_INFO(use_prefix_tree_memory_cache_ || !prefix_tree_requested
                                 || kv_cache_config_.enable_legacy_memory_connector_fallback,
@@ -383,6 +382,13 @@ void KVCacheMemoryConnector::initBlockPool() {
             const size_t key_capacity  = total_bytes / bytes_per_key;
             compressed_capacity        = key_capacity;
             state_swa_capacity         = key_capacity;
+        }
+        if (whole_request_cache && diskCacheEnabled()) {
+            // Checkpoints are disk-backed. Keep only the host pool's sentinel
+            // capacity; the worker allocates pinned staging for in-flight IO.
+            state_swa_capacity       = 2;
+            const size_t state_bytes = state_swa_capacity * state_swa_block_size_;
+            compressed_capacity = total_bytes > state_bytes ? (total_bytes - state_bytes) / compressed_block_size_ : 0;
         }
         RTP_LLM_CHECK_WITH_INFO(compressed_capacity > 1 && state_swa_capacity > 1,
                                 "pool_size_mb=%ld too small for prefix memory pools, compressed=%zu state_swa=%zu "
@@ -525,6 +531,13 @@ void KVCacheMemoryConnector::initDiskBlockPools() {
         return pool;
     };
 
+    if (usePrefixTreeMemoryCache() && wholeStateRequestCache()) {
+        // The disk tier is exclusively for Linear checkpoints. Paged attention
+        // remains in memory, so a disk state can never masquerade as a KV chain.
+        RTP_LLM_CHECK_WITH_INFO(state_swa_block_size_ > 0, "Linear disk checkpoint size is zero");
+        incomplete_disk_pool_ = make_disk_pool(CacheBlockKind::STATE_SWA_KV, total_disk_bytes, state_swa_block_size_);
+        return;
+    }
     if (usePrefixTreeMemoryCache()) {
         RTP_LLM_CHECK_WITH_INFO(compressed_block_size_ > 0 && state_swa_block_size_ > 0,
                                 "init prefix disk pool failed, prefix block sizes are invalid");
@@ -1310,6 +1323,9 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForRead(const CacheKeysType&         
         const auto cache_key                  = cache_keys.at(i);
         const auto copy_info_count_before_key = copy_infos.size();
         for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            if (wholeStateRequestCache() && kind == CacheBlockKind::STATE_SWA_KV && i != start_index + read_num - 1) {
+                continue;
+            }
             const auto required_mask = prefixSlotValidMask(layer_attn_block_ids, slots, static_cast<size_t>(i), kind);
             const bool kind_required =
                 std::any_of(required_mask.begin(), required_mask.end(), [](uint8_t valid) { return valid != 0; });
@@ -1416,7 +1432,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
                                                      slots,
                                                      0,
                                                      static_cast<int>(cache_keys_size),
-                                                     no_need_write);
+                                                     no_need_write,
+                                                     resource->reuseBlockNum());
         if (!copy_plan || copy_plan->copy_infos.empty()) {
             reportWriteMetrics(no_need_write, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);
             return nullptr;
@@ -1615,12 +1632,17 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForWrite(const CacheKeysType&        
                                                     const std::vector<LayerRegionSlot>& slots,
                                                     int                                 start_index,
                                                     int                                 write_num,
-                                                    bool&                               no_need_write) {
+                                                    bool&                               no_need_write,
+                                                    size_t                              reused_blocks) {
     std::vector<CopyInfoPerKey> copy_infos;
     copy_infos.reserve(static_cast<size_t>(write_num) * 2);
     for (int i = start_index; i < start_index + write_num; ++i) {
         const auto cache_key = cache_keys.at(i);
         for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            if (wholeStateRequestCache() && kind == CacheBlockKind::STATE_SWA_KV
+                && static_cast<size_t>(i + 1) < reused_blocks) {
+                continue;
+            }
             const auto slot_valid_mask = prefixSlotValidMask(layer_attn_block_ids, slots, static_cast<size_t>(i), kind);
             const bool kind_required =
                 std::any_of(slot_valid_mask.begin(), slot_valid_mask.end(), [](uint8_t valid) { return valid != 0; });
@@ -2937,8 +2959,12 @@ bool KVCacheMemoryConnector::allocatePrefixBackingsForWrite(std::vector<CopyInfo
 }
 
 bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info) {
+    const bool disk_only =
+        wholeStateRequestCache() && diskCacheEnabled() && copy_info.kind == CacheBlockKind::STATE_SWA_KV;
+    const bool allow_disk =
+        diskCacheEnabled() && (!wholeStateRequestCache() || copy_info.kind == CacheBlockKind::STATE_SWA_KV);
     BlockIdxType mem_block = NULL_BLOCK_IDX;
-    if (tryMallocMemoryBlock(copy_info.kind, mem_block)) {
+    if (!disk_only && tryMallocMemoryBlock(copy_info.kind, mem_block)) {
         copy_info.backing_type = CacheBackingType::MEMORY;
         copy_info.mem_block    = mem_block;
         copy_info.disk_slot    = -1;
@@ -2946,7 +2972,7 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
     }
 
     int32_t disk_slot = -1;
-    if (diskCacheEnabled() && tryMallocDiskSlot(copy_info.kind, disk_slot)) {
+    if (allow_disk && tryMallocDiskSlot(copy_info.kind, disk_slot)) {
         copy_info.backing_type = CacheBackingType::DISK;
         copy_info.mem_block    = NULL_BLOCK_IDX;
         copy_info.disk_slot    = disk_slot;
@@ -2974,13 +3000,13 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
             reportEvictionLifetime(evicted.kind, evicted.backing_type, evicted.created_time_us);
             releasePrefixCacheBacking(evicted);
         }
-        if (tryMallocMemoryBlock(copy_info.kind, mem_block)) {
+        if (!disk_only && tryMallocMemoryBlock(copy_info.kind, mem_block)) {
             copy_info.backing_type = CacheBackingType::MEMORY;
             copy_info.mem_block    = mem_block;
             copy_info.disk_slot    = -1;
             return true;
         }
-        if (diskCacheEnabled() && tryMallocDiskSlot(copy_info.kind, disk_slot)) {
+        if (allow_disk && tryMallocDiskSlot(copy_info.kind, disk_slot)) {
             copy_info.backing_type = CacheBackingType::DISK;
             copy_info.mem_block    = NULL_BLOCK_IDX;
             copy_info.disk_slot    = disk_slot;
@@ -3855,17 +3881,17 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                     nullptr, &collector);
             }
 
-            if (complete_disk_pool_) {
-                const auto total_disk_slots = complete_disk_pool_->totalSlots()
+            if (complete_disk_pool_ || incomplete_disk_pool_) {
+                const auto total_disk_slots = (complete_disk_pool_ ? complete_disk_pool_->totalSlots() : 0)
                                               + (incomplete_disk_pool_ ? incomplete_disk_pool_->totalSlots() : 0);
-                const auto free_disk_slots =
-                    complete_disk_pool_->freeSlots() + (incomplete_disk_pool_ ? incomplete_disk_pool_->freeSlots() : 0);
+                const auto free_disk_slots = (complete_disk_pool_ ? complete_disk_pool_->freeSlots() : 0)
+                                             + (incomplete_disk_pool_ ? incomplete_disk_pool_->freeSlots() : 0);
                 const auto available_disk_slots =
-                    complete_disk_pool_->availableSlots()
+                    (complete_disk_pool_ ? complete_disk_pool_->availableSlots() : 0)
                     + (incomplete_disk_pool_ ? incomplete_disk_pool_->availableSlots() : 0);
-                const auto read_bytes =
-                    complete_disk_pool_->readBytes() + (incomplete_disk_pool_ ? incomplete_disk_pool_->readBytes() : 0);
-                const auto write_bytes = complete_disk_pool_->writeBytes()
+                const auto read_bytes = (complete_disk_pool_ ? complete_disk_pool_->readBytes() : 0)
+                                        + (incomplete_disk_pool_ ? incomplete_disk_pool_->readBytes() : 0);
+                const auto write_bytes = (complete_disk_pool_ ? complete_disk_pool_->writeBytes() : 0)
                                          + (incomplete_disk_pool_ ? incomplete_disk_pool_->writeBytes() : 0);
                 const auto now = std::chrono::steady_clock::now();
                 const auto elapsed_us =
@@ -3897,6 +3923,9 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                     nullptr, &disk_collector);
                 if (usePrefixTreeMemoryCache() && incomplete_disk_pool_) {
                     auto report_prefix_disk_pool = [this](const char* name, const DiskBlockPoolPtr& pool) {
+                        if (!pool) {
+                            return;
+                        }
                         const auto                            pool_total = pool->totalSlots();
                         const auto                            pool_free  = pool->freeSlots();
                         const auto                            pool_avail = pool->availableSlots();

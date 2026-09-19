@@ -28,6 +28,7 @@ def chunk_gated_delta_rule_fwd_h_cublas(
     chunk_indices: torch.LongTensor | None = None,
     use_exp2: bool = True,
     transpose_state_layout: bool = False,
+    intermediate_state_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     """Deterministic K3 chunk-state recurrence using CUDA BLAS GEMMs.
 
@@ -86,6 +87,7 @@ def chunk_gated_delta_rule_fwd_h_cublas(
             value_heads,
             value_dim if transpose_state_layout else key_dim,
             key_dim if transpose_state_layout else value_dim,
+            dtype=intermediate_state_dtype or k.dtype,
         )
     else:
         if batch != 1:
@@ -109,6 +111,7 @@ def chunk_gated_delta_rule_fwd_h_cublas(
             value_heads,
             value_dim if transpose_state_layout else key_dim,
             key_dim if transpose_state_layout else value_dim,
+            dtype=intermediate_state_dtype or k.dtype,
         )
 
     sequence_count = len(sequence_ranges)
@@ -154,9 +157,9 @@ def chunk_gated_delta_rule_fwd_h_cublas(
                 global_chunk_index if cu_seqlens is not None else local_chunk_index
             )
             if transpose_state_layout:
-                h[batch_index, target_chunk] = stored_state.transpose(-1, -2)
+                h[batch_index, target_chunk] = state.transpose(-1, -2)
             else:
-                h[batch_index, target_chunk] = stored_state
+                h[batch_index, target_chunk] = state
 
             # baddbmm accepts the head-interleaved strided views directly.
             # Materializing both chunks here adds two D2D copies per Python

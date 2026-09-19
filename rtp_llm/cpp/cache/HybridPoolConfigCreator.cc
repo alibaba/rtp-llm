@@ -326,9 +326,18 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.linear_request_cache_pool_blocks = kv_cache_config.linear_request_cache_pool_blocks;
     config.linear_speculative_reserve_step = gen_num_per_cycle > 0 ? gen_num_per_cycle + 1 : 0;
     config.role_type                       = parallelism_config.role_type;
-    const char* linear_request_cache_env   = std::getenv("ENABLE_LINEAR_ATTN_REQUEST_CACHE");
+    const char* linear_request_cache_env    = std::getenv("ENABLE_LINEAR_ATTN_REQUEST_CACHE");
     config.enable_linear_attention_request_cache =
         linear_request_cache_env != nullptr && std::string(linear_request_cache_env) == "1";
+    if (config.role_type != RoleType::DECODE && config.enable_linear_attention_request_cache
+        && kv_cache_config.reuse_cache && kv_cache_config.enable_memory_cache
+        && kv_cache_config.enable_memory_cache_disk) {
+        RTP_LLM_CHECK_WITH_INFO(!kv_cache_config.enable_tiered_memory_cache,
+                                "Linear disk checkpoints require direct memory-cache writes");
+        const int64_t checkpoint_tokens = static_cast<int64_t>(config.seq_size_per_block) * config.linear_step;
+        config.linear_disk_checkpoint_blocks =
+            static_cast<uint32_t>(std::max<int64_t>(0, model_config.max_seq_len - 1) / checkpoint_tokens);
+    }
     config.is_sparse = model_config.attn_config.is_sparse;
 
     if (!model_config.attn_config.layer_compress_ratios.empty()) {

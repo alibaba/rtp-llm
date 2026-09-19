@@ -87,13 +87,16 @@ struct CacheConfig {
     // paged block_num, so paged pools don't overcommit HBM. 0 means no reservation.
     size_t fixed_pool_reserve_bytes = 0;
 
-    // Linear attention has a token-independent pool. Two blocks are resident
+    // Tail-only Linear attention has a token-independent pool. Two blocks are resident
     // per live request; speculative decode may additionally reserve rollback
     // states for the duration of a target-verify step.
     int      linear_speculative_reserve_step       = 0;
     RoleType role_type                             = RoleType::PDFUSION;
     bool     enable_linear_attention_request_cache = false;
     uint32_t linear_request_cache_pool_blocks      = 0;
+    // Transient output checkpoints are connector-owned until offload completes;
+    // only the request tail is inserted into the persistent device cache.
+    uint32_t linear_disk_checkpoint_blocks = 0;
 
     // Attention-specific configuration
     int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
@@ -143,10 +146,16 @@ struct CacheConfig {
                 // cache entries while the next batch owns its two live states.
                 const uint32_t cached_request_blocks = role_type == RoleType::DECODE ? 0u : 1u;
                 const uint32_t live_blocks = concurrency * (kResidentBlocksPerRequest + speculative_blocks);
-                const uint32_t auto_blocks = live_blocks + concurrency * cached_request_blocks;
+                const uint32_t prefill_concurrency   = static_cast<uint32_t>(
+                    std::max<int64_t>(1, runtime_config.fifo_scheduler_config.max_context_batch_size));
+                const uint32_t checkpoint_blocks =
+                    role_type == RoleType::DECODE ? 0u : 2u * prefill_concurrency * linear_disk_checkpoint_blocks;
+                const uint32_t auto_blocks = live_blocks + concurrency * cached_request_blocks + checkpoint_blocks;
+                // A tail-only override must leave room for checkpoints held
+                // by the asynchronous disk writer.
                 rule_blocks = linear_request_cache_pool_blocks == 0 ?
                                   auto_blocks :
-                                  std::max(linear_request_cache_pool_blocks, live_blocks);
+                                  std::max(linear_request_cache_pool_blocks, live_blocks + checkpoint_blocks);
             } else if (use_explicit_hca_blocks) {
                 rule_blocks = dsv4_hca_state_pool_blocks;
             } else if (use_explicit_fixed_blocks) {
@@ -217,6 +226,7 @@ struct CacheConfig {
         OUTPUT_FIELD(linear_speculative_reserve_step);
         OUTPUT_FIELD(enable_linear_attention_request_cache);
         OUTPUT_FIELD(linear_request_cache_pool_blocks);
+        OUTPUT_FIELD(linear_disk_checkpoint_blocks);
         OUTPUT_FIELD_EXPR("role_type", roleTypeToString(role_type));
         OUTPUT_FIELD(group_layer_num);
         OUTPUT_FIELD(linear_group_num);

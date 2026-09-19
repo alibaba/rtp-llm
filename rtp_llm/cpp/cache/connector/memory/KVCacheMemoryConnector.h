@@ -187,12 +187,13 @@ private:
                                                              int                                 start_index,
                                                              int                                 read_num);
     std::shared_ptr<CopyPlan>    buildPrefixCopyPlanForWrite(const CacheKeysType&                cache_keys,
-                                                              const BlockDependenciesType&        dependencies,
-                                                              const LayerAttnBlockIds&            layer_attn_block_ids,
-                                                              const std::vector<LayerRegionSlot>& slots,
-                                                              int                                 start_index,
-                                                              int                                 write_num,
-                                                              bool&                               no_need_write);
+                                                             const BlockDependenciesType&        dependencies,
+                                                             const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                             const std::vector<LayerRegionSlot>& slots,
+                                                             int                                 start_index,
+                                                             int                                 write_num,
+                                                             bool&                               no_need_write,
+                                                             size_t                              reused_blocks = 0);
     bool                         allocatePrefixBackingsForWrite(std::vector<CopyInfoPerKey>& copy_infos);
     bool                         allocateOnePrefixBacking(CopyInfoPerKey& copy_info);
     bool                         preparePrefixMergeSources(std::vector<CopyInfoPerKey>& copy_infos);

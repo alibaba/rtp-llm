@@ -92,6 +92,45 @@ KVCacheConfig makeKvConfig() {
 
 }  // namespace
 
+TEST(GLM53CacheConfigTest, DiskCheckpointsReserveTransientBatchesEvenWithSmallPoolOverride) {
+    ScopedEnvVar      request_cache_mode("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
+    ParallelismConfig pc;
+    pc.role_type = RoleType::PREFILL;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size                      = 4;
+    runtime.fifo_scheduler_config.max_context_batch_size = 2;
+    auto model                                           = makeGlm53Config();
+    model.max_seq_len                                    = 1025;
+    auto kv_config                                       = makeKvConfig();
+    kv_config.reuse_cache                                = true;
+    kv_config.enable_memory_cache                        = true;
+    kv_config.enable_memory_cache_disk                   = true;
+    for (int step : {1, 3, 4}) {
+        kv_config.linear_step                      = step;
+        kv_config.linear_request_cache_pool_blocks = 0;
+        auto           config      = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
+        const uint32_t checkpoints = 1024 / (128 * step);
+        EXPECT_EQ(config.linear_disk_checkpoint_blocks, checkpoints);
+        config.finalizeBlockNums(10000, runtime);
+        EXPECT_EQ(config.group_block_nums[1], 12u + 4u * checkpoints);
+        kv_config.linear_request_cache_pool_blocks = 1;
+        config = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
+        config.finalizeBlockNums(10000, runtime);
+        EXPECT_EQ(config.group_block_nums[1], 8u + 4u * checkpoints);
+    }
+    pc.role_type       = RoleType::DECODE;
+    auto decode_config = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
+    EXPECT_EQ(decode_config.linear_disk_checkpoint_blocks, 0u);
+    decode_config.finalizeBlockNums(10000, runtime);
+    EXPECT_EQ(decode_config.group_block_nums[1], 8u);
+    pc.role_type                       = RoleType::PREFILL;
+    kv_config.enable_memory_cache_disk = false;
+    auto config                        = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
+    EXPECT_EQ(config.linear_disk_checkpoint_blocks, 0u);
+    config.finalizeBlockNums(10000, runtime);
+    EXPECT_EQ(config.group_block_nums[1], 8u);
+}
+
 TEST(GLM53CacheConfigTest, AppendsKPoolRegionsOnlyToMlaLayers) {
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, makeKvConfig(), false, 0);

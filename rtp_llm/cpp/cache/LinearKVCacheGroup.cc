@@ -36,12 +36,15 @@ bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserv
         // The state after the last completely reusable alignment unit may sit
         // well before the two-block working tail (for example position 7 for
         // a 1030-token request with 128-token pages and CP8). Keep exactly that
-        // one candidate; all earlier step states remain disposable.
+        // one persistent candidate; optional disk checkpoints are transient.
         const int  safe_slots         = std::max(seq_slots - 1, 0);
         const int  aligned_slots      = safe_slots / request_cache_alignment_blocks_ * request_cache_alignment_blocks_;
         const int  cache_candidate    = aligned_slots - 1;
         const bool is_cache_candidate = enable_reuse_cache && pos == cache_candidate;
-        return is_seq_tail || is_reserve || is_cache_candidate;
+        const bool is_disk_checkpoint = disk_checkpoint_mode_ && enable_reuse_cache && pos < safe_slots
+                                        && (pos + 1) % std::max(1, linear_step_) == 0
+                                        && (pos + 1) % request_cache_alignment_blocks_ == 0;
+        return is_seq_tail || is_reserve || is_cache_candidate || is_disk_checkpoint;
     }
 
     const int  step          = std::max(1, linear_step_);

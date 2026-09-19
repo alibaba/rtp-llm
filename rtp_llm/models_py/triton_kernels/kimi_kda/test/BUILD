@@ -74,3 +74,17 @@ py_test(
     tags = ["manual"],
     visibility = ["//visibility:public"],
 )
+
+py_test(
+    name = "kda_checkpoint_precision_test",
+    srcs = ["kda_checkpoint_precision_test.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        ":torch",
+        ":triton",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+    tags = ["manual"],
+)

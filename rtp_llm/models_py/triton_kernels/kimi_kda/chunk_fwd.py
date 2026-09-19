@@ -91,7 +91,9 @@ def chunk_kda_fwd(
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
-            intermediate_state_dtype=k.dtype,
+            intermediate_state_dtype=(
+                torch.float32 if return_intermediate_states else k.dtype
+            ),
             use_exp2=True,
         )
     else:
@@ -106,6 +108,9 @@ def chunk_kda_fwd(
             chunk_size=chunk_size,
             use_exp2=True,
             transpose_state_layout=state_v_first,
+            intermediate_state_dtype=(
+                torch.float32 if return_intermediate_states else k.dtype
+            ),
         )
 
     o = chunk_gla_fwd_o_gk(

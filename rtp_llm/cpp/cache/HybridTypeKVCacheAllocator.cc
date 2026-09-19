@@ -50,6 +50,7 @@ bool HybridTypeKVCacheAllocator::doInit() {
             auto linear_group = std::make_shared<LinearKVCacheGroup>(
                 ids, spec, block_pool_, gid, config_.linear_step, shared_cache_raw, nullptr, config_.linear_fixed_cap);
             linear_group->setRequestCacheMode(config_.enable_linear_attention_request_cache);
+            linear_group->setDiskCheckpointMode(config_.linear_disk_checkpoint_blocks > 0);
             linear_group->setRequestCacheAlignmentBlocks(linear_request_cache_alignment_blocks_);
             group = std::move(linear_group);
             linear_group_ids_.push_back(gid);

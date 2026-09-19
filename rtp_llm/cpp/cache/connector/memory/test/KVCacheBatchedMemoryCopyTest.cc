@@ -471,6 +471,70 @@ private:
 
 
 
+TEST(KVCacheBatchedMemoryCopyTest, WholeRequestReadOnlyRestoresSelectedCheckpoint) {
+    auto config                                  = makeTinyTypedHybridPoolConfig();
+    config.group_types[1]                        = CacheGroupType::LINEAR;
+    config.linear_group_num                      = 1;
+    config.enable_linear_attention_request_cache = true;
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb         = 8;
+    kv_config.memory_cache_sync_timeout_ms = 1000;
+    auto allocator                         = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto connector =
+        std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, std::vector<std::string>{"127.0.0.1:1"});
+    ASSERT_TRUE(connector->init());
+    KVCacheResource resource;
+    resource.cacheKeys() = {101, 102, 103, 104};
+    resource.initGroups(
+        2, config.layer_all_num, config.layer_to_group_id, 1, config.group_types, config.layer_region_to_group_id);
+    resource.mutableBlockIds(0).assign({1, 2, 3, 4});
+    // These output slots are allocated, but only the selected checkpoint
+    // at key 103 needs to be present in the external cache.
+    resource.mutableBlockIds(1).assign({5, 6, 7, 8});
+    resource.ensureLinearBlockDependencies();
+    const auto slots  = connector->layerRegionSlots();
+    const auto blocks = connector->resourceLayerRegionBlocks(resource, slots);
+    for (size_t index = 0; index < 3; ++index) {
+        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            if (kind == CacheBlockKind::STATE_SWA_KV && index != 2) {
+                continue;
+            }
+            auto pool      = connector->memoryPoolFor(kind);
+            auto allocated = pool->malloc(1);
+            ASSERT_EQ(allocated.size(), 1u);
+            KVCacheMemoryConnector::CopyInfoPerKey copy;
+            copy.cache_key       = resource.cacheKeys()[index];
+            copy.kind            = kind;
+            copy.mem_block       = allocated[0];
+            copy.block_size      = connector->prefixKindBlockSize(kind, slots);
+            copy.slot_valid_mask = connector->prefixSlotValidMask(blocks, slots, index, kind);
+            connector->putPrefixToCache(copy, resource.blockDependencies()[index], slots);
+        }
+    }
+    EXPECT_EQ(connector->matchWholeRequest(resource), 3u);
+    auto plan =
+        connector->buildPrefixCopyPlanForRead(resource.cacheKeys(), resource.blockDependencies(), blocks, slots, 0, 3);
+    ASSERT_NE(plan, nullptr);
+    ASSERT_EQ(plan->copy_infos.size(), 4u);
+    size_t states = 0;
+    for (const auto& copy : plan->copy_infos) {
+        if (copy.kind == CacheBlockKind::STATE_SWA_KV) {
+            EXPECT_EQ(copy.cache_key, 103);
+            ++states;
+        }
+    }
+    EXPECT_EQ(states, 1u);
+    bool no_write = false;
+    auto write    = connector->buildPrefixCopyPlanForWrite(
+        resource.cacheKeys(), resource.blockDependencies(), blocks, slots, 0, 4, no_write, 3);
+    ASSERT_NE(write, nullptr);
+    for (const auto& copy : write->copy_infos) {
+        if (copy.kind == CacheBlockKind::STATE_SWA_KV) {
+            EXPECT_GE(copy.cache_key, 103);
+        }
+    }
+}
+
 TEST(KVCacheBatchedMemoryCopyTest, AutomaticHostSplitKeepsAUsableLinearStateAtLowConcurrency) {
     auto config                                  = makeTinyTypedHybridPoolConfig();
     config.group_types[1]                        = CacheGroupType::LINEAR;

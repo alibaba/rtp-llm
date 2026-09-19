@@ -39,6 +39,10 @@ public:
         request_cache_mode_ = enabled;
     }
 
+    void setDiskCheckpointMode(bool enabled) {
+        disk_checkpoint_mode_ = enabled;
+    }
+
     void setRequestCacheAlignmentBlocks(int blocks) {
         request_cache_alignment_blocks_ = std::max(blocks, 1);
     }
@@ -69,6 +73,7 @@ private:
     // older candidates are released as soon as the next aligned boundary wins.
     static constexpr int kResidentBlocksPerRequest       = 2;
     bool                 request_cache_mode_             = false;
+    bool                 disk_checkpoint_mode_           = false;
     int                  request_cache_alignment_blocks_ = 1;
     int                  linear_step_                    = 1;
     int                  linear_fixed_cap_               = 0;
