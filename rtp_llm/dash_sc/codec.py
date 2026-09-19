@@ -671,6 +671,7 @@ class OtherParams:
     traffic_reject_priority: int | None = None
     reasoning_effort: str | None = None
     request_headers: dict[str, str] = field(default_factory=dict)
+    skip_input_inspection: bool = False
 
 
 @dataclass(frozen=True)
@@ -939,6 +940,25 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
                     return_input_ids = vf != 0.0
 
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
+    inspection = ds_attrs.get("x-dashscope-inner-gateway-datainspection")
+    try:
+        inspection = json.loads(inspection) if isinstance(inspection, str) else inspection
+    except (TypeError, ValueError):
+        inspection = None
+    # Match chat's explicit input=disable policy. Missing/malformed metadata
+    # must keep the existing fail-closed inspection behavior.
+    qwenchat_inspection = _parse_optional_parameter_bool(
+        request, "qwenchat_datainspection"
+    )
+    if qwenchat_inspection is None:
+        qwenchat_inspection = _parse_optional_bool(
+            _lookup_ds_request_control(ds_attrs, "qwenchat_datainspection")
+        )
+    skip_input_inspection = (
+        isinstance(inspection, dict)
+        and str(inspection.get("input", "")).strip().lower() == "disable"
+        and qwenchat_inspection is not True
+    )
     enable_thinking = _parse_optional_bool(
         _lookup_ds_request_control(ds_attrs, "x-ds-llm-thinking")
     )
@@ -983,7 +1003,12 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
         )
 
     request_headers: dict[str, str] = {}
-    for header_name in ("user_id", "x-dashscope-apikeyid"):
+    for header_name in (
+        "user_id",
+        "x-dashscope-uid",
+        "x-dashscope-service",
+        "x-dashscope-apikeyid",
+    ):
         value = _normalize_non_empty_str(ds_attrs.get(header_name))
         if value is not None:
             request_headers[header_name] = value
@@ -995,6 +1020,7 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
         timeout_ms=timeout_ms,
         traffic_reject_priority=traffic_reject_priority,
         reasoning_effort=reasoning_effort,
+        skip_input_inspection=skip_input_inspection,
         request_headers=request_headers,
     )
 
@@ -1061,10 +1087,11 @@ _MULTIMODAL_PARAMETER_KEYS: tuple[str, ...] = ("payload", "__messages__")
 _PER_PART_CONFIG_INT_KEYS: tuple[str, ...] = (
     "min_pixels",
     "max_pixels",
-    "fps",
+    "max_long_side_pixel",
     "max_frames",
     "min_frames",
 )
+_PER_PART_CONFIG_FLOAT_KEYS: tuple[str, ...] = ("fps",)
 
 
 @dataclass(frozen=True)
@@ -1084,7 +1111,8 @@ class MultimodalPart:
     mm_type: Any
     min_pixels: int = -1
     max_pixels: int = -1
-    fps: int = -1
+    max_long_side_pixel: int = -1
+    fps: float = -1.0
     max_frames: int = -1
     min_frames: int = -1
 
@@ -1106,7 +1134,7 @@ def _extract_openai_url(part: dict, inner_field: str) -> str | None:
     return None
 
 
-def _extract_per_part_config(part: dict) -> dict[str, int]:
+def _extract_per_part_config(part: dict) -> dict[str, int | float]:
     """Pull per-part numeric overrides (min_pixels, max_pixels, fps, ...).
 
     Supports two layouts in one pass:
@@ -1125,10 +1153,18 @@ def _extract_per_part_config(part: dict) -> dict[str, int]:
             value = nested.get(key)
             if isinstance(value, (int, float)) and value > 0:
                 out[key] = int(value)
+        for key in _PER_PART_CONFIG_FLOAT_KEYS:
+            value = nested.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                out[key] = float(value)
     for key in _PER_PART_CONFIG_INT_KEYS:
         value = part.get(key)
         if isinstance(value, (int, float)) and value > 0:
             out[key] = int(value)
+    for key in _PER_PART_CONFIG_FLOAT_KEYS:
+        value = part.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            out[key] = float(value)
     return out
 
 

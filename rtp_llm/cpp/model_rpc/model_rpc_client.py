@@ -1,7 +1,7 @@
 import functools
 import json
 import logging
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, Union
 
 import grpc
 from grpc import StatusCode
@@ -13,10 +13,15 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateInputPB,
     GenerateOutputsPB,
     MultimodalInputPB,
+    MultimodalInputsPB,
     RoleAddrPB,
 )
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceStub,
+    RpcServiceStub,
+)
 from rtp_llm.server.request_headers import (
+    dashscope_greennet_metadata,
     extract_correlation_request_id,
     extract_trace_id,
 )
@@ -224,7 +229,15 @@ def trans_input(input_py: GenerateInput):
     return input_pb
 
 
-def get_multimodal_preprocess_value(value: Optional[int], default: int):
+def _make_multimodal_inputs_pb(input_pb: GenerateInputPB) -> MultimodalInputsPB:
+    mm_inputs_pb = MultimodalInputsPB(request_id=input_pb.request_id)
+    mm_inputs_pb.multimodal_inputs.extend(input_pb.multimodal_inputs)
+    return mm_inputs_pb
+
+
+def get_multimodal_preprocess_value(
+    value: Optional[Union[int, float]], default: Union[int, float]
+) -> Union[int, float]:
     if value is not None and value != -1:
         return value
     else:
@@ -234,6 +247,11 @@ def get_multimodal_preprocess_value(value: Optional[int], default: int):
 def trans_multimodal_input(
     input_py: GenerateInput, input_pb: GenerateInputPB, generate_config: GenerateConfig
 ):
+    input_pb.multimodal_inputs.extend(iter_multimodal_inputs(input_py, generate_config))
+
+
+def iter_multimodal_inputs(input_py: GenerateInput, generate_config: GenerateConfig):
+    """Resolve preprocessing identically for inference and routing, one input at a time."""
     resized_shape = [-1, -1]
     if generate_config.resized_shape:
         if len(generate_config.resized_shape) != 2:
@@ -246,6 +264,9 @@ def trans_multimodal_input(
         mm_input_pb = MultimodalInputPB()
         mm_input_pb.multimodal_url = mm_input.url
         mm_input_pb.multimodal_type = mm_input.mm_type
+        mm_input_pb.skip_input_inspection = bool(
+            getattr(mm_input, "skip_input_inspection", False)
+        )
         if mm_input.tensor.numel() > 0:
             mm_input_pb.multimodal_tensor.CopyFrom(
                 trans_from_tensor(mm_input.tensor)
@@ -263,9 +284,10 @@ def trans_multimodal_input(
         mm_preprocess_config_pb.max_pixels = get_multimodal_preprocess_value(
             generate_config.max_pixels, mm_input.mm_preprocess_config.max_pixels
         )
-        mm_preprocess_config_pb.fps = get_multimodal_preprocess_value(
+        fps = get_multimodal_preprocess_value(
             generate_config.fps, mm_input.mm_preprocess_config.fps
         )
+        mm_preprocess_config_pb.fps = float(fps)
         mm_preprocess_config_pb.min_frames = get_multimodal_preprocess_value(
             generate_config.min_frames, mm_input.mm_preprocess_config.min_frames
         )
@@ -280,7 +302,45 @@ def trans_multimodal_input(
         mm_preprocess_config_pb.mm_timeout_ms = get_multimodal_preprocess_value(
             generate_config.mm_timeout_ms, mm_input.mm_preprocess_config.mm_timeout_ms
         )
-        input_pb.multimodal_inputs.append(mm_input_pb)
+        mm_preprocess_config_pb.max_long_side_pixel = int(
+            get_multimodal_preprocess_value(
+                generate_config.max_long_side_pixel,
+                getattr(mm_input.mm_preprocess_config, "max_long_side_pixel", -1),
+            )
+        )
+        yield mm_input_pb
+
+
+def multimodal_cache_keys(input_py: GenerateInput) -> list[str]:
+    from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+
+    keys = []
+    for original, item in zip(
+        input_py.mm_inputs, iter_multimodal_inputs(input_py, input_py.generate_config)
+    ):
+        if not item.multimodal_url or (
+            original.tensor is not None and original.tensor.numel() > 0
+        ):
+            return []
+        cfg = item.mm_preprocess_config
+        resolved = MMPreprocessConfig(
+            cfg.width,
+            cfg.height,
+            cfg.min_pixels,
+            cfg.max_pixels,
+            cfg.fps,
+            cfg.min_frames,
+            cfg.max_frames,
+            list(cfg.crop_positions),
+            cfg.mm_timeout_ms,
+            cfg.max_long_side_pixel,
+        )
+        keys.append(
+            MultimodalInput(
+                item.multimodal_url, item.multimodal_type, original.tensor, resolved
+            ).cache_key()
+        )
+    return keys
 
 
 # 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array
@@ -506,7 +566,6 @@ class ModelRpcClient(object):
         input_pb = trans_input(input_py)
 
         if input_pb.multimodal_inputs:
-            await self._try_async_submit_vit(input_py, input_pb)
             # GreenNet content-safety gate: block before prefill until the VIT
             # encoder's inspection verdict lands. A violation raises
             # FtRuntimeException(UNSAFE_INPUT_CONTENT) here, short-circuiting the
@@ -519,6 +578,9 @@ class ModelRpcClient(object):
             stub = RpcServiceStub(channel)
 
             grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
+            greennet_metadata = dashscope_greennet_metadata(input_py.headers)
+            if greennet_metadata:
+                grpc_kwargs["metadata"] = greennet_metadata
             response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
@@ -577,24 +639,6 @@ class ModelRpcClient(object):
             if response_iterator:
                 response_iterator.cancel()
 
-    async def _try_async_submit_vit(
-        self, input_py: GenerateInput, input_pb: GenerateInputPB
-    ) -> None:
-        for role_addr in input_py.generate_config.role_addrs:
-            if role_addr.role == RoleType.VIT:
-                vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
-                try:
-                    mm_inputs_pb = MultimodalInputsPB()
-                    mm_inputs_pb.multimodal_inputs.extend(input_pb.multimodal_inputs)
-                    channel = await self._channel_pool.get(vit_addr)
-                    stub = MultimodalRpcServiceStub(channel)
-                    await stub.AsyncSubmitEmbedding(mm_inputs_pb, timeout=5.0)
-                except Exception as e:
-                    logging.warning(
-                        f"request: [{input_py.request_id}] async vit submit to {vit_addr} failed: {e}"
-                    )
-                break
-
     async def _wait_greennet_verdict(
         self, input_py: GenerateInput, input_pb: GenerateInputPB
     ) -> None:
@@ -607,6 +651,10 @@ class ModelRpcClient(object):
         inline inside mm_process_engine and surfaces the same exception through
         the normal generate stream.
 
+        Successful hash metadata includes an approval for the exact ViT/media
+        pair, so that path returns without another RPC. Keep the verdict RPC
+        for requests that did not acquire approved metadata.
+
         When greennet is disabled (open-source build or ENABLE_SAFETY_INSPECTION
         off), this returns immediately WITHOUT any RPC — so the disabled path is
         byte-identical to the pre-greennet behavior (no extra round-trip).
@@ -618,13 +666,28 @@ class ModelRpcClient(object):
         for role_addr in input_py.generate_config.role_addrs:
             if role_addr.role != RoleType.VIT:
                 continue
+            if (
+                input_py.greennet_verified_vit is not None
+                and input_py.greennet_verified_vit
+                == (
+                    role_addr.ip,
+                    role_addr.grpc_port,
+                    tuple(dict.fromkeys(multimodal_cache_keys(input_py))),
+                )
+            ):
+                # Hash acquisition already waited for inspection (or reused an
+                # approved hash). No separate ViT RPC is needed on this route.
+                continue
             vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
-            mm_inputs_pb = MultimodalInputsPB()
-            mm_inputs_pb.multimodal_inputs.extend(input_pb.multimodal_inputs)
+            mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
             channel = await self._channel_pool.get(vit_addr)
             stub = MultimodalRpcServiceStub(channel)
             try:
-                await stub.WaitGreenNetVerdict(mm_inputs_pb, timeout=120.0)
+                await stub.WaitGreenNetVerdict(
+                    mm_inputs_pb,
+                    timeout=120.0,
+                    metadata=dashscope_greennet_metadata(input_py.headers),
+                )
             except grpc.RpcError as e:
                 error_details = ErrorDetailsPB()
                 metadata = e.trailing_metadata()

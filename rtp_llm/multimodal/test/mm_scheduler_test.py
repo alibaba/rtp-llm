@@ -1,16 +1,26 @@
+import os
 import threading
 import time
+import weakref
 from typing import Any, List, Optional
-from unittest import TestCase, main
+from unittest import TestCase, main, mock
+from unittest.mock import patch
 
 import torch
 
-from rtp_llm.multimodal.mm_scheduler import MMScheduler, OutputCountMismatchError
+from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.multimodal.mm_scheduler import (
+    MMScheduler,
+    OutputCountMismatchError,
+)
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import MMWorkEstimate
 from rtp_llm.multimodal.multimodal_util import (
     build_multimodal_output_pb,
     maybe_tensor_to_list,
 )
+from rtp_llm.server.server_args.server_args import EnvArgumentParser
+from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
@@ -27,6 +37,7 @@ class _FakeMMPart:
         oom_over: Optional[int] = None,
         short_over: Optional[int] = None,
         work_budget: Optional[MMWorkEstimate] = None,
+        device: str = "cpu",
     ):
         self.delay = delay
         # Raise a CUDA OOM when a single forward carries more than this many items.
@@ -34,6 +45,7 @@ class _FakeMMPart:
         # Return one fewer output when a forward carries more than this many items.
         self.short_over = short_over
         self.work_budget = work_budget
+        self.device = torch.device(device)
         self.calls: List[int] = []
         self.call_values: List[List[float]] = []
         self.call_started = threading.Event()
@@ -41,6 +53,10 @@ class _FakeMMPart:
 
     def get_batch_work_budget(self, max_batch_media: int) -> Optional[MMWorkEstimate]:
         return self.work_budget
+
+    @property
+    def _device(self) -> torch.device:
+        return self.device
 
     @staticmethod
     def _is_poison(data: Any) -> bool:
@@ -85,6 +101,7 @@ class _FakeWorkItem:
         mm_type: MMUrlType = MMUrlType.IMAGE,
         preprocess_result: Any = None,
         input_patches: Optional[int] = None,
+        estimated_workspace_bytes: Optional[int] = None,
     ):
         # mm_inputs is the raw media list; its length is what the scheduler
         # bounds batches by (sum(len(wi.mm_inputs)) across a request).
@@ -98,8 +115,11 @@ class _FakeWorkItem:
         self.need_check_cache = False
         self.cache_key = None
         self.work_estimate = (
-            MMWorkEstimate(input_patches=input_patches)
-            if input_patches is not None
+            MMWorkEstimate(
+                input_patches=input_patches or 0,
+                estimated_workspace_bytes=estimated_workspace_bytes or 0,
+            )
+            if input_patches is not None or estimated_workspace_bytes is not None
             else None
         )
 
@@ -136,6 +156,53 @@ def _submit_concurrently(
 
 
 class MMSchedulerTest(TestCase):
+    def test_queue_metrics_report_depth_and_wait(self):
+        """Queue gauges expose backlog depth and time before a forward starts."""
+        fake = _FakeMMPart(delay=0.2)
+        sched = MMScheduler(fake, batch_wait_ms=0, max_batch_size=1)
+        errors: List[Optional[Exception]] = [None, None]
+
+        def submit(index: int):
+            try:
+                sched.submit_and_wait([_FakeWorkItem(timeout_ms=5000)])
+            except Exception as error:  # noqa: BLE001 - asserted below
+                errors[index] = error
+
+        with mock.patch("rtp_llm.multimodal.mm_scheduler.kmonitor.report") as report:
+            first = threading.Thread(target=submit, args=(0,))
+            second = threading.Thread(target=submit, args=(1,))
+            try:
+                first.start()
+                self.assertTrue(fake.call_started.wait(timeout=1.0))
+                second.start()
+                # Keep the second request behind the first forward so its queue
+                # wait is observable rather than a scheduler race.
+                time.sleep(0.03)
+                second.join(timeout=2.0)
+                first.join(timeout=2.0)
+            finally:
+                sched.close()
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(errors, [None, None])
+
+            depth_values = [
+                call.args[1]
+                for call in report.call_args_list
+                if call.args
+                and call.args[0] == GaugeMetrics.VIT_EMBEDDING_QUEUE_SIZE_METRIC
+            ]
+            wait_values = [
+                call.args[1]
+                for call in report.call_args_list
+                if call.args
+                and call.args[0] == GaugeMetrics.VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC
+            ]
+            self.assertIn(1, depth_values)
+            self.assertEqual(depth_values[-1], 0)
+            self.assertGreater(max(wait_values), 50.0)
+
     def test_multi_request_batching(self):
         """Several concurrent submissions are merged into one forward."""
         fake = _FakeMMPart()
@@ -244,6 +311,29 @@ class MMSchedulerTest(TestCase):
         self.assertTrue(all(e is None for e in errors), errors)
         self.assertEqual(fake.calls, [1, 1, 1, 1])
 
+    def test_explicit_patch_limit_splits_cross_request_batch(self):
+        """The operator patch cap overrides a larger model-derived budget."""
+        fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=100))
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=300,
+            max_batch_size=8,
+            max_batch_images=100,
+            max_batch_patches=10,
+        )
+        barrier = threading.Barrier(4)
+        try:
+            errors = _submit_concurrently(
+                sched,
+                [[_FakeWorkItem(input_patches=6)] for _ in range(4)],
+                barrier=barrier,
+            )
+        finally:
+            sched.close()
+
+        self.assertTrue(all(e is None for e in errors), errors)
+        self.assertEqual(fake.calls, [1, 1, 1, 1])
+
     def test_cost_aware_model_splits_large_request(self):
         """An opted-in model advances an oversized request in bounded chunks."""
         fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=10))
@@ -259,6 +349,42 @@ class MMSchedulerTest(TestCase):
 
         self.assertEqual(fake.calls, [1, 1])
         self.assertTrue(all(item.embedding_result is not None for item in items))
+
+    def test_explicit_patch_limit_splits_large_request(self):
+        """A request is chunked by patch count before the model budget binds."""
+        fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=100))
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=0,
+            max_batch_size=8,
+            max_batch_images=100,
+            max_batch_patches=10,
+        )
+        items = [
+            _FakeWorkItem(input_patches=6),
+            _FakeWorkItem(input_patches=4),
+            _FakeWorkItem(input_patches=6),
+        ]
+        try:
+            sched.submit_and_wait(items)
+        finally:
+            sched.close()
+
+        self.assertEqual(fake.calls, [2, 1])
+        self.assertTrue(all(item.embedding_result is not None for item in items))
+
+    def test_single_item_over_explicit_patch_limit_still_runs_alone(self):
+        """Keep the existing indivisible-work-item fallback behavior."""
+        fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=100))
+        sched = MMScheduler(fake, batch_wait_ms=0, max_batch_patches=10)
+        item = _FakeWorkItem(input_patches=11)
+        try:
+            sched.submit_and_wait([item])
+        finally:
+            sched.close()
+
+        self.assertEqual(fake.calls, [1])
+        self.assertIsNotNone(item.embedding_result)
 
     def test_split_request_yields_to_waiting_request(self):
         """A large request queues each next chunk at the tail for fairness."""
@@ -377,8 +503,8 @@ class MMSchedulerTest(TestCase):
         )
         self.assertEqual(fake.calls, [3])  # the failed combined forward only
 
-    def test_cost_aware_oom_retries_by_binary_split(self):
-        """An opted-in model isolates an oversized batch instead of failing it."""
+    def test_cost_aware_oom_fails_whole_batch_and_executor_continues(self):
+        """A cost-aware model fails the batch once; later requests still run."""
         fake = _FakeMMPart(
             oom_over=1,
             work_budget=MMWorkEstimate(input_patches=100),
@@ -393,29 +519,290 @@ class MMSchedulerTest(TestCase):
                 [[_FakeWorkItem(input_patches=1)] for _ in range(3)],
                 barrier=barrier,
             )
+            self.assertTrue(all(isinstance(e, RuntimeError) for e in errors), errors)
+            self.assertTrue(
+                all(
+                    isinstance(e.__cause__, torch.cuda.OutOfMemoryError) for e in errors
+                ),
+                errors,
+            )
+            self.assertEqual(fake.calls, [3])
+            next_item = _FakeWorkItem(input_patches=1)
+            sched.submit_and_wait([next_item])
+            self.assertIsNotNone(next_item.embedding_result)
+        finally:
+            sched.close()
+
+        self.assertEqual(fake.calls, [3, 1])
+
+    def test_oom_fails_request_without_retrying_or_running_remaining_chunks(self):
+        for budget, batch_size in ((100, 4), (2, 2)):
+            with self.subTest(budget=budget):
+                fake = _FakeMMPart(
+                    oom_over=1, work_budget=MMWorkEstimate(input_patches=budget)
+                )
+                sched = MMScheduler(fake, batch_wait_ms=0, max_batch_images=100)
+                items = [_FakeWorkItem(input_patches=1) for _ in range(4)]
+                try:
+                    with self.assertRaisesRegex(
+                        RuntimeError, "fake CUDA OOM"
+                    ) as raised:
+                        sched.submit_and_wait(items)
+                    self.assertIsInstance(
+                        raised.exception.__cause__, torch.cuda.OutOfMemoryError
+                    )
+                    self.assertTrue(
+                        all(item.embedding_result is None for item in items)
+                    )
+                    next_item = _FakeWorkItem(input_patches=1)
+                    sched.submit_and_wait([next_item])
+                    self.assertIsNotNone(next_item.embedding_result)
+                    self.assertEqual(fake.calls, [batch_size, 1])
+                finally:
+                    sched.close()
+
+    def test_oom_releases_forward_workspace_before_empty_cache(self):
+        """The retained error must not keep failed forward locals alive."""
+
+        class OOMPart(_FakeMMPart):
+            def batched_embedding(self, data_list, mm_types, **kwargs):
+                workspace = torch.zeros(16)
+                self.workspace_ref = weakref.ref(workspace)
+                raise torch.cuda.OutOfMemoryError("fake workspace OOM")
+
+        fake = OOMPart()
+        sched = MMScheduler(fake, batch_wait_ms=0)
+
+        def check_workspace_released():
+            self.assertIsNone(fake.workspace_ref())
+
+        try:
+            with mock.patch(
+                "rtp_llm.multimodal.mm_scheduler.torch.cuda.empty_cache",
+                side_effect=check_workspace_released,
+            ) as empty_cache:
+                with self.assertRaisesRegex(
+                    RuntimeError, "fake workspace OOM"
+                ) as raised:
+                    sched.submit_and_wait([_FakeWorkItem()])
+                empty_cache.assert_called_once()
+                cause = raised.exception.__cause__
+                self.assertIsInstance(cause, torch.cuda.OutOfMemoryError)
+                self.assertIsNone(cause.__traceback__)
+                self.assertIsNone(fake.workspace_ref())
+        finally:
+            sched.close()
+
+    @patch("rtp_llm.multimodal.mm_scheduler.torch.cuda.empty_cache")
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_reserved",
+        return_value=0,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_allocated",
+        return_value=0,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.mem_get_info",
+        return_value=(1000, 2000),
+    )
+    def test_memory_reserve_splits_batch_before_forward(
+        self, mem_get_info, memory_allocated, memory_reserved, empty_cache
+    ):
+        """Runtime headroom admission shrinks a cross-request batch proactively."""
+        fake = _FakeMMPart(
+            work_budget=MMWorkEstimate(estimated_workspace_bytes=10_000),
+            device="cuda:0",
+        )
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=300,
+            max_batch_size=8,
+            max_batch_images=100,
+            gpu_memory_reserve_bytes=100,
+        )
+        barrier = threading.Barrier(3)
+        try:
+            errors = _submit_concurrently(
+                sched,
+                [
+                    [_FakeWorkItem(estimated_workspace_bytes=400)]
+                    for _ in range(3)
+                ],
+                barrier=barrier,
+            )
         finally:
             sched.close()
 
         self.assertTrue(all(error is None for error in errors), errors)
-        self.assertEqual(fake.calls, [3, 1, 2, 1, 1])
+        self.assertEqual(fake.calls, [2, 1])
+        empty_cache.assert_not_called()
+        self.assertGreaterEqual(mem_get_info.call_count, 3)
 
-    def test_cost_aware_oom_splits_items_within_one_request(self):
-        """OOM retry can bisect a multi-item chunk while preserving completion."""
+    @patch("rtp_llm.multimodal.mm_scheduler.torch.cuda.empty_cache")
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_reserved",
+        return_value=0,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_allocated",
+        return_value=0,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.mem_get_info",
+        return_value=(700, 2000),
+    )
+    def test_memory_reserve_splits_items_within_request(
+        self, mem_get_info, memory_allocated, memory_reserved, empty_cache
+    ):
+        """Runtime headroom admission also bisects work items in one chunk."""
         fake = _FakeMMPart(
-            oom_over=1,
-            work_budget=MMWorkEstimate(input_patches=100),
+            work_budget=MMWorkEstimate(estimated_workspace_bytes=10_000),
+            device="cuda:0",
         )
         sched = MMScheduler(
-            fake, batch_wait_ms=0, max_batch_size=8, max_batch_images=100
+            fake,
+            batch_wait_ms=0,
+            max_batch_size=8,
+            max_batch_images=100,
+            gpu_memory_reserve_bytes=100,
         )
-        items = [_FakeWorkItem(input_patches=1) for _ in range(4)]
+        items = [
+            _FakeWorkItem(estimated_workspace_bytes=300) for _ in range(4)
+        ]
         try:
             sched.submit_and_wait(items)
         finally:
             sched.close()
 
-        self.assertEqual(fake.calls, [4, 2, 1, 1, 2, 1, 1])
+        self.assertEqual(fake.calls, [2, 2])
         self.assertTrue(all(item.embedding_result is not None for item in items))
+        empty_cache.assert_not_called()
+
+    @patch("rtp_llm.multimodal.mm_scheduler.torch.cuda.empty_cache")
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_reserved",
+        return_value=0,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_allocated",
+        return_value=0,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.mem_get_info",
+        return_value=(650, 2000),
+    )
+    def test_memory_reserve_rejects_indivisible_item_before_forward(
+        self, mem_get_info, memory_allocated, memory_reserved, empty_cache
+    ):
+        """An indivisible item that cannot preserve headroom fails pre-forward."""
+        fake = _FakeMMPart(
+            work_budget=MMWorkEstimate(estimated_workspace_bytes=10_000),
+            device="cuda:0",
+        )
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=0,
+            max_batch_size=8,
+            max_batch_images=100,
+            gpu_memory_reserve_bytes=100,
+        )
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                sched.submit_and_wait(
+                    [_FakeWorkItem(estimated_workspace_bytes=600)]
+                )
+        finally:
+            sched.close()
+
+        self.assertIsInstance(ctx.exception.__cause__, torch.cuda.OutOfMemoryError)
+        self.assertEqual(fake.calls, [])
+        empty_cache.assert_not_called()
+
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_reserved",
+        return_value=500,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_allocated",
+        return_value=300,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.mem_get_info",
+        return_value=(600, 2000),
+    )
+    def test_memory_reserve_counts_allocator_reusable_bytes(
+        self, mem_get_info, memory_allocated, memory_reserved
+    ):
+        """Cached unused allocator blocks contribute to runtime allowance."""
+        fake = _FakeMMPart(
+            work_budget=MMWorkEstimate(estimated_workspace_bytes=10_000),
+            device="cuda:0",
+        )
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=0,
+            max_batch_size=8,
+            max_batch_images=100,
+            gpu_memory_reserve_bytes=100,
+        )
+        try:
+            sched.submit_and_wait(
+                [_FakeWorkItem(estimated_workspace_bytes=700)]
+            )
+        finally:
+            sched.close()
+
+        self.assertEqual(fake.calls, [1])
+
+    @patch("rtp_llm.multimodal.mm_scheduler.torch.cuda.mem_get_info")
+    def test_zero_memory_reserve_does_not_query_cuda(self, mem_get_info):
+        """The default preserves the old scheduler path without CUDA polling."""
+        fake = _FakeMMPart()
+        sched = MMScheduler(fake, batch_wait_ms=0)
+        try:
+            sched.submit_and_wait([_FakeWorkItem()])
+        finally:
+            sched.close()
+
+        self.assertEqual(fake.calls, [1])
+        mem_get_info.assert_not_called()
+
+    def test_gpu_scheduler_server_args_and_config(self):
+        """Public CLI/env-backed limits reach GPU-batch scheduler kwargs."""
+        config = VitConfig()
+        parser = EnvArgumentParser()
+        parser.set_root_config(config)
+        init_vit_group_args(parser, config)
+        with patch.dict(
+            os.environ,
+            {
+                "VIT_GPU_MAX_BATCH_PATCHES": "131072",
+                "VIT_GPU_MEMORY_RESERVE_BYTES": "1073741824",
+            },
+            clear=False,
+        ):
+            parser.parse_args(["--use_gpu_batch", "1"])
+
+        self.assertEqual(config.gpu_max_batch_patches, 131072)
+        self.assertEqual(config.gpu_memory_reserve_bytes, 1073741824)
+        self.assertEqual(
+            config.embedding_scheduler_args()["max_batch_patches"], 131072
+        )
+        self.assertEqual(
+            config.embedding_scheduler_args()["gpu_memory_reserve_bytes"],
+            1073741824,
+        )
+        self.assertIn(
+            "gpu_memory_reserve_bytes: 1073741824", config.to_string()
+        )
+        self.assertIn("gpu_max_batch_patches: 131072", config.to_string())
+
+        config.use_gpu_batch = False
+        self.assertEqual(config.embedding_scheduler_args()["max_batch_patches"], 0)
+        self.assertEqual(
+            config.embedding_scheduler_args()["gpu_memory_reserve_bytes"], 0
+        )
 
     def test_count_mismatch_fails_whole_batch(self):
         """A short combined return fails the whole batch; there is no retry."""
@@ -468,6 +855,16 @@ class MMSchedulerTest(TestCase):
             MMScheduler(fake, max_batch_size=0)
         with self.assertRaisesRegex(ValueError, "max_batch_images must be > 0"):
             MMScheduler(fake, max_batch_images=0)
+        with self.assertRaisesRegex(ValueError, "max_batch_patches must be >= 0"):
+            MMScheduler(fake, max_batch_patches=-1)
+        with self.assertRaisesRegex(ValueError, "requires a cost-aware model"):
+            MMScheduler(fake, max_batch_patches=1)
+        with self.assertRaisesRegex(
+            ValueError, "gpu_memory_reserve_bytes must be >= 0"
+        ):
+            MMScheduler(fake, gpu_memory_reserve_bytes=-1)
+        with self.assertRaisesRegex(ValueError, "requires a cost-aware model"):
+            MMScheduler(fake, gpu_memory_reserve_bytes=1)
 
 
 class MMWorkEstimateTest(TestCase):

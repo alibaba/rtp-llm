@@ -3,7 +3,7 @@
 import math
 import threading
 from io import BytesIO
-from typing import Any, List
+from typing import Any, List, Optional
 
 import torch
 import torch.nn as nn
@@ -18,6 +18,7 @@ from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_moonvit import (
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     ImageEmbeddingInterface,
+    MMWorkEstimate,
 )
 from rtp_llm.multimodal.multimodal_util import MMUrlType, get_bytes_io_from_url
 
@@ -167,6 +168,139 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
     @property
     def _data_type(self):
         return self.vision_tower.patch_embed.proj.weight.dtype
+
+    def _work_geometry(self, image: Image.Image) -> tuple[int, int]:
+        """Return exact post-resize input patches and projected tokens."""
+        if not isinstance(image, Image.Image):
+            raise TypeError(
+                f"Kimi-K3 work estimation expects PIL.Image, got {type(image)}"
+            )
+
+        processor_config = self.image_processor.media_proc_cfg
+        patch_size = int(processor_config["patch_size"])
+        vision_patch_size = int(self.vision_config.patch_size)
+        if patch_size != vision_patch_size:
+            raise ValueError(
+                "Kimi-K3 processor and MoonViT patch sizes differ: "
+                f"{patch_size} != {vision_patch_size}"
+            )
+
+        processor_merge_size = int(processor_config["merge_kernel_size"])
+        merge_h, merge_w = map(int, self.vision_config.merge_kernel_size)
+        if (merge_h, merge_w) != (
+            processor_merge_size,
+            processor_merge_size,
+        ):
+            raise ValueError(
+                "Kimi-K3 processor and MoonViT merge sizes differ: "
+                f"{processor_merge_size} != {(merge_h, merge_w)}"
+            )
+
+        resize = self.image_processor.resize_config_for_size(*image.size)
+        padded_height = int(resize["new_height"]) + int(resize["pad_height"])
+        padded_width = int(resize["new_width"]) + int(resize["pad_width"])
+        if padded_height <= 0 or padded_width <= 0:
+            raise ValueError(
+                "Kimi-K3 resize produced a non-positive padded size: "
+                f"{(padded_height, padded_width)}"
+            )
+        if padded_height % patch_size or padded_width % patch_size:
+            raise ValueError(
+                "Kimi-K3 resized image is not patch-aligned: "
+                f"{(padded_height, padded_width)} vs patch size {patch_size}"
+            )
+
+        grid_h = padded_height // patch_size
+        grid_w = padded_width // patch_size
+        if grid_h % merge_h or grid_w % merge_w:
+            raise ValueError(
+                f"Kimi-K3 patch grid {(grid_h, grid_w)} is not merge-aligned "
+                f"to {(merge_h, merge_w)}"
+            )
+        return grid_h * grid_w, (grid_h // merge_h) * (grid_w // merge_w)
+
+    def _estimated_workspace_bytes(self, input_patches: int, output_tokens: int) -> int:
+        """Conservatively estimate batch-scaled MoonViT live activations."""
+        config = self.vision_config
+        dtype_bytes = torch.empty((), dtype=self._data_type).element_size()
+        qkv_hidden_size = config.qkv_hidden_size or config.vt_hidden_size
+
+        # Pixel staging, residual/norm, QKV/RoPE/attention and MLP temporaries.
+        vision_elements = input_patches * (
+            config.num_channels * config.patch_size**2
+            + 2 * config.vt_hidden_size
+            + 6 * qkv_hidden_size
+            + 2 * config.vt_intermediate_size
+        )
+        # The merger flattens merge_h * merge_w patches before its first linear.
+        projector_elements = (
+            2 * input_patches * config.mm_hidden_size
+            + 2 * output_tokens * config.text_hidden_size
+        )
+        return dtype_bytes * (vision_elements + projector_elements)
+
+    def estimate_work(
+        self, data: Any, mm_type: Optional[MMUrlType] = None
+    ) -> MMWorkEstimate:
+        """Compute K3 MoonViT work without materializing image patches."""
+        if mm_type not in (None, MMUrlType.DEFAULT, MMUrlType.IMAGE):
+            raise ValueError("Kimi-K3 only supports image multimodal inputs")
+
+        input_patches, output_tokens = self._work_geometry(data)
+        return MMWorkEstimate(
+            input_patches=input_patches,
+            output_tokens=output_tokens,
+            estimated_workspace_bytes=self._estimated_workspace_bytes(
+                input_patches, output_tokens
+            ),
+            # Every image is an independent varlen-attention segment.
+            max_attention_segment=input_patches,
+            attention_work=input_patches**2,
+        )
+
+    def get_batch_work_budget(self, max_batch_media: int) -> Optional[MMWorkEstimate]:
+        """Map the existing media-count cap to K3-equivalent work limits."""
+        # Serial mode passes sys.maxsize and must preserve its historical path.
+        if max_batch_media >= 1 << 30:
+            return None
+
+        processor_config = self.image_processor.media_proc_cfg
+        reference_patches = int(processor_config["in_patch_limit"])
+        if reference_patches <= 0:
+            raise ValueError(
+                "Kimi-K3 in_patch_limit must be positive, got " f"{reference_patches}"
+            )
+
+        # Validate the shared processor/model geometry before deriving a budget.
+        patch_size = int(processor_config["patch_size"])
+        processor_merge_size = int(processor_config["merge_kernel_size"])
+        merge_h, merge_w = map(int, self.vision_config.merge_kernel_size)
+        if patch_size != int(self.vision_config.patch_size):
+            raise ValueError(
+                "Kimi-K3 processor and MoonViT patch sizes differ: "
+                f"{patch_size} != {self.vision_config.patch_size}"
+            )
+        if (merge_h, merge_w) != (
+            processor_merge_size,
+            processor_merge_size,
+        ):
+            raise ValueError(
+                "Kimi-K3 processor and MoonViT merge sizes differ: "
+                f"{processor_merge_size} != {(merge_h, merge_w)}"
+            )
+
+        merge_area = merge_h * merge_w
+        reference_output_tokens = max(1, reference_patches // merge_area)
+        reference = MMWorkEstimate(
+            input_patches=reference_patches,
+            output_tokens=reference_output_tokens,
+            estimated_workspace_bytes=self._estimated_workspace_bytes(
+                reference_patches, reference_output_tokens
+            ),
+            max_attention_segment=reference_patches,
+            attention_work=reference_patches**2,
+        )
+        return reference.scaled(max_batch_media)
 
     @staticmethod
     def preprocess_input(mm_inputs, vit_config, **kwargs):

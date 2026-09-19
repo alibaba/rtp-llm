@@ -10,13 +10,17 @@ from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
+from google.protobuf.json_format import ParseDict, ParseError
+from pydantic import BaseModel, Field
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     add_MultimodalRpcServiceServicer_to_server,
 )
@@ -25,7 +29,70 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.ops import RoleType
+from rtp_llm.server.mm_cache_metadata import (
+    MM_CACHE_SNAPSHOT_MAX_KEYS,
+    get_mm_cache_keys,
+    get_mm_cache_metadata,
+)
+from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, create_rpc_server
+
+
+class MMCacheMetadataRequest(BaseModel):
+    keys: List[str] = Field(max_length=256)
+    inputs: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=256)
+    request_id: int = 0
+    timeout_ms: int = Field(default=120000, gt=0)
+
+
+def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
+    @app.get("/mm_cache/keys")
+    @app.post("/mm_cache/keys")
+    def cache_keys():
+        try:
+            return get_mm_cache_keys(engine, MM_CACHE_SNAPSHOT_MAX_KEYS)
+        except NotImplementedError as error:
+            raise HTTPException(status_code=501, detail=str(error)) from error
+        except OverflowError as error:
+            raise HTTPException(status_code=413, detail=str(error)) from error
+
+    @app.post("/mm_cache/metadata")
+    def cache_metadata(request: MMCacheMetadataRequest, raw_request: RawRequest):
+        try:
+            inputs = None
+            if request.inputs is not None:
+                inputs = ParseDict(
+                    {"multimodal_inputs": request.inputs}, MultimodalInputsPB()
+                )
+                inputs.request_id = request.request_id
+            headers = extract_request_headers(raw_request.headers)
+            return get_mm_cache_metadata(
+                engine,
+                request.keys,
+                inputs,
+                request.timeout_ms,
+                user_id=headers.get("x-dashscope-uid", ""),
+                service_name=headers.get("x-dashscope-service", ""),
+                model_name=headers.get("x-rtp-model-name", ""),
+            )
+        except NotImplementedError as error:
+            raise HTTPException(status_code=501, detail=str(error)) from error
+        except OverflowError as error:
+            raise HTTPException(status_code=413, detail=str(error)) from error
+        except (ValueError, TypeError, ParseError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except TimeoutError as error:
+            raise HTTPException(
+                status_code=504, detail="ViT hash computation timed out"
+            ) from error
+        except FtRuntimeException as error:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error_code": int(error.exception_type),
+                    "message": error.message,
+                },
+            ) from error
 
 
 class GracefulShutdownServer(Server):
@@ -135,6 +202,7 @@ class VitEndpointApp:
             )
         ]
         app = FastAPI(middleware=middleware)
+        register_mm_cache_routes(app, self.vit_endpoint_server.mm_process_engine)
 
         @app.get("/health")
         @app.post("/health")

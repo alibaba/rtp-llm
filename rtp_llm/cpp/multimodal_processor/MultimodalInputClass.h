@@ -9,24 +9,26 @@
 
 namespace rtp_llm {
 struct MMPreprocessConfig {
-    int32_t            width          = -1;
-    int32_t            height         = -1;
-    int32_t            min_pixels     = -1;
-    int32_t            max_pixels     = -1;
-    int32_t            fps            = -1;
-    int32_t            min_frames     = -1;
-    int32_t            max_frames     = -1;
-    std::vector<float> crop_positions = {};
-    int32_t            mm_timeout_ms  = -1;
-    MMPreprocessConfig(int32_t            width          = -1,
-                       int32_t            height         = -1,
-                       int32_t            min_pixels     = -1,
-                       int32_t            max_pixels     = -1,
-                       int32_t            fps            = -1,
-                       int32_t            min_frames     = -1,
-                       int32_t            max_frames     = -1,
-                       std::vector<float> crop_positions = {},
-                       int32_t            mm_timeout_ms  = -1):
+    int32_t            width               = -1;
+    int32_t            height              = -1;
+    int32_t            min_pixels          = -1;
+    int32_t            max_pixels          = -1;
+    float              fps                 = -1.0f;
+    int32_t            min_frames          = -1;
+    int32_t            max_frames          = -1;
+    std::vector<float> crop_positions      = {};
+    int32_t            mm_timeout_ms       = -1;
+    int32_t            max_long_side_pixel = -1;
+    MMPreprocessConfig(int32_t            width               = -1,
+                       int32_t            height              = -1,
+                       int32_t            min_pixels          = -1,
+                       int32_t            max_pixels          = -1,
+                       float              fps                 = -1.0f,
+                       int32_t            min_frames          = -1,
+                       int32_t            max_frames          = -1,
+                       std::vector<float> crop_positions      = {},
+                       int32_t            mm_timeout_ms       = -1,
+                       int32_t            max_long_side_pixel = -1):
         width(width),
         height(height),
         min_pixels(min_pixels),
@@ -35,7 +37,8 @@ struct MMPreprocessConfig {
         min_frames(min_frames),
         max_frames(max_frames),
         crop_positions(crop_positions),
-        mm_timeout_ms(mm_timeout_ms) {}
+        mm_timeout_ms(mm_timeout_ms),
+        max_long_side_pixel(max_long_side_pixel) {}
     std::string to_string() const {
         std::string crop_positions_str = "";
         for (const float& crop_position : crop_positions) {
@@ -46,7 +49,8 @@ struct MMPreprocessConfig {
         }
         return std::to_string(width) + "_" + std::to_string(height) + "_" + std::to_string(min_pixels) + "_"
                + std::to_string(max_pixels) + "_" + std::to_string(fps) + "_" + std::to_string(min_frames) + "_"
-               + std::to_string(max_frames) + "_" + crop_positions_str + "_" + std::to_string(mm_timeout_ms);
+               + std::to_string(max_frames) + "_" + crop_positions_str + "_" + std::to_string(mm_timeout_ms) + "_"
+               + std::to_string(max_long_side_pixel);
     }
     std::string cache_key() const {
         std::string crop_positions_str = "";
@@ -58,44 +62,63 @@ struct MMPreprocessConfig {
         }
         return std::to_string(width) + "_" + std::to_string(height) + "_" + std::to_string(min_pixels) + "_"
                + std::to_string(max_pixels) + "_" + std::to_string(fps) + "_" + std::to_string(min_frames) + "_"
-               + std::to_string(max_frames) + "_" + crop_positions_str;
+               + std::to_string(max_frames) + "_" + crop_positions_str + "_" + std::to_string(max_long_side_pixel);
     }
 };
 
 class MultimodalInput {
 public:
     std::string        url;
-    int32_t            mm_type              = 0;
-    torch::Tensor      tensor               = torch::empty({0});
-    MMPreprocessConfig mm_preprocess_config = MMPreprocessConfig();
+    int32_t            mm_type               = 0;
+    torch::Tensor      tensor                = torch::empty({0});
+    MMPreprocessConfig mm_preprocess_config  = MMPreprocessConfig();
+    bool               skip_input_inspection = false;
     MultimodalInput(std::string        url,
                     torch::Tensor      t,
-                    int32_t            mm_type        = 0,
-                    int32_t            width          = -1,
-                    int32_t            height         = -1,
-                    int32_t            min_pixels     = -1,
-                    int32_t            max_pixels     = -1,
-                    int32_t            fps            = -1,
-                    int32_t            min_frames     = -1,
-                    int32_t            max_frames     = -1,
-                    std::vector<float> crop_positions = {},
-                    int32_t            mm_timeout_ms  = -1):
+                    int32_t            mm_type               = 0,
+                    int32_t            width                 = -1,
+                    int32_t            height                = -1,
+                    int32_t            min_pixels            = -1,
+                    int32_t            max_pixels            = -1,
+                    float              fps                   = -1.0f,
+                    int32_t            min_frames            = -1,
+                    int32_t            max_frames            = -1,
+                    std::vector<float> crop_positions        = {},
+                    int32_t            mm_timeout_ms         = -1,
+                    int32_t            max_long_side_pixel   = -1,
+                    bool               skip_input_inspection = false):
         url(url),
         mm_type(mm_type),
         tensor(t),
-        mm_preprocess_config(MMPreprocessConfig(
-            width, height, min_pixels, max_pixels, fps, min_frames, max_frames, crop_positions, mm_timeout_ms)) {}
+        mm_preprocess_config(MMPreprocessConfig(width,
+                                                height,
+                                                min_pixels,
+                                                max_pixels,
+                                                fps,
+                                                min_frames,
+                                                max_frames,
+                                                crop_positions,
+                                                mm_timeout_ms,
+                                                max_long_side_pixel)),
+        skip_input_inspection(skip_input_inspection) {}
     MultimodalInput(std::string        url,
-                    int32_t            mm_type              = 0,
-                    torch::Tensor      tensor               = torch::empty({0}),
-                    MMPreprocessConfig mm_preprocess_config = MMPreprocessConfig()):
-        url(url), mm_type(mm_type), tensor(tensor), mm_preprocess_config(mm_preprocess_config) {}
+                    int32_t            mm_type               = 0,
+                    torch::Tensor      tensor                = torch::empty({0}),
+                    MMPreprocessConfig mm_preprocess_config  = MMPreprocessConfig(),
+                    bool               skip_input_inspection = false):
+        url(url),
+        mm_type(mm_type),
+        tensor(tensor),
+        mm_preprocess_config(mm_preprocess_config),
+        skip_input_inspection(skip_input_inspection) {}
     std::string to_string() const {
         return url.substr(0, 256) + "_" + std::to_string(mm_type) + "_" + mm_preprocess_config.to_string();
     }
     std::string cache_key() const {
         size_t url_hash = std::hash<std::string>{}(url);
-        return std::to_string(url_hash) + "_" + std::to_string(mm_type) + "_" + mm_preprocess_config.cache_key();
+        auto   key = std::to_string(url_hash) + "_" + std::to_string(mm_type) + "_" + mm_preprocess_config.cache_key();
+        // Never let an inspected request reuse an uninspected embedding or verdict.
+        return skip_input_inspection ? key + "_inspection_disabled" : key;
     }
 };
 }  // namespace rtp_llm

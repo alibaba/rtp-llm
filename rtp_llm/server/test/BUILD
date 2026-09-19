@@ -51,3 +51,21 @@ py_test(
         "//rtp_llm/server:server",
     ],
 )
+
+py_test(
+    name = "mm_cache_routing_test",
+    srcs = ["mm_cache_routing_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
+    name = "mm_hash_rpc_test",
+    srcs = ["mm_hash_rpc_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+    ],
+)

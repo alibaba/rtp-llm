@@ -39,6 +39,41 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_vit_cache_capacity_defaults_env_and_cli_override(self):
+        from rtp_llm.config.py_config_modules import VitConfig
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        sys.argv = ["prog"]
+        config = setup_args().vit_config
+        self.assertEqual(config.mm_cache_gpu_max_bytes, 20 * 1024**3)
+        self.assertEqual(config.mm_cache_cpu_max_bytes, 200 * 1024**3)
+        self.assertEqual(
+            config.mm_hash_key_cache_max_bytes,
+            VitConfig.DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES,
+        )
+        # The legacy internal cache count does not size the shared caches.
+        os.environ["MM_CACHE_ITEM_NUM"] = "0"
+        os.environ["MM_CACHE_GPU_MAX_BYTES"] = "2147483648"
+        os.environ["MM_CACHE_CPU_MAX_BYTES"] = "4294967296"
+        os.environ["MM_HASH_KEY_CACHE_MAX_BYTES"] = "134217728"
+        config = setup_args().vit_config
+        self.assertEqual(config.mm_cache_gpu_max_bytes, 2147483648)
+        self.assertEqual(config.mm_cache_cpu_max_bytes, 4294967296)
+        self.assertEqual(config.mm_hash_key_cache_max_bytes, 134217728)
+        sys.argv = [
+            "prog",
+            "--mm_cache_gpu_max_bytes",
+            "0",
+            "--mm_cache_cpu_max_bytes",
+            "1024",
+            "--mm_hash_key_cache_max_bytes",
+            "67108864",
+        ]
+        config = setup_args().vit_config
+        self.assertEqual(config.mm_cache_gpu_max_bytes, 0)
+        self.assertEqual(config.mm_cache_cpu_max_bytes, 1024)
+        self.assertEqual(config.mm_hash_key_cache_max_bytes, 67108864)
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables
@@ -57,6 +92,8 @@ class ServerArgsSetTest(TestCase):
         os.environ["WARM_UP_JIT_AND_WRITE_REMOTE"] = "dfs://bucket/jit/writer"
         os.environ["MM_IMAGE_MIN_DIMENSION"] = "12"
         os.environ["MM_IMAGE_MAX_ASPECT_RATIO"] = "150.5"
+        os.environ["VIT_CONCURRENCY"] = "12"
+        os.environ["VIT_MAX_QUEUE_SIZE"] = "34"
 
         sys.argv = ["prog"]
 
@@ -103,6 +140,8 @@ class ServerArgsSetTest(TestCase):
         )
         self.assertEqual(py_env_configs.vit_config.mm_image_min_dimension, 12)
         self.assertEqual(py_env_configs.vit_config.mm_image_max_aspect_ratio, 150.5)
+        self.assertEqual(py_env_configs.vit_config.vit_concurrency, 12)
+        self.assertEqual(py_env_configs.vit_config.vit_max_queue_size, 34)
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -134,6 +173,10 @@ class ServerArgsSetTest(TestCase):
             "4",
             "--cache_store_rdma_worker_thread_count",
             "2",
+            "--vit_concurrency",
+            "24",
+            "--vit_max_queue_size",
+            "48",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -181,6 +224,8 @@ class ServerArgsSetTest(TestCase):
         # Verify cache_store_config
         self.assertEqual(py_env_configs.cache_store_config.rdma_io_thread_count, 4)
         self.assertEqual(py_env_configs.cache_store_config.rdma_worker_thread_count, 2)
+        self.assertEqual(py_env_configs.vit_config.vit_concurrency, 24)
+        self.assertEqual(py_env_configs.vit_config.vit_max_queue_size, 48)
 
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""

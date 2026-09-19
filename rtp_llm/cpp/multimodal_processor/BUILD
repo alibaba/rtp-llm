@@ -10,6 +10,7 @@ cc_library(
     name = "multimodal_input_class",
     hdrs = [
         "MultimodalInputClass.h",
+        "MultimodalTokenUtils.h",
     ],
     visibility = ["//visibility:public"],
 )

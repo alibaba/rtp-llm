@@ -759,6 +759,8 @@ expected = {
     "CACHE_STORE_RDMA_MODE": "1",
     "CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS": "30000",
     "RDMA_CONNECT_RETRY_TIMES": "3",
+    "RESERVE_BLOCK_RATIO": "5",
+    "RTP_LLM_MTP_ASYNC_PREPARE": "0",
     "KIMI_K3_CHUNKWISE_RDMA": chunkwise_rdma,
     "DSV4_MEGA_MOE_INPUT_PACKER": "fused",
     "DSV4_MEGA_MOE_INPUT_PACKER_IMPL": "optimized",
@@ -822,7 +824,6 @@ else:
         "KIMI_K3_DECODE_TOPOLOGY": decode_topology,
         "DECODE_CP_KV_CACHE_SHARDED": "1",
         "DECODE_CP_Q_REPLICATED": decode_q_replicated,
-        "RTP_MLA_DECODE_KERNEL": "tokenspeed_mla",
         "MOE_STRATEGY": "mega_moe_se",
         "RTP_LLM_DEVICE_INPUT": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
@@ -888,6 +889,10 @@ apply_validated_common_profile() {
     export CACHE_STORE_RDMA_MODE=1
     export CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS=30000
     export RDMA_CONNECT_RETRY_TIMES=3
+    # Pin the framework defaults so the validated smoke cannot inherit stale
+    # cache-reserve or asynchronous-MTP settings from the container image.
+    export RESERVE_BLOCK_RATIO=5
+    export RTP_LLM_MTP_ASYNC_PREPARE=0
     if [[ -n "${smoke_accl_use_nics}" ]]; then
         export ACCL_USE_NICS="${smoke_accl_use_nics}"
     else
@@ -982,7 +987,6 @@ apply_validated_decode_profile() {
     export KIMI_K3_DECODE_TOPOLOGY="${smoke_decode_topology}"
     export DECODE_CP_KV_CACHE_SHARDED=1
     export DECODE_CP_Q_REPLICATED="${smoke_decode_q_replicated}"
-    export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
     export RTP_LLM_DROP_BROAD_SYNC=1

@@ -16,7 +16,7 @@ from rtp_llm.config.quant_config import (
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
 from rtp_llm.ops import DataType, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
-from rtp_llm.ops import TaskType
+from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.base_model_datatypes import VitParameters
 from rtp_llm.utils.util import get_config_from_path, to_torch_dtype
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -63,6 +63,7 @@ class ModelConfig(CppModelConfig):
         "tie_word_embeddings",
         "quantization",
         "mm_related_params",
+        "vit_separation",
         "src_quantization_bit",
         "config_dtype",
         "template_type",
@@ -227,7 +228,11 @@ class ModelConfig(CppModelConfig):
             + self.word_emb_param_count(vocab_size) * 2
         )  # maybe some model donot have lm_head
 
-        if self.mm_model_config.is_multimodal:
+        if (
+            self.mm_model_config.is_multimodal
+            and not getattr(self, "is_mtp", False)
+            and self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE
+        ):
             model_size += get_multimodal_mixin_cls(self.model_type).eval_mm_model_size(
                 self.mm_related_params, self.extra_data_path, self.local_extra_data_path
             )
@@ -322,7 +327,11 @@ class ModelConfig(CppModelConfig):
             + self.hidden_size
         )
 
-        if self.mm_model_config.is_multimodal:
+        if (
+            self.mm_model_config.is_multimodal
+            and not getattr(self, "is_mtp", False)
+            and self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE
+        ):
             param_count += get_multimodal_mixin_cls(
                 self.model_type
             ).eval_mm_model_param_count(
@@ -527,6 +536,7 @@ class ModelConfig(CppModelConfig):
         )
         self.render_config: Optional[Any] = None  # RenderConfig for renderer factory
         self.mm_related_params = VitParameters()
+        self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
         self.quant_config = None
 
     def apply_override_args(self, json_model_override_args: str) -> None:
@@ -814,6 +824,8 @@ def build_model_config(
     if vit_config:
         model_config.extra_data_path = vit_config.extra_data_path
         model_config.local_extra_data_path = vit_config.local_extra_data_path
+        # Remote ViT weights must not be instantiated or counted on the LLM worker.
+        model_config.vit_separation = vit_config.vit_separation
     model_config.phy2log_path = model_args.phy2log_path
 
     if model_args.mla_ops_type:

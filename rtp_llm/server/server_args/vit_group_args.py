@@ -134,7 +134,31 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(vit_config, "mm_cache_item_num"),
         type=int,
         default=10,
-        help="多模态开启的Cache的大小",
+        help="旧模型内部按条目缓存的容量；ViT embedding cache 使用 MM_CACHE_GPU_MAX_BYTES 和 MM_CACHE_CPU_MAX_BYTES",
+    )
+    vit_group.add_argument(
+        "--mm_cache_gpu_max_bytes",
+        env_name="MM_CACHE_GPU_MAX_BYTES",
+        bind_to=(vit_config, "mm_cache_gpu_max_bytes"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_CACHE_GPU_MAX_BYTES,
+        help="每个ViT进程的GPU embedding缓存容量，单位bytes，默认20GiB，0关闭GPU驻留；淘汰时下放CPU",
+    )
+    vit_group.add_argument(
+        "--mm_cache_cpu_max_bytes",
+        env_name="MM_CACHE_CPU_MAX_BYTES",
+        bind_to=(vit_config, "mm_cache_cpu_max_bytes"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_CACHE_CPU_MAX_BYTES,
+        help="每个ViT进程的CPU embedding缓存容量，单位bytes，默认200GiB，0关闭CPU驻留；命中时恢复原设备",
+    )
+    vit_group.add_argument(
+        "--mm_hash_key_cache_max_bytes",
+        env_name="MM_HASH_KEY_CACHE_MAX_BYTES",
+        bind_to=(vit_config, "mm_hash_key_cache_max_bytes"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES,
+        help="每个ViT进程的CPU hash缓存容量，单位bytes，包含hash张量和key元数据，0关闭",
     )
     vit_group.add_argument(
         "--url_cache_item_num",
@@ -191,6 +215,22 @@ def init_vit_group_args(parser, vit_config):
         type=int,
         default=4,
         help="多模态预处理时最大线程数量",
+    )
+    vit_group.add_argument(
+        "--vit_concurrency",
+        env_name="VIT_CONCURRENCY",
+        bind_to=(vit_config, "vit_concurrency"),
+        type=int,
+        default=64,
+        help="ViT 异步计算的最大并发数",
+    )
+    vit_group.add_argument(
+        "--vit_max_queue_size",
+        env_name="VIT_MAX_QUEUE_SIZE",
+        bind_to=(vit_config, "vit_max_queue_size"),
+        type=int,
+        default=64,
+        help="ViT 异步计算等待队列的最大任务数",
     )
     vit_group.add_argument(
         "--biencoder_preprocess",
@@ -320,7 +360,7 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(vit_config, "mm_rdma_max_inflight_bytes"),
         type=int,
         default=8 * 1024 * 1024 * 1024,
-        help="encoder 侧在途（已注册未释放）embedding slot 的总字节软上限，超过则该次回退 bytes；0 表示不限制",
+        help="encoder 侧在途 embedding slot 上限；LLM 侧启动时按该值一次性申请并注册 pinned CPU 内存池，池耗尽时请求直接失败",
     )
     vit_group.add_argument(
         "--mm_rdma_max_slot_bytes",
@@ -364,4 +404,22 @@ def init_vit_group_args(parser, vit_config):
         help="防止单次forward OOM。单个batch内的最大原始图片/媒体数；支持成本估算的模型可将"
         "多work-item请求拆成多个有界forward，其他模型仍会拒绝超过该值的请求"
         "（仅在 use_gpu_batch 时生效）",
+    )
+    vit_group.add_argument(
+        "--gpu_max_batch_patches",
+        env_name="VIT_GPU_MAX_BATCH_PATCHES",
+        bind_to=(vit_config, "gpu_max_batch_patches"),
+        type=int,
+        default=0,
+        help="单次GPU forward允许的input patch总数；0表示关闭。仅支持提供"
+        "MMWorkEstimate.input_patches的模型，超过后在work item边界切分",
+    )
+    vit_group.add_argument(
+        "--gpu_memory_reserve_bytes",
+        env_name="VIT_GPU_MEMORY_RESERVE_BYTES",
+        bind_to=(vit_config, "gpu_memory_reserve_bytes"),
+        type=int,
+        default=0,
+        help="每次多模态GPU forward前保留的显存安全余量（字节）。0表示关闭；"
+        "开启后需要模型提供estimated_workspace_bytes，并在显存不足时主动二分batch/work item",
     )

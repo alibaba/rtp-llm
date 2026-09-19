@@ -181,13 +181,18 @@ async def _create_proxy_servicer_on_loop(
     *,
     rank_id: Optional[int] = None,
     server_id: str = "",
+    dash_sc_grpc_config=None,
 ) -> DashScProxyServicer:
     """Construct proxy servicer inside the running asyncio owner loop.
 
     Outbound ``grpc.aio.Channel`` objects are event-loop affine, but the shared
     channel cache builds them lazily when a request first uses an address.
     """
-    return DashScProxyServicer(rank_id=rank_id, server_id=server_id)
+    return DashScProxyServicer(
+        rank_id=rank_id,
+        server_id=server_id,
+        dash_sc_grpc_config=dash_sc_grpc_config,
+    )
 
 
 def _derive_echo_prefix_ids(generate_env_config: Any, base_tok: Any) -> List[int]:
@@ -582,6 +587,7 @@ class DashScApp:
                     _create_proxy_servicer_on_loop(
                         rank_id=self.server_config.rank_id,
                         server_id=self.server_config.frontend_server_id,
+                        dash_sc_grpc_config=self.dash_sc_grpc_config,
                     ),
                     loop,
                 )

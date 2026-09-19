@@ -2,19 +2,36 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import grpc
+import orjson
+
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.py_config_modules import MasterConfig
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    ErrorDetailsPB,
+    MultimodalHashRequestPB,
+    MultimodalInputsPB,
+)
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceStub,
+)
 from rtp_llm.server.host_service import HostService
-from rtp_llm.server.request_headers import normalize_request_headers
+from rtp_llm.server.mm_cache_metadata import MAX_METADATA_BYTES, metadata_from_proto
+from rtp_llm.server.request_headers import (
+    dashscope_greennet_metadata,
+    normalize_request_headers,
+)
 from rtp_llm.server.worker_status import ScheduleMeta
 from rtp_llm.utils.base_model_datatypes import GenerateInput
+from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
 route_logger = logging.getLogger("route_logger")
 
@@ -24,6 +41,7 @@ SUCCESS_CODE = 200
 DEFAULT_REQUEST_PRIORITY = 100
 CONNECTOR_LIMIT_PER_HOST = 30
 CONNECTOR_KEEPALIVE_TIMEOUT_SEC = 30
+VIT_ROUTE_STALE_CODE = 8407
 
 
 @dataclass
@@ -108,6 +126,12 @@ class MasterClient:
         self.host_service: Optional[HostService] = host_service
         self.max_connect_pool_size = self.master_config.master_max_connect_pool_size
         self._session: Optional[Any] = None
+        self._vit_channels = GrpcHostChannelPool(
+            options=[
+                ("grpc.max_receive_message_length", MAX_METADATA_BYTES),
+                ("grpc.max_send_message_length", MAX_METADATA_BYTES),
+            ]
+        )
         self.latest_queue_length: int = 0
         self.session_timeout_s = self._get_session_timeout_s()
 
@@ -144,6 +168,7 @@ class MasterClient:
         return self._session
 
     async def close(self) -> None:
+        await self._vit_channels.close()
         if self._session and not self._session.closed:
             await self._session.close()
 
@@ -157,13 +182,14 @@ class MasterClient:
         generate_timeout_ms: int,
         request_id: int,
         request_headers: Optional[Dict[str, str]] = None,
+        path: str = SCHEDULE_PATH,
     ) -> FlexlbResponse:
         """
         Send one schedule request to the given host (master or slave).
         Returns FlexlbResponse: ok_with_result on HTTP success, error_response on
         non-200 body, connection_failed_response when no response received.
         """
-        url = f"http://{addr}{SCHEDULE_PATH}"
+        url = f"http://{addr}{path}"
         headers = {"Content-Type": "application/json"}
         headers.update(normalize_request_headers(request_headers))
         # generate_timeout_ms <= 0 -> ClientTimeout(total=None); aiohttp treats as unlimited.
@@ -184,6 +210,10 @@ class MasterClient:
                 timeout=request_timeout,
             ) as response:
                 if response.status != SUCCESS_CODE:
+                    if path != SCHEDULE_PATH and response.status in (404, 405, 501):
+                        return FlexlbResponse.error_response(
+                            response.status, "ViT route unsupported"
+                        )
                     error_code = int(ExceptionType.MASTER_NO_AVAILABLE_WORKER)
                     error_message = None
                     try:
@@ -235,6 +265,11 @@ class MasterClient:
         cache_key_block_size: int,
         input: GenerateInput,
         request_id: int,
+        *,
+        media_keys: Optional[List[str]] = None,
+        selected_vit: Optional[Dict[str, Any]] = None,
+        seq_len: Optional[int] = None,
+        vit_only: bool = False,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -257,6 +292,9 @@ class MasterClient:
             # per-request not provided -> use args default (master_default_timeout_ms).
             # When that default is <= 0, _send_schedule_request builds ClientTimeout(total=None).
             ttft_timeout_ms = self.master_config.master_default_timeout_ms
+        route_timeout_ms = ttft_timeout_ms
+        if vit_only:
+            route_timeout_ms = min(ttft_timeout_ms, 500) if ttft_timeout_ms > 0 else 500
         request_priority = getattr(
             input.generate_config,
             "traffic_reject_priority",
@@ -268,17 +306,27 @@ class MasterClient:
             "model": "engine_service",
             "block_cache_keys": block_cache_keys,
             "cache_key_block_size": cache_key_block_size,
-            "seq_len": input.prompt_length,
+            "seq_len": input.prompt_length if seq_len is None else seq_len,
             "debug": False,
             "request_priority": request_priority,
             "generate_timeout": ttft_timeout_ms,
             "request_id": request_id,
             "request_time_ms": int(start * 1000),
         }
+        if media_keys is not None:
+            payload["media_keys"] = media_keys
+        if selected_vit is not None:
+            payload["selected_vit"] = selected_vit
+        path_args = {"path": "/rtp_llm/vit/route"} if vit_only else {}
 
         request_headers = getattr(input, "headers", None)
         resp = await self._send_schedule_request(
-            master_addr, payload, ttft_timeout_ms, request_id, request_headers
+            master_addr,
+            payload,
+            route_timeout_ms,
+            request_id,
+            request_headers,
+            **path_args,
         )
 
         if resp.connection_failed and slave_addr:
@@ -288,7 +336,12 @@ class MasterClient:
                 request_id,
             )
             resp = await self._send_schedule_request(
-                slave_addr, payload, ttft_timeout_ms, request_id, request_headers
+                slave_addr,
+                payload,
+                route_timeout_ms,
+                request_id,
+                request_headers,
+                **path_args,
             )
 
         if resp.result is None:
@@ -311,6 +364,8 @@ class MasterClient:
             except ValueError:
                 exception_type = ExceptionType.MASTER_NO_AVAILABLE_WORKER
             message = resp.result.get("error_message") or "master schedule error"
+            if selected_vit is not None and code == VIT_ROUTE_STALE_CODE:
+                return FlexlbResponse.error_response(code, message)
             route_logger.error(
                 "Master schedule error, request_id=%s, error_code=%s, error_message=%s",
                 request_id,
@@ -329,4 +384,176 @@ class MasterClient:
             )
             for s in schedule_meta.server_status
         ]
-        return FlexlbResponse.ok(role_addrs)
+        return FlexlbResponse(role_addrs=role_addrs, result=resp.result)
+
+    async def get_vit_cache_metadata(
+        self, address: RoleAddr, keys: List[str], input: Optional[GenerateInput] = None
+    ):
+        """Probe hashes, then submit only missing media when routing requires them."""
+        started = time.monotonic()
+        unique_keys = list(dict.fromkeys(keys))
+        if input is not None:
+            input.greennet_verified_vit = None
+        metadata = await self._get_vit_metadata(
+            address,
+            MultimodalHashRequestPB(keys=unique_keys),
+            DEFAULT_REQUEST_TIMEOUT_SEC,
+            headers=input.headers if input is not None else None,
+        )
+        if input is None:
+            return metadata
+        entries = {
+            e["key"]: e
+            for e in (metadata or {}).get("entries", [])
+            if isinstance(e, dict) and isinstance(e.get("key"), str)
+        }
+        if not metadata or metadata.get("feature_hash_version") != 1:
+            entries = {}
+        missing = {
+            key
+            for key in unique_keys
+            if not entries.get(key, {}).get(
+                "hash_hit", entries.get(key, {}).get("hit", False)
+            )
+        }
+        if not missing:
+            self._record_greennet_approval(input, address, unique_keys, entries)
+            return metadata
+
+        from rtp_llm.cpp.model_rpc.model_rpc_client import iter_multimodal_inputs
+
+        # The cache-hit probe carries no URLs. On a miss serialize each distinct
+        # missing input once, without copying image/video data into embeddings.
+        inputs = MultimodalInputsPB(request_id=input.request_id)
+        submitted = set()
+        for key, item in zip(
+            keys, iter_multimodal_inputs(input, input.generate_config)
+        ):
+            if key in missing and key not in submitted:
+                inputs.multimodal_inputs.add().CopyFrom(item)
+                submitted.add(key)
+        if submitted != missing:
+            raise FtRuntimeException(
+                ExceptionType.MM_PROCESS_ERROR, "Missing ViT submission inputs"
+            )
+        configured_timeout = input.generate_config.mm_timeout_ms
+        if not configured_timeout or configured_timeout <= 0:
+            configured_timeout = max(
+                (
+                    i.mm_preprocess_config.mm_timeout_ms
+                    for i in input.mm_inputs
+                    if i.mm_preprocess_config.mm_timeout_ms > 0
+                ),
+                default=120000,
+            )
+        limits = [configured_timeout]
+        for name in ("ttft_timeout_ms", "timeout_ms"):
+            limit = getattr(input.generate_config, name, None)
+            if limit and limit > 0:
+                limits.append(limit)
+        remaining = min(limits) / 1000.0 - (time.monotonic() - started)
+        if remaining <= 0:
+            raise FtRuntimeException(
+                ExceptionType.GENERATE_TIMEOUT, "ViT hash acquisition timed out"
+            )
+        filled = await self._get_vit_metadata(
+            address,
+            MultimodalHashRequestPB(
+                keys=[key for key in unique_keys if key in missing],
+                inputs=inputs,
+                timeout_ms=max(1, int(remaining * 1000)),
+            ),
+            remaining,
+            required=True,
+            headers=input.headers,
+        )
+        if metadata and filled.get("worker_instance") != metadata.get(
+            "worker_instance"
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR, "ViT restarted during hash acquisition"
+            )
+        if filled.get("feature_hash_version") != 1:
+            raise FtRuntimeException(
+                ExceptionType.MM_PROCESS_ERROR, "Unsupported ViT feature hash version"
+            )
+        entries.update({e["key"]: e for e in filled.get("entries", [])})
+        if any(
+            not entries.get(key, {}).get(
+                "hash_hit", entries.get(key, {}).get("hit", False)
+            )
+            for key in unique_keys
+        ):
+            raise FtRuntimeException(
+                ExceptionType.MM_PROCESS_ERROR, "ViT returned incomplete feature hashes"
+            )
+        filled["entries"] = [entries[key] for key in unique_keys]
+        self._record_greennet_approval(input, address, unique_keys, entries)
+        return filled
+
+    @staticmethod
+    def _record_greennet_approval(
+        input: GenerateInput,
+        address: RoleAddr,
+        keys: List[str],
+        entries: Dict[str, Any],
+    ) -> None:
+        if keys and all(entries[key].get("greennet_passed") is True for key in keys):
+            input.greennet_verified_vit = (address.ip, address.grpc_port, tuple(keys))
+
+    async def _get_vit_metadata(
+        self,
+        address,
+        request,
+        timeout_sec,
+        required=False,
+        headers=None,
+    ):
+        started = time.monotonic()
+        try:
+            channel = await self._vit_channels.get(f"{address.ip}:{address.grpc_port}")
+            response = await MultimodalRpcServiceStub(channel).GetMultimodalHashes(
+                request,
+                timeout=timeout_sec,
+                metadata=dashscope_greennet_metadata(headers),
+            )
+            return metadata_from_proto(response)
+        except grpc.RpcError as error:
+            if required:
+                code = (
+                    ExceptionType.GENERATE_TIMEOUT
+                    if error.code() == grpc.StatusCode.DEADLINE_EXCEEDED
+                    else ExceptionType.MM_PROCESS_ERROR
+                )
+                message = error.details() or "ViT hash acquisition failed"
+                for key, value in error.trailing_metadata() or ():
+                    if key == "grpc-status-details-bin":
+                        details = ErrorDetailsPB.FromString(value)
+                        code = ExceptionType(details.error_code)
+                        message = details.error_message
+                        break
+                raise FtRuntimeException(code, message) from error
+            route_logger.warning(
+                "ViT hash probe unavailable, address=%s:%s, status=%s",
+                address.ip,
+                address.grpc_port,
+                error.code(),
+            )
+            return None
+        except (TimeoutError, OSError, ValueError) as error:
+            if required:
+                code = (
+                    ExceptionType.GENERATE_TIMEOUT
+                    if isinstance(error, TimeoutError)
+                    else ExceptionType.MM_PROCESS_ERROR
+                )
+                raise FtRuntimeException(
+                    code, f"ViT hash acquisition failed: {type(error).__name__}"
+                ) from error
+            route_logger.warning("ViT hash probe failed: %s", error)
+            return None
+        finally:
+            route_logger.debug(
+                "ViT hash RPC elapsed_ms=%.3f",
+                (time.monotonic() - started) * 1000,
+            )

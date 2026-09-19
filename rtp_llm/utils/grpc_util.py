@@ -1,6 +1,7 @@
 import torch
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import TensorPB
+from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 
 def trans_option(pb_object, py_object, name):
@@ -51,7 +52,8 @@ def trans_from_tensor(t: torch.Tensor):
     if t is None or t.numel() == 0:
         return TensorPB()
     res = TensorPB()
-    t = t.cpu()
+    with cuda_graph_gate.operation():
+        t = t.cpu()
     res.shape.extend(list(t.shape))
     if t.dtype == torch.float32:
         res.data_type = TensorPB.DataType.FP32

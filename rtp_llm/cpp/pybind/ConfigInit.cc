@@ -1,5 +1,6 @@
 #define PYBIND11_DETAILED_ERROR_MESSAGES
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/common/blockUtil.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
@@ -15,11 +16,13 @@
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
 #include "pybind11/stl.h"
+#include <stdexcept>
 
 namespace py = pybind11;
 using namespace rtp_llm;
 
-void registerMultimodal(const py::module& m) {
+void registerMultimodal(py::module& m) {
+    m.def("get_multimodal_token_spans", &getMultimodalTokenSpans);
     pybind11::class_<MultimodalInput>(m, "MultimodalInput")
         .def(pybind11::init<std::string, int32_t, torch::Tensor, MMPreprocessConfig>(),
              py::arg("url"),
@@ -30,21 +33,34 @@ void registerMultimodal(const py::module& m) {
         .def_readwrite("mm_type", &MultimodalInput::mm_type)
         .def_readwrite("tensor", &MultimodalInput::tensor)
         .def_readwrite("mm_preprocess_config", &MultimodalInput::mm_preprocess_config)
+        .def_readwrite("skip_input_inspection", &MultimodalInput::skip_input_inspection)
         .def("to_string", &MultimodalInput::to_string)
         .def("cache_key", &MultimodalInput::cache_key)
         .def(pybind11::pickle(
             [](const MultimodalInput& m) {  // __getstate__
-                return py::make_tuple(m.url, m.mm_type, m.tensor, m.mm_preprocess_config);
+                return py::make_tuple(m.url, m.mm_type, m.tensor, m.mm_preprocess_config, m.skip_input_inspection);
             },
             [](py::tuple t) {  // __setstate__
+                if (t.size() != 4 && t.size() != 5) {
+                    throw std::runtime_error("Invalid MultimodalInput pickle state");
+                }
                 return MultimodalInput(t[0].cast<std::string>(),
                                        t[1].cast<int32_t>(),
                                        t[2].cast<torch::Tensor>(),
-                                       t[3].cast<MMPreprocessConfig>());
+                                       t[3].cast<MMPreprocessConfig>(),
+                                       t.size() == 5 ? t[4].cast<bool>() : false);
             }));
     pybind11::class_<MMPreprocessConfig>(m, "MMPreprocessConfig")
-        .def(pybind11::
-                 init<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, std::vector<float>, int32_t>(),
+        .def(pybind11::init<int32_t,
+                            int32_t,
+                            int32_t,
+                            int32_t,
+                            float,
+                            int32_t,
+                            int32_t,
+                            std::vector<float>,
+                            int32_t,
+                            int32_t>(),
              py::arg("width"),
              py::arg("height"),
              py::arg("min_pixels"),
@@ -53,7 +69,8 @@ void registerMultimodal(const py::module& m) {
              py::arg("min_frames"),
              py::arg("max_frames"),
              py::arg("crop_positions"),
-             py::arg("mm_timeout_ms"))
+             py::arg("mm_timeout_ms"),
+             py::arg("max_long_side_pixel") = -1)
         .def_readwrite("width", &MMPreprocessConfig::width)
         .def_readwrite("height", &MMPreprocessConfig::height)
         .def_readwrite("min_pixels", &MMPreprocessConfig::min_pixels)
@@ -63,6 +80,7 @@ void registerMultimodal(const py::module& m) {
         .def_readwrite("max_frames", &MMPreprocessConfig::max_frames)
         .def_readwrite("crop_positions", &MMPreprocessConfig::crop_positions)
         .def_readwrite("mm_timeout_ms", &MMPreprocessConfig::mm_timeout_ms)
+        .def_readwrite("max_long_side_pixel", &MMPreprocessConfig::max_long_side_pixel)
         .def("to_string", &MMPreprocessConfig::to_string)
         .def(pybind11::pickle(
             [](const MMPreprocessConfig& m) {  // __getstate__
@@ -74,18 +92,20 @@ void registerMultimodal(const py::module& m) {
                                       m.min_frames,
                                       m.max_frames,
                                       m.crop_positions,
-                                      m.mm_timeout_ms);
+                                      m.mm_timeout_ms,
+                                      m.max_long_side_pixel);
             },
             [](py::tuple t) {  // __setstate__
                 return MMPreprocessConfig(t[0].cast<int32_t>(),
                                           t[1].cast<int32_t>(),
                                           t[2].cast<int32_t>(),
                                           t[3].cast<int32_t>(),
-                                          t[4].cast<int32_t>(),
+                                          t[4].cast<float>(),
                                           t[5].cast<int32_t>(),
                                           t[6].cast<int32_t>(),
                                           t[7].cast<std::vector<float>>(),
-                                          t[8].cast<int32_t>());
+                                          t[8].cast<int32_t>(),
+                                          t.size() > 9 ? t[9].cast<int32_t>() : -1);
             }));
 }
 

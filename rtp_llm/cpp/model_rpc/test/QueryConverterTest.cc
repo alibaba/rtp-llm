@@ -15,6 +15,51 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST_F(QueryConverterTest, testMultimodalInspectionPolicyRoundTrip) {
+    MultimodalInputsPB input;
+    auto*              mm_input = input.add_multimodal_inputs();
+    mm_input->set_multimodal_url("image-url");
+    mm_input->set_multimodal_type(1);
+    mm_input->set_skip_input_inspection(true);
+
+    auto converted = QueryConverter::transMMInput(&input);
+    ASSERT_EQ(converted.size(), 1);
+    EXPECT_TRUE(converted[0].skip_input_inspection);
+
+    auto inspected                  = converted[0];
+    inspected.skip_input_inspection = false;
+    EXPECT_NE(converted[0].cache_key(), inspected.cache_key());
+
+    auto round_trip = QueryConverter::transMMInputsPB(converted);
+    ASSERT_EQ(round_trip.multimodal_inputs_size(), 1);
+    EXPECT_TRUE(round_trip.multimodal_inputs(0).skip_input_inspection());
+}
+
+TEST_F(QueryConverterTest, testMultimodalFeatureHashRoundTripAndLegacyFallback) {
+    MultimodalOutputPB output;
+    QueryConverter::transTensorPB(output.mutable_multimodal_embedding(), torch::ones({3, 4}, torch::kFloat32));
+    output.add_split_size(2);
+    output.add_split_size(1);
+    auto hashes = torch::tensor({-123, 456, -789}, torch::kInt32);
+    QueryConverter::transTensorPB(output.mutable_multimodal_feature_hash(), hashes);
+    output.set_feature_hash_version(1);
+
+    auto decoded = QueryConverter::transMMOutput(&output);
+    ASSERT_TRUE(decoded.mm_feature_hashes.has_value());
+    ASSERT_EQ(decoded.mm_feature_hashes->size(), 2);
+    EXPECT_TRUE(torch::equal(torch::cat(*decoded.mm_feature_hashes), hashes));
+    EXPECT_EQ(decoded.mm_features[0].size(0), 2);
+    EXPECT_EQ(decoded.mm_features[1].size(0), 1);
+
+    output.set_feature_hash_version(2);
+    EXPECT_THROW(QueryConverter::transMMOutput(&output), std::exception);
+    output.set_feature_hash_version(1);
+    QueryConverter::transTensorPB(output.mutable_multimodal_feature_hash(), torch::ones({2}, torch::kInt32));
+    EXPECT_THROW(QueryConverter::transMMOutput(&output), std::exception);
+    output.clear_multimodal_feature_hash();
+    EXPECT_FALSE(QueryConverter::transMMOutput(&output).mm_feature_hashes.has_value());
+}
+
 TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
     input.mutable_request_info()->set_frontend_ip("10.0.0.1");
@@ -76,6 +121,29 @@ TEST_F(QueryConverterTest, testTransInput) {
     vector<int> stop_words_2{3, 4, 5};
     ASSERT_EQ(generate_config->stop_words_list[0], stop_words_1);
     ASSERT_EQ(generate_config->stop_words_list[1], stop_words_2);
+}
+
+TEST_F(QueryConverterTest, testTransMMInputsPBRequestId) {
+    const int64_t request_id = 987654321;
+    auto          output     = QueryConverter::transMMInputsPB({}, request_id);
+
+    EXPECT_EQ(output.request_id(), request_id);
+}
+
+TEST_F(QueryConverterTest, testTransMMPreprocessConfigFractionalFps) {
+    MMPreprocessConfig config(-1, -1, -1, -1, 0.2f, -1, 64, {}, -1, 1008);
+    MultimodalInput    input("https://example.com/video.mp4", 2, torch::empty({0}), config);
+
+    auto output = QueryConverter::transMMInputsPB({input});
+    ASSERT_EQ(output.multimodal_inputs_size(), 1);
+    const auto& config_pb = output.multimodal_inputs(0).mm_preprocess_config();
+    EXPECT_FLOAT_EQ(config_pb.fps(), 0.2f);
+    EXPECT_EQ(config_pb.max_long_side_pixel(), 1008);
+
+    auto round_trip = QueryConverter::transMMInput(&output);
+    ASSERT_EQ(round_trip.size(), 1);
+    EXPECT_FLOAT_EQ(round_trip[0].mm_preprocess_config.fps, 0.2f);
+    EXPECT_EQ(round_trip[0].mm_preprocess_config.max_long_side_pixel, 1008);
 }
 
 TEST_F(QueryConverterTest, testTransOutput) {

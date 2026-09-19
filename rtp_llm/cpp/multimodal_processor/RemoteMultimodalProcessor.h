@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <limits>
+#include <memory>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -43,6 +45,22 @@ private:
     // Deadline (ms) for the best-effort slot-release RPC; keeps it off the critical path.
     int64_t rdma_release_timeout_ms_ = 1000;
 
+    static std::unique_ptr<grpc::ClientContext> makeClientContext(grpc::ServerContext* server_context) {
+        if (server_context == nullptr) {
+            return std::make_unique<grpc::ClientContext>();
+        }
+        grpc::PropagationOptions options;
+        options.enable_deadline_propagation().enable_cancellation_propagation();
+        auto context = grpc::ClientContext::FromServerContext(*server_context, options);
+        for (const auto* key : {"x-dashscope-uid", "x-dashscope-service"}) {
+            const auto value = dashScopeMetadata(server_context, key);
+            if (!value.empty()) {
+                context->AddMetadata(key, value);
+            }
+        }
+        return context;
+    }
+
     // Best-effort: tell the encoder it can return the slot(s) to its free list. One response may
     // carry several slots (chunked output), so all handles are released in a single RPC.
     // This runs on the inference path, so the RPC is bounded by a short deadline: a slow
@@ -74,9 +92,9 @@ private:
     // roles (the order the encoder packed: embedding chunk(s), optional pos_id, then per-image
     // extra_input). A large output is row-split across several slots, so there may be MORE THAN
     // ONE EMBEDDING tensor — they are concatenated back along dim 0 here.
-    MultimodalOutput assembleRdmaOutput(const std::vector<torch::Tensor>&        mm_tensors,
-                                        const std::vector<MMRdmaTensorPB::Role>& roles,
-                                        const MultimodalOutputPB*                output_pb) {
+    ErrorResult<MultimodalOutput> assembleRdmaOutput(const std::vector<torch::Tensor>&        mm_tensors,
+                                                     const std::vector<MMRdmaTensorPB::Role>& roles,
+                                                     const MultimodalOutputPB*                output_pb) {
         RTP_LLM_CHECK_WITH_INFO(mm_tensors.size() == roles.size(),
                                 "rdma read tensor count=%zu does not match manifest role count=%zu",
                                 mm_tensors.size(),
@@ -93,10 +111,8 @@ private:
                     break;
                 case MMRdmaTensorPB::POS_ID:
                     RTP_LLM_CHECK_WITH_INFO(!has_pos_id, "rdma manifest carries more than one pos_id");
-                    // PositionIdsGenerator reads pos_id on the host (data_ptr<int32_t>()), but the
-                    // RDMA read lands it in GPU memory. Bring it back to CPU so the host deref is
-                    // valid — matching the inline-bytes path (and the embedding/extra_input tensors
-                    // stay on GPU, where their consumers move them with .to(kCUDA) anyway).
+                    // PositionIdsGenerator reads pos_id on the host. The RDMA destination is
+                    // already pinned CPU memory, so this is a no-op that preserves that contract.
                     mm_position_id = mm_tensors[i].to(torch::kCPU);
                     has_pos_id     = true;
                     break;
@@ -110,8 +126,45 @@ private:
         RTP_LLM_CHECK_WITH_INFO(!embedding_chunks.empty(), "rdma manifest has no embedding tensor");
         // One chunk in the common case; concatenate the row-splits back into the full embedding
         // otherwise (chunk order is preserved by the caller, so the rows line up with split_size).
-        torch::Tensor mm_embedding =
-            embedding_chunks.size() == 1 ? embedding_chunks[0] : torch::cat(embedding_chunks, 0);
+        torch::Tensor mm_embedding;
+        if (embedding_chunks.size() == 1) {
+            mm_embedding = embedding_chunks[0];
+        } else {
+            std::vector<int64_t> shape(embedding_chunks[0].sizes().begin(), embedding_chunks[0].sizes().end());
+            int64_t              total_rows = 0;
+            for (const auto& chunk : embedding_chunks) {
+                RTP_LLM_CHECK_WITH_INFO(chunk.dim() == embedding_chunks[0].dim(),
+                                        "rdma embedding chunks have inconsistent rank");
+                for (int64_t dim = 1; dim < chunk.dim(); ++dim) {
+                    RTP_LLM_CHECK_WITH_INFO(chunk.size(dim) == embedding_chunks[0].size(dim),
+                                            "rdma embedding chunks have inconsistent shape");
+                }
+                total_rows += chunk.size(0);
+            }
+            shape[0]               = total_rows;
+            uint64_t merged_nbytes = 0;
+            for (const auto& chunk : embedding_chunks) {
+                const uint64_t chunk_nbytes = static_cast<uint64_t>(chunk.numel()) * chunk.element_size();
+                RTP_LLM_CHECK_WITH_INFO(merged_nbytes <= std::numeric_limits<uint64_t>::max() - chunk_nbytes,
+                                        "rdma embedding merged byte size overflows");
+                merged_nbytes += chunk_nbytes;
+            }
+            torch::Tensor merged_storage;
+            const auto    allocation_status = rdma_transport_->allocatePinnedBuffer(merged_nbytes, &merged_storage);
+            if (allocation_status != MMRdmaReadStatus::SUCCESS) {
+                const std::string message =
+                    allocation_status == MMRdmaReadStatus::POOL_EXHAUSTED ?
+                        "multimodal RDMA pinned receive pool exhausted during multi-slot assembly" :
+                        "multimodal RDMA pinned allocation failed during multi-slot assembly";
+                return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, message);
+            }
+            mm_embedding       = merged_storage.view(embedding_chunks[0].scalar_type()).reshape(shape);
+            int64_t row_offset = 0;
+            for (const auto& chunk : embedding_chunks) {
+                mm_embedding.narrow(0, row_offset, chunk.size(0)).copy_(chunk);
+                row_offset += chunk.size(0);
+            }
+        }
 
         std::vector<int64_t> split_sizes;
         for (auto split_size : output_pb->split_size()) {
@@ -125,6 +178,14 @@ private:
 
         MultimodalOutput mm_output;
         mm_output.mm_features = mm_embedding.split(split_sizes, 0);
+        if (output_pb->has_multimodal_feature_hash()) {
+            auto hashes = QueryConverter::transTensor(output_pb->multimodal_feature_hash());
+            if (output_pb->feature_hash_version() != 1 || hashes.dim() != 1 || hashes.scalar_type() != torch::kInt32
+                || hashes.numel() != split_total) {
+                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid multimodal feature hash metadata");
+            }
+            mm_output.mm_feature_hashes = hashes.split(split_sizes, 0);
+        }
 
         if (has_pos_id) {
             RTP_LLM_CHECK_WITH_INFO(split_total == mm_position_id.size(0),
@@ -146,7 +207,9 @@ private:
     }
 
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port = "") {
+                                                      std::string                                 ip_port    = "",
+                                                      int64_t                                     request_id = 0,
+                                                      grpc::ServerContext* server_context = nullptr) {
         if (ip_port == "") {
             return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "ip:port is empty in remote multimodal processing");
         }
@@ -154,17 +217,26 @@ private:
         if (!connection_status.ok()) {
             return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, connection_status.status().ToString());
         }
-        auto&               connection = connection_status.value();
-        auto                stub       = connection.stub;
-        MultimodalOutputPB  output_pb;
-        grpc::ClientContext context;
+        auto&              connection = connection_status.value();
+        auto               stub       = connection.stub;
+        MultimodalOutputPB output_pb;
+        auto               context = makeClientContext(server_context);
 
-        auto request = QueryConverter::transMMInputsPB(mm_inputs);
+        auto request = QueryConverter::transMMInputsPB(mm_inputs, request_id);
         if (rdma_transport_ != nullptr) {
             request.set_support_rdma(true);
         }
-        auto status = stub->RemoteMultimodalEmbedding(&context, request, &output_pb);
+        auto status = stub->RemoteMultimodalEmbedding(context.get(), request, &output_pb);
         if (!status.ok()) {
+            if (status.error_code() == grpc::StatusCode::CANCELLED) {
+                return ErrorInfo(ErrorCode::CANCELLED, status.error_message());
+            }
+            if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {
+                return ErrorInfo(ErrorCode::CONCURRENCY_LIMIT_ERROR, status.error_message());
+            }
+            if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+                return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, status.error_message());
+            }
             return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, status.error_message());
         }
 
@@ -192,11 +264,12 @@ private:
 
             std::vector<torch::Tensor>        mm_tensors;
             std::vector<MMRdmaTensorPB::Role> roles;
-            bool                              read_ok = true;
+            MMRdmaReadStatus                  read_status = MMRdmaReadStatus::SUCCESS;
             for (const auto* desc : descs) {
                 std::vector<torch::Tensor> chunk_tensors;
-                if (!rdma_transport_->readEmbedding(*desc, &chunk_tensors)) {
-                    read_ok = false;
+                const auto                 chunk_status = rdma_transport_->readEmbedding(*desc, &chunk_tensors);
+                if (chunk_status != MMRdmaReadStatus::SUCCESS) {
+                    read_status = chunk_status;
                     break;
                 }
                 for (int i = 0; i < desc->tensors_size(); ++i) {
@@ -206,7 +279,7 @@ private:
             }
             releaseRemoteSlots(stub, handles);  // either way, free the encoder slot(s)
 
-            if (read_ok) {
+            if (read_status == MMRdmaReadStatus::SUCCESS) {
                 // Benchmark hook: MM_RDMA_READ_ONLY=1 aborts the request right after a
                 // successful RDMA READ (already timed + logged as [MM-RDMA-BW]), so we can
                 // measure pure read bandwidth without running prefill/decode. The request
@@ -221,6 +294,9 @@ private:
                 }
                 return assembleRdmaOutput(mm_tensors, roles, &output_pb);
             }
+            if (read_status == MMRdmaReadStatus::POOL_EXHAUSTED) {
+                return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "multimodal RDMA pinned receive pool exhausted");
+            }
             // RDMA read failed. As agreed, fall back to the inline-bytes path: re-issue the
             // request with support_rdma=false so the encoder returns the embedding as bytes
             // instead of descriptor(s). The slots from the failed attempt were already released
@@ -229,9 +305,9 @@ private:
                                 "falling back to inline bytes",
                                 descs.size());
             request.set_support_rdma(false);
-            MultimodalOutputPB  fallback_pb;
-            grpc::ClientContext fallback_context;
-            auto fallback_status = stub->RemoteMultimodalEmbedding(&fallback_context, request, &fallback_pb);
+            MultimodalOutputPB fallback_pb;
+            auto               fallback_context = makeClientContext(server_context);
+            auto fallback_status = stub->RemoteMultimodalEmbedding(fallback_context.get(), request, &fallback_pb);
             if (!fallback_status.ok()) {
                 return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
                                  "rdma read failed and inline-bytes fallback also failed: "

@@ -174,7 +174,10 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
      * Get multimodal cache status via gRPC
      */
     public EngineRpcService.CacheStatusPB getMultimodalCacheStatus(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCall(ip, port, stub -> stub.getMultimodalRpcServiceStub().getCacheStatus(request), requestTimeoutMs, ServiceType.MULTIMODAL_CACHE_STATUS);
+        // A directory with 100k hashes plus residency keys can exceed the channel's 8 MiB default.
+        return executeGrpcCall(ip, port, stub -> stub.getMultimodalRpcServiceStub()
+                .withMaxInboundMessageSize(16 * 1024 * 1024).getCacheStatus(request),
+                requestTimeoutMs, ServiceType.MULTIMODAL_CACHE_STATUS);
     }
 
     @Override

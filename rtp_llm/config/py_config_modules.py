@@ -245,6 +245,11 @@ class VitConfig:
     DEFAULT_MM_IMAGE_MIN_DIMENSION: int = 10
     DEFAULT_MM_IMAGE_MAX_ASPECT_RATIO: float = 200.0
     DEFAULT_MM_VIDEO_MAX_FRAMES: int = 64
+    # Per-process byte budgets. Hashes live on CPU, independently of the
+    # tensor-bearing embedding cache. Zero disables the respective cache.
+    DEFAULT_MM_CACHE_GPU_MAX_BYTES: int = 20 * 1024 * 1024 * 1024
+    DEFAULT_MM_CACHE_CPU_MAX_BYTES: int = 200 * 1024 * 1024 * 1024
+    DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES: int = 256 * 1024 * 1024
 
     def __init__(self):
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
@@ -264,6 +269,11 @@ class VitConfig:
         )
         self.mm_video_max_frames: int = VitConfig.DEFAULT_MM_VIDEO_MAX_FRAMES
         self.mm_cache_item_num: int = 10
+        self.mm_cache_gpu_max_bytes: int = VitConfig.DEFAULT_MM_CACHE_GPU_MAX_BYTES
+        self.mm_cache_cpu_max_bytes: int = VitConfig.DEFAULT_MM_CACHE_CPU_MAX_BYTES
+        self.mm_hash_key_cache_max_bytes: int = (
+            VitConfig.DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES
+        )
         self.url_cache_item_num: int = 100
         self.use_igraph_cache: bool = True
         self.igraph_search_dom: str = "com.taobao.search.igraph.common"
@@ -271,6 +281,8 @@ class VitConfig:
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
         self.mm_preprocess_max_workers: int = 4
+        self.vit_concurrency: int = 64
+        self.vit_max_queue_size: int = 64
         self.biencoder_preprocess: bool = False
         self.extra_input_in_mm_embedding = ""
         # Matches the --mm_timeout_ms / MM_TIMEOUT_MS server-arg default so this
@@ -297,14 +309,22 @@ class VitConfig:
         self.gpu_batch_wait_ms: int = 10
         self.gpu_max_batch_size: int = 8
         self.gpu_max_batch_images: int = 32
+        # Optional exact patch-count cap for models that provide
+        # MMWorkEstimate.input_patches. 0 preserves the historical model-derived
+        # work budget.
+        self.gpu_max_batch_patches: int = 0
+        # Minimum allocator-visible GPU headroom to preserve before launching a
+        # multimodal forward. 0 keeps the historical static-budget-only path.
+        self.gpu_memory_reserve_bytes: int = 0
 
     def embedding_scheduler_args(self) -> Dict[str, int]:
         """Resolved MMScheduler kwargs.
 
         use_gpu_batch on  -> cross-request GPU batching with the gpu_* limits;
-        gpu_max_batch_images caps each forward. Models that provide a work
-        budget may split a multi-work-item request across bounded forwards;
-        legacy models retain the original whole-request image cap.
+        gpu_max_batch_images and optional gpu_max_batch_patches cap each
+        forward. Models that provide a work budget may split a multi-work-item
+        request across bounded forwards; legacy models retain the original
+        whole-request image cap.
         use_gpu_batch off -> serial mode: one request per forward, no wait window,
         and no image cap (sys.maxsize) — matches the old inline path, which never
         bounded a single request's image count.
@@ -314,11 +334,17 @@ class VitConfig:
                 "batch_wait_ms": self.gpu_batch_wait_ms,
                 "max_batch_size": self.gpu_max_batch_size,
                 "max_batch_images": self.gpu_max_batch_images,
+                "max_batch_patches": self.gpu_max_batch_patches,
+                "gpu_memory_reserve_bytes": self.gpu_memory_reserve_bytes,
             }
         return {
             "batch_wait_ms": 0,
             "max_batch_size": 1,
             "max_batch_images": sys.maxsize,
+            "max_batch_patches": 0,
+            # The reserve is meaningful only for cost-aware GPU batching. Keep
+            # serial mode byte-for-byte compatible even if the env is present.
+            "gpu_memory_reserve_bytes": 0,
         }
 
     def to_string(self):
@@ -334,6 +360,9 @@ class VitConfig:
             f"mm_image_max_aspect_ratio: {self.mm_image_max_aspect_ratio}\n"
             f"mm_video_max_frames: {self.mm_video_max_frames}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
+            f"mm_cache_gpu_max_bytes: {self.mm_cache_gpu_max_bytes}\n"
+            f"mm_cache_cpu_max_bytes: {self.mm_cache_cpu_max_bytes}\n"
+            f"mm_hash_key_cache_max_bytes: {self.mm_hash_key_cache_max_bytes}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"
             f"igraph_search_dom: {self.igraph_search_dom}\n"
@@ -361,7 +390,9 @@ class VitConfig:
             f"use_gpu_batch: {self.use_gpu_batch}\n"
             f"gpu_batch_wait_ms: {self.gpu_batch_wait_ms}\n"
             f"gpu_max_batch_size: {self.gpu_max_batch_size}\n"
-            f"gpu_max_batch_images: {self.gpu_max_batch_images}"
+            f"gpu_max_batch_images: {self.gpu_max_batch_images}\n"
+            f"gpu_max_batch_patches: {self.gpu_max_batch_patches}\n"
+            f"gpu_memory_reserve_bytes: {self.gpu_memory_reserve_bytes}"
         )
 
 

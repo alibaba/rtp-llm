@@ -47,6 +47,14 @@ class AccMetrics(Enum):
     VIT_ERROR_QPS_METRIC = "py_rtp_vit_error_qps"
     VIT_SUCCESS_QPS_METRIC = "py_rtp_vit_success_qps"
     VIT_PROCESS_POOL_RESTART_QPS_METRIC = "py_rtp_vit_process_pool_restart_qps"
+    VIT_CUDA_GRAPH_HIT_QPS_METRIC = "py_rtp_vit_cuda_graph_hit_qps"
+    VIT_CUDA_GRAPH_MISS_QPS_METRIC = "py_rtp_vit_cuda_graph_miss_qps"
+    VIT_CUDA_GRAPH_CAPTURE_QPS_METRIC = "py_rtp_vit_cuda_graph_capture_qps"
+    VIT_CUDA_GRAPH_FALLBACK_QPS_METRIC = "py_rtp_vit_cuda_graph_fallback_qps"
+    VIT_EMBEDDING_CACHE_HIT_QPS_METRIC = "py_rtp_vit_embedding_cache_hit_qps"
+    VIT_EMBEDDING_CACHE_MISS_QPS_METRIC = "py_rtp_vit_embedding_cache_miss_qps"
+    VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC = "py_rtp_vit_embedding_cache_inflight_qps"
+    VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC = "py_rtp_vit_embedding_cache_eviction_qps"
 
 
 class GaugeMetrics(Enum):
@@ -81,18 +89,32 @@ class GaugeMetrics(Enum):
     PARSE_IGRAPH_RESPONSE_RT_METRIC = "py_rtp_parse_igraph_response_rt"
 
     # vit preprocess
+    # Kept for callers that still import the historical total-preprocess metric.
+    # New preprocessing reports use the download/other split below.
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
+    VIT_DOWNLOAD_RT_METRIC = "py_rtp_vit_download_rt"
+    VIT_PREPROCESS_OTHER_RT_METRIC = "py_rtp_vit_preprocess_other_rt"
     VIT_EMBEDDING_RT_METRIC = "py_rtp_vit_embedding_rt"
     # End-to-end embedding latency via the GPU batch scheduler (queue wait +
     # batch-collect wait + forward). Diff against VIT_EMBEDDING_RT (forward only)
     # to see the scheduling overhead.
     VIT_EMBEDDING_BATCH_RT_METRIC = "py_rtp_vit_embedding_batch_rt"
-
     TOOL_CALL_LOOP_REPEAT_COUNT_METRIC = "py_rtp_tool_call_loop_repeat_count"
     TOOL_CALL_LOOP_CURRENT_SPAN_TOKENS_METRIC = (
         "py_rtp_tool_call_loop_current_span_tokens"
     )
     TOOL_CALL_LOOP_CHECK_RT_METRIC = "py_rtp_tool_call_loop_check_rt"
+    # Number of visual tokens produced by one user request. For a multi-image
+    # request this is the sum of the leading dimensions of all embeddings.
+    VIT_EMBEDDING_LENGTH_METRIC = "py_rtp_vit_embedding_length"
+    # Number of scheduler chunks waiting for a GPU forward. The carried-over
+    # pending chunk is included in this point-in-time gauge.
+    VIT_EMBEDDING_QUEUE_SIZE_METRIC = "py_rtp_vit_embedding_queue_size"
+    # Time from scheduler enqueue until the chunk is about to enter a forward.
+    VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC = "py_rtp_vit_embedding_queue_wait_rt"
+    VIT_CUDA_GRAPH_PADDING_RATIO_METRIC = "py_rtp_vit_cuda_graph_padding_ratio"
+    VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
+    VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
 
 
 class MetricReporter(object):
