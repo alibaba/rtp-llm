@@ -20,7 +20,11 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     INDEXER_KV,
     SWA_KV,
 )
-from rtp_llm.models_py.modules.dsv4.cp import cp_all_gather_full_varlen
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4.cp import (
+    _cp_restore_gathered_full_2d,
+    cp_all_gather_full_varlen,
+)
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_indexer as prefill_indexer
 from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
     cp_kv_slot_mapping,
@@ -35,10 +39,72 @@ from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     _ATTN_TYPE_ENUM_BY_INT,
+    _get_cp_comm_stream,
     AttentionFP8,
 )
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
 from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
+
+# Chunked gather-project tile: the KV-source projection's full-sequence
+# intermediates (values/scores/latent/keys) stay bounded to this many rows at
+# a time. Seams carry the ratio-2 pair state, so results are bit-identical to
+# the single-shot projection at any tile size.
+_PRODUCE_GLOBAL_TILE_ROWS = 32768
+
+
+class _V41AsyncXGather:
+    """In-flight KV-source hidden-state CP all-gather (CP communication stream).
+
+    The V4.1 CP-overlap wiring: the gather is launched at layer entry and
+    drains on the serialized CP stream while the default stream runs the
+    layer's QKV projections and SWA write. The handle keeps the send and
+    receive buffers alive until ``wait`` joins on the default stream, which
+    replaces allocator ``record_stream`` calls (same lifetime contract as
+    ``cp.CudaAsyncCPGatherImpl``).
+    """
+
+    __slots__ = ("work", "completion_event", "stream", "gathered", "local_2d")
+
+    def __init__(self, work, completion_event, stream, gathered, local_2d):
+        self.work = work
+        self.completion_event = completion_event
+        self.stream = stream
+        self.gathered = gathered
+        self.local_2d = local_2d
+
+
+def _start_prefill_x_gather_async(x: torch.Tensor, cp_ctx):
+    """Start the KV-source ``x`` all-gather on the CP communication stream."""
+    from rtp_llm.models_py.distributed import collective_torch
+    from rtp_llm.models_py.distributed.collective_torch import Group
+
+    local_2d = x.reshape(cp_ctx.chunk_length, -1).contiguous()
+    process_group = collective_torch._get_group(Group.TP)
+    world_size = torch.distributed.get_world_size(process_group)
+    gather_rows = world_size * local_2d.size(0)
+    gathered = torch.empty(
+        (gather_rows, local_2d.size(1)),
+        dtype=local_2d.dtype,
+        device=local_2d.device,
+    )
+    current = torch.cuda.current_stream(local_2d.device)
+    stream = _get_cp_comm_stream(local_2d.device)
+    stream.wait_stream(current)
+    with torch.cuda.stream(stream):
+        work = torch.distributed.all_gather_into_tensor(
+            gathered, local_2d, group=process_group, async_op=True
+        )
+        completion_event = torch.cuda.Event()
+        completion_event.record(stream)
+    return _V41AsyncXGather(work, completion_event, stream, gathered, local_2d)
+
+
+def _wait_prefill_x_gather(handle: _V41AsyncXGather, cp_ctx) -> torch.Tensor:
+    """Join the async gather on the default stream and restore real order."""
+    current = torch.cuda.current_stream(handle.gathered.device)
+    current.wait_event(handle.completion_event)
+    handle.work.wait()
+    return _cp_restore_gathered_full_2d(handle.gathered, cp_ctx)
 
 
 def rms_norm(x, weight, eps):
@@ -247,6 +313,10 @@ class AttentionV41FP8(AttentionFP8):
             # the duration of one forward; drop them with the rest of the
             # per-forward shared state.
             self._shared_attention.pop("prefill_chunk_meta", None)
+            # The layer-invariant sparse index plan (global/SWA gather indices
+            # + per-row lengths) is cached per index-source group and dropped
+            # with the rest of the per-forward shared state.
+            self._shared_attention.pop("prefill_index_plan", None)
 
     def _owner(self):
         return self._shared_attention["layers"][self.kv_source_layer_id]
@@ -353,83 +423,123 @@ class AttentionV41FP8(AttentionFP8):
             pool[idx] = torch.where((slots >= 0)[:, None], data, pool[idx])
 
     def _produce_global(self, x_full, positions, req_ids, starts, lengths, *, prefill):
-        """Publish this owner's main/index pools, and materialize source keys."""
+        """Publish this owner's main/index pools, and materialize source keys.
+
+        The projection runs in ``_PRODUCE_GLOBAL_TILE_ROWS`` row tiles (chunked
+        gather-project): each tile's values/scores/latent/keys live only until
+        its pool writes land, so the full-sequence intermediates never
+        coexist. The ratio-2 pair state is carried across tile seams, keeping
+        the pooled results bit-identical to a single-shot projection.
+        """
         owner = self._owner()
         ratio = self.compress_ratio
         from rtp_llm.models_py.modules.dsv4.fp8.compressor import _linear_bf16_bf16_fp32
 
-        values = _linear_bf16_bf16_fp32(x_full, owner.global_wkv)
+        main_pool = self._source_pool(self._global_region())
+        index_pool = self._source_pool(INDEXER_KV)
+        rows = int(x_full.shape[0])
+        previous = None
         if ratio == 2:
-            scores = _linear_bf16_bf16_fp32(x_full, owner.global_wgate)
             # Read the previous token before tail writes can reuse its ring slot.
             previous = self._read_state(
                 (starts - 1).clamp_min(0),
                 torch.arange(len(starts), device=x_full.device),
             )
-            value_prev = torch.cat((values[:1], values[:-1]), 0)
-            score_prev = torch.cat((scores[:1], scores[:-1]), 0)
-            first = positions == starts[req_ids]
-            # Replace the boolean-mask index ``previous[req_ids[first]]`` (a
-            # device->host ``nonzero`` sync) with an integer gather on the full
-            # ``req_ids`` + a ``torch.where`` select. Same result, no sync.
-            value_prev = torch.where(
-                first[:, None],
-                previous[req_ids, : self.head_dim].to(values.dtype),
-                value_prev,
+        # Warmup (pool unbound) still needs the full keys for the shared
+        # materialization, so it keeps every tile's keys; the pool path drops
+        # them right after quantization.
+        warm_keys = [] if main_pool is None else None
+        carry = None
+        # ``max(rows, 1)`` keeps the degenerate empty forward on the same path
+        # (one zero-row tile) instead of forking a second code shape.
+        for t0 in range(0, max(rows, 1), _PRODUCE_GLOBAL_TILE_ROWS):
+            t1 = min(t0 + _PRODUCE_GLOBAL_TILE_ROWS, rows)
+            x_tile = x_full[t0:t1]
+            pos_tile = positions[t0:t1]
+            req_tile = req_ids[t0:t1]
+            values = _linear_bf16_bf16_fp32(x_tile, owner.global_wkv)
+            if ratio == 2:
+                scores = _linear_bf16_bf16_fp32(x_tile, owner.global_wgate)
+                # The seam row's previous value/score is the last row of the
+                # previous tile; the first tile's head is replaced by the
+                # per-request state read below, exactly as the single-shot
+                # roll's head was.
+                if carry is not None:
+                    head_values, head_scores = carry
+                else:
+                    head_values, head_scores = values[:1], scores[:1]
+                value_prev = torch.cat((head_values, values[:-1]), 0)
+                score_prev = torch.cat((head_scores, scores[:-1]), 0)
+                first = pos_tile == starts[req_tile]
+                # Replace the boolean-mask index ``previous[req_ids[first]]`` (a
+                # device->host ``nonzero`` sync) with an integer gather on the full
+                # ``req_ids`` + a ``torch.where`` select. Same result, no sync.
+                value_prev = torch.where(
+                    first[:, None],
+                    previous[req_tile, : self.head_dim].to(values.dtype),
+                    value_prev,
+                )
+                score_prev = torch.where(
+                    first[:, None],
+                    previous[req_tile, self.head_dim :].to(scores.dtype),
+                    score_prev,
+                )
+                boundary = (pos_tile + 1).remainder(2) == 0
+                # Every ``tensor[boundary]`` below is a boolean-mask index, and each
+                # one independently runs ``nonzero`` to size its output — a
+                # device->host sync per use, six times over for a single mask.
+                # Compact once into integer indices and reuse them.
+                boundary_idx = torch.nonzero(boundary, as_tuple=True)[0]
+                latent = compress_pairs(
+                    torch.stack((value_prev[boundary_idx], values[boundary_idx]), 1),
+                    torch.stack((score_prev[boundary_idx], scores[boundary_idx]), 1),
+                    owner.global_norm,
+                    self.eps,
+                )
+                self._write_states(
+                    values, scores, pos_tile, req_tile, starts + lengths
+                )
+                boundary_pos, boundary_req = (
+                    pos_tile[boundary_idx],
+                    req_tile[boundary_idx],
+                )
+                carry = (values[-1:].clone(), scores[-1:].clone())
+            else:
+                latent = rms_norm(values, owner.global_norm, self.eps).to(torch.bfloat16)
+                # ratio == 1: every position is a boundary — skip the all-True
+                # boolean-mask compaction (``positions[torch.ones_like(...)]`` is a
+                # pure device->host ``nonzero`` sync that selects everything).
+                boundary_pos, boundary_req = pos_tile, req_tile
+            freqs = self.freqs_cis[(boundary_pos // ratio) * ratio]
+            global_keys = rope_only(latent.clone(), freqs, self.rope_head_dim)
+            index_keys = rope_only(
+                rms_norm(F.linear(latent, owner.index_wk), owner.index_k_norm, self.eps),
+                freqs,
+                self.rope_head_dim,
             )
-            score_prev = torch.where(
-                first[:, None],
-                previous[req_ids, self.head_dim :].to(scores.dtype),
-                score_prev,
-            )
-            boundary = (positions + 1).remainder(2) == 0
-            # Every ``tensor[boundary]`` below is a boolean-mask index, and each
-            # one independently runs ``nonzero`` to size its output — a
-            # device->host sync per use, six times over for a single mask.
-            # Compact once into integer indices and reuse them.
-            boundary_idx = torch.nonzero(boundary, as_tuple=True)[0]
-            latent = compress_pairs(
-                torch.stack((value_prev[boundary_idx], values[boundary_idx]), 1),
-                torch.stack((score_prev[boundary_idx], scores[boundary_idx]), 1),
-                owner.global_norm,
-                self.eps,
-            )
-            self._write_states(values, scores, positions, req_ids, starts + lengths)
-            boundary_pos, boundary_req = (
-                positions[boundary_idx],
-                req_ids[boundary_idx],
-            )
-        else:
-            latent = rms_norm(values, owner.global_norm, self.eps).to(torch.bfloat16)
-            # ratio == 1: every position is a boundary — skip the all-True
-            # boolean-mask compaction (``positions[torch.ones_like(...)]`` is a
-            # pure device->host ``nonzero`` sync that selects everything).
-            boundary_pos, boundary_req = positions, req_ids
-        freqs = self.freqs_cis[(boundary_pos // ratio) * ratio]
-        global_keys = rope_only(latent.clone(), freqs, self.rope_head_dim)
-        index_keys = rope_only(
-            rms_norm(F.linear(latent, owner.index_wk), owner.index_k_norm, self.eps),
-            freqs,
-            self.rope_head_dim,
-        )
-        main_pool = self._source_pool(self._global_region())
-        index_pool = self._source_pool(INDEXER_KV)
-        if main_pool is not None:
-            from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
-                quantize_and_insert_k_cache_fp4,
-                quantize_indexer_k_fp4,
-            )
+            if main_pool is not None:
+                from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
+                    quantize_and_insert_k_cache_fp4,
+                    quantize_indexer_k_fp4,
+                )
 
-            quantize_and_insert_k_cache_fp4(
-                global_keys.contiguous(),
-                main_pool,
-                self._slots(self._global_region(), boundary_pos, boundary_req),
-            )
-            quantize_indexer_k_fp4(
-                index_keys.contiguous(),
-                self._slots(INDEXER_KV, boundary_pos, boundary_req),
-                index_pool,
-            )
+                quantize_and_insert_k_cache_fp4(
+                    global_keys.contiguous(),
+                    main_pool,
+                    self._slots(self._global_region(), boundary_pos, boundary_req),
+                )
+                quantize_indexer_k_fp4(
+                    index_keys.contiguous(),
+                    self._slots(INDEXER_KV, boundary_pos, boundary_req),
+                    index_pool,
+                )
+            else:
+                warm_keys.append((boundary_pos, boundary_req, global_keys, index_keys))
+        if warm_keys:
+            boundary_pos = torch.cat([tile[0] for tile in warm_keys])
+            boundary_req = torch.cat([tile[1] for tile in warm_keys])
+            global_keys = torch.cat([tile[2] for tile in warm_keys])
+            index_keys = torch.cat([tile[3] for tile in warm_keys])
         result = []
         fused_indexer = prefill and prefill_indexer.is_supported(
             x_full.device, getattr(self, "index_n_heads", 0), index_keys.shape[-1]
@@ -485,13 +595,20 @@ class AttentionV41FP8(AttentionFP8):
                     self._gather_shards(k)
                 if prefill:
                     from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
-                        dequantize_k_cache_slots_fp4,
+                        dequantize_k_cache_bytes_fp4,
+                        gather_k_cache_bytes_fp4,
                     )
 
-                    g = dequantize_k_cache_slots_fp4(
+                    # Byte-first transport: all-reduce the raw 288B FP4 pool
+                    # bytes (each byte has exactly one owner, so the SUM
+                    # reassembles them bit-exactly) and dequantize on the
+                    # receiving side — 288B per entry on the wire instead of
+                    # the 1024B dequantized rows.
+                    raw_global = gather_k_cache_bytes_fp4(
                         main_pool, self._slots(self._global_region(), pos, req)
                     )
-                    self._gather_shards(g)
+                    self._gather_shards(raw_global)
+                    g = dequantize_k_cache_bytes_fp4(raw_global)
                 else:
                     g = None
             result.append((g, k))
@@ -726,6 +843,26 @@ class AttentionV41FP8(AttentionFP8):
         qkv = self._prefill_compute_qkv(
             x, common, shared_input_quant=shared_input_quant
         )
+        # V4.1 CP overlap (kv-source layers): launch the hidden-state
+        # all-gather on the CP communication stream after the QKV path has
+        # enqueued its own (earlier-needed) kv gather, so the NCCL channel
+        # order matches the consumption order. The x gather then drains
+        # behind the SWA workspace read and pool write on the default
+        # stream instead of blocking the layer between the SWA write and
+        # the global projection. Same collective sequence on every rank, so
+        # NCCL ordering is preserved.
+        x_gather = None
+        if (
+            self.is_kv_source
+            and common.cp_on
+            and common.device.type == "cuda"
+            and not (
+                torch.cuda.is_available()
+                and torch.cuda.is_current_stream_capturing()
+            )
+        ):
+            with record_function_range("dsv41.prefill.x_gather.async_start"):
+                x_gather = _start_prefill_x_gather_async(x, common.cp_ctx)
         # Read old SWA tails before writes wrap over them in long prefill chunks.
         swa, swa_starts = (
             self._swa_prefill_workspace(qkv, common)
@@ -746,7 +883,11 @@ class AttentionV41FP8(AttentionFP8):
             common.cp_ctx.input_lengths_global if common.cp_on else common.input_lengths
         ).long()
         if self.is_kv_source:
-            x_full = cp_all_gather_full_varlen(x, common.cp_ctx) if common.cp_on else x
+            if x_gather is not None:
+                with record_function_range("dsv41.prefill.x_gather.wait_restore"):
+                    x_full = _wait_prefill_x_gather(x_gather, common.cp_ctx)
+            else:
+                x_full = cp_all_gather_full_varlen(x, common.cp_ctx) if common.cp_on else x
             # ``repeat_interleave`` with a CUDA ``lengths`` tensor computes the
             # output size via a host-side ``.item()`` sync unless ``output_size``
             # is supplied. ``x_full.shape[0]`` is already known on host and equals
@@ -775,20 +916,35 @@ class AttentionV41FP8(AttentionFP8):
         chunks = []
         for (g, _), sw in zip(globals_by_req, swa):
             chunks.extend((g, sw))
-        swpos = (
-            positions[:, None]
-            - self.window_size
-            + 1
-            + torch.arange(self.window_size, device=x.device)[None]
-        )
-        swidx = torch.where(swpos >= swstart, offsets + ns + swpos - swstart, -1)
-        global_idx = torch.where(selected >= 0, offsets + selected, -1)
-        indices = torch.cat((global_idx, swidx), -1).int()
-        # FlashMLA's length bounds count a compact valid prefix.
-        indices = indices.gather(1, torch.argsort(indices < 0, dim=-1, stable=True))
-        lens = (indices >= 0).sum(-1).int()
-        if indices.shape[1] % 64:
-            indices = F.pad(indices, (0, 64 - indices.shape[1] % 64), value=-1)
+        # Cross-layer index plan cache: within one index-source group every
+        # layer consumes the same ``selected`` tensor against the same
+        # per-forward positions / chunk offsets / SWA starts, so the sparse
+        # gather indices and row lengths are bit-identical across the group.
+        # Build once per group (keyed by the selected tensor's identity) and
+        # reuse — the argsort/cat/pad chain drops from once per layer to once
+        # per group. Dropped with the rest of the per-forward shared state in
+        # ``_begin_forward``.
+        plan = self._shared_attention.get("prefill_index_plan")
+        if plan is not None and plan[0] is selected:
+            indices, lens = plan[1], plan[2]
+        else:
+            swpos = (
+                positions[:, None]
+                - self.window_size
+                + 1
+                + torch.arange(self.window_size, device=x.device)[None]
+            )
+            swidx = torch.where(swpos >= swstart, offsets + ns + swpos - swstart, -1)
+            global_idx = torch.where(selected >= 0, offsets + selected, -1)
+            indices = torch.cat((global_idx, swidx), -1).int()
+            # FlashMLA's length bounds count a compact valid prefix.
+            indices = indices.gather(
+                1, torch.argsort(indices < 0, dim=-1, stable=True)
+            )
+            lens = (indices >= 0).sum(-1).int()
+            if indices.shape[1] % 64:
+                indices = F.pad(indices, (0, 64 - indices.shape[1] % 64), value=-1)
+            self._shared_attention["prefill_index_plan"] = (selected, indices, lens)
         qkv = self._materialize_prefill_q(qkv, common)
         return self._flash_mla_sparse_fwd_chunked_projected(
             q=qkv.q,
