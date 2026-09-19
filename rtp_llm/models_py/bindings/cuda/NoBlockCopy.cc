@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -16,8 +17,14 @@ namespace rtp_llm {
 namespace {
 
 at::cuda::CUDAStream& getNoBlockCopyStream() {
-    static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
-    return stream;
+    int device = 0;
+    check_cuda_value(cudaGetDevice(&device));
+    static thread_local std::map<int, at::cuda::CUDAStream> streams;
+    auto                                                    it = streams.find(device);
+    if (it == streams.end()) {
+        it = streams.emplace(device, at::cuda::getStreamFromPool(/*isHighPriority=*/false, device)).first;
+    }
+    return it->second;
 }
 
 enum class HostCoverage {
@@ -281,6 +288,56 @@ copyPinnedHostSegmentsToDeviceStaging(const StagedMemoryCopyParams& params, void
 #endif
 }
 
+cudaError_t submitBatchedMemoryCopy(const BatchedMemoryCopyParams& params, cudaStream_t stream) {
+#if CUDART_VERSION >= 12080
+    const size_t             tile_num = params.tiles.size();
+    std::vector<void*>       dsts;
+    std::vector<const void*> srcs;
+    std::vector<size_t>      sizes;
+    dsts.reserve(tile_num);
+    srcs.reserve(tile_num);
+    sizes.reserve(tile_num);
+    for (const auto& tile : params.tiles) {
+        if (tile.dst == nullptr || tile.src == nullptr || tile.bytes == 0) {
+            continue;
+        }
+        dsts.push_back(tile.dst);
+        srcs.push_back(tile.src);
+        sizes.push_back(tile.bytes);
+    }
+    if (dsts.empty()) {
+        return cudaSuccess;
+    }
+
+    cudaMemcpyAttributes attr{};
+    attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+    size_t attr_idx     = 0;
+#if CUDART_VERSION >= 13000
+    return cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, stream);
+#else
+    std::vector<void*> mutable_srcs;
+    mutable_srcs.reserve(srcs.size());
+    for (auto* src : srcs) {
+        mutable_srcs.push_back(const_cast<void*>(src));
+    }
+    size_t fail_idx = 0;
+    return cudaMemcpyBatchAsync(
+        dsts.data(), mutable_srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, &fail_idx, stream);
+#endif
+#else
+    // Older CUDA runtimes retain the same stream/lifetime contract.
+    for (const auto& tile : params.tiles) {
+        if (tile.dst && tile.src && tile.bytes) {
+            const auto err = cudaMemcpyAsync(tile.dst, tile.src, tile.bytes, cudaMemcpyDefault, stream);
+            if (err != cudaSuccess) {
+                return err;
+            }
+        }
+    }
+    return cudaSuccess;
+#endif
+}
+
 }  // namespace
 
 void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch) {
@@ -356,45 +413,16 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
     check_cuda_value(cudaSetDevice(params.device_index));
     auto stream = getNoBlockCopyStream().stream();
 
-    const size_t             tile_num = params.tiles.size();
-    std::vector<void*>       dsts;
-    std::vector<const void*> srcs;
-    std::vector<size_t>      sizes;
-    dsts.reserve(tile_num);
-    srcs.reserve(tile_num);
-    sizes.reserve(tile_num);
-    for (const auto& tile : params.tiles) {
-        if (tile.dst == nullptr || tile.src == nullptr || tile.bytes == 0) {
-            continue;
-        }
-        dsts.push_back(tile.dst);
-        srcs.push_back(tile.src);
-        sizes.push_back(tile.bytes);
-    }
-    if (dsts.empty()) {
-        return true;
-    }
-
-    cudaMemcpyAttributes attr{};
-    attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
-    size_t attr_idx     = 0;
-#if CUDART_VERSION >= 13000
-    auto err = cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, stream);
-#else
-    std::vector<void*> mutable_srcs;
-    mutable_srcs.reserve(srcs.size());
-    for (auto* src : srcs) {
-        mutable_srcs.push_back(const_cast<void*>(src));
-    }
-    size_t fail_idx = 0;
-    auto   err      = cudaMemcpyBatchAsync(
-        dsts.data(), mutable_srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, &fail_idx, stream);
-#endif
+    auto err = submitBatchedMemoryCopy(params, stream);
+    // A failed batch may already have submitted copies. Drain them before
+    // callers release storage or attempt a fallback on the same destinations.
+    const auto sync_error = cudaStreamSynchronize(stream);
     if (err == cudaSuccess) {
-        err = cudaStreamSynchronize(stream);
+        err = sync_error;
     }
     if (err != cudaSuccess) {
-        RTP_LLM_LOG_WARNING("execBatchedMemoryCopy failed: tiles=%zu, error=%s", dsts.size(), cudaGetErrorString(err));
+        RTP_LLM_LOG_WARNING(
+            "execBatchedMemoryCopy failed: tiles=%zu, error=%s", params.tiles.size(), cudaGetErrorString(err));
         return false;
     }
     check_cuda_error();
@@ -404,6 +432,8 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
     return false;
 #endif
 }
+
+
 
 bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch* scratch) {
     if (params.tiles.empty()) {

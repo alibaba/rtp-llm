@@ -20,103 +20,6 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace rtp_llm {
-
-bool KVCacheAllocator::init() {
-    return doInit();
-}
-
-MallocResult KVCacheAllocator::malloc(const MallocInfo&) {
-    return {false, 0};
-}
-
-MallocResult KVCacheAllocator::initMalloc(const MallocInfo&) {
-    return {false, 0};
-}
-
-BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, KVCacheRegionName, int block_id) const {
-    return convertIndexToAddr(layer_id, block_id);
-}
-
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(int layer_id, KVCacheRegionName, int block_id) const {
-    return convertIndexToBuffer(layer_id, block_id);
-}
-
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
-    int layer_id, KVCacheRegionName, int block_id, int partition_count, int partition_id) const {
-    return convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
-}
-
-void KVCacheAllocator::blockCopy(int, int) {}
-void KVCacheAllocator::blockBatchCopy(const std::vector<BlockIdPair>&) {}
-void KVCacheAllocator::blockBatchCopy(const BlockIdPair*, const BlockIdPair*) {}
-void KVCacheAllocator::blockBatchCopy(const torch::Tensor&) {}
-void KVCacheAllocator::regUserMr(size_t, std::shared_ptr<CacheStore>) {}
-
-int64_t KVCacheAllocator::getMrCostTimeMs() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::freeBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::availableBlocksNum() const {
-    return 0;
-}
-
-BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t) {
-    return nullptr;
-}
-
-void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr&) {}
-
-size_t KVCacheAllocator::requestRefBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::connectorRefBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::blockCacheRefBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::notInUseBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::availableTokensNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::totalTokensNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::totalBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::maxAvailableTokensNum() const {
-    return 0;
-}
-
-KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t) const {
-    return {};
-}
-
-std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots() const {
-    return {};
-}
-
-uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t, int local_layer_id) const {
-    return static_cast<uint32_t>(local_layer_id);
-}
-
-}  // namespace rtp_llm
-
 namespace rtp_llm::test {
 namespace {
 
@@ -429,7 +332,8 @@ class FakeTypedKVCacheAllocator: public KVCacheAllocator {
 public:
     explicit FakeTypedKVCacheAllocator(const CacheConfig&          config,
                                        size_t                      payload_gap_bytes = 0,
-                                       std::set<KVCacheRegionName> host_regions      = {}):
+                                       std::set<KVCacheRegionName> host_regions      = {},
+                                       std::set<int>               host_layers       = {}):
         KVCacheAllocator(config, AllocationType::DEVICE),
         host_regions_(std::move(host_regions)),
         payload_gap_bytes_(payload_gap_bytes) {
@@ -453,7 +357,8 @@ public:
                     continue;
                 }
                 const auto region_name = static_cast<KVCacheRegionName>(region);
-                const bool host_region = host_regions_.count(region_name) > 0;
+                const bool host_region =
+                    host_regions_.count(region_name) > 0 && (host_layers.empty() || host_layers.count(layer) > 0);
                 auto       tensor = torch::empty({static_cast<int64_t>(config.block_num), static_cast<int64_t>(stride)},
                                            host_region ? host_options : cuda_options);
                 if (host_region) {
@@ -563,6 +468,8 @@ private:
 };
 
 }  // namespace
+
+
 
 TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout) {
     KVCacheConfig            kv_config;
@@ -944,6 +851,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
     EXPECT_NE(plan->copy_infos[2].slot_valid_mask[hca_kv_slot], 0);
     EXPECT_EQ(plan->copy_infos[2].slot_valid_mask[swa_slot], 0);
 }
+
+
+
+
 
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadRejectsCompressedOnlyWhenStateSwaRequired) {
     auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);

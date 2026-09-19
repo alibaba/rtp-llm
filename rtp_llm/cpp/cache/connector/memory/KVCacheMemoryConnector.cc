@@ -1831,12 +1831,9 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
                       request.copy_items_size(),
                       has_typed_slots);
 
-    // Untyped H2D in batch/auto mode transfers each pinned memory-cache block into persistent device staging,
-    // then scatters tiles with the existing vectorized SM kernel. Legacy mode keeps the established memcpy loop.
-    const bool can_optimize_untyped_batch = copy_direction == CopyDirection::D2H;
-    const bool try_batch_first =
-        can_optimize_untyped_batch
-        && (copy_mode == MemoryCacheCopyMode::BATCH || (copy_mode == MemoryCacheCopyMode::AUTO && !has_typed_slots));
+    // Both directions can transfer pinned cache blocks directly. Keep the
+    // staged path for layouts that cannot be expressed as contiguous tiles.
+    const bool try_batch_first = copy_mode != MemoryCacheCopyMode::LEGACY;
     if (try_batch_first && tryCopyCacheWithBatchedMemoryCopy(request, copy_direction, slots)) {
         response.set_success(true);
         reportCopyMetrics(true, timer.done_us(), copy_direction);
@@ -1975,25 +1972,74 @@ bool KVCacheMemoryConnector::copyMemoryItemsGeneric(const MemoryOperationRequest
 bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestPB&     request,
                                                    CopyDirection                       direction,
                                                    const std::vector<LayerRegionSlot>& slots) {
-    bool has_disk_item = false;
-    for (int i = 0; i < request.copy_items_size(); ++i) {
-        const auto& item = request.copy_items(i);
+    // Each disk item gets its own aligned slice until the batch completes.
+    // Pinned staging allows one H2D/D2H batch across memory and disk backings.
+    size_t disk_items = 0;
+    for (const auto& item : request.copy_items()) {
         if (item.backing_type() == MemoryOperationRequestPB::DISK
-            || item.src_backing_type() == MemoryOperationRequestPB::DISK
             || item.src_disk_slot_presence_case() == MemoryOperationRequestPB::CopyItem::kSrcDiskSlot) {
-            has_disk_item = true;
-            break;
+            ++disk_items;
         }
     }
-    void* raw_buffer = nullptr;
-    if (has_disk_item) {
-        const size_t stride_bytes = maxDiskSlotStrideBytes();
-        if (stride_bytes == 0 || ::posix_memalign(&raw_buffer, 4096, stride_bytes) != 0 || raw_buffer == nullptr) {
-            RTP_LLM_LOG_WARNING("allocate prefix disk staging buffer failed, bytes=%zu", stride_bytes);
+    const size_t  disk_stride    = maxDiskSlotStrideBytes();
+    auto          state_pool     = memoryPoolFor(CacheBlockKind::STATE_SWA_KV);
+    const bool    pinned_staging = state_pool && state_pool->where() == MemoryType::MEMORY_CPU_PINNED;
+    torch::Tensor staging;
+    char*         staging_base = nullptr;
+    if (disk_items > 0) {
+        if (disk_stride == 0 || disk_items > (static_cast<size_t>(INT64_MAX) - 4095) / disk_stride) {
             return false;
         }
+        staging =
+            torch::empty({static_cast<int64_t>(disk_items * disk_stride + 4095)},
+                         torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(pinned_staging));
+        staging_base =
+            reinterpret_cast<char*>((reinterpret_cast<uintptr_t>(staging.data_ptr()) + 4095) & ~uintptr_t(4095));
     }
-    std::unique_ptr<void, decltype(&std::free)> staging(raw_buffer, &std::free);
+    struct DiskWrite {
+        DiskBlockPoolPtr pool;
+        int32_t          slot;
+        void*            data;
+    };
+    std::vector<DiskWrite>                disk_writes;
+    size_t                                disk_index        = 0;
+    std::vector<torch::Tensor>            dst_buffers;
+    std::vector<torch::Tensor>            src_buffers;
+    bool                                  batch_eligible = true;
+    auto                                  flush          = [&]() {
+        if (dst_buffers.empty()) {
+            return true;
+        }
+        BatchedMemoryCopyParams params;
+        bool                               eligible = batch_eligible;
+        std::vector<BatchedMemoryCopyTile> host_tiles;
+        for (size_t i = 0; i < dst_buffers.size(); ++i) {
+            const auto& dst = dst_buffers[i];
+            const auto& src = src_buffers[i];
+            if (!dst.is_cuda() && !src.is_cuda()) {
+                appendHostMemoryCopyTile(dst.data_ptr(), src.data_ptr(), src.nbytes(), host_tiles);
+                continue;
+            }
+            if (dst.is_cuda() == src.is_cuda()) {
+                eligible = false;
+                break;
+            }
+            const int device = dst.is_cuda() ? dst.get_device() : src.get_device();
+            if (params.device_index >= 0 && params.device_index != device) {
+                eligible = false;
+                break;
+            }
+            params.device_index = device;
+            appendBatchedMemoryCopyTile(dst.data_ptr(), src.data_ptr(), src.nbytes(), params.tiles);
+        }
+        if (memoryCacheCopyMode() == MemoryCacheCopyMode::LEGACY || !eligible
+                   || !execBatchedMemoryCopy(params)) {
+            execNoBlockCopy(MultiCopyParams{dst_buffers, src_buffers});
+            return true;  // The fallback already includes host-to-host tiles.
+        }
+        execHostMemoryCopyTiles(host_tiles);
+        return true;
+    };
 
     for (int i = 0; i < request.copy_items_size(); ++i) {
         const auto& item           = request.copy_items(i);
@@ -2009,6 +2055,11 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
             kind = CacheBlockKind::STATE_SWA_KV;
         } else {
             return false;
+        }
+        void* raw_buffer = nullptr;
+        if (item.backing_type() == MemoryOperationRequestPB::DISK
+            || item.src_disk_slot_presence_case() == MemoryOperationRequestPB::CopyItem::kSrcDiskSlot) {
+            raw_buffer = staging_base + disk_index++ * disk_stride;
         }
         auto pool      = memoryPoolFor(kind);
         auto disk_pool = diskPoolFor(kind);
@@ -2026,6 +2077,7 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
                 return false;
             }
             backing_buffer = mem_buffers[0];
+            batch_eligible = batch_eligible && pool->where() == MemoryType::MEMORY_CPU_PINNED;
         } else if (item.backing_type() == MemoryOperationRequestPB::DISK) {
             if (!disk_pool || raw_buffer == nullptr || !disk_pool->validSlot(item.disk_slot())) {
                 return false;
@@ -2040,6 +2092,7 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
             backing_buffer.is_cuda    = false;
             backing_buffer.addr       = raw_buffer;
             backing_buffer.size_bytes = disk_pool->blockSizeBytes();
+            batch_eligible            = batch_eligible && pinned_staging;
         } else {
             return false;
         }
@@ -2081,8 +2134,6 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
             }
         }
 
-        std::vector<torch::Tensor> dst_buffers;
-        std::vector<torch::Tensor> src_buffers;
         size_t                     byte_off = 0;
         for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
             const auto& slot = slots[slot_idx];
@@ -2109,12 +2160,17 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
             }
             byte_off += slot.stride_bytes;
         }
-        if (!dst_buffers.empty()) {
-            MultiCopyParams mc{dst_buffers, src_buffers};
-            execNoBlockCopy(mc);
+        if (direction == CopyDirection::D2H && item.backing_type() == MemoryOperationRequestPB::DISK) {
+            disk_writes.push_back({disk_pool, item.disk_slot(), raw_buffer});
         }
-        if (direction == CopyDirection::D2H && item.backing_type() == MemoryOperationRequestPB::DISK
-            && !disk_pool->write(item.disk_slot(), raw_buffer, disk_pool->slotStrideBytes())) {
+    }
+    if (!flush()) {
+        return false;
+    }
+    // Publish only after all GPU writes have completed. The connector context
+    // retains source blocks and disk slots through this worker's completion.
+    for (const auto& write : disk_writes) {
+        if (!write.pool->write(write.slot, write.data, write.pool->slotStrideBytes())) {
             return false;
         }
     }
@@ -2422,6 +2478,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const MemoryOpera
     }
 
     BatchedMemoryCopyParams params;
+    std::vector<BatchedMemoryCopyTile> host_tiles;
     size_t                  logical_rows  = 0;
     size_t                  payload_bytes = 0;
 
@@ -2472,12 +2529,18 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const MemoryOpera
                     within_layer_off += gpu_buffer.size_bytes;
                     continue;
                 }
-                if (!gpu_buffer.is_cuda) {
-                    return false;
-                }
                 if (within_layer_off + gpu_buffer.size_bytes > layer_stride
                     || byte_off + within_layer_off + gpu_buffer.size_bytes > mem_buffer.size_bytes) {
                     return false;
+                }
+                if (!gpu_buffer.is_cuda) {
+                    auto* host_addr = static_cast<char*>(mem_buffer.addr) + byte_off + within_layer_off;
+                    appendHostMemoryCopyTile(direction == CopyDirection::H2D ? gpu_buffer.addr : host_addr,
+                                             direction == CopyDirection::H2D ? host_addr : gpu_buffer.addr,
+                                             gpu_buffer.size_bytes,
+                                             host_tiles);
+                    within_layer_off += gpu_buffer.size_bytes;
+                    continue;
                 }
                 if (params.device_index < 0) {
                     params.device_index = gpu_buffer.device_index;
@@ -2500,6 +2563,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const MemoryOpera
     }
 
     if (params.tiles.empty()) {
+        execHostMemoryCopyTiles(host_tiles);
         return true;
     }
 
@@ -2521,6 +2585,9 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const MemoryOpera
                       params.device_index,
                       success,
                       copy_timer.done_us());
+    if (success) {
+        execHostMemoryCopyTiles(host_tiles);
+    }
     return success;
 }
 
