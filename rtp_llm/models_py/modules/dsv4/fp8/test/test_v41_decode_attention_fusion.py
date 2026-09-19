@@ -150,6 +150,47 @@ def _select(attn, x, qr, positions):
     return AttentionV41FP8._select_indices_decode(attn, x, qr, positions)
 
 
+# Last paged logits returned by the patched scorer. The tensor is the graph
+# pool buffer on CUDA, so after a replay it holds the replayed logits.
+_LAST_PAGED_LOGITS = []
+
+
+def _recorded_paged_score(*args, **kwargs):
+    result = _original_paged_score(*args, **kwargs)
+    _LAST_PAGED_LOGITS.append(result)
+    return result
+
+
+def _assert_selection_equivalent(case, got, expected, positions, ratio):
+    """Compare selections against the torch-path reference.
+
+    Rows within index_topk keep the bitwise ascending contract (dense
+    shortcut). Rows beyond index_topk compare as valid top-k selections of
+    the same logits: the radix-select TopK op's documented contract
+    (test_topk_v3.py) leaves output order unspecified and tie members are
+    kernel's choice, so indices compare through their gathered value
+    multisets (falling back to set equality without recorded logits).
+    """
+    long_rows = ((positions + 1) // ratio) > 512
+    torch.testing.assert_close(
+        got[~long_rows], expected[~long_rows], rtol=0, atol=0
+    )
+    logits = _LAST_PAGED_LOGITS[-1] if _LAST_PAGED_LOGITS else None
+    for row in long_rows.nonzero().flatten().tolist():
+        g = got[row][got[row] >= 0]
+        e = expected[row][expected[row] >= 0]
+        case.assertEqual(g.numel(), e.numel())
+        if logits is not None:
+            torch.testing.assert_close(
+                logits[row].gather(0, g.long()).sort().values,
+                logits[row].gather(0, e.long()).sort().values,
+                rtol=0,
+                atol=0,
+            )
+        else:
+            case.assertEqual(set(g.tolist()), set(e.tolist()))
+
+
 def _reference(attn, packed, x, qr, positions, candidates=None):
     old = SimpleNamespace(**vars(attn))
     keys = _keys_from_packed(
@@ -166,6 +207,9 @@ def _reference(attn, packed, x, qr, positions, candidates=None):
 
 
 class V41DecodeAttentionFusionCPU(unittest.TestCase):
+    def setUp(self):
+        _LAST_PAGED_LOGITS.clear()
+
     def test_paged_source_routing_per_token_lengths_and_short_context(self):
         for ratio in (1, 2):
             with self.subTest(ratio=ratio):
@@ -174,11 +218,13 @@ class V41DecodeAttentionFusionCPU(unittest.TestCase):
                 attn.layer_id += 4
                 attn._shared_attention["global"][attn.layer_id] = object()
                 with patch.object(
-                    indexer, "score_decode_indexer", side_effect=_original_paged_score
+                    indexer, "score_decode_indexer", side_effect=_recorded_paged_score
                 ) as scorer:
                     got = _select(attn, x, qr, positions)
                 expected, _ = _reference(attn, packed, x, qr, positions)
-                torch.testing.assert_close(got, expected, rtol=0, atol=0)
+                _assert_selection_equivalent(
+                    self, got, expected, positions, ratio
+                )
                 args = scorer.call_args.args
                 self.assertIs(args[3], packed.pool)
                 self.assertIs(args[4], packed.block_table)
@@ -206,21 +252,25 @@ class V41DecodeAttentionFusionCPU(unittest.TestCase):
     def test_candidate_source_consumer_and_latest_block_are_preserved(self):
         attn, packed, x, qr, positions = _fixture("cpu", 1, candidate=True)
         with patch.object(
-            indexer, "score_decode_indexer", side_effect=_original_paged_score
+            indexer, "score_decode_indexer", side_effect=_recorded_paged_score
         ):
             source = _select(attn, x, qr, positions)
             candidates = attn._shared_attention["candidates"].clone()
             expected_source, expected_candidates = _reference(
                 attn, packed, x, qr, positions
             )
-            torch.testing.assert_close(source, expected_source, rtol=0, atol=0)
+            _assert_selection_equivalent(
+                self, source, expected_source, positions, 1
+            )
             torch.testing.assert_close(candidates, expected_candidates, rtol=0, atol=0)
             newest = positions // 8
             self.assertTrue((candidates == newest[:, None]).any(-1).all())
             attn.layer_id = 24
             consumer = _select(attn, x, qr, positions)
             expected, _ = _reference(attn, packed, x, qr, positions, candidates)
-            torch.testing.assert_close(consumer, expected, rtol=0, atol=0)
+            _assert_selection_equivalent(
+                self, consumer, expected, positions, 1
+            )
             for row in range(6, 12):
                 valid = consumer[row][consumer[row] >= 0]
                 self.assertTrue(torch.isin(valid // 8, candidates[row]).all())
@@ -234,6 +284,9 @@ class V41DecodeAttentionFusionCPU(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class V41DecodeAttentionFusionCUDA(unittest.TestCase):
+    def setUp(self):
+        _LAST_PAGED_LOGITS.clear()
+
     def test_actual_slot_gate_and_padded_pool_fallback(self):
         for ratio in (1, 2):
             for padded in (False, True):
@@ -295,7 +348,7 @@ class V41DecodeAttentionFusionCUDA(unittest.TestCase):
                     "cuda", ratio, candidate=ratio == 1
                 )
                 with patch.object(
-                    indexer, "score_decode_indexer", side_effect=_original_paged_score
+                    indexer, "score_decode_indexer", side_effect=_recorded_paged_score
                 ):
                     stream = torch.cuda.Stream()
                     stream.wait_stream(torch.cuda.current_stream())
@@ -317,7 +370,9 @@ class V41DecodeAttentionFusionCUDA(unittest.TestCase):
                         expected, candidates = _reference(
                             attn, packed, x, qr, positions
                         )
-                        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+                        _assert_selection_equivalent(
+                    self, got, expected, positions, ratio
+                )
                         if candidates is not None:
                             torch.testing.assert_close(
                                 attn._shared_attention["candidates"],
