@@ -466,14 +466,15 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
         max_pixels = media_config["max_image_tokens"] * token_pixels
         request_min_pixels = int(mm_input.mm_preprocess_config.min_pixels)
         request_max_pixels = int(mm_input.mm_preprocess_config.max_pixels)
-        if request_min_pixels > 0:
-            min_pixels = request_min_pixels
-        if request_max_pixels > 0:
-            max_pixels = min(max_pixels, request_max_pixels)
-        if min_pixels > max_pixels:
-            raise ValueError(
-                "GLM-5.3-Flash min_pixels must not exceed the effective max_pixels"
-            )
+        if mm_input.mm_type != MMUrlType.VIDEO:
+            if request_min_pixels > 0:
+                min_pixels = request_min_pixels
+            if request_max_pixels > 0:
+                max_pixels = min(max_pixels, request_max_pixels)
+            if min_pixels > max_pixels:
+                raise ValueError(
+                    "GLM-5.3-Flash min_pixels must not exceed the effective max_pixels"
+                )
 
         data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
         if mm_input.mm_type == MMUrlType.VIDEO:
@@ -520,6 +521,13 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
                 int(media_config["max_image_tokens"]),
                 GLM53_DEFAULT_VIDEO_MAX_TOKENS,
             )
+            # Request pixel bounds apply to each sampled video frame, as in
+            # the DashScope/Qwen2.5-VL interface. The GLM resize function and
+            # model token cap instead budget pixels across the whole video.
+            if request_min_pixels > 0:
+                min_pixels = request_min_pixels * len(indices)
+            if request_max_pixels > 0:
+                max_pixels = min(max_pixels, request_max_pixels * len(indices))
             max_pixels = min(max_pixels, video_max_tokens * token_pixels)
             if min_pixels > max_pixels:
                 raise ValueError(

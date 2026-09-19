@@ -197,8 +197,8 @@ class Glm53FlashVitTest(unittest.TestCase):
 
         preprocess_config = SimpleNamespace(
             fps=2.0,
-            min_pixels=2 * 28 * 28,
-            max_pixels=4 * 28 * 28,
+            min_pixels=28 * 28,
+            max_pixels=28 * 28,
             max_frames=4,
         )
         mm_input = SimpleNamespace(
@@ -247,6 +247,92 @@ class Glm53FlashVitTest(unittest.TestCase):
         self.assertEqual(pixel_values.shape, (4, 6))
         self.assertEqual(grid_thw.tolist(), [[2, 2, 2]])
         self.assertEqual(timestamps, [0.0, 1.2])
+
+    def test_video_pixel_limit_is_per_frame_and_preserves_model_token_cap(self):
+        media_config = {
+            "patch_size": 14,
+            "temporal_patch_size": 2,
+            "merge_size": 2,
+            "min_image_tokens": 16,
+            "max_image_tokens": 240000,
+            "fps": 2,
+        }
+        for frame_count in (8, 64, 256):
+            with self.subTest(frame_count=frame_count):
+
+                class FakeVideoReader:
+                    def __init__(self, data, ctx, num_threads):
+                        pass
+
+                    def __len__(self):
+                        return frame_count * 15
+
+                    def get_avg_fps(self):
+                        return 30.0
+
+                    def get_batch(self, indices):
+                        frames = np.broadcast_to(
+                            np.zeros((360, 640, 3), dtype=np.uint8),
+                            (len(indices), 360, 640, 3),
+                        )
+                        return SimpleNamespace(asnumpy=lambda: frames)
+
+                class FakeVideoProcessor:
+                    def preprocess(self, *, videos, return_tensors, do_resize):
+                        self.frame_sizes = [frame.size for frame in videos]
+                        width, height = self.frame_sizes[0]
+                        return {
+                            "pixel_values_videos": torch.zeros(1, 6),
+                            "video_grid_thw": torch.tensor(
+                                [[len(videos) // 2, height // 14, width // 14]]
+                            ),
+                        }
+
+                video_processor = FakeVideoProcessor()
+                mm_input = SimpleNamespace(
+                    url="memory://video",
+                    mm_type=MMUrlType.VIDEO,
+                    mm_preprocess_config=SimpleNamespace(
+                        fps=2.0,
+                        min_pixels=-1,
+                        max_pixels=501760,
+                        max_frames=frame_count,
+                    ),
+                )
+                with (
+                    patch.object(glm53_mixin, "VideoReader", FakeVideoReader),
+                    patch.object(glm53_mixin, "cpu", lambda _: object()),
+                    patch.object(
+                        glm53_mixin, "get_bytes_io_from_url", return_value=object()
+                    ),
+                ):
+                    _, grid_thw, timestamps = Glm53FlashImageEmbedding.preprocess_input(
+                        [mm_input],
+                        SimpleNamespace(
+                            download_headers="", mm_video_max_frames=frame_count
+                        ),
+                        processor=None,
+                        video_processor=video_processor,
+                        processor_config={
+                            "image_processor": media_config,
+                            "video_processor": media_config,
+                        },
+                    )
+
+                self.assertEqual(len(video_processor.frame_sizes), frame_count)
+                self.assertEqual(len(timestamps), frame_count // 2)
+                self.assertTrue(
+                    all(w * h <= 501760 for w, h in video_processor.frame_sizes)
+                )
+                vision_tokens = int(grid_thw[0].prod()) // 4
+                self.assertLessEqual(vision_tokens, 30000)
+                if frame_count <= 64:
+                    self.assertEqual(
+                        video_processor.frame_sizes, [(644, 364)] * frame_count
+                    )
+                    self.assertEqual(vision_tokens, frame_count // 2 * 13 * 23)
+                else:
+                    self.assertGreater(vision_tokens, 20000)
 
     def test_real_mp4_decord_preprocess(self):
         video_path = Path(os.environ["TEST_TMPDIR"]) / "glm53_decord_test.mp4"
