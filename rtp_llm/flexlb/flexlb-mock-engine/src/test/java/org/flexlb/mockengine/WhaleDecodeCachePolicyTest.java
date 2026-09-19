@@ -75,6 +75,33 @@ class WhaleDecodeCachePolicyTest {
         }
     }
 
+    @Test void disabledReuseStillAccountsGeneratedKvWhileDecodeIsRunning() throws Exception {
+        var model = model("{\"reuse_cache\":false,\"reserve_block_ratio\":0}");
+        try (var cluster = MockEngineTestCluster.create(model, 62000, 1, 1)) {
+            var d = cluster.decodes().get(0);
+            var cache = cache(d);
+            var shape = new MockPerformanceModel.RequestShape(
+                    EngineRpcService.GenerateInputPB.getDefaultInstance(),
+                    64, 129, List.of(), 0, 0, false);
+            assertTrue(d.reserveDecodeLease(1L, shape));
+            assertEquals(1, cache.heldBlocks());
+
+            // Decode owns the generated KV while the stream is alive even when
+            // completed Decode prefixes are not retained for later reuse.
+            var grow = d.getClass().getDeclaredMethod("growDecodeLeaseLocked", long.class, int.class);
+            grow.setAccessible(true);
+            assertNull(grow.invoke(d, 1L, 193));
+            assertEquals(4, cache.heldBlocks());
+
+            var finish = d.getClass().getDeclaredMethod(
+                    "admitBlockLease", long.class, MockPerformanceModel.RequestShape.class);
+            finish.setAccessible(true);
+            assertEquals(false, finish.invoke(d, 1L, shape));
+            assertEquals(0, cache.heldBlocks());
+            assertTrue(cache.snapshotKeys().isEmpty());
+        }
+    }
+
     @Test void explicitWatermarkUsesProductionFloorAndBoundary() {
         var cache = new MockLruBlockCache(26, .08, true);
         assertEquals(2, cache.reserveBlocks());
