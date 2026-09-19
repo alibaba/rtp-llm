@@ -9,11 +9,12 @@ the main→MTP-draft boundary is what lets the MTP forward borrow the ~16+16 GiB
 those buffers would otherwise pin process-wide on a near-full 1M+CP8 card.
 
 Each compressor role owns a fixed sub-region of ONE union buffer carved by byte
-offsets (see :class:`PrefillWorkspace` for the layout). Sizes are the per-forward
-MAXIMUM (derived from ``max_seq_len + cp_size + max_context_batch_size``),
-identical on every forward, so a freed block is exactly reusable by the next
-forward. Internal callers use the same metadata that sized the workspace, so
-getters do not repeat capacity checks during inference.
+offsets (see :class:`PrefillWorkspace` for the layout). Ordinary V4 retains
+fixed maximum Q and CP row capacities, identical on every forward for allocator
+reuse. Only V4.1 sizes Q to the actual rank-local padded token count and passes
+``reserve_cp=False``: it owns its CP gather buffers separately, without V4's
+compressor or nested indexer modules. Widths remain model-level maxima, and the
+union retains its 1 GiB allocation buckets for both models.
 
 The CP region is split per gather ROLE, because two concurrent compressor gather
 lifetimes can be in flight within a single CSA layer:
@@ -33,11 +34,9 @@ layers, never recycled by the allocator) and relies on the
 import torch
 
 # Default union-buffer alignment. Rounding every per-forward union block up to a
-# clean 1 GiB multiple makes the caching allocator hand back an identically-sized
-# block each forward, so the next forward (incl. the MTP draft right after)
-# reuses it with ZERO fragmentation — the whole point of this per-forward buffer.
-# The cost is up to <1 GiB rounded-up slack on small/warmup forwards, freed at
-# forward exit (acceptable: the card is not full then). CPU unit tests pass a
+# clean 1 GiB multiple allows adjacent input sizes to reuse one allocation
+# bucket, including target/draft forwards with the same live row footprint.
+# The cost is <1 GiB rounded-up slack, freed at forward exit. CPU unit tests pass a
 # small ``align_bytes`` (e.g. 1) so the rounding does not force a 1 GiB host
 # allocation.
 _PREFILL_WS_ALIGN_BYTES = 1 << 30
@@ -68,10 +67,8 @@ class PrefillWorkspace:
 
     Union size = ``round_up(max(q_bytes, 2*main_bytes + 2*idx_bytes),
     align_bytes)`` (``align_bytes`` defaults to 1 GiB so the per-forward block is
-    a clean multiple → the caching allocator reuses the same-sized block across
-    forwards with zero fragmentation, and hands it back at the main→MTP draft
-    boundary). Folding Q into the compressor CP region saves the standalone
-    16 GiB Q buffer.
+    a clean multiple for reuse across similarly sized forwards, and is released
+    at the main→MTP draft boundary). Q shares the larger of the two regions.
 
     Read/write ordering between the aliasing roles is guaranteed only for CP
     buffers whose contents are no longer live when Q is materialized. The Q vs

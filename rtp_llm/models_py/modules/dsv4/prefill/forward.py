@@ -334,20 +334,23 @@ def forward_layers(
     owned KV regions are registered with the PD-disagg cache_store immediately
     after that layer's forward.
     """
-    # Allocate the max-sized workspace before CP metadata, embedding, or any
-    # other forward-local CUDA tensor.  If embedding lands in the cached block
-    # first, it can split the only contiguous region large enough for this
-    # allocation and force the expandable allocator to map another region.
+    # Allocate before CP metadata or embedding can split a reusable cached block.
+    # V4.1 Q preserves input_ids' full rank-local padded row count. Ordinary V4
+    # retains its fixed maximum Q and compressor CP capacities for allocator reuse.
     ws: Optional[PrefillWorkspace] = None
     if v4.fp8_kv_cache:
+        # AttentionV41FP8 only uses prefill_q: its global/KV gathers own their
+        # buffers, and it never constructs the V4 compressor/indexer modules.
+        v41 = getattr(getattr(v4, "args", None), "v41_config", None) is not None
         reserve_cp = (
-            getattr(v4, "_cp_info", None) is not None
+            not v41
+            and getattr(v4, "_cp_info", None) is not None
             and int(getattr(v4, "_cp_size", 1)) > 1
             and int(v4._prefill_ws_full_rows) > 0
         )
         ws = PrefillWorkspace(
             input_ids.device,
-            q_rows=v4._prefill_ws_q_rows,
+            q_rows=int(input_ids.size(0)) if v41 else v4._prefill_ws_q_rows,
             q_dim=v4._prefill_ws_q_dim,
             reserve_cp=reserve_cp,
             cp_rows=v4._prefill_ws_full_rows,
@@ -492,7 +495,7 @@ def forward_layers(
                     prefix_lengths = pl.to(
                         device=positions.device, dtype=torch.int32
                     ).contiguous()
-            # The max-sized workspace was allocated at function entry, before
+            # The workspace was allocated at function entry, before
             # embedding could fragment its cached address range.  It remains a
             # per-forward local so the MTP draft can reuse the block immediately.
             assert ws is not None
