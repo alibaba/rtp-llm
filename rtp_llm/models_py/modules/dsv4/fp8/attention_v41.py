@@ -42,6 +42,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     _get_cp_comm_stream,
     AttentionFP8,
 )
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
 from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 
@@ -109,6 +110,30 @@ def _wait_prefill_x_gather(handle: _V41AsyncXGather, cp_ctx) -> torch.Tensor:
 
 def rms_norm(x, weight, eps):
     """Preserve the BF16 normalization boundary used by V4.1."""
+    # BF16 CUDA sites run on the framework native RMSNorm (the same
+    # ``rtp_llm_ops.rmsnorm`` single-launch kernel the V4 path uses in
+    # ``_rmsnorm_weighted``): fp32 accumulation, at most one BF16 ulp from
+    # this reference formula. FP32-boundary sites (compressor projections)
+    # keep the reference path; the op is BF16-only (fp32 input would NaN).
+    if (
+        x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.ndim >= 2
+        and x.numel() > 0
+        and x.is_contiguous()
+        and weight.is_cuda
+        and weight.device == x.device
+        and weight.dtype == torch.bfloat16
+        and weight.ndim == 1
+        and weight.shape[0] == x.shape[-1]
+        and weight.is_contiguous()
+    ):
+        flat = x.view(-1, x.shape[-1])
+        out = torch.empty_like(flat)
+        rtp_llm_ops.rmsnorm(
+            out, flat, weight, eps, torch.cuda.current_stream().cuda_stream
+        )
+        return out.view(x.shape)
     xf = x.float()
     return (
         xf * torch.rsqrt(xf.square().mean(-1, keepdim=True) + eps) * weight.float()

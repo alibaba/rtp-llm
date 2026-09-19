@@ -314,6 +314,53 @@ class AttentionV41Test(unittest.TestCase):
                 torch.testing.assert_close(values_tile, values_ref, rtol=0, atol=0)
                 torch.testing.assert_close(scores_tile, scores_ref, rtol=0, atol=0)
 
+    @torch.inference_mode()
+    def test_rms_norm_native_matches_reference(self):
+        # Native RMSNorm contract (migrated from the dev-lane math test): on a
+        # Blackwell CUDA device the bf16 sites run the framework
+        # ``rtp_llm_ops.rmsnorm`` kernel; the result stays within one BF16
+        # ulp of this reference formula with a >=99.9% bit-exact rate.
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 10:
+            self.skipTest("native rmsnorm requires a Blackwell CUDA device")
+        device = torch.device("cuda")
+        shapes = [(2, 5120), (7, 1280), (2048, 512), (3, 128), (1, 5120)]
+        for index, shape in enumerate(shapes):
+            torch.manual_seed(83 + index)
+            hidden = torch.randn(*shape, device=device).bfloat16()
+            weight = (torch.randn(shape[-1], device=device) * 0.5 + 1).bfloat16()
+            native = rms_norm(hidden, weight, 1e-20)
+            reference = (
+                hidden.float()
+                * torch.rsqrt(hidden.float().square().mean(-1, keepdim=True) + 1e-20)
+                * weight.float()
+            ).to(hidden.dtype)
+            ai = native.view(torch.int16).to(torch.int32)
+            bi = reference.view(torch.int16).to(torch.int32)
+            ulp = (
+                torch.where(ai >= 0, ai, -32768 - ai)
+                - torch.where(bi >= 0, bi, -32768 - bi)
+            ).abs()
+            exact = (native == reference).float().mean().item()
+            self.assertGreaterEqual(exact, 0.999, (shape, exact))
+            self.assertLessEqual(int(ulp.max().item()), 1, (shape, int(ulp.max())))
+
+    @torch.inference_mode()
+    def test_rms_norm_fp32_boundary_keeps_reference_path(self):
+        # FP32-boundary sites (compressor projections) and CPU tensors keep
+        # the reference formula bit-exactly; only bf16 CUDA input pairs take
+        # the native kernel.
+        torch.manual_seed(92)
+        hidden = torch.randn(4, 512).bfloat16()
+        weight = torch.randn(512).bfloat16()
+        mixed = rms_norm(hidden.float(), weight, 1e-6)
+        expected = (
+            hidden.float()
+            * torch.rsqrt(hidden.float().square().mean(-1, keepdim=True) + 1e-6)
+            * weight.float()
+        )
+        self.assertEqual(mixed.dtype, torch.float32)
+        self.assertTrue(torch.equal(mixed, expected))
+
     def test_begin_forward_drops_cross_layer_index_plan(self):
         attn = AttentionV41FP8.__new__(AttentionV41FP8)
         torch.nn.Module.__init__(attn)
