@@ -1644,7 +1644,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteQuantizedMhaS
     config.finalizeBlockNums(/*global_block_num=*/5, RuntimeConfig{});
 
     ASSERT_FALSE(config.is_sparse);
-    ASSERT_GT(config.kvScaleStrideBytesForGroup(0), 0u);
+    ASSERT_GT(config.topology().groups()[0].kvScaleStrideBytes(), 0u);
 
     allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
@@ -1657,7 +1657,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteQuantizedMhaS
     ASSERT_EQ(allocated->size(), 4u);
     pool->incRef(*allocated);
 
-    const auto stride   = config.kvScaleStrideBytesForGroup(0);
+    const auto stride   = config.topology().groups()[0].kvScaleStrideBytes();
     auto       snapshot = [&]() {
         std::vector<std::vector<uint8_t>> blocks(allocated->size());
         for (size_t index = 0; index < allocated->size(); ++index) {

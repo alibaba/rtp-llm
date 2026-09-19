@@ -36,11 +36,12 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
 std::string targetGroupSummary(const CacheConfig& target_config) {
     std::ostringstream os;
     os << '[';
-    for (size_t target_gid = 0; target_gid < static_cast<size_t>(target_config.groupNums()); ++target_gid) {
-        if (target_gid > 0) {
+    bool first = true;
+    for (const auto& group : target_config.topology().groups()) {
+        if (!first) {
             os << ", ";
         }
-        const auto& group = target_config.topology().groupById(target_gid);
+        first = false;
         os << "{tag=" << group.tag << ", group_type=" << cacheGroupTypeName(group.policy.group_type);
         if (group.spec != nullptr) {
             os << ", spec_type=" << static_cast<int>(group.spec->type)
@@ -60,25 +61,25 @@ std::string targetGroupSummary(const CacheConfig& target_config) {
 }
 
 std::optional<size_t> resolveDefaultMTPGroupAlias(const CacheConfig& target_config, const CacheConfig& propose_config) {
-    if (propose_config.groupNums() != 1 || propose_config.tagForGroup(0) != "default") {
+    if (propose_config.groupNums() != 1 || propose_config.topology().groups().front().tag != "default") {
         return std::nullopt;
     }
 
-    for (size_t target_gid = 0; target_gid < static_cast<size_t>(target_config.groupNums()); ++target_gid) {
-        if (target_config.tagForGroup(target_gid) == "default") {
+    for (const auto& group : target_config.topology().groups()) {
+        if (group.tag == "default") {
             return std::nullopt;  // Exact tag matching remains authoritative.
         }
     }
 
-    const auto& source_group = propose_config.topology().groupById(0);
+    const auto& source_group = propose_config.topology().groups().front();
     if (source_group.policy.group_type != CacheGroupType::FULL || source_group.spec == nullptr
         || !isFullAttentionSpec(source_group.spec->type)) {
         return std::nullopt;
     }
 
     std::vector<size_t> candidates;
-    for (size_t target_gid = 0; target_gid < static_cast<size_t>(target_config.groupNums()); ++target_gid) {
-        const auto& target_group = target_config.topology().groupById(target_gid);
+    for (size_t target_gid = 0; target_gid < target_config.topology().groups().size(); ++target_gid) {
+        const auto& target_group = target_config.topology().groups()[target_gid];
         // The aliased draft layer uses its own MTP memory layout. Group-tag APIs still expose it as the target
         // group, however, so both logical block granularity and physical block shape must remain compatible.
         if (CacheConfig::samePolicy(target_group.policy, source_group.policy) && target_group.spec != nullptr
@@ -208,16 +209,18 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     RTP_LLM_CHECK_WITH_INFO(module_index >= 0, "CacheConfig::mergeMTPModule invalid module_index=%d", module_index);
 
     const auto default_alias_target_gid = resolveDefaultMTPGroupAlias(*this, propose_config);
-    for (size_t gid = 0; gid < static_cast<size_t>(propose_config.groupNums()); ++gid) {
-        const auto& tag              = propose_config.topology().groupById(gid).tag;
+    bool       any_group                = false;
+    for (const auto& propose_group : propose_config.topology().groups()) {
+        const auto& tag              = propose_group.tag;
         const bool  has_exact_target = std::any_of(topology().groups().begin(),
                                                   topology().groups().end(),
                                                   [&tag](const auto& group) { return group.tag == tag; });
         // Every declared draft segment needs backing in an existing target
         // pool. Dropping an unmatched tag would also omit its memory budget.
-        RTP_LLM_CHECK_WITH_INFO(has_exact_target || (gid == 0 && default_alias_target_gid.has_value()),
+        RTP_LLM_CHECK_WITH_INFO(has_exact_target || (!any_group && default_alias_target_gid.has_value()),
                                 "CacheConfig::mergeMTPModule unmapped draft cache group tag=%s",
                                 tag.c_str());
+        any_group = true;
     }
     auto sub_cfg       = std::make_shared<CacheConfig>(propose_config);
     sub_cfg->block_num = block_num;
@@ -237,7 +240,7 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     const auto                              target_group_num = target_groups.size();
     std::unordered_map<std::string, size_t> propose_gid_by_tag;
     for (size_t gid = 0; gid < propose_config.topology().groups().size(); ++gid) {
-        propose_gid_by_tag.emplace(propose_config.topology().groupById(gid).tag, gid);
+        propose_gid_by_tag.emplace(propose_config.topology().groups()[gid].tag, gid);
     }
     std::vector<GroupBase> sub_groups;
     std::vector<LayerBase> sub_layers(static_cast<size_t>(mtp_layer_num));
@@ -260,7 +263,7 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
             source_gid    = 0;
         }
         const bool  has_propose_group = has_exact_group || uses_default_alias;
-        const auto& source_group      = source_config->topology().groupById(source_gid);
+        const auto& source_group      = source_config->topology().groups()[source_gid];
         const auto  source_layer_ids  = source_config->layerIdsForGroup(source_group.tag);
 
         if (has_propose_group) {
@@ -467,15 +470,15 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
 
     const auto step   = static_cast<uint32_t>(std::max(1, linear_step));
     auto       groups = topology().groups();
-    for (size_t gid = 0; gid < groups.size(); ++gid) {
-        const auto explicit_independent_blocks = groups[gid].policy.explicit_block_num;
+    for (auto& group : groups) {
+        const auto explicit_independent_blocks = group.policy.explicit_block_num;
         uint32_t   rule_blocks                 = global_block_num;
         if (explicit_independent_blocks > 0) {
             rule_blocks = explicit_independent_blocks;
-        } else if (groups[gid].policy.group_type == CacheGroupType::SWA) {
+        } else if (group.policy.group_type == CacheGroupType::SWA) {
             rule_blocks = global_block_num / step + (global_block_num % step != 0 ? 1u : 0u);
         }
-        groups[gid].block_num = rule_blocks;
+        group.block_num = rule_blocks;
     }
     // The published topology already owns frozen Specs; changing capacity does
     // not require cloning their immutable byte layouts again.

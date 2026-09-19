@@ -28,12 +28,13 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
         // Multi-group consumers read their tagged specs and block tables.
         model_input_gatherer_config_.kernel_seq_size_per_block = 0;
         if (cache_config.groupNums() == 1) {
-            model_input_gatherer_config_.block_stride_bytes        = cache_config.kvBlockStrideBytesForGroup(0);
-            model_input_gatherer_config_.scale_stride_bytes        = cache_config.kvScaleStrideBytesForGroup(0);
-            model_input_gatherer_config_.kernel_seq_size_per_block = cache_config.kernelSeqSizePerBlockForGroup(0);
+            const auto& group                                      = cache_config.topology().groups().front();
+            model_input_gatherer_config_.block_stride_bytes        = group.kvBlockStrideBytes();
+            model_input_gatherer_config_.scale_stride_bytes        = group.kvScaleStrideBytes();
+            model_input_gatherer_config_.kernel_seq_size_per_block = group.kernelSeqSizePerBlock();
         }
         model_input_gatherer_config_.kernel_blocks_per_kv_block = cache_config.topology().maxKernelBlocksPerKvBlock();
-        const auto& topology_groups = cache_config.topology().groups();
+        const auto& topology_groups                             = cache_config.topology().groups();
         model_input_gatherer_config_.kv_cache_group_types.reserve(topology_groups.size());
         model_input_gatherer_config_.kv_cache_group_tags.reserve(topology_groups.size());
         for (const auto& group : topology_groups) {

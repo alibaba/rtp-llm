@@ -193,14 +193,14 @@ bool DefaultLayerGroupPolicy::init() {
     }
     uint64_t group_name_bithash = 1;
     for (const auto& topology_layer : topology_.layers()) {
-        const int  layer           = topology_layer.layer_id;
-        const auto layer_group_ids = topology_.groupIdsForLayer(layer);
-        if (layer_group_ids.empty()) {
+        const int layer = topology_layer.layer_id;
+        if (topology_layer.group_tags.empty()) {
             RTP_LLM_LOG_ERROR("layer [%d] has no cache group id", layer);
             return false;
         }
-        for (const int group_idx : layer_group_ids) {
-            bool is_full_group = false;
+        for (const auto& cache_tag : topology_layer.group_tags) {
+            const int group_idx     = static_cast<int>(topology_.groupIdForTag(cache_tag));
+            bool      is_full_group = false;
             if (full_group_ids_.find(group_idx) != full_group_ids_.end()) {
                 is_full_group = true;
             }
@@ -216,8 +216,6 @@ bool DefaultLayerGroupPolicy::init() {
                     return false;
                 }
                 RTP_LLM_CHECK_WITH_INFO(group_idx >= 0, "invalid remote cache group id=%d", group_idx);
-                const auto& topology_group    = topology_.groupById(static_cast<size_t>(group_idx));
-                const auto& cache_tag         = topology_group.tag;
                 const auto [tag_it, inserted] = tag_to_group_id_.emplace(cache_tag, group_idx);
                 if (!inserted && tag_it->second != group_idx) {
                     RTP_LLM_LOG_ERROR("duplicate remote cache tag [%s] for group ids [%d] and [%d]",
@@ -229,7 +227,7 @@ bool DefaultLayerGroupPolicy::init() {
                 const std::string prefix           = is_full_group ? "F" : GetOtherGroupPrefixName();
                 std::string       group_name       = prefix + cache_tag;
                 const size_t      block_size_bytes = group_block_size_bytes_.empty() ?
-                                                         topology_.blockSizeBytesForGroup(static_cast<size_t>(group_idx)) :
+                                                         topology_.blockSizeBytesForGroup(cache_tag) :
                                                          group_block_size_bytes_.at(static_cast<size_t>(group_idx));
                 groups_[group_idx] = Group{is_full_group, group_name_bithash, group_name, cache_tag, block_size_bytes};
                 group_to_layer_ids_[group_idx] = {};

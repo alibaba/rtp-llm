@@ -650,7 +650,8 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                               /*max_seq_len=*/64,
                               /*hidden_size=*/1,
                               active_config.seq_size_per_block,
-                              active_config.groupNums() == 1 ? active_config.kernelSeqSizePerBlockForGroup(0) : 0,
+                              active_config.groupNums() == 1 ? active_config.groups().front().kernelSeqSizePerBlock() :
+                                                               0,
                               manager,
                               scenario.mtp_cache_config_index};
 
@@ -754,7 +755,7 @@ py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
                                   /*max_seq_len=*/4,
                                   /*hidden_size=*/4,
                                   config.seq_size_per_block,
-                                  config.kernelSeqSizePerBlockForGroup(0),
+                                  config.groups().front().kernelSeqSizePerBlock(),
                                   manager,
                                   /*mtp_cache_config_index=*/std::nullopt};
         try {
@@ -824,7 +825,7 @@ py::dict runGenerationPrefillCaptureScenario(py::object py_model, const std::str
                               /*max_seq_len=*/4,
                               /*hidden_size=*/4,
                               config.seq_size_per_block,
-                              config.kernelSeqSizePerBlockForGroup(0),
+                              config.topology().groups()[0].kernelSeqSizePerBlock(),
                               manager,
                               /*mtp_cache_config_index=*/std::nullopt};
 

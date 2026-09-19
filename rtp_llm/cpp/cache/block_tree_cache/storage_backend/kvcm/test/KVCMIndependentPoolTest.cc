@@ -151,10 +151,10 @@ protected:
                     const auto  prefix         = group < 2 ? "F" : "L";
                     for (int tp = 0; tp < (rank == 0 ? 1 : 2); ++tp) {
                         EXPECT_EQ(sizes.at("tp" + std::to_string(tp) + "_" + prefix + topology_group.tag),
-                                  config_.blockSizeBytesForGroup(group));
+                                  config_.blockSizeBytesForGroup(config_.topology().groupById(group).tag));
                     }
                 }
-                EXPECT_NE(config_.blockSizeBytesForGroup(0), config_.blockSizeBytesForGroup(2));
+                EXPECT_NE(config_.blockSizeBytesForGroup(config_.topology().groups()[0].tag), config_.blockSizeBytesForGroup(config_.topology().groups()[2].tag));
                 return std::move(meta);
             }));
         static const std::string storage_config = R"({"sdk_backend_configs":[]})";
@@ -215,7 +215,7 @@ protected:
 
     void fill(uint8_t value) {
         for (size_t group = 0; group < pools_.size(); ++group) {
-            for (int layer : config_.layerIdsForGroup(group)) {
+            for (int layer : config_.layerIdsForGroup(config_.tagForGroup(group))) {
                 for (const auto& buffer :
                      allocator_->convertIndexToBuffer(layer, config_.tagForGroup(group), blocks_[group])) {
                     ASSERT_EQ(cudaMemset(buffer.addr, value == 0 ? 0 : value + group, buffer.size_bytes), cudaSuccess);
@@ -272,7 +272,7 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
     ASSERT_TRUE(read(*backend_, request(), matched.match_meta));
     EXPECT_EQ(state_->reads, (std::vector<size_t>{1, 1, 1}));
     for (size_t group = 0; group < pools_.size(); ++group) {
-        for (int layer : config_.layerIdsForGroup(group)) {
+        for (int layer : config_.layerIdsForGroup(config_.tagForGroup(group))) {
             for (const auto& buffer :
                  allocator_->convertIndexToBuffer(layer, config_.tagForGroup(group), blocks_[group])) {
                 std::vector<uint8_t> bytes(buffer.size_bytes);

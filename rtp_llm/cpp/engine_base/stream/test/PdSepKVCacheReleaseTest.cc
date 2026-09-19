@@ -266,8 +266,8 @@ torch_ext::PyCacheStoreInputs makeDsv4WriteInputs(int64_t                       
 
 // Mirrors DecodeRpcServer::loadCacheForAllRank: RPC load rows are keyed by
 // topology tag, never by the resource-local group index.
-DecodeRpcServer::LoadKVCacheContext::TaggedBlockIds
-makeTaggedBlockIds(const KVCacheManager& manager, const BatchKVCacheResource& resource) {
+DecodeRpcServer::LoadKVCacheContext::TaggedBlockIds makeTaggedBlockIds(const KVCacheManager&       manager,
+                                                                       const BatchKVCacheResource& resource) {
     DecodeRpcServer::LoadKVCacheContext::TaggedBlockIds block_ids_by_tag;
     for (const auto& group : manager.cacheConfig().topology().groups()) {
         const auto group_id = manager.cacheConfig().topology().groupIdForTag(group.tag);
@@ -855,7 +855,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                 "kv_" + makeCacheKey(model_id, std::to_string(cache_keys[logical_pos]), /*layer_id=*/0, "default");
             const auto block = stored_request->getBlock(key);
             ASSERT_NE(block, nullptr) << "cp_rank=" << cp_rank << " logical_pos=" << logical_pos;
-            const auto transfer_bytes = manager->cacheConfig().kvBlockStrideBytesForGroup(0);
+            const auto transfer_bytes = manager->cacheConfig().topology().groups()[0].kvBlockStrideBytes();
             const auto expected_address =
                 static_cast<uint8_t*>(kv_base.data_ptr()) + static_cast<size_t>(blocks[local_pos]) * transfer_bytes;
             EXPECT_EQ(block->addr.get(), expected_address);
@@ -1169,7 +1169,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     const auto csa_gid       = static_cast<size_t>(cache_config.groupIdForTag("csa_kv"));
     const auto first_csa_key = "kv_" + makeCacheKey(model_id, std::to_string(cache_keys[0]), /*layer_id=*/2, "csa_kv");
     ASSERT_NE(cache_store->stored_blocks_.find(first_csa_key), cache_store->stored_blocks_.end());
-    EXPECT_EQ(cache_store->stored_blocks_[first_csa_key].size(), cache_config.kvBlockStrideBytesForGroup(csa_gid));
+    EXPECT_EQ(cache_store->stored_blocks_[first_csa_key].size(),
+              cache_config.topology().groups()[csa_gid].kvBlockStrideBytes());
 
     EngineInitParams params;
     params.model_id                 = model_id;
@@ -1401,7 +1402,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
         ASSERT_TRUE(buf.defined());
         for (int b = 0; b < block_num; ++b) {
             auto bid       = resource->blocks(0, 0)[b];
-            auto kv_stride = config.kvBlockStrideBytesForGroup(0);
+            auto kv_stride = config.topology().groups()[0].kvBlockStrideBytes();
             ASSERT_FALSE(isNullBlockIdx(bid));
             auto device_slice = torch::from_blob((uint8_t*)buf.data_ptr() + bid * kv_stride,
                                                  {(int64_t)kv_stride},

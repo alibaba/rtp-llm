@@ -212,8 +212,8 @@ bool CacheTopology::hasOneGroupPerLayer() const {
 
 size_t CacheTopology::totalGroupBlockSizeBytes() const {
     size_t total = 0;
-    for (size_t gid = 0; gid < groups_.size(); ++gid) {
-        const auto bytes = blockSizeBytesForGroup(gid);
+    for (const auto& group : groups_) {
+        const auto bytes = blockSizeBytesForGroup(group.tag);
         RTP_LLM_CHECK_WITH_INFO(bytes <= std::numeric_limits<size_t>::max() - total,
                                 "CacheTopology total block size overflow");
         total += bytes;

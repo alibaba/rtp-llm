@@ -270,8 +270,7 @@ protected:
     void                 rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                             const std::vector<BlockIndicesType>& referenced_blocks,
                                             const std::vector<size_t>&           original_sizes);
-    virtual void copyBlockMappingForGroup(int group_id, const std::vector<BlockIdPair>& block_update_mapping) const;
-    virtual MemoryType memoryTypeForGroup(int group_id) const;
+    virtual MemoryType   memoryTypeForGroup(int group_id) const;
 
     std::vector<KVCacheGroupPtr>    kv_cache_groups_;
     std::vector<int>                full_group_ids_;

@@ -186,8 +186,8 @@ static void setGroupBlockNumsForTest(CacheConfig& config, const std::vector<uint
     kv_strides.reserve(static_cast<size_t>(config.groupNums()));
     scale_strides.reserve(static_cast<size_t>(config.groupNums()));
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        kv_strides.push_back(config.kvBlockStrideBytesForGroup(gid));
-        scale_strides.push_back(config.kvScaleStrideBytesForGroup(gid));
+        kv_strides.push_back(config.topology().groups()[gid].kvBlockStrideBytes());
+        scale_strides.push_back(config.topology().groups()[gid].kvScaleStrideBytes());
     }
     config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
 }
@@ -319,9 +319,9 @@ TEST(CacheConfigCreatorTest, ProLayerClassification) {
     auto              config = CacheConfigCreator::createWarmupConfig(makeProModelConfig(), pc, 0);
     EXPECT_EQ(config.layer_num, 61u);
     EXPECT_EQ(publishedGroupTags(config.topology()), kDsv4ProFirstSeenTags);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_kv")).size(), 30u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "hca_kv")).size(), 31u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "swa_kv")).size(), 61u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_kv")].tag).size(), 30u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "hca_kv")].tag).size(), 31u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "swa_kv")].tag).size(), 61u);
 }
 
 TEST(CacheConfigCreatorTest, FlashLayerClassification) {
@@ -329,9 +329,9 @@ TEST(CacheConfigCreatorTest, FlashLayerClassification) {
     auto              config = CacheConfigCreator::createWarmupConfig(makeFlashModelConfig(), pc, 0);
     EXPECT_EQ(config.layer_num, 43u);
     EXPECT_EQ(publishedGroupTags(config.topology()), kDsv4FlashFirstSeenTags);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_kv")).size(), 21u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "hca_kv")).size(), 20u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "swa_kv")).size(), 43u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_kv")].tag).size(), 21u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "hca_kv")].tag).size(), 20u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "swa_kv")].tag).size(), 43u);
 }
 
 TEST(CacheConfigCreatorTest, ProAndFlashGroupBytesUseEachGroupsLayerOwnership) {
@@ -342,10 +342,10 @@ TEST(CacheConfigCreatorTest, ProAndFlashGroupBytesUseEachGroupsLayerOwnership) {
 
         size_t expected_total_bytes = 0;
         for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-            const size_t expected_group_bytes =
-                config.layerIdsForGroup(gid).size()
-                * (config.kvBlockStrideBytesForGroup(gid) + config.kvScaleStrideBytesForGroup(gid));
-            EXPECT_EQ(config.blockSizeBytesForGroup(gid), expected_group_bytes)
+            const size_t expected_group_bytes = config.layerIdsForGroup(config.topology().groups()[gid].tag).size()
+                                                * (config.topology().groups()[gid].kvBlockStrideBytes()
+                                                   + config.topology().groups()[gid].kvScaleStrideBytes());
+            EXPECT_EQ(config.blockSizeBytesForGroup(config.topology().groups()[gid].tag), expected_group_bytes)
                 << "use_flash=" << use_flash << " gid=" << gid;
             expected_total_bytes += expected_group_bytes;
         }
@@ -360,7 +360,8 @@ TEST(CacheConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
     EXPECT_EQ(config.layer_num, 1u);
     EXPECT_GT(config.totalGroupBlockSizeBytes(), 0u);
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 1u);
-    ASSERT_EQ(config.layerIdsForGroup(gidForTag(config, "swa_kv")), std::vector<int>({0}));
+    ASSERT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "swa_kv")].tag),
+              std::vector<int>({0}));
     ASSERT_EQ(config.topology().layers().size(), 1u);
     EXPECT_EQ(config.topology().layer(0).group_tags, std::vector<std::string>({"swa_kv"}));
     EXPECT_EQ(config.tagForGroup(0), "swa_kv");
@@ -424,7 +425,8 @@ TEST(CacheConfigCreatorTest, SparseIndexerUsesIndependentNaturalStridePool) {
 
     ASSERT_GT(config.groupNums(), 1);
     for (const auto& group : config.topology().groups()) {
-        const auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.groupIdForTag(group.tag));
+        const auto pool_config =
+            DeviceBlockPoolConfigHelper::createConfigForGroup(config, group);
         ASSERT_FALSE(pool_config.memory_layouts.empty());
         for (const auto& layout : pool_config.memory_layouts) {
             EXPECT_FALSE(layout.enable_hybrid_attention);
@@ -434,16 +436,16 @@ TEST(CacheConfigCreatorTest, SparseIndexerUsesIndependentNaturalStridePool) {
     EXPECT_EQ(publishedGroupTags(config.topology()), (std::vector<std::string>{"default", "indexer_kv"}));
     const auto default_gid = static_cast<size_t>(config.groupIdForTag("default"));
     const auto indexer_gid = static_cast<size_t>(config.groupIdForTag("indexer_kv"));
-    EXPECT_EQ(config.layerIdsForGroup(default_gid), (std::vector<int>{0, 1}));
-    EXPECT_EQ(config.layerIdsForGroup(indexer_gid), (std::vector<int>{0, 1}));
-    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(default_gid), 128u);
-    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(indexer_gid), 128u);
-    EXPECT_EQ(config.kvScaleStrideBytesForGroup(default_gid), 0u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[default_gid].tag), (std::vector<int>{0, 1}));
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[indexer_gid].tag), (std::vector<int>{0, 1}));
+    EXPECT_EQ(config.topology().groups()[default_gid].kernelSeqSizePerBlock(), 128u);
+    EXPECT_EQ(config.topology().groups()[indexer_gid].kernelSeqSizePerBlock(), 128u);
+    EXPECT_EQ(config.topology().groups()[default_gid].kvScaleStrideBytes(), 0u);
     EXPECT_TRUE(config.policyForGroup(default_gid).enable_prefix_reuse);
     EXPECT_TRUE(config.policyForGroup(indexer_gid).enable_prefix_reuse);
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(indexer_gid), 512u * 132u);
-    EXPECT_EQ(config.kvScaleStrideBytesForGroup(indexer_gid), 0u);
-    EXPECT_EQ(config.blockSizeBytesForGroup(indexer_gid), 2u * 512u * 132u);
+    EXPECT_EQ(config.topology().groups()[indexer_gid].kvBlockStrideBytes(), 512u * 132u);
+    EXPECT_EQ(config.topology().groups()[indexer_gid].kvScaleStrideBytes(), 0u);
+    EXPECT_EQ(config.blockSizeBytesForGroup(config.topology().groups()[indexer_gid].tag), 2u * 512u * 132u);
 }
 
 static GroupBase makeTestGroup(const KVCacheSpecPtr& spec, CacheGroupType type, std::vector<int> layer_ids) {
@@ -469,9 +471,11 @@ TEST(CacheConfigTest, GroupIdentityQueriesPreserveGeometryAcrossTopologyOrders) 
         EXPECT_EQ(config.layerIdsForGroup("full"), (std::vector<int>{1, 2}));
         EXPECT_EQ(config.layerIdsForGroup("swa"), (std::vector<int>{0, 1}));
         EXPECT_EQ(config.blockSizeBytesForGroup("full"),
-                  config.blockSizeBytesForGroup(static_cast<size_t>(config.groupIdForTag("full"))));
+                  config.blockSizeBytesForGroup(
+                      config.topology().groups()[static_cast<size_t>(config.groupIdForTag("full"))].tag));
         EXPECT_EQ(config.blockSizeBytesForGroup("swa"),
-                  config.blockSizeBytesForGroup(static_cast<size_t>(config.groupIdForTag("swa"))));
+                  config.blockSizeBytesForGroup(
+                      config.topology().groups()[static_cast<size_t>(config.groupIdForTag("swa"))].tag));
         EXPECT_ANY_THROW(config.layerIdsForGroup("missing"));
         EXPECT_ANY_THROW(config.blockSizeBytesForGroup("missing"));
     }
@@ -495,7 +499,7 @@ TEST(CacheConfigTest, SetTopologyInstallsTagAndGroupTopology) {
     EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"swa", "csa"}));
     EXPECT_EQ(config.groupForLayer(1, "swa").tag, "swa");
     EXPECT_EQ(config.groupForLayer(1, "csa").tag, "csa");
-    EXPECT_THROW((void)config.groupIdFor(1), std::exception);
+    EXPECT_THROW((void)config.soleGroupForLayer(1), std::exception);
     EXPECT_EQ(config.topology().layer(1).group_tags, std::vector<std::string>({"swa", "csa"}));
 }
 
@@ -545,8 +549,8 @@ TEST(CacheConfigTest, TopologyRemainsTheSingleSourceAcrossSupportedUpdates) {
     EXPECT_NE(finalized_topology.get(), layout_topology.get());
     EXPECT_EQ(config.group("full").block_num, 23u);
     EXPECT_EQ(config.group("linear").block_num, 23u);
-    EXPECT_EQ(config.blockNumForGroup(0), config.group("full").block_num);
-    EXPECT_EQ(config.blockNumForGroup(1), config.group("linear").block_num);
+    EXPECT_EQ(config.topology().groups()[0].block_num, config.group("full").block_num);
+    EXPECT_EQ(config.topology().groups()[1].block_num, config.group("linear").block_num);
     EXPECT_EQ(layout_topology->group("full").block_num, 17u);
     EXPECT_EQ(layout_topology->group("linear").block_num, 9u);
 }
@@ -677,8 +681,8 @@ TEST(CacheConfigCreatorTest, Dsv4GroupPoliciesMatchLegacyBehavior) {
 }
 
 TEST(CacheConfigCreatorTest, SlidingWindowPolicyPropagatesAndSurvivesAggregation) {
-    ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createWarmupConfig(makeFlashModelConfig(), pc, 0);
+    ParallelismConfig             pc;
+    auto                          config = CacheConfigCreator::createWarmupConfig(makeFlashModelConfig(), pc, 0);
     std::vector<CacheGroupPolicy> policies;
     for (const auto& group : config.topology().groups()) {
         policies.push_back(group.policy);
@@ -729,26 +733,26 @@ TEST(CacheConfigCreatorTest, ProPoolSpecs) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createWarmupConfig(makeProModelConfig(), pc, 0);
 
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_kv")).size(), 30u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_kv")].tag).size(), 30u);
     EXPECT_EQ(config.specForGroup(gidForTag(config, "csa_kv"))->block_size_bytes(), 32u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.typeForGroup(gidForTag(config, "csa_kv")), CacheGroupType::FULL);
 
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "hca_kv")).size(), 31u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "hca_kv")].tag).size(), 31u);
     EXPECT_EQ(config.specForGroup(gidForTag(config, "hca_kv"))->block_size_bytes(), 1u * kDsv4KvEntryBytes);
 
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "indexer_kv")).size(), 30u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "indexer_kv")].tag).size(), 30u);
     EXPECT_EQ(config.specForGroup(gidForTag(config, "indexer_kv"))->block_size_bytes(), 32u * kDsv4IndexerEntryBytes);
 
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "indexer_state")).size(), 30u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "indexer_state")].tag).size(), 30u);
     EXPECT_EQ(config.specForGroup(gidForTag(config, "indexer_state"))->block_size_bytes(), 8u * 512u * 4u);
 
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_state")).size(), 30u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_state")].tag).size(), 30u);
     EXPECT_EQ(config.specForGroup(gidForTag(config, "csa_state"))->block_size_bytes(), 8u * 2048u * 4u);
 
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "hca_state")).size(), 31u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "hca_state")].tag).size(), 31u);
     EXPECT_EQ(config.specForGroup(gidForTag(config, "hca_state"))->block_size_bytes(), 128u * 1024u * 4u);
 
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "swa_kv")).size(), 61u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "swa_kv")].tag).size(), 61u);
     EXPECT_EQ(config.specForGroup(gidForTag(config, "swa_kv"))->block_size_bytes(),
               kDsv4TokensPerBlock * kDsv4KvEntryBytes);
 }
@@ -756,9 +760,9 @@ TEST(CacheConfigCreatorTest, ProPoolSpecs) {
 TEST(CacheConfigCreatorTest, FlashPoolSpecs) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createWarmupConfig(makeFlashModelConfig(), pc, 0);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_kv")).size(), 21u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "hca_kv")).size(), 20u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "swa_kv")).size(), 43u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_kv")].tag).size(), 21u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "hca_kv")].tag).size(), 20u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "swa_kv")].tag).size(), 43u);
 }
 
 // ============================================================
@@ -792,11 +796,11 @@ TEST(CacheConfigCreatorTest, Fp8BlockSizeBytesUsePaddedPhysicalStride) {
     EXPECT_EQ(config.specForGroup(gidForTag(config, "indexer_kv"))->block_size_bytes(), 32u * 132u);
     EXPECT_EQ(config.specForGroup(gidForTag(config, "swa_kv"))->block_size_bytes(), 74880u);
 
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "csa_kv")),
+    EXPECT_EQ(config.topology().groups()[gidForTag(config, "csa_kv")].kvBlockStrideBytes(),
               config.specForGroup(gidForTag(config, "csa_kv"))->block_size_bytes());
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "hca_kv")),
+    EXPECT_EQ(config.topology().groups()[gidForTag(config, "hca_kv")].kvBlockStrideBytes(),
               config.specForGroup(gidForTag(config, "hca_kv"))->block_size_bytes());
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "swa_kv")),
+    EXPECT_EQ(config.topology().groups()[gidForTag(config, "swa_kv")].kvBlockStrideBytes(),
               config.specForGroup(gidForTag(config, "swa_kv"))->block_size_bytes());
 }
 
@@ -808,8 +812,8 @@ TEST(CacheConfigCreatorTest, BasicConfigUsesModelDefaultPhysicalAndKernelBlockSi
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
 
     EXPECT_EQ(config.seq_size_per_block, kDsv4TokensPerBlock);
-    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(gidForTag(config, "csa_kv")), 128u);
-    EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(gidForTag(config, "csa_kv")), 1u);
+    EXPECT_EQ(config.topology().groups()[gidForTag(config, "csa_kv")].kernelSeqSizePerBlock(), 128u);
+    EXPECT_EQ(config.topology().groups()[gidForTag(config, "csa_kv")].kernelBlocksPerKvBlock(), 1u);
 
     const auto* csa_kv =
         dynamic_cast<const CompressedKVCacheSpec*>(config.specForGroup(gidForTag(config, "csa_kv")).get());
@@ -828,17 +832,17 @@ TEST(CacheConfigCreatorTest, BasicConfigUsesModelDefaultPhysicalAndKernelBlockSi
     EXPECT_EQ(idx_kv->block_size() / kDsv4IndexerEntryBytes, 32u);
     EXPECT_EQ(opaqueEntriesPerBlock(*swa_kv, kDsv4KvEntryBytes), 128u);
 
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "csa_kv")),
+    EXPECT_EQ(config.topology().groups()[gidForTag(config, "csa_kv")].kvBlockStrideBytes(),
               config.specForGroup(gidForTag(config, "csa_kv"))->block_size_bytes());
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "hca_kv")),
+    EXPECT_EQ(config.topology().groups()[gidForTag(config, "hca_kv")].kvBlockStrideBytes(),
               config.specForGroup(gidForTag(config, "hca_kv"))->block_size_bytes());
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "indexer_kv")),
+    EXPECT_EQ(config.topology().groups()[gidForTag(config, "indexer_kv")].kvBlockStrideBytes(),
               config.specForGroup(gidForTag(config, "indexer_kv"))->block_size_bytes());
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "swa_kv")),
+    EXPECT_EQ(config.topology().groups()[gidForTag(config, "swa_kv")].kvBlockStrideBytes(),
               config.specForGroup(gidForTag(config, "swa_kv"))->block_size_bytes());
 
-    auto full_pool = DeviceBlockPoolConfigHelper::createConfigForGroup(config, gidForTag(config, "csa_kv"));
-    auto swa_pool  = DeviceBlockPoolConfigHelper::createConfigForGroup(config, gidForTag(config, "swa_kv"));
+    auto full_pool = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("csa_kv"));
+    auto swa_pool  = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("swa_kv"));
     ASSERT_EQ(full_pool.memory_layouts.size(), 1u);
     ASSERT_EQ(swa_pool.memory_layouts.size(), 1u);
     EXPECT_EQ(full_pool.memory_layouts[0].kernel_blocks_per_kv_block, 1u);
@@ -861,8 +865,8 @@ TEST(CacheConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGroupBpk)
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), static_cast<size_t>(kDsv4PoolNum));
     EXPECT_EQ(config.seq_size_per_block, 16384u);
-    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(gidForTag(config, "csa_kv")), 128u);
-    EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(gidForTag(config, "csa_kv")), 128u);
+    EXPECT_EQ(config.topology().groups()[gidForTag(config, "csa_kv")].kernelSeqSizePerBlock(), 128u);
+    EXPECT_EQ(config.topology().groups()[gidForTag(config, "csa_kv")].kernelBlocksPerKvBlock(), 128u);
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         EXPECT_EQ(config.seqSizePerBlockForGroup(gid), 16384u) << "tag=" << config.tagForGroup(gid);
     }
@@ -885,15 +889,15 @@ TEST(CacheConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGroupBpk)
     EXPECT_EQ(opaqueEntriesPerBlock(*idx_kv, kDsv4IndexerEntryBytes), 32u * 128u);
     EXPECT_EQ(opaqueEntriesPerBlock(*swa_kv, kDsv4KvEntryBytes), 128u);
 
-    EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(csa_kv_gid), 128u);
-    EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(swa_kv_gid), 1u);
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(csa_kv_gid), csa_kv->block_size_bytes());
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(hca_kv_gid), hca_kv->block_size_bytes());
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(idx_kv_gid), idx_kv->block_size_bytes());
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(swa_kv_gid), swa_kv->block_size_bytes());
+    EXPECT_EQ(config.topology().groups()[csa_kv_gid].kernelBlocksPerKvBlock(), 128u);
+    EXPECT_EQ(config.topology().groups()[swa_kv_gid].kernelBlocksPerKvBlock(), 1u);
+    EXPECT_EQ(config.topology().groups()[csa_kv_gid].kvBlockStrideBytes(), csa_kv->block_size_bytes());
+    EXPECT_EQ(config.topology().groups()[hca_kv_gid].kvBlockStrideBytes(), hca_kv->block_size_bytes());
+    EXPECT_EQ(config.topology().groups()[idx_kv_gid].kvBlockStrideBytes(), idx_kv->block_size_bytes());
+    EXPECT_EQ(config.topology().groups()[swa_kv_gid].kvBlockStrideBytes(), swa_kv->block_size_bytes());
 
-    auto full_pool_bpk = DeviceBlockPoolConfigHelper::createConfigForGroup(config, csa_kv_gid);
-    auto swa_pool_bpk  = DeviceBlockPoolConfigHelper::createConfigForGroup(config, swa_kv_gid);
+    auto full_pool_bpk = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.topology().groups()[csa_kv_gid]);
+    auto swa_pool_bpk  = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.topology().groups()[swa_kv_gid]);
     ASSERT_EQ(full_pool_bpk.memory_layouts.size(), 1u);
     ASSERT_EQ(swa_pool_bpk.memory_layouts.size(), 1u);
     EXPECT_EQ(full_pool_bpk.memory_layouts[0].kernel_blocks_per_kv_block, 128u);
@@ -925,7 +929,7 @@ TEST(CacheConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlocks) {
     EXPECT_EQ(config.specForGroup(gidForTag(config, "swa_kv"))->block_size_bytes(), 18720u);
     for (const auto& tag : {"indexer_state", "csa_state", "hca_state", "swa_kv"}) {
         const auto gid = gidForTag(config, tag);
-        EXPECT_EQ(config.kvBlockStrideBytesForGroup(gid), config.specForGroup(gid)->block_size_bytes());
+        EXPECT_EQ(config.topology().groups()[gid].kvBlockStrideBytes(), config.specForGroup(gid)->block_size_bytes());
     }
 
     pc.role_type       = RoleType::DECODE;
@@ -998,8 +1002,8 @@ TEST(CacheConfigCreatorTest, FlashCacheConfig) {
 
     EXPECT_EQ(config.groupNums(), 7);
     EXPECT_EQ(config.layer_num, 43u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "swa_kv")).size(), 43u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_kv")).size(), 21u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "swa_kv")].tag).size(), 43u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_kv")].tag).size(), 21u);
 }
 
 TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolConfig) {
@@ -1008,7 +1012,8 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolConfig)
 
     EXPECT_GT(config.groupNums(), 1);
     for (const auto& group : config.topology().groups()) {
-        const auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.groupIdForTag(group.tag));
+        const auto pool_config =
+            DeviceBlockPoolConfigHelper::createConfigForGroup(config, group);
         ASSERT_FALSE(pool_config.memory_layouts.empty());
         for (const auto& layout : pool_config.memory_layouts) {
             EXPECT_FALSE(layout.enable_hybrid_attention);
@@ -1028,13 +1033,14 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolConfig)
     const auto linear_gid = gidForTag(config, "linear");
     const auto full_gid   = gidForTag(config, "full");
     EXPECT_EQ(config.totalGroupBlockSizeBytes(),
-              config.blockSizeBytesForGroup(linear_gid) + config.blockSizeBytesForGroup(full_gid));
+              config.blockSizeBytesForGroup(config.topology().groups()[linear_gid].tag)
+                  + config.blockSizeBytesForGroup(config.topology().groups()[full_gid].tag));
 
     RuntimeConfig runtime_config;
     config.linear_step = 4;
     config.finalizeBlockNums(/*global_block_num=*/37, runtime_config);
-    EXPECT_EQ(config.blockNumForGroup(linear_gid), 37u);
-    EXPECT_EQ(config.blockNumForGroup(full_gid), 37u);
+    EXPECT_EQ(config.topology().groups()[linear_gid].block_num, 37u);
+    EXPECT_EQ(config.topology().groups()[full_gid].block_num, 37u);
 }
 
 TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolSplitsFullAndSwaSpecs) {
@@ -1055,12 +1061,12 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolSplitsFullAndSwaSpecs
     EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"full", "swa", "linear"}));
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 3u);
     EXPECT_NE(config.specForGroup(0).get(), config.specForGroup(1).get());
-    EXPECT_EQ(config.layerIdsForGroup(0), std::vector<int>({0}));
-    EXPECT_EQ(config.layerIdsForGroup(1), std::vector<int>({1, 3}));
-    EXPECT_EQ(config.layerIdsForGroup(2), std::vector<int>({2}));
-    EXPECT_EQ(config.layerIdsForGroup(0).size(), 1u);
-    EXPECT_EQ(config.layerIdsForGroup(1).size(), 2u);
-    EXPECT_EQ(config.layerIdsForGroup(2).size(), 1u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[0].tag), std::vector<int>({0}));
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[1].tag), std::vector<int>({1, 3}));
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[2].tag), std::vector<int>({2}));
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[0].tag).size(), 1u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[1].tag).size(), 2u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[2].tag).size(), 1u);
     EXPECT_EQ(config.groupForLayer(1, "swa").tag, "swa");
     EXPECT_EQ(config.groupForLayer(2, "linear").tag, "linear");
 
@@ -1068,15 +1074,16 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolSplitsFullAndSwaSpecs
     const auto swa_gid    = gidForTag(config, "swa");
     const auto linear_gid = gidForTag(config, "linear");
     EXPECT_EQ(config.totalGroupBlockSizeBytes(),
-              config.blockSizeBytesForGroup(full_gid) + config.blockSizeBytesForGroup(swa_gid)
-                  + config.blockSizeBytesForGroup(linear_gid));
+              config.blockSizeBytesForGroup(config.topology().groups()[full_gid].tag)
+                  + config.blockSizeBytesForGroup(config.topology().groups()[swa_gid].tag)
+                  + config.blockSizeBytesForGroup(config.topology().groups()[linear_gid].tag));
 
     RuntimeConfig runtime_config;
     config.linear_step = 3;
     config.finalizeBlockNums(/*global_block_num=*/10, runtime_config);
-    EXPECT_EQ(config.blockNumForGroup(full_gid), 10u);
-    EXPECT_EQ(config.blockNumForGroup(linear_gid), 10u);
-    EXPECT_EQ(config.blockNumForGroup(swa_gid), 4u);
+    EXPECT_EQ(config.topology().groups()[full_gid].block_num, 10u);
+    EXPECT_EQ(config.topology().groups()[linear_gid].block_num, 10u);
+    EXPECT_EQ(config.topology().groups()[swa_gid].block_num, 4u);
 }
 
 TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolBackingFitsBudgetExactly) {
@@ -1100,11 +1107,11 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolBackingFitsBudgetExac
     size_t swa_bytes   = 0;
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         if (config.typeForGroup(gid) == CacheGroupType::SWA) {
-            swa_bytes += config.blockSizeBytesForGroup(gid);
-            EXPECT_EQ(config.blockNumForGroup(gid), (static_cast<uint32_t>(config.block_num) + 3u) / 4u);
+            swa_bytes += config.blockSizeBytesForGroup(config.topology().groups()[gid].tag);
+            EXPECT_EQ(config.topology().groups()[gid].block_num, (static_cast<uint32_t>(config.block_num) + 3u) / 4u);
         } else {
-            paged_bytes += config.blockSizeBytesForGroup(gid);
-            EXPECT_EQ(config.blockNumForGroup(gid), static_cast<uint32_t>(config.block_num));
+            paged_bytes += config.blockSizeBytesForGroup(config.topology().groups()[gid].tag);
+            EXPECT_EQ(config.topology().groups()[gid].block_num, static_cast<uint32_t>(config.block_num));
         }
     }
 
@@ -1196,8 +1203,10 @@ TEST(CacheConfigCreatorTest, OpaqueDescriptorsAcceptOptionalNonLinearAttentionMe
     const auto with_metadata = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     EXPECT_EQ(publishedGroupTags(with_metadata.topology()), publishedGroupTags(without_metadata.topology()));
     for (size_t gid = 0; gid < static_cast<size_t>(with_metadata.groupNums()); ++gid) {
-        EXPECT_EQ(with_metadata.blockSizeBytesForGroup(gid), without_metadata.blockSizeBytesForGroup(gid));
-        EXPECT_EQ(with_metadata.layerIdsForGroup(gid), without_metadata.layerIdsForGroup(gid));
+        EXPECT_EQ(with_metadata.blockSizeBytesForGroup(with_metadata.topology().groups()[gid].tag),
+                  without_metadata.blockSizeBytesForGroup(without_metadata.topology().groups()[gid].tag));
+        EXPECT_EQ(with_metadata.layerIdsForGroup(with_metadata.topology().groups()[gid].tag),
+                  without_metadata.layerIdsForGroup(without_metadata.topology().groups()[gid].tag));
     }
     mc.hybrid_attention_config.hybrid_attention_types.pop_back();
     EXPECT_THROW((void)CacheConfigCreator::createWarmupConfig(mc, pc, 0), std::exception);
@@ -1423,7 +1432,7 @@ TEST(CacheConfigCreatorTest, DSV4StateSwaPoolsFollowGlobalBlocks) {
 
     ASSERT_EQ(config.topology().groups().size(), static_cast<size_t>(kDsv4PoolNum));
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(config.blockNumForGroup(gid), 100u) << "gid=" << gid;
+        EXPECT_EQ(config.topology().groups()[gid].block_num, 100u) << "gid=" << gid;
     }
     EXPECT_EQ(test::explicitPoolReserveBytes(config), 0u);
 }
@@ -1445,10 +1454,10 @@ TEST(CacheConfigCreatorTest, DSV4HcaStatePoolBlocksOverridesOnlyHcaState) {
     const auto hca_state_gid = gidForTag(config, "hca_state");
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         const uint32_t expected = gid == hca_state_gid ? 350u : 100u;
-        EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
+        EXPECT_EQ(config.topology().groups()[gid].block_num, expected) << "gid=" << gid;
     }
 
-    const size_t expected_reserve = 350u * config.blockSizeBytesForGroup(hca_state_gid);
+    const size_t expected_reserve = 350u * config.blockSizeBytesForGroup(config.topology().groups()[hca_state_gid].tag);
     EXPECT_EQ(test::explicitPoolReserveBytes(config), expected_reserve);
     ASSERT_EQ(config.topology().groups().size(), static_cast<size_t>(kDsv4PoolNum));
     EXPECT_EQ(config.policyForGroup(hca_state_gid).explicit_block_num, 350u);
@@ -1479,14 +1488,14 @@ TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigAllowsDecoupledPhysicalAndKerne
 
     auto old_valid = create_config(128, 128);
     EXPECT_EQ(old_valid.seq_size_per_block, 128u);
-    EXPECT_EQ(old_valid.kernelSeqSizePerBlockForGroup(gidForTag(old_valid, "csa_kv")), 128u);
-    EXPECT_EQ(old_valid.kernelBlocksPerKvBlockForGroup(gidForTag(old_valid, "csa_kv")), 1u);
+    EXPECT_EQ(old_valid.topology().groups()[gidForTag(old_valid, "csa_kv")].kernelSeqSizePerBlock(), 128u);
+    EXPECT_EQ(old_valid.topology().groups()[gidForTag(old_valid, "csa_kv")].kernelBlocksPerKvBlock(), 1u);
     EXPECT_EQ(old_valid.topology().group("indexer_kv").kernelSeqSizePerBlock(), 128u);
 
     auto decoupled = create_config(16384, 128);
     EXPECT_EQ(decoupled.seq_size_per_block, 16384u);
-    EXPECT_EQ(decoupled.kernelSeqSizePerBlockForGroup(gidForTag(decoupled, "csa_kv")), 128u);
-    EXPECT_EQ(decoupled.kernelBlocksPerKvBlockForGroup(gidForTag(decoupled, "csa_kv")), 128u);
+    EXPECT_EQ(decoupled.topology().groups()[gidForTag(decoupled, "csa_kv")].kernelSeqSizePerBlock(), 128u);
+    EXPECT_EQ(decoupled.topology().groups()[gidForTag(decoupled, "csa_kv")].kernelBlocksPerKvBlock(), 128u);
 }
 
 // Absorbs DEV's CacheConfigTest.DSV4KernelSeqSizeRejectsInvalidPhysicalKernelShape.  DEV enforced
@@ -1542,7 +1551,7 @@ TEST(CacheConfigCreatorTest, DSV4HcaStatePoolBlocksIndependentOfMaxConcurrency) 
         const auto hca_state_gid = gidForTag(config, "hca_state");
         for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
             const uint32_t expected = static_cast<size_t>(gid) == hca_state_gid ? 256u : 100u;
-            EXPECT_EQ(config.blockNumForGroup(gid), expected)
+            EXPECT_EQ(config.topology().groups()[gid].block_num, expected)
                 << "gid=" << gid << " max_concurrency=" << max_concurrency;
         }
     }
@@ -1575,12 +1584,13 @@ TEST(CacheConfigCreatorTest, DSV4FixedPoolBlocksIndependentOfMaxConcurrency) {
         for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
             const bool     is_fixed = config.typeForGroup(static_cast<size_t>(gid)) == CacheGroupType::SWA;
             const uint32_t expected = is_fixed ? kFixedPoolBlocks : 100u;
-            EXPECT_EQ(config.blockNumForGroup(gid), expected)
+            EXPECT_EQ(config.topology().groups()[gid].block_num, expected)
                 << "gid=" << gid << " tag=" << config.tagForGroup(static_cast<size_t>(gid))
                 << " max_concurrency=" << max_concurrency;
             if (is_fixed) {
                 expected_reserve +=
-                    static_cast<size_t>(kFixedPoolBlocks) * config.blockSizeBytesForGroup(static_cast<size_t>(gid));
+                    static_cast<size_t>(kFixedPoolBlocks)
+                    * config.blockSizeBytesForGroup(config.topology().groups()[static_cast<size_t>(gid)].tag);
             }
         }
         // DEV also pinned down that every explicitly-sized pool contributes to the paged-budget
@@ -1607,7 +1617,7 @@ TEST(CacheConfigCreatorTest, DSV4HcaStatePoolBlocksCanBeOverriddenByConfig) {
     const auto hca_state_gid = gidForTag(config, "hca_state");
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
         const uint32_t expected = static_cast<size_t>(gid) == hca_state_gid ? 6u : 100u;
-        EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
+        EXPECT_EQ(config.topology().groups()[gid].block_num, expected) << "gid=" << gid;
     }
 }
 
@@ -1623,15 +1633,15 @@ TEST(CacheConfigTest, ModelSpecCloneKeepsExistingConfigStable) {
     pc_tp1.tp_size  = 1;
     auto config_tp1 = CacheConfigCreator::createWarmupConfig(model_config, pc_tp1, 0);
     ASSERT_EQ(static_cast<size_t>(config_tp1.groupNums()), 1u);
-    EXPECT_EQ(config_tp1.localKvHeadNumForGroup(0), 4);
+    EXPECT_EQ(config_tp1.topology().groups()[0].localKvHeadNum(), 4);
 
     ParallelismConfig pc_tp2;
     pc_tp2.tp_size  = 2;
     auto config_tp2 = CacheConfigCreator::createWarmupConfig(model_config, pc_tp2, 0);
     ASSERT_EQ(static_cast<size_t>(config_tp2.groupNums()), 1u);
-    EXPECT_EQ(config_tp2.localKvHeadNumForGroup(0), 2);
+    EXPECT_EQ(config_tp2.topology().groups()[0].localKvHeadNum(), 2);
 
-    EXPECT_EQ(config_tp1.localKvHeadNumForGroup(0), 4);
+    EXPECT_EQ(config_tp1.topology().groups()[0].localKvHeadNum(), 4);
     EXPECT_NE(config_tp1.specForGroup(0).get(), config_tp2.specForGroup(0).get());
 }
 
@@ -1672,15 +1682,15 @@ TEST(CacheConfigCreatorTest, UnresolvedModelGeometryUsesRawCacheOptions) {
     options.seq_size_per_block = 64;  // tokens/cache-key block
     const auto fallback        = CacheConfigCreator::createWarmupConfig(model, ParallelismConfig{}, options, 0);
     EXPECT_EQ(fallback.seq_size_per_block, 64u);
-    EXPECT_EQ(fallback.seqSizePerBlockForGroup(0), 64u);        // tokens/group physical block
-    EXPECT_EQ(fallback.kernelSeqSizePerBlockForGroup(0), 64u);  // tokens/kernel page
+    EXPECT_EQ(fallback.seqSizePerBlockForGroup(0), 64u);                      // tokens/group physical block
+    EXPECT_EQ(fallback.topology().groups()[0].kernelSeqSizePerBlock(), 64u);  // tokens/kernel page
 
     options.seq_size_per_block        = 64;
     options.kernel_seq_size_per_block = 16;
     const auto config                 = CacheConfigCreator::createWarmupConfig(model, ParallelismConfig{}, options, 0);
     EXPECT_EQ(config.seq_size_per_block, 64u);
     EXPECT_EQ(config.seqSizePerBlockForGroup(0), 64u);
-    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(0), 16u);
+    EXPECT_EQ(config.topology().groups()[0].kernelSeqSizePerBlock(), 16u);
 
     options.kernel_seq_size_per_block = 128;  // tokens/kernel page: exceeds the physical block
     EXPECT_ANY_THROW(CacheConfigCreator::createWarmupConfig(model, ParallelismConfig{}, options, 0));
@@ -1703,7 +1713,7 @@ TEST(CacheConfigCreatorTest, ModelGeometryUsesUint32Range) {
         const auto config = CacheConfigCreator::createWarmupConfig(model, ParallelismConfig{}, options, 0);
         EXPECT_EQ(config.seq_size_per_block, max_span);
         EXPECT_EQ(config.seqSizePerBlockForGroup(0), max_span);
-        EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(0), kernel_span == 0 ? max_span : kernel_span);
+        EXPECT_EQ(config.topology().groups()[0].kernelSeqSizePerBlock(), kernel_span == 0 ? max_span : kernel_span);
     }
 
     const auto overflow_span                  = static_cast<size_t>(max_span) + 1;
@@ -1736,11 +1746,11 @@ TEST(CacheConfigTest, RuntimeKernelBlockOverrideUpdatesTopology) {
 
     ASSERT_EQ(config.groupNums(), 1);
     EXPECT_EQ(config.seq_size_per_block, 512u);
-    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(0), 64u);
+    EXPECT_EQ(config.topology().groups()[0].kernelSeqSizePerBlock(), 64u);
     EXPECT_EQ(config.seqSizePerBlockForGroup(0), 512u);
-    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(0), 64u);
-    EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(0), 8u);
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(0), 512u * (512u + 64u) * sizeof(at::BFloat16));
+    EXPECT_EQ(config.topology().groups()[0].kernelSeqSizePerBlock(), 64u);
+    EXPECT_EQ(config.topology().groups()[0].kernelBlocksPerKvBlock(), 8u);
+    EXPECT_EQ(config.topology().groups()[0].kvBlockStrideBytes(), 512u * (512u + 64u) * sizeof(at::BFloat16));
 }
 
 TEST(CacheConfigCreatorTest, MhaPhysicalDataAndScaleStridesAreNotExpandedTwice) {
@@ -1755,9 +1765,9 @@ TEST(CacheConfigCreatorTest, MhaPhysicalDataAndScaleStridesAreNotExpandedTwice) 
     KVCacheConfig options;
     options.kernel_seq_size_per_block = 8;
     const auto config                 = CacheConfigCreator::createWarmupConfig(model, ParallelismConfig{}, options, 0);
-    EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(0), 4u);
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(0), 2u * 2u * 16u * 32u);
-    EXPECT_EQ(config.kvScaleStrideBytesForGroup(0), 2u * 2u * 32u * sizeof(float));
+    EXPECT_EQ(config.topology().groups()[0].kernelBlocksPerKvBlock(), 4u);
+    EXPECT_EQ(config.topology().groups()[0].kvBlockStrideBytes(), 2u * 2u * 16u * 32u);
+    EXPECT_EQ(config.topology().groups()[0].kvScaleStrideBytes(), 2u * 2u * 32u * sizeof(float));
 }
 
 TEST(CacheConfigTest, SpecBuilderDerivesAttentionSpecsFromContext) {
@@ -1985,9 +1995,10 @@ TEST(CacheConfigTest, FinalizeBlockNumsAppliesToIndependentPools) {
     const auto hca_state_gid = gidForTag(config, "hca_state");
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
         const uint32_t expected = static_cast<size_t>(gid) == hca_state_gid ? 256u : 100u;
-        EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
+        EXPECT_EQ(config.topology().groups()[gid].block_num, expected) << "gid=" << gid;
     }
-    EXPECT_EQ(test::explicitPoolReserveBytes(config), 256u * config.blockSizeBytesForGroup(hca_state_gid));
+    EXPECT_EQ(test::explicitPoolReserveBytes(config),
+              256u * config.blockSizeBytesForGroup(config.topology().groups()[hca_state_gid].tag));
 }
 
 TEST(CacheConfigTest, HcaStateReserveDeductedFromPagedBudget) {
@@ -2016,14 +2027,16 @@ TEST(CacheConfigTest, HcaStateReserveDeductedFromPagedBudget) {
 
     // More HCA_STATE blocks reserve more HBM and leave fewer blocks for the global pools.
     EXPECT_GT(config_with.block_num, config_without.block_num);
-    EXPECT_EQ(config_with.blockNumForGroup(gidForTag(config_with, "hca_kv")),
+    EXPECT_EQ(config_with.topology().groups()[gidForTag(config_with, "hca_kv")].block_num,
               static_cast<uint32_t>(config_with.block_num));
-    EXPECT_EQ(config_without.blockNumForGroup(gidForTag(config_without, "hca_kv")),
+    EXPECT_EQ(config_without.topology().groups()[gidForTag(config_without, "hca_kv")].block_num,
               static_cast<uint32_t>(config_without.block_num));
-    EXPECT_EQ(config_with.blockNumForGroup(gidForTag(config_with, "hca_state")), small_hca_state_pool);
-    EXPECT_EQ(config_without.blockNumForGroup(gidForTag(config_without, "hca_state")), large_hca_state_pool);
-    const size_t expected_reserve = static_cast<size_t>(small_hca_state_pool)
-                                    * config_with.blockSizeBytesForGroup(gidForTag(config_with, "hca_state"));
+    EXPECT_EQ(config_with.topology().groups()[gidForTag(config_with, "hca_state")].block_num, small_hca_state_pool);
+    EXPECT_EQ(config_without.topology().groups()[gidForTag(config_without, "hca_state")].block_num,
+              large_hca_state_pool);
+    const size_t expected_reserve =
+        static_cast<size_t>(small_hca_state_pool)
+        * config_with.blockSizeBytesForGroup(config_with.topology().groups()[gidForTag(config_with, "hca_state")].tag);
     EXPECT_EQ(test::explicitPoolReserveBytes(config_with), expected_reserve);
 }
 
@@ -2043,9 +2056,9 @@ TEST(CacheConfigTest, DSV4ExplicitHcaStatePoolBlocksIgnoreLinearStep) {
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         const uint32_t expected =
             gid == hca_state_gid ? 256u : (config.typeForGroup(gid) == CacheGroupType::SWA ? 25u : 100u);
-        EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
+        EXPECT_EQ(config.topology().groups()[gid].block_num, expected) << "gid=" << gid;
     }
-    const size_t expected_reserve = 256u * config.blockSizeBytesForGroup(hca_state_gid);
+    const size_t expected_reserve = 256u * config.blockSizeBytesForGroup(config.topology().groups()[hca_state_gid].tag);
     EXPECT_EQ(test::explicitPoolReserveBytes(config), expected_reserve);
 }
 
@@ -2067,7 +2080,7 @@ TEST(CacheConfigTest, DSV4StateSwaPoolsWithoutExplicitBlocksScaleWithLinearStep)
     ASSERT_EQ(config.topology().groups().size(), static_cast<size_t>(kDsv4PoolNum));
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
         const uint32_t expected = config.typeForGroup(gid) == CacheGroupType::SWA ? 25u : 100u;
-        EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
+        EXPECT_EQ(config.topology().groups()[gid].block_num, expected) << "gid=" << gid;
     }
     EXPECT_EQ(test::explicitPoolReserveBytes(config), 0u);
 }
@@ -2118,11 +2131,13 @@ TEST(CacheConfigTest, DSV4PinnedFixedPoolFallbackIsExcludedFromGpuBudget) {
         if (pinned_fixed.typeForGroup(static_cast<size_t>(gid)) != CacheGroupType::SWA) {
             continue;
         }
-        EXPECT_EQ(pinned_fixed.blockNumForGroup(static_cast<size_t>(gid)), kFixedPoolBlocks) << "tag=" << tag;
+        EXPECT_EQ(pinned_fixed.topology().groups()[static_cast<size_t>(gid)].block_num, kFixedPoolBlocks)
+            << "tag=" << tag;
         EXPECT_EQ(pinned_fixed.policyForGroup(static_cast<size_t>(gid)).memory_placement,
                   CacheMemoryPlacement::HOST_PINNED)
             << "tag=" << tag;
-        EXPECT_EQ(gpu_fixed.blockNumForGroup(gidForTag(gpu_fixed, tag)), kFixedPoolBlocks) << "tag=" << tag;
+        EXPECT_EQ(gpu_fixed.topology().groups()[gidForTag(gpu_fixed, tag)].block_num, kFixedPoolBlocks)
+            << "tag=" << tag;
     }
 }
 
@@ -2168,9 +2183,10 @@ TEST(CacheConfigTest, DSV4PinnedFixedPoolFallbackFollowsExpandedFullPoolWhenStep
     ASSERT_EQ(gpu_fixed.topology().groups().size(), static_cast<size_t>(kDsv4PoolNum));
     ASSERT_EQ(pinned_fixed.topology().groups().size(), static_cast<size_t>(kDsv4PoolNum));
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(gpu_fixed.blockNumForGroup(static_cast<size_t>(gid)), static_cast<uint32_t>(gpu_fixed.block_num))
+        EXPECT_EQ(gpu_fixed.topology().groups()[static_cast<size_t>(gid)].block_num,
+                  static_cast<uint32_t>(gpu_fixed.block_num))
             << "gid=" << gid << " tag=" << gpu_fixed.tagForGroup(static_cast<size_t>(gid));
-        EXPECT_EQ(pinned_fixed.blockNumForGroup(static_cast<size_t>(gid)),
+        EXPECT_EQ(pinned_fixed.topology().groups()[static_cast<size_t>(gid)].block_num,
                   static_cast<uint32_t>(pinned_fixed.block_num))
             << "gid=" << gid << " tag=" << pinned_fixed.tagForGroup(static_cast<size_t>(gid));
     }
@@ -2224,7 +2240,7 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     EXPECT_EQ(config.topology().layer(44).group_tags, std::vector<std::string>({"swa_kv"}));
     EXPECT_EQ(config.groupForLayer(44, "swa_kv").tag, "swa_kv");
 
-    EXPECT_EQ(config.layerIdsForGroup(swa_gid).size(), 45u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[swa_gid].tag).size(), 45u);
 
     // Merge preserves target publication order and placeholder identities;
     // only layer IDs are draft-local. Runtime block tables carry their own tags.
@@ -2232,31 +2248,39 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     EXPECT_EQ(publishedGroupTags(config.mtp_sub_configs[1]->topology()), publishedGroupTags(config.topology()));
     EXPECT_EQ(config.mtp_sub_configs[0]->groupForLayer(0, "swa_kv").tag, "swa_kv");
     EXPECT_EQ(config.mtp_sub_configs[1]->groupForLayer(0, "swa_kv").tag, "swa_kv");
-    EXPECT_EQ(config.mtp_sub_configs[0]->layerIdsForGroup(swa_gid), std::vector<int>({0}));
-    EXPECT_EQ(config.mtp_sub_configs[1]->layerIdsForGroup(swa_gid), std::vector<int>({0}));
+    EXPECT_EQ(config.mtp_sub_configs[0]->layerIdsForGroup(config.mtp_sub_configs[0]->topology().groups()[swa_gid].tag),
+              std::vector<int>({0}));
+    EXPECT_EQ(config.mtp_sub_configs[1]->layerIdsForGroup(config.mtp_sub_configs[1]->topology().groups()[swa_gid].tag),
+              std::vector<int>({0}));
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         if (gid == swa_gid) {
             continue;
         }
-        EXPECT_TRUE(config.mtp_sub_configs[0]->layerIdsForGroup(gid).empty()) << config.tagForGroup(gid);
-        EXPECT_TRUE(config.mtp_sub_configs[1]->layerIdsForGroup(gid).empty()) << config.tagForGroup(gid);
+        EXPECT_TRUE(config.mtp_sub_configs[0]
+                        ->layerIdsForGroup(config.mtp_sub_configs[0]->topology().groups()[gid].tag)
+                        .empty())
+            << config.tagForGroup(gid);
+        EXPECT_TRUE(config.mtp_sub_configs[1]
+                        ->layerIdsForGroup(config.mtp_sub_configs[1]->topology().groups()[gid].tag)
+                        .empty())
+            << config.tagForGroup(gid);
     }
     EXPECT_EQ(config.seq_size_per_block, 16384u);
     const auto csa_gid = gidForTag(config, "csa_kv");
-    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(csa_gid), 128u);
-    EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(csa_gid), 128u);
-    EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(swa_gid), 1u);
+    EXPECT_EQ(config.topology().groups()[csa_gid].kernelSeqSizePerBlock(), 128u);
+    EXPECT_EQ(config.topology().groups()[csa_gid].kernelBlocksPerKvBlock(), 128u);
+    EXPECT_EQ(config.topology().groups()[swa_gid].kernelBlocksPerKvBlock(), 1u);
     EXPECT_EQ(config.mtp_sub_configs[0]->seq_size_per_block, 16384u);
-    EXPECT_EQ(config.mtp_sub_configs[0]->kernelSeqSizePerBlockForGroup(csa_gid), 128u);
+    EXPECT_EQ(config.mtp_sub_configs[0]->topology().groups()[csa_gid].kernelSeqSizePerBlock(), 128u);
 
-    EXPECT_EQ(config.blockNumForGroup(swa_gid), 25u);
+    EXPECT_EQ(config.topology().groups()[swa_gid].block_num, 25u);
     EXPECT_EQ(config.mtp_sub_configs[0]->linear_step, 4);
     EXPECT_EQ(config.mtp_sub_configs[1]->linear_step, 4);
-    EXPECT_EQ(config.mtp_sub_configs[0]->blockNumForGroup(swa_gid), 25u);
-    EXPECT_EQ(config.mtp_sub_configs[1]->blockNumForGroup(swa_gid), 25u);
+    EXPECT_EQ(config.mtp_sub_configs[0]->topology().groups()[swa_gid].block_num, 25u);
+    EXPECT_EQ(config.mtp_sub_configs[1]->topology().groups()[swa_gid].block_num, 25u);
 
     EXPECT_EQ(test::explicitPoolReserveBytes(config),
-              256u * config.blockSizeBytesForGroup(gidForTag(config, "hca_state")));
+              256u * config.blockSizeBytesForGroup(config.topology().groups()[gidForTag(config, "hca_state")].tag));
 }
 
 TEST(CacheConfigTest, DSV4MtpJointBudgetIncludesScoreAndProposeSwaBacking) {
@@ -2293,16 +2317,17 @@ TEST(CacheConfigTest, DSV4MtpJointBudgetIncludesScoreAndProposeSwaBacking) {
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         const auto explicit_blocks = config.policyForGroup(gid).explicit_block_num;
         if (explicit_blocks > 0) {
-            EXPECT_EQ(config.blockNumForGroup(gid), explicit_blocks) << "gid=" << gid;
+            EXPECT_EQ(config.topology().groups()[gid].block_num, explicit_blocks) << "gid=" << gid;
             continue;
         }
         if (config.typeForGroup(gid) == CacheGroupType::SWA) {
-            swa_bytes += config.blockSizeBytesForGroup(gid);
-            EXPECT_EQ(config.blockNumForGroup(gid), (static_cast<uint32_t>(config.block_num) + 3u) / 4u)
+            swa_bytes += config.blockSizeBytesForGroup(config.topology().groups()[gid].tag);
+            EXPECT_EQ(config.topology().groups()[gid].block_num, (static_cast<uint32_t>(config.block_num) + 3u) / 4u)
                 << "gid=" << gid;
         } else {
-            paged_bytes += config.blockSizeBytesForGroup(gid);
-            EXPECT_EQ(config.blockNumForGroup(gid), static_cast<uint32_t>(config.block_num)) << "gid=" << gid;
+            paged_bytes += config.blockSizeBytesForGroup(config.topology().groups()[gid].tag);
+            EXPECT_EQ(config.topology().groups()[gid].block_num, static_cast<uint32_t>(config.block_num))
+                << "gid=" << gid;
         }
     }
 
@@ -2320,7 +2345,7 @@ TEST(CacheConfigTest, DSV4MtpJointBudgetIncludesScoreAndProposeSwaBacking) {
     for (const auto& sub_config : config.mtp_sub_configs) {
         ASSERT_NE(sub_config, nullptr);
         EXPECT_EQ(sub_config->linear_step, 4);
-        EXPECT_EQ(sub_config->blockNumForGroup(swa_gid), (block_num + 3u) / 4u);
+        EXPECT_EQ(sub_config->topology().groups()[swa_gid].block_num, (block_num + 3u) / 4u);
     }
 }
 
@@ -2527,14 +2552,14 @@ TEST(CacheConfigCreatorTest, BlockIdConsistencyAcrossGroups) {
     }
 
     // Verify group layer ids: each group has the correct layer list.
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_kv")),
-              config.layerIdsForGroup(gidForTag(config, "indexer_kv")));
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_kv")),
-              config.layerIdsForGroup(gidForTag(config, "indexer_state")));
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_kv")),
-              config.layerIdsForGroup(gidForTag(config, "csa_state")));
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "hca_kv")),
-              config.layerIdsForGroup(gidForTag(config, "hca_state")));
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_kv")].tag),
+              config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "indexer_kv")].tag));
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_kv")].tag),
+              config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "indexer_state")].tag));
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_kv")].tag),
+              config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_state")].tag));
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "hca_kv")].tag),
+              config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "hca_state")].tag));
 }
 
 // ============================================================
@@ -2610,7 +2635,7 @@ TEST_F(DSV4AllocatorTest, CompressedBlockCopyIncludesEveryPageAndPadding) {
     config.finalizeBlockNums(4, RuntimeConfig{});
     KVCacheAllocator allocator(config, AllocationType::HOST);
     ASSERT_TRUE(allocator.init());
-    ASSERT_EQ(config.kvBlockStrideBytesForGroup(0), kBlockStrideBytes);
+    ASSERT_EQ(config.topology().groups()[0].kvBlockStrideBytes(), kBlockStrideBytes);
     auto* src  = static_cast<uint8_t*>(allocator.convertIndexToAddr(0, 1).kv_addr);
     auto* dst  = static_cast<uint8_t*>(allocator.convertIndexToAddr(0, 2).kv_addr);
     auto* next = static_cast<uint8_t*>(allocator.convertIndexToAddr(0, 3).kv_addr);
@@ -2689,8 +2714,9 @@ TEST_F(DSV4AllocatorTest, AddressLookupAllGroups) {
     // Group 1 (HCA KV): hca_layer_ids[0]
     // Group 6 (SWA KV): all_layer_ids[0]
     for (int gid = 0; gid < 7; gid++) {
-        ASSERT_FALSE(config.layerIdsForGroup(gid).empty()) << "group " << gid << " has no layers";
-        int  layer_id = config.layerIdsForGroup(gid)[0];
+        ASSERT_FALSE(config.layerIdsForGroup(config.topology().groups()[gid].tag).empty())
+            << "group " << gid << " has no layers";
+        int  layer_id = config.layerIdsForGroup(config.topology().groups()[gid].tag)[0];
         auto addr     = allocator->convertIndexToAddr(layer_id, config.tagForGroup(gid), /*block_id=*/1);
         EXPECT_NE(addr.kv_addr, nullptr) << "null kv_addr for group " << gid << " layer " << layer_id;
     }
@@ -2721,7 +2747,7 @@ TEST_F(DSV4AllocatorTest, ConvertIndexToBufferAllGroups) {
 
     // convertIndexToBuffer should work for layers in each of the 7 groups
     for (int gid = 0; gid < 7; gid++) {
-        int  layer_id = config.layerIdsForGroup(gid)[0];
+        int  layer_id = config.layerIdsForGroup(config.topology().groups()[gid].tag)[0];
         auto buf      = allocator->convertIndexToBuffer(layer_id, config.tagForGroup(gid), /*block_id=*/1);
         ASSERT_FALSE(buf.empty()) << "empty buffer for group " << gid;
         EXPECT_NE(buf[0].addr, nullptr) << "null addr for group " << gid;
@@ -2753,13 +2779,13 @@ TEST_F(DSV4AllocatorTest, MallocAndFreeBlocks) {
 TEST_F(DSV4AllocatorTest, SevenGroupLayerMapping) {
     auto config = makeDSV4AllocatorConfig();
 
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_kv")).size(), 30u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "hca_kv")).size(), 31u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "indexer_kv")).size(), 30u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "indexer_state")).size(), 30u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_state")).size(), 30u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "hca_state")).size(), 31u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "swa_kv")).size(), 61u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_kv")].tag).size(), 30u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "hca_kv")].tag).size(), 31u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "indexer_kv")].tag).size(), 30u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "indexer_state")].tag).size(), 30u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_state")].tag).size(), 30u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "hca_state")].tag).size(), 31u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "swa_kv")].tag).size(), 61u);
 
     EXPECT_EQ(config.typeForGroup(gidForTag(config, "csa_kv")), CacheGroupType::FULL);
     EXPECT_EQ(config.typeForGroup(gidForTag(config, "hca_kv")), CacheGroupType::FULL);
@@ -2792,7 +2818,7 @@ TEST_F(DSV4AllocatorTest, KVBlockStrideIsMaxAcrossGroups) {
     for (int i = 0; i < kDsv4PoolNum; i++) {
         expected_max = std::max(expected_max, config.specForGroup(i)->block_size_bytes());
     }
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "hca_state")), expected_max);
+    EXPECT_EQ(config.topology().groups()[gidForTag(config, "hca_state")].kvBlockStrideBytes(), expected_max);
     // HCA_STATE has the largest per-block bytes (128 entries * 1024 * 4)
     EXPECT_EQ(expected_max, config.specForGroup(gidForTag(config, "hca_state"))->block_size_bytes());
 }
@@ -2819,9 +2845,9 @@ TEST_F(DSV4AllocatorTest, FlashGroupTypes) {
     auto config = makeDSV4AllocatorConfig(/*use_flash=*/true);
 
     // Flash: 21 CSA + 20 HCA + 2 SWA-only = 43 layers
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_kv")).size(), 21u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "hca_kv")).size(), 20u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "swa_kv")).size(), 43u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_kv")].tag).size(), 21u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "hca_kv")].tag).size(), 20u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "swa_kv")].tag).size(), 43u);
 
     EXPECT_EQ(config.typeForGroup(gidForTag(config, "csa_kv")), CacheGroupType::FULL);
     EXPECT_EQ(config.typeForGroup(gidForTag(config, "hca_kv")), CacheGroupType::FULL);
@@ -2838,8 +2864,9 @@ TEST_F(DSV4AllocatorTest, FlashAddressLookupAllGroups) {
     ASSERT_TRUE(allocator->init());
 
     for (int gid = 0; gid < 7; gid++) {
-        ASSERT_FALSE(config.layerIdsForGroup(gid).empty()) << "Flash group " << gid << " has no layers";
-        int  layer_id = config.layerIdsForGroup(gid)[0];
+        ASSERT_FALSE(config.layerIdsForGroup(config.topology().groups()[gid].tag).empty())
+            << "Flash group " << gid << " has no layers";
+        int  layer_id = config.layerIdsForGroup(config.topology().groups()[gid].tag)[0];
         auto addr     = allocator->convertIndexToAddr(layer_id, config.tagForGroup(gid), /*block_id=*/1);
         EXPECT_NE(addr.kv_addr, nullptr) << "Flash null kv_addr for group " << gid;
     }
@@ -2862,13 +2889,13 @@ TEST_F(DSV4AllocatorTest, FlashBlockPoolTensors) {
 TEST_F(DSV4AllocatorTest, FlashLayerMapping) {
     auto config = makeDSV4AllocatorConfig(/*use_flash=*/true);
 
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_kv")).size(), 21u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "hca_kv")).size(), 20u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "indexer_kv")).size(), 21u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "indexer_state")).size(), 21u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "csa_state")).size(), 21u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "hca_state")).size(), 20u);
-    EXPECT_EQ(config.layerIdsForGroup(gidForTag(config, "swa_kv")).size(), 43u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_kv")].tag).size(), 21u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "hca_kv")].tag).size(), 20u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "indexer_kv")].tag).size(), 21u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "indexer_state")].tag).size(), 21u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "csa_state")].tag).size(), 21u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "hca_state")].tag).size(), 20u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[gidForTag(config, "swa_kv")].tag).size(), 43u);
 }
 
 TEST_F(DSV4AllocatorTest, FlashSpecBlockSizes) {
@@ -3622,13 +3649,13 @@ TEST(CacheConfigCreatorTest, CandidateBaselineLeavesGroupCapacityUnresolved) {
     const auto spec = config.specForGroup(0);
     EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"full"}));
     EXPECT_EQ(config.seqSizePerBlockForGroup(0), 4u);
-    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(0), 4u);
+    EXPECT_EQ(config.topology().groups()[0].kernelSeqSizePerBlock(), 4u);
 
     config.finalizeBlockNums(7, {});
     EXPECT_EQ(config.block_num, 7u);
     EXPECT_EQ(config.group("full").block_num, 7u);
     EXPECT_EQ(config.specForGroup(0), spec);
-    EXPECT_EQ(config.layerIdsForGroup(0), std::vector<int>({0}));
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[0].tag), std::vector<int>({0}));
     EXPECT_ANY_THROW(config.finalizeBlockNums(0, {}));
 }
 
@@ -3640,11 +3667,11 @@ TEST(CacheConfigCreatorTest, WarmupReturnsCompleteExplicitPoolCapacityWithoutBud
     options.linear_step    = 4;
     auto config            = CacheConfigCreator::createWarmupConfig(model, {}, options);
     EXPECT_EQ(config.block_num, 1u);
-    EXPECT_EQ(config.blockNumForGroup(config.groupIdForTag("full")), 1u);
-    EXPECT_EQ(config.blockNumForGroup(config.groupIdForTag("state")), 7u);
+    EXPECT_EQ(config.topology().groups()[config.groupIdForTag("full")].block_num, 1u);
+    EXPECT_EQ(config.topology().groups()[config.groupIdForTag("state")].block_num, 7u);
     EXPECT_TRUE(config.mtp_sub_configs.empty());
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        EXPECT_GT(DeviceBlockPoolConfigHelper::createConfigForGroup(config, gid).total_size_bytes, 0u);
+        EXPECT_GT(DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.topology().groups()[gid]).total_size_bytes, 0u);
     }
 }
 
@@ -3670,19 +3697,19 @@ TEST(CacheConfigCreatorTest, MergedBudgetUsesEachPhysicalSegmentOnce) {
             ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
             const auto gid       = static_cast<size_t>(config.groupIdForTag("full"));
             const auto state_gid = static_cast<size_t>(config.groupIdForTag("state"));
-            const auto pool      = DeviceBlockPoolConfigHelper::createConfigForGroup(config, gid);
+            const auto pool      = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.topology().groups()[gid]);
             ASSERT_EQ(pool.memory_layouts.size(), 3u);
             EXPECT_EQ(pool.memory_layouts[1].kv_block_stride_bytes, 2 * pool.memory_layouts[0].kv_block_stride_bytes);
             for (const auto& sub : config.mtp_sub_configs) {
-                EXPECT_TRUE(sub->layerIdsForGroup(state_gid).empty());
-                EXPECT_EQ(sub->blockNumForGroup(gid), config.blockNumForGroup(gid));
+                EXPECT_TRUE(sub->layerIdsForGroup(sub->topology().groups()[state_gid].tag).empty());
+                EXPECT_EQ(sub->topology().groups()[gid].block_num, config.topology().groups()[gid].block_num);
             }
             const auto charged_bytes = [&](const CacheConfig& candidate) {
                 size_t bytes = 0;
                 for (size_t id = 0; id < static_cast<size_t>(candidate.groupNums()); ++id) {
                     const auto policy = candidate.policyForGroup(id);
                     if (policy.explicit_block_num == 0 || policy.charge_to_paged_budget) {
-                        bytes += DeviceBlockPoolConfigHelper::createConfigForGroup(candidate, id).total_size_bytes;
+                        bytes += DeviceBlockPoolConfigHelper::createConfigForGroup(candidate, candidate.topology().groups()[id]).total_size_bytes;
                     }
                 }
                 return bytes;
@@ -3693,8 +3720,8 @@ TEST(CacheConfigCreatorTest, MergedBudgetUsesEachPhysicalSegmentOnce) {
             config.finalizeBlockNums(baseline_blocks + 1, {});
             EXPECT_GT(charged_bytes(config), budget_bytes);
             config.finalizeBlockNums(7, {});
-            EXPECT_EQ(config.blockNumForGroup(gid), group_type == CacheGroupType::SWA ? 3u : 7u);
-            EXPECT_EQ(config.blockNumForGroup(state_gid), 7u);
+            EXPECT_EQ(config.topology().groups()[gid].block_num, group_type == CacheGroupType::SWA ? 3u : 7u);
+            EXPECT_EQ(config.topology().groups()[state_gid].block_num, 7u);
         }
     }
 }
@@ -3748,8 +3775,10 @@ TEST(CacheConfigCreatorTest, MtpRejectsUnknownDraftTagsButAllowsUnusedTargetGrou
     ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     EXPECT_EQ(publishedGroupTags(config.mtp_sub_configs[0]->topology()), publishedGroupTags(config.topology()));
     const auto state_gid = static_cast<size_t>(config.groupIdForTag("state"));
-    EXPECT_TRUE(config.mtp_sub_configs[0]->layerIdsForGroup(state_gid).empty());
-    EXPECT_EQ(DeviceBlockPoolConfigHelper::createConfigForGroup(config, state_gid).memory_layouts.size(), 1u);
+    EXPECT_TRUE(config.mtp_sub_configs[0]
+                    ->layerIdsForGroup(config.mtp_sub_configs[0]->topology().groups()[state_gid].tag)
+                    .empty());
+    EXPECT_EQ(DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.topology().groups()[state_gid]).memory_layouts.size(), 1u);
 }
 
 TEST(CacheConfigCreatorTest, MtpRejectsIncompatiblePoolPolicyAndTokenSpans) {
@@ -3783,7 +3812,7 @@ TEST(CacheConfigCreatorTest, ExplicitOnlyAutomaticBudgetRejectsUndefinedBaseline
     options.test_block_num = 3;
     auto config            = finalizeCacheConfig(CacheConfigCreator::createConfig(model, {}, {}, options));
     EXPECT_EQ(config.block_num, 3u);
-    EXPECT_EQ(config.blockNumForGroup(0), 7u);
+    EXPECT_EQ(config.topology().groups()[0].block_num, 7u);
 }
 
 TEST(CacheConfigCreatorTest, ExplicitPoolBudgetMultiplicationOverflowIsRejected) {
@@ -3793,7 +3822,8 @@ TEST(CacheConfigCreatorTest, ExplicitPoolBudgetMultiplicationOverflowIsRejected)
     // The byte-stride override itself is valid; only multiplying by pool
     // capacity exceeds size_t. Warmup builds the same Spec without a budget.
     const auto warmup = CacheConfigCreator::createWarmupConfig(model, {});
-    EXPECT_EQ(warmup.kvBlockStrideBytesForGroup(warmup.groupIdForTag("state")), std::numeric_limits<size_t>::max() / 2);
+    EXPECT_EQ(warmup.topology().groups()[warmup.groupIdForTag("state")].kvBlockStrideBytes(),
+              std::numeric_limits<size_t>::max() / 2);
     KVCacheConfig options;
     options.kv_cache_mem_mb = 1;
     try {

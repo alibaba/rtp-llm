@@ -351,8 +351,8 @@ inline void setGroupBlockNums(CacheConfig& config, uint32_t block_num) {
     kv_strides.reserve(block_nums.size());
     scale_strides.reserve(block_nums.size());
     for (size_t group_id = 0; group_id < block_nums.size(); ++group_id) {
-        kv_strides.push_back(config.kvBlockStrideBytesForGroup(group_id));
-        scale_strides.push_back(config.kvScaleStrideBytesForGroup(group_id));
+        kv_strides.push_back(config.topology().groups()[group_id].kvBlockStrideBytes());
+        scale_strides.push_back(config.topology().groups()[group_id].kvScaleStrideBytes());
     }
     config.setGroupBlockLayout(std::move(block_nums), std::move(kv_strides), std::move(scale_strides));
 }
@@ -867,7 +867,7 @@ inline bool fillGroupBlockPayload(const std::shared_ptr<KVCacheManager>& manager
     if (static_cast<size_t>(group_id) >= groups.size() || groups[static_cast<size_t>(group_id)] == nullptr) {
         return false;
     }
-    const auto& layer_ids = config.layerIdsForGroup(static_cast<size_t>(group_id));
+    const auto& layer_ids = config.layerIdsForGroup(config.topology().groups()[static_cast<size_t>(group_id)].tag);
     if (layer_ids.empty()) {
         return false;
     }
@@ -895,7 +895,7 @@ inline bool groupBlockPayloadMatches(const std::shared_ptr<KVCacheManager>& mana
     if (static_cast<size_t>(group_id) >= groups.size() || groups[static_cast<size_t>(group_id)] == nullptr) {
         return false;
     }
-    const auto& layer_ids = config.layerIdsForGroup(static_cast<size_t>(group_id));
+    const auto& layer_ids = config.layerIdsForGroup(config.topology().groups()[static_cast<size_t>(group_id)].tag);
     if (layer_ids.empty()) {
         return false;
     }

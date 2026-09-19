@@ -411,7 +411,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateConfigSupportsOneLinearIndependentP
     ASSERT_EQ(config.groupNums(), 1);
     EXPECT_EQ(config.tagForGroup(0), "linear");
     EXPECT_EQ(config.typeForGroup(0), CacheGroupType::LINEAR);
-    EXPECT_EQ(config.layerIdsForGroup(0), std::vector<int>({0, 1}));
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[0].tag), std::vector<int>({0, 1}));
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, CreateConfigRejectsLinearDescriptorWithoutAttentionMetadata) {
@@ -509,10 +509,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigUsesFirstSeenTagsWithFu
     ASSERT_EQ(cache_config.groupNums(), 4);
     EXPECT_EQ(publishedGroupTags(cache_config.topology()), expected_tags);
     EXPECT_EQ(publishedGroupTypes(cache_config.topology()), expected_types);
-    EXPECT_EQ(cache_config.layerIdsForGroup(0), expected_linear0);
-    EXPECT_EQ(cache_config.layerIdsForGroup(1), expected_linear1);
-    EXPECT_EQ(cache_config.layerIdsForGroup(2), expected_full);
-    EXPECT_EQ(cache_config.layerIdsForGroup(3), expected_linear2);
+    EXPECT_EQ(cache_config.layerIdsForGroup(cache_config.topology().groups()[0].tag), expected_linear0);
+    EXPECT_EQ(cache_config.layerIdsForGroup(cache_config.topology().groups()[1].tag), expected_linear1);
+    EXPECT_EQ(cache_config.layerIdsForGroup(cache_config.topology().groups()[2].tag), expected_full);
+    EXPECT_EQ(cache_config.layerIdsForGroup(cache_config.topology().groups()[3].tag), expected_linear2);
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigKeepsExplicitPhysicallyHeterogeneousLinearTags) {
@@ -615,9 +615,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridWithMtpSubCon
         ASSERT_EQ(sub->groupNums(), 2);
         std::vector<std::string> expected_tags{"linear", "full"};
         EXPECT_EQ(publishedGroupTags(sub->topology()), expected_tags);
-        ASSERT_EQ(sub->layerIdsForGroup(1).size(), 1u);
-        EXPECT_EQ(sub->layerIdsForGroup(1)[0], 0);
-        EXPECT_TRUE(sub->layerIdsForGroup(0).empty());
+        ASSERT_EQ(sub->layerIdsForGroup(sub->topology().groups()[1].tag).size(), 1u);
+        EXPECT_EQ(sub->layerIdsForGroup(sub->topology().groups()[1].tag)[0], 0);
+        EXPECT_TRUE(sub->layerIdsForGroup(sub->topology().groups()[0].tag).empty());
     }
 
     EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/2), 2u);
@@ -639,12 +639,12 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EagleMapsSoleDefaultFullDraftGroupToUniqu
 
     const auto full_gid = static_cast<size_t>(config.groupIdForTag("full"));
     EXPECT_EQ(sub_config->groupForLayer(0, "full").tag, "full");
-    EXPECT_EQ(sub_config->layerIdsForGroup(full_gid), std::vector<int>({0}));
+    EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().groups()[full_gid].tag), std::vector<int>({0}));
     EXPECT_EQ(sub_config->specForGroup(full_gid)->tag, "full");
     EXPECT_EQ(sub_config->specForGroup(full_gid)->type, KVCacheSpecType::MultiHeadAttention);
 
     const auto linear_gid = static_cast<size_t>(config.groupIdForTag("linear"));
-    EXPECT_TRUE(sub_config->layerIdsForGroup(linear_gid).empty());
+    EXPECT_TRUE(sub_config->layerIdsForGroup(sub_config->topology().groups()[linear_gid].tag).empty());
 
     auto manager = std::make_shared<KVCacheManager>(config);
     ASSERT_TRUE(manager->init());
@@ -659,13 +659,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MtpMapsDefaultFullDraftGroupForEveryModul
     ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
     const auto full_gid   = static_cast<size_t>(config.groupIdForTag("full"));
     const auto linear_gid = static_cast<size_t>(config.groupIdForTag("linear"));
-    EXPECT_EQ(config.layerIdsForGroup(full_gid), std::vector<int>({2, 3, 4, 5}));
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[full_gid].tag), std::vector<int>({2, 3, 4, 5}));
     for (size_t module_index = 0; module_index < config.mtp_sub_configs.size(); ++module_index) {
         const auto& sub_config = config.mtp_sub_configs[module_index];
         ASSERT_NE(sub_config, nullptr);
         EXPECT_EQ(publishedGroupTags(sub_config->topology()), publishedGroupTags(config.topology()));
-        EXPECT_EQ(sub_config->layerIdsForGroup(full_gid), std::vector<int>({0}));
-        EXPECT_TRUE(sub_config->layerIdsForGroup(linear_gid).empty());
+        EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().groups()[full_gid].tag), std::vector<int>({0}));
+        EXPECT_TRUE(sub_config->layerIdsForGroup(sub_config->topology().groups()[linear_gid].tag).empty());
         EXPECT_EQ(config.groupForLayer(static_cast<int>(4 + module_index), "full").tag, "full");
     }
 }
@@ -713,20 +713,20 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateSpConfigPreservesQwenPackingAlignme
                                                                                      /*is_eagle=*/false)));
 
     EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"linear", "full"}));
-    EXPECT_EQ(config.layerIdsForGroup(config.groupIdForTag("full")).size(), 4u);
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[config.groupIdForTag("full")].tag).size(), 4u);
     ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
 
     const auto full_gid   = static_cast<size_t>(config.groupIdForTag("full"));
     const auto linear_gid = static_cast<size_t>(config.groupIdForTag("linear"));
-    EXPECT_EQ(config.layerIdsForGroup(full_gid), std::vector<int>({3, 7, 8, 9}));
+    EXPECT_EQ(config.layerIdsForGroup(config.topology().groups()[full_gid].tag), std::vector<int>({3, 7, 8, 9}));
     EXPECT_EQ(config.groupForLayer(8, "full").tag, "full");
     EXPECT_EQ(config.groupForLayer(9, "full").tag, "full");
 
     for (const auto& sub_config : config.mtp_sub_configs) {
         ASSERT_NE(sub_config, nullptr);
         EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"linear", "full"}));
-        EXPECT_EQ(sub_config->layerIdsForGroup(full_gid), std::vector<int>({0}));
-        EXPECT_TRUE(sub_config->layerIdsForGroup(linear_gid).empty());
+        EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().groups()[full_gid].tag), std::vector<int>({0}));
+        EXPECT_TRUE(sub_config->layerIdsForGroup(sub_config->topology().groups()[linear_gid].tag).empty());
     }
 
     auto manager = std::make_shared<KVCacheManager>(config);
@@ -734,13 +734,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateSpConfigPreservesQwenPackingAlignme
     auto allocator = std::dynamic_pointer_cast<KVCacheAllocator>(manager->allocator_);
     ASSERT_NE(allocator, nullptr);
     ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
-    const auto  full_pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, full_gid);
+    const auto  full_pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.topology().groups()[full_gid]);
     const auto& full_layouts     = full_pool_config.memory_layouts;
     ASSERT_EQ(full_layouts.size(), 3u);
     EXPECT_EQ(full_layouts[0].layer_num, 2u);
     EXPECT_EQ(full_layouts[1].layer_num, 1u);
     EXPECT_EQ(full_layouts[2].layer_num, 1u);
-    const auto  linear_pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, linear_gid);
+    const auto  linear_pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.topology().groups()[linear_gid]);
     const auto& linear_layouts     = linear_pool_config.memory_layouts;
     ASSERT_EQ(linear_layouts.size(), 1u);
     EXPECT_EQ(linear_layouts[0].layer_num, 6u);
@@ -769,8 +769,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpAliasesCompatibleDefaultMlaGroup)
     EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"full"}));
     EXPECT_EQ(sub_config->specForGroup(0)->type, KVCacheSpecType::MultiHeadLatentAttention);
     EXPECT_EQ(sub_config->specForGroup(0)->tag, "full");
-    EXPECT_EQ(sub_config->layerIdsForGroup(0), std::vector<int>({0}));
-    EXPECT_EQ(main_config.layerIdsForGroup(0), std::vector<int>({0, 1}));
+    EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().groups()[0].tag), std::vector<int>({0}));
+    EXPECT_EQ(main_config.layerIdsForGroup(main_config.topology().groups()[0].tag), std::vector<int>({0, 1}));
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsAmbiguousDefaultFullGroupAlias) {
@@ -856,9 +856,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsIncompatibleDefaultFullGro
 
     auto different_group_stride = compatible_propose;
     setGroupBlockLayout(different_group_stride,
-                        {different_group_stride.blockNumForGroup(0)},
-                        {different_group_stride.kvBlockStrideBytesForGroup(0) + 1},
-                        {different_group_stride.kvScaleStrideBytesForGroup(0)});
+                        {different_group_stride.topology().groups()[0].block_num},
+                        {different_group_stride.topology().groups()[0].kvBlockStrideBytes() + 1},
+                        {different_group_stride.topology().groups()[0].kvScaleStrideBytes()});
     expect_no_compatible_alias(target, different_group_stride);
 
     auto target_with_different_policy    = target;
@@ -890,10 +890,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpPrefersExactDefaultGroupMatch) {
     EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"default", "aux"}));
     const auto default_gid = static_cast<size_t>(main_config.groupIdForTag("default"));
     const auto aux_gid     = static_cast<size_t>(main_config.groupIdForTag("aux"));
-    EXPECT_EQ(sub_config->layerIdsForGroup(default_gid), std::vector<int>({0}));
-    EXPECT_TRUE(sub_config->layerIdsForGroup(aux_gid).empty());
-    EXPECT_EQ(main_config.layerIdsForGroup(default_gid), std::vector<int>({0, 2}));
-    EXPECT_EQ(main_config.layerIdsForGroup(aux_gid), std::vector<int>({1}));
+    EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().groups()[default_gid].tag), std::vector<int>({0}));
+    EXPECT_TRUE(sub_config->layerIdsForGroup(sub_config->topology().groups()[aux_gid].tag).empty());
+    EXPECT_EQ(main_config.layerIdsForGroup(main_config.topology().groups()[default_gid].tag), std::vector<int>({0, 2}));
+    EXPECT_EQ(main_config.layerIdsForGroup(main_config.topology().groups()[aux_gid].tag), std::vector<int>({1}));
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasDefaultLinearProposeGroup) {
@@ -967,8 +967,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpAllowsUnequalIndependentGroupLaye
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
     auto sub_config = main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/5);
     ASSERT_NE(sub_config, nullptr);
-    EXPECT_EQ(main_config.layerIdsForGroup(main_config.groupIdForTag("linear")), (std::vector<int>{3, 4, 5}));
-    EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->groupIdForTag("linear")), (std::vector<int>{0}));
+    EXPECT_EQ(main_config.layerIdsForGroup(main_config.topology().groups()[main_config.groupIdForTag("linear")].tag),
+              (std::vector<int>{3, 4, 5}));
+    EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().groups()[sub_config->groupIdForTag("linear")].tag),
+              (std::vector<int>{0}));
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsPartialSourceAndDerivesOrderedLayers) {
@@ -987,7 +989,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsPartialSourceAndDerivesOrd
 
     auto reordered_source = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
-    EXPECT_EQ(reordered_source.layerIdsForGroup(0), (std::vector<int>{0, 1}));
+    EXPECT_EQ(reordered_source.layerIdsForGroup(reordered_source.topology().groups()[0].tag), (std::vector<int>{0, 1}));
     EXPECT_NO_THROW(main_config.mergeMTPModule(reordered_source, /*module_index=*/0, /*main_layer_num=*/2));
 }
 
@@ -2014,11 +2016,11 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseS
     ASSERT_FALSE(full_buf.empty());
     EXPECT_NE(linear_buf[0].addr, nullptr);
     EXPECT_NE(full_buf[0].addr, nullptr);
-    EXPECT_EQ(linear_buf[0].size_bytes, config.kvBlockStrideBytesForGroup(linear_group_id));
-    EXPECT_EQ(full_buf[0].size_bytes, config.kvBlockStrideBytesForGroup(full_group_id));
-    EXPECT_LT(
-        linear_buf[0].size_bytes,
-        std::max(config.kvBlockStrideBytesForGroup(linear_group_id), config.kvBlockStrideBytesForGroup(full_group_id)));
+    EXPECT_EQ(linear_buf[0].size_bytes, config.topology().groups()[linear_group_id].kvBlockStrideBytes());
+    EXPECT_EQ(full_buf[0].size_bytes, config.topology().groups()[full_group_id].kvBlockStrideBytes());
+    EXPECT_LT(linear_buf[0].size_bytes,
+              std::max(config.topology().groups()[linear_group_id].kvBlockStrideBytes(),
+                       config.topology().groups()[full_group_id].kvBlockStrideBytes()));
 
     auto layout = allocator->allLayerCacheBase();
     EXPECT_EQ(layout.groups().size(), static_cast<size_t>(config.groupNums()));
@@ -2242,7 +2244,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, EstimatePeakNeedBlocksUsesLinearActiveTailPolicy) {
-    auto config = makeTinyHybridConfig();
+    auto                          config = makeTinyHybridConfig();
     std::vector<CacheGroupPolicy> policies;
     for (const auto& group : config.topology().groups()) {
         policies.push_back(group.policy);

@@ -55,9 +55,8 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
         const auto& group          = config.topology().groups()[gid];
         size_t      group_bytes    = 0;
-        const auto  append_segment = [&](const CacheConfig& source, size_t source_gid, bool main) {
-            const auto&  segment   = source.topology().groupById(source_gid);
-            const auto   layer_ids = source.layerIdsForGroup(source_gid);
+        const auto  append_segment = [&](const CacheConfig& source, const GroupBase& segment, bool main) {
+            const auto   layer_ids = source.layerIdsForGroup(segment.tag);
             const size_t layer_count =
                 main ? std::count_if(
                     layer_ids.begin(),
@@ -69,11 +68,12 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
         };
         // Exactly the physical segments assembled by BlockPoolConfigHelper:
         // target layers use the target Spec, draft layers use their own Specs.
-        append_segment(config, gid, true);
+        append_segment(config, group, true);
         for (const auto& sub : config.mtp_sub_configs) {
-            RTP_LLM_CHECK_WITH_INFO(
-                sub->tagForGroup(gid) == group.tag, "MTP group order is inconsistent for tag=%s", group.tag.c_str());
-            append_segment(*sub, gid, false);
+            RTP_LLM_CHECK_WITH_INFO(sub->topology().groups()[gid].tag == group.tag,
+                                    "MTP group order is inconsistent for tag=%s",
+                                    group.tag.c_str());
+            append_segment(*sub, sub->topology().groups()[gid], false);
         }
         const auto& policy = group.policy;
         if (policy.explicit_block_num > 0) {

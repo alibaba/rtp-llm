@@ -159,8 +159,8 @@ TEST_F(NormalBatchStreamProcessorTest, testModelKernelPageIgnoresLargerStatePool
                 {attention, state}, {{1}, {0}}, {CacheGroupType::FULL, CacheGroupType::SWA}, {"attention", "state"});
         }
 
-        EXPECT_EQ(cache_config.kernelSeqSizePerBlockForGroup(cache_config.groupIdForTag("attention")), 128u);
-        EXPECT_EQ(cache_config.kernelSeqSizePerBlockForGroup(cache_config.groupIdForTag("state")), 512u);
+        EXPECT_EQ(cache_config.group("attention").kernelSeqSizePerBlock(), 128u);
+        EXPECT_EQ(cache_config.group("state").kernelSeqSizePerBlock(), 512u);
         NormalBatchStreamProcessor processor(
             model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, true);
         EXPECT_EQ(processor.model_input_gatherer_config_.seq_size_per_block, 256u);
@@ -535,8 +535,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
-        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.kvBlockStrideBytesForGroup(0));
-        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.kvScaleStrideBytesForGroup(0));
+        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.groups().front().kvBlockStrideBytes());
+        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.groups().front().kvScaleStrideBytes());
     }
     {
         MMModelConfig mm_model_config;

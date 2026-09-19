@@ -196,7 +196,8 @@ inline size_t explicitPoolReserveBytes(const CacheConfig& config) {
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         const auto& policy = config.topology().groupById(gid).policy;
         if (policy.explicit_block_num > 0 && policy.charge_to_paged_budget) {
-            reserve += static_cast<size_t>(config.blockNumForGroup(gid)) * config.blockSizeBytesForGroup(gid);
+            reserve += static_cast<size_t>(config.topology().groups()[gid].block_num)
+                       * config.blockSizeBytesForGroup(config.topology().groups()[gid].tag);
         }
     }
     return reserve;

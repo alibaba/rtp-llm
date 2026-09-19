@@ -785,33 +785,32 @@ void KVCacheManager::initCacheEventPublisher() {
             return;
         }
 
-        std::vector<CacheGroupPolicy> group_policies;
-        group_policies.reserve(config_.topology().groups().size());
-        for (const auto& group : config_.topology().groups()) {
-            group_policies.push_back(group.policy);
-        }
         // KVCM currently represents one complete prefix chain per key.  A
         // tail-sparse reuse group is still required by local reuse, but cannot
         // be represented in that contract; publishing only the FULL groups
         // would advertise keys that the local cache cannot actually reuse.
-        for (const auto& policy : group_policies) {
-            if (policy.enable_prefix_reuse && policy.active_tail_blocks != 0) {
+        std::vector<int64_t>     group_block_size_bytes;
+        std::vector<std::string> reuse_group_tags;
+        for (const auto& group : config_.topology().groups()) {
+            if (!cacheGroupPublishesPrefixChain(group.policy)) {
+                continue;
+            }
+            if (group.policy.enable_prefix_reuse && group.policy.active_tail_blocks != 0) {
                 RTP_LLM_LOG_WARNING(
                     "KV cache event publisher disabled because tail-sparse reuse groups are unsupported");
                 return;
             }
-        }
-        const auto reuse_group_ids = reuseParticipatingGroupIdsFromPolicies(group_policies);
-        if (reuse_group_ids.empty()) {
-            RTP_LLM_LOG_ERROR("KV cache event publisher disabled because no cache group participates in prefix reuse");
-            return;
-        }
-        for (const auto group_id : reuse_group_ids) {
-            if (group_policies.at(static_cast<size_t>(group_id)).memory_placement != CacheMemoryPlacement::DEVICE) {
+            if (group.policy.memory_placement != CacheMemoryPlacement::DEVICE) {
                 RTP_LLM_LOG_WARNING(
                     "KV cache event publisher disabled because publishing non-DEVICE cache groups is unsupported");
                 return;
             }
+            reuse_group_tags.push_back(group.tag);
+            group_block_size_bytes.push_back(static_cast<int64_t>(config_.blockSizeBytesForGroup(group.tag)));
+        }
+        if (reuse_group_tags.empty()) {
+            RTP_LLM_LOG_ERROR("KV cache event publisher disabled because no cache group participates in prefix reuse");
+            return;
         }
 
         if (!block_tree_cache_) {
@@ -833,15 +832,6 @@ void KVCacheManager::initCacheEventPublisher() {
         publisher_context.spec_name         = "rtp_llm_hbm_" + std::to_string(config_.seq_size_per_block);
         publisher_context.location_uri      = "rtp-llm://" + publisher_context.host_ip_port + "/hbm";
         publisher_context.block_size_tokens = static_cast<int32_t>(config_.seq_size_per_block);
-        std::vector<int64_t>     group_block_size_bytes;
-        std::vector<std::string> reuse_group_tags;
-        group_block_size_bytes.reserve(reuse_group_ids.size());
-        reuse_group_tags.reserve(reuse_group_ids.size());
-        for (const auto group_id : reuse_group_ids) {
-            const auto& tag = config_.topology().groupById(static_cast<size_t>(group_id)).tag;
-            reuse_group_tags.push_back(tag);
-            group_block_size_bytes.push_back(static_cast<int64_t>(config_.blockSizeBytesForGroup(tag)));
-        }
         // Pipeline parallelism is rejected above because a unique PP owner is
         // not represented in ParallelismConfig yet.
         publisher_context.spec_size_bytes =

@@ -78,30 +78,28 @@ public:
         std::vector<int32_t> other_group_ids;
         // CacheConfig::blockSizeBytesForGroup resolves MTP child-owned physical
         // strides; do not replace this with topology-derived geometry.
-        std::vector<size_t> group_block_size_bytes;
-        group_block_size_bytes.reserve(static_cast<size_t>(cache_config_.groupNums()));
-        for (int32_t group_id = 0; group_id < cache_config_.groupNums(); ++group_id) {
-            if (cache_config_.typeForGroup(static_cast<size_t>(group_id)) == CacheGroupType::FULL) {
-                full_group_ids.push_back(group_id);
+        std::vector<size_t>           group_block_size_bytes;
+        const std::vector<GroupBase>& groups = cache_config_.topology().groups();
+        group_block_size_bytes.reserve(groups.size());
+        for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+            const auto& group = groups[group_id];
+            if (group.policy.group_type == CacheGroupType::FULL) {
+                full_group_ids.push_back(static_cast<int32_t>(group_id));
             } else {
-                other_group_ids.push_back(group_id);
+                other_group_ids.push_back(static_cast<int32_t>(group_id));
             }
-            group_block_size_bytes.push_back(cache_config_.blockSizeBytesForGroup(static_cast<size_t>(group_id)));
+            group_block_size_bytes.push_back(cache_config_.blockSizeBytesForGroup(group.tag));
         }
         if (other_group_ids.empty()) {
-            group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(topology,
-                                                                         buffer_resolver,
-                                                                         full_group_ids,
-                                                                         other_group_ids,
-                                                                         std::move(group_block_size_bytes));
+            group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(
+                topology, buffer_resolver, full_group_ids, other_group_ids, std::move(group_block_size_bytes));
         } else {
-            group_policy_ =
-                std::make_unique<kvcm::FullLinearLayerGroupPolicy>(topology,
-                                                                   buffer_resolver,
-                                                                   full_group_ids,
-                                                                   other_group_ids,
-                                                                   std::max(1, cache_config_.linear_step),
-                                                                   std::move(group_block_size_bytes));
+            group_policy_ = std::make_unique<kvcm::FullLinearLayerGroupPolicy>(topology,
+                                                                               buffer_resolver,
+                                                                               full_group_ids,
+                                                                               other_group_ids,
+                                                                               std::max(1, cache_config_.linear_step),
+                                                                               std::move(group_block_size_bytes));
         }
         if (!group_policy_->init()) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM group policy init failed");
@@ -381,7 +379,7 @@ private:
         for (const auto& [group_id, group] : group_policy_->groups()) {
             for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
                 const std::string spec_name = kvcm::genLocationSpecName(rank, group.group_name);
-                infos->emplace(spec_name, cache_config_.blockSizeBytesForGroup(static_cast<size_t>(group_id)));
+                infos->emplace(spec_name, cache_config_.blockSizeBytesForGroup(group.tag));
             }
         }
         return {std::move(infos), std::move(groups)};

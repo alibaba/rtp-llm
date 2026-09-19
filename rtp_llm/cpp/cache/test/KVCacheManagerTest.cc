@@ -109,7 +109,7 @@ static void assertScaleEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_
     ASSERT_NE(addr_info.kv_scale_addr, nullptr);
     ASSERT_EQ(expected_k.size(), expected_v.size());
 
-    const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kvScaleStrideBytesForGroup(0);
+    const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().topology().groups()[0].kvScaleStrideBytes();
     ASSERT_GT(kv_scale_stride_bytes, 0u);
     const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
     void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr_info.kv_scale_addr) + kv_scale_block_bytes);
@@ -165,8 +165,8 @@ static void setGroupBlockNumsForTest(CacheConfig& config, const std::vector<uint
     kv_strides.reserve(static_cast<size_t>(config.groupNums()));
     scale_strides.reserve(static_cast<size_t>(config.groupNums()));
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        kv_strides.push_back(config.kvBlockStrideBytesForGroup(gid));
-        scale_strides.push_back(config.kvScaleStrideBytesForGroup(gid));
+        kv_strides.push_back(config.topology().groups()[gid].kvBlockStrideBytes());
+        scale_strides.push_back(config.topology().groups()[gid].kvScaleStrideBytes());
     }
     rtp_llm::test::setGroupBlockLayout(config, block_nums, kv_strides, scale_strides);
 }
@@ -437,7 +437,7 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     ASSERT_TRUE(cache_manager->init());
 
     EXPECT_EQ(cache_manager->cacheConfig().block_num, 1u);
-    EXPECT_EQ(cache_manager->cacheConfig().blockNumForGroup(0), 1u);
+    EXPECT_EQ(cache_manager->cacheConfig().topology().groups()[0].block_num, 1u);
     EXPECT_EQ(cache_manager->totalBlocksNum(), 0u);
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0u);
     EXPECT_EQ(cache_manager->availableBlocksNum(), 0u);
@@ -534,7 +534,7 @@ TEST_F(KVCacheManagerTest, WarmupPreservesExplicitChargedIndependentPoolPolicy) 
     const auto  policy    = finalized.policyForGroup(static_cast<size_t>(explicit_gid));
     EXPECT_EQ(policy.explicit_block_num, 4u);
     EXPECT_TRUE(policy.charge_to_paged_budget);
-    EXPECT_EQ(finalized.blockNumForGroup(static_cast<size_t>(explicit_gid)), 4u);
+    EXPECT_EQ(finalized.topology().groups()[static_cast<size_t>(explicit_gid)].block_num, 4u);
     EXPECT_GT(explicitPoolReserveBytes(finalized), 0u);
 }
 
@@ -543,7 +543,7 @@ TEST_F(KVCacheManagerTest, WarmupPreservesCompletedCapacity) {
     KVCacheManager manager(config, /*warmup=*/true);
     ASSERT_TRUE(manager.init());
     EXPECT_EQ(manager.cacheConfig().block_num, 4u);
-    EXPECT_EQ(manager.cacheConfig().blockNumForGroup(0), 4u);
+    EXPECT_EQ(manager.cacheConfig().topology().groups()[0].block_num, 4u);
     EXPECT_EQ(manager.totalBlocksNum(), 3u);
 }
 
@@ -616,11 +616,11 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     const auto candidate_config =
         CacheConfigCreator::createConfig(target, {}, {}, options, std::nullopt, sp, &draft, true);
     const auto candidate = candidate_config.block_num;
-    EXPECT_EQ(candidate_config.blockNumForGroup(0), 0u);
+    EXPECT_EQ(candidate_config.topology().groups()[0].block_num, 0u);
     ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 2u);
     for (const auto& sub : candidate_config.mtp_sub_configs) {
         EXPECT_EQ(sub->block_num, 0u);
-        EXPECT_EQ(sub->blockNumForGroup(0), 0u);
+        EXPECT_EQ(sub->topology().groups()[0].block_num, 0u);
     }
     KVCacheManager manager(candidate_config, false, nullptr, options, {}, {}, sp);
     ASSERT_TRUE(manager.init());
@@ -641,10 +641,10 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     EXPECT_GT(pool->getTotalSizeBytes() + bytes_per_block, budget_bytes);
     for (const auto& sub : config.mtp_sub_configs) {
         EXPECT_EQ(sub->block_num, candidate);
-        EXPECT_EQ(sub->blockNumForGroup(0), candidate);
+        EXPECT_EQ(sub->topology().groups()[0].block_num, candidate);
     }
     // Confirming the manager's copy must not mutate the caller's child views.
-    EXPECT_EQ(candidate_config.mtp_sub_configs[0]->blockNumForGroup(0), 0u);
+    EXPECT_EQ(candidate_config.mtp_sub_configs[0]->topology().groups()[0].block_num, 0u);
 }
 
 TEST_F(KVCacheManagerTest, UnresolvedNormalConfigCannotBeUsedForWarmup) {
@@ -781,8 +781,9 @@ TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysi
     const int linear_gid = cache_config.groupIdForTag("linear");
     ASSERT_GE(full_gid, 0);
     ASSERT_GE(linear_gid, 0);
-    EXPECT_NE(cache_config.blockSizeBytesForGroup(static_cast<size_t>(full_gid)),
-              cache_config.blockSizeBytesForGroup(static_cast<size_t>(linear_gid)));
+    EXPECT_NE(
+        cache_config.blockSizeBytesForGroup(cache_config.topology().groups()[static_cast<size_t>(full_gid)].tag),
+        cache_config.blockSizeBytesForGroup(cache_config.topology().groups()[static_cast<size_t>(linear_gid)].tag));
 
     const auto& pools = allocator->groupBlockPools();
     ASSERT_EQ(pools.size(), 2u);
@@ -1093,7 +1094,7 @@ TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {
         auto host_k_t = torch::tensor(src_k, torch::kFloat32);
         auto host_v_t = torch::tensor(src_v, torch::kFloat32);
 
-        const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kvScaleStrideBytesForGroup(0);
+        const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().topology().groups()[0].kvScaleStrideBytes();
         ASSERT_GT(kv_scale_stride_bytes, 0u);
         const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
         void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr.kv_scale_addr) + kv_scale_block_bytes);
@@ -1219,8 +1220,10 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     const int csa_state_gid = manager_config.groupIdForTag("csa_state");
     const int hca_gid       = manager_config.groupIdForTag("hca_kv");
     const int hca_state_gid = manager_config.groupIdForTag("hca_state");
-    const int csa_layer     = manager_config.layerIdsForGroup(static_cast<size_t>(csa_gid))[0];
-    const int hca_layer     = manager_config.layerIdsForGroup(static_cast<size_t>(hca_gid))[0];
+    const int csa_layer =
+        manager_config.layerIdsForGroup(manager_config.topology().groups()[static_cast<size_t>(csa_gid)].tag)[0];
+    const int hca_layer =
+        manager_config.layerIdsForGroup(manager_config.topology().groups()[static_cast<size_t>(hca_gid)].tag)[0];
     EXPECT_NE(manager->convertIndexToAddr(csa_layer, "csa_kv", resource->blocks(0, csa_gid)[0]).kv_addr, nullptr);
     EXPECT_NE(manager->convertIndexToAddr(csa_layer, "indexer_kv", resource->blocks(0, indexer_gid)[0]).kv_addr,
               nullptr);
@@ -1271,8 +1274,8 @@ TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern
     EXPECT_THROW((void)manager_config.groupForLayer(/*layer_id=*/0, "hca_kv"), std::exception);
 
     // Layer 2 is CSA: CSA_KV + INDEXER_KV + INDEXER_STATE + CSA_STATE + SWA_KV.
-    const int csa_layer =
-        manager_config.layerIdsForGroup(static_cast<size_t>(manager_config.groupIdForTag("csa_kv")))[0];
+    const int csa_layer = manager_config.layerIdsForGroup(
+        manager_config.topology().groups()[static_cast<size_t>(manager_config.groupIdForTag("csa_kv"))].tag)[0];
     expectTagGroup(csa_layer, "csa_kv", manager_config.groupIdForTag("csa_kv"));
     expectTagGroup(csa_layer, "indexer_kv", manager_config.groupIdForTag("indexer_kv"));
     expectTagGroup(csa_layer, "indexer_state", manager_config.groupIdForTag("indexer_state"));
@@ -1281,8 +1284,8 @@ TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern
     EXPECT_THROW((void)manager_config.groupForLayer(csa_layer, "hca_kv"), std::exception);
 
     // Layer 3 is HCA: HCA_KV + HCA_STATE + SWA_KV.
-    const int hca_layer =
-        manager_config.layerIdsForGroup(static_cast<size_t>(manager_config.groupIdForTag("hca_kv")))[0];
+    const int hca_layer = manager_config.layerIdsForGroup(
+        manager_config.topology().groups()[static_cast<size_t>(manager_config.groupIdForTag("hca_kv"))].tag)[0];
     expectTagGroup(hca_layer, "hca_kv", manager_config.groupIdForTag("hca_kv"));
     expectTagGroup(hca_layer, "hca_state", manager_config.groupIdForTag("hca_state"));
     expectTagGroup(hca_layer, "swa_kv", manager_config.groupIdForTag("swa_kv"));
@@ -1316,9 +1319,11 @@ TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
     const int csa_state_gid     = manager_config.groupIdForTag("csa_state");
     const int hca_gid           = manager_config.groupIdForTag("hca_kv");
     const int hca_state_gid     = manager_config.groupIdForTag("hca_state");
-    const int csa_layer         = manager_config.layerIdsForGroup(static_cast<size_t>(csa_gid))[0];
-    const int hca_layer         = manager_config.layerIdsForGroup(static_cast<size_t>(hca_gid))[0];
-    const int swa_only_layer    = 0;
+    const int csa_layer =
+        manager_config.layerIdsForGroup(manager_config.topology().groups()[static_cast<size_t>(csa_gid)].tag)[0];
+    const int hca_layer =
+        manager_config.layerIdsForGroup(manager_config.topology().groups()[static_cast<size_t>(hca_gid)].tag)[0];
+    const int swa_only_layer = 0;
 
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
         const auto& blocks = resource->blocks(0, gid);
@@ -1606,7 +1611,8 @@ protected:
     // raw bytes also catches scale corruption that float tolerances could hide.
     torch::Tensor payload(int pattern_id, int block, int layer, bool scale) const {
         const auto&  config = manager_->cacheConfig();
-        const size_t bytes  = scale ? config.kvScaleStrideBytesForGroup(0) : config.kvBlockStrideBytesForGroup(0);
+        const size_t bytes  = scale ? config.topology().groups()[0].kvScaleStrideBytes() :
+                                      config.topology().groups()[0].kvBlockStrideBytes();
         auto         host   = torch::empty({static_cast<int64_t>(bytes)}, torch::kUInt8);
         // Keep tuple identity in 32 bits: an additive uint8_t seed can make
         // entire regions identical after wrapping, hiding cross-region copies.
@@ -2488,7 +2494,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     ASSERT_EQ(manager_config.topology().groups().size(), static_cast<size_t>(kDsv4PoolNum));
     for (int gid : dsv4FixedTailGroupIds(manager_config)) {
         const uint32_t expected = isHcaStateGroup(manager_config, gid) ? 12u : 8u;
-        ASSERT_EQ(manager_config.blockNumForGroup(static_cast<size_t>(gid)), expected) << "group " << gid;
+        ASSERT_EQ(manager_config.topology().groups()[static_cast<size_t>(gid)].block_num, expected) << "group " << gid;
     }
 
     auto manager = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);

@@ -136,14 +136,14 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cac
     }
 
     std::vector<KVCacheGroupPtr> aligned(group_count);
+    const auto&                  topology_groups = cache_config.topology().groups();
     for (const auto& group : allocator_groups) {
         if (!group || !group->blockPool()) {
             RTP_LLM_LOG_ERROR("allocator group/direct pool must be non-null");
             return {};
         }
-        const auto& tag             = group->tag();
-        const auto& topology_groups = cache_config.topology().groups();
-        const auto  found           = std::find_if(topology_groups.begin(),
+        const auto& tag   = group->tag();
+        const auto  found = std::find_if(topology_groups.begin(),
                                         topology_groups.end(),
                                         [&tag](const GroupBase& declared) { return declared.tag == tag; });
         if (found == topology_groups.end()) {
@@ -166,7 +166,7 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cac
             return {};
         }
         const auto& actual   = group->config();
-        const auto& declared = cache_config.topology().groupById(group_id);
+        const auto& declared = topology_groups[group_id];
         if (actual.spec != declared.spec || !CacheConfig::samePolicy(actual.policy, declared.policy)
             || actual.block_num != declared.block_num) {
             RTP_LLM_LOG_ERROR("allocator group_id=%zu does not exactly match topology", group_id);
@@ -304,7 +304,7 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                 
     const auto& topology = cache_config.topology();
     const auto  group_id = topology.groupIdForTag(tag);
     RTP_LLM_CHECK_WITH_INFO(group_id < group_pools.size(), "invalid storage tag=%.*s", (int)tag.size(), tag.data());
-    const auto layer_ids = topology.layerIdsForGroup(group_id);
+    const auto layer_ids = topology.layerIdsForGroup(tag);
     const auto layer     = std::find(layer_ids.begin(), layer_ids.end(), layer_id);
     RTP_LLM_CHECK_WITH_INFO(
         layer != layer_ids.end(), "layer_id=%d does not belong to storage group_id=%d", layer_id, group_id);
@@ -396,7 +396,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     }
     for (int group_id = 0; group_id < group_count; ++group_id) {
         auto        pool = groups[static_cast<size_t>(group_id)]->blockPool();
-        const auto& tag  = cache_config.topology().groupById(static_cast<size_t>(group_id)).tag;
+        const auto& tag  = cache_config.topology().groups()[static_cast<size_t>(group_id)].tag;
         if (!pool || pool->poolName() != tag || unique_pools.erase(pool.get()) != 1) {
             RTP_LLM_LOG_ERROR("allocator/group direct pool mismatch for tag=%s", tag.c_str());
             return nullptr;
