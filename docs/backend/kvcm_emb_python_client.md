@@ -56,7 +56,9 @@ For production use:
 - KVCM enables `kvcm.kv_meta.enabled=true`. KVMeta and the fixed-block
   MetaService use the same `kvcm.service.rpc_port`.
 - The process has a `kvcm_py_client` wheel that exports
-  `kv_cache_manager.client.KvMetaObjectClient`.
+  `kv_cache_manager.client.KvMetaObjectClient` with
+  `KV_META_OBJECT_API_VERSION=2`. Older capability levels fail before instance
+  registration.
 - If the fixed-block instance group is `pace_group_m3`, KVCM administrators
   create the separate `kve_pace_group_m3` group before starting this client.
   The client registers its instance automatically, but does not create groups.
@@ -247,7 +249,7 @@ client = RtpKvMetaObjectClient.from_env(environ=test_reco_environment)
 
 ### Tests
 
-The 52 fast tests do not require the KVCM wheel. They cover configuration and
+The 53 fast tests do not require the KVCM wheel. They cover configuration and
 provider failures, lazy dependency loading, exception identity and structured
 progress preservation, no implicit mutation retry/cleanup, and lifecycle
 errors in addition to the successful paths:

@@ -289,6 +289,32 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
 
         self.assertIsInstance(caught.exception.__cause__, ImportError)
 
+    def test_rejects_incompatible_kvcm_object_api_before_registration(self):
+        for incompatible_version in (1, 3, True, "2", None):
+            with self.subTest(version=incompatible_version):
+                package = ModuleType("kv_cache_manager")
+                package.__path__ = []
+                client_module = ModuleType("kv_cache_manager.client")
+                client_module.KV_META_OBJECT_API_VERSION = incompatible_version
+                client_module.KvMetaObjectClient = MagicMock()
+                client_module.KvMetaObjectClientConfig = MagicMock()
+                package.client = client_module
+
+                with (
+                    patch.dict(
+                        sys.modules,
+                        {
+                            "kv_cache_manager": package,
+                            "kv_cache_manager.client": client_module,
+                        },
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "API version 2"),
+                ):
+                    RtpKvMetaObjectClient._from_config(_client_config())
+
+                client_module.KvMetaObjectClient.assert_not_called()
+                client_module.KvMetaObjectClientConfig.assert_not_called()
+
     def test_invalid_endpoint_fails_before_loading_optional_wheel(self):
         environment = {
             "RECO_SERVER_ADDRESS": "127.0.0.1:65536",
