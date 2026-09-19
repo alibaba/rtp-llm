@@ -960,6 +960,15 @@ class DeepSeekV4Model(GptModelBase):
                 logging.exception("[DeepSeekV4Model] MegaMoE prewarm failed")
                 raise
 
+        # Kernel JIT prewarm (dsv4_kernel_jit_warmup): shape-driven from the
+        # live model, model-generation agnostic. V4.1 previously skipped this
+        # whole section (the gate above), leaving DeepGEMM's M-dependent dense
+        # GEMM heuristic configs to cold-compile mid-serving (~2s per kernel
+        # per shape on first hit of each new batch token count) — observed as
+        # multi-second TTFT spikes on concurrent prefix-hit prefill batches.
+        if device_str.startswith("cuda") and model_warm_up:
+            import torch as _torch
+
             try:
                 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
                     _collect_dsv4_batched_fp8_einsum_shapes,
@@ -1084,24 +1093,48 @@ class DeepSeekV4Model(GptModelBase):
                     max_m=_dense_gemm_max_m,
                     device=_jit_device,
                 )
-                _batched_fp8_einsum_shapes = _collect_dsv4_batched_fp8_einsum_shapes(
-                    self.v4
+                # V4.1 best-effort guards: the warmups below were written for
+                # the V4 module layout and are not all validated against V4.1
+                # structures (batched fp8 einsum dummy inputs assert on V4.1
+                # wo_a shapes). A failing step is logged and skipped for V4.1
+                # so the validated steps (dense GEMM above) still run; V4
+                # keeps the original fail-fast behavior.
+                _v41_best_effort = self._v4_args.v41_config is not None
+
+                def _warmup_step(label, fn):
+                    try:
+                        fn()
+                    except Exception:
+                        if _v41_best_effort:
+                            logging.exception(
+                                "[DeepSeekV4Model] warmup step %s skipped (V4.1 best-effort)",
+                                label,
+                            )
+                        else:
+                            raise
+
+                _warmup_step(
+                    "batched_fp8_einsum",
+                    lambda: warmup_batched_fp8_einsum_jit(
+                        _collect_dsv4_batched_fp8_einsum_shapes(self.v4),
+                        max_m=_dense_gemm_max_m,
+                        device=_jit_device,
+                    ),
                 )
-                warmup_batched_fp8_einsum_jit(
-                    _batched_fp8_einsum_shapes,
-                    max_m=_dense_gemm_max_m,
-                    device=_jit_device,
+                _warmup_step(
+                    "mhc_prenorm_gemm",
+                    lambda: warmup_mhc_prenorm_gemm_jit(
+                        _collect_dsv4_mhc_prenorm_shapes(self.v4),
+                        max_m=_dense_gemm_max_m,
+                        device=_jit_device,
+                    ),
                 )
-                _mhc_prenorm_shapes = _collect_dsv4_mhc_prenorm_shapes(self.v4)
-                warmup_mhc_prenorm_gemm_jit(
-                    _mhc_prenorm_shapes,
-                    max_m=_dense_gemm_max_m,
-                    device=_jit_device,
-                )
-                _mhc_head_fused_shapes = _collect_dsv4_mhc_head_fused_shapes(self.v4)
-                warmup_mhc_head_fused_jit(
-                    _mhc_head_fused_shapes,
-                    device=_jit_device,
+                _warmup_step(
+                    "mhc_head_fused",
+                    lambda: warmup_mhc_head_fused_jit(
+                        _collect_dsv4_mhc_head_fused_shapes(self.v4),
+                        device=_jit_device,
+                    ),
                 )
                 if (
                     self.fp8_kv_cache
@@ -1110,15 +1143,20 @@ class DeepSeekV4Model(GptModelBase):
                     and _prefill_cp_size > 1
                     and _prefill_kv_cache_sharded
                 ):
-                    warmup_dsv4_fp8_swa_slot_dequant_jit(
-                        kv_cache=self.kv_cache,
-                        cp_size=_prefill_cp_size,
-                        device=_jit_device,
+                    _warmup_step(
+                        "fp8_swa_slot_dequant",
+                        lambda: warmup_dsv4_fp8_swa_slot_dequant_jit(
+                            kv_cache=self.kv_cache,
+                            cp_size=_prefill_cp_size,
+                            device=_jit_device,
+                        ),
                     )
-                _fp8_mqa_logits_shapes = _collect_dsv4_fp8_mqa_logits_shapes(self.v4)
-                warmup_fp8_mqa_logits_jit(
-                    _fp8_mqa_logits_shapes,
-                    device=_jit_device,
+                _warmup_step(
+                    "fp8_mqa_logits",
+                    lambda: warmup_fp8_mqa_logits_jit(
+                        _collect_dsv4_fp8_mqa_logits_shapes(self.v4),
+                        device=_jit_device,
+                    ),
                 )
                 logging.info("[DeepSeekV4Model] kernel JIT prewarm done")
             except Exception:

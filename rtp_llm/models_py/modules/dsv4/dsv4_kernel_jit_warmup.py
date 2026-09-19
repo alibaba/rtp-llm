@@ -63,6 +63,26 @@ _DENSE_GEMM_HEURISTIC_SCAN_LIMIT = 32768
 _SM100_DENSE_BLOCK_M_CANDIDATES = tuple(range(16, 257, 16))
 _SM100_DENSE_BLOCK_N_CANDIDATES = (16,) + tuple(range(32, 257, 32))
 
+# Real-launch M sweep for dense GEMM JIT coverage. DeepGEMM's SM100 dense
+# heuristic selects swap_ab/block/cluster/pipeline configs from M at runtime;
+# the layout mirror below cannot fully replicate it (observed in serving:
+# swap_ab block_m 112/224/240 configs for the wkv shape are picked by the real
+# heuristic but never by the mirror, so mid-serving first hits of a new batch
+# token count compiled ~2s per kernel per shape). The sweep launches the real
+# GEMM for a grid of M values so every heuristic config reachable in the
+# serving M range is compiled at startup; the deep_jit disk cache deduplicates
+# repeats, so a warm cache makes the sweep cost a few fast launches.
+_DENSE_GEMM_SWEEP_ENV = "DSV4_DENSE_GEMM_WARMUP_SWEEP"
+_DENSE_GEMM_SWEEP_FINE_STEP_ENV = "DSV4_DENSE_GEMM_WARMUP_SWEEP_FINE_STEP"
+_DENSE_GEMM_SWEEP_FINE_LIMIT_ENV = "DSV4_DENSE_GEMM_WARMUP_SWEEP_FINE_LIMIT"
+_DENSE_GEMM_SWEEP_COARSE_STEP_ENV = "DSV4_DENSE_GEMM_WARMUP_SWEEP_COARSE_STEP"
+_DENSE_GEMM_SWEEP_DEFAULTS = {
+    _DENSE_GEMM_SWEEP_ENV: "1",
+    _DENSE_GEMM_SWEEP_FINE_STEP_ENV: "256",
+    _DENSE_GEMM_SWEEP_FINE_LIMIT_ENV: "8192",
+    _DENSE_GEMM_SWEEP_COARSE_STEP_ENV: "1024",
+}
+
 _BRANCH_KERNEL_JIT_WARMED_KEYS: set[tuple] = set()
 _DENSE_GEMM_JIT_WARMED_KEYS: set[tuple] = set()
 _BATCHED_FP8_EINSUM_JIT_WARMED_KEYS: set[tuple] = set()
@@ -110,9 +130,7 @@ def _compute_state_ring_entries(
 def _batch_block_warmup_sizes(
     max_batch_size: int, *, max_supported_batch: int
 ) -> tuple[int, ...]:
-    max_supported_batch = min(
-        max(int(max_batch_size), 1), int(max_supported_batch)
-    )
+    max_supported_batch = min(max(int(max_batch_size), 1), int(max_supported_batch))
     max_batch_block = 1 << (max_supported_batch - 1).bit_length()
     sizes = []
     batch_block = 1
@@ -210,9 +228,7 @@ def warmup_cp_metadata_jit(
     t0 = time.time()
     batch_sizes = _cp_batch_block_warmup_sizes(max_batch_size)
     swa_slot_batch_sizes = (
-        _swa_slot_batch_block_warmup_sizes(max_batch_size)
-        if swa_slot_enabled
-        else ()
+        _swa_slot_batch_block_warmup_sizes(max_batch_size) if swa_slot_enabled else ()
     )
     for batch_size in batch_sizes:
         lengths_host = (2,) * batch_size
@@ -265,18 +281,14 @@ def warmup_cp_metadata_jit(
             dtype=torch.bfloat16,
             device=device,
         )
-        pool_cache = torch.zeros(
-            (2, 4, ENTRY_BYTES), dtype=torch.uint8, device=device
-        )
+        pool_cache = torch.zeros((2, 4, ENTRY_BYTES), dtype=torch.uint8, device=device)
         pool_block_table = torch.zeros(
             (batch_size, 1), dtype=torch.int32, device=device
         )
         pool_padded_lens = torch.full(
             (batch_size,), 2, dtype=torch.int32, device=device
         )
-        pool_actual_lens = torch.ones(
-            batch_size, dtype=torch.int32, device=device
-        )
+        pool_actual_lens = torch.ones(batch_size, dtype=torch.int32, device=device)
         pool_local_flat = torch.empty(
             (2 * batch_size, ENTRY_BYTES), dtype=torch.uint8, device=device
         )
@@ -312,6 +324,7 @@ def warmup_cp_metadata_jit(
             dtype=torch.int64,
             device=device,
         )
+
         def _launch() -> None:
             nonlocal restore, positions, forward_metadata, pool_restore
             nonlocal pool_direct_gather
@@ -429,9 +442,7 @@ def warmup_cp_metadata_jit(
             dtype=torch.int32,
             device=device,
         )
-        swa_slot_prefixes = torch.zeros(
-            batch_size, dtype=torch.int32, device=device
-        )
+        swa_slot_prefixes = torch.zeros(batch_size, dtype=torch.int32, device=device)
 
         def _launch_swa_slot() -> None:
             compute_swa_slot_in_flat_from_cu(
@@ -1199,6 +1210,33 @@ def _collect_dsv4_dense_gemm_shapes(model: Any) -> Dict[tuple[str, int, int], di
             )
             continue
 
+        if cls_name == "V41MXFP8Linear":
+            # V4.1 dense projections (utils.V41MXFP8Linear): FP8 weights with
+            # per-row MXFP8 UE8M0-packed scales, executed at runtime via
+            # deep_gemm.fp8_fp4_gemm_nt(recipe=(1, 1, 32)) with group-32
+            # per-token input scales. Without this branch the V4.1 walk
+            # collected zero dense shapes and the dense GEMM JIT warmup was a
+            # no-op, leaving every M-derived heuristic config to cold-compile
+            # mid-serving.
+            weight = getattr(module, "weight", None)
+            scale = getattr(module, "weight_scales", None)
+            if weight is None or scale is None:
+                continue
+            if not (hasattr(module, "N") and hasattr(module, "K")):
+                continue
+            key = _shape_key("fp8_v41mx", int(module.N), int(module.K))
+            _maybe_add_shape(
+                shapes,
+                key,
+                {
+                    "name": module_name,
+                    "module": module,
+                    "weight": weight,
+                    "scale": scale,
+                },
+            )
+            continue
+
         if getattr(module, "storage", None) == "fp4":
             weight = getattr(module, "weight", None)
             scale = getattr(module, "scale_gemm", None)
@@ -1694,6 +1732,32 @@ def _sm100_dense_layout_signature(
     return best + storage + (num_groups, gemm_type_key)
 
 
+def _dense_gemm_sweep_m_values(max_m: int) -> tuple[int, ...]:
+    """Real-launch M sweep grid: fine below the fine limit, coarse above.
+
+    Fine steps cover the low/mid M range where the heuristic swaps configs
+    frequently (observed boundaries every ~256-512 tokens); coarse steps cover
+    the high range where the chosen config is stable. Bounded by the heuristic
+    scan limit, matching the mirror grid's coverage range. Env knobs are read
+    per call so tests and operators can toggle without reimporting.
+    """
+    env = {
+        name: os.environ.get(name, default)
+        for name, default in _DENSE_GEMM_SWEEP_DEFAULTS.items()
+    }
+    if env[_DENSE_GEMM_SWEEP_ENV].strip().lower() in ("0", "false", "off", "no"):
+        return ()
+    limit = min(int(max_m), _DENSE_GEMM_HEURISTIC_SCAN_LIMIT)
+    if limit <= 0:
+        return ()
+    fine = max(1, int(env[_DENSE_GEMM_SWEEP_FINE_STEP_ENV]))
+    coarse = max(fine, int(env[_DENSE_GEMM_SWEEP_COARSE_STEP_ENV]))
+    fine_limit = min(limit, max(0, int(env[_DENSE_GEMM_SWEEP_FINE_LIMIT_ENV])))
+    values = set(range(fine, fine_limit + 1, fine))
+    values.update(range(coarse, limit + 1, coarse))
+    return tuple(sorted(v for v in values if 0 < v <= limit))
+
+
 def _candidate_dense_gemm_m_values(
     *,
     max_m: int,
@@ -1894,6 +1958,35 @@ def warmup_dense_gemm_jit(
     m_grids = {key: grid for key, grid in m_grids.items() if grid}
     if not m_grids:
         return
+
+    # Real-launch M sweep: the mirror grid above cannot fully replicate the
+    # runtime heuristic's config choices, so add a real GEMM launch for every
+    # sweep M. The deep_jit disk cache deduplicates compiles; a fully warm
+    # cache pays only the (small) launch cost.
+    sweep_values = _dense_gemm_sweep_m_values(int(max_m))
+    if sweep_values:
+        m_grids = {
+            key: tuple(sorted(set(grid) | set(sweep_values)))
+            for key, grid in m_grids.items()
+        }
+        if _dist_rank() == 0:
+            logging.info(
+                "[DSV4 DenseGEMM] real-launch M sweep enabled: %d values (fine step %s up to %s, coarse step %s up to %d)",
+                len(sweep_values),
+                os.environ.get(
+                    _DENSE_GEMM_SWEEP_FINE_STEP_ENV,
+                    _DENSE_GEMM_SWEEP_DEFAULTS[_DENSE_GEMM_SWEEP_FINE_STEP_ENV],
+                ),
+                os.environ.get(
+                    _DENSE_GEMM_SWEEP_FINE_LIMIT_ENV,
+                    _DENSE_GEMM_SWEEP_DEFAULTS[_DENSE_GEMM_SWEEP_FINE_LIMIT_ENV],
+                ),
+                os.environ.get(
+                    _DENSE_GEMM_SWEEP_COARSE_STEP_ENV,
+                    _DENSE_GEMM_SWEEP_DEFAULTS[_DENSE_GEMM_SWEEP_COARSE_STEP_ENV],
+                ),
+                min(int(max_m), _DENSE_GEMM_HEURISTIC_SCAN_LIMIT),
+            )
 
     warmup_key = (
         int(max_m),
@@ -2347,13 +2440,9 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
     slot_indices = torch.tensor([0, -1], dtype=torch.long, device=device)
     out = dequantize_slots_to_bf16(full_view, slot_indices)
     if direct_scatter_enabled:
-        slot_mapping = torch.tensor(
-            [[0, 1], [1, -1]], dtype=torch.long, device=device
-        )
+        slot_mapping = torch.tensor([[0, 1], [1, -1]], dtype=torch.long, device=device)
         gather_lens = torch.tensor([2, 1], dtype=torch.int32, device=device)
-        workspace = torch.empty(
-            (2, 4, HEAD_DIM), dtype=torch.bfloat16, device=device
-        )
+        workspace = torch.empty((2, 4, HEAD_DIM), dtype=torch.bfloat16, device=device)
         direct_scatter = try_dequantize_and_gather_k_cache_slots_to_workspace(
             out=workspace,
             k_cache=full_view,
@@ -2442,6 +2531,35 @@ def _launch_dummy_gemm(
     device: torch.device,
 ) -> None:
     kind, n_value, k_value = key
+    if kind == "fp8_v41mx":
+        # Mirror the V41MXFP8Linear runtime call exactly: group-32 per-token
+        # input quantization (column-major TMA-aligned UE8M0) + the model's
+        # real FP8 weight and packed scales via fp8_fp4_gemm_nt.
+        import deep_gemm
+
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8,
+        )
+
+        a = torch.zeros((m_value, k_value), dtype=torch.bfloat16, device=device)
+        a_q, a_s = sgl_per_token_group_quant_fp8(
+            a,
+            group_size=32,
+            eps=torch.finfo(torch.float32).tiny,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        out = torch.empty((m_value, n_value), dtype=torch.bfloat16, device=device)
+        deep_gemm.fp8_fp4_gemm_nt(
+            (a_q, a_s),
+            (info["weight"], info["scale"]),
+            out,
+            recipe=(1, 1, 32),
+        )
+        del a, a_q, a_s, out
+        return
+
     if kind == "fp8":
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
 

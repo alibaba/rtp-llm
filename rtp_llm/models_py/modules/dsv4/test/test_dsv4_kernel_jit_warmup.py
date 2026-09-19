@@ -53,8 +53,8 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _run_tilelang_warmup_launch_with_retry,
     _run_triton_warmup_launch_with_retry,
     _sm100_dense_layout_signature,
-    _swa_slot_batch_block_warmup_sizes,
     _state_ring_entries_warmup_values,
+    _swa_slot_batch_block_warmup_sizes,
     _warmup_fused_kv_compress_norm_rope_insert,
     resolve_cp_metadata_warmup_max_batch_size,
     resolve_dense_gemm_warmup_max_m,
@@ -1402,9 +1402,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 device=pool_3d.device,
             )
 
-        def fake_direct_scatter(
-            *, out, k_cache, slot_mapping, gather_lens, offset
-        ):
+        def fake_direct_scatter(*, out, k_cache, slot_mapping, gather_lens, offset):
             direct_calls.append(
                 (
                     tuple(k_cache.shape),
@@ -1885,6 +1883,147 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 launch,
                 device=torch.device("cpu"),
             )
+
+    def test_collect_dense_shapes_includes_v41_mxfp8_linears(self):
+        root = nn.Module()
+        V41Linear = _module_type(
+            "V41MXFP8Linear",
+            {
+                "N": 4608,
+                "K": 5120,
+                "weight": torch.empty((4608, 5120), dtype=torch.int8),
+                "weight_scales": torch.empty((144, 160), dtype=torch.int32),
+            },
+        )
+        root.add_module("wkv", V41Linear())
+        root.add_module("wkv_same_shape", V41Linear())
+
+        shapes = _collect_dsv4_dense_gemm_shapes(root)
+        self.assertEqual(sorted(shapes.keys()), [("fp8_v41mx", 4608, 5120)])
+        self.assertEqual(shapes[("fp8_v41mx", 4608, 5120)]["name"], "wkv")
+        self.assertIs(shapes[("fp8_v41mx", 4608, 5120)]["weight"], root.wkv.weight)
+
+    def test_dense_gemm_sweep_m_values_grid_shape(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DSV4_DENSE_GEMM_WARMUP_SWEEP": "1",
+                "DSV4_DENSE_GEMM_WARMUP_SWEEP_FINE_STEP": "256",
+                "DSV4_DENSE_GEMM_WARMUP_SWEEP_FINE_LIMIT": "8192",
+                "DSV4_DENSE_GEMM_WARMUP_SWEEP_COARSE_STEP": "1024",
+            },
+        ):
+            values = warmup_module._dense_gemm_sweep_m_values(0)
+            self.assertEqual(values, ())
+            values = warmup_module._dense_gemm_sweep_m_values(16384)
+            self.assertEqual(values[0], 256)
+            self.assertEqual(values[-1], 16384)
+            # fine grid below the fine limit, coarse grid above it
+            self.assertIn(768, values)
+            self.assertIn(8192, values)
+            self.assertIn(16384, values)
+            self.assertNotIn(8576, values)  # 8192 < m < 9216 is skipped
+            self.assertEqual(
+                [v for v in values if v <= 8192],
+                list(range(256, 8193, 256)),
+            )
+            self.assertEqual(
+                [v for v in values if v > 8192],
+                list(range(9216, 16385, 1024)),
+            )
+
+    def test_dense_gemm_sweep_m_values_env_gates(self):
+        with mock.patch.dict(os.environ, {"DSV4_DENSE_GEMM_WARMUP_SWEEP": "0"}):
+            self.assertEqual(warmup_module._dense_gemm_sweep_m_values(32768), ())
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DSV4_DENSE_GEMM_WARMUP_SWEEP": "1",
+                "DSV4_DENSE_GEMM_WARMUP_SWEEP_FINE_STEP": "512",
+                "DSV4_DENSE_GEMM_WARMUP_SWEEP_FINE_LIMIT": "0",
+                "DSV4_DENSE_GEMM_WARMUP_SWEEP_COARSE_STEP": "2048",
+            },
+        ):
+            values = warmup_module._dense_gemm_sweep_m_values(6144)
+            self.assertEqual(values, tuple(range(2048, 6145, 2048)))
+
+    def test_warmup_dense_gemm_jit_merges_sweep_into_m_grids(self):
+        # The mirror grid alone cannot cover every runtime heuristic config;
+        # the real-launch sweep must be merged into the launch grid.
+        Fp8Linear = _module_type(
+            "CudaFp8DeepGEMMLinear",
+            {
+                "N": 16,
+                "K": 32,
+                "weight": torch.empty((16, 32), dtype=torch.bfloat16),
+                "weight_scales": torch.empty((16, 1), dtype=torch.int32),
+                "scale_ue8m0": True,
+            },
+        )
+        model = Fp8Linear()
+        shapes = {
+            ("fp8", 16, 32): {
+                "name": "lin",
+                "module": model,
+                "weight": model.weight,
+                "scale": model.weight_scales,
+            }
+        }
+        launched = []
+
+        def fake_launch(key, info, m_value, device):
+            launched.append((key, m_value))
+
+        mirror_grid = (99,)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DSV4_DENSE_GEMM_WARMUP_SWEEP": "1",
+                "DSV4_DENSE_GEMM_WARMUP_SWEEP_FINE_STEP": "256",
+                "DSV4_DENSE_GEMM_WARMUP_SWEEP_FINE_LIMIT": "512",
+                "DSV4_DENSE_GEMM_WARMUP_SWEEP_COARSE_STEP": "512",
+            },
+        ):
+            with mock.patch.object(warmup_module, "_is_cuda_device", return_value=True):
+                with mock.patch.object(
+                    warmup_module,
+                    "_generate_dense_gemm_warmup_m_grid",
+                    return_value=mirror_grid,
+                ):
+                    with mock.patch.object(
+                        warmup_module, "_launch_dummy_gemm", side_effect=fake_launch
+                    ):
+                        with mock.patch.object(
+                            warmup_module,
+                            "_run_deepgemm_warmup_launch_with_retry",
+                            side_effect=lambda label, shape, fn, device=None: fn(),
+                        ):
+                            with mock.patch.object(
+                                warmup_module,
+                                "_run_deepgemm_warmup_launches_serialized",
+                                side_effect=lambda label, fn: fn(),
+                            ):
+                                with mock.patch.object(
+                                    warmup_module, "_dist_rank", return_value=0
+                                ):
+                                    with mock.patch.object(
+                                        warmup_module,
+                                        "_get_deep_gemm_num_sms",
+                                        return_value=152,
+                                    ):
+                                        with mock.patch.object(
+                                            warmup_module, "_sync_cuda"
+                                        ):
+                                            with mock.patch.object(
+                                                warmup_module, "_release_cuda_cache"
+                                            ):
+                                                warmup_module.warmup_dense_gemm_jit(
+                                                    shapes,
+                                                    max_m=1024,
+                                                    device=torch.device("cpu"),
+                                                )
+        ms = sorted(m for _, m in launched)
+        self.assertEqual(ms, sorted(set((99,) + tuple(range(256, 513, 256)) + (1024,))))
 
 
 if __name__ == "__main__":
