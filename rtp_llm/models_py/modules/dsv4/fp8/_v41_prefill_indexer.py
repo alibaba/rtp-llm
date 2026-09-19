@@ -53,17 +53,20 @@ def is_supported(device: torch.device, num_heads: int, head_dim: int) -> bool:
 
 
 def logits_chunk_rows(num_keys: int) -> int:
-    """Bound logical FP32 logits to 256 MiB, with at most 512 queries.
+    """Bound logical FP32 logits to 256 MiB, with at most 4096 queries.
 
     DeepGEMM additionally pads its row stride by up to 511 keys and aligns
     query rows to its small Q tile. This is independent of the head dimension;
-    no [queries, heads, keys] temporary is materialized.
+    no [queries, heads, keys] temporary is materialized. The 4096-row query
+    batch is the batched source scan: four times fewer scorer launches,
+    topk calls and per-chunk glue than the 512-row cap at 16K+ contexts,
+    with the same 256 MiB logits bound.
     """
     if num_keys < 0:
         raise ValueError("num_keys must be nonnegative")
     if num_keys == 0:
         return 512
-    return max(1, min(512, (256 * 1024 * 1024) // (4 * num_keys)))
+    return max(1, min(4096, (256 * 1024 * 1024) // (4 * num_keys)))
 
 
 def quantize_indexer_q(q: torch.Tensor):

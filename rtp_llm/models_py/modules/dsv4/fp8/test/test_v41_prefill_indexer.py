@@ -104,7 +104,7 @@ class V41PrefillIndexerCPU(unittest.TestCase):
             with self.subTest(keys=keys):
                 rows = indexer.logits_chunk_rows(keys)
                 self.assertGreaterEqual(rows, 1)
-                self.assertLessEqual(rows, 512)
+                self.assertLessEqual(rows, 4096)
                 if keys * 4 <= cap:
                     self.assertLessEqual(rows * keys * 4, cap)
                 else:
@@ -444,6 +444,39 @@ class V41PrefillIndexerCUDA(unittest.TestCase):
         mask_candidate_logits(consumer, candidates, 8)
         mask_candidate_logits(consumer_ref, candidates, 8)
         self._assert_scores_and_topk(consumer, consumer_ref)
+    def test_batched_source_scan_rows_match_512_row_chunks(self):
+        """The batched source scan (up to 4096 query rows per scorer call) is
+        row-independent: one large call equals the 512-row chunk sequence it
+        replaces, bit-for-bit."""
+        keys = 16555
+        rows = 4096
+        generator = torch.Generator(device=self.device).manual_seed(45)
+        q = torch.randn(rows, 32, 128, generator=generator, device=self.device).bfloat16()
+        k = torch.randn(keys, 128, generator=generator, device=self.device).bfloat16()
+        weights = (
+            torch.randn(rows, 32, generator=generator, device=self.device) / 32.0
+        )
+        visible = torch.full((rows,), keys, dtype=torch.int32, device=self.device)
+        visible[0] = 0
+        q_payload, q_sf = indexer.quantize_indexer_q(q)
+        k_payload, k_sf = indexer.quantize_indexer_k_reference(k)
+        batched = indexer.score_indexer_chunk(
+            q_payload, q_sf, k_payload, k_sf, weights, visible
+        )
+        chunked = torch.cat(
+            [
+                indexer.score_indexer_chunk(
+                    q_payload[i : i + 512],
+                    q_sf[i : i + 512],
+                    k_payload,
+                    k_sf,
+                    weights[i : i + 512],
+                    visible[i : i + 512],
+                )
+                for i in range(0, rows, 512)
+            ]
+        )
+        torch.testing.assert_close(batched, chunked, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

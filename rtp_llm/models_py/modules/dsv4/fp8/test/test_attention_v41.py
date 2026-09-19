@@ -7,6 +7,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import cp_kv_slot_mapping
+from rtp_llm.models_py.modules.dsv4.fp8 import attention_v41 as attention_v41_module
 from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (
     AttentionV41FP8,
     compress_pairs,
@@ -230,6 +231,102 @@ class AttentionV41Test(unittest.TestCase):
         self.assertTrue((results[1][:1024] == -1).all())
         self.assertTrue((results[2] == -1).all())
         self.assertTrue((results[3] == -1).all())
+
+    def _kv_source_fixture(self, state_writes):
+        attn = AttentionV41FP8.__new__(AttentionV41FP8)
+        torch.nn.Module.__init__(attn)
+        attn.layer_id = 2
+        attn.kv_source_layer_id = 2
+        attn.compress_ratio = 2
+        attn.head_dim = 4
+        attn.rope_head_dim = 2
+        attn.eps = 1e-6
+        attn.global_wkv = torch.eye(4, dtype=torch.bfloat16)
+        attn.global_wgate = torch.eye(4, dtype=torch.bfloat16) * 0.125
+        attn.global_norm = torch.ones(4, dtype=torch.bfloat16)
+        attn.index_wk = torch.eye(4, dtype=torch.bfloat16)
+        attn.index_k_norm = torch.ones(4, dtype=torch.bfloat16)
+        attn.freqs_cis = torch.ones(16, 1, dtype=torch.complex64)
+        attn._shared_attention = {"layers": {2: attn}}
+        attn._source_pool = lambda region: None
+        # [B, 2 * head_dim] previous-pair state per request.
+        previous = torch.arange(2 * 8, dtype=torch.float32).view(2, 8)
+        attn._read_state = lambda positions, req_ids: previous
+
+        def record_writes(values, scores, positions, req_ids, seq_ends):
+            state_writes.append(
+                (positions.clone(), values.clone(), scores.clone())
+            )
+
+        attn._write_states = record_writes
+        return attn
+
+    def test_produce_global_tiling_is_bit_identical_across_tile_sizes(self):
+        # Chunked gather-project: tiles cut at arbitrary rows (including inside
+        # ratio-2 pairs and across requests); the seam carries the pair state,
+        # so every tile size produces the same pooled globals and the same
+        # concatenated per-token state writes as the single-shot projection.
+        torch.manual_seed(11)
+        rows = 9
+        x_full = torch.randn(rows, 4).bfloat16()
+        positions = torch.tensor([3, 4, 5, 6, 7, 8, 9, 10, 11], dtype=torch.long)
+        req_ids = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1, 1], dtype=torch.long)
+        starts = torch.tensor([3, 7], dtype=torch.long)
+        lengths = torch.tensor([4, 5], dtype=torch.long)
+
+        def run(tile_rows):
+            state_writes = []
+            attn = self._kv_source_fixture(state_writes)
+            with patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor._linear_bf16_bf16_fp32",
+                side_effect=lambda x, w: torch.nn.functional.linear(x.float(), w.float()),
+            ), patch.object(
+                attention_v41_module, "_PRODUCE_GLOBAL_TILE_ROWS", tile_rows
+            ):
+                attn._produce_global(
+                    x_full,
+                    positions,
+                    req_ids,
+                    starts,
+                    lengths,
+                    prefill=True,
+                )
+            return attn._shared_attention["global"][2], state_writes
+
+        reference_globals, reference_writes = run(4096)
+        self.assertEqual(len(reference_writes), 1)
+        for tile_rows in (1, 2, 3, 4, 5, 8):
+            with self.subTest(tile_rows=tile_rows):
+                tiled_globals, tiled_writes = run(tile_rows)
+                self.assertEqual(len(tiled_globals), len(reference_globals))
+                for (g_ref, k_ref), (g_tile, k_tile) in zip(
+                    reference_globals, tiled_globals
+                ):
+                    torch.testing.assert_close(g_tile, g_ref, rtol=0, atol=0)
+                    torch.testing.assert_close(k_tile, k_ref, rtol=0, atol=0)
+                pos_ref = torch.cat([w[0] for w in reference_writes])
+                values_ref = torch.cat([w[1] for w in reference_writes])
+                scores_ref = torch.cat([w[2] for w in reference_writes])
+                pos_tile = torch.cat([w[0] for w in tiled_writes])
+                values_tile = torch.cat([w[1] for w in tiled_writes])
+                scores_tile = torch.cat([w[2] for w in tiled_writes])
+                torch.testing.assert_close(pos_tile, pos_ref, rtol=0, atol=0)
+                torch.testing.assert_close(values_tile, values_ref, rtol=0, atol=0)
+                torch.testing.assert_close(scores_tile, scores_ref, rtol=0, atol=0)
+
+    def test_begin_forward_drops_cross_layer_index_plan(self):
+        attn = AttentionV41FP8.__new__(AttentionV41FP8)
+        torch.nn.Module.__init__(attn)
+        attn.layer_id = 2
+        attn._shared_attention = {
+            "layers": {2: attn},
+            "prefill_index_plan": object(),
+            "prefill_chunk_meta": object(),
+        }
+        attn._begin_forward()
+        self.assertNotIn("prefill_index_plan", attn._shared_attention)
+        self.assertNotIn("prefill_chunk_meta", attn._shared_attention)
+        self.assertEqual(attn._shared_attention["global"], {})
 
 
 if __name__ == "__main__":

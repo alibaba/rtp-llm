@@ -206,6 +206,34 @@ def quantize_and_insert_k_cache_fp4(
     )
 
 
+@triton.jit(do_not_specialize=["N", "block_stride", "num_cache_blocks"])
+def _fp4_global_gather_bytes_kernel(
+    cache_ptr,  # [num_blocks, block_size, 288] uint8
+    slot_mapping_ptr,  # [N] int64; <0 = zero-fill
+    out_ptr,  # [N, 288] uint8 (raw pool bytes)
+    N,
+    ROW_BYTES: tl.constexpr,
+    ARANGE: tl.constexpr,  # power-of-2 cover of ROW_BYTES (triton arange)
+    cache_block_size: tl.constexpr,
+    block_stride,
+    num_cache_blocks,
+):
+    pid = tl.program_id(0).to(tl.int64)
+    if pid >= N:
+        return
+    cols = tl.arange(0, ARANGE)
+    mask = cols < ROW_BYTES
+    out_row = out_ptr + pid * ROW_BYTES + cols
+    slot = tl.load(slot_mapping_ptr + pid).to(tl.int64)
+    if slot < 0:
+        tl.store(out_row, tl.zeros((ARANGE,), dtype=tl.uint8), mask=mask)
+        return
+    block_idx = slot // cache_block_size
+    offset = slot % cache_block_size
+    base = cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64) + offset * ROW_BYTES
+    tl.store(out_row, tl.load(base + cols, mask=mask, other=0), mask=mask)
+
+
 def dequantize_k_cache_slots_fp4(
     pool_3d: torch.Tensor,  # [num_blocks, block_size, 288] uint8
     slot_indices: torch.Tensor,  # [N] int (flat slot ids; <0 = zero-fill)
@@ -239,6 +267,63 @@ def dequantize_k_cache_slots_fp4(
         num_warps=4,
     )
     return out
+
+
+def gather_k_cache_bytes_fp4(
+    pool_3d: torch.Tensor,  # [num_blocks, block_size, 288] uint8
+    slot_indices: torch.Tensor,  # [N] int (flat slot ids; <0 = zero-fill)
+) -> torch.Tensor:
+    """Gather raw 288B FP4 pool entries to a contiguous ``[N, 288]`` uint8 tensor.
+
+    Byte-first CP transport: each rank reads only its owned slots (others
+    zero-filled) so an all-reduce over the gathered bytes — every byte has
+    exactly one owner — reassembles the full entry set at one quarter of the
+    BF16 dequantized wire size.
+    """
+    N = int(slot_indices.numel())
+    out = torch.zeros(
+        (N, FP4_GLOBAL_ENTRY_BYTES), dtype=torch.uint8, device=pool_3d.device
+    )
+    if N == 0:
+        return out
+    slots_i64 = slot_indices.reshape(-1).to(torch.int64).contiguous()
+    _fp4_global_gather_bytes_kernel[(N,)](
+        pool_3d,
+        slots_i64,
+        out,
+        N,
+        ROW_BYTES=FP4_GLOBAL_ENTRY_BYTES,
+        ARANGE=triton.next_power_of_2(FP4_GLOBAL_ENTRY_BYTES),
+        cache_block_size=int(pool_3d.shape[1]),
+        block_stride=int(pool_3d.stride(0)),
+        num_cache_blocks=int(pool_3d.shape[0]),
+        num_warps=4,
+    )
+    return out
+
+
+def dequantize_k_cache_bytes_fp4(
+    raw_bytes: torch.Tensor,  # [N, 288] uint8 (row-interleaved entries)
+    *,
+    out_dtype: torch.dtype = torch.bfloat16,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Dequantize contiguous 288B FP4 entries to ``[N, 512] out_dtype``.
+
+    The receiving side of the byte-first transport: the all-reduced raw bytes
+    are viewed as a single-block pool so the existing dequant kernel applies
+    unchanged.
+    """
+    N = int(raw_bytes.shape[0])
+    if out is None:
+        out = torch.empty((N, FP4_GLOBAL_HEAD_DIM), dtype=out_dtype, device=raw_bytes.device)
+    if N == 0:
+        return out
+    pool_view = raw_bytes.view(1, N, FP4_GLOBAL_ENTRY_BYTES)
+    slots = torch.arange(N, dtype=torch.int64, device=raw_bytes.device)
+    return dequantize_k_cache_slots_fp4(
+        pool_view, slots, out_dtype=out_dtype, out=out
+    )
 
 
 # ---------------------------------------------------------------------------

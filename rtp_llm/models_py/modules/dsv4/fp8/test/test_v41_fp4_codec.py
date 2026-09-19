@@ -23,8 +23,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
     FP4_GLOBAL_ENTRY_BYTES,
     FP4_INDEXER_ENTRY_BYTES,
     dequantize_indexer_k_fp4,
+    dequantize_k_cache_bytes_fp4,
     dequantize_k_cache_slots_fp4,
     gather_indexer_k_fp4,
+    gather_k_cache_bytes_fp4,
     quantize_and_insert_k_cache_fp4,
     quantize_indexer_k_fp4,
     quantize_rows_fp4,
@@ -176,6 +178,36 @@ class V41Fp4CodecGpuTest(unittest.TestCase):
             16, dim=-1
         )
         torch.testing.assert_close(dequant.float(), expected, rtol=0, atol=0)
+
+    def test_global_byte_gather_then_dequant_matches_direct_dequant(self):
+        """Byte-first CP transport contract: the raw 288B entries gathered per
+        owned slot (zero elsewhere) dequantize to exactly the direct per-slot
+        dequant, so an owner-summing all-reduce reassembles identical rows."""
+        torch.manual_seed(23)
+        rows, entries = 257, 128
+        values = torch.randn(rows, 512, device="cuda", dtype=torch.bfloat16)
+        pool = _pool(entries, FP4_GLOBAL_ENTRY_BYTES, 4, values.device)
+        slots = torch.arange(rows, dtype=torch.int64, device="cuda")
+        quantize_and_insert_k_cache_fp4(values, pool, slots)
+        direct = dequantize_k_cache_slots_fp4(pool, slots)
+        raw = gather_k_cache_bytes_fp4(pool, slots)
+        self.assertEqual(tuple(raw.shape), (rows, FP4_GLOBAL_ENTRY_BYTES))
+        # The gathered bytes are exactly the pool's 288B rows.
+        pool_flat = pool.reshape(-1, FP4_GLOBAL_ENTRY_BYTES)
+        torch.testing.assert_close(raw, pool_flat[slots], rtol=0, atol=0)
+        # Dequantizing the gathered bytes reproduces the direct dequant.
+        from_bytes = dequantize_k_cache_bytes_fp4(raw)
+        torch.testing.assert_close(from_bytes, direct, rtol=0, atol=0)
+        # Sentinel slots zero-fill both the bytes and the dequant output.
+        sentinel = torch.tensor([-1, -1, 5, -1], dtype=torch.int64, device="cuda")
+        raw_sentinel = gather_k_cache_bytes_fp4(pool, sentinel)
+        self.assertTrue((raw_sentinel[[0, 1, 3]] == 0).all())
+        self.assertTrue(
+            (dequantize_k_cache_bytes_fp4(raw_sentinel)[[0, 1, 3]] == 0).all()
+        )
+        torch.testing.assert_close(
+            dequantize_k_cache_bytes_fp4(raw_sentinel)[2], direct[5], rtol=0, atol=0
+        )
 
     def test_indexer_gather_and_dequant_roundtrip(self):
         torch.manual_seed(17)
