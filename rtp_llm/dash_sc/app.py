@@ -624,11 +624,19 @@ class DashScApp:
                     and grammar_config.grammar_backend.strip().lower() == "xgrammar"
                 ):
                     grammar_validator = GrammarValidator(
-                        build_model_grammar_tokenizer_info_json(
-                            base_tok, model_config
-                        ),
+                        build_model_grammar_tokenizer_info_json(base_tok, model_config),
                         grammar_config,
                         self.py_env_configs.grammar_admission_config,
+                    )
+                v41_processor_config = None
+                if model_config.model_type == "deepseek_v41":
+                    from rtp_llm.config.dsv41_config import V41Config
+                    from rtp_llm.models.multimodal.deepseek_v41_processor import (
+                        V41ImageProcessorConfig,
+                    )
+
+                    v41_processor_config = V41ImageProcessorConfig.from_model_config(
+                        V41Config.from_path(model_config.ckpt_path)
                     )
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
@@ -644,6 +652,8 @@ class DashScApp:
                     repetition_monitor_config=repetition_monitor_config,
                     grammar_validator=grammar_validator,
                     model_type=model_config.model_type,
+                    v41_processor_config=v41_processor_config,
+                    max_seq_len=model_config.max_seq_len,
                 )
 
             loop = self._start_enqueue_loop()

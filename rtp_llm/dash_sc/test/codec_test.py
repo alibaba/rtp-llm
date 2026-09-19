@@ -11,6 +11,7 @@ import torch
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
+    DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
     DASH_ERROR_TIMEOUT,
     DashErrorSpec,
@@ -26,6 +27,7 @@ from rtp_llm.dash_sc.codec import (
     parse_input_ids_from_request,
     parse_other_params,
     parse_sampling_params,
+    parse_v41_image_request,
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.inference.servicer import stream_log_tag
@@ -115,6 +117,52 @@ def _add_tensor(
     inp.datatype = datatype
     inp.shape[:] = shape
     req.raw_input_contents.append(raw)
+
+
+class V41ImageEnvelopeTest(TestCase):
+    def test_spectrum_media_order_without_header_or_sampling_changes(self):
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "input": {
+                    "messages": [
+                        {"role": "user", "content": [{"image": "a"}, {"image": "b"}]},
+                        {
+                            "role": "tool",
+                            "content": [
+                                {"type": "image_url", "image_url": {"url": "a"}}
+                            ],
+                        },
+                    ]
+                },
+                "parameters": {"max_new_tokens": 999},
+            }
+        )
+        req.parameters["header"].string_param = json.dumps({"x-request-id": "r"})
+        images = parse_v41_image_request(req)
+        self.assertEqual(images, [{"url": "a"}, {"url": "b"}, {"url": "a"}])
+        self.assertEqual(req.parameters["header"].string_param, '{"x-request-id": "r"}')
+
+    def test_invalid_envelopes_are_parameter_errors(self):
+        for payload in (
+            "{",
+            "null",
+            "[]",
+            "{}",
+            json.dumps({"input": {"messages": {}}}),
+            json.dumps({"input": {"messages": [{"content": "text"}]}}),
+            json.dumps({"input": {"messages": [{"content": [None]}]}}),
+            json.dumps({"input": {"messages": [{"content": [{"image": ""}]}]}}),
+            json.dumps({"input": {"messages": [{"content": [{"video": "v"}]}]}}),
+        ):
+            with self.subTest(payload=payload):
+                req = predict_v2_pb2.ModelInferRequest()
+                req.parameters["payload"].string_param = payload
+                with self.assertRaises(DashScParameterError):
+                    parse_v41_image_request(req)
+        req.parameters["payload"].int64_param = 3
+        with self.assertRaises(DashScParameterError):
+            parse_v41_image_request(req)
 
 
 class DashScGrpcRequestTest(TestCase):
@@ -983,12 +1031,7 @@ class StreamResponseBuilderTest(TestCase):
         resp = build_dash_error_response(
             "req-error",
             "glm",
-            error_spec=DashErrorSpec(
-                error_no=8,
-                finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
-                status_code=400,
-                status_name="InvalidParameter",
-            ),
+            error_spec=DASH_ERROR_BAD_REQUEST,
             status_message="invalid\nmax_new_tokens",
         )
 
@@ -1013,7 +1056,7 @@ class StreamResponseBuilderTest(TestCase):
         }
         self.assertEqual(
             _unpack_int64_le(by_name["finish_reason"]),
-            [LLMFinishReason.STOP_ENGINE_PARAM],
+            [LLMFinishReason.USE_PARAMETER_STATUS],
         )
         self.assertEqual(by_name["finished"], b"\x01")
         self.assertNotIn("generated_ids", by_name)

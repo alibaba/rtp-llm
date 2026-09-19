@@ -9,7 +9,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from unittest import TestCase, main
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
@@ -28,6 +28,7 @@ from rtp_llm.models.multimodal.deepseek_v41_processor import (
     load_image_bytes,
     plan_image_grid,
     prepare_vl_inputs,
+    prepare_vl_inputs_from_token_ids,
     preprocess_image,
 )
 
@@ -293,6 +294,75 @@ class V41ProcessorTest(TestCase):
             {"url": "data:image/png;base64," + encoded},
         ):
             self.assertEqual(load_image_bytes(record), data)
+
+
+class V41TokenIdsProcessorTest(TestCase):
+    def test_shared_expansion_preserves_special_ids_and_duplicate_order(self):
+        config = V41ImageProcessorConfig(
+            vision_patch_size=2,
+            vision_downsample_ratio=1,
+            vision_min_pixels=0,
+            vision_max_n_token=32,
+        )
+        marker = config.image_token_id
+        ids = [0, 129260, marker, 1, marker, marker, 129261]
+        a, b = image_data(3, 5), image_data(5, 3, offset=9)
+        records = [{"data": data} for data in (a, b, a)]
+        tokenizer = Mock()
+        tokenizer.encode.return_value = ids
+        expected = prepare_vl_inputs("prompt", records, tokenizer, config)
+        actual = prepare_vl_inputs_from_token_ids(ids, records, config)
+        self.assertEqual(actual.prompt, "")
+        self.assertEqual(actual.token_ids, expected.token_ids)
+        self.assertEqual(actual.token_types, expected.token_types)
+        self.assertEqual(actual.image_content_hashes, expected.image_content_hashes)
+        self.assertEqual(
+            actual.images[0].content_sha256, actual.images[2].content_sha256
+        )
+        self.assertNotEqual(
+            actual.images[0].content_sha256, actual.images[1].content_sha256
+        )
+        self.assertEqual(
+            [
+                token
+                for token, kind in zip(actual.token_ids, actual.token_types)
+                if kind == TEXT
+            ],
+            [0, 129260, 1, 129261],
+        )
+        self.assertEqual(
+            len(actual.token_ids), len(ids) - 3 + sum(i.length for i in actual.images)
+        )
+        for image, reference in zip(actual.images, expected.images):
+            self.assertEqual(image.start, reference.start)
+            self.assertTrue(torch.equal(image.patches, reference.patches))
+            self.assertTrue(torch.equal(image.types, reference.types))
+            self.assertEqual(image.patches.device.type, "cpu")
+            self.assertEqual(image.patches.dtype, torch.bfloat16)
+            self.assertEqual(image.processor_identity, config.identity)
+        self.assertEqual(ids, [0, 129260, marker, 1, marker, marker, 129261])
+        tokenizer.encode.assert_called_once_with("prompt")
+
+    def test_empty_ids_do_not_fall_back_to_tokenization(self):
+        config = V41ImageProcessorConfig()
+        prepared = prepare_vl_inputs_from_token_ids([], [], config, prompt="ignored")
+        self.assertEqual(prepared.token_ids, ())
+        self.assertEqual(prepared.images, ())
+
+    def test_count_mismatch_fails_before_download(self):
+        config = V41ImageProcessorConfig()
+        loader = Mock(side_effect=AssertionError("must not download"))
+        for ids, images in (
+            ([], [{"url": "https://example.test/image"}]),
+            ([config.image_token_id], []),
+            ([config.image_token_id] * 2, [{"url": "https://example.test/image"}]),
+        ):
+            with self.subTest(ids=ids):
+                with self.assertRaisesRegex(ValueError, "placeholder count"):
+                    prepare_vl_inputs_from_token_ids(
+                        ids, images, config, url_loader=loader
+                    )
+        loader.assert_not_called()
 
 
 if __name__ == "__main__":
