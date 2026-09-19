@@ -551,7 +551,11 @@ def _prepare_v41_image_request(request, input_ids, processor_config, images=None
         if not images:
             return None
         return prepare_vl_inputs_from_token_ids(
-            input_ids, images, processor_config, url_loader=load_url
+            input_ids,
+            images,
+            processor_config,
+            url_loader=load_url,
+            max_image_bytes=10 * 1024 * 1024,
         )
     except (TypeError, ValueError) as error:
         raise FtRuntimeException(ExceptionType.INVALID_PARAMS, str(error)) from error
