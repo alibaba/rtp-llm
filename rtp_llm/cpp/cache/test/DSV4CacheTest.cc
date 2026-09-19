@@ -532,8 +532,9 @@ TEST(CacheConfigTest, TopologyRemainsTheSingleSourceAcrossSupportedUpdates) {
     EXPECT_NE(layout_topology.get(), policy_topology.get());
     EXPECT_EQ(config.group("full").block_num, 17u);
     EXPECT_EQ(config.group("linear").block_num, 9u);
-    EXPECT_EQ(config.groupKvBlockStrideBytesSnapshot(), (std::vector<size_t>{128, 256}));
-    EXPECT_EQ(config.groupKvScaleStrideBytesSnapshot(), (std::vector<size_t>{4, 8}));
+    EXPECT_EQ(config.group("full").kvBlockStrideBytes(), 128u);
+    EXPECT_EQ(config.group("full").kvScaleStrideBytes(), 4u);
+    EXPECT_EQ(config.group("linear").kvScaleStrideBytes(), 8u);
     EXPECT_EQ(config.group("linear").block_num, 9u);
     EXPECT_EQ(config.group("linear").kvBlockStrideBytes(), 256u);
     EXPECT_EQ(policy_topology->group("linear").block_num, 0u);
@@ -785,7 +786,6 @@ TEST(CacheConfigCreatorTest, Fp8BlockSizeBytesUsePaddedPhysicalStride) {
     auto config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
-    ASSERT_EQ(config.groupKvBlockStrideBytesSnapshot().size(), 7u);
 
     EXPECT_EQ(config.specForGroup(gidForTag(config, "csa_kv"))->block_size_bytes(), 19008u);
     EXPECT_EQ(config.specForGroup(gidForTag(config, "hca_kv"))->block_size_bytes(), 1152u);
@@ -912,7 +912,6 @@ TEST(CacheConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlocks) {
     auto config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
-    ASSERT_EQ(config.groupKvBlockStrideBytesSnapshot().size(), 7u);
 
     EXPECT_EQ(config.specForGroup(gidForTag(config, "csa_kv"))->block_size_bytes(), 19008u);
     EXPECT_EQ(config.specForGroup(gidForTag(config, "hca_kv"))->block_size_bytes(), 1152u);

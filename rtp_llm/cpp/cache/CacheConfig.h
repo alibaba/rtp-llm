@@ -145,60 +145,6 @@ public:
         return topology().layerIdsForGroup(group_tag);
     }
 
-    std::vector<size_t> groupSeqBlockSizesSnapshot() const {
-        std::vector<size_t> values;
-        values.reserve(topology().groups().size());
-        for (size_t gid = 0; gid < topology().groups().size(); ++gid) {
-            values.push_back(seqSizePerBlockForGroup(gid));
-        }
-        return values;
-    }
-
-    std::vector<size_t> groupKernelSeqBlockSizesSnapshot() const {
-        std::vector<size_t> values;
-        values.reserve(topology().groups().size());
-        for (size_t gid = 0; gid < topology().groups().size(); ++gid) {
-            values.push_back(kernelSeqSizePerBlockForGroup(gid));
-        }
-        return values;
-    }
-
-    std::vector<size_t> groupKernelBlocksPerKvBlockSnapshot() const {
-        std::vector<size_t> values;
-        values.reserve(topology().groups().size());
-        for (size_t gid = 0; gid < topology().groups().size(); ++gid) {
-            values.push_back(kernelBlocksPerKvBlockForGroup(gid));
-        }
-        return values;
-    }
-
-    std::vector<size_t> groupBlockSizeBytesSnapshot() const {
-        std::vector<size_t> result;
-        result.reserve(static_cast<size_t>(groupNums()));
-        for (size_t gid = 0; gid < static_cast<size_t>(groupNums()); ++gid) {
-            result.push_back(blockSizeBytesForGroup(gid));
-        }
-        return result;
-    }
-
-    std::vector<size_t> groupKvBlockStrideBytesSnapshot() const {
-        std::vector<size_t> strides;
-        strides.reserve(topology().groups().size());
-        for (const auto& group : topology().groups()) {
-            strides.push_back(group.kvBlockStrideBytes());
-        }
-        return strides;
-    }
-
-    std::vector<size_t> groupKvScaleStrideBytesSnapshot() const {
-        std::vector<size_t> strides;
-        strides.reserve(topology().groups().size());
-        for (const auto& group : topology().groups()) {
-            strides.push_back(group.kvScaleStrideBytes());
-        }
-        return strides;
-    }
-
     uint32_t blockNumForGroup(size_t gid) const {
         return topology().groupById(gid).block_num;
     }
