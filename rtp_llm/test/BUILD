@@ -89,6 +89,12 @@ py_test(
 )
 
 py_test(
+    name = "tokenizer_prefix_cache_test",
+    srcs = ["tokenizer_prefix_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "v41_recipe_protocol_test",
     srcs = ["v41_recipe_protocol_test.py"],
     data = [

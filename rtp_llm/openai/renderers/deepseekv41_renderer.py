@@ -7,6 +7,7 @@ import uuid
 
 from rtp_llm.config.dsv41_config import V41Config
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.frontend.tokenizer_prefix_cache import PrefixCachingTokenizer
 from rtp_llm.models.multimodal.deepseek_v41_processor import (
     V41ImageProcessorConfig,
     prepare_vl_inputs,
@@ -110,6 +111,20 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
     def _build_prompt(self, request):
         return self._encode_request(request)[0]
 
+    def _vl_tokenizer(self):
+        """Tokenizer passed into prepare_vl_inputs (encode-only use there).
+
+        Wraps the frontend tokenizer with the verified prefix-ids cache so a
+        prompt extending a recently rendered prompt (shared system prompt,
+        prefix-cache hit, multi-turn) encodes only its new suffix. Falls back
+        to the plain tokenizer when the cache is structurally unusable.
+        """
+        cache = getattr(self, "_vl_prefix_cache", None)
+        if cache is None:
+            cache = PrefixCachingTokenizer(self.tokenizer)
+            self._vl_prefix_cache = cache
+        return cache
+
     def prepare_v41_inputs(self, request, *, url_loader=None, output_budget=None):
         """Prepare request-owned canonical IDs, masks, images and content hashes.
 
@@ -125,7 +140,7 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
             return prepare_vl_inputs(
                 prompt,
                 media["images"],
-                self.tokenizer,
+                self._vl_tokenizer(),
                 self.image_processor_config,
                 url_loader=url_loader,
                 output_budget=output_budget,
