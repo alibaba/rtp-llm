@@ -32,15 +32,21 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(const std::functio
             return ErrorInfo(ErrorCode::CANCELLED, "request cancelled while waiting for an output");
         }
         checkTimeout();
-        // Clear the flag before re-testing emptiness so a push landing between the test and the wait
-        // still wakes us; a notify missed entirely is bounded by the slice anyway.
-        output_wait_->wake.store(false, std::memory_order_release);
-        if (generate_outputs_queue_.isEmpty()) {
-            std::unique_lock<std::mutex> lock(output_wait_->mu);
-            output_wait_->cv.wait_for(lock, kOutputWaitSlice, [this] {
-                return output_wait_->wake.load(std::memory_order_acquire) || !generate_outputs_queue_.isEmpty();
-            });
-        }
+        // Publication is serialized on output_wait_->mu (see enqueueGenerateOutput), so clearing the
+        // flag, re-testing the queue and registering the wait happen in ONE critical section. A
+        // producer therefore either is still blocked outside this mutex -- in which case the predicate
+        // below observes its output -- or publishes once the wait is registered, in which case the
+        // notify reaches it. There is no third interleaving, so a notification cannot be lost.
+        //
+        // Neither the cancellation callback nor checkTimeout() may run under this mutex: both re-enter
+        // the stream state machine, and checkTimeout() takes mutex_, which the producer already holds
+        // before taking mu. Lock order is mutex_ -> mu -> the queue's own lock; this predicate only
+        // ever nests mu -> the queue lock, so the order stays acyclic.
+        std::unique_lock<std::mutex> lock(output_wait_->mu);
+        output_wait_->wake.store(false, std::memory_order_relaxed);
+        output_wait_->cv.wait_for(lock, kOutputWaitSlice, [this] {
+            return output_wait_->wake.load(std::memory_order_relaxed) || !generate_outputs_queue_.isEmpty();
+        });
     }
     if (hasError()) {
         return statusInfo();
@@ -189,9 +195,21 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
         generate_outputs_queue_.push(std::move(generate_results));
     }
     // Wake a nextOutput() waiter on BOTH branches: the error branch is a terminal transition, so a
-    // waiter must not sit out the rest of its slice before observing it. An atomic store plus a notify
-    // keeps this off the producer's lock path -- this runs while the stream mutex_ is held.
-    output_wait_->wake.store(true, std::memory_order_release);
+    // waiter must not sit out the rest of its slice before observing it.
+    //
+    // The flag is published under output_wait_->mu. Storing it outside that mutex and only notifying
+    // was a lost-NOTIFICATION defect, not an atomic-visibility one: a waiter that had already
+    // evaluated its predicate as false had not yet registered on the condition variable, so the notify
+    // reached nobody and delivery slipped to the end of the wait slice. Taking the mutex here blocks
+    // the producer until the waiter is either still before its predicate evaluation or fully parked,
+    // which is exactly the serialization the wait needs. The queue's own lock is already released by
+    // the push above, so this adds no nesting beyond the documented order mutex_ -> mu -> queue lock.
+    // The notify is issued after releasing mu so a woken waiter does not immediately re-block on it;
+    // that is safe because the flag was published under mu.
+    {
+        std::lock_guard<std::mutex> wait_lock(output_wait_->mu);
+        output_wait_->wake.store(true, std::memory_order_relaxed);
+    }
     output_wait_->cv.notify_all();
 }
 

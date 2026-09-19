@@ -290,9 +290,13 @@ public:
         }
     }
 
-    // Start one upstream GenerateStreamCall on its own thread; returns the thread.
-    std::thread startUpstream(std::shared_ptr<::grpc::ClientContext>* out_ctx) {
+    // Start one upstream GenerateStreamCall on its own thread; returns the thread. An optional upstream
+    // deadline lets a test compare the two hops' budgets in either direction.
+    std::thread startUpstream(std::shared_ptr<::grpc::ClientContext>* out_ctx, int64_t upstream_deadline_ms = 0) {
         auto ctx = std::make_shared<::grpc::ClientContext>();
+        if (upstream_deadline_ms > 0) {
+            ctx->set_deadline(std::chrono::system_clock::now() + Ms(upstream_deadline_ms));
+        }
         *out_ctx = ctx;
         return std::thread([this, ctx]() {
             GenerateInputPB input;
@@ -525,6 +529,103 @@ TEST(CancellationPropagation, RepeatedCancellationsEachRelease) {
 
         pair.joinUpstream(client);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 7. The two hops' deadlines are independent in BOTH directions (deadline propagation stays disabled
+//    while cancellation propagation stays enabled).
+// ---------------------------------------------------------------------------
+
+TEST(CancellationPropagation, UpstreamDeadlineEarlierThanDownstreamStillReleasesTheChild) {
+    PdPair pair(/*propagate=*/true);
+    ASSERT_TRUE(pair.ok()) << pair.initError();
+    // The downstream policy is far looser than the upstream budget. If the child ended on its OWN
+    // deadline it would take 5 s; it must instead be released when the upstream call expires. Because
+    // deadline propagation is disabled, that release cannot be inheritance -- it is the parent's final
+    // op cascading cancellation to the child, which is exactly what unblocks a handler parked in Read().
+    pair.prefill()->setDownstreamDeadlineMs(5000);
+
+    std::shared_ptr<::grpc::ClientContext> ctx;
+    auto                                   client = pair.startUpstream(&ctx, /*upstream_deadline_ms=*/400);
+
+    ASSERT_TRUE(pair.prefill()->waitForBlockedInRead(std::chrono::seconds(10)));
+    ASSERT_TRUE(pair.decode()->waitForAllocate(std::chrono::seconds(10)));
+
+    const auto t0 = Clock::now();
+    ASSERT_TRUE(pair.prefill()->waitForReturn(std::chrono::seconds(10)))
+        << "an expired upstream call did not release the downstream (detail: "
+        << pair.prefill()->returnDetail() << ")";
+    const int64_t elapsed = msSince(t0);
+    EXPECT_GE(elapsed, 300) << "released before the upstream deadline expired: " << elapsed << " ms";
+    EXPECT_LT(elapsed, 4000)
+        << "released at/near the 5 s downstream deadline, so this was deadline inheritance or a stall "
+           "rather than cancellation propagation: "
+        << elapsed << " ms";
+    // The downstream leg must be released too, not merely the prefill's blocked read. Wait for it: the
+    // decode records its cancellation only as it exits its own poll loop.
+    ASSERT_TRUE(pair.decode()->waitForRelease(Ms(kReleaseBudgetMs)))
+        << "an expired upstream call released the prefill but left the downstream leg held";
+    EXPECT_TRUE(pair.decode()->sawCancellation())
+        << "the downstream did not observe the cancellation that released it";
+
+    pair.joinUpstream(client);
+}
+
+TEST(CancellationPropagation, DownstreamDeadlineEarlierThanUpstreamEndsTheChildFirst) {
+    PdPair pair(/*propagate=*/true);
+    ASSERT_TRUE(pair.ok()) << pair.initError();
+    pair.prefill()->setDownstreamDeadlineMs(400);
+
+    std::shared_ptr<::grpc::ClientContext> ctx;
+    // The upstream budget is far longer, so the tighter EXPLICIT downstream deadline must still govern.
+    // Together with the case above this pins both directions: neither hop's budget silently replaces
+    // the other's, which is what disabling deadline propagation is supposed to guarantee.
+    auto client = pair.startUpstream(&ctx, /*upstream_deadline_ms=*/5000);
+
+    ASSERT_TRUE(pair.prefill()->waitForBlockedInRead(std::chrono::seconds(10)));
+    ASSERT_TRUE(pair.decode()->waitForAllocate(std::chrono::seconds(10)));
+
+    const auto t0 = Clock::now();
+    ASSERT_TRUE(pair.prefill()->waitForReturn(std::chrono::seconds(10)))
+        << "the tighter downstream deadline did not end the call (detail: "
+        << pair.prefill()->returnDetail() << ")";
+    const int64_t elapsed = msSince(t0);
+    EXPECT_GE(elapsed, 300) << "ended before its own 400 ms deadline: " << elapsed << " ms";
+    EXPECT_LT(elapsed, 2500) << "downstream deadline took far longer than configured: " << elapsed << " ms";
+
+    pair.joinUpstream(client);
+    // The upstream call must not have expired on its own 5 s budget -- the handler returned because the
+    // downstream ended. (ClientContext has no IsCancelled() at this gRPC version, so the call's status
+    // is the observable: DEADLINE_EXCEEDED here would mean the two hops' budgets were conflated.)
+    EXPECT_NE(::grpc::StatusCode::DEADLINE_EXCEEDED, pair.upstreamStatus().error_code())
+        << "the longer upstream call expired, so the downstream deadline leaked into it";
+}
+
+// ---------------------------------------------------------------------------
+// 8. The no-server-context path (a deferred caller) keeps working.
+// ---------------------------------------------------------------------------
+
+TEST(CancellationPropagation, NullParentFallbackPathStillCompletesNormally) {
+    // Production builds an independent ClientContext when there is no server context to inherit from:
+    // the deferred batch path constructs slot contexts on a worker pool thread after the originating
+    // handler has returned, and the core asserts that a propagation parent is a server call. This is
+    // that same construction, and it must serve a normal request -- not merely "fail to propagate".
+    PdPair pair(/*propagate=*/false);
+    ASSERT_TRUE(pair.ok()) << pair.initError();
+    pair.prefill()->setDownstreamDeadlineMs(0);
+
+    std::shared_ptr<::grpc::ClientContext> ctx;
+    auto                                   client = pair.startUpstream(&ctx, /*upstream_deadline_ms=*/5000);
+    ASSERT_TRUE(pair.decode()->waitForAllocate(std::chrono::seconds(10)));
+    pair.decode()->requestStop();  // the downstream ends normally
+
+    ASSERT_TRUE(pair.prefill()->waitForReturn(std::chrono::seconds(10)))
+        << "the fallback context did not complete a normal request (detail: "
+        << pair.prefill()->returnDetail() << ")";
+    EXPECT_FALSE(pair.decode()->sawCancellation())
+        << "a normal downstream shutdown was reported as a cancellation on the fallback path";
+
+    pair.joinUpstream(client);
 }
 
 }  // namespace
