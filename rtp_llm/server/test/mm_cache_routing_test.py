@@ -757,6 +757,12 @@ class MMCacheApiTest(unittest.TestCase):
             [torch.ones(2, 4, device="cuda")], feature_hashes=[hashes]
         )
         response = server._trans_output_rdma(result)
+        exported_embeddings, exported_pos, exported_extras = (
+            server._rdma.export_embedding.call_args.args
+        )
+        self.assertIs(exported_embeddings[0], result.embeddings[0])
+        self.assertIsNone(exported_pos)
+        self.assertEqual(exported_extras, [])
         self.assertEqual(response.output_rdma.handle, "handle")
         self.assertEqual(response.feature_hash_version, 1)
         self.assertTrue(
@@ -764,6 +770,41 @@ class MMCacheApiTest(unittest.TestCase):
         )
         self.assertFalse(response.HasField("multimodal_embedding"))
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_rdma_response_exports_multiple_embeddings_without_concat(self):
+        from unittest.mock import Mock
+
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MMRdmaDescPB
+        from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+        from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
+
+        server = MultimodalRpcServer.__new__(MultimodalRpcServer)
+        server._rdma = Mock()
+        server._rdma.export_embedding.return_value = [
+            MMRdmaDescPB(handle="first").SerializeToString(),
+            MMRdmaDescPB(handle="second").SerializeToString(),
+        ]
+        embeddings = [
+            torch.full((2, 4), 1.0, device="cuda"),
+            torch.full((3, 4), 2.0, device="cuda"),
+        ]
+        result = MMEmbeddingRes(embeddings)
+
+        response = server._trans_output_rdma(result)
+
+        exported_embeddings, exported_pos, exported_extras = (
+            server._rdma.export_embedding.call_args.args
+        )
+        self.assertIs(exported_embeddings, embeddings)
+        self.assertIs(exported_embeddings[0], embeddings[0])
+        self.assertIs(exported_embeddings[1], embeddings[1])
+        self.assertIsNone(exported_pos)
+        self.assertEqual(exported_extras, [])
+        self.assertEqual(list(response.split_size), [2, 3])
+        self.assertEqual(
+            [desc.handle for desc in response.output_rdma_chunks],
+            ["first", "second"],
+        )
 
 if __name__ == "__main__":
     unittest.main()

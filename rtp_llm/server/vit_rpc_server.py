@@ -141,26 +141,26 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         """
         if self._rdma is None or not res.embeddings:
             return None
-        emb = torch.concat(res.embeddings).contiguous()
-        if not emb.is_cuda:
+        if not all(emb.is_cuda for emb in res.embeddings):
             return None
 
+        device = res.embeddings[0].device
         pos = None
         if res.position_ids is not None and len(res.position_ids) > 0:
-            pos = torch.concat(res.position_ids).to(device=emb.device).contiguous()
+            pos = torch.concat(res.position_ids).to(device=device).contiguous()
         extras = []
         if res.extra_input is not None and len(res.extra_input) > 0:
-            extras = [e.to(device=emb.device).contiguous() for e in res.extra_input]
+            extras = [e.to(device=device).contiguous() for e in res.extra_input]
 
         # export_embedding returns a list of serialized MMRdmaDescPB (one per RDMA slot): a single
         # element for the common fits-in-one-slot case, N when the output was chunked, and an empty
         # list on failure (-> fall back to inline bytes).
-        desc_bytes_list = self._rdma.export_embedding(emb, pos, extras)
+        desc_bytes_list = self._rdma.export_embedding(res.embeddings, pos, extras)
         if not desc_bytes_list:
             logging.warning(
                 "[VIT] mm rdma export failed; falling back to inline bytes "
                 "(embedding_bytes=%d, pos=%s, extra_count=%d)",
-                emb.numel() * emb.element_size(),
+                sum(emb.numel() * emb.element_size() for emb in res.embeddings),
                 pos is not None,
                 len(extras),
             )
