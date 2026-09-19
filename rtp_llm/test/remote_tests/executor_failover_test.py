@@ -60,6 +60,9 @@ class _FakeExecutor:
     cancelled = []
     closed = []
     calls = []
+    cancel_succeeded = True
+    operation_done = True
+    waits = []
 
     def __init__(self, endpoint, cas, metadata):
         self.grpc_uri = endpoint
@@ -72,7 +75,11 @@ class _FakeExecutor:
 
     def cancel_operation(self, operation_name, timeout=5):
         self.cancelled.append(operation_name)
-        return True
+        return self.cancel_succeeded
+
+    def wait_operation_done(self, operation_name, timeout=5):
+        self.waits.append(operation_name)
+        return self.operation_done
 
     def close(self):
         self.closed.append(self.grpc_uri)
@@ -87,6 +94,9 @@ def _reset_fake_executor():
     _FakeExecutor.cancelled = []
     _FakeExecutor.closed = []
     _FakeExecutor.calls = []
+    _FakeExecutor.cancel_succeeded = True
+    _FakeExecutor.operation_done = True
+    _FakeExecutor.waits = []
 
 
 class _FakeCollectedItem:
@@ -1025,6 +1035,83 @@ def _done_operation(exit_code=0):
     return op
 
 
+@pytest.mark.parametrize(
+    "state",
+    [
+        "completed",
+        "remote_error",
+        "executing",
+        "completed_metadata_only",
+        "empty",
+        "not_found",
+        "deadline",
+        "different_operation",
+    ],
+)
+def test_wait_operation_done_requires_matching_terminal_response(state):
+    class _ReadError(grpc.RpcError):
+        def code(self):
+            return (
+                grpc.StatusCode.NOT_FOUND
+                if state == "not_found"
+                else grpc.StatusCode.DEADLINE_EXCEEDED
+            )
+
+    class _Stream:
+        cancelled = False
+
+        def __iter__(self):
+            if state in {"not_found", "deadline"}:
+                raise _ReadError()
+            if state == "empty":
+                return
+            op = remote_execution_pb2.Operation(name="operations/observed")
+            if state in {"completed", "remote_error", "different_operation"}:
+                op.done = True
+            if state == "remote_error":
+                op.error.code = 1
+                op.error.message = "cancelled"
+            if state == "different_operation":
+                op.name = "operations/another"
+            if state in {"executing", "completed_metadata_only"}:
+                meta = remote_execution_pb2.ExecuteOperationMetadata(
+                    stage=remote_execution_pb2.ExecutionStage.Value.Value(
+                        "EXECUTING" if state == "executing" else "COMPLETED"
+                    )
+                )
+                op.metadata.Pack(meta)
+            yield op
+
+        def cancel(self):
+            self.cancelled = True
+
+    stream = _Stream()
+    seen = {}
+
+    class _Stub:
+        def WaitExecution(self, request, metadata, timeout):
+            seen.update(name=request.name, metadata=metadata, timeout=timeout)
+            return stream
+
+    metadata = [("test-header", "test-value")]
+    executor = RemoteExecutor(
+        "grpc://scheduler.example.test:50052", _FakeCAS(), metadata
+    )
+    executor.stub = _Stub()
+    try:
+        assert executor.wait_operation_done("operations/observed", timeout=3) is (
+            state in {"completed", "remote_error"}
+        )
+        assert seen == {
+            "name": "operations/observed",
+            "metadata": metadata,
+            "timeout": 3,
+        }
+        assert stream.cancelled is True
+    finally:
+        executor.close()
+
+
 def test_execute_uses_action_timeout_and_rpc_deadline():
     cas = _CapturingCAS()
     executor = RemoteExecutor("grpc://scheduler.example.test:50052", cas)
@@ -1047,6 +1134,7 @@ def test_execute_uses_action_timeout_and_rpc_deadline():
     )
 
     assert result.exit_code == 0
+    assert result.operation_done is True
     assert seen["rpc_timeout"] == 1620
     action_timeouts = []
     for data in cas.uploaded_blobs:
@@ -1660,6 +1748,90 @@ def test_failover_retries_on_next_executor_ip(monkeypatch):
     assert _FakeExecutor.cancelled == ["operations/1"]
 
 
+@pytest.mark.parametrize("cancel_succeeded", [False, True])
+@pytest.mark.parametrize("operation_done", [False, True])
+def test_failover_requires_terminal_operation_before_resubmit(
+    monkeypatch, cancel_succeeded, operation_done
+):
+    _reset_fake_executor()
+    monkeypatch.setattr(
+        endpoint_info,
+        "resolve_ipv4_addresses",
+        lambda host, port: ["10.0.0.1", "10.0.0.2"],
+    )
+    original = ExecutionResult(
+        exit_code=-1,
+        infra_category="watchdog_timeout",
+        operation_name="operations/unresolved",
+        last_stage="QUEUED",
+    )
+    _FakeExecutor.results = [original, ExecutionResult(exit_code=0)]
+    _FakeExecutor.cancel_succeeded = cancel_succeeded
+    _FakeExecutor.operation_done = operation_done
+    executor = FailoverRemoteExecutor(
+        "grpc://scheduler.example.test:50052",
+        _FakeCAS(),
+        max_failovers=1,
+        executor_factory=_FakeExecutor,
+    )
+
+    result = executor.execute(command=["bash", "-c", "true"])
+
+    if operation_done:
+        assert result.exit_code == 0
+        assert result.failover_attempts == 1
+        assert len(_FakeExecutor.calls) == 2
+    else:
+        assert result is original
+        assert result.exit_code == -1
+        assert result.failover_attempts == 0
+        assert len(_FakeExecutor.calls) == 1
+        assert len(_FakeExecutor.results) == 1
+        assert _FakeExecutor.endpoints == ["grpc://10.0.0.1:50052"]
+    assert _FakeExecutor.cancelled == ["operations/unresolved"]
+    assert _FakeExecutor.waits == ["operations/unresolved"]
+    assert _FakeExecutor.closed == _FakeExecutor.endpoints
+
+
+@pytest.mark.parametrize("operation_done", [False, True])
+def test_plugin_retry_preserves_unresolved_operation_failure(
+    monkeypatch, operation_done
+):
+    plugin = object.__new__(remote_plugin.RemoteREAPIPlugin)
+    plugin._ensure_remote_clients = lambda: None
+    original = ExecutionResult(
+        exit_code=-1,
+        infra_category="watchdog_timeout",
+        operation_name="operations/prior",
+        last_stage="QUEUED",
+        operation_done=operation_done,
+    )
+    results = [original, ExecutionResult(exit_code=0)]
+    calls = []
+    waits = []
+
+    def execute(**kwargs):
+        calls.append(kwargs)
+        return results.pop(0)
+
+    plugin.executor = SimpleNamespace(execute=execute)
+    monkeypatch.setattr(remote_plugin, "MAX_RETRIES", 1)
+    monkeypatch.setattr(remote_plugin.time, "sleep", waits.append)
+
+    result = plugin._execute_with_retry(command=["bash", "-c", "true"])
+
+    if operation_done:
+        assert result.exit_code == 0
+        assert len(calls) == 2
+        assert waits == [2]
+    else:
+        assert result is original
+        assert result.exit_code == -1
+        assert len(calls) == 1
+        assert len(results) == 1
+        assert waits == []
+
+
 def test_failover_refuses_retry_when_global_budget_is_low(monkeypatch):
     _reset_fake_executor()
     monkeypatch.setattr(
@@ -1710,6 +1882,7 @@ def test_failover_retries_worker_io_status_with_scheduler_exit_code(monkeypatch)
             infra_category="executor_worker_io",
             operation_name="operations/2",
             last_stage="COMPLETED",
+            operation_done=True,
         ),
         ExecutionResult(exit_code=0),
     ]
@@ -1731,6 +1904,7 @@ def test_failover_retries_worker_io_status_with_scheduler_exit_code(monkeypatch)
         "grpc://10.0.0.2:50052",
     ]
     assert _FakeExecutor.cancelled == ["operations/2"]
+    assert _FakeExecutor.waits == []
     assert _FakeExecutor.calls[0].get("env_vars") is None
     assert _FakeExecutor.calls[1]["env_vars"] == {
         "RTP_REMOTE_EXECUTOR_FAILOVER_ATTEMPT": "1"
@@ -1807,6 +1981,7 @@ def test_failover_retries_worker_gpu_xid(monkeypatch):
             infra_category="worker_gpu_xid",
             operation_name="operations/gpu-xid",
             last_stage="COMPLETED",
+            operation_done=True,
         ),
         ExecutionResult(exit_code=0),
     ]
@@ -1828,6 +2003,7 @@ def test_failover_retries_worker_gpu_xid(monkeypatch):
         "grpc://10.0.0.2:50052",
     ]
     assert _FakeExecutor.cancelled == ["operations/gpu-xid"]
+    assert _FakeExecutor.waits == []
 
 
 def _operation_with_stage(stage_name):

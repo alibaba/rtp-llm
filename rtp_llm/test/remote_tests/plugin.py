@@ -892,6 +892,14 @@ class RemoteREAPIPlugin:
                     )
                     break
             result = self.executor.execute(**kwargs)
+            if result.operation_name and not result.operation_done:
+                log.warning(
+                    "[RETRY] refusing retry: prior operation is not confirmed "
+                    "terminal operation=%s last_stage=%s",
+                    result.operation_name,
+                    result.last_stage or "n/a",
+                )
+                return result
             # REAPI codes 34/38 are transient infra failures — same policy as
             # bazel build (setup.py imports the same constant from _build/reapi_retry).
             should_retry = (

@@ -535,8 +535,9 @@ description = "Python UT on SM8x class GPUs (py-ut-sm8x)"
 gpu_type = "A10"
 minimum_count = 1
 # Preserve the 2730 previously executed cases, restore 200 mainline methods,
-# and add two coverage/staging regressions. Every case must execute.
-expected_count = 2932
+# and add two coverage/staging plus 14 remote termination regressions.
+# Every case must execute.
+expected_count = 2946
 forbid_skips = true
 paths = [
     "rtp_llm/access_logger/test",
@@ -595,7 +596,7 @@ markexpr = "not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke
 description = "Open-source-only Python UT on SM8x after internal_source is stripped"
 gpu_type = "A10"
 minimum_count = 1
-expected_count = 2932
+expected_count = 2946
 forbid_skips = true
 paths = [
     "rtp_llm/access_logger/test",

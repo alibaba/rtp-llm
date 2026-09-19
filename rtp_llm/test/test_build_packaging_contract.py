@@ -969,8 +969,8 @@ class BuildPackagingContractTest(TestCase):
         self.assertIn("not SM100_ARM", profiles["py_ut_sm100"]["markexpr"])
 
         for name, expected_count in {
-            "py_ut_sm8x": 2932,
-            "py_ut_oss_sm8x": 2932,
+            "py_ut_sm8x": 2946,
+            "py_ut_oss_sm8x": 2946,
             "py_ut_sm9x": 491,
             "py_ut_sm100": 20,
             "py_ut_sm120": 108,

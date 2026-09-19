@@ -109,6 +109,8 @@ class ExecutionResult:
     last_stage: Optional[str] = None
     infra_category: Optional[str] = None
     failover_attempts: int = 0
+    # Set only after receiving Operation.done, not from stage metadata alone.
+    operation_done: bool = False
 
 
 class RemoteExecutor:
@@ -162,11 +164,37 @@ class RemoteExecutor:
                 metadata=self.metadata,
                 timeout=timeout,
             )
-            log.info("Cancelled remote operation %s", operation_name)
+            log.info("Requested cancellation of remote operation %s", operation_name)
             return True
         except Exception:
             log.warning("Failed to cancel remote operation %s", operation_name)
             return False
+
+    def wait_operation_done(self, operation_name: str, timeout: int = 5) -> bool:
+        """Confirm termination before another executor may rerun this action."""
+        stream = None
+        try:
+            stream = self.stub.WaitExecution(
+                re_pb2.WaitExecutionRequest(name=operation_name),
+                metadata=self.metadata,
+                timeout=timeout,
+            )
+            for op in stream:
+                if op.name == operation_name and op.done:
+                    return True
+        except grpc.RpcError as exc:
+            # NOT_FOUND may mean the queried scheduler cannot see the action;
+            # cancellation acknowledgement alone also does not prove it ended.
+            log.warning(
+                "Cannot confirm terminal remote operation %s: %s",
+                operation_name,
+                exc.code().name,
+            )
+        finally:
+            cancel_stream = getattr(stream, "cancel", None)
+            if cancel_stream is not None:
+                cancel_stream()  # Stop observation, not the remote operation.
+        return False
 
     @staticmethod
     def _try_unpack_execute_metadata(
@@ -518,6 +546,7 @@ class RemoteExecutor:
                     result.executor_endpoint = self.grpc_uri
                     result.operation_name = op.name
                     result.last_stage = last_stage
+                    result.operation_done = True
                     self._write_final_stream_files(
                         stream_stdout_file,
                         stream_stderr_file,
@@ -1094,6 +1123,18 @@ class FailoverRemoteExecutor:
                 old_operation = result.operation_name
                 if old_operation:
                     executor.cancel_operation(old_operation)
+                    if not result.operation_done and not executor.wait_operation_done(
+                        old_operation
+                    ):
+                        log.warning(
+                            "[EXECUTOR_FAILOVER] refusing retry: prior operation "
+                            "is not confirmed terminal endpoint=%s operation=%s "
+                            "last_stage=%s will_rerun=false",
+                            endpoint,
+                            old_operation,
+                            result.last_stage or "n/a",
+                        )
+                        return result
                 endpoint = next_endpoint
                 attempts += 1
                 log.warning(
