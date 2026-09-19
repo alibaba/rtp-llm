@@ -1,4 +1,4 @@
-# xgrammar built from source (mlc-ai/xgrammar @ v0.2.3).
+# xgrammar built from the revision pinned in WORKSPACE.
 
 cc_library(
     name = "xgrammar_headers",
@@ -32,6 +32,7 @@ cc_library(
     srcs = glob(
         [
             "cpp/*.cc",
+            "cpp/converter_ext/*.cc",
             "cpp/support/*.cc",
         ],
         exclude = [
