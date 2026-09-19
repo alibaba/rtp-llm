@@ -15,12 +15,11 @@ from .score_chunk import (
     m3_index_score_chunk_rows,
 )
 
-
 _HEUR_flash_attn_fwd_with_block_score_kernel = {
-        "BLOCK_SIZE_KD": lambda args: triton.next_power_of_2(args["qk_head_dim"]),
-        "BLOCK_SIZE_VD": lambda args: triton.next_power_of_2(args["v_head_dim"]),
-        "HAS_SINK": lambda args: args["sink_ptr"] is not None,
-    }
+    "BLOCK_SIZE_KD": lambda args: triton.next_power_of_2(args["qk_head_dim"]),
+    "BLOCK_SIZE_VD": lambda args: triton.next_power_of_2(args["v_head_dim"]),
+    "HAS_SINK": lambda args: args["sink_ptr"] is not None,
+}
 
 
 @triton.heuristics(_HEUR_flash_attn_fwd_with_block_score_kernel)
@@ -224,6 +223,9 @@ def _flash_attn_fwd_with_block_score_kernel(
             mask=kd_mask[:, None] & pos_mask[None, :],
             other=0.0,
         )
+        # E4M3 idx_K is a storage format. Convert in registers so the existing
+        # BF16 query/score contract and accumulation order stay unchanged.
+        k = k.to(q.dtype)
         # compute qk
         qk = tl.dot(q, k) * sm_scale_log2e
         if i >= diag_start:
@@ -535,9 +537,7 @@ def _flash_prefill_with_topk_index_chunked(
     output = (
         None
         if disable_index_value
-        else torch.empty(
-            total_q, num_heads, v_head_dim, dtype=q.dtype, device=q.device
-        )
+        else torch.empty(total_q, num_heads, v_head_dim, dtype=q.dtype, device=q.device)
     )
     topk_idx = torch.full(
         (num_heads, total_q, topk),
@@ -563,9 +563,7 @@ def _flash_prefill_with_topk_index_chunked(
         chunk_q = q_end - q_start
         max_seqblock_k = triton.cdiv(chunk.max_seqlen_k, block_size_k)
         score_numel = num_heads * chunk_q * max_seqblock_k
-        score = score_storage[:score_numel].view(
-            num_heads, chunk_q, max_seqblock_k
-        )
+        score = score_storage[:score_numel].view(num_heads, chunk_q, max_seqblock_k)
         q_chunk = q[q_start:q_end]
         output_chunk = None if output is None else output[q_start:q_end]
 
@@ -622,9 +620,7 @@ def _flash_prefill_with_topk_index_chunked(
         cu_seqblocks_q = chunk.cu_seqlens
         max_seqblock_q = chunk.max_seqlen_q
         topk_chunk = topk_idx[:, q_start:q_end, :]
-        _topk_index_kernel[
-            (max_seqblock_q, chunk.cu_seqlens.shape[0] - 1, num_heads)
-        ](
+        _topk_index_kernel[(max_seqblock_q, chunk.cu_seqlens.shape[0] - 1, num_heads)](
             score,
             topk_chunk,
             1,
@@ -669,9 +665,10 @@ def flash_prefill_with_topk_index(
     score_type: str = "max",
     disable_index_value: bool = False,
 ):
-    assert score_type in ("max", "lse"), (
-        f"score_type must be 'max' or 'lse', got {score_type!r}"
-    )
+    assert score_type in (
+        "max",
+        "lse",
+    ), f"score_type must be 'max' or 'lse', got {score_type!r}"
     triton.set_allocator(robust_allocator)
     # dtype check
     assert q.dtype == torch.bfloat16 or q.dtype == torch.float16
@@ -723,9 +720,7 @@ def flash_prefill_with_topk_index(
     if disable_index_value:
         o = None
     else:
-        o = torch.empty(
-            total_q, num_heads, v_head_dim, dtype=q.dtype, device=q.device
-        )
+        o = torch.empty(total_q, num_heads, v_head_dim, dtype=q.dtype, device=q.device)
     score = torch.full(
         (num_heads, total_q, max_seqblock_k),
         float("-inf"),

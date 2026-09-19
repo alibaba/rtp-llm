@@ -285,6 +285,7 @@ def minimax_paged_sparse_decode(
     paged_main_v: torch.Tensor,  # [block, kh, page, dim]
     phys_block_table: torch.Tensor,  # [batch, max_blocks]
     paged_idx_k: torch.Tensor,  # [block, page, idx_dim]
+    paged_idx_scale: Optional[torch.Tensor] = None,  # [block, page]
     sm_scale: Optional[float] = None,
     idx_sm_scale: Optional[float] = None,
     score_type: str = "max",
@@ -334,6 +335,7 @@ def minimax_paged_sparse_decode(
         score_type=score_type,
         decode_query_len=decode_query_len,
         token_seq_lens=seq_lens,
+        k_scale=paged_idx_scale,
     )
     if idx_group_size > 1:
         topk_idx = topk_index_reduce(

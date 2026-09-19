@@ -153,6 +153,7 @@ def _decode_score_kernel(
             mask=dim_mask[:, None] & pos_mask[None, :],
             other=0.0,
         )
+        k = k.to(q.dtype)
         # compute qk
         qk = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_N), dtype=tl.float32)
         qk += tl.where(off_n[None, :] < chunk_end - i, 0, float("-inf"))
@@ -212,6 +213,7 @@ _HEUR_decode_score_paged_kernel = {
 def _decode_score_kernel_paged(
     q_ptr,  # Q: b x qh x d
     k_paged_ptr,  # idx K paged: block x page x d (single shared idx head)
+    k_scale_ptr,
     block_table_ptr,  # physical block table: b x max_blocks (logical blk -> phys page)
     score_ptr,  # Score: qh x b x max_seqblock
     seq_lens,
@@ -234,6 +236,8 @@ def _decode_score_kernel_paged(
     stride_k_blk,
     stride_k_p,
     stride_k_d,
+    stride_ks_blk,
+    stride_ks_pos,
     stride_bt_b,
     stride_bt_blk,
     stride_s_h,
@@ -245,6 +249,7 @@ def _decode_score_kernel_paged(
     BLOCK_SIZE_D: tl.constexpr,
     NUM_KV_CHUNKS: tl.constexpr,
     SCORE_TYPE: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
 ):
     """Zero-copy variant of ``_decode_score_kernel`` (disable_index_value path).
 
@@ -303,6 +308,13 @@ def _decode_score_kernel_paged(
             mask=dim_mask[:, None] & pos_mask[None, :],
             other=0.0,
         )
+        if HAS_SCALE:
+            scale = tl.load(
+                k_scale_ptr + page * stride_ks_blk + off_n * stride_ks_pos,
+                mask=pos_mask,
+            )
+            k = k * scale[None, :]
+        k = k.to(q.dtype)
         # compute qk
         qk = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_N), dtype=tl.float32)
         qk += tl.where(off_n[None, :] < seq_len - base_pos, 0, float("-inf"))
@@ -355,6 +367,7 @@ _HEUR_decode_index_score_kernel = {
 def _decode_index_score_kernel(
     q_ptr,  # idx_q: [total_q, num_idx_heads, head_dim]
     ik_cache_ptr,  # index-K cache: [num_blocks, block_size, head_dim]
+    ik_scale_ptr,
     score_ptr,  # [num_idx_heads, total_q, max_block]
     block_table_ptr,  # [num_reqs, max_blocks]
     seq_lens,  # [num_reqs]
@@ -372,6 +385,8 @@ def _decode_index_score_kernel(
     stride_ik_blk,
     stride_ik_pos,
     stride_ik_d,
+    stride_iks_blk,
+    stride_iks_pos,
     stride_s_h,
     stride_s_n,
     stride_s_k,
@@ -381,6 +396,7 @@ def _decode_index_score_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     num_kv_chunks,
+    HAS_SCALE: tl.constexpr,
 ):
     BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
     pid_r = tl.program_id(0)
@@ -434,6 +450,14 @@ def _decode_index_score_kernel(
             mask=valid_page,
             other=0.0,
         )
+        if HAS_SCALE:
+            scale = tl.load(
+                ik_scale_ptr + safe_page * stride_iks_blk + off_k * stride_iks_pos,
+                mask=valid_page,
+                other=0.0,
+            )
+            k = k * scale[:, None]
+        k = k.to(q.dtype)
         kq = tl.dot(k, q, out_dtype=tl.float32)
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
         score = tl.max(kq, axis=0)
@@ -623,6 +647,7 @@ def _decode_score_attn_kernel(
             mask=dim_mask[:, None] & pos_mask[None, :],
             other=0.0,
         )
+        k = k.to(q.dtype)
         # load V as (BLOCK_SIZE_N, head_dim) via indirect addressing
         v_off = (
             slots[:, None] * stride_v_s
@@ -1217,6 +1242,7 @@ def flash_decode_with_topk_idx_paged(
     score_type: str = "max",
     decode_query_len: int = 1,
     token_seq_lens: Optional[torch.Tensor] = None,
+    k_scale: Optional[torch.Tensor] = None,
 ) -> tuple[None, torch.Tensor]:
     """Paged-only index decode: score idx_K through the physical block table."""
     assert score_type in (
@@ -1238,6 +1264,11 @@ def flash_decode_with_topk_idx_paged(
             raise RuntimeError("multi-Q paged idx decode requires token_seq_lens")
         token_seq_lens = seq_lens
     num_phys_blocks, page_size, _ = k_paged.shape
+    if k_scale is not None and tuple(k_scale.shape) != tuple(k_paged.shape[:2]):
+        raise RuntimeError(
+            f"paged idx scale shape {tuple(k_scale.shape)} does not match "
+            f"value pages {tuple(k_paged.shape[:2])}"
+        )
     assert int(page_size) == int(
         block_size
     ), f"paged idx decode requires page_size({page_size}) == block_size({block_size})"
@@ -1274,6 +1305,7 @@ def flash_decode_with_topk_idx_paged(
         _decode_index_score_kernel[grid](
             q,
             k_paged,
+            k_scale if k_scale is not None else k_paged,
             score,
             block_table,
             seq_lens,
@@ -1291,6 +1323,8 @@ def flash_decode_with_topk_idx_paged(
             k_paged.stride(0),
             k_paged.stride(1),
             k_paged.stride(2),
+            0 if k_scale is None else k_scale.stride(0),
+            0 if k_scale is None else k_scale.stride(1),
             score.stride(0),
             score.stride(1),
             score.stride(2),
@@ -1299,6 +1333,7 @@ def flash_decode_with_topk_idx_paged(
             BLOCK_SIZE_K=block_size,
             BLOCK_SIZE_Q=triton.next_power_of_2(decode_query_len),
             num_kv_chunks=NUM_KV_CHUNKS,
+            HAS_SCALE=k_scale is not None,
         )
     else:
         if decode_query_len != 1:
@@ -1307,6 +1342,7 @@ def flash_decode_with_topk_idx_paged(
         _decode_score_kernel_paged[grid](
             q,
             k_paged,
+            k_scale if k_scale is not None else k_paged,
             block_table,
             score,
             seq_lens,
@@ -1324,6 +1360,8 @@ def flash_decode_with_topk_idx_paged(
             k_paged.stride(0),
             k_paged.stride(1),
             k_paged.stride(2),
+            0 if k_scale is None else k_scale.stride(0),
+            0 if k_scale is None else k_scale.stride(1),
             block_table.stride(0),
             block_table.stride(1),
             score.stride(0),
@@ -1331,6 +1369,7 @@ def flash_decode_with_topk_idx_paged(
             score.stride(2),
             NUM_KV_CHUNKS=NUM_KV_CHUNKS,
             SCORE_TYPE=score_type,
+            HAS_SCALE=k_scale is not None,
         )
 
     batch_size = total_q

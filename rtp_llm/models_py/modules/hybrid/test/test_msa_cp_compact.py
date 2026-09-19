@@ -407,7 +407,7 @@ class CompactCpKernelTest(unittest.TestCase):
         for dtype in (torch.bfloat16, torch.float8_e4m3fn):
             with self.subTest(dtype=dtype):
                 base = torch.zeros(4, 2, 2, 128, 128, dtype=dtype, device=device)
-                scale = torch.zeros(512, 64, dtype=torch.bfloat16, device=device)
+                scale = torch.zeros(4, 128, 64, dtype=torch.bfloat16, device=device)
                 idx = torch.full((1024, 1, 64), -7, dtype=torch.bfloat16, device=device)
                 base_ref, scale_ref, idx_ref = base.clone(), scale.clone(), idx.clone()
                 k = torch.empty(8, 2, 128, 128, dtype=torch.bfloat16, device=device)
@@ -422,6 +422,7 @@ class CompactCpKernelTest(unittest.TestCase):
                     idx_ref,
                     base_ref,
                     scale_ref,
+                    None,
                     meta[1],
                     512,
                     256,
@@ -441,6 +442,7 @@ class CompactCpKernelTest(unittest.TestCase):
                     idx,
                     base,
                     scale,
+                    None,
                     meta[1],
                     512,
                     256,

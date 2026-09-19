@@ -201,6 +201,7 @@ class PrefillScoreChunkTest(unittest.TestCase):
             inputs["block_size_k"],
             inputs["q"].shape[1],
             1,
+            False,
         )
         cached_chunks = [object()]
         plan = {
@@ -274,7 +275,7 @@ class PrefillScoreChunkTest(unittest.TestCase):
             device=device,
         )
         paged_idx = torch.full(
-            (2 * scratch_seq_len, ni),
+            (4, page_size, ni),
             7,
             dtype=torch.bfloat16,
             device=device,
@@ -290,6 +291,7 @@ class PrefillScoreChunkTest(unittest.TestCase):
             scratch_idx,
             paged_kv,
             paged_idx,
+            None,
             kv_lens,
             scratch_seq_len,
             nk,
@@ -311,7 +313,7 @@ class PrefillScoreChunkTest(unittest.TestCase):
         self.assertEqual(torch.count_nonzero(scratch_v[5:8]).item(), 0)
         self.assertEqual(torch.count_nonzero(scratch_idx[5:8]).item(), 0)
 
-    def test_fused_cp_paged_write_builds_fp8_hnd_working_pages(self) -> None:
+    def test_fused_cp_paged_write_builds_fp8_main_and_index_working_pages(self) -> None:
         from rtp_llm.models_py.modules.hybrid.msa_attention import _fused_cp_paged_write
 
         device = torch.device("cuda")
@@ -353,7 +355,7 @@ class PrefillScoreChunkTest(unittest.TestCase):
         scratch_idx = torch.full(
             (2 * scratch_seq_len, 1, ni),
             7,
-            dtype=torch.bfloat16,
+            dtype=torch.float8_e4m3fn,
             device=device,
         )
         persistent_kv = torch.full(
@@ -362,11 +364,21 @@ class PrefillScoreChunkTest(unittest.TestCase):
             dtype=torch.float8_e4m3fn,
             device=device,
         )
-        persistent_idx = torch.full(
-            (2 * scratch_seq_len, ni),
-            7,
-            dtype=torch.bfloat16,
+        carrier = torch.zeros(
+            page_count,
+            page_size * (ni + 4) // 4,
+            dtype=torch.float32,
             device=device,
+        )
+        raw_carrier = carrier.view(torch.uint8)
+        persistent_idx = raw_carrier.as_strided(
+            (page_count, page_size, ni),
+            (raw_carrier.stride(0), ni, 1),
+        ).view(torch.float8_e4m3fn)
+        persistent_idx_scale = (
+            raw_carrier[:, page_size * ni :]
+            .view(torch.float32)
+            .view(page_count, page_size)
         )
 
         _fused_cp_paged_write(
@@ -379,6 +391,7 @@ class PrefillScoreChunkTest(unittest.TestCase):
             scratch_idx,
             persistent_kv,
             persistent_idx,
+            persistent_idx_scale,
             kv_lens,
             scratch_seq_len,
             nk,
@@ -410,6 +423,43 @@ class PrefillScoreChunkTest(unittest.TestCase):
         self.assertEqual(torch.count_nonzero(token_major_k[5:8]).item(), 0)
         self.assertEqual(torch.count_nonzero(token_major_v[5:8]).item(), 0)
         self.assertEqual(torch.count_nonzero(scratch_idx[5:8]).item(), 0)
+        expected_idx = packed[:, 2 * nk :].reshape(token_count, 1, ni)
+        self.assertTrue(
+            torch.equal(
+                scratch_idx[write_slots].view(torch.uint8),
+                expected_idx.to(torch.float8_e4m3fn).view(torch.uint8),
+            )
+        )
+        valid = slot_mapping >= 0
+        expected_scale = (
+            expected_idx[valid, 0]
+            .float()
+            .abs()
+            .amax(dim=-1)
+            .div(448.0)
+            .clamp_min(1.0e-12)
+        )
+        expected_quant = expected_idx[valid, 0].float() / expected_scale[:, None]
+        self.assertTrue(
+            torch.equal(
+                persistent_idx[
+                    slot_mapping[valid] // page_size,
+                    slot_mapping[valid] % page_size,
+                ].view(torch.uint8),
+                expected_quant.to(torch.float8_e4m3fn).view(torch.uint8),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                persistent_idx_scale[
+                    slot_mapping[valid] // page_size,
+                    slot_mapping[valid] % page_size,
+                ],
+                expected_scale,
+                rtol=1e-6,
+                atol=0,
+            )
+        )
         self.assertTrue(
             torch.equal(
                 persistent_kv[0, 0, :, 0].view(torch.uint8),
@@ -449,11 +499,12 @@ class PrefillScoreChunkTest(unittest.TestCase):
         attn.kv_head_num = 1
         attn.head_dim = 1
         attn.idx_head_dim = 1
+        attn.idx_k_fp8_mode = 0
+        attn._idx_k_persistent_dtype = torch.bfloat16
+        attn._idx_k_working_dtype = torch.bfloat16
         attn._scratch_slots = 4
         attn._scratch_seq_len = 4
-        attn._idx_k_paged_view = lambda _cache: torch.empty(
-            2, 2, 1, dtype=torch.bfloat16
-        )
+        kv_cache = SimpleNamespace(kv_scale_base=torch.empty(2, 1))
         packed = torch.zeros(1, 3, dtype=torch.bfloat16)
         one = torch.zeros(1, dtype=torch.int64)
 
@@ -469,7 +520,7 @@ class PrefillScoreChunkTest(unittest.TestCase):
                     return_value=idx_scratch,
                 ), mock.patch.object(msa_attention, "_fused_cp_paged_write") as write:
                     k_paged, v_paged = attn._write_cp_suffix_to_bf16_working_pages(
-                        SimpleNamespace(),
+                        kv_cache,
                         packed,
                         one,
                         one,
@@ -495,7 +546,7 @@ class PrefillScoreChunkTest(unittest.TestCase):
 
         device = torch.device("cuda")
         dst_pages = torch.tensor([1, 0], dtype=torch.int64, device=device)
-        idx_pages = torch.tensor(
+        idx_pages_bf16 = torch.tensor(
             [[[1], [2]], [[3], [4]]], dtype=torch.bfloat16, device=device
         )
         source = torch.arange(1, 17, dtype=torch.bfloat16, device=device).reshape(
@@ -503,29 +554,87 @@ class PrefillScoreChunkTest(unittest.TestCase):
         )
 
         for persistent_dtype in (torch.bfloat16, torch.float8_e4m3fn):
-            with self.subTest(persistent_dtype=persistent_dtype):
-                main_pages = source.to(persistent_dtype)
-                k_paged = torch.zeros(2, 1, 2, 2, dtype=torch.bfloat16, device=device)
-                v_paged = torch.zeros_like(k_paged)
-                idx_scratch = torch.zeros(2, 2, 1, dtype=torch.bfloat16, device=device)
+            for idx_src_dtype, idx_dst_dtype in (
+                (torch.bfloat16, torch.bfloat16),
+                (torch.float8_e4m3fn, torch.bfloat16),
+                (torch.float8_e4m3fn, torch.float8_e4m3fn),
+            ):
+                with self.subTest(
+                    persistent_dtype=persistent_dtype,
+                    idx_src_dtype=idx_src_dtype,
+                    idx_dst_dtype=idx_dst_dtype,
+                ):
+                    idx_pages = idx_pages_bf16.to(idx_src_dtype)
+                    main_pages = source.to(persistent_dtype)
+                    k_paged = torch.zeros(
+                        2, 1, 2, 2, dtype=torch.bfloat16, device=device
+                    )
+                    v_paged = torch.zeros_like(k_paged)
+                    idx_scratch = torch.zeros(
+                        2, 2, 1, dtype=idx_dst_dtype, device=device
+                    )
 
-                _scatter_cp_prefix_pages(
-                    main_pages,
-                    idx_pages,
-                    dst_pages,
-                    k_paged,
-                    v_paged,
-                    idx_scratch,
-                )
-                torch.cuda.synchronize()
+                    _scatter_cp_prefix_pages(
+                        main_pages,
+                        idx_pages,
+                        None,
+                        dst_pages,
+                        k_paged,
+                        v_paged,
+                        idx_scratch,
+                    )
+                    torch.cuda.synchronize()
 
-                expected = main_pages.to(torch.bfloat16)
-                self.assertTrue(torch.equal(k_paged[1], expected[0, 0]))
-                self.assertTrue(torch.equal(v_paged[1], expected[0, 1]))
-                self.assertTrue(torch.equal(k_paged[0], expected[1, 0]))
-                self.assertTrue(torch.equal(v_paged[0], expected[1, 1]))
-                self.assertTrue(torch.equal(idx_scratch[1], idx_pages[0]))
-                self.assertTrue(torch.equal(idx_scratch[0], idx_pages[1]))
+                    expected = main_pages.to(torch.bfloat16)
+                    self.assertTrue(torch.equal(k_paged[1], expected[0, 0]))
+                    self.assertTrue(torch.equal(v_paged[1], expected[0, 1]))
+                    self.assertTrue(torch.equal(k_paged[0], expected[1, 0]))
+                    self.assertTrue(torch.equal(v_paged[0], expected[1, 1]))
+                    self.assertTrue(
+                        torch.equal(idx_scratch[1], idx_pages[0].to(idx_dst_dtype))
+                    )
+                    self.assertTrue(
+                        torch.equal(idx_scratch[0], idx_pages[1].to(idx_dst_dtype))
+                    )
+
+        idx_scales = torch.full((2, 2), 0.25, dtype=torch.float32, device=device)
+        idx_quant = (idx_pages_bf16.float() / idx_scales[..., None]).to(
+            torch.float8_e4m3fn
+        )
+        idx_scratch = torch.zeros(2, 2, 1, dtype=torch.bfloat16, device=device)
+        k_paged = torch.zeros(2, 1, 2, 2, dtype=torch.bfloat16, device=device)
+        v_paged = torch.zeros_like(k_paged)
+        _scatter_cp_prefix_pages(
+            source,
+            idx_quant,
+            idx_scales,
+            dst_pages,
+            k_paged,
+            v_paged,
+            idx_scratch,
+        )
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(idx_scratch[1], idx_pages_bf16[0]))
+        self.assertTrue(torch.equal(idx_scratch[0], idx_pages_bf16[1]))
+
+    def test_idx_k_side_region_views_scaled_fp8_layout(self) -> None:
+        from types import SimpleNamespace
+
+        from rtp_llm.models_py.modules.hybrid.msa_attention import MSAAttention
+
+        attn = MSAAttention.__new__(MSAAttention)
+        torch.nn.Module.__init__(attn)
+        attn.page_size = 4
+        attn.idx_head_dim = 8
+        attn.idx_k_fp8_mode = 1
+        carrier = torch.zeros(3, 4 * (8 + 4) // 4, dtype=torch.float32, device="cuda")
+        values, scales = attn._idx_k_paged_storage(
+            SimpleNamespace(kv_scale_base=carrier)
+        )
+        self.assertEqual(values.shape, (3, 4, 8))
+        self.assertEqual(values.dtype, torch.float8_e4m3fn)
+        self.assertEqual(scales.shape, (3, 4))
+        self.assertEqual(scales.dtype, torch.float32)
 
     def test_cp_prefix_restore_reads_replicated_paged_cache(self) -> None:
         from rtp_llm.models_py.modules.hybrid.msa_attention import MSAAttention
@@ -544,7 +653,7 @@ class PrefillScoreChunkTest(unittest.TestCase):
         )
         block_table = torch.tensor([[2, 0]], dtype=torch.int32, device=device)
         attn._paged_kv_base_view = lambda _cache: main_pool
-        attn._idx_k_paged_view = lambda _cache: idx_pool
+        attn._idx_k_paged_storage = lambda _cache: (idx_pool, None)
         attn._physical_block_table = lambda _inputs: block_table
         k_paged = torch.zeros(2, 1, 2, 2, dtype=torch.bfloat16, device=device)
         v_paged = torch.zeros_like(k_paged)
@@ -767,6 +876,97 @@ class PrefillScoreChunkTest(unittest.TestCase):
         self.assertLess(max_abs, 0.02)
 
     @unittest.skipUnless(_fmha_available(), "fmha_sm100 required")
+    def test_fmha_index_score_accepts_fp8_working_cache(self) -> None:
+        from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
+            build_index_score_plan,
+            flash_prefill_topk_to_block_tables,
+        )
+
+        inputs = self._inputs()
+        idx_q = inputs.pop("q")
+        idx_k = inputs.pop("k_cache")
+        common = dict(
+            idx_q=idx_q,
+            req_to_token=inputs["req_to_token"],
+            cu_seqlens=inputs["cu_seqlens"],
+            seq_lens=inputs["seq_lens"],
+            prefix_lens=inputs["prefix_lens"],
+            max_seqlen_q=inputs["max_seqlen_q"],
+            max_seqlen_k=inputs["max_seqlen_k"],
+            block_size_k=inputs["block_size_k"],
+            topk=inputs["topk"],
+            num_pages=(inputs["max_seqlen_k"] + inputs["block_size_k"] - 1)
+            // inputs["block_size_k"],
+            init_blocks=0,
+            local_blocks=0,
+            emit_block_table=False,
+        )
+        plan_args = (
+            inputs["cu_seqlens"],
+            inputs["seq_lens"],
+            inputs["prefix_lens"],
+            idx_q.shape[1],
+            1,
+            inputs["block_size_k"],
+        )
+        bf16_topk = flash_prefill_topk_to_block_tables(
+            idx_k_cache=idx_k,
+            index_score_plan=build_index_score_plan(*plan_args),
+            **common,
+        )[2]
+        idx_k_fp8 = idx_k.to(torch.float8_e4m3fn)
+        q_scale = (
+            idx_q.float().abs().amax(dim=-1, keepdim=True).div(448.0).clamp_min(1.0e-12)
+        )
+        idx_q_fp8 = (idx_q.float() / q_scale).to(torch.float8_e4m3fn)
+        fp8_common = {**common, "idx_q": idx_q_fp8}
+        fp8_plan = build_index_score_plan(*plan_args, use_fp8_kvcache=True)
+        fp8_topk = flash_prefill_topk_to_block_tables(
+            idx_k_cache=idx_k_fp8,
+            index_score_plan=fp8_plan,
+            **common,
+        )[2]
+        first_buffer_ptr = fp8_plan["_idx_q_fp8_buf"].data_ptr()
+        explicit_fp8_topk = flash_prefill_topk_to_block_tables(
+            idx_k_cache=idx_k_fp8,
+            index_score_plan=fp8_plan,
+            **fp8_common,
+        )[2]
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(fp8_topk, explicit_fp8_topk))
+        self.assertEqual(fp8_plan["_idx_q_fp8_buf"].data_ptr(), first_buffer_ptr)
+        overlap = (fp8_topk[..., :, None] == bf16_topk[..., None, :]).any(-1).float()
+        # Top-k identities near a random score boundary can move under E4M3.
+        # Require high overlap here and leave task accuracy to the paired E2E run.
+        self.assertGreater(overlap.mean().item(), 0.90)
+
+    def test_fp8_index_q_dynamic_quantization_scales_each_query_head(self) -> None:
+        from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
+            _quantize_index_q_for_fp8_fmha,
+        )
+
+        q = torch.tensor(
+            [
+                [[0.0, 0.0, 0.0, 0.0], [1.0e-3, -2.0e-3, 3.0e-3, -4.0e-3]],
+                [[1.0, -2.0, 3.0, -4.0], [100.0, -200.0, 300.0, -400.0]],
+            ],
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        plan = {}
+        quantized = _quantize_index_q_for_fp8_fmha(q, plan)
+        torch.cuda.synchronize()
+
+        expected_scale = (
+            q.float().abs().amax(dim=-1, keepdim=True).div(448.0).clamp_min(1.0e-12)
+        )
+        expected = (q.float() / expected_scale).to(torch.float8_e4m3fn)
+        self.assertTrue(
+            torch.equal(quantized.view(torch.uint8), expected.view(torch.uint8))
+        )
+        self.assertEqual(plan["_idx_q_fp8_buf"].data_ptr(), quantized.data_ptr())
+
+    @unittest.skipUnless(_fmha_available(), "fmha_sm100 required")
     def test_fmha_chunk_matches_full(self) -> None:
         from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
             build_index_score_plan,
@@ -824,6 +1024,30 @@ class PrefillScoreChunkTest(unittest.TestCase):
         self.assertTrue(torch.equal(chunked_topk_with_bt, full_topk))
         self.assertTrue(torch.equal(chunked_bt, full_bt))
         self.assertTrue(torch.equal(chunked_lens, full_lens))
+
+        # Mode 2 quantizes index Q at the score boundary so both full and
+        # chunked OnlyScore calls dispatch the all-E4M3 FMHA variant.
+        os.environ.pop("M3_MSA_INDEX_SCORE_CHUNK_ROWS", None)
+        fp8_kwargs = {
+            **kwargs,
+            "idx_k_cache": inputs["k_cache"].to(torch.float8_e4m3fn),
+            "index_score_plan": build_index_score_plan(
+                inputs["cu_seqlens"],
+                inputs["seq_lens"],
+                inputs["prefix_lens"],
+                q.shape[1],
+                1,
+                inputs["block_size_k"],
+                use_fp8_kvcache=True,
+            ),
+            "emit_block_table": False,
+        }
+        _, _, fp8_full_topk = flash_prefill_topk_to_block_tables(**fp8_kwargs)
+        os.environ["M3_MSA_INDEX_SCORE_CHUNK_ROWS"] = "64"
+        fp8_kwargs["index_score_plan"] = {}
+        _, _, fp8_chunked_topk = flash_prefill_topk_to_block_tables(**fp8_kwargs)
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(fp8_chunked_topk, fp8_full_topk))
 
 
 if __name__ == "__main__":

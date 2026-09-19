@@ -931,6 +931,25 @@ class MiniMaxM3(DeepSeekV2):
             local_tokens = int(sparse_cfg.get("sparse_local_tokens", 0))
             local_blocks = (local_tokens + block_size - 1) // block_size + 1
         idx_head_dim = int(sparse_cfg["sparse_index_dim"])
+        raw_idx_k_fp8_mode = os.environ.get("M3_IDX_K_FP8_MODE", "0")
+        try:
+            idx_k_fp8_mode = int(raw_idx_k_fp8_mode)
+        except ValueError as exc:
+            raise ValueError(
+                "M3_IDX_K_FP8_MODE must be 0 (BF16), 1 (FP8 persistent cache), "
+                f"or 2 (FP8 persistent and working cache), got {raw_idx_k_fp8_mode!r}"
+            ) from exc
+        if idx_k_fp8_mode not in (0, 1, 2):
+            raise ValueError(
+                "M3_IDX_K_FP8_MODE must be 0 (BF16), 1 (FP8 persistent cache), "
+                f"or 2 (FP8 persistent and working cache), got {idx_k_fp8_mode}"
+            )
+        idx_paged_enabled = os.environ.get("M3_IDX_PAGED", "0") == "1"
+        if idx_k_fp8_mode > 0 and not idx_paged_enabled:
+            raise ValueError(
+                "M3_IDX_K_FP8_MODE=1/2 requires M3_IDX_PAGED=1 because FP8 "
+                "idx_K is a paged persistent-cache layout"
+            )
         config.msa_sparse_config = {
             "sparse_layer_ids": sparse_layer_ids,
             "disable_value_layer_ids": sorted(disable_value_layer_ids),
@@ -941,17 +960,21 @@ class MiniMaxM3(DeepSeekV2):
             "init_blocks": init_blocks,
             "local_blocks": local_blocks,
             "score_type": str(sparse_cfg.get("sparse_score_type", "max")),
+            "idx_k_fp8_mode": idx_k_fp8_mode,
         }
         # PD-compatible idx_K: when M3_IDX_PAGED is set, tell the C++ cache
         # config to enlarge the MHA scale region of the main paged pool so the
-        # BF16 idx_K can be stored there (addressed by the same block table and
-        # transferred with the main K/V under PD separation). We deliberately do
+        # idx_K values and optional per-token scales can be stored there (addressed
+        # by the same block table and transferred with main K/V under PD separation).
+        # We deliberately do
         # NOT set ``attn_config.is_sparse`` here: that flag flips the pool to the
         # MLA layout (BlockPoolConfigHelper: is_mla = use_mla || is_sparse) which
         # would break M3's MHA main-K/V paging. ``indexer_head_dim`` alone drives
         # the scale-region sizing in SingleConfigCreator without touching is_mla.
-        if os.environ.get("M3_IDX_PAGED", "0") == "1":
+        if idx_paged_enabled:
             config.attn_config.indexer_head_dim = idx_head_dim
+            if idx_k_fp8_mode > 0:
+                config.attn_config.indexer_cache_fp8_mode = idx_k_fp8_mode
         logging.info("minimax-m3 MSA sparse config: %s", config.msa_sparse_config)
 
     def _create_python_model(self):

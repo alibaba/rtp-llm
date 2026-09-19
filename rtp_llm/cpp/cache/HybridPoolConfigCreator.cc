@@ -4,6 +4,7 @@
 
 #include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/IndexerCacheLayout.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
@@ -173,8 +174,9 @@ void setupIndependentPoolSizes(CacheConfig& config, const ModelConfig& model_con
         auto         kernel_scale     = spec->scale_block_size_bytes();
         if (!config.use_mla && model_config.attn_config.indexer_head_dim > 0
             && config.group_types[gid] == CacheGroupType::FULL) {
-            const auto indexer_dim           = static_cast<size_t>(model_config.attn_config.indexer_head_dim);
-            kernel_scale                     = indexer_dim * 2 * spec->seq_size_per_block;
+            kernel_scale = indexerCacheBlockBytes(static_cast<size_t>(model_config.attn_config.indexer_head_dim),
+                                                  model_config.attn_config.indexer_cache_fp8_mode,
+                                                  spec->seq_size_per_block);
             config.use_opaque_kv_cache_store = true;
             // See SingleConfigCreator: the scale slot now carries the head-independent
             // MSA indexer-K cache, so it must not follow the data block's head partition.

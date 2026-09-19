@@ -350,8 +350,10 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
             static_cast<size_t>(gid) < config_.global_layer_ids.size(), "missing layer ids for group %d", gid);
         const auto   copy_type = BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(gid)]->where(),
                                                               group_block_pools_[static_cast<size_t>(gid)]->where());
-        const auto&  spec      = config_.cache_specs[static_cast<size_t>(gid)];
-        const size_t buffers_per_layer = spec->scale_block_size_bytes() > 0 ? 2 : 1;
+        const size_t scale_block_bytes = static_cast<size_t>(gid) < config_.group_kv_scale_stride_bytes.size() ?
+                                             config_.group_kv_scale_stride_bytes[static_cast<size_t>(gid)] :
+                                             config_.cache_specs[static_cast<size_t>(gid)]->scale_block_size_bytes();
+        const size_t buffers_per_layer = scale_block_bytes > 0 ? 2 : 1;
         copy_nums[copy_type] += config_.global_layer_ids[static_cast<size_t>(gid)].size()
                                 * static_cast<size_t>(end_ptr - begin_ptr) * buffers_per_layer;
     }
@@ -370,9 +372,14 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
             RTP_LLM_CHECK_WITH_INFO(
                 static_cast<size_t>(gid) < config_.global_layer_ids.size(), "missing layer ids for group %d", gid);
 
-            const size_t kv_block_size_bytes = config_.cache_specs[static_cast<size_t>(gid)]->block_size_bytes();
-            const size_t scale_block_bytes   = config_.cache_specs[static_cast<size_t>(gid)]->scale_block_size_bytes();
-            const auto   copy_type =
+            const size_t kv_block_size_bytes = static_cast<size_t>(gid) < config_.group_kv_block_stride_bytes.size() ?
+                                                   config_.group_kv_block_stride_bytes[static_cast<size_t>(gid)] :
+                                                   config_.cache_specs[static_cast<size_t>(gid)]->block_size_bytes();
+            const size_t scale_block_bytes =
+                static_cast<size_t>(gid) < config_.group_kv_scale_stride_bytes.size() ?
+                    config_.group_kv_scale_stride_bytes[static_cast<size_t>(gid)] :
+                    config_.cache_specs[static_cast<size_t>(gid)]->scale_block_size_bytes();
+            const auto copy_type =
                 BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(gid)]->where(),
                                                group_block_pools_[static_cast<size_t>(gid)]->where());
 
@@ -393,7 +400,14 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
 
                 copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes, copy_type);
 
-                if (scale_block_bytes > 0 && src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
+                if (scale_block_bytes > 0) {
+                    RTP_LLM_CHECK_WITH_INFO(
+                        src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr,
+                        "missing scale block address for group %d layer %d, src_block %d, dst_block %d",
+                        gid,
+                        layer_id,
+                        src_block_index,
+                        dest_block_index);
                     copy_params.add(
                         dst_addr_info.kv_scale_addr, src_addr_info.kv_scale_addr, scale_block_bytes, copy_type);
                 }
@@ -433,11 +447,9 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
         int64_t chain_block_count = 0;
         int64_t state_block_count = 0;
         for (const auto cache_key : evict_result.evicted_keys) {
-            const auto& slots = evict_result.evicted_slots.at(cache_key);
-            const auto block_count = static_cast<int64_t>(
-                std::count_if(slots.begin(), slots.end(), [](BlockIdxType block_idx) {
-                    return !isNullBlockIdx(block_idx);
-                }));
+            const auto& slots       = evict_result.evicted_slots.at(cache_key);
+            const auto  block_count = static_cast<int64_t>(std::count_if(
+                slots.begin(), slots.end(), [](BlockIdxType block_idx) { return !isNullBlockIdx(block_idx); }));
             if (evict_result.evicted_state_only_group.count(cache_key)) {
                 state_block_count += block_count;
             } else {

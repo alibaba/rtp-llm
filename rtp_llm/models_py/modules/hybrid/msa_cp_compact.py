@@ -231,17 +231,34 @@ def build_source_metadata(
 
 @triton.jit
 def _restore_idx_pages_kernel(
-    src, source_rows, dst_pages, dst, PAGE_ELEMS: tl.constexpr, BLOCK: tl.constexpr
+    src,
+    scales,
+    source_rows,
+    dst_pages,
+    dst,
+    PAGE_ELEMS: tl.constexpr,
+    IDX_DIM: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
+    BLOCK: tl.constexpr,
 ):
     page = tl.program_id(0).to(tl.int64)
     off = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     source = tl.load(source_rows + page).to(tl.int64)
     target = tl.load(dst_pages + page).to(tl.int64)
     values = tl.load(src + source * PAGE_ELEMS + off, off < PAGE_ELEMS, other=0.0)
+    if HAS_SCALE:
+        scale = tl.load(
+            scales + source * (PAGE_ELEMS // IDX_DIM) + off // IDX_DIM,
+            off < PAGE_ELEMS,
+            other=0.0,
+        )
+        values = values * scale
     tl.store(dst + target * PAGE_ELEMS + off, values, off < PAGE_ELEMS)
 
 
-def restore_idx_pages(idx_pages, dst_pages, idx_scratch, restore_rows=None):
+def restore_idx_pages(
+    idx_pages, dst_pages, idx_scratch, restore_rows=None, idx_scales=None
+):
     if not dst_pages.numel():
         return
     if restore_rows is None:
@@ -249,10 +266,13 @@ def restore_idx_pages(idx_pages, dst_pages, idx_scratch, restore_rows=None):
     page_elems = idx_pages.shape[1] * idx_pages.shape[2]
     _restore_idx_pages_kernel[(dst_pages.numel(), triton.cdiv(page_elems, 1024))](
         idx_pages,
+        idx_scales if idx_scales is not None else idx_pages,
         restore_rows,
         dst_pages,
         idx_scratch,
         PAGE_ELEMS=page_elems,
+        IDX_DIM=int(idx_pages.shape[2]),
+        HAS_SCALE=idx_scales is not None,
         BLOCK=1024,
     )
 

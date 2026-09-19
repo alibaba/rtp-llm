@@ -8,11 +8,13 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
+#include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
+#include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -56,6 +58,82 @@ static KVCacheConfig makeDsv4KvCacheConfig(uint32_t fixed_pool_blocks = kDsv4Fix
     config.seq_size_per_block     = 128;
     config.dsv4_fixed_pool_blocks = fixed_pool_blocks;
     return config;
+}
+
+TEST(SingleConfigCreatorTest, M3IndexerCacheFp8UsesScaledE4M3Stride) {
+    ModelConfig mc;
+    mc.num_layers                         = 61;
+    mc.attn_config.head_num               = 64;
+    mc.attn_config.kv_head_num            = 8;
+    mc.attn_config.size_per_head          = 128;
+    mc.attn_config.tokens_per_block       = 128;
+    mc.attn_config.indexer_head_dim       = 128;
+    mc.attn_config.indexer_cache_fp8_mode = 1;
+    ParallelismConfig pc;
+
+    const auto config          = SingleConfigCreator::createSingleConfig(mc, pc, false);
+    const auto expected_stride = static_cast<size_t>(128) * (128 + sizeof(float));
+    EXPECT_EQ(config.kv_scale_stride_bytes, expected_stride);
+    EXPECT_EQ(config.kv_scale_size_bytes, static_cast<size_t>(mc.num_layers) * expected_stride);
+    EXPECT_TRUE(config.use_opaque_kv_cache_store);
+    EXPECT_FALSE(config.scale_region_is_head_partitioned);
+}
+
+TEST(SingleConfigCreatorTest, M3IndexerCacheBf16StrideRemainsBackwardCompatible) {
+    ModelConfig mc;
+    mc.num_layers                         = 61;
+    mc.attn_config.head_num               = 64;
+    mc.attn_config.kv_head_num            = 8;
+    mc.attn_config.size_per_head          = 128;
+    mc.attn_config.tokens_per_block       = 128;
+    mc.attn_config.indexer_head_dim       = 128;
+    mc.attn_config.indexer_cache_fp8_mode = 0;
+    ParallelismConfig pc;
+
+    const auto config = SingleConfigCreator::createSingleConfig(mc, pc, false);
+    EXPECT_EQ(config.kv_scale_stride_bytes, static_cast<size_t>(128) * 128 * sizeof(uint16_t));
+}
+
+static ModelConfig makeM3HybridIndexerModelConfig(int fp8_mode, bool independent_pool) {
+    ModelConfig mc;
+    mc.num_layers                                                = 4;
+    mc.hidden_size                                               = 512;
+    mc.attn_config.head_num                                      = 8;
+    mc.attn_config.kv_head_num                                   = 2;
+    mc.attn_config.size_per_head                                 = 64;
+    mc.attn_config.tokens_per_block                              = 128;
+    mc.attn_config.indexer_head_dim                              = 128;
+    mc.attn_config.indexer_cache_fp8_mode                        = fp8_mode;
+    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    mc.hybrid_attention_config.enable_independent_kv_cache_pools = independent_pool;
+    mc.hybrid_attention_config.hybrid_attention_types            = {
+        HybridAttentionType::LINEAR, HybridAttentionType::NONE, HybridAttentionType::LINEAR, HybridAttentionType::NONE};
+    mc.linear_attention_config.linear_conv_kernel_dim = 4;
+    mc.linear_attention_config.linear_key_head_dim    = 16;
+    mc.linear_attention_config.linear_value_head_dim  = 16;
+    mc.linear_attention_config.linear_num_key_heads   = 2;
+    mc.linear_attention_config.linear_num_value_heads = 2;
+    return mc;
+}
+
+TEST(HybridConfigCreatorTest, M3IndexerCacheUsesSharedFp8Layout) {
+    ParallelismConfig pc;
+    const auto config = HybridConfigCreator::createHybridConfig(makeM3HybridIndexerModelConfig(2, false), pc, false);
+    const auto expected_stride = static_cast<size_t>(128) * (128 + sizeof(float));
+    EXPECT_EQ(config.kv_scale_stride_bytes, expected_stride);
+    EXPECT_TRUE(config.use_opaque_kv_cache_store);
+    EXPECT_FALSE(config.scale_region_is_head_partitioned);
+}
+
+TEST(HybridPoolConfigCreatorTest, M3IndexerCacheUsesSharedFp8Layout) {
+    ParallelismConfig pc;
+    const auto        config = HybridPoolConfigCreator::createConfig(
+        makeM3HybridIndexerModelConfig(2, true), pc, makeDsv4KvCacheConfig(), false, 0);
+    const auto expected_kernel_stride = static_cast<size_t>(128) * (128 + sizeof(float));
+    ASSERT_FALSE(config.group_kv_scale_stride_bytes.empty());
+    EXPECT_EQ(config.group_kv_scale_stride_bytes.front(), expected_kernel_stride * config.kernelBlocksPerKvBlock());
+    EXPECT_TRUE(config.use_opaque_kv_cache_store);
+    EXPECT_FALSE(config.scale_region_is_head_partitioned);
 }
 
 static ModelConfig makeProModelConfig() {

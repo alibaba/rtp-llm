@@ -100,6 +100,74 @@ _M3_CHUNK_WS_CACHE = M3_PREFILL_WORKSPACE_CACHE
 
 _CHUNKED_SPARSE_ATTN_LOGGED = False
 
+_FP8_E4M3_MAX = tl.constexpr(448.0)
+
+
+@triton.jit
+def _quantize_index_q_fp8_kernel(
+    src_ptr,
+    dst_ptr,
+    rows,
+    SRC_S0: tl.constexpr,
+    SRC_S1: tl.constexpr,
+    DST_S0: tl.constexpr,
+    DST_S1: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    row = tl.program_id(0)
+    dim = tl.arange(0, BLOCK_D)
+    mask = (row < rows) & (dim < HEAD_DIM)
+    values = tl.load(src_ptr + row * SRC_S0 + dim * SRC_S1, mask=mask, other=0.0)
+    absmax = tl.max(tl.where(dim < HEAD_DIM, tl.abs(values), 0.0), axis=0)
+    scale = tl.maximum(absmax / _FP8_E4M3_MAX, 1.0e-12)
+    tl.store(dst_ptr + row * DST_S0 + dim * DST_S1, values / scale, mask=mask)
+
+
+def _quantize_index_q_for_fp8_fmha(
+    idx_q: torch.Tensor, workspace_owner: dict | None
+) -> torch.Tensor:
+    """Dynamically quantize each [token, head] row and reuse plan workspace.
+
+    OnlyScore selects K blocks independently for every query head. Multiplying
+    all dimensions in one query-head row by the same positive scalar therefore
+    preserves its ideal top-k ordering while using the E4M3 range effectively.
+    """
+    if idx_q.dim() != 3 or idx_q.dtype != torch.bfloat16:
+        raise ValueError(
+            "FP8 index-Q quantization expects BF16 [token,head,dim], got "
+            f"shape={tuple(idx_q.shape)} dtype={idx_q.dtype}"
+        )
+    if int(idx_q.stride(2)) != 1:
+        idx_q = idx_q.contiguous()
+    output = None if workspace_owner is None else workspace_owner.get("_idx_q_fp8_buf")
+    if (
+        output is None
+        or output.shape != idx_q.shape
+        or output.device != idx_q.device
+        or output.dtype != torch.float8_e4m3fn
+    ):
+        output = torch.empty_like(idx_q, dtype=torch.float8_e4m3fn)
+        if workspace_owner is not None:
+            workspace_owner["_idx_q_fp8_buf"] = output
+    rows = int(idx_q.shape[0]) * int(idx_q.shape[1])
+    head_dim = int(idx_q.shape[2])
+    src = idx_q.view(rows, head_dim)
+    dst = output.view(rows, head_dim)
+    _quantize_index_q_fp8_kernel[(rows,)](
+        src,
+        dst,
+        rows,
+        SRC_S0=int(src.stride(0)),
+        SRC_S1=int(src.stride(1)),
+        DST_S0=int(dst.stride(0)),
+        DST_S1=int(dst.stride(1)),
+        HEAD_DIM=head_dim,
+        BLOCK_D=triton.next_power_of_2(head_dim),
+        num_warps=1,
+    )
+    return output
+
 
 def _get_or_create_chunk_ws(nbytes: int, device: torch.device) -> torch.Tensor:
     return get_or_create_m3_prefill_workspace(nbytes, device)
@@ -324,6 +392,7 @@ def build_index_score_plan(
     block_size_k,
     *,
     host_metadata: PrefillScoreHostMetadata | None = None,
+    use_fp8_kvcache: bool = False,
 ):
     """Build the fmha_sm100 OnlyScore plan for the index QK score.
 
@@ -343,7 +412,7 @@ def build_index_score_plan(
     qo_seg = torch.tensor(host_metadata.query_lens, dtype=torch.int32, device="cpu")
     kv_seg = torch.tensor(host_metadata.seq_lens, dtype=torch.int32, device="cpu")
     qo_off = torch.tensor(host_metadata.prefix_lens, dtype=torch.int32, device="cpu")
-    return _fmha_sm100_plan(
+    plan = _fmha_sm100_plan(
         qo_seg,
         kv_seg,
         num_idx_heads,
@@ -353,7 +422,10 @@ def build_index_score_plan(
         output_maxscore=True,
         causal=True,
         num_kv_splits=1,
+        use_fp8_kvcache=use_fp8_kvcache,
     )
+    plan["_use_fp8_kvcache"] = bool(use_fp8_kvcache)
+    return plan
 
 
 def _attach_direct_csr(plan, kv_seg_cpu, block_size_k, device):
@@ -828,6 +900,7 @@ def prepare_fmha_index_score_chunks(
     max_seqlen_k,
     *,
     host_metadata: PrefillScoreHostMetadata | None = None,
+    use_fp8_kvcache: bool = False,
 ):
     cache_key = (
         chunk_rows,
@@ -837,6 +910,7 @@ def prepare_fmha_index_score_chunks(
         block_size_k,
         num_heads,
         idx_kv_heads,
+        bool(use_fp8_kvcache),
     )
     if isinstance(index_score_plan, dict):
         cached = index_score_plan.get("_index_score_chunk_meta")
@@ -864,6 +938,7 @@ def prepare_fmha_index_score_chunks(
                 idx_kv_heads,
                 block_size_k,
                 host_metadata=chunk.host_metadata,
+                use_fp8_kvcache=use_fp8_kvcache,
             ),
         )
         for chunk in chunks
@@ -894,6 +969,7 @@ def _flash_prefill_topk_to_block_tables_chunked(
     emit_block_table,
     num_heads,
     idx_kv_heads,
+    use_fp8_kvcache,
 ):
     from fmha_sm100.api import _fmha_sm100
 
@@ -911,6 +987,7 @@ def _flash_prefill_topk_to_block_tables_chunked(
         idx_kv_heads,
         total_q,
         max_seqlen_k,
+        use_fp8_kvcache=use_fp8_kvcache,
     )
     block_tables, output_seq_lens, topk_idx = _allocate_topk_outputs(
         total_q, num_heads, topk, idx_q.device, emit_block_table
@@ -1049,6 +1126,21 @@ def flash_prefill_topk_to_block_tables(
     triton.set_allocator(robust_allocator)
     total_q, num_heads, qk_head_dim = idx_q.shape
     max_slots, idx_kv_heads, _ = idx_k_cache.shape  # idx K is usually single-head
+    # The legacy fmha_sm100 OnlyScore kernel has one input dtype for Q/K/V.
+    # Keep projection, normalization and RoPE in BF16, then dynamically quantize
+    # index Q at this operator boundary when mode 2 supplies E4M3 index-K pages.
+    # The plan owns the output buffer so all sparse layers reuse one allocation.
+    if idx_k_cache.dtype == torch.float8_e4m3fn and idx_q.dtype == torch.bfloat16:
+        idx_q = _quantize_index_q_for_fp8_fmha(idx_q, index_score_plan)
+    if idx_q.dtype != idx_k_cache.dtype:
+        raise ValueError(
+            "fmha index score requires Q and K to use the same storage dtype; "
+            f"q_dtype={idx_q.dtype} k_dtype={idx_k_cache.dtype}"
+        )
+    if idx_q.dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+        raise ValueError(
+            "fmha index score supports only BF16 or E4M3 inputs, got " f"{idx_q.dtype}"
+        )
     gqa_group_size = num_heads // idx_kv_heads  # QK kernel: index-heads share idx K
     # block-table layout: in production idx_group_size==1 so each index head maps to
     # one main-attention KV head -> NKV == num_heads.
@@ -1094,6 +1186,7 @@ def flash_prefill_topk_to_block_tables(
             emit_block_table=emit_block_table,
             num_heads=num_heads,
             idx_kv_heads=idx_kv_heads,
+            use_fp8_kvcache=idx_k_cache.dtype == torch.float8_e4m3fn,
         )
     cu_seqblocks_q, max_seqblock_q, all_seqblock_q, _, _, _ = get_cu_seqblocks(
         cu_seqlens, max_seqlen_q, block_size_q, block_size_k
@@ -1105,7 +1198,20 @@ def flash_prefill_topk_to_block_tables(
     plan = index_score_plan
     if plan is None:
         plan = build_index_score_plan(
-            cu_seqlens, seq_lens, prefix_lens, num_heads, idx_kv_heads, block_size_k
+            cu_seqlens,
+            seq_lens,
+            prefix_lens,
+            num_heads,
+            idx_kv_heads,
+            block_size_k,
+            use_fp8_kvcache=idx_k_cache.dtype == torch.float8_e4m3fn,
+        )
+    plan_uses_fp8 = bool(plan.get("_use_fp8_kvcache", False))
+    storage_uses_fp8 = idx_k_cache.dtype == torch.float8_e4m3fn
+    if plan_uses_fp8 != storage_uses_fp8:
+        raise ValueError(
+            "index-score plan/cache dtype mismatch: "
+            f"plan_fp8={plan_uses_fp8} cache_dtype={idx_k_cache.dtype}"
         )
     # Reuse the maxscore buffer across sparse layers instead of letting fmha
     # allocate it per call. fmha's internal alloc is torch.full(..., -inf), whose

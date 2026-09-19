@@ -3,6 +3,7 @@
 #include <numeric>
 
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/IndexerCacheLayout.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 
 namespace rtp_llm {
@@ -156,8 +157,10 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
     config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
     if (!config.use_mla && model_config.attn_config.indexer_head_dim > 0) {
-        const auto indexer_dim           = static_cast<size_t>(model_config.attn_config.indexer_head_dim);
-        config.kv_scale_stride_bytes     = indexer_dim * 2 * full_spec->seq_size_per_block;
+        config.kv_scale_stride_bytes =
+            indexerCacheBlockBytes(static_cast<size_t>(model_config.attn_config.indexer_head_dim),
+                                   model_config.attn_config.indexer_cache_fp8_mode,
+                                   full_spec->seq_size_per_block);
         config.use_opaque_kv_cache_store = true;
         // See SingleConfigCreator: the scale slot now carries the head-independent
         // MSA indexer-K cache, so it must not follow the data block's head partition.

@@ -471,8 +471,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory_cache_high_watermark_ratio", &KVCacheConfig::memory_cache_high_watermark_ratio)
         .def_readwrite("memory_cache_remote_eviction_watermark_ratio",
                        &KVCacheConfig::memory_cache_remote_eviction_watermark_ratio)
-        .def_readwrite("memory_cache_remote_eviction_timeout_ms", &KVCacheConfig::memory_cache_remote_eviction_timeout_ms)
-        .def_readwrite("memory_cache_remote_eviction_max_blocks", &KVCacheConfig::memory_cache_remote_eviction_max_blocks)
+        .def_readwrite("memory_cache_remote_eviction_timeout_ms",
+                       &KVCacheConfig::memory_cache_remote_eviction_timeout_ms)
+        .def_readwrite("memory_cache_remote_eviction_max_blocks",
+                       &KVCacheConfig::memory_cache_remote_eviction_max_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
         .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
@@ -1650,6 +1652,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("indexer_head_dim", &AttentionConfigs::indexer_head_dim)
         .def_readwrite("indexer_head_num", &AttentionConfigs::indexer_head_num)
         .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
+        .def_readwrite("indexer_cache_fp8_mode", &AttentionConfigs::indexer_cache_fp8_mode)
         // DeepSeek-V4 fields
         .def_readwrite("layer_compress_ratios", &AttentionConfigs::layer_compress_ratios)
         .def_readwrite("o_groups", &AttentionConfigs::o_groups)

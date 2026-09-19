@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/IndexerCacheLayout.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -62,12 +63,13 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
         // paged pool so it is addressed by the same block table and travels with
         // the main K/V during PD separation. is_mla stays false (the main K/V
         // keeps its HND layout); the scale region is exposed to Python as FP32
-        // and reinterpreted as BF16 there. BF16 => 2 bytes/elem, so the per-block
-        // stride is indexer_head_dim * 2 * seq_size_per_block bytes.
-        auto indexer_dim             = static_cast<size_t>(model_config.attn_config.indexer_head_dim);
-        config.kv_scale_stride_bytes = indexer_dim * 2 * spec->seq_size_per_block;
-        config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
-        // PD transfer: the idx_K BF16 cache in the scale slot is a single logical
+        // and reinterpreted as BF16 or E4M3 there.
+        config.kv_scale_stride_bytes =
+            indexerCacheBlockBytes(static_cast<size_t>(model_config.attn_config.indexer_head_dim),
+                                   model_config.attn_config.indexer_cache_fp8_mode,
+                                   spec->seq_size_per_block);
+        config.kv_scale_size_bytes = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+        // PD transfer: the idx_K cache in the scale slot is a single logical
         // block (not k/v separable), and the main K/V HND block is not k/v-split
         // friendly for byte-half partitioning. Use opaque whole-block PD transfer
         // (single kv_/kv_scale_ blocks) like GLM5/DSV4, so prefill-store and

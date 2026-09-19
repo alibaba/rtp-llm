@@ -236,6 +236,7 @@ cc_library(
         "DSV4CacheConfigHelper.h",
         "HybridConfigCreator.h",
         "HybridPoolConfigCreator.h",
+        "IndexerCacheLayout.h",
         "KVCacheHashUtil.h",
         "MemoryEvaluationHelper.h",
         "SingleConfigCreator.h",
