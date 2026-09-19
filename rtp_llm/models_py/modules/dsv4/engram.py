@@ -580,6 +580,50 @@ def gated_engram_residual(
     token_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Exact normalized signed-square-root gate used by the reference."""
+    if (
+        not torch.is_grad_enabled()
+        and hidden.is_cuda
+        and hidden.ndim == 3
+        and hidden.numel() > 0
+        and (hidden.shape[-2], hidden.shape[-1]) == (4, 5120)
+        and kv.shape == hidden.shape[:-2] + (5 * 5120,)
+        and q_weight.shape == k_weight.shape == (4, 5120)
+        and all(
+            value.dtype == torch.bfloat16
+            and value.device == hidden.device
+            and value.is_contiguous()
+            for value in (hidden, kv, q_weight, k_weight)
+        )
+        and (
+            token_mask is None
+            or (
+                token_mask.device == hidden.device
+                and token_mask.dtype == torch.bool
+                and token_mask.shape == hidden.shape[:-2]
+                and token_mask.is_contiguous()
+            )
+        )
+    ):
+        from rtp_llm.models_py.modules.dsv4._engram_inject_triton import (
+            engram_inject_kernel,
+        )
+
+        out = torch.empty_like(hidden)
+        engram_inject_kernel[(hidden.numel() // (4 * 5120), 4)](
+            hidden,
+            kv,
+            q_weight,
+            k_weight,
+            hidden if token_mask is None else token_mask,
+            out,
+            DIM=5120,
+            HC=4,
+            HAS_MASK=token_mask is not None,
+            EPS=eps,
+            BLOCK=8192,
+            enable_fp_fusion=False,
+        )
+        return out
     tokens, copies, dim = hidden.shape
     key = kv[:, : copies * dim].reshape(tokens, copies, dim).float()
     value = kv[:, copies * dim :].reshape(tokens, 1, dim).float()
