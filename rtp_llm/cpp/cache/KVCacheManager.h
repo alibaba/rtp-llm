@@ -87,7 +87,7 @@ public:
     void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     void blockBatchCopy(const torch::Tensor& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
-    void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,
@@ -99,23 +99,17 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
                   convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id, int group_id) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, int group_id) const;
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int block_index, int layer_id, int group_id, int partition_count, int partition_id) const;
-    BlockAddrInfo          convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const;
-    std::vector<BlockInfo> convertIndexToBufferByTag(int block_index, int layer_id, const std::string& tag) const;
-    std::vector<BlockInfo> convertIndexToBufferByTag(
-        int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const;
+    BlockAddrInfo convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
 
     GroupedCacheLayerLayout allLayerCacheBase() const;
 
     // for main model; grouped layout preserves layers that own multiple cache groups
     GroupedCacheLayerLayout getMainModelGroupedCacheLayerLayout() const;
-    GroupedCacheLayerLayout getMainModelCacheLayerLayout() const;
     // for mtp module
     GroupedCacheLayerLayout getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const;
-    GroupedCacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
 
     // 资源统计和信息查询
     size_t      freeBlocksNum() const;
@@ -157,21 +151,10 @@ public:
         return cp_slot_mapper_;
     }
 
-    // Write one KV block (optionally per-layer) from host/device tensors for test
-    virtual bool
-    writeKVBlockForTest(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
-    virtual bool writeKVBlockForTest(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
-
-    bool setKVBlockValue(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer) {
-        return writeKVBlockForTest(block_index, layer_id, k_buffer, v_buffer);
-    }
-
-    bool setKVBlockValue(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer) {
-        return writeKVBlockForTest(block_index, k_buffer, v_buffer);
-    }
-
 private:
     void                  allocateAndSync();
+    uint32_t              synchronizeBlockNum(uint32_t candidate_block_num);
+    static uint32_t       selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service);
     std::function<void()> allocationChangeCallback() const;
     void                  reportMetricsLoop();
     bool collectCacheHitRates(std::chrono::steady_clock::time_point now, RtpLLMCacheReuseMetricsCollector& metrics);

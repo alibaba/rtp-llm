@@ -36,9 +36,9 @@ struct KVCMMatchMeta final: StorageBackendMatchMeta {
     kv_cache_manager::Locations locations;
 };
 
-const StorageBlockHandle* findHandle(const std::vector<StorageBlockHandle>& handles, size_t group_id) {
-    const auto it = std::find_if(handles.begin(), handles.end(), [group_id](const StorageBlockHandle& handle) {
-        return handle.group_id == group_id && !isNullBlockIdx(handle.block);
+const StorageBlockHandle* findHandle(const std::vector<StorageBlockHandle>& handles, std::string_view tag) {
+    const auto it = std::find_if(handles.begin(), handles.end(), [tag](const StorageBlockHandle& handle) {
+        return handle.tag == tag && !isNullBlockIdx(handle.block);
     });
     return it == handles.end() ? nullptr : &*it;
 }
@@ -76,19 +76,30 @@ public:
         }
         std::vector<int32_t> full_group_ids;
         std::vector<int32_t> other_group_ids;
-        for (int32_t group_id = 0; group_id < cache_config_.groupNums(); ++group_id) {
-            if (cache_config_.typeForGroup(static_cast<size_t>(group_id)) == CacheGroupType::FULL) {
-                full_group_ids.push_back(group_id);
+        // CacheConfig::blockSizeBytesForGroup resolves MTP child-owned physical
+        // strides; do not replace this with topology-derived geometry.
+        std::vector<size_t>           group_block_size_bytes;
+        const std::vector<GroupBase>& groups = cache_config_.topology().groups();
+        group_block_size_bytes.reserve(groups.size());
+        for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+            const auto& group = groups[group_id];
+            if (group.policy.group_type == CacheGroupType::FULL) {
+                full_group_ids.push_back(static_cast<int32_t>(group_id));
             } else {
-                other_group_ids.push_back(group_id);
+                other_group_ids.push_back(static_cast<int32_t>(group_id));
             }
+            group_block_size_bytes.push_back(cache_config_.blockSizeBytesForGroup(group.tag));
         }
         if (other_group_ids.empty()) {
             group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(
-                topology, buffer_resolver, full_group_ids, other_group_ids);
+                topology, buffer_resolver, full_group_ids, other_group_ids, std::move(group_block_size_bytes));
         } else {
-            group_policy_ = std::make_unique<kvcm::FullLinearLayerGroupPolicy>(
-                topology, buffer_resolver, full_group_ids, other_group_ids, std::max(1, cache_config_.linear_step));
+            group_policy_ = std::make_unique<kvcm::FullLinearLayerGroupPolicy>(topology,
+                                                                               buffer_resolver,
+                                                                               full_group_ids,
+                                                                               other_group_ids,
+                                                                               std::max(1, cache_config_.linear_step),
+                                                                               std::move(group_block_size_bytes));
         }
         if (!group_policy_->init()) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM group policy init failed");
@@ -199,11 +210,11 @@ public:
                 const auto        info = spec_info.find(location_spec.spec_name);
                 const std::string spec_name(location_spec.spec_name);
                 RTP_LLM_CHECK_WITH_INFO(info != spec_info.end(), "KVCM read has unknown spec [%s]", spec_name.c_str());
-                const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.group_id);
+                const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.tag);
                 RTP_LLM_CHECK_WITH_INFO(handle != nullptr,
-                                        "KVCM read has no destination handle for key=%zu group=%d",
+                                        "KVCM read has no destination handle for key=%zu tag=%s",
                                         key_idx,
-                                        info->second.group_id);
+                                        info->second.tag.c_str());
                 auto* remote = requests.at(static_cast<size_t>(info->second.tp_rank)).mutable_remote_request();
                 remote->add_group_tags(info->second.tag);
                 remote->add_block_ids(handle->block);
@@ -252,11 +263,11 @@ public:
                     const auto info = spec_info.find(location_spec.spec_name);
                     RTP_LLM_CHECK_WITH_INFO(
                         info != spec_info.end(), "KVCM write has unknown spec [%s]", location_spec.spec_name.c_str());
-                    const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.group_id);
+                    const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.tag);
                     RTP_LLM_CHECK_WITH_INFO(handle != nullptr,
-                                            "KVCM write has no source handle for key=%zu group=%d",
+                                            "KVCM write has no source handle for key=%zu tag=%s",
                                             key_idx,
-                                            info->second.group_id);
+                                            info->second.tag.c_str());
                     const size_t rank   = static_cast<size_t>(info->second.tp_rank);
                     auto*        remote = requests.at(rank).mutable_remote_request();
                     remote->add_group_tags(info->second.tag);
@@ -319,7 +330,7 @@ public:
         }
         setCudaDevice();
         kv_cache_manager::BlockBuffers buffers;
-        if (!group_policy_->genBlockBuffersByTag(tags, blocks, buffers)) {
+        if (!group_policy_->genBlockBuffers(tags, blocks, buffers)) {
             return false;
         }
         if (transfer_pool_count_ > 1) {
@@ -368,7 +379,7 @@ private:
         for (const auto& [group_id, group] : group_policy_->groups()) {
             for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
                 const std::string spec_name = kvcm::genLocationSpecName(rank, group.group_name);
-                infos->emplace(spec_name, cache_config_.blockSizeBytesForGroup(static_cast<size_t>(group_id)));
+                infos->emplace(spec_name, cache_config_.blockSizeBytesForGroup(group.tag));
             }
         }
         return {std::move(infos), std::move(groups)};
@@ -640,7 +651,9 @@ KVCMStorageBackend::~KVCMStorageBackend() = default;
 bool KVCMStorageBackend::initImpl() {
     return impl_->init(
         topology(),
-        [this](int layer_id, int group_id, int block_id) { return convertIndexToBuffer(layer_id, group_id, block_id); },
+        [this](int layer_id, const std::string& tag, int block_id) {
+            return convertIndexToBuffer(layer_id, tag, block_id);
+        },
         devicePools());
 }
 

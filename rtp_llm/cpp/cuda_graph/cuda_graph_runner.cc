@@ -1609,7 +1609,11 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
     }
 
-    const int64_t max_blocks = max_kv_blocks * seq_size_per_block_ / kernel_seq_size_per_block_;
+    RTP_LLM_CHECK_WITH_INFO(max_kv_blocks > 0
+                                && max_kernel_blocks_per_kv_block_
+                                       <= static_cast<size_t>(std::numeric_limits<int64_t>::max() / max_kv_blocks),
+                            "CUDA graph block table capacity overflow");
+    const int64_t max_blocks = max_kv_blocks * max_kernel_blocks_per_kv_block_;
     // kv_cache_kernel_block_id_device [batch_size, block_num]
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
         torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);

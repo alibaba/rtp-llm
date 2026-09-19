@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DirectSubscriber.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -106,10 +106,9 @@ class KVCMIndependentPoolTest: public DeviceTestBase {
 protected:
     void SetUp() override {
         DeviceTestBase::SetUp();
-        auto environment                    = makeMultiGroupBackendEnvironment("independent_config", 2, 1, 1);
-        config_                             = environment.cache_config;
-        config_.use_independent_block_pools = true;
-        allocator_                          = std::make_shared<HybridPoolKVCacheAllocator>(config_);
+        auto environment = makeMultiGroupBackendEnvironment("independent_config", 2, 1, 1);
+        config_          = environment.cache_config;
+        allocator_       = std::make_shared<KVCacheAllocator>(config_);
         ASSERT_TRUE(allocator_->init());
         state_ = std::make_shared<PoolTransferState>();
         pools_ = allocator_->groupBlockPools();
@@ -152,10 +151,10 @@ protected:
                     const auto  prefix         = group < 2 ? "F" : "L";
                     for (int tp = 0; tp < (rank == 0 ? 1 : 2); ++tp) {
                         EXPECT_EQ(sizes.at("tp" + std::to_string(tp) + "_" + prefix + topology_group.tag),
-                                  config_.blockSizeBytesForGroup(group));
+                                  config_.blockSizeBytesForGroup(config_.topology().groupById(group).tag));
                     }
                 }
-                EXPECT_NE(config_.blockSizeBytesForGroup(0), config_.blockSizeBytesForGroup(2));
+                EXPECT_NE(config_.blockSizeBytesForGroup(config_.topology().groups()[0].tag), config_.blockSizeBytesForGroup(config_.topology().groups()[2].tag));
                 return std::move(meta);
             }));
         static const std::string storage_config = R"({"sdk_backend_configs":[]})";
@@ -197,8 +196,8 @@ protected:
         backend_ = std::make_shared<KVCMStorageBackend>(
             config_, options, RuntimeConfig{}, parallel, SpeculativeExecutionConfig{}, nullptr, wrapper_);
         if (fail_second || rank != 0) {
-            return backend_->init(config_.topologyPtr(), pools_, [&](int layer, int group, int block) {
-                return allocator_->convertIndexToBuffer(layer, group, block);
+            return backend_->init(config_.topologyPtr(), pools_, [&](int layer, const std::string& tag, int block) {
+                return allocator_->convertIndexToBuffer(layer, tag, block);
             });
         }
         cache_ = createBlockTreeCache(config_, options, allocator_, parallel, backend_);
@@ -208,15 +207,17 @@ protected:
     StorageRequest request() const {
         StorageRequest result;
         result.keys    = std::make_shared<CacheKeysType>(CacheKeysType{101});
-        result.handles = {{{2, blocks_[2]}, {1, blocks_[1]}, {0, blocks_[0]}}};
+        result.handles = {{{config_.tagForGroup(2), blocks_[2]},
+                           {config_.tagForGroup(1), blocks_[1]},
+                           {config_.tagForGroup(0), blocks_[0]}}};
         return result;
     }
 
     void fill(uint8_t value) {
         for (size_t group = 0; group < pools_.size(); ++group) {
-            for (int layer : config_.topology().groupById(group).layer_ids) {
+            for (int layer : config_.layerIdsForGroup(config_.tagForGroup(group))) {
                 for (const auto& buffer :
-                     allocator_->convertIndexToBuffer(layer, static_cast<int>(group), blocks_[group])) {
+                     allocator_->convertIndexToBuffer(layer, config_.tagForGroup(group), blocks_[group])) {
                     ASSERT_EQ(cudaMemset(buffer.addr, value == 0 ? 0 : value + group, buffer.size_bytes), cudaSuccess);
                 }
             }
@@ -224,7 +225,7 @@ protected:
     }
 
     CacheConfig                                          config_;
-    std::shared_ptr<HybridPoolKVCacheAllocator>          allocator_;
+    std::shared_ptr<KVCacheAllocator>                    allocator_;
     std::vector<DeviceBlockPoolPtr>                      pools_;
     std::vector<std::unique_ptr<ScopedReferencedBlocks>> refs_;
     std::vector<BlockIdxType>                            blocks_;
@@ -271,9 +272,9 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
     ASSERT_TRUE(read(*backend_, request(), matched.match_meta));
     EXPECT_EQ(state_->reads, (std::vector<size_t>{1, 1, 1}));
     for (size_t group = 0; group < pools_.size(); ++group) {
-        for (int layer : config_.topology().groupById(group).layer_ids) {
+        for (int layer : config_.layerIdsForGroup(config_.tagForGroup(group))) {
             for (const auto& buffer :
-                 allocator_->convertIndexToBuffer(layer, static_cast<int>(group), blocks_[group])) {
+                 allocator_->convertIndexToBuffer(layer, config_.tagForGroup(group), blocks_[group])) {
                 std::vector<uint8_t> bytes(buffer.size_bytes);
                 ASSERT_EQ(cudaMemcpy(bytes.data(), buffer.addr, bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
                 EXPECT_EQ(bytes, std::vector<uint8_t>(bytes.size(), 17 + group));

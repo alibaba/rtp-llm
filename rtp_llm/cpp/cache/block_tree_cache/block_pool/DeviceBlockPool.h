@@ -27,6 +27,7 @@ struct DeviceBlockPoolConfig: public BlockPoolConfigBase {
     std::vector<MemoryLayoutConfig> memory_layouts;
     bool                            use_pinned_cpu_backing{false};
     bool                            use_device_malloc_backing{false};
+    bool                            allow_sentinel_only{false};
 };
 
 class DeviceBlockPool;

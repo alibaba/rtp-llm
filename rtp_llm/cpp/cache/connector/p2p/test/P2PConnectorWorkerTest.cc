@@ -1,11 +1,13 @@
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <thread>
 #include <gtest/gtest.h>
 #include <memory>
 #include <vector>
 #include <chrono>
 #include <map>
+#include <tuple>
 
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorker.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
@@ -33,10 +35,43 @@ TEST(P2PKeyUtilTest, LayerCacheBufferUsesTagIdentity) {
     EXPECT_NE(key, P2PKeyUtil::makePartitionLayerTagKey("request", 3, "linear", 1));
 }
 
+class RecordingLayerBlockConverter: public LayerBlockConverter {
+public:
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
+        calls.emplace_back(layer_id, tag, block_id, partition_count, partition_id);
+        BlockInfo info;
+        info.addr       = reinterpret_cast<void*>(static_cast<uintptr_t>(block_id + 1));
+        info.size_bytes = static_cast<size_t>(block_id + 4);
+        return {info};
+    }
+
+    std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
+        return {};
+    }
+
+    mutable std::vector<std::tuple<int, std::string, int, int, int>> calls;
+};
+
+TEST(P2PKeyUtilTest, BufferConversionCarriesLayerTagAndBlockIdentity) {
+    auto converter = std::make_shared<RecordingLayerBlockConverter>();
+    auto buffer    = std::make_shared<LayerCacheBuffer>(/*layer_id=*/3, "linear");
+    buffer->addBlockId(/*cache_key=*/101, /*block_id=*/7);
+
+    const auto infos =
+        LayerCacheBufferUtil::buildKeyBlockInfos(converter, buffer, /*partition_count=*/2, /*partition_id=*/1);
+
+    ASSERT_EQ(converter->calls.size(), 1u);
+    EXPECT_EQ(converter->calls.front(), std::make_tuple(3, std::string("linear"), 7, 2, 1));
+    ASSERT_EQ(infos.size(), 1u);
+    ASSERT_EQ(infos.at(101)->blocks.size(), 1u);
+    EXPECT_EQ(infos.at(101)->blocks.front().addr, reinterpret_cast<void*>(8));
+}
+
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
 public:
-    std::vector<BlockInfo> convertIndexToBufferByTag(int, const std::string&, int, int, int) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int, int, int) const override {
         return {};
     }
 
@@ -150,9 +185,7 @@ private:
             const auto layer_begin = has_identity && third_last != std::string::npos ? third_last + 1 : second_last + 1;
             const auto layer_end   = has_identity ? second_last : last;
             return std::stoi(layer_key.substr(layer_begin, layer_end - layer_begin));
-        } catch (...) {
-            return -1;
-        }
+        } catch (...) { return -1; }
     }
 
     static std::string parseCacheTag(const std::string& layer_key) {

@@ -59,6 +59,7 @@ std::string GptModelInputs::debugString(bool force) const {
     if (kv_cache_block_id.defined()) {
         debug_string << ", kv_cache_block_id: " << tb(kv_cache_block_id);
     }
+    debug_string << ", kv_cache_group_tags: " << combineStrings(kv_cache_group_tags);
     if (attention_mask.defined()) {
         debug_string << ", attention_mask: " << tb(attention_mask);
     }

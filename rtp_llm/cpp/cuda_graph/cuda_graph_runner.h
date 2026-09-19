@@ -54,6 +54,7 @@ public:
         max_seq_len_(graph_params.max_seq_len),
         seq_size_per_block_(graph_params.tokens_per_block),
         kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
+        max_kernel_blocks_per_kv_block_(graph_params.max_kernel_blocks_per_kv_block),
         hidden_size_(graph_params.hidden_size),
         input_hidden_size_(graph_params.input_hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
@@ -73,10 +74,11 @@ public:
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
-        if (kernel_seq_size_per_block_ <= 0) {
-            throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
-        }
-        max_bs_ = graph_params.max_context_batch_size;
+        auto resolved_geometry = graph_params;
+        resolved_geometry.resolveCacheGeometry();
+        max_kernel_blocks_per_kv_block_ = resolved_geometry.max_kernel_blocks_per_kv_block;
+        kv_cache_group_tags_            = resolved_geometry.kv_cache_group_tags;
+        max_bs_                         = graph_params.max_context_batch_size;
         if (role_ == CudaGraphRole::AUTO) {
             role_ = is_target_verify_ ? CudaGraphRole::TARGET_VERIFY :
                     is_prefill_cuda_graph_mode_ ?
@@ -238,6 +240,7 @@ private:
     int                     max_seq_len_{0};
     int                     seq_size_per_block_{0};
     int                     kernel_seq_size_per_block_{0};
+    size_t                  max_kernel_blocks_per_kv_block_{1};
     int                     hidden_size_{0};
     size_t                  input_hidden_size_{0};
     int                     hc_mult_{1};

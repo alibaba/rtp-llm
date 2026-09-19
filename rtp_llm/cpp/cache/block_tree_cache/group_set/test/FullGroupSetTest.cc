@@ -19,9 +19,10 @@ protected:
         ASSERT_NE(pool_, nullptr);
         host_pool_ = block_tree_cache_test::makeHostPool(1, 128);
         ASSERT_NE(host_pool_, nullptr);
-        group_     = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_}, host_pool_, nullptr);
-        auto group = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 1);
-        group_->initialize(0, makeTestTopology({std::move(group)}), {0});
+        group_        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_}, host_pool_, nullptr);
+        auto group    = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 1);
+        auto topology = makeTestTopology({std::move(group)});
+        group_->initialize(0, topology, {topology->groupById(0).tag});
         tree_ = std::make_unique<BlockTree>(std::vector<GroupSetPtr>{group_});
     }
 
@@ -252,10 +253,10 @@ TEST_F(FullGroupSetTest, CompleteDeviceValueRequiresDeviceTierAndNoNullBlocks) {
     ASSERT_NE(second_pool, nullptr);
     auto two_pool_group =
         std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_, second_pool}, nullptr, nullptr);
-    auto      first          = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 1);
-    GroupBase second         = first;
-    two_pool_group->initialize(
-        0, makeTestTopology({std::move(first), std::move(second)}), {0, 1});
+    auto first    = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 1);
+    auto second   = first;
+    auto topology = makeTestTopology({std::move(first), std::move(second)});
+    two_pool_group->initialize(0, topology, {topology->groupById(0).tag, topology->groupById(1).tag});
 
     GroupSetResource resource;
     EXPECT_FALSE(resource.hasCompleteDeviceValue());

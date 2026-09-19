@@ -17,9 +17,10 @@ protected:
     void SetUp() override {
         pool_ = block_tree_cache_test::makeDevicePool({{1, 0}}, 128, "linear_group_set_test");
         ASSERT_NE(pool_, nullptr);
-        group_     = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_}, nullptr, nullptr);
-        auto group = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::LINEAR), {0}, 1);
-        group_->initialize(0, makeTestTopology({std::move(group)}), {0});
+        group_        = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_}, nullptr, nullptr);
+        auto group    = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::LINEAR), {0}, 1);
+        auto topology = makeTestTopology({std::move(group)});
+        group_->initialize(0, topology, {topology->groupById(0).tag});
     }
 
     void TearDown() override {

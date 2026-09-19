@@ -163,10 +163,10 @@ struct BackendEnvironment {
     DeviceBlockPoolPtr device_pool;
     BlockIdxType       block_id{NULL_BLOCK_IDX};
 
-    BackendEnvironment()                                     = default;
-    BackendEnvironment(BackendEnvironment&&) noexcept        = default;
-    BackendEnvironment& operator=(BackendEnvironment&&)      = delete;
-    BackendEnvironment(const BackendEnvironment&)            = delete;
+    BackendEnvironment()                              = default;
+    BackendEnvironment(BackendEnvironment&&) noexcept = default;
+    BackendEnvironment& operator=(BackendEnvironment&&) = delete;
+    BackendEnvironment(const BackendEnvironment&)       = delete;
     BackendEnvironment& operator=(const BackendEnvironment&) = delete;
     ~BackendEnvironment() {
         if (device_pool && device_pool->isAllocated(block_id)) {
@@ -180,10 +180,10 @@ struct BackendHandle {
 
     BackendHandle() = default;
     explicit BackendHandle(std::unique_ptr<KVCMStorageBackend> value): backend(std::move(value)) {}
-    BackendHandle(BackendHandle&&) noexcept            = default;
+    BackendHandle(BackendHandle&&) noexcept = default;
     BackendHandle& operator=(BackendHandle&&) noexcept = default;
     BackendHandle(const BackendHandle&)                = delete;
-    BackendHandle& operator=(const BackendHandle&)     = delete;
+    BackendHandle& operator=(const BackendHandle&) = delete;
     ~BackendHandle() {
         if (backend) {
             backend->shutdown();
@@ -240,10 +240,11 @@ T await(std::future<T>& future) {
                                                          DataType::TYPE_FP16,
                                                          /*local_head_num_kv=*/1,
                                                          /*size_per_head=*/2);
-    result.device_pool  = block_tree_cache_test::makeDevicePool(
-        {{result.cache_config.kv_block_stride_bytes, result.cache_config.kv_scale_stride_bytes}},
-        /*usable_count=*/8,
-        pool_name);
+    result.device_pool =
+        block_tree_cache_test::makeDevicePool({{result.cache_config.topology().groups()[0].kvBlockStrideBytes(),
+                                                result.cache_config.topology().groups()[0].kvScaleStrideBytes()}},
+                                              /*usable_count=*/8,
+                                              pool_name);
     const auto block = result.device_pool->malloc();
     RTP_LLM_CHECK(block.has_value());
     result.block_id = *block;
@@ -261,13 +262,14 @@ T await(std::future<T>& future) {
                                                                /*local_head_num_kv=*/1,
                                                                /*size_per_head=*/2);
     std::vector<block_tree_cache_test::DeviceLayerBufferSpec> layer_specs;
-    const auto& layer_group_ids = result.cache_config.topology().layerGroupIdsSnapshot();
-    layer_specs.reserve(layer_group_ids.size());
-    for (const auto& group_ids : layer_group_ids) {
+    const auto&                                               topology_layers = result.cache_config.topology().layers();
+    layer_specs.reserve(topology_layers.size());
+    for (const auto& topology_layer : topology_layers) {
+        const auto group_ids = result.cache_config.topology().groupIdsForLayer(topology_layer.layer_id);
         RTP_LLM_CHECK(group_ids.size() == 1u);
         const auto group_id = static_cast<size_t>(group_ids.front());
-        layer_specs.push_back({result.cache_config.kvBlockStrideBytesForGroup(group_id),
-                               result.cache_config.kvScaleStrideBytesForGroup(group_id)});
+        layer_specs.push_back({result.cache_config.topology().groups()[group_id].kvBlockStrideBytes(),
+                               result.cache_config.topology().groups()[group_id].kvScaleStrideBytes()});
     }
     result.device_pool = block_tree_cache_test::makeDevicePool(layer_specs, /*usable_count=*/8, pool_name);
     const auto block   = result.device_pool->malloc();
@@ -283,15 +285,12 @@ T await(std::future<T>& future) {
                                                                      int                linear_step = 2) {
     RTP_LLM_CHECK(full_group_count > 0 && linear_group_count > 0);
     BackendEnvironment result;
-    const size_t       group_count                = full_group_count + linear_group_count;
-    result.cache_config.dtype                     = DataType::TYPE_FP16;
-    result.cache_config.layer_num                 = static_cast<uint32_t>(group_count);
-    result.cache_config.layer_all_num             = static_cast<uint32_t>(group_count);
-    result.cache_config.block_num                 = 8;
-    result.cache_config.seq_size_per_block        = 8;
-    result.cache_config.kernel_seq_size_per_block = 8;
-    result.cache_config.group_layer_num           = 1;
-    result.cache_config.linear_step               = linear_step;
+    const size_t       group_count         = full_group_count + linear_group_count;
+    result.cache_config.dtype              = DataType::TYPE_FP16;
+    result.cache_config.layer_num          = static_cast<uint32_t>(group_count);
+    result.cache_config.block_num          = 8;
+    result.cache_config.seq_size_per_block = 8;
+    result.cache_config.linear_step        = linear_step;
 
     std::vector<KVCacheSpecPtr>   specs;
     std::vector<std::vector<int>> layers_by_group;
@@ -313,21 +312,13 @@ T await(std::future<T>& future) {
     }
     result.cache_config.fromGroupedSpecs(specs, layers_by_group, types, tags);
 
-    size_t max_stride = 0;
-    result.cache_config.layer_to_block_stride_bytes.clear();
-    result.cache_config.layer_to_block_stride_bytes.reserve(group_count);
     std::vector<block_tree_cache_test::DeviceLayerBufferSpec> layer_specs;
     layer_specs.reserve(group_count);
     for (size_t group_id = 0; group_id < group_count; ++group_id) {
-        const size_t kv_stride    = result.cache_config.kvBlockStrideBytesForGroup(group_id);
-        const size_t scale_stride = result.cache_config.kvScaleStrideBytesForGroup(group_id);
-        max_stride                = std::max(max_stride, kv_stride + scale_stride);
-        result.cache_config.layer_to_block_stride_bytes.push_back(static_cast<int>(kv_stride + scale_stride));
+        const size_t kv_stride    = result.cache_config.topology().groups()[group_id].kvBlockStrideBytes();
+        const size_t scale_stride = result.cache_config.topology().groups()[group_id].kvScaleStrideBytes();
         layer_specs.push_back({kv_stride, scale_stride});
     }
-    result.cache_config.kv_block_stride_bytes = max_stride;
-    result.cache_config.kv_block_size_bytes   = max_stride * group_count;
-    result.cache_config.block_size_bytes      = result.cache_config.kv_block_size_bytes;
 
     result.device_pool = block_tree_cache_test::makeDevicePool(layer_specs, /*usable_count=*/12, pool_name);
     const auto block   = result.device_pool->malloc();
@@ -364,7 +355,7 @@ T await(std::future<T>& future) {
     RTP_LLM_CHECK(block_ids.empty() || block_ids.size() == request.keys->size());
     for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
         const auto block_id = block_ids.empty() ? environment.block_id : block_ids[key_index];
-        request.handles[key_index].push_back({/*group_id=*/0, block_id});
+        request.handles[key_index].push_back({environment.cache_config.tagForGroup(0), block_id});
     }
     request.local_matched_blocks_num = local_matched_blocks;
     return request;
@@ -391,7 +382,8 @@ T await(std::future<T>& future) {
     for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
         for (const size_t group_id : groups_by_key[key_index]) {
             RTP_LLM_CHECK(group_id < environment.cache_config.topology().groups().size());
-            request.handles[key_index].push_back({group_id, block_ids[key_index]});
+            request.handles[key_index].push_back(
+                {environment.cache_config.tagForGroup(group_id), block_ids[key_index]});
         }
     }
     request.local_matched_blocks_num = local_matched_blocks;
@@ -399,9 +391,10 @@ T await(std::future<T>& future) {
 }
 
 [[maybe_unused]] void* blockBase(const BackendEnvironment& environment, size_t group_id, BlockIdxType block_id) {
-    const auto& group = environment.cache_config.topology().groupById(group_id);
-    RTP_LLM_CHECK(group.layer_ids.size() == 1u);
-    const auto info = environment.device_pool->convertIndexToBuffer(group.layer_ids.front(), block_id);
+    const auto layer_ids =
+        environment.cache_config.layerIdsForGroup(environment.cache_config.topology().groups()[group_id].tag);
+    RTP_LLM_CHECK(layer_ids.size() == 1u);
+    const auto info = environment.device_pool->convertIndexToBuffer(layer_ids.front(), block_id);
     RTP_LLM_CHECK(info.size() == 1u);
     return info.front().addr;
 }
@@ -435,9 +428,10 @@ read(KVCMStorageBackend& backend, StorageRequest request, std::shared_ptr<Storag
 
 [[maybe_unused]] bool initSingleRank(KVCMStorageBackend& backend, const BackendEnvironment& environment) {
     std::vector<DeviceBlockPoolPtr> pools(environment.cache_config.topology().groups().size(), environment.device_pool);
-    return backend.init(environment.cache_config.topologyPtr(), std::move(pools), [&](int layer_id, int, int block_id) {
-        return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-    });
+    return backend.init(
+        environment.cache_config.topologyPtr(), std::move(pools), [&](int layer_id, const std::string&, int block_id) {
+            return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
+        });
 }
 
 }  // namespace

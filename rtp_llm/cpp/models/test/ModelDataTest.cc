@@ -6,9 +6,18 @@
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 
 #include <functional>
+#include <algorithm>
+#include <cerrno>
+#include <cstdlib>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <type_traits>
+
+extern char** environ;
 
 using namespace std;
 
@@ -244,6 +253,205 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
 
 namespace {
 
+void expectIntTensor(const torch::Tensor& actual, const torch::Tensor& expected) {
+    ASSERT_TRUE(actual.defined());
+    EXPECT_EQ(actual.device(), expected.device());
+    EXPECT_TRUE(torch::equal(actual, expected));
+}
+
+void checkGroupedTpRound(GptModelInputs&                 inputs,
+                         int                             rank,
+                         const std::vector<std::string>& root_tags,
+                         bool                            empty_tables) {
+    auto local_tags = root_tags;
+    if (rank != 0 && local_tags.size() > 1) {
+        std::rotate(local_tags.begin(), local_tags.begin() + 1, local_tags.end());
+    }
+    const auto group_count    = static_cast<int64_t>(root_tags.size());
+    const auto physical_slots = empty_tables ? 0 : 2;
+    const auto kernel_slots   = empty_tables ? 0 : 3;
+    auto       physical =
+        torch::arange(group_count * 2 * physical_slots, torch::kInt32).reshape({group_count, 2, physical_slots});
+    auto kernel = torch::arange(group_count * 2 * kernel_slots, torch::kInt32).reshape({group_count, 2, kernel_slots});
+    auto types  = torch::arange(group_count, torch::kInt32);
+    auto copies =
+        empty_tables ?
+            torch::empty({0, 3}, torch::kInt32) :
+            torch::tensor(
+                {static_cast<int>(group_count - 1), 11, 21, 0, 12, 22, static_cast<int>(group_count - 1), 13, 23},
+                torch::kInt32)
+                .reshape({3, 3});
+
+    if (rank == 0) {
+        inputs = GptModelInputs{};
+    }
+    inputs.kv_cache_group_tags = local_tags;
+    if (rank == 0) {
+        inputs.combo_tokens             = torch::tensor({7, 8}, torch::kInt32);
+        inputs.input_lengths            = torch::tensor({1, 1}, torch::kInt32);
+        inputs.sequence_lengths         = torch::tensor({4, 5}, torch::kInt32);
+        inputs.kv_cache_block_id        = physical.clone();
+        inputs.kv_cache_kernel_block_id = kernel.clone();
+        inputs.kv_cache_group_types     = types.clone();
+        inputs.kv_cache_update_mapping  = copies.clone();
+    }
+    const auto        original_physical = inputs.kv_cache_block_id;
+    const auto        original_kernel   = inputs.kv_cache_kernel_block_id;
+    const auto        original_types    = inputs.kv_cache_group_types;
+    const auto        original_copies   = inputs.kv_cache_update_mapping;
+    ParallelismConfig config;
+    config.tp_size = 2;
+    config.tp_rank = rank;
+    tpSyncModelInputs(inputs, config);
+
+    EXPECT_EQ(inputs.kv_cache_group_tags, local_tags);
+    std::vector<int64_t> local_to_root;
+    for (const auto& tag : local_tags) {
+        local_to_root.push_back(std::find(root_tags.begin(), root_tags.end(), tag) - root_tags.begin());
+    }
+    const auto order = torch::tensor(local_to_root, torch::kInt64);
+    if (empty_tables && rank != 0) {
+        EXPECT_TRUE(!inputs.kv_cache_block_id.defined() || inputs.kv_cache_block_id.numel() == 0);
+        EXPECT_TRUE(!inputs.kv_cache_kernel_block_id.defined() || inputs.kv_cache_kernel_block_id.numel() == 0);
+    } else {
+        expectIntTensor(inputs.kv_cache_block_id, physical.index_select(0, order));
+        expectIntTensor(inputs.kv_cache_kernel_block_id, kernel.index_select(0, order));
+    }
+    expectIntTensor(inputs.kv_cache_group_types, types.index_select(0, order));
+    auto expected_copies = copies.clone();
+    for (int64_t row = 0; row < expected_copies.size(0); ++row) {
+        auto& group_row = expected_copies.data_ptr<int>()[row * 3];
+        group_row       = std::find(local_tags.begin(), local_tags.end(), root_tags[group_row]) - local_tags.begin();
+    }
+    if (empty_tables && rank != 0) {
+        EXPECT_TRUE(!inputs.kv_cache_update_mapping.defined() || inputs.kv_cache_update_mapping.numel() == 0);
+    } else {
+        expectIntTensor(inputs.kv_cache_update_mapping, expected_copies);
+    }
+    expectIntTensor(inputs.combo_tokens, torch::tensor({7, 8}, torch::kInt32));
+    if (rank == 0) {
+        EXPECT_TRUE(inputs.kv_cache_block_id.is_same(original_physical));
+        EXPECT_TRUE(inputs.kv_cache_kernel_block_id.is_same(original_kernel));
+        EXPECT_TRUE(inputs.kv_cache_group_types.is_same(original_types));
+        EXPECT_TRUE(inputs.kv_cache_update_mapping.is_same(original_copies));
+    }
+}
+
+}  // namespace
+
+// Re-exec gives each TP rank a fresh CUDA runtime even when other tests have already initialized CUDA.
+TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
+    const auto rank_env = std::getenv("RTP_MODEL_TP_TEST_RANK");
+    const auto base_env = std::getenv("RTP_MODEL_TP_TEST_BASE");
+    ASSERT_NE(rank_env, nullptr);
+    ASSERT_NE(base_env, nullptr);
+    ::alarm(90);
+    const int rank        = std::atoi(rank_env);
+    auto&     broadcaster = CpuTpBroadcaster::instance();
+    broadcaster.initialize(rank, 2, base_env);
+    GptModelInputs inputs;
+    checkGroupedTpRound(inputs, rank, {"z_group", "a_group", std::string("\x80") + "_group"}, false);
+    checkGroupedTpRound(inputs, rank, {"single_group"}, false);
+    checkGroupedTpRound(inputs, rank, {"z_group", "a_group"}, true);
+
+    if (rank == 0) {
+        inputs = GptModelInputs{};
+    } else {
+        inputs.kv_cache_block_id        = torch::ones({1, 2, 2}, torch::kInt32);
+        inputs.kv_cache_kernel_block_id = torch::ones({1, 2, 3}, torch::kInt32);
+        inputs.kv_cache_group_types     = torch::ones({1}, torch::kInt32);
+        inputs.kv_cache_update_mapping  = torch::zeros({1, 3}, torch::kInt32);
+    }
+    inputs.kv_cache_group_tags = {"stale_group"};
+    ParallelismConfig config;
+    config.tp_size = 2;
+    config.tp_rank = rank;
+    tpSyncModelInputs(inputs, config);
+    EXPECT_TRUE(inputs.kv_cache_group_tags.empty());
+    EXPECT_TRUE(!inputs.kv_cache_block_id.defined() || inputs.kv_cache_block_id.numel() == 0);
+    EXPECT_TRUE(!inputs.kv_cache_kernel_block_id.defined() || inputs.kv_cache_kernel_block_id.numel() == 0);
+    EXPECT_TRUE(!inputs.kv_cache_group_types.defined() || inputs.kv_cache_group_types.numel() == 0);
+    EXPECT_TRUE(!inputs.kv_cache_update_mapping.defined() || inputs.kv_cache_update_mapping.numel() == 0);
+
+    // Both children exercise sender-side rejection, so malformed metadata cannot strand a peer in a collective.
+    config.tp_rank = 0;
+    GptModelInputs invalid;
+    invalid.kv_cache_block_id   = torch::zeros({2, 1, 1}, torch::kInt32);
+    invalid.kv_cache_group_tags = {"group", "group"};
+    EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
+    invalid.kv_cache_group_tags = {"group", ""};
+    EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
+    invalid.kv_cache_group_tags = {"group"};
+    EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
+    invalid.kv_cache_group_tags.clear();
+    EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
+    invalid.kv_cache_group_tags      = {"first", "second"};
+    invalid.kv_cache_block_id        = torch::zeros({2, 1, 1}, torch::kInt32);
+    invalid.kv_cache_update_mapping  = torch::tensor({2, 1, 2}, torch::kInt32).reshape({1, 3});
+    EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
+    broadcaster.reset();
+    ::alarm(0);
+}
+
+TEST(ModelInputTpSyncTest, PreservesIdentityAcrossRankOrderings) {
+    const auto        tmpdir  = std::getenv("TMPDIR");
+    std::string       pattern = std::string(tmpdir ? tmpdir : "/tmp") + "/model_tp.XXXXXX";
+    std::vector<char> temp_path(pattern.begin(), pattern.end());
+    temp_path.push_back('\0');
+    ASSERT_NE(::mkdtemp(temp_path.data()), nullptr);
+    const std::string  base = std::string(temp_path.data()) + "/b";
+    std::vector<pid_t> children;
+    for (int rank = 0; rank < 2; ++rank) {
+        std::vector<std::string> env_strings;
+        for (char** entry = environ; *entry != nullptr; ++entry) {
+            const std::string value(*entry);
+            if (value.rfind("GTEST_", 0) != 0 && value.rfind("RTP_MODEL_TP_TEST_", 0) != 0) {
+                env_strings.push_back(value);
+            }
+        }
+        env_strings.push_back("RTP_MODEL_TP_TEST_RANK=" + std::to_string(rank));
+        env_strings.push_back("RTP_MODEL_TP_TEST_BASE=" + base);
+        std::vector<char*> child_env;
+        for (auto& value : env_strings) {
+            child_env.push_back(value.data());
+        }
+        child_env.push_back(nullptr);
+        std::vector<std::string> args = {"/proc/self/exe",
+                                         "--gtest_filter=ModelInputTpSyncChild.DISABLED_RunRank",
+                                         "--gtest_also_run_disabled_tests",
+                                         "--gtest_output="};
+        std::vector<char*>       child_args;
+        for (auto& arg : args) {
+            child_args.push_back(arg.data());
+        }
+        child_args.push_back(nullptr);
+        pid_t     pid    = -1;
+        const int result = ::posix_spawn(&pid, "/proc/self/exe", nullptr, nullptr, child_args.data(), child_env.data());
+        EXPECT_EQ(result, 0);
+        if (result == 0) {
+            children.push_back(pid);
+        }
+    }
+    for (const auto pid : children) {
+        int   status = 0;
+        pid_t waited;
+        do {
+            waited = ::waitpid(pid, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        EXPECT_EQ(waited, pid);
+        if (waited == pid) {
+            EXPECT_TRUE(WIFEXITED(status)) << "TP test child failed: " << status;
+            if (WIFEXITED(status)) {
+                EXPECT_EQ(WEXITSTATUS(status), 0);
+            }
+        }
+    }
+    ::unlink((base + "_0.sock").c_str());
+    ::rmdir(temp_path.data());
+}
+
+namespace {
+
 GptModelDescription makeGenerationPrefillCudaGraphMoeDescription() {
     GptModelDescription description;
     description.data_type   = DataType::TYPE_BF16;
@@ -353,12 +561,18 @@ TEST_F(ModelDataTest, testGenerationPrefillCudaGraphMaskedMoeBackendRequiresSm90
 }
 
 TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRequiresSingleFullCacheGroup) {
-    EXPECT_TRUE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::FULL}));
+    const GroupBase full{"full", nullptr, defaultCacheGroupPolicy(CacheGroupType::FULL)};
+    const GroupBase linear{"linear", nullptr, defaultCacheGroupPolicy(CacheGroupType::LINEAR)};
+    const GroupBase swa{"swa", nullptr, defaultCacheGroupPolicy(CacheGroupType::SWA)};
+    const GroupBase other_full{"other_full", nullptr, defaultCacheGroupPolicy(CacheGroupType::FULL)};
+
+    EXPECT_TRUE(supportsGenerationPrefillCudaGraphCacheTopology({full}));
     EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({}));
-    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::LINEAR}));
-    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::SWA}));
-    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::FULL, CacheGroupType::LINEAR}));
-    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::FULL, CacheGroupType::SWA}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({linear}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({swa}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({full, linear}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({full, swa}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({full, other_full}));
 }
 
 TEST_F(ModelDataTest, testGenerationPrefillCudaGraphSupportsSingleGpuFp8MaskedMoe) {

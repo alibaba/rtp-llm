@@ -159,12 +159,12 @@ TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers)
 
     std::vector<void*> expected_full_bases;
     std::vector<void*> expected_linear_bases;
-    for (const int layer_id : environment.cache_config.topology().groupById(1).layer_ids) {
+    for (const int layer_id : environment.cache_config.layerIdsForGroup(environment.cache_config.topology().groups()[1].tag)) {
         const auto block_info = environment.device_pool->convertIndexToBuffer(layer_id, environment.block_id);
         ASSERT_EQ(block_info.size(), 1u);
         expected_full_bases.push_back(block_info.front().addr);
     }
-    for (const int layer_id : environment.cache_config.topology().groupById(0).layer_ids) {
+    for (const int layer_id : environment.cache_config.layerIdsForGroup(environment.cache_config.topology().groups()[0].tag)) {
         const auto block_info = environment.device_pool->convertIndexToBuffer(layer_id, environment.block_id);
         ASSERT_EQ(block_info.size(), 1u);
         expected_linear_bases.push_back(block_info.front().addr);
@@ -214,7 +214,8 @@ TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers)
 
     StorageRequest request;
     request.keys    = std::make_shared<const CacheKeysType>(CacheKeysType{101});
-    request.handles = {{{/*group_id=*/0, environment.block_id}, {/*group_id=*/1, environment.block_id}}};
+    request.handles = {{{environment.cache_config.tagForGroup(0), environment.block_id},
+                        {environment.cache_config.tagForGroup(1), environment.block_id}}};
     backend->write(backend->prepareWrite(std::move(request)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);

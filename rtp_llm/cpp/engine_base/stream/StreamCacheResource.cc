@@ -23,18 +23,16 @@ namespace {
 
 std::shared_ptr<const CacheTopology> warmupCacheTopology() {
     static const auto topology = []() {
-        constexpr auto kWarmupCacheTag = "__warmup__";
-        auto           spec            = std::make_shared<MHAKVCacheSpec>();
-        spec->tag                      = kWarmupCacheTag;
+        constexpr auto kWarmupCacheTag  = "__warmup__";
+        auto           spec             = std::make_shared<MHAKVCacheSpec>();
+        spec->tag                       = kWarmupCacheTag;
+        spec->seq_size_per_block        = 1;
+        spec->kernel_seq_size_per_block = 1;
 
         GroupBase group;
-        group.tag                       = kWarmupCacheTag;
-        group.spec                      = std::move(spec);
-        group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        group.layer_ids                 = {0};
-        group.seq_size_per_block        = 1;
-        group.kernel_seq_size_per_block = 1;
-
+        group.tag    = kWarmupCacheTag;
+        group.spec   = std::move(spec);
+        group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
         return CacheTopology::create({std::move(group)}, {{0, {kWarmupCacheTag}}});
     }();
     return topology;
@@ -551,11 +549,9 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    auto type_list = resource_context_.cache_manager->cacheConfig().groupTypesSnapshot();
-
-    for (size_t i = 0; i < type_list.size(); i++) {
-        if (type_list[i] == CacheGroupType::LINEAR) {
-            batch_kv_cache_resource_->swapBlocks(batch_id, i, rhs, lhs);
+    for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, rhs, lhs);
         }
     }
 }

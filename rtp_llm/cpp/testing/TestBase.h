@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/testing/KVCacheTestUtils.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -238,7 +239,7 @@ protected:
                 const auto max_k_blocks   = max_pad_seq / cache_config.seq_size_per_block;
                 const auto blocks_to_fill = std::min<size_t>(max_k_blocks, k_indexs.size());
                 const auto spec           = cache_config.specForGroup(0);
-                const auto local_kv_heads = cache_config.localKvHeadNumForGroup(0);
+                const auto local_kv_heads = cache_config.groups().front().localKvHeadNum();
                 RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "local_head_num_kv must be positive");
                 const auto elems_per_kv_block   = spec->k_block_size();
                 const auto elems_per_head_block = static_cast<size_t>(local_kv_heads) * cache_config.seq_size_per_block;
@@ -297,8 +298,8 @@ protected:
                     }
                     // std::cout << "index: " << k << " start: " << block_start << " end: " << block_end << std::endl;
                     // std::cout << "block index: " << k_indexs[k] << std::endl;
-                    if (!cache_manager_->setKVBlockValue(k_indexs[k], kblock, vblock)) {
-                        std::cout << "setKVBlockValue failed for block index: " << k_indexs[k] << std::endl;
+                    if (!rtp_llm::test::writeKVBlockForTest(*cache_manager_, k_indexs[k], kblock, vblock)) {
+                        std::cout << "writeKVBlockForTest failed for block index: " << k_indexs[k] << std::endl;
                         return torch::Tensor();
                     }
                 }

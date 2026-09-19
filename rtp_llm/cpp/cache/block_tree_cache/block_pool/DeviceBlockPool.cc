@@ -166,9 +166,10 @@ DeviceBlockPool::normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConf
                                 config->physical_block_count,
                                 computed_physical_block_count);
     }
-    RTP_LLM_CHECK_WITH_INFO(computed_physical_block_count > 1,
+    RTP_LLM_CHECK_WITH_INFO(computed_physical_block_count > 1
+                                || (config->allow_sentinel_only && computed_physical_block_count == 1),
                             "device block pool [%s] physical_block_count [%zu] (from memory_layouts[*].block_num) "
-                            "must be > 1",
+                            "must be > 1 unless this is a sentinel-only warmup pool",
                             config->pool_name.c_str(),
                             computed_physical_block_count);
 

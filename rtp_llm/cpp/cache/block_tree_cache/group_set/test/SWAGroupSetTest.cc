@@ -27,7 +27,8 @@ protected:
         policy.enable_prefix_reuse = true;
         policy.sliding_window_size = 128;
         auto group                 = makeTestGroupBase(std::move(policy), {0}, 1, 0, 128, 64);
-        group_->initialize(0, makeTestTopology({std::move(group)}), {0});
+        auto topology              = makeTestTopology({std::move(group)});
+        group_->initialize(0, topology, {topology->groupById(0).tag});
     }
 
     void TearDown() override {

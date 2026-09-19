@@ -208,10 +208,11 @@ protected:
         for (const auto& key_handles : request.handles) {
             key_handle_counts_.push_back(key_handles.size());
             for (const auto& handle : key_handles) {
-                const auto& group = topology().groupById(handle.group_id);
-                group_tags_.push_back(group.tag);
+                group_tags_.push_back(handle.tag);
                 blocks_.push_back(handle.block);
-                const auto buffers = convertIndexToBuffer(group.layer_ids.front(), handle.group_id, handle.block);
+                const auto& layer_ids = topology().layerIdsForGroup(handle.tag);
+                RTP_LLM_CHECK(!layer_ids.empty());
+                const auto buffers = convertIndexToBuffer(layer_ids.front(), handle.tag, handle.block);
                 addresses_.push_back(buffers.front().addr);
             }
         }
@@ -340,7 +341,9 @@ protected:
         }
         BlockTreeMatchResult match = env_->cache->match(keys_);
         EXPECT_EQ(match.matched_device_blocks, keys_.size());
-        EXPECT_EQ(env_->cache->matchedBlocksForGroup(0, match.matched_device_resources), expected_blocks);
+        EXPECT_EQ(env_->cache->matchedBlocksForGroup(env_->groups.front()->groupTags().front(),
+                                                     match.matched_device_resources),
+                  expected_blocks);
         releaseRequestRefsForTest(*env_->cache, match.matched_device_resources);
         EXPECT_EQ(candidateCountForTier(*env_->cache, Tier::DEVICE), 0u);
     }
@@ -839,8 +842,9 @@ TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
         GTEST_SKIP() << "CUDA not available";
     }
     auto make_group = [](std::string tag, int layer) {
-        GroupBase group =
+        auto group_config =
             block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {layer});
+        auto group = std::move(group_config.group);
         auto spec  = group.spec->clone();
         spec->tag  = tag;
         group.tag  = std::move(tag);
@@ -848,11 +852,11 @@ TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
         return group;
     };
     auto topology  = CacheTopology::create({make_group("z_group", 0), make_group("a_group", 1)},
-                                           {{0, {"z_group"}}, {1, {"a_group"}}});
+                                          {{0, {"z_group"}}, {1, {"a_group"}}});
     auto pool_z    = makeDevicePool({{16, 0}}, kStoreDeviceBlocks, "storage_tag_z");
     auto pool_a    = makeDevicePool({{16, 0}}, kStoreDeviceBlocks, "storage_tag_a");
     auto group_set = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_z, pool_a}, nullptr, nullptr);
-    group_set->initialize(0, topology, {0, 1});
+    group_set->initialize(0, topology, {"z_group", "a_group"});
 
     auto                 backend = std::make_shared<PendingWriteBackend>();
     BlockTreeCacheConfig config;

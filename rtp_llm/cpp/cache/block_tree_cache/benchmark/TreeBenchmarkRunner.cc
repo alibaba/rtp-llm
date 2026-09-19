@@ -214,11 +214,11 @@ public:
     void releaseRequestBlocks(std::vector<BlockIndicesType>& blocks) override {
         const auto& group_sets = cache_.groupSets();
         for (const GroupSetPtr& group_set : group_sets) {
-            const auto& group_ids = group_set->groupIds();
-            const auto& pools     = group_set->devicePools();
-            RTP_LLM_CHECK(group_ids.size() == pools.size());
-            for (size_t member_index = 0; member_index < group_ids.size(); ++member_index) {
-                const size_t group_id = group_ids[member_index];
+            const auto& group_tags = group_set->groupTags();
+            const auto& pools      = group_set->devicePools();
+            RTP_LLM_CHECK(group_tags.size() == pools.size());
+            for (size_t member_index = 0; member_index < group_tags.size(); ++member_index) {
+                const size_t group_id = group_set->topologyPtr()->groupIdForTag(group_tags[member_index]);
                 if (group_id >= blocks.size() || blocks[group_id].empty()) {
                     continue;
                 }
@@ -248,10 +248,10 @@ private:
     static void appendRequestBlocks(const GroupSetPtr&             group_set,
                                     const BlockIndicesType&        blocks,
                                     std::vector<BlockIndicesType>& request_blocks) {
-        const auto& group_ids = group_set->groupIds();
-        RTP_LLM_CHECK(group_ids.size() == blocks.size());
-        for (size_t member_index = 0; member_index < group_ids.size(); ++member_index) {
-            const size_t group_id = group_ids[member_index];
+        const auto& group_tags = group_set->groupTags();
+        RTP_LLM_CHECK(group_tags.size() == blocks.size());
+        for (size_t member_index = 0; member_index < group_tags.size(); ++member_index) {
+            const size_t group_id = group_set->topologyPtr()->groupIdForTag(group_tags[member_index]);
             if (request_blocks.size() <= group_id) {
                 request_blocks.resize(group_id + 1);
             }

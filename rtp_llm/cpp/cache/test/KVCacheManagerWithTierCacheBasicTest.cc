@@ -287,9 +287,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
         EXPECT_TRUE(pathSnapshotContainsBlocks(
             *maybe_host, descriptor.group_set_id, Tier::HOST, descriptor.blocksAt(Tier::HOST)));
         const GroupSetPtr& group_set = cache->groupSets()[descriptor.group_set_id];
-        ASSERT_EQ(group_set->groupIds().size(), descriptor.blocksAt(Tier::DEVICE).size());
-        for (size_t member_group_id = 0; member_group_id < group_set->groupIds().size(); ++member_group_id) {
-            const int               group_id = static_cast<int>(group_set->groupIds()[member_group_id]);
+        ASSERT_EQ(group_set->groupTags().size(), descriptor.blocksAt(Tier::DEVICE).size());
+        for (size_t member_group_id = 0; member_group_id < group_set->groupTags().size(); ++member_group_id) {
+            const int               group_id = static_cast<int>(topologyGroupId(group_set, member_group_id));
             const BlockIndicesType& blocks   = first_resource->blocks(0, group_id);
             EXPECT_NE(std::find(blocks.begin(), blocks.end(), descriptor.blocksAt(Tier::DEVICE)[member_group_id]),
                       blocks.end());
@@ -518,9 +518,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
         EXPECT_EQ(group_set->hostPool()->treeRefCount(state.host_block), 2u);
         EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 1u);
 
-        ASSERT_EQ(group_set->groupIds().size(), group_set->devicePools().size());
-        for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
-            const int               group_id = static_cast<int>(group_set->groupIds()[member_index]);
+        ASSERT_EQ(group_set->groupTags().size(), group_set->devicePools().size());
+        for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
+            const int               group_id = static_cast<int>(topologyGroupId(group_set, member_index));
             const BlockIndicesType& batch0   = resource->blocks(0, group_id);
             const BlockIndicesType& batch1   = resource->blocks(1, group_id);
             ASSERT_EQ(batch0.size(), 2u);
@@ -577,9 +577,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
         const GroupSetPtr&      group_set = cache->groupSets()[group_set_id];
         const GroupSetResource& tree      = found[0]->group_set_resources[group_set_id];
-        ASSERT_EQ(tree.device_blocks.size(), group_set->groupIds().size());
-        for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
-            const int               group_id = static_cast<int>(group_set->groupIds()[member_index]);
+        ASSERT_EQ(tree.device_blocks.size(), group_set->groupTags().size());
+        for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
+            const int               group_id = static_cast<int>(topologyGroupId(group_set, member_index));
             const BlockIndicesType& batch0   = resource->blocks(0, group_id);
             const BlockIndicesType& batch1   = resource->blocks(1, group_id);
             EXPECT_EQ(batch0[0], tree.device_blocks[member_index]);

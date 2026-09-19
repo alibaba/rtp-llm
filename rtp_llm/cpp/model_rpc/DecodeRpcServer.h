@@ -7,6 +7,8 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 
+#include <unordered_map>
+
 namespace rtp_llm {
 
 class DecodeRpcServer: public RemoteRpcServer {
@@ -25,37 +27,52 @@ public:
 
     class LoadKVCacheContext {
     public:
-        LoadKVCacheContext(int64_t                          request_id,
-                           const std::string&               request_key,
-                           const std::vector<std::string>&  peer_addrs,
-                           const std::vector<CacheKeyType>& cache_keys,
-                           const GroupBlockIds&             block_ids_by_group,
-                           int64_t                          reuse_block_size,
-                           int64_t                          timeout_ms,
-                           int                              partition_count,
-                           int                              partition_id,
-                           grpc::ServerContext*             server_context,
-                           int32_t                          prefill_cp_size = 1):
+        using TaggedBlockIds = std::unordered_map<std::string, std::shared_ptr<BlockIds>>;
+
+        LoadKVCacheContext(int64_t                  request_id,
+                           std::string              request_key,
+                           std::vector<std::string> peer_addrs,
+                           CacheKeysType            cache_keys,
+                           TaggedBlockIds           block_ids_by_tag,
+                           int64_t                  reuse_block_size,
+                           int64_t                  timeout_ms,
+                           int                      partition_count,
+                           int                      partition_id,
+                           grpc::ServerContext*     server_context,
+                           int32_t                  prefill_cp_size = 1):
             request_id(request_id),
-            request_key(request_key),
-            peer_addrs(peer_addrs),
-            cache_keys(cache_keys),
-            block_ids_by_group(block_ids_by_group),
+            request_key(std::move(request_key)),
+            peer_addrs(std::move(peer_addrs)),
+            cache_keys(std::move(cache_keys)),
+            block_ids_by_tag(std::move(block_ids_by_tag)),
             reuse_block_size(reuse_block_size),
             timeout_ms(timeout_ms),
             partition_count(partition_count),
             partition_id(partition_id),
             server_context(server_context),
-            prefill_cp_size(prefill_cp_size) {}
-        int64_t                          request_id;
-        const std::string&               request_key;
-        const std::vector<std::string>&  peer_addrs;
-        const std::vector<CacheKeyType>& cache_keys;
-        const GroupBlockIds&             block_ids_by_group;
-        int64_t                          reuse_block_size;
-        int64_t                          timeout_ms;
-        int                              partition_count;
-        int                              partition_id;
+            prefill_cp_size(prefill_cp_size) {
+            for (const auto& [tag, blocks] : this->block_ids_by_tag) {
+                RTP_LLM_CHECK_WITH_INFO(!tag.empty() && blocks != nullptr, "invalid RPC cache block row");
+            }
+        }
+
+        const BlockIds& blockIdsForGroup(std::string_view tag) const {
+            const auto value = std::string(tag);
+            const auto it    = block_ids_by_tag.find(value);
+            RTP_LLM_CHECK_WITH_INFO(it != block_ids_by_tag.end(), "missing RPC cache tag=%s", value.c_str());
+            RTP_LLM_CHECK_WITH_INFO(it->second != nullptr, "null RPC cache holder tag=%s", value.c_str());
+            return *it->second;
+        }
+
+        int64_t                  request_id;
+        std::string              request_key;
+        std::vector<std::string> peer_addrs;
+        CacheKeysType            cache_keys;
+        TaggedBlockIds           block_ids_by_tag;
+        int64_t                  reuse_block_size;
+        int64_t                  timeout_ms;
+        int                      partition_count;
+        int                      partition_id;
 
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
@@ -97,8 +114,9 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
-    static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
-    static std::string     makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
+    static LoadKVCacheContext::TaggedBlockIds decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
+                                                                  const CacheTopology&          topology);
+    static std::string makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
@@ -113,24 +131,24 @@ private:
                                                                bool                    use_hybrid,
                                                                size_t                  group_seq_size_per_block,
                                                                size_t                  base_seq_size_per_block);
-    static size_t cacheKeysPerPhysicalBlock(size_t group_seq_size_per_block, size_t base_seq_size_per_block);
-    static size_t keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
-                                           size_t                  group_seq_size_per_block,
-                                           size_t                  base_seq_size_per_block);
-    static void   markCacheKeyRange(std::vector<size_t>& cache_key_counts,
-                                    size_t               endpoint_key_index,
-                                    size_t               block_offset_index,
-                                    size_t               cache_keys_per_physical_block);
-    static size_t completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
-                                               const std::vector<size_t>& required_cache_key_counts,
-                                               const std::vector<size_t>& transferred_cache_key_counts);
-    static size_t minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts);
+    static size_t    cacheKeysPerPhysicalBlock(size_t group_seq_size_per_block, size_t base_seq_size_per_block);
+    static size_t    keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
+                                              size_t                  group_seq_size_per_block,
+                                              size_t                  base_seq_size_per_block);
+    static void      markCacheKeyRange(std::vector<size_t>& cache_key_counts,
+                                       size_t               endpoint_key_index,
+                                       size_t               block_offset_index,
+                                       size_t               cache_keys_per_physical_block);
+    static size_t    completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
+                                                  const std::vector<size_t>& required_cache_key_counts,
+                                                  const std::vector<size_t>& transferred_cache_key_counts);
+    static size_t    minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts);
     static ErrorInfo validateRemoteLoadTopology(size_t worker_size, size_t peer_size);
     static std::vector<size_t> completionQueueExpectedResponseCounts(size_t worker_size);
     static int                 markLoadedCacheReuse(const std::shared_ptr<GenerateStream>& stream,
                                                     const LoadCacheResult&                 load_result,
                                                     int                                    seq_size_per_block,
-                                                    bool                                   use_independent_block_pools);
+                                                    size_t                                 group_num);
     static grpc::Status        generateRequestReadFailureStatus(bool cancelled);
     static ErrorInfo           cacheLoadClientError(int64_t request_id, ErrorCode error_code);
     // Classifies error.type for the synthesized Decode phase spans. Static and

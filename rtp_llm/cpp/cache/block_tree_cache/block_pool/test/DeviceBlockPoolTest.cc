@@ -138,6 +138,28 @@ TEST(DeviceBlockPoolTest, ConstructorRejectsInvalidConfigMatrix) {
     }
 }
 
+TEST(DeviceBlockPoolTest, SentinelOnlyWarmupPoolHasBackingButNoAllocatableBlocks) {
+    const auto cache_config = rtp_llm::test::makeSimpleMhaCacheConfig(/*layer_num=*/4,
+                                                                      /*block_num=*/1,
+                                                                      /*tokens_per_block=*/1,
+                                                                      TYPE_FP16,
+                                                                      /*local_head_num_kv=*/1,
+                                                                      /*size_per_head=*/64);
+    auto config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(cache_config));
+    config->pool_name                 = "sentinel_only_warmup";
+    config->use_device_malloc_backing = true;
+    config->allow_sentinel_only       = true;
+
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+    EXPECT_EQ(pool.totalBlocksNum(), 0u);
+    EXPECT_EQ(pool.freeBlocksNum(), 0u);
+    EXPECT_EQ(pool.availableBlocksNum(), 0u);
+    EXPECT_FALSE(pool.malloc().has_value());
+    EXPECT_NE(pool.getBaseAddress(), nullptr);
+    EXPECT_NE(pool.convertIndexToAddr(/*global_layer_id=*/0, /*block=*/0).kv_addr, nullptr);
+}
+
 TEST(DeviceBlockPoolTest, MultiLayoutMtpConfigUsesMainBlockCountAndGlobalLayerMapping) {
     CacheConfig cache_config = makeMtpCacheConfig();
     ASSERT_EQ(cache_config.block_num, 3u);

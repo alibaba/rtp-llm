@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -14,18 +15,16 @@ namespace test {
 namespace {
 
 GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 8;
+    auto spec                       = std::make_shared<MHAKVCacheSpec>();
+    spec->tag                       = tag;
+    spec->seq_size_per_block        = 8;
+    spec->kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
 
     GroupBase group;
-    group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(type);
-    group.layer_ids                 = {0};
-    group.block_num                 = 16;
-    group.seq_size_per_block        = 8;
-    group.kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
+    group.tag       = std::move(tag);
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(type);
+    group.block_num = 16;
     return group;
 }
 
@@ -49,6 +48,33 @@ TEST(BlockIdsTest, NonFull_MirrorsKernelBlocks) {
     ids.setAt(1, 9);
     ASSERT_EQ(ids.blocks(), (BlockIndicesType{3, 9, 1}));
     ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{3, 9, 1}));
+}
+
+TEST(KVCacheResourceTest, SwapBlocksUsesTagAcrossDifferentGroupOrders) {
+    for (const bool reversed : {false, true}) {
+        std::vector<GroupBase> groups{makeResourceGroup("full", CacheGroupType::FULL),
+                                      makeResourceGroup("linear", CacheGroupType::LINEAR)};
+        if (reversed) {
+            std::reverse(groups.begin(), groups.end());
+        }
+        const auto           topology = CacheTopology::create(std::move(groups), {{0, {"full"}}, {1, {"linear"}}});
+        BatchKVCacheResource resource;
+        resource.resetBatchSize(2);
+        resource.initGroups(topology);
+        for (int batch = 0; batch < 2; ++batch) {
+            resource.mutableBlockIds(batch, "full").assign({2, 5});
+            resource.mutableBlockIds(batch, "linear").assign({3, 7});
+        }
+        resource.swapBlocks(1, "linear", 0, 1);
+        EXPECT_EQ(resource.blocksForLayer(1, 1, "linear"), (BlockIndicesType{7, 3}));
+        EXPECT_EQ(resource.blocksForLayer(0, 1, "linear"), (BlockIndicesType{3, 7}));
+        EXPECT_EQ(resource.blocksForLayer(1, 0, "full"), (BlockIndicesType{2, 5}));
+        resource.swapBlocks(1, "full", 0, 1);
+        EXPECT_EQ(resource.kernelBlocksForLayer(1, 0, "full"), (BlockIndicesType{20, 21, 22, 23, 8, 9, 10, 11}));
+        EXPECT_ANY_THROW(resource.swapBlocks(1, "missing", 0, 1));
+        EXPECT_ANY_THROW(resource.swapBlocks(2, "linear", 0, 1));
+        EXPECT_ANY_THROW(resource.blocksForLayer(1, 0, "linear"));
+    }
 }
 
 TEST(BlockIdsTest, Full_ExpandsKernelBlocks) {
@@ -213,15 +239,14 @@ TEST(KVCacheResourceTest, CacheKeysMaintainLinearDependencies) {
     EXPECT_EQ(resource.blockDependencies()[2].ordinal, 2u);
 }
 
-TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
-    CacheConfig config;
-    config.seq_size_per_block        = 1;
-    config.kernel_seq_size_per_block = 0;
-    ASSERT_EQ(config.kernelBlocksPerKvBlock(), 1u);
-
-    config.seq_size_per_block        = 8;
-    config.kernel_seq_size_per_block = 2;
-    ASSERT_EQ(config.kernelBlocksPerKvBlock(), 4u);
+TEST(CacheTopologyTest, GroupDerivesKernelBlocksFromSpec) {
+    auto spec                       = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, 8, "full");
+    spec->kernel_seq_size_per_block = 2;
+    GroupBase group;
+    group.tag    = "full";
+    group.spec   = std::move(spec);
+    group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    ASSERT_EQ(group.kernelBlocksPerKvBlock(), 4u);
 }
 
 TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {

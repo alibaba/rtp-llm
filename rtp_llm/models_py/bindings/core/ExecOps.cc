@@ -206,17 +206,12 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     RTP_LLM_CHECK_WITH_INFO(
         group.spec != nullptr, "cache-store tag=%s has no KVCacheSpec attached", layer_kv.tag.c_str());
 
-    // Physical address stride and logical transfer length differ for a shared pool:
-    // blocks use the allocation-wide stride, while each tag transfers only its group-local bytes.
-    const bool use_group_local_storage_layout = cache_config.use_independent_block_pools;
     // LayerKVCache may expose kernel-page views; CacheStore keys and block IDs use physical pages.
-    const size_t seq_size_per_block = group.seq_size_per_block;
-    const size_t kv_block_stride_bytes =
-        use_group_local_storage_layout ? group.kv_block_stride_bytes : cache_config.kv_block_stride_bytes;
-    const size_t kv_scale_stride_bytes =
-        use_group_local_storage_layout ? group.kv_scale_stride_bytes : cache_config.kv_scale_stride_bytes;
-    const size_t kv_block_transfer_bytes         = group.kv_block_stride_bytes;
-    const size_t kv_scale_transfer_bytes         = group.kv_scale_stride_bytes;
+    const size_t seq_size_per_block              = group.seqSizePerBlock();
+    const size_t kv_block_stride_bytes           = group.kvBlockStrideBytes();
+    const size_t kv_scale_stride_bytes           = group.kvScaleStrideBytes();
+    const size_t kv_block_transfer_bytes         = group.kvBlockStrideBytes();
+    const size_t kv_scale_transfer_bytes         = group.kvScaleStrideBytes();
     const bool   use_group_cache_transfer_policy = cache_config.topology().groups().size() > 1;
 
     RTP_LLM_CHECK_WITH_INFO(
@@ -304,18 +299,15 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                                 seq_size_per_block,
                                 base_seq_size_per_block);
         const size_t key_blocks_per_group_block = seq_size_per_block / base_seq_size_per_block;
-        const bool compact_cp_mapping = group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK
-                                        && key_blocks_per_group_block > 1;
-        RTP_LLM_CHECK_WITH_INFO(!compact_cp_mapping
-                                    || key_blocks_per_group_block == static_cast<size_t>(cp_size),
+        const bool   compact_cp_mapping =
+            group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && key_blocks_per_group_block > 1;
+        RTP_LLM_CHECK_WITH_INFO(!compact_cp_mapping || key_blocks_per_group_block == static_cast<size_t>(cp_size),
                                 "cache-store tag=%s compact block scale=%zu does not match cp_size=%d",
                                 layer_kv.tag.c_str(),
                                 key_blocks_per_group_block,
                                 cp_size);
-        const int planner_cp_size = group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK
-                                        && !compact_cp_mapping ?
-                                        1 :
-                                        cp_size;
+        const int planner_cp_size =
+            group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && !compact_cp_mapping ? 1 : cp_size;
 
         const int prefix_length = prefix_lengths_host[context_index];
         RTP_LLM_CHECK_WITH_INFO(prefix_length % static_cast<int>(base_seq_size_per_block) == 0,
@@ -325,25 +317,25 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                                 prefix_length,
                                 base_seq_size_per_block);
 
-        const auto input_index  = static_cast<int64_t>(decoder_batch_size + batch_id);
-        const int  input_length = input_lengths_host[input_index];
-        const size_t request_cache_key_count = std::min(
-            cache_keys_per_batch,
-            static_cast<size_t>((input_length + static_cast<int>(base_seq_size_per_block) - 1)
-                                / static_cast<int>(base_seq_size_per_block)
-                                + prefix_length / static_cast<int>(base_seq_size_per_block)));
+        const auto   input_index  = static_cast<int64_t>(decoder_batch_size + batch_id);
+        const int    input_length = input_lengths_host[input_index];
+        const size_t request_cache_key_count =
+            std::min(cache_keys_per_batch,
+                     static_cast<size_t>((input_length + static_cast<int>(base_seq_size_per_block) - 1)
+                                             / static_cast<int>(base_seq_size_per_block)
+                                         + prefix_length / static_cast<int>(base_seq_size_per_block)));
         if (request_cache_key_count == 0) {
             continue;
         }
         const size_t total_logical_blocks =
-            compact_cp_mapping ? request_cache_key_count :
-                                 (request_cache_key_count + key_blocks_per_group_block - 1)
-                                     / key_blocks_per_group_block;
+            compact_cp_mapping ?
+                request_cache_key_count :
+                (request_cache_key_count + key_blocks_per_group_block - 1) / key_blocks_per_group_block;
         const size_t key_blocks_per_logical_block = compact_cp_mapping ? 1 : key_blocks_per_group_block;
 
-        const int64_t request_id     = request_ids[context_index];
-        auto          event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
-        auto          request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+        const int64_t        request_id     = request_ids[context_index];
+        auto                 event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
+        auto                 request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         std::vector<int64_t> publication_lease_keys;
         std::vector<int32_t> publication_lease_blocks;
         RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %zu",
@@ -458,13 +450,13 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         // cache_keys stays in the full logical namespace. The common cache
         // policy owns the key/offset projection for both legacy and sharded cases.
         const auto block_plan = buildCacheStorePlan(group.policy,
-                                                     total_logical_blocks,
-                                                     /*reuse_block_size=*/0,
-                                                     use_group_cache_transfer_policy,
-                                                     cp_rank,
-                                                     planner_cp_size,
-                                                     key_blocks_per_logical_block,
-                                                     request_cache_key_count);
+                                                    total_logical_blocks,
+                                                    /*reuse_block_size=*/0,
+                                                    use_group_cache_transfer_policy,
+                                                    cp_rank,
+                                                    planner_cp_size,
+                                                    key_blocks_per_logical_block,
+                                                    request_cache_key_count);
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);
         }
@@ -472,9 +464,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         if (request_blocks->getBlocksCount() > 0) {
             CacheStoreCompletionCallback store_completion;
             if (register_store_completion) {
-                store_completion = register_store_completion(publication_lease_keys,
-                                                              publication_lease_blocks,
-                                                              cache_config.groupIdForTag(layer_kv.tag));
+                store_completion = register_store_completion(
+                    publication_lease_keys, publication_lease_blocks, cache_config.groupIdForTag(layer_kv.tag));
             }
             auto store_callback = [layer_id = layer_kv.layer_id,
                                    cache_model_id,
@@ -498,9 +489,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                         store_completion(nullptr);
                     } else {
                         store_completion(std::make_exception_ptr(std::runtime_error(
-                            "cache-store publication failed for request " + std::to_string(request_id)
-                            + ", model " + std::to_string(cache_model_id) + ", layer " + std::to_string(layer_id)
-                            + ", tag " + tag + ", error code " + std::to_string(static_cast<int>(ec)))));
+                            "cache-store publication failed for request " + std::to_string(request_id) + ", model "
+                            + std::to_string(cache_model_id) + ", layer " + std::to_string(layer_id) + ", tag " + tag
+                            + ", error code " + std::to_string(static_cast<int>(ec)))));
                     }
                 }
             };
@@ -718,8 +709,9 @@ void execBroadcastCpu(const BroadcastParams& params) {
     auto& broadcaster = CpuTpBroadcaster::instance();
     if (broadcaster.isInitialized()) {
         for (auto& tensor : params.buffers) {
-            RTP_LLM_CHECK_WITH_INFO(
-                tensor.is_cpu(), "execBroadcastCpu requires CPU tensors (got device=%s)", tensor.device().str().c_str());
+            RTP_LLM_CHECK_WITH_INFO(tensor.is_cpu(),
+                                    "execBroadcastCpu requires CPU tensors (got device=%s)",
+                                    tensor.device().str().c_str());
             auto contiguous = tensor.contiguous();
             broadcaster.broadcast(contiguous.data_ptr(), contiguous.nbytes(), params.root);
             if (!contiguous.is_same(tensor)) {
@@ -899,12 +891,10 @@ void registerExecCtxOps(pybind11::module& m) {
         py::arg("tp_size"),
         py::arg("base_path"));
 
-    m.def(
-        "destroy_cpu_tp_broadcaster",
-        []() {
-            py::gil_scoped_release release;
-            CpuTpBroadcaster::instance().reset();
-        });
+    m.def("destroy_cpu_tp_broadcaster", []() {
+        py::gil_scoped_release release;
+        CpuTpBroadcaster::instance().reset();
+    });
 }
 
 }  // namespace rtp_llm

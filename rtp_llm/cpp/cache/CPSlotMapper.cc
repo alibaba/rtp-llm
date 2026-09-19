@@ -99,9 +99,11 @@ int CPSlotMapper::reuseBlockTokens(const CacheConfig& config) const {
         return static_cast<int>(tokens);
     };
     if (isSharded()) {
-        for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-            if (config.typeForGroup(gid) == CacheGroupType::FULL) {
-                return checked_tokens(logicalSeqSizePerBlock(config, gid));
+        for (const auto& group : config.topology().groups()) {
+            if (group.policy.group_type == CacheGroupType::FULL) {
+                return checked_tokens(group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN ?
+                                          static_cast<size_t>(virtual_block_size_) :
+                                          group.seqSizePerBlock());
             }
         }
     }

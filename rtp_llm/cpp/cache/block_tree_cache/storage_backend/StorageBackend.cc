@@ -25,9 +25,7 @@ void invokeCallback(const StorageBackend* backend, Callback&& callback) noexcept
         callback();
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("StorageBackend completion failed: %s", error.what());
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("StorageBackend completion failed with an unknown exception");
-    }
+    } catch (...) { RTP_LLM_LOG_ERROR("StorageBackend completion failed with an unknown exception"); }
 }
 
 struct StorageTaskState {
@@ -219,6 +217,7 @@ void StorageBackend::shutdown() {
 }
 
 std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepare(StorageRequest request) {
+    validateRequest(request, /*allow_null_blocks=*/false);
     auto state     = std::make_shared<storage_backend_detail::StorageTaskState>();
     state->request = std::move(request);
     RTP_LLM_CHECK(initialized_);
@@ -226,8 +225,8 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
     std::unordered_set<BlockKey, BlockKeyHash> pinned;
     for (const auto& key_handles : state->request.handles) {
         for (const StorageBlockHandle& handle : key_handles) {
-            RTP_LLM_CHECK(handle.group_id < device_pools_.size() && !isNullBlockIdx(handle.block));
-            const auto&    pool = device_pools_[handle.group_id];
+            const auto     group_id = topology().groupIdForTag(handle.tag);
+            const auto&    pool     = device_pools_[group_id];
             const BlockKey key{pool.get(), handle.block};
             if (pinned.insert(key).second) {
                 pool->incRef(handle.block);
@@ -236,6 +235,29 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
         }
     }
     return state;
+}
+
+void StorageBackend::validateRequest(const StorageRequest& request, bool allow_null_blocks) const {
+    RTP_LLM_CHECK_WITH_INFO(request.keys != nullptr, "storage request requires cache keys");
+    RTP_LLM_CHECK_WITH_INFO(request.handles.size() == request.keys->size(),
+                            "storage request key/handle count mismatch: keys=%zu handles=%zu",
+                            request.keys->size(),
+                            request.handles.size());
+    for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
+        std::unordered_set<std::string> seen_tags;
+        for (const auto& handle : request.handles[key_index]) {
+            RTP_LLM_CHECK_WITH_INFO(!handle.tag.empty(), "storage handle has empty tag at key=%zu", key_index);
+            (void)topology().groupIdForTag(handle.tag);
+            RTP_LLM_CHECK_WITH_INFO(seen_tags.emplace(handle.tag).second,
+                                    "storage request has duplicate tag=%s at key=%zu",
+                                    handle.tag.c_str(),
+                                    key_index);
+            RTP_LLM_CHECK_WITH_INFO(allow_null_blocks || !isNullBlockIdx(handle.block),
+                                    "storage request has null block for tag=%s at key=%zu",
+                                    handle.tag.c_str(),
+                                    key_index);
+        }
+    }
 }
 
 const CacheTopology& StorageBackend::topology() const {
@@ -248,28 +270,28 @@ const std::vector<DeviceBlockPoolPtr>& StorageBackend::devicePools() const {
     return device_pools_;
 }
 
-std::vector<BlockInfo> StorageBackend::convertIndexToBuffer(int layer_id, int group_id, int block_id) const {
-    RTP_LLM_CHECK(buffer_resolver_ && group_id >= 0 && static_cast<size_t>(group_id) < device_pools_.size());
-    return buffer_resolver_(layer_id, group_id, block_id);
+std::vector<BlockInfo> StorageBackend::convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const {
+    RTP_LLM_CHECK(static_cast<bool>(buffer_resolver_));
+    (void)topology().groupIdForTag(tag);
+    return buffer_resolver_(layer_id, tag, block_id);
 }
 
-bool StorageBackend::isHandleRequired(size_t key_index, size_t matched_key_count, size_t group_id) const {
+bool StorageBackend::isHandleRequired(size_t key_index, size_t matched_key_count, std::string_view tag) const {
     RTP_LLM_CHECK(key_index < matched_key_count);
-    const size_t reuse_count = topology().groupById(group_id).reuseBlockCount(matched_key_count);
+    const size_t reuse_count = topology().group(tag).reuseBlockCount(matched_key_count);
     return matched_key_count - key_index <= reuse_count;
 }
 
 void StorageBackend::match(StorageRequest request, MatchDone done) {
     RTP_LLM_CHECK(initialized_);
+    validateRequest(request, /*allow_null_blocks=*/true);
     dispatch([this, request = std::move(request), done = std::move(done)](Lifecycle outcome) mutable {
         StorageMatchResult result;
         bool               success = outcome == Lifecycle::ACCEPTING;
         if (success) {
             try {
                 result = matchImpl(request);
-            } catch (...) {
-                success = false;
-            }
+            } catch (...) { success = false; }
         }
         if (done) {
             done(success ? result.matched_blocks_num : 0, success ? std::move(result.match_meta) : nullptr, success);
@@ -285,9 +307,7 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
         if (success) {
             try {
                 readImpl(state->request, match_meta);
-            } catch (...) {
-                success = false;
-            }
+            } catch (...) { success = false; }
         }
         state->finish();
         if (done) {
