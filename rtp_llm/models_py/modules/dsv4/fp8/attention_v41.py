@@ -199,10 +199,6 @@ def mask_candidate_logits(logits, candidates, block_size):
 
 
 class AttentionV41FP8(AttentionFP8):
-    # V4.1: CP-overlap is the only prefill path (hard-on; the env switch
-    # remains a V4.0-shared-baseline toggle only).
-    _prefill_cp_overlap_hard_on = True
-
     def __init__(self, *args, v41_config, shared_attention, **kwargs):
         ratio = int(kwargs["compress_ratio"])
         if ratio not in (0, 1, 2):

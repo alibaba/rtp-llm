@@ -444,6 +444,7 @@ class V41PrefillIndexerCUDA(unittest.TestCase):
         mask_candidate_logits(consumer, candidates, 8)
         mask_candidate_logits(consumer_ref, candidates, 8)
         self._assert_scores_and_topk(consumer, consumer_ref)
+
     def test_batched_source_scan_rows_match_512_row_chunks(self):
         """The batched source scan (up to 4096 query rows per scorer call) is
         row-independent: one large call equals the 512-row chunk sequence it
