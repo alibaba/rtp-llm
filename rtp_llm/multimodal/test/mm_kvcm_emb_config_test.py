@@ -428,13 +428,74 @@ class RtpKvMetaExplicitConfigTest(unittest.TestCase):
             RtpKvMetaObjectClientConfig.from_kv_cache_config(
                 config
             ).write_timeout_seconds,
-            41,
+            51,
         )
 
         primary["meta_channel_config"]["call_timeout"] = 600_000
         config = _split_reco_config(reco_client_config=_serialized({"": primary}))
         with self.assertRaisesRegex(RtpKvMetaObjectConfigError, "write lease limit"):
             RtpKvMetaObjectClientConfig.from_kv_cache_config(config)
+
+    def test_timeout_overrides_are_isolated_and_drive_the_write_lease(self):
+        source = _primary_config()
+        original = copy.deepcopy(source)
+        config = _split_reco_config(reco_client_config=_serialized({"": source}))
+
+        derived = RtpKvMetaObjectClientConfig.from_kv_cache_config(
+            config,
+            call_timeout_ms=5_000,
+            put_timeout_ms=40_000,
+            get_timeout_ms=700,
+        )
+        transfer = json.loads(derived.transfer_client_config)
+
+        self.assertEqual(derived.call_timeout_ms, 5_000)
+        self.assertEqual(derived.write_timeout_seconds, 96)
+        self.assertEqual(transfer["meta_channel_config"]["call_timeout"], 5_000)
+        self.assertEqual(
+            transfer["sdk_config"]["timeout_config"],
+            {"put_timeout_ms": 40_000, "get_timeout_ms": 700},
+        )
+        self.assertEqual(source, original)
+
+    def test_timeout_overrides_cannot_mask_invalid_shared_configuration(self):
+        primary = _primary_config()
+        primary["sdk_config"]["timeout_config"]["get_timeout_ms"] = 0
+        config = _split_reco_config(reco_client_config=_serialized({"": primary}))
+
+        with self.assertRaisesRegex(
+            RtpKvMetaObjectConfigError, "KVCM SDK get_timeout_ms"
+        ):
+            RtpKvMetaObjectClientConfig.from_kv_cache_config(config, get_timeout_ms=500)
+
+        valid_config = _split_reco_config(reco_client_config=_serialized())
+        for field, value in (
+            ("call_timeout_ms", 0),
+            ("put_timeout_ms", True),
+            ("get_timeout_ms", 1 << 31),
+        ):
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(RtpKvMetaObjectConfigError):
+                    RtpKvMetaObjectClientConfig.from_kv_cache_config(
+                        valid_config, **{field: value}
+                    )
+
+        resolver_calls = []
+        vip_primary = _primary_config(
+            enable_vipserver=True,
+            vipserver_domain="kvcm.example",
+            address=[],
+        )
+        vip_config = _split_reco_config(
+            reco_client_config=_serialized({"": vip_primary})
+        )
+        with self.assertRaises(RtpKvMetaObjectConfigError):
+            RtpKvMetaObjectClientConfig.from_kv_cache_config(
+                vip_config,
+                vipserver_resolver=lambda domain: resolver_calls.append(domain),
+                get_timeout_ms=0,
+            )
+        self.assertEqual(resolver_calls, [])
 
     def test_serialization_failure_is_redacted(self):
         config = _split_reco_config(reco_client_config=_serialized())
@@ -631,7 +692,7 @@ class RtpKvMetaSplitConfigTest(unittest.TestCase):
         self.assertEqual(derived.instance_group, "kve_pace_group_m3")
         self.assertEqual(derived.instance_id, "kve_pace_group_m3")
         self.assertEqual(derived.call_timeout_ms, 1500)
-        self.assertEqual(derived.write_timeout_seconds, 105)
+        self.assertEqual(derived.write_timeout_seconds, 205)
         self.assertEqual(
             transfer["sdk_config"]["timeout_config"],
             {"put_timeout_ms": 100_000, "get_timeout_ms": 100_000},

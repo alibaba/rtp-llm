@@ -401,6 +401,47 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
         self.assertEqual(client._config.max_object_bytes, 4096)
         client_type.assert_called_once()
 
+    def test_from_env_applies_cache_specific_timeout_overrides(self):
+        environment = {
+            "RECO_SERVER_ADDRESS": "127.0.0.1:19001",
+            "RECO_INSTANCE_GROUP": "pace_group_m3",
+            "RECO_PUT_TIMEOUT_MS": "100000",
+            "RECO_GET_TIMEOUT_MS": "100000",
+        }
+        generic_client = MagicMock()
+        config_type = MagicMock(side_effect=lambda **values: SimpleNamespace(**values))
+        client_type = MagicMock(return_value=generic_client)
+
+        with patch.object(
+            kvcm_client,
+            "_load_kvcm_client_types",
+            return_value=(client_type, config_type),
+        ):
+            client = RtpKvMetaObjectClient.from_env(
+                environ=environment,
+                call_timeout_ms=400,
+                put_timeout_ms=1_200,
+                get_timeout_ms=600,
+            )
+
+        transfer = json.loads(client._config.transfer_client_config)
+        self.assertEqual(client._config.call_timeout_ms, 400)
+        self.assertEqual(
+            transfer["sdk_config"]["timeout_config"],
+            {"put_timeout_ms": 1_200, "get_timeout_ms": 600},
+        )
+        config_type.assert_called_once_with(
+            addresses=client._config.addresses,
+            instance_id="kve_pace_group_m3",
+            instance_group="kve_pace_group_m3",
+            user_data="",
+            transfer_client_config=client._config.transfer_client_config,
+            call_timeout_ms=400,
+            write_timeout_seconds=30,
+            max_object_bytes=1024 * 1024 * 1024,
+        )
+        client_type.assert_called_once()
+
     def test_no_arg_constructor_reuses_online_vip_settings(self):
         environment = {
             "RECO_ENABLE_VIPSERVER": "1",

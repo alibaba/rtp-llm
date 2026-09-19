@@ -41,11 +41,20 @@ with RtpKvMetaObjectClient() as client:
 torch.testing.assert_close(output, embedding)
 ```
 
+This is an API/lifecycle smoke test and also models a one-request E→P handoff.
+Its fresh UUID plus immediate `remove_one()` deliberately provides no
+cross-request cache reuse.
+
 For production use:
 
 - Create one client when the worker starts, reuse it across requests, and
   close it when the worker stops.
-- Use a unique key for every object and remove the object after consumption.
+- For a reusable embedding cache, derive a stable immutable key from tenant,
+  encoder/preprocess revisions, input-content digest, and tensor schema. Load
+  before encoding and do not remove the shared key after each reader; KVCM's
+  Reclaimer owns normal capacity eviction.
+- For request-scoped E→P handoff, use a fresh unguessable key and remove it
+  only after the final consumer has finished loading.
 - `load_one()` writes into the supplied tensor; allocate it with the expected
   shape, dtype, device, and byte size before loading.
 
@@ -62,6 +71,15 @@ For production use:
 - If the fixed-block instance group is `pace_group_m3`, KVCM administrators
   create the separate `kve_pace_group_m3` group before starting this client.
   The client registers its instance automatically, but does not create groups.
+  That group must use KVCM's `local` or `cached` metadata mode so reads refresh
+  LRU heat; KVMeta intentionally rejects direct Redis metadata, which would
+  otherwise reclaim capacity without preserving hot embeddings. `cached`
+  requires a non-empty valid URI and a local hot-cache layer. `local` is
+  process memory only. A production shared TairMempool/PACE cache must use
+  `cached` with Redis/async Redis as its persistent layer, plus a persistent
+  KVCM Registry; otherwise a KVCM restart loses allocation ownership and GC
+  cannot reconstruct it. Reserve `local` for tests or an explicitly ephemeral
+  deployment backed by an independently verified namespace TTL/sweeper.
 
 ### Existing online configuration
 
@@ -98,6 +116,81 @@ Static `RECO_SERVER_ADDRESS` values use `hostname:port`, `IPv4:port`, or
 `[IPv6]:port`. Ports must be in the range 1-65535. VIPServer IPv4 and IPv6
 results are both supported and are frozen into the derived client config.
 
+### Bound cache latency independently
+
+The inherited online values `RECO_GET_TIMEOUT_MS=100000` and
+`RECO_PUT_TIMEOUT_MS=100000` are 100-second upper bounds. They remain the
+default for compatibility, but they are not a safe failure budget for an
+optional reusable cache: a failed lookup must fall back before waiting costs
+more than recomputing the embedding. No additional environment variables are
+needed; pass cache-specific limits when constructing this client:
+
+```python
+client = RtpKvMetaObjectClient.from_env(
+    call_timeout_ms=500,  # KVMeta control-plane RPC budget
+    get_timeout_ms=2_000, # example for a backend with a proven <=2s drain
+    put_timeout_ms=3_000, # best-effort publish budget for that backend
+)
+```
+
+These numbers are examples, not universal defaults. Set them from measured
+object sizes, backend tail latency, encoder recompute cost, and the request
+SLO. The override is copied only into the derived `kve_` client; it does not
+mutate RTP's parsed config or the fixed-block KVCache client. KVCM derives a
+write lease that strictly exceeds two effective Put windows plus three
+metadata-call windows. The two Put windows cover queue/admission time and a
+backend call that starts immediately before the outer deadline; accepted work
+is drained before caller-owned tensor memory can be released.
+Running a native call in an unbounded Python future is not an equivalent
+timeout because cancellation cannot prove that backend I/O stopped touching
+the caller-owned buffer. These SDK limits apply to each native batch; a
+logical call above KVCM's 64-object boundary can consume multiple sequential
+budgets, so RTP must also bound object-set size against its end-to-end SLO.
+
+For TairMempool/PACE, these values must also be strictly greater than the
+effective `TAIR_MEMPOOL_SYNC_TIMEOUT_MS` (10 seconds by default in the PACE
+revision currently linked by KVCM), and PACE's complete inner timeout hierarchy
+must be valid. The native KVMeta client fails initialization otherwise; the
+fixed-block KVCache client is unchanged. Therefore the sub-second values often
+used for an optional cache are not currently a hard PACE deadline. The existing
+100-second `RECO_GET_TIMEOUT_MS`/`RECO_PUT_TIMEOUT_MS` pass the hierarchy check,
+but they are still too large for fail-fast inference unless measured recompute
+cost and request SLO justify them. A smaller PACE budget requires configuring
+and validating the PACE inner timeouts together, not only overriding this
+facade.
+
+This hierarchy check protects the local caller-buffer/write-lease budget. It
+does not prove that a timeout has drained already submitted remote RDMA/Commit.
+KVCM therefore keeps a failed TairMempool write invisible and charged for a
+server-side 180-second quarantine after the client commit deadline; a repeated
+failed Finish is idempotent and a later successful Finish cannot resurrect it.
+No new RTP environment variable is required. If an existing deployment sets
+`TAIR_MEMPOOL_QUARANTINE_TTL_MS`, however, the variable-size PACE client requires
+it to be positive and at most 180000; a longer client quarantine would outlive
+KVCM's address quarantine and initialization fails before PACE I/O. This guard
+does not change the fixed-block client. The server quarantine does not change
+the derived client lease (for the listed online 100-second Put / 1.5-second
+metadata settings, it remains 205 seconds). KVCM invokes its TairMempool
+cleanup extension once. The extension chunks large batches at 256 identities
+and uses generation-aware exact free/query endpoints on the same KVCM port.
+Provider records the logical release on the allocation descriptor, so a lost
+response retried against the same Provider process cannot decrement the same
+reference twice; only manager-owned physical finalization may resume. A
+Provider restart creates a new incarnation and first imports surviving backend
+allocations as recovery-owned records, so requests carrying the old
+incarnation can never target a newly allocated successor at the same address.
+After an acknowledged mutation the adapter retries only the read-only absence
+query. If acknowledgement was lost, it may resend the same idempotent exact
+free once. A complete, non-partial targeted proof must show every address
+absent; malformed, duplicate, partial, or still-present results fail closed.
+
+Before production use, the deployed PACE revision must still pass fault
+injection for `timeout -> failed PutFinish -> quarantine -> Free -> same-address
+reuse`. The measured worst-case late RDMA/Commit lifetime must be below 180
+seconds. Until that is proved, legacy PACE DRAM/direct-RDMA is suitable only for
+an isolated functional canary, not a correctness-qualified reusable embedding
+cache.
+
 ### Client lifecycle and batch API
 
 The no-argument constructor snapshots the current `RECO_*` values, validates
@@ -106,9 +199,10 @@ generic KVCM client. KVCM instance registration happens during construction.
 
 `load_one()` fills and returns the supplied tensor; it never allocates a
 replacement. Shape, dtype and device come from RTP's receipt layer, which owns
-that protocol. The caller must use a fresh object key. If `save_one()` reports
-an unknown mutation outcome, retain that key for controlled cleanup after the
-write session has converged.
+that protocol. A request-handoff caller uses a fresh object key; a reusable
+cache caller uses a stable semantic key whose complete inputs always produce
+the same bytes. If `save_one()` reports an unknown mutation outcome, retain
+that key for controlled reconciliation after the write session has converged.
 
 The context manager above only demonstrates the complete lifecycle. A
 production RTP worker should construct one client during component startup,
@@ -138,9 +232,86 @@ shape, dtype, and exact byte size; P allocates a matching tensor and calls
 `load`. RTP's transport owns the object key/receipt contract, successful-use
 release routing, request-level retry, and reconciliation of unknown client
 outcomes. KVCM's dedicated KVMeta Reclaimer independently owns cache-capacity
-watermarks, LRU retirement, metadata-first deletion, and physical backend
-reclamation; it must be enabled and healthy even when RTP normally calls
-`remove` after consumption.
+watermarks and LRU retirement. Every reclamation first persists an exact-owner
+`DELETING` tombstone, then proves the matching physical generation absent, and
+only then removes metadata and releases charged capacity. It must be enabled
+and healthy even when RTP normally calls `remove` after consumption.
+
+### Choose the lifecycle before integration
+
+The facade is an exact-object primitive, not an RTP scheduler or
+`get_or_compute` implementation. Two valid integrations use different key and
+deletion rules:
+
+| Integration | Key | Read/write order | Removal |
+|---|---|---|---|
+| Reusable embedding cache | Canonical digest of tenant isolation scope + encoder/model revision + preprocessing/tokenizer revision + media-content digest + tensor role/chunk index/shape/dtype/layout + cache schema | Load first; on any load failure recompute; publish the recomputed result best-effort | Never per reader; let the KVCM Reclaimer evict it, or invalidate by changing the versioned namespace/key |
+| Request-scoped E→P handoff | Fresh unguessable UUID per logical object | E saves; receipt carries key and tensor metadata; P loads | Only the known final consumer removes it; Reclaimer is the crash/timeout safety net |
+
+Do not combine a stable shared key with per-request removal: one request can
+delete an object while another is loading it. KVMeta V1 has a configured read
+grace for automatic reclamation but no server-side read lease, and explicit
+`remove` has no grace. Conversely, a fresh UUID followed by immediate removal
+is a mailbox/transport, not a cache, because later requests cannot hit it.
+
+A reusable-cache integration should keep all cache failure handling outside
+the model's correctness path. The output shape and dtype must be derivable
+from the request/preprocessing contract so the destination can be allocated
+before `load_one()`:
+
+```python
+from kv_cache_manager.client import KvMetaObjectClientError
+
+
+def get_or_compute_embedding(
+    client,
+    semantic_key,
+    empty_output,
+    encode,
+    request_id,
+    on_cache_error,
+):
+    try:
+        return client.load_one(semantic_key, empty_output, trace_id=request_id)
+    except KvMetaObjectClientError as error:
+        # Miss, timeout, reclaim race, or backend failure: recomputation is
+        # authoritative. This hook must be non-throwing.
+        on_cache_error("load", semantic_key, error)
+
+    embedding = encode()
+
+    try:
+        client.save_one(semantic_key, embedding, trace_id=request_id)
+    except KvMetaObjectClientError as error:
+        # A cache write is best effort. For unknown_outcome, the hook must
+        # enqueue bounded reconciliation; it must never blindly retry/remove a
+        # stable shared key or raise into inference.
+        on_cache_error("save", semantic_key, error)
+    return embedding
+```
+
+`on_cache_error` is an RTP-owned, non-throwing metrics/reconciliation hook. For
+`error.unknown_outcome`, it should retain the operation and key in a bounded
+queue until state can be queried safely. The semantic key should be a compact
+digest (not raw media or tenant data) and must stay within KVCM's key limit.
+Count a business hit only after the complete object set has loaded and its
+digest has passed, not when metadata lookup alone succeeds.
+
+A recomputed result does not by itself repair a committed bad entry. KVCM
+treats a same-key, same-size `save_one()` as an immutable-value hit, and its
+metadata lookup refreshes LRU before the later data-plane read is known to be
+good. A durable backend-not-found or checksum mismatch must therefore enter a
+bounded per-key repair controller: one designated repairer removes the bad
+key, waits for that mutation to converge, and then permits republish. Ordinary
+timeouts, overload, and transient I/O failures only fall back for the current
+request; they must not make every reader remove a shared key. Until RTP owns
+that repair loop, persistent poisoned entries are an explicit limitation of
+reusable-cache mode.
+
+RTP still needs to supply bounded per-key singleflight/jitter, whole-object-set
+fallback, digest verification, optional worker-local L1, hit/byte-hit and
+encoder-skip metrics, and the actual scheduler/transport wiring. Those
+application concerns are intentionally not hidden inside this client.
 
 ### Error handling
 
@@ -149,10 +320,10 @@ errors according to the phase and exception type:
 
 | Failure | Exception | Observable state and caller action |
 |---|---|---|
-| Invalid `RECO_*` values, malformed JSON/address/VIPServer results, or unsafe limits | `RtpKvMetaObjectConfigError` | Construction stops before instance registration or object I/O. Fix the deployment configuration; do not retry in the request path. |
-| `environ` is not a mapping, `kv_cache_config` is `None`, or an internal config object has the wrong type | `TypeError` | This is a caller programming error. Fail startup or the owning component initialization. |
+| Invalid `RECO_*` values, malformed JSON/address/VIPServer results, or unsafe limits | `RtpKvMetaObjectConfigError` | Construction stops before instance registration or object I/O. Fail the KVMeta component initialization; an optional-cache integration may disable only this feature and continue inference. Do not retry in the request path. |
+| `environ` is not a mapping, `kv_cache_config` is `None`, or an internal config object has the wrong type | `TypeError` | This is a caller programming error. Fail the KVMeta component initialization; do not turn it into per-request retries. |
 | `kv_cache_manager.client` cannot import the high-level KVMeta object classes | `RuntimeError` with an `ImportError` cause | Deploy the KVCM wheel that contains KVMeta object support. Unused RTP paths remain unaffected because the wheel is imported lazily. |
-| KVCM native API validation, client configuration, or instance registration fails | Original KVCM exception, such as `ImportError` or `KvMetaObjectClientError(operation="init")` | Client construction fails and no facade is returned. Preserve the exception and fail component startup. |
+| KVCM native API validation, client configuration, or instance registration fails | Original KVCM exception, such as `ImportError` or `KvMetaObjectClientError(operation="init")` | Client construction fails and no facade is returned. Preserve the exception; either fail the explicitly required feature rollout or disable only optional cache use. |
 | Empty/mismatched sequences, duplicate/invalid keys, invalid `trace_id`, non-contiguous or unsupported tensors, or an object above `max_object_bytes` | `TypeError` or `ValueError` from the generic client | The complete logical `save`, `load`, or non-empty `remove` call is validated before native I/O. Fix the request; automatic retry cannot make it valid. An empty `remove([])` is a no-op. |
 | Native metadata or data-plane failure | `KvMetaObjectClientError` | Inspect the structured fields below. The facade propagates the same exception object without retrying, wrapping, or discarding progress information. |
 | Valid non-empty operation after the client is closed | `RuntimeError` | The client cannot be reopened; create a new worker-lifetime client. `close()` itself is idempotent. |
@@ -173,8 +344,11 @@ diagnostic fields are:
 `save` and `load` stop at the first failed batch. `remove` attempts all batches
 once so cleanup can make maximum progress. No mutation is automatically
 retried or rolled back. In particular, if `unknown_outcome` is true, do not
-blindly repeat `save` under the same key. Retain the UUID key in a bounded
-cleanup queue and reconcile or remove it after the write session converges.
+blindly repeat `save` under the same key. Retain the operation and object key
+in a bounded reconciliation queue; query state after the write session
+converges. Only request-handoff ownership may lead to cleanup removal. A
+reusable shared key must not be blindly removed because another request can be
+using the committed value.
 RTP owns that application-lifecycle cleanup and any higher-level retry policy;
 KVCM's KVMeta Reclaimer remains the independent capacity and physical-GC
 safety net.
@@ -250,12 +424,14 @@ client = RtpKvMetaObjectClient.from_env(environ=test_reco_environment)
   `KvMetaObjectClientError`; the facade does not hide fields such as error code,
   completed batch position or unknown mutation outcome.
 - Mutating calls are not retried automatically when the outcome is ambiguous.
-  RTP should use fresh UUID keys and retain failed keys for controlled cleanup.
+  Handoff mode should retain fresh UUID keys for controlled cleanup; reusable
+  cache mode should retain stable keys for bounded reconciliation and must not
+  blindly overwrite or remove a key that another request can share.
 - `close()` is idempotent. Prefer the context-manager form.
 
 ### Tests
 
-The 53 fast tests do not require the KVCM wheel. They cover configuration and
+The 56 fast tests do not require the KVCM wheel. They cover configuration and
 provider failures, lazy dependency loading, exception identity and structured
 progress preservation, no implicit mutation retry/cleanup, and lifecycle
 errors in addition to the successful paths:

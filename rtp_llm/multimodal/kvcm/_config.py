@@ -30,7 +30,7 @@ _MAX_ADDRESS_BYTES = 1024
 _MAX_INSTANCE_ID_BYTES = 512
 _MAX_INSTANCE_GROUP_BYTES = 512
 _MAX_USER_DATA_BYTES = 64 * 1024
-_MAX_OBJECT_BYTES = 1024 * 1024 * 1024
+DEFAULT_MAX_OBJECT_BYTES = 1024 * 1024 * 1024
 _MAX_CALL_TIMEOUT_MS = 600_000
 _MAX_WRITE_TIMEOUT_SECONDS = 1800
 _MAX_INT32 = (1 << 31) - 1
@@ -66,7 +66,7 @@ class RtpKvMetaObjectClientConfig:
     transfer_client_config: str = field(repr=False)
     call_timeout_ms: int
     write_timeout_seconds: int
-    max_object_bytes: int = _MAX_OBJECT_BYTES
+    max_object_bytes: int = DEFAULT_MAX_OBJECT_BYTES
 
     @classmethod
     def from_env(
@@ -74,7 +74,10 @@ class RtpKvMetaObjectClientConfig:
         *,
         environ: Mapping[str, str] | None = None,
         vipserver_resolver: Callable[[str], Iterable[Any]] | None = None,
-        max_object_bytes: int = _MAX_OBJECT_BYTES,
+        max_object_bytes: int = DEFAULT_MAX_OBJECT_BYTES,
+        call_timeout_ms: int | None = None,
+        put_timeout_ms: int | None = None,
+        get_timeout_ms: int | None = None,
     ) -> RtpKvMetaObjectClientConfig:
         """Snapshot the existing split ``RECO_*`` environment or config map."""
 
@@ -83,6 +86,9 @@ class RtpKvMetaObjectClientConfig:
             settings,
             vipserver_resolver=vipserver_resolver,
             max_object_bytes=max_object_bytes,
+            call_timeout_ms=call_timeout_ms,
+            put_timeout_ms=put_timeout_ms,
+            get_timeout_ms=get_timeout_ms,
         )
 
     @classmethod
@@ -91,7 +97,10 @@ class RtpKvMetaObjectClientConfig:
         kv_cache_config: Any,
         *,
         vipserver_resolver: Callable[[str], Iterable[Any]] | None = None,
-        max_object_bytes: int = _MAX_OBJECT_BYTES,
+        max_object_bytes: int = DEFAULT_MAX_OBJECT_BYTES,
+        call_timeout_ms: int | None = None,
+        put_timeout_ms: int | None = None,
+        get_timeout_ms: int | None = None,
     ) -> RtpKvMetaObjectClientConfig:
         """Snapshot an already parsed RTP ``KVCacheConfig`` object."""
 
@@ -100,6 +109,9 @@ class RtpKvMetaObjectClientConfig:
             settings,
             vipserver_resolver=vipserver_resolver,
             max_object_bytes=max_object_bytes,
+            call_timeout_ms=call_timeout_ms,
+            put_timeout_ms=put_timeout_ms,
+            get_timeout_ms=get_timeout_ms,
         )
 
 
@@ -394,7 +406,7 @@ def _derive_identity(primary: dict, field: str, maximum: int) -> str:
     return derived
 
 
-def _validate_sdk_config(primary: dict) -> int:
+def _validate_sdk_config(primary: dict) -> tuple[int, int]:
     sdk_config = _required_mapping(primary.get("sdk_config"), "KVCM sdk_config")
     _positive_int(sdk_config.get("thread_num"), "KVCM SDK thread_num", _MAX_INT32)
     queue_size = _positive_int(
@@ -428,12 +440,12 @@ def _validate_sdk_config(primary: dict) -> int:
         "KVCM SDK put_timeout_ms",
         _MAX_INT32,
     )
-    _positive_int(
+    get_timeout_ms = _positive_int(
         timeout_config.get("get_timeout_ms"),
         "KVCM SDK get_timeout_ms",
         _MAX_INT32,
     )
-    return put_timeout_ms
+    return put_timeout_ms, get_timeout_ms
 
 
 def _parse_env_bool(value: str, name: str) -> bool:
@@ -689,9 +701,39 @@ def _derive_primary_config(
     *,
     vipserver_resolver: Callable[[str], Iterable[Any]] | None,
     max_object_bytes: int,
+    call_timeout_ms: int | None,
+    put_timeout_ms: int | None,
+    get_timeout_ms: int | None,
 ) -> RtpKvMetaObjectClientConfig:
     max_object_bytes = _positive_int(
-        max_object_bytes, "KVMeta max_object_bytes", _MAX_OBJECT_BYTES
+        max_object_bytes, "KVMeta max_object_bytes", DEFAULT_MAX_OBJECT_BYTES
+    )
+    override_call_timeout_ms = (
+        None
+        if call_timeout_ms is None
+        else _positive_int(
+            call_timeout_ms,
+            "KVMeta metadata call_timeout override",
+            _MAX_CALL_TIMEOUT_MS,
+        )
+    )
+    override_put_timeout_ms = (
+        None
+        if put_timeout_ms is None
+        else _positive_int(
+            put_timeout_ms,
+            "KVMeta SDK put_timeout_ms override",
+            _MAX_INT32,
+        )
+    )
+    override_get_timeout_ms = (
+        None
+        if get_timeout_ms is None
+        else _positive_int(
+            get_timeout_ms,
+            "KVMeta SDK get_timeout_ms override",
+            _MAX_INT32,
+        )
     )
     instance_group = _derive_identity(
         primary, "instance_group", _MAX_INSTANCE_GROUP_BYTES
@@ -726,12 +768,27 @@ def _derive_primary_config(
         "KVCM metadata connection_timeout",
         _MAX_UINT32,
     )
-    call_timeout_ms = _positive_int(
+    configured_call_timeout_ms = _positive_int(
         meta_channel.get("call_timeout"),
         "KVCM metadata call_timeout",
         _MAX_CALL_TIMEOUT_MS,
     )
-    put_timeout_ms = _validate_sdk_config(primary)
+    configured_put_timeout_ms, configured_get_timeout_ms = _validate_sdk_config(primary)
+    effective_call_timeout_ms = (
+        configured_call_timeout_ms
+        if override_call_timeout_ms is None
+        else override_call_timeout_ms
+    )
+    effective_put_timeout_ms = (
+        configured_put_timeout_ms
+        if override_put_timeout_ms is None
+        else override_put_timeout_ms
+    )
+    effective_get_timeout_ms = (
+        configured_get_timeout_ms
+        if override_get_timeout_ms is None
+        else override_get_timeout_ms
+    )
 
     model_deployment = _required_mapping(
         primary.get("model_deployment"), "KVCM model_deployment"
@@ -743,7 +800,12 @@ def _derive_primary_config(
         allow_empty=True,
     )
 
-    minimum_lease_ms = put_timeout_ms + 3 * call_timeout_ms
+    # KVCM's exact-object transfer path starts its outer deadline before
+    # enqueueing and drains accepted work before returning caller-owned
+    # buffers. A task that starts just before that deadline may consume one
+    # additional complete backend Put timeout, so the server-side write lease
+    # must cover both windows plus the three metadata RPC windows.
+    minimum_lease_ms = 2 * effective_put_timeout_ms + 3 * effective_call_timeout_ms
     write_timeout_seconds = max(
         _DEFAULT_WRITE_TIMEOUT_SECONDS, minimum_lease_ms // 1000 + 1
     )
@@ -753,6 +815,13 @@ def _derive_primary_config(
         )
 
     transfer_config = copy.deepcopy(primary)
+    transfer_config["meta_channel_config"]["call_timeout"] = effective_call_timeout_ms
+    transfer_config["sdk_config"]["timeout_config"].update(
+        {
+            "put_timeout_ms": effective_put_timeout_ms,
+            "get_timeout_ms": effective_get_timeout_ms,
+        }
+    )
     transfer_config.update(
         {
             "enable_vipserver": False,
@@ -792,7 +861,7 @@ def _derive_primary_config(
         instance_group=instance_group,
         user_data=user_data,
         transfer_client_config=serialized_transfer_config,
-        call_timeout_ms=call_timeout_ms,
+        call_timeout_ms=effective_call_timeout_ms,
         write_timeout_seconds=write_timeout_seconds,
         max_object_bytes=max_object_bytes,
     )
@@ -803,6 +872,9 @@ def _config_from_reco_settings(
     *,
     vipserver_resolver: Callable[[str], Iterable[Any]] | None,
     max_object_bytes: int,
+    call_timeout_ms: int | None,
+    put_timeout_ms: int | None,
+    get_timeout_ms: int | None,
 ) -> RtpKvMetaObjectClientConfig:
     if isinstance(settings, _ExplicitRecoSettings):
         primary = _select_primary_config(_parse_shared_config(settings.client_config))
@@ -812,4 +884,7 @@ def _config_from_reco_settings(
         primary,
         vipserver_resolver=vipserver_resolver,
         max_object_bytes=max_object_bytes,
+        call_timeout_ms=call_timeout_ms,
+        put_timeout_ms=put_timeout_ms,
+        get_timeout_ms=get_timeout_ms,
     )

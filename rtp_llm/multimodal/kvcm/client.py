@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from types import TracebackType
 from typing import Any, TypeVar
 
-from ._config import RtpKvMetaObjectClientConfig
+from ._config import DEFAULT_MAX_OBJECT_BYTES, RtpKvMetaObjectClientConfig
 
 _MISSING_WHEEL_MESSAGE = (
     "KVCM EMB storage requires the kvcm_py_client wheel with KVMeta object support"
@@ -81,13 +81,19 @@ class RtpKvMetaObjectClient:
         cls,
         *,
         environ: Mapping[str, str] | None = None,
-        max_object_bytes: int = 1024 * 1024 * 1024,
+        max_object_bytes: int = DEFAULT_MAX_OBJECT_BYTES,
+        call_timeout_ms: int | None = None,
+        put_timeout_ms: int | None = None,
+        get_timeout_ms: int | None = None,
     ) -> RtpKvMetaObjectClient:
         """Create from ``environ``, or the current process's ``RECO_*`` values."""
 
         config = RtpKvMetaObjectClientConfig.from_env(
             environ=environ,
             max_object_bytes=max_object_bytes,
+            call_timeout_ms=call_timeout_ms,
+            put_timeout_ms=put_timeout_ms,
+            get_timeout_ms=get_timeout_ms,
         )
         return cls._from_config(config)
 
@@ -96,13 +102,19 @@ class RtpKvMetaObjectClient:
         cls,
         kv_cache_config: Any,
         *,
-        max_object_bytes: int = 1024 * 1024 * 1024,
+        max_object_bytes: int = DEFAULT_MAX_OBJECT_BYTES,
+        call_timeout_ms: int | None = None,
+        put_timeout_ms: int | None = None,
+        get_timeout_ms: int | None = None,
     ) -> RtpKvMetaObjectClient:
         """Create and register from RTP's parsed ``KVCacheConfig`` object."""
 
         config = RtpKvMetaObjectClientConfig.from_kv_cache_config(
             kv_cache_config,
             max_object_bytes=max_object_bytes,
+            call_timeout_ms=call_timeout_ms,
+            put_timeout_ms=put_timeout_ms,
+            get_timeout_ms=get_timeout_ms,
         )
         return cls._from_config(config)
 

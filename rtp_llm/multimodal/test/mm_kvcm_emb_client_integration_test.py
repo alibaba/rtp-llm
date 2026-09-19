@@ -33,7 +33,11 @@ from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
 from urllib import request as urllib_request
 
-import torch
+try:
+    import torch
+except ModuleNotFoundError:
+    # torch is intentionally optional unless this manual test is requested.
+    torch = None
 
 from rtp_llm.multimodal.kvcm import RtpKvMetaObjectClient
 from rtp_llm.multimodal.kvcm._config import KVE_INSTANCE_PREFIX
@@ -88,6 +92,10 @@ def _read_log_tail(path: Path, max_chars: int = 16_384) -> str:
         return ""
 
 
+def _process_output_path(tmp_path: Path) -> Path:
+    return tmp_path / "logs" / "kvcm_process.log"
+
+
 def _terminate_process(process: subprocess.Popen, timeout: float = 5.0) -> None:
     if process.poll() is not None:
         return
@@ -138,6 +146,8 @@ def _write_startup_config(tmp_path: Path):
 
 
 def _require_kvcm_dependencies() -> None:
+    if torch is None:
+        raise RuntimeError("the live KVCM integration test requires torch")
     required_paths = (
         _KVCM_BIN,
         _KVCM_SERVER_CONFIG,
@@ -182,13 +192,18 @@ def _start_kvmeta(tmp_path: Path, startup_path: Path):
         "-e",
         f"kvcm.startup_config={startup_path}",
     ]
-    process = subprocess.Popen(
-        command,
-        cwd=tmp_path,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    process_output = _process_output_path(tmp_path)
+    # Do not leave an undrained PIPE behind a verbose server: it can fill and
+    # deadlock the integration test before teardown gets a chance to call
+    # communicate(). The child owns its duplicated file descriptor after
+    # Popen returns, so the parent can close this handle immediately.
+    with process_output.open("wb") as output_stream:
+        process = subprocess.Popen(
+            command,
+            cwd=tmp_path,
+            stdout=output_stream,
+            stderr=subprocess.STDOUT,
+        )
 
     server_log = tmp_path / "logs" / "kv_cache_manager.log"
     expected_ports = {rpc_port, http_port, admin_rpc_port, admin_http_port}
@@ -196,10 +211,9 @@ def _start_kvmeta(tmp_path: Path, startup_path: Path):
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            stdout, stderr = process.communicate()
             raise RuntimeError(
                 f"KVCM exited during startup ({process.returncode})\n"
-                f"stdout:\n{stdout}\nstderr:\n{stderr}\n"
+                f"process output tail:\n{_read_log_tail(process_output)}\n"
                 f"log tail:\n{_read_log_tail(server_log)}"
             )
         for port in expected_ports - listening_ports:
@@ -222,10 +236,9 @@ def _start_kvmeta(tmp_path: Path, startup_path: Path):
         time.sleep(0.1)
 
     _terminate_process(process)
-    stdout, stderr = process.communicate()
     raise RuntimeError(
         "KVCM did not become ready within 30 seconds\n"
-        f"stdout:\n{stdout}\nstderr:\n{stderr}\n"
+        f"process output tail:\n{_read_log_tail(process_output)}\n"
         f"log tail:\n{_read_log_tail(server_log)}"
     )
 
@@ -241,15 +254,20 @@ def _stop_kvmeta(
             process.wait(timeout=20)
         except subprocess.TimeoutExpired:
             _terminate_process(process)
-    stdout, stderr = process.communicate()
+    process_output = (
+        _read_log_tail(
+            _process_output_path(server_log.parent.parent), max_chars=1024 * 1024
+        )
+        if server_log is not None
+        else ""
+    )
     if process.returncode != 0:
         raise RuntimeError(
             f"KVCM did not stop cleanly ({process.returncode})\n"
-            f"stdout:\n{stdout}\nstderr:\n{stderr}"
+            f"process output tail:\n{process_output}"
         )
-    sanitizer_output = f"{stdout}\n{stderr}"
-    if "AddressSanitizer" in sanitizer_output or "LeakSanitizer" in sanitizer_output:
-        raise RuntimeError(f"KVCM sanitizer failure:\n{sanitizer_output}")
+    if "AddressSanitizer" in process_output or "LeakSanitizer" in process_output:
+        raise RuntimeError(f"KVCM sanitizer failure:\n{process_output}")
     if server_log is None:
         return
 
@@ -555,7 +573,7 @@ class RtpKvMetaObjectClientIntegrationTest(TestCase):
                         producer.instance_id, KVE_INSTANCE_PREFIX + base_group
                     )
                     self.assertEqual(producer._config.addresses, (endpoint,))
-                    self.assertEqual(producer._config.write_timeout_seconds, 105)
+                    self.assertEqual(producer._config.write_timeout_seconds, 205)
 
                     # P side: use the same values after RTP argument parsing.
                     # A second registration must be reusable and observe the
@@ -563,9 +581,17 @@ class RtpKvMetaObjectClientIntegrationTest(TestCase):
                     consumer = RtpKvMetaObjectClient.from_kv_cache_config(
                         _parsed_kv_cache_config(environment),
                         max_object_bytes=1024 * 1024,
+                        put_timeout_ms=5_000,
+                        get_timeout_ms=5_000,
                     )
                     self.assertEqual(consumer.instance_id, producer.instance_id)
                     self.assertEqual(consumer.instance_group, producer.instance_group)
+                    self.assertEqual(
+                        json.loads(consumer._config.transfer_client_config)[
+                            "sdk_config"
+                        ]["timeout_config"],
+                        {"put_timeout_ms": 5_000, "get_timeout_ms": 5_000},
+                    )
 
                     # The explicit map used by an existing fixed-block client
                     # must coexist without requiring any EMB-only settings.
