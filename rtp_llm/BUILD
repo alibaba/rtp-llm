@@ -630,6 +630,15 @@ py_package(
     }),
 )
 
+# Keep admission and native XGrammar on the same revision for CUDA 13 ARM.
+xgrammar_whl_reqs = select({
+    "@//:using_cuda13_arm": [
+        "xgrammar @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp_llm/arm_pkg/xgrammar/38b97c02062dea5e27bd3d0f456c5ca66676d923/01e12e11d7b0aa3e64ae8525516b0e1b65803b54f702675fe062bd0cfc906554/xgrammar-0.2.8.dev0%2Bg38b97c0-cp310-cp310-linux_aarch64.whl#sha256=01e12e11d7b0aa3e64ae8525516b0e1b65803b54f702675fe062bd0cfc906554",
+        "apache-tvm-ffi==0.1.11",
+    ],
+    "//conditions:default": ["xgrammar==0.2.5"],
+})
+
 whl_reqs = [
     "jinja2",
     "sympy",
@@ -687,8 +696,7 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi",
-    "xgrammar==0.2.5",
-] + whl_deps() + platform_deps() + xft_dep
+] + xgrammar_whl_reqs + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
     name = "rtp_llm_frontend_whl",
@@ -730,8 +738,7 @@ whl_reqs_dash_sc_grpc = [
     "grpcio>=1.57.0",
     "jsonschema==4.26.0",
     "protobuf>=4.25",
-    "xgrammar==0.2.5",
-]
+] + xgrammar_whl_reqs
 
 py_wheel(
     name = "rtp_llm_dash_sc_grpc_whl",

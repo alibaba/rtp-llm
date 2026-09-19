@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include <xgrammar/matcher.h>
 #include <xgrammar/tokenizer_info.h>
 
 namespace rtp_llm {
@@ -48,6 +49,29 @@ XGrammarBackendOptions baseOptions() {
 
 GrammarKeyCpp jsonKey(const std::string& schema) {
     return GrammarKeyCpp{"json", schema};
+}
+
+GrammarKeyCpp v41ToolKey(const std::string& schema) {
+    return GrammarKeyCpp{"structural_tag",
+                         R"({"type":"structural_tag","format":{
+        "type":"tag","begin":"\n\n<\uff5cDSML\uff5c calls>\n",
+        "content":{"type":"tags_with_separator","separator":"","at_least_one":true,
+            "tags":[{"type":"tag","begin":"<\uff5cDSML\uff5c invoke name=\"run\">\n",
+                "content":{"type":"json_schema","style":"deepseek_v4_1_xml",
+                    "any_order":false,"max_whitespace_cnt":4,"json_schema":)"
+                             + schema + R"(},
+                "end":"</\uff5cDSML\uff5c invoke>\n"}]},
+        "end":"</\uff5cDSML\uff5c calls>"}})"};
+}
+
+std::string v41ToolCall(const std::string& parameters, const std::string& name = "run") {
+    return "\n\n<\uff5cDSML\uff5c calls>\n<\uff5cDSML\uff5c invoke name=\"" + name + "\">\n" + parameters
+           + "\n</\uff5cDSML\uff5c invoke>\n</\uff5cDSML\uff5c calls>";
+}
+
+bool acceptsCompletion(const std::shared_ptr<xgrammar::CompiledGrammar>& compiled, const std::string& text) {
+    xgrammar::GrammarMatcher matcher(*compiled);
+    return matcher.AcceptString(text) && matcher.AcceptToken(0) && matcher.IsTerminated();
 }
 
 const char* kSimpleSchema = R"({"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]})";
@@ -404,6 +428,82 @@ TEST(XGrammarBackendCppTest, CompilesEveryGrammarTypeThroughThePool) {
     EXPECT_TRUE(backend->compileNow(GrammarKeyCpp{"ebnf", "root ::= \"a\""}).compiled);
     EXPECT_EQ(backend->stats().cache_size, 3);
     EXPECT_EQ(backend->stats().inflight, 0);
+}
+
+TEST(XGrammarBackendCppTest, DeepSeekV41XmlEnforcesTypedNestedRequiredAndNamedCalls) {
+    auto backend = makeBackend(baseOptions());
+    auto result  = backend->compileNow(v41ToolKey(R"({
+        "type":"object",
+        "properties":{
+            "city":{"type":"string"},
+            "n":{"type":"integer"},
+            "payload":{"type":"object","properties":{"code":{"type":"string","pattern":"^[A-Z]{2}$"}},
+                "required":["code"],"additionalProperties":false}},
+        "required":["city","n","payload"],"additionalProperties":false})"));
+    ASSERT_TRUE(result.compiled) << result.error_message;
+    EXPECT_FALSE(result.is_invalid);
+    EXPECT_FALSE(result.is_overloaded);
+
+    const std::string city =
+        "<\uff5cDSML\uff5c parameter name=\"city\" string=\"true\">Paris</\uff5cDSML\uff5c parameter>\n";
+    const std::string number =
+        "<\uff5cDSML\uff5c parameter name=\"n\" string=\"false\">42</\uff5cDSML\uff5c parameter>\n";
+    const auto payload = [](const std::string& value) {
+        return "<\uff5cDSML\uff5c parameter name=\"payload\" string=\"false\">" + value
+               + "</\uff5cDSML\uff5c parameter>";
+    };
+    const auto parameters = city + number + payload(R"({"code":"AB"})");
+    EXPECT_TRUE(acceptsCompletion(result.compiled, v41ToolCall(parameters)));
+
+    const std::vector<std::string> invalid = {
+        v41ToolCall(parameters, "other"),
+        v41ToolCall(number + payload(R"({"code":"AB"})")),
+        v41ToolCall(city + number + payload(R"({"code":"Ab"})")),
+        v41ToolCall(city + number + payload(R"({"code":42})")),
+        v41ToolCall(city + number + payload(R"({})")),
+        v41ToolCall(city + number + payload(R"({"code":"AB","extra":0})")),
+        v41ToolCall(city + "<\uff5cDSML\uff5c parameter name=\"n\" string=\"false\">1.5</\uff5cDSML\uff5c parameter>\n"
+                    + payload(R"({"code":"AB"})")),
+        v41ToolCall(city + "<\uff5cDSML\uff5c parameter name=\"n\" string=\"true\">42</\uff5cDSML\uff5c parameter>\n"
+                    + payload(R"({"code":"AB"})")),
+        v41ToolCall(parameters
+                    + "<\uff5cDSML\uff5c parameter name=\"extra\" string=\"false\">0</\uff5cDSML\uff5c parameter>"),
+        "\n\n<\uff5cDSML\uff5c calls>\n</\uff5cDSML\uff5c calls>",
+        "plain text",
+        "",
+    };
+    for (const auto& text : invalid) {
+        EXPECT_FALSE(acceptsCompletion(result.compiled, text)) << text;
+    }
+}
+
+TEST(XGrammarBackendCppTest, DeepSeekV41XmlRootConstUsesParameterEncoding) {
+    auto backend = makeBackend(baseOptions());
+    auto result  = backend->compileNow(v41ToolKey(R"({"const":{"city":"Paris"}})"));
+    ASSERT_TRUE(result.compiled) << result.error_message;
+    EXPECT_TRUE(acceptsCompletion(
+        result.compiled,
+        v41ToolCall("<\uff5cDSML\uff5c parameter name=\"city\" string=\"true\">Paris</\uff5cDSML\uff5c parameter>")));
+    EXPECT_FALSE(acceptsCompletion(result.compiled, v41ToolCall(R"({"city":"Paris"})")));
+    EXPECT_FALSE(acceptsCompletion(
+        result.compiled,
+        v41ToolCall("<\uff5cDSML\uff5c parameter name=\"city\" string=\"true\">London</\uff5cDSML\uff5c parameter>")));
+}
+
+TEST(XGrammarBackendCppTest, RejectsMisspelledDeepSeekV41XmlStyle) {
+    auto              backend = makeBackend(baseOptions());
+    auto              key     = v41ToolKey(R"({"type":"object"})");
+    const std::string style   = "deepseek_v4_1_xml";
+    const auto        pos     = key.key_string.find(style);
+    ASSERT_NE(pos, std::string::npos);
+    key.key_string.replace(pos, style.size(), "deepseek_v41_xml");
+
+    const auto result = backend->compileNow(key);
+    EXPECT_FALSE(result.compiled);
+    EXPECT_TRUE(result.is_invalid);
+    EXPECT_FALSE(result.is_overloaded);
+    EXPECT_FALSE(result.error_message.empty());
+    EXPECT_FALSE(backend->getCachedInvalid(key).empty());
 }
 
 TEST(XGrammarBackendCppTest, ClearDropsCachedVerdicts) {

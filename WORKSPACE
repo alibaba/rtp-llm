@@ -25,10 +25,10 @@ maybe(
     new_git_repository,
     name = "xgrammar",
     remote = "git@gitlab.alibaba-inc.com:foundation_models/xgrammar_github.git",
-    commit = "557becfb64c503ae9c04344b0047661f43f44320",  # v0.2.3
+    commit = "38b97c02062dea5e27bd3d0f456c5ca66676d923",  # DeepSeek V4.1 XML correctness and matcher fixes.
     init_submodules = False,
     patch_cmds = [
-        "git submodule update --init --depth=1 3rdparty/dlpack 3rdparty/picojson",
+        "git submodule update --init --depth=1 3rdparty/dlpack",
     ],
     build_file = "//3rdparty/xgrammar:xgrammar.BUILD",
 )
