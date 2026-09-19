@@ -20,6 +20,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
+    fill_fp8_kv_cache_scale,
     gather_cp_sharded_prefix_pool,
     generate_full_causal_kv_indices,
     generate_half_kv_indices,
@@ -28,6 +29,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_q_indices,
     plan_prefix_paged_attention,
 )
+from rtp_llm.ops import KvCacheDataType
 
 # ---------------------------------------------------------------------------
 # Reference helpers (independent of the code under test)
@@ -385,6 +387,62 @@ class TestGenerateHalfKvIndices(unittest.TestCase):
             hq = generate_half_q_indices(chunks)
             self.assertEqual(len(set(hk) & set(hq)), 0)
             self.assertEqual(sorted(hk + hq), list(range(sum(chunks))))
+
+
+class TestFillFp8KvCacheScale(unittest.TestCase):
+    """fill_fp8_kv_cache_scale must only touch head-partitioned scale slots."""
+
+    def _params(self, page_indice, per_batch_pages):
+        return SimpleNamespace(
+            decode_page_indptr_d=torch.tensor(
+                [sum(per_batch_pages[:i]) for i in range(len(per_batch_pages))],
+                dtype=torch.int32,
+            ),
+            page_indice_d=torch.tensor(page_indice, dtype=torch.int32),
+        )
+
+    def test_fills_head_partitioned_scale(self):
+        page_size, num_kv_heads = 128, 4
+        scale = torch.zeros(8, 2 * num_kv_heads * page_size)
+        kv_cache = SimpleNamespace(kv_scale_base=scale)
+        params = self._params(page_indice=list(range(8)), per_batch_pages=[2])
+        fill_fp8_kv_cache_scale(
+            kv_cache,
+            params,
+            batch_indices=torch.tensor([0, 0, 0, 0], dtype=torch.int32),
+            positions=torch.tensor([0, 1, 128, 129], dtype=torch.int32),
+            num_kv_heads=num_kv_heads,
+            page_size=page_size,
+            kv_cache_dtype=KvCacheDataType.FP8,
+        )
+        expected = torch.zeros(8, 2, num_kv_heads, page_size)
+        # page 0 -> block 0, page 1 -> block 1; local positions 0,1 on each
+        expected[0, :, :, 0] = 1.0
+        expected[0, :, :, 1] = 1.0
+        expected[1, :, :, 0] = 1.0
+        expected[1, :, :, 1] = 1.0
+        self.assertTrue(
+            torch.equal(scale.view(8, 2, num_kv_heads, page_size), expected)
+        )
+
+    def test_skips_indexer_side_region_stride(self):
+        """Hybrid MSA scale slots carry the indexer-K side region; never write them."""
+        page_size, num_kv_heads = 128, 4
+        for side_stride in (8192, 4224):
+            with self.subTest(side_stride=side_stride):
+                scale = torch.full((4, side_stride), 7.0)
+                kv_cache = SimpleNamespace(kv_scale_base=scale)
+                params = self._params(page_indice=list(range(4)), per_batch_pages=[1])
+                fill_fp8_kv_cache_scale(
+                    kv_cache,
+                    params,
+                    batch_indices=torch.tensor([0], dtype=torch.int32),
+                    positions=torch.tensor([0], dtype=torch.int32),
+                    num_kv_heads=num_kv_heads,
+                    page_size=page_size,
+                    kv_cache_dtype=KvCacheDataType.FP8,
+                )
+                self.assertTrue(torch.equal(scale, torch.full_like(scale, 7.0)))
 
 
 if __name__ == "__main__":

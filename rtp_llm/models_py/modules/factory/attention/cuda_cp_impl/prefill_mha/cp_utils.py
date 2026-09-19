@@ -139,6 +139,18 @@ def fill_fp8_kv_cache_scale(
     if scale_base is None or scale_base.numel() == 0 or positions.numel() == 0:
         return
 
+    if (
+        scale_base.dim() == 2
+        and int(scale_base.shape[1]) != 2 * num_kv_heads * page_size
+    ):
+        # Hybrid MSA pools (indexer_head_dim > 0) re-purpose the per-layer
+        # scale slot as the indexer-K side region: the per-block stride no
+        # longer matches the head-partitioned [2, heads, page] KV-scale layout
+        # this helper fills, and writing through the reshaped view would land
+        # inside the side region. Skip such pools; their FP8 K/V scale handling
+        # does not go through this slot.
+        return
+
     batch_indices_l = batch_indices.to(dtype=torch.long)
     positions_l = positions.to(dtype=torch.long)
     page_offsets = params.decode_page_indptr_d[batch_indices_l] + torch.div(
