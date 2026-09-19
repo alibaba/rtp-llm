@@ -11,6 +11,8 @@ from ._config import RtpKvMetaObjectClientConfig
 _MISSING_WHEEL_MESSAGE = (
     "KVCM EMB storage requires the kvcm_py_client wheel with KVMeta object support"
 )
+_INCOMPATIBLE_WHEEL_MESSAGE = "KVCM EMB storage requires KVMeta object API version 2"
+_REQUIRED_KVCM_OBJECT_API_VERSION = 2
 _TensorT = TypeVar("_TensorT")
 
 
@@ -18,9 +20,21 @@ def _load_kvcm_client_types() -> tuple[type[Any], type[Any]]:
     """Import the optional KVCM package only when a client is constructed."""
 
     try:
-        from kv_cache_manager.client import KvMetaObjectClient, KvMetaObjectClientConfig
+        from kv_cache_manager.client import (
+            KV_META_OBJECT_API_VERSION,
+            KvMetaObjectClient,
+            KvMetaObjectClientConfig,
+        )
     except ImportError as error:
         raise RuntimeError(_MISSING_WHEEL_MESSAGE) from error
+    # API v2 is the first capability level that includes the production
+    # lifecycle/Close contract used by this facade. Fail before registration
+    # rather than silently running an older, source-compatible but unsafe wheel.
+    if (
+        type(KV_META_OBJECT_API_VERSION) is not int
+        or KV_META_OBJECT_API_VERSION != _REQUIRED_KVCM_OBJECT_API_VERSION
+    ):
+        raise RuntimeError(_INCOMPATIBLE_WHEEL_MESSAGE)
     return KvMetaObjectClient, KvMetaObjectClientConfig
 
 

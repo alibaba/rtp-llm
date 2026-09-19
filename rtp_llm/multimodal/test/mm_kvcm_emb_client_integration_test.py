@@ -519,7 +519,7 @@ class RtpKvMetaObjectClientIntegrationTest(TestCase):
                 for path in wheel_files
             )
         )
-        self.assertEqual(KV_META_OBJECT_API_VERSION, 1)
+        self.assertEqual(KV_META_OBJECT_API_VERSION, 2)
         self.assertEqual(
             kvcm_py_client.KV_META_OBJECT_API_VERSION,
             KV_META_OBJECT_API_VERSION,
