@@ -199,24 +199,6 @@ final class MockPerformanceModel {
     // javadoc for the production speculative-decode anchor.
     private final int decodeReserveStep;
     boolean decodeReuseCache = true;
-    enum DecodeOutputKvRetention {
-        DISABLED,
-        UNIQUE_PER_REQUEST;
-
-        static DecodeOutputKvRetention parse(JsonNode node) {
-            if (node.isMissingNode() || node.isNull()) return DISABLED;
-            if (!node.isTextual()) {
-                throw new IllegalStateException("decode.output_kv_retention must be a string");
-            }
-            return switch (node.asText()) {
-                case "disabled" -> DISABLED;
-                case "unique_per_request" -> UNIQUE_PER_REQUEST;
-                default -> throw new IllegalStateException(
-                        "decode.output_kv_retention must be disabled or unique_per_request");
-            };
-        }
-    }
-    DecodeOutputKvRetention decodeOutputKvRetention = DecodeOutputKvRetention.DISABLED;
     boolean prefillGpuPrefixTree = true;
     boolean decodeGpuPrefixTree = true;
     Double decodeReserveBlockRatio; // Explicit percentage; null preserves legacy case rounding.
@@ -341,7 +323,6 @@ final class MockPerformanceModel {
         copy.eosModel = eosModel;
         copy.runtimeEosModel = runtimeEosModel;
         copy.decodeReuseCache = decodeReuseCache;
-        copy.decodeOutputKvRetention = decodeOutputKvRetention;
         copy.prefillGpuPrefixTree = prefillGpuPrefixTree;
         copy.decodeGpuPrefixTree = decodeGpuPrefixTree;
         copy.memoryCacheBlocks = memoryCacheBlocks;
@@ -463,8 +444,6 @@ final class MockPerformanceModel {
             }
             model.decodeReuseCache = decode.get("reuse_cache").booleanValue();
         }
-        model.decodeOutputKvRetention = DecodeOutputKvRetention.parse(
-                decode.path("output_kv_retention"));
         if (decode.has("reserve_block_ratio")) {
             JsonNode ratio = decode.get("reserve_block_ratio");
             double value = ratio.asDouble(Double.NaN);
@@ -591,58 +570,6 @@ final class MockPerformanceModel {
                 .outputLength(input, Math.max(1, outputLen), explicitOutputLength);
         return new RequestShape(input, inputLen, outputLen, List.copyOf(blockKeys),
                 hitTokens, hitBlocks, nativeKeys);
-    }
-
-    /**
-     * Keys retained by a successful decode. Production keeps KV for consumed
-     * generated tokens, while the final sampled token has no following forward
-     * pass and therefore no KV. The opt-in pessimistic model gives each request
-     * a deterministic synthetic continuation: it preserves physical eviction
-     * pressure without inventing cross-request output reuse.
-     */
-    List<Long> decodeCompletionBlockKeys(RequestShape shape) {
-        if (decodeOutputKvRetention == DecodeOutputKvRetention.DISABLED) {
-            return shape.blockKeys();
-        }
-        int consumedOutputTokens = Math.max(0, shape.outputLen() - 1);
-        int completeBlocks = (shape.inputLen() + consumedOutputTokens) / blockSize;
-        if (completeBlocks <= shape.blockKeys().size()) {
-            return shape.blockKeys();
-        }
-
-        List<Long> keys = new ArrayList<>(completeBlocks);
-        long hash = 0;
-        if (shape.nativeKeys() && shape.inputLen() == shape.input().getTokenIdsCount()) {
-            for (int i = 0; i < shape.inputLen(); i++) {
-                hash = rollCacheHash(hash, shape.input().getTokenIds(i));
-                if ((i + 1) % blockSize == 0) keys.add(hash);
-            }
-            for (int i = 0; i < consumedOutputTokens; i++) {
-                hash = rollCacheHash(hash, syntheticOutputToken(shape.input().getRequestId(), i));
-                if ((shape.inputLen() + i + 1) % blockSize == 0) keys.add(hash);
-            }
-        } else {
-            keys.addAll(shape.blockKeys());
-            hash = keys.isEmpty() ? 0 : keys.get(keys.size() - 1);
-            while (keys.size() < completeBlocks) {
-                hash = rollCacheHash(hash, syntheticOutputToken(
-                        shape.input().getRequestId(), keys.size()));
-                keys.add(hash);
-            }
-        }
-        return List.copyOf(keys.subList(0, Math.min(keys.size(), completeBlocks)));
-    }
-
-    private static long rollCacheHash(long hash, int token) {
-        return hash ^ ((long) token + 0x9e3779b97f4a7c15L
-                + (hash << 12) + (hash >> 32));
-    }
-
-    private static int syntheticOutputToken(long requestId, int outputIndex) {
-        long value = requestId + 0x9e3779b97f4a7c15L * (outputIndex + 1L);
-        value = (value ^ (value >>> 30)) * 0xbf58476d1ce4e5b9L;
-        value = (value ^ (value >>> 27)) * 0x94d049bb133111ebL;
-        return (int) (value ^ (value >>> 31));
     }
 
     void setEosModel(MockEosModel model) {
