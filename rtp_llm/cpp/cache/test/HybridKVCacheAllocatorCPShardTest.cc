@@ -303,6 +303,67 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocCpSize4) {
     EXPECT_EQ(batch_res->blocksNum(0, gid_full), 2);  // ceil(8/4)=2
 }
 
+TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseKeepsCompleteVirtualBlocksBeforePartialTail) {
+    struct Case {
+        int cp_size;
+        int seq_len;
+        int expected_reuse;
+    };
+    const std::vector<Case> cases = {
+        {1, 8, 4},
+        {1, 9, 8},
+        {2, 8, 0},
+        {2, 9, 8},
+        {2, 12, 8},
+        {2, 13, 8},
+        {2, 16, 8},
+        {4, 16, 0},
+        {4, 17, 16},
+        {4, 28, 16},
+        {4, 29, 16},
+        {4, 32, 16},
+    };
+    constexpr int spb = 4;
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(::testing::Message() << "cp=" << test_case.cp_size << " seq_len=" << test_case.seq_len);
+        auto config    = makeCPHybridConfig();
+        auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+        allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
+        ASSERT_TRUE(allocator->init());
+        CacheKeysType keys;
+        for (int i = 0; i < (test_case.seq_len + spb - 1) / spb; ++i) {
+            keys.push_back(100 + i);
+        }
+        CacheKeysType canonical_keys;
+        for (int i = test_case.cp_size - 1; i < static_cast<int>(keys.size()); i += test_case.cp_size) {
+            canonical_keys.push_back(keys[i]);
+        }
+        // Seed even a final partial key to prove that sequence length, rather
+        // than a cache miss, excludes incomplete or fully consumed prefixes.
+        auto full_blocks  = seedCache(allocator->getBlockPool(), allocator->sharedBlockCache(), 2, 1, canonical_keys);
+        auto state_blocks = seedCache(allocator->getBlockPool(), allocator->sharedBlockCache(), 2, 0, canonical_keys);
+        auto res          = makeBatchRes(1, 2, static_cast<int>(config.layer_all_num), config.layer_to_group_id, keys);
+        auto tokens       = makeTokens(1, test_case.seq_len, spb);
+        MallocInfo info{res, tokens};
+        info.cp_slot_mapper               = std::make_shared<CPSlotMapper>(0, test_case.cp_size, spb);
+        info.enable_remove_skipped_blocks = false;
+        const auto result                 = allocator->malloc(info);
+        ASSERT_TRUE(result.success);
+        ASSERT_EQ(result.reuse_len, test_case.expected_reuse);
+        EXPECT_LT(result.reuse_len, test_case.seq_len);
+        const int reused_blocks = test_case.expected_reuse / (spb * test_case.cp_size);
+        EXPECT_EQ(res->cacheResource(0).deviceReuseBlockNum(), reused_blocks);
+        for (int i = 0; i < reused_blocks; ++i) {
+            EXPECT_EQ(res->blocks(0, 1)[i], full_blocks[i]);
+        }
+        if (reused_blocks > 0) {
+            EXPECT_EQ(res->blocks(0, 0)[test_case.expected_reuse / spb - 1], state_blocks[reused_blocks - 1]);
+        }
+        allocator->free(FreeInfo{res, tokens});
+        EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
+    }
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

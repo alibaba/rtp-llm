@@ -32,6 +32,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm::test {
 
@@ -199,6 +200,14 @@ public:
     const std::vector<int64_t>& tokens() const override {
         return tokens_;
     }
+
+    bool isValidReuseBlockCount(size_t block_count) const override {
+        return !complete_token_ids_
+               || complete_token_ids_->isValidReuseLength(static_cast<int>(block_count) * reuse_block_tokens_);
+    }
+
+    CompleteTokenIdsPtr complete_token_ids_;
+    int                 reuse_block_tokens_ = 1;
 
 private:
     bool                 enable_memory_cache_{false};
@@ -1801,6 +1810,167 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatchPrefixStopsWhenRequiredStateSwaMiss
     EXPECT_TRUE(match_ctx->done());
     EXPECT_TRUE(match_ctx->success());
     EXPECT_EQ(match_ctx->matchedBlockCount(), 1u);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncMatchImageBoundariesPreserveSnapshotsAndContiguousPrefix) {
+    struct Case {
+        const char*                      name;
+        std::vector<std::pair<int, int>> images;
+        int                              cp_size;
+        int                              cached_blocks;
+        int                              device_blocks;
+        int                              expected_blocks;
+        int                              missing_key   = -1;
+        int                              missing_state = -1;
+    };
+    const std::vector<Case> cases = {
+        {"inside_image_keeps_device_prefix", {{730, 1724}}, 4, 3, 1, 1},
+        {"inside_image_selects_earlier_snapshot", {{730, 1724}}, 4, 3, 0, 1},
+        {"after_image", {{730, 1724}}, 4, 4, 1, 4},
+        {"at_image_end", {{730, 1536}}, 4, 3, 1, 3},
+        {"adjacent_images", {{300, 730}, {730, 1724}}, 4, 3, 0, 0},
+        {"between_adjacent_images", {{730, 1024}, {1024, 1724}}, 4, 2, 1, 2},
+        {"missing_key_inside_image", {{730, 1724}}, 4, 4, 1, 1, 1},
+        {"missing_state_at_legal_end", {{730, 1724}}, 4, 4, 1, 1, -1, 3},
+        {"text_only", {}, 4, 3, 1, 3},
+        {"non_cp_inside_image", {{730, 1724}}, 1, 12, 1, 5},
+    };
+    for (bool prefix_tree : {false, true}) {
+        SCOPED_TRACE(prefix_tree ? "prefix_tree" : "legacy");
+        for (const auto& test_case : cases) {
+            SCOPED_TRACE(test_case.name);
+            auto cfg                               = createDsv4TypedConnectorConfig();
+            auto kv_cfg                            = kv_cache_config_;
+            kv_cfg.memory_cache_size_mb            = 1;
+            kv_cfg.enable_prefix_tree_memory_cache = prefix_tree;
+            kv_cfg.enable_memory_cache_disk        = false;
+            auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+            ASSERT_TRUE(conn->init());
+            ASSERT_EQ(conn->usePrefixTreeMemoryCache(), prefix_tree);
+            const auto slots        = conn->layerRegionSlots();
+            const int  block_tokens = cfg.seq_size_per_block * test_case.cp_size;
+
+            auto resource = std::make_shared<KVCacheResource>();
+            for (int i = 0; i <= test_case.cached_blocks; ++i) {
+                resource->cacheKeys().push_back(85000 + i);
+            }
+            resource->initGroups(
+                7, cfg.layer_all_num, cfg.layer_to_group_id, 1, cfg.group_types, cfg.layer_region_to_group_id);
+            for (const auto& slot : slots) {
+                BlockIndicesType blocks;
+                for (int i = 0; i <= test_case.cached_blocks; ++i) {
+                    blocks.push_back(100 + 10 * i + slot.group_id);
+                }
+                resource->mutableBlockIds(slot.layer_id, slot.region_name).assign(std::move(blocks));
+            }
+            resource->setDeviceReuseBlockNum(test_case.device_blocks);
+            resource->setLastBlockAligned(false);
+            resource->ensureLinearBlockDependencies();
+            const auto  layer_blocks = conn->resourceLayerRegionBlocks(*resource, slots);
+            const auto& keys         = resource->cacheKeys();
+            for (int i = 0; i < test_case.cached_blocks; ++i) {
+                if (prefix_tree) {
+                    for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+                        if ((i == test_case.missing_key && kind == CacheBlockKind::COMPRESSED_KV)
+                            || (i == test_case.missing_state && kind == CacheBlockKind::STATE_SWA_KV)) {
+                            continue;
+                        }
+                        auto pool = conn->memoryPoolFor(kind);
+                        ASSERT_NE(pool, nullptr);
+                        auto blocks = pool->malloc(1);
+                        ASSERT_EQ(blocks.size(), 1u);
+                        PrefixTreeMemoryBlockCache::CacheItem item;
+                        item.cache_key       = keys[i];
+                        item.kind            = kind;
+                        item.backing_type    = CacheBackingType::MEMORY;
+                        item.block_index     = blocks[0];
+                        item.block_size      = conn->prefixKindBlockSize(kind, slots);
+                        item.slot_valid_mask = conn->prefixSlotValidMask(layer_blocks, slots, i, kind);
+                        ASSERT_TRUE(
+                            conn->prefix_block_cache_->putCommitted(keys[i], resource->blockDependencies()[i], item)
+                                .first);
+                        conn->referencePrefixCacheBacking(item);
+                        pool->requestFree(blocks);
+                    }
+                } else if (i != test_case.missing_key) {
+                    const bool complete = i != test_case.missing_state;
+                    auto       pool     = conn->memoryPoolFor(blockKindFromComplete(complete));
+                    ASSERT_NE(pool, nullptr);
+                    auto blocks = pool->malloc(1);
+                    ASSERT_EQ(blocks.size(), 1u);
+                    MemoryBlockCache::CacheItem item;
+                    item.cache_key   = keys[i];
+                    item.block_index = blocks[0];
+                    item.block_size  = complete ? conn->complete_block_size_ : conn->incomplete_block_size_;
+                    item.is_complete = complete;
+                    conn->block_cache_->put(item);
+                    pool->blockCacheReference(blocks);
+                    pool->requestFree(blocks);
+                }
+            }
+
+            auto images = std::make_shared<V41RequestInputs>();
+            for (const auto& span : test_case.images) {
+                V41ImageInput image;
+                image.start = span.first;
+                image.types = torch::zeros({span.second - span.first}, torch::kInt32);
+                images->images.push_back(std::move(image));
+            }
+            auto input                = std::make_shared<GenerateInput>();
+            input->input_ids          = torch::zeros({2560}, torch::kInt32);
+            input->generate_config    = std::make_shared<GenerateConfig>();
+            input->v41_inputs         = images;
+            auto meta                 = std::make_shared<TestReadMeta>(true);
+            meta->complete_token_ids_ = std::make_shared<CompleteTokenIds>(1, 1, 2560, cfg.seq_size_per_block);
+            meta->complete_token_ids_->init(input);
+            meta->reuse_block_tokens_ = block_tokens;
+
+            {
+                auto match = conn->asyncMatch(resource, meta);
+                if (test_case.expected_blocks == test_case.device_blocks) {
+                    EXPECT_EQ(match, nullptr);
+                } else {
+                    ASSERT_NE(match, nullptr);
+                    EXPECT_EQ(match->matchedBlockCount(), test_case.expected_blocks);
+                    auto memory_match = std::dynamic_pointer_cast<MemoryAsyncMatchContext>(match);
+                    ASSERT_NE(memory_match, nullptr);
+                    EXPECT_EQ(memory_match->startReadBlockIndex(), test_case.device_blocks);
+                    EXPECT_EQ(memory_match->readBlockNum(), test_case.expected_blocks - test_case.device_blocks);
+                    auto plan =
+                        std::static_pointer_cast<KVCacheMemoryConnector::CopyPlan>(memory_match->readCopyPlan());
+                    ASSERT_NE(plan, nullptr);
+                    ASSERT_FALSE(plan->copy_infos.empty());
+                    EXPECT_EQ(plan->copy_infos.back().cache_key, keys[test_case.expected_blocks - 1]);
+                    if (prefix_tree) {
+                        EXPECT_EQ(plan->copy_infos.back().kind, CacheBlockKind::STATE_SWA_KV);
+                    } else {
+                        EXPECT_TRUE(plan->copy_infos.back().is_complete);
+                    }
+                    for (const auto& copy : plan->copy_infos) {
+                        ASSERT_GE(copy.cache_key, keys[test_case.device_blocks]);
+                        ASSERT_LE(copy.cache_key, keys[test_case.expected_blocks - 1]);
+                        const size_t key_index = static_cast<size_t>(copy.cache_key - keys.front());
+                        ASSERT_EQ(copy.gpu_blocks.size(), slots.size());
+                        for (size_t slot = 0; slot < slots.size(); ++slot) {
+                            EXPECT_EQ(copy.gpu_blocks[slot],
+                                      layer_blocks[slots[slot].layer_id][static_cast<size_t>(slots[slot].region_name)]
+                                          ->blocks()[key_index]);
+                        }
+                    }
+                }
+                EXPECT_EQ(resource->reuseBlockNum(), test_case.device_blocks);
+            }
+            for (auto kind : {CacheBlockKind::COMPLETE,
+                              CacheBlockKind::INCOMPLETE,
+                              CacheBlockKind::COMPRESSED_KV,
+                              CacheBlockKind::STATE_SWA_KV}) {
+                auto pool = conn->memoryPoolFor(kind);
+                if (pool) {
+                    EXPECT_EQ(pool->requestRefBlocksNum(), 0u);
+                }
+            }
+        }
+    }
 }
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots) {

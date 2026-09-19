@@ -1,4 +1,5 @@
 import base64
+import binascii
 import hashlib
 import importlib.util
 import io
@@ -28,7 +29,6 @@ from rtp_llm.models.multimodal.deepseek_v41_processor import (
     plan_image_grid,
     prepare_vl_inputs,
     preprocess_image,
-    validate_complete_image_chunks,
 )
 
 PROCESSOR_SHA256 = "482759e3bcc4e9bb5ee582b244cc563f5d0e163d8b48dda91ebb7106e62f9272"
@@ -179,6 +179,10 @@ class V41ProcessorTest(TestCase):
         self.assertTrue(
             torch.equal(actual.image_mask, torch.tensor(expected[1]) != TEXT)
         )
+        self.assertEqual(
+            actual.image_content_hashes,
+            tuple(hashlib.sha256(record["data"]).hexdigest() for record in records),
+        )
         for image, other in zip(actual.images, expected[2]):
             self.assertEqual(
                 (image.start, image.n_vit_h, image.n_vit_w),
@@ -186,6 +190,7 @@ class V41ProcessorTest(TestCase):
             )
             self.assertTrue(torch.equal(image.patches, other.patches))
             self.assertTrue(torch.equal(image.types, other.types))
+            self.assertEqual(image.processor_identity, self.config.identity)
             self.assertEqual(
                 set(actual.token_ids[image.start : image.start + image.length]),
                 {129264},
@@ -208,29 +213,75 @@ class V41ProcessorTest(TestCase):
             actual.image_content_hashes, different_pixels.image_content_hashes
         )
 
-    def test_global_chunks_and_context_budget(self):
+    def test_append_text_preserves_image_spans_and_identity(self):
         prompt = f"prefix {IMAGE_PLACEHOLDER} suffix"
         records = [{"data": image_data(41, 83)}]
         prepared = prepare_vl_inputs(prompt, records, self.tokenizer, self.config)
-        image = prepared.images[0]
-        validate_complete_image_chunks(0, image.start, prepared.images)
-        validate_complete_image_chunks(
-            image.start, image.start + image.length, prepared.images
+        suffix = " added text"
+        suffix_tokens = tuple(self.tokenizer.encode(suffix))
+        appended = prepared.append_text(suffix, iter(suffix_tokens))
+        self.assertEqual(appended.prompt, prompt + suffix)
+        self.assertEqual(appended.token_ids, prepared.token_ids + suffix_tokens)
+        self.assertEqual(
+            appended.token_types, prepared.token_types + (TEXT,) * len(suffix_tokens)
         )
-        with self.assertRaisesRegex(ValueError, "must not split"):
-            validate_complete_image_chunks(
-                image.start + 1, len(prepared.token_ids), prepared.images
+        self.assertIs(appended.images, prepared.images)
+        self.assertEqual(appended.image_content_hashes, prepared.image_content_hashes)
+        self.assertTrue(
+            torch.equal(
+                appended.image_mask[: len(prepared.token_ids)], prepared.image_mask
             )
-        with self.assertRaisesRegex(ValueError, "context limit"):
+        )
+        self.assertFalse(appended.image_mask[len(prepared.token_ids) :].any())
+        self.assertEqual(prepared.prompt, prompt)
+
+    def test_preparation_leaves_context_budget_to_generation(self):
+        config = replace(self.config, max_seq_len=1)
+        for prompt, records in (
+            ("text request", []),
+            (f"prefix {IMAGE_PLACEHOLDER} suffix", [{"data": image_data(41, 83)}]),
+        ):
+            with self.subTest(prompt=prompt):
+                expected = prepare_vl_inputs(prompt, records, self.tokenizer, config)
+                actual = prepare_vl_inputs(
+                    prompt,
+                    records,
+                    self.tokenizer,
+                    config,
+                    output_budget=1048576,
+                )
+                self.assertGreater(len(actual.token_ids), config.max_seq_len)
+                self.assertEqual(actual.token_ids, expected.token_ids)
+                self.assertEqual(actual.token_types, expected.token_types)
+                self.assertEqual(
+                    actual.image_content_hashes, expected.image_content_hashes
+                )
+                self.assertEqual(
+                    tuple(image.processor_identity for image in actual.images),
+                    tuple(image.processor_identity for image in expected.images),
+                )
+
+    def test_invalid_image_records_still_report_parse_errors(self):
+        prompt = f"prefix {IMAGE_PLACEHOLDER} suffix"
+        record = {"data": image_data(3, 5)}
+        for text, records in (
+            (prompt, []),
+            (prompt, [record, record]),
+            ("no image placeholder", [record]),
+        ):
+            with self.subTest(text=text, count=len(records)):
+                with self.assertRaisesRegex(ValueError, "placeholder count"):
+                    prepare_vl_inputs(text, records, self.tokenizer, self.config)
+        with self.assertRaisesRegex(ValueError, "invalid or damaged"):
             prepare_vl_inputs(
-                prompt,
-                records,
-                self.tokenizer,
-                replace(self.config, max_seq_len=len(prepared.token_ids) + 255),
-                output_budget=256,
+                prompt, [{"data": b"not an image"}], self.tokenizer, self.config
             )
-        with self.assertRaisesRegex(ValueError, "placeholder count"):
-            prepare_vl_inputs(prompt, [], self.tokenizer, self.config)
+        with self.assertRaisesRegex(ValueError, "no supported data or URL"):
+            load_image_bytes({})
+        with self.assertRaisesRegex(ValueError, "require base64"):
+            load_image_bytes({"url": "data:image/png,plain-text"})
+        with self.assertRaises(binascii.Error):
+            load_image_bytes({"data": "!invalid-base64!"})
 
     def test_data_records_are_equivalent(self):
         data = image_data(3, 5)

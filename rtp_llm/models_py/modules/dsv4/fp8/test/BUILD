@@ -166,7 +166,8 @@ py_test(
     name = "test_v41_fp4_codec",
     srcs = ["test_v41_fp4_codec.py"],
     deps = _DSV4_FP8_TEST_DEPS,
-    tags = ["requires-dsv41-weights"],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
     timeout = "moderate",
 )
 

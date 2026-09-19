@@ -42,6 +42,7 @@ protected:
 
     int reuseCache(const CacheKeysType&                 cache_keys,
                    BatchKVCacheResource&                kv_resource,
+                   const CompleteTokenIds&              complete_token_ids,
                    const std::shared_ptr<CPSlotMapper>& cp_mapper);
 
     virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const = 0;

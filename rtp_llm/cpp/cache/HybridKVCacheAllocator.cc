@@ -101,13 +101,15 @@ HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&               
 
 int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
                                        BatchKVCacheResource&                kv_resource,
+                                       const CompleteTokenIds&              complete_token_ids,
                                        const std::shared_ptr<CPSlotMapper>& cp_mapper) {
     // Under cp shard, FULL groups index block_ids by cp-virtual-block units
     // (one entry covers cp_size physical blocks). LINEAR/SWA groups index by
     // raw block_size logical blocks. So when populating tail blocks for
     // LINEAR/SWA we need to scale the array length and matched-block position
     // back to the logical-block coordinate system.
-    const int                     cp_scale = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
+    const int reuse_unit_tokens = cpVirtualBlockSizeForGroup(cp_mapper, CacheGroupType::FULL, seqSizePerBlock());
+    const int cp_scale          = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     int                           min_full_reuse_blocks = static_cast<int>(cache_keys.size());
     std::vector<BlockIndicesType> full_matched_blocks(kv_cache_groups_.size());
 
@@ -120,8 +122,12 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     int                           pos = min_full_reuse_blocks - 1;
     std::vector<BlockIdxType>     linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
     std::vector<BlockIndicesType> swa_tail_blocks(swa_group_ids_.size());
-    const bool                    has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
-    for (; pos >= 0 && has_tail_groups; --pos) {
+    for (; pos >= 0; --pos) {
+        // Select a legal image boundary before restoring any group's snapshot.
+        // CP candidates are virtual blocks; a physical-block rewind can have no matching tail state.
+        if (!complete_token_ids.isValidReuseLength((pos + 1) * reuse_unit_tokens)) {
+            continue;
+        }
         bool                          all_tail_groups_matched = true;
         std::vector<BlockIdxType>     candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
         std::vector<BlockIndicesType> candidate_swa_tail_blocks(swa_group_ids_.size());
@@ -160,7 +166,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         }
     }
 
-    const int reuse_blocks_len = has_tail_groups ? std::max(pos + 1, 0) : std::max(min_full_reuse_blocks, 0);
+    const int reuse_blocks_len = std::max(pos + 1, 0);
     if (reuse_blocks_len <= 0) {
         return 0;
     }
@@ -222,12 +228,13 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
 
     if (malloc_info.enable_device_cache) {
         // CP-sharded: subsample to last-rank canonical key namespace before matching.
-        CacheKeysType cp_keys = cpEffectiveCacheKeys(cp_mapper, cache_keys);
-        // Always drop the last match key. It may be a partial tail; even when
-        // aligned, fully reusing the input leaves no prefill tokens to compute.
-        CacheKeysType match_keys(cp_keys.begin(), cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1);
-        auto          begin_us = currentTimeUs();
-        reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
+        CacheKeysType match_keys = cpEffectiveCacheKeys(cp_mapper, cache_keys);
+        // CP subsampling may already exclude the partial tail. Keep every complete
+        // virtual block that still leaves at least one token for prefill.
+        const size_t max_reuse_blocks = static_cast<size_t>(std::max(seq_len - 1, 0) / reuse_unit_tokens);
+        match_keys.resize(std::min(match_keys.size(), max_reuse_blocks));
+        auto begin_us          = currentTimeUs();
+        reuse_blocks           = reuseCache(match_keys, *kv_resource, *malloc_info.complete_token_ids, cp_mapper);
         match_cost_time_us     = currentTimeUs() - begin_us;
 
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {

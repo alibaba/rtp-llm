@@ -24,11 +24,13 @@ public:
             /*layer_num=*/3, /*block_num=*/9, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
     }
 
-    GenerateStreamPtr createContextStream(std::vector<int> input_ids) {
+    GenerateStreamPtr createContextStream(std::vector<int>                        input_ids,
+                                          std::shared_ptr<const V41RequestInputs> v41_inputs = nullptr) {
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         ResourceContext                 resource_context;
         generate_input->generate_config = generate_config;
+        generate_input->v41_inputs      = std::move(v41_inputs);
         generate_input->input_ids =
             torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
         return std::make_shared<NormalGenerateStream>(
@@ -107,6 +109,58 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     // flip back to true and verify
     stream->generate_input_->generate_config->reuse_cache = true;
     ASSERT_TRUE(stream->reuseCache());
+}
+
+TEST_F(GenerateStreamTest, testImageReuseBoundariesFollowTokenView) {
+    auto          images = std::make_shared<V41RequestInputs>();
+    V41ImageInput first;
+    first.start = 3;
+    first.types = torch::zeros({4}, torch::kInt32);
+    V41ImageInput second;
+    second.start   = 7;
+    second.types   = torch::zeros({3}, torch::kInt32);
+    images->images = {first, second};
+    auto builder   = GenerateStreamBuilder();
+    auto stream    = builder.createContextStream(std::vector<int>(12, 1), images);
+    auto tokens    = stream->completeTokenIdsPtr();
+    for (int boundary : {0, 3, 7, 10, 12}) {
+        EXPECT_TRUE(tokens->isValidReuseLength(boundary)) << boundary;
+    }
+    for (int boundary : {4, 6, 8, 9}) {
+        EXPECT_FALSE(tokens->isValidReuseLength(boundary)) << boundary;
+    }
+    CompleteTokenIds shifted(*tokens, /*share=*/true, /*shift_token_num=*/2);
+    CompleteTokenIds copied(shifted);
+    for (const auto* view : {&shifted, &copied}) {
+        EXPECT_TRUE(view->isValidReuseLength(1));
+        EXPECT_FALSE(view->isValidReuseLength(2));
+        EXPECT_TRUE(view->isValidReuseLength(5));
+        EXPECT_FALSE(view->isValidReuseLength(6));
+        EXPECT_TRUE(view->isValidReuseLength(8));
+    }
+    auto text_stream = builder.createContextStream(std::vector<int>(12, 1));
+    EXPECT_TRUE(text_stream->completeTokenIdsPtr()->isValidReuseLength(4));
+}
+
+TEST_F(GenerateStreamTest, testSetReuseLengthDoesNotRewindRestoredCache) {
+    auto          images = std::make_shared<V41RequestInputs>();
+    V41ImageInput image;
+    image.start = 730;
+    image.types = torch::zeros({994}, torch::kInt32);
+    images->images.push_back(image);
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream(std::vector<int>(2048, 1), images);
+    // Boundary legality belongs to snapshot selection. The stream must preserve
+    // the supplied execution position and keep all reuse counters consistent.
+    for (int boundary : {512, 1536, 1792}) {
+        stream->setReuseLength(boundary);
+        stream->setInitialReuseLength(boundary);
+        stream->setLocalReuseLength(boundary);
+        EXPECT_EQ(stream->reuseLength(), boundary);
+        EXPECT_EQ(stream->initialReuseLength(), boundary);
+        EXPECT_EQ(stream->localReuseLength(), boundary);
+        EXPECT_EQ(stream->deviceReuseLength(), boundary);
+    }
 }
 
 TEST_F(GenerateStreamTest, testInitialReuseLengthMustBeLessThanSeqLength) {

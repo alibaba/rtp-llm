@@ -94,6 +94,20 @@ std::vector<int32_t> CompleteTokenIds::imageCacheIdentity(int begin, int count) 
     return result;
 }
 
+bool CompleteTokenIds::isValidReuseLength(int reuse_length) const {
+    if (!v41_inputs_) {
+        return true;
+    }
+    for (const auto& image : v41_inputs_->images) {
+        const int64_t start = image.start - canonical_offset_;
+        const int64_t end   = start + image.types.numel();
+        if (reuse_length > start && reuse_length < end) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int CompleteTokenIds::maxBatchSize() {
     return max_batch_size_;
 }

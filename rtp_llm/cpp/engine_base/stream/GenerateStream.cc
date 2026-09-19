@@ -406,23 +406,6 @@ int GenerateStream::initialReuseLength() const {
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
-    if (generate_input_->v41_inputs && reuse_length_ > 0) {
-        // V4.1 image spans must stay whole across the reuse boundary: a
-        // straddling image's ViT feature rows are not re-computable from the
-        // partial context. Round the boundary down to the enclosing KV block
-        // so the reused prefix stays block-aligned. Iterate in reverse and
-        // keep rounding: an earlier image may straddle the rounded-down
-        // boundary (image1[10,200), image2[200,390), reuse=256 -> 192 would
-        // otherwise re-split image1).
-        const int block = std::max(1, seqSizePerBlock());
-        for (auto it = generate_input_->v41_inputs->images.rbegin();
-             it != generate_input_->v41_inputs->images.rend(); ++it) {
-            const int64_t end = static_cast<int64_t>(it->start) + it->types.numel();
-            if (reuse_length_ > it->start && reuse_length_ < end) {
-                reuse_length_ = static_cast<int>(it->start) / block * block;
-            }
-        }
-    }
     if (generate_input_->mm_locs) {
         auto& locs      = generate_input_->mm_locs.value();
         auto* locs_data = locs.data_ptr<int32_t>();

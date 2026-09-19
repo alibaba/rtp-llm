@@ -5,6 +5,7 @@
 #include <memory>
 #include <stdexcept>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -17,6 +18,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -175,7 +177,10 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     return config;
 }
 
-static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block) {
+static CompleteTokenIdsPtr makeCompleteTokenIds(int                                     batch_size,
+                                                int                                     seq_length,
+                                                int                                     seq_size_per_block,
+                                                std::shared_ptr<const V41RequestInputs> v41_inputs = nullptr) {
     auto  cti        = std::make_shared<CompleteTokenIds>(batch_size, batch_size, seq_length + 64, seq_size_per_block);
     auto  input_ids  = torch::empty({(int64_t)seq_length}, torch::kInt32);
     auto* token_data = input_ids.data_ptr<int32_t>();
@@ -185,6 +190,7 @@ static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, 
     auto gi             = std::make_shared<GenerateInput>();
     gi->input_ids       = input_ids;
     gi->generate_config = std::make_shared<GenerateConfig>();
+    gi->v41_inputs      = std::move(v41_inputs);
     cti->init(gi);
     return cti;
 }
@@ -1355,6 +1361,132 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
 
     FreeInfo hit_free{hit_res, hit_tokens};
     allocator->free(hit_free);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, ImageReuseSelectsMatchingSnapshotsBeforeRestore) {
+    struct Case {
+        const char*                      name;
+        std::vector<std::pair<int, int>> images;
+        int                              cp_size;
+        int                              cached_tokens;
+        int                              missing_swa_tokens;
+        int                              expected_reuse;
+        bool                             change_content = false;
+    };
+    const std::vector<Case> cases = {
+        {"cp4_inside_image", {{730, 1724}}, 4, 1536, 0, 512},
+        {"cp4_adjacent_images", {{300, 730}, {730, 1724}}, 4, 1536, 0, 0},
+        {"cp4_after_image", {{730, 1724}}, 4, 2048, 0, 2048},
+        {"cp4_after_image_snapshot_missing", {{730, 1724}}, 4, 2048, 2048, 512},
+        {"cp4_at_image_end", {{730, 1536}}, 4, 1536, 0, 1536},
+        {"cp4_between_adjacent_images", {{730, 1024}, {1024, 1724}}, 4, 1024, 0, 1024},
+        {"cp4_missing_legal_snapshot", {{1250, 1724}}, 4, 1536, 1024, 512},
+        {"cp4_no_legal_snapshot", {{730, 1724}}, 4, 1536, 512, 0},
+        {"cp4_changed_image_content", {{730, 1724}}, 4, 2048, 0, 512, true},
+        {"non_cp_inside_image", {{730, 1724}}, 1, 1536, 0, 640},
+        {"non_cp_adjacent_images", {{300, 730}, {730, 1724}}, 1, 1536, 0, 256},
+    };
+    constexpr int spb     = 128;
+    constexpr int seq_len = 2560;
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        ParallelismConfig pc;
+        pc.role_type                          = RoleType::PREFILL;
+        pc.tp_size                            = test_case.cp_size;
+        pc.prefill_cp_config.kv_cache_sharded = test_case.cp_size > 1;
+        KVCacheConfig kv_config;
+        kv_config.seq_size_per_block     = spb;
+        kv_config.dsv4_fixed_pool_blocks = 64;
+        auto config      = HybridPoolConfigCreator::createConfig(makeTinyDSV4ModelConfig(), pc, kv_config, false, 0);
+        config.block_num = 64;
+        auto allocator   = makeAllocator(config, RoleType::PREFILL);
+        auto cp_mapper   = std::make_shared<CPSlotMapper>(0, test_case.cp_size, spb);
+        allocator->setCPSlotMapper(cp_mapper);
+        ASSERT_TRUE(allocator->init());
+        const int reuse_unit    = spb * test_case.cp_size;
+        const int cached_blocks = test_case.cached_tokens / reuse_unit;
+        const int reuse_blocks  = test_case.expected_reuse / reuse_unit;
+
+        auto images = std::make_shared<V41RequestInputs>();
+        for (const auto& span : test_case.images) {
+            V41ImageInput image;
+            image.start              = span.first;
+            image.types              = torch::zeros({span.second - span.first}, torch::kInt32);
+            image.n_vit_h            = 1;
+            image.n_vit_w            = 1;
+            image.content_sha256     = std::string(64, 'a');
+            image.processor_identity = std::string(64, 'b');
+            images->images.push_back(std::move(image));
+        }
+        auto seed_tokens = makeCompleteTokenIds(1, seq_len, spb, images);
+        auto seed_res    = makeBatchResource(1, config);
+        initCacheKeys(seed_res, seed_tokens, spb);
+
+        // Distinct block IDs identify the snapshot at each candidate boundary.
+        std::vector<BlockIndicesType> snapshots(config.groupNums(), BlockIndicesType(cached_blocks, NULL_BLOCK_IDX));
+        for (int gid = 0; gid < config.groupNums(); ++gid) {
+            if (skipReuseCacheRegion(config.group_region_names[gid])) {
+                continue;
+            }
+            for (int i = 0; i < cached_blocks; ++i) {
+                if (config.group_region_names[gid] == KVCacheRegionName::SWA_KV
+                    && (i + 1) * reuse_unit == test_case.missing_swa_tokens) {
+                    continue;
+                }
+                const auto key    = seed_res->cacheKeys(0)[(i + 1) * test_case.cp_size - 1];
+                snapshots[gid][i] = seedNonResidentCacheItem(allocator, gid, key);
+            }
+        }
+        const auto counters_before = snapshotPoolCounters(allocator);
+
+        auto request_images = std::make_shared<V41RequestInputs>(*images);
+        if (test_case.change_content) {
+            request_images->images[0].content_sha256 = std::string(64, 'c');
+        }
+        auto tokens = makeCompleteTokenIds(1, seq_len, spb, request_images);
+        auto res    = makeBatchResource(1, config);
+        initCacheKeys(res, tokens, spb);
+        if (test_case.change_content) {
+            EXPECT_EQ(res->cacheKeys(0)[3], seed_res->cacheKeys(0)[3]);
+            EXPECT_NE(res->cacheKeys(0)[7], seed_res->cacheKeys(0)[7]);
+        } else {
+            EXPECT_EQ(res->cacheKeys(0), seed_res->cacheKeys(0));
+        }
+
+        MallocInfo info{res, tokens};
+        info.reuse_cache                  = true;
+        info.enable_device_cache          = true;
+        info.cp_slot_mapper               = cp_mapper;
+        info.enable_remove_skipped_blocks = false;
+        const auto result                 = allocator->malloc(info);
+        ASSERT_TRUE(result.success);
+        ASSERT_EQ(result.reuse_len, test_case.expected_reuse);
+        EXPECT_EQ(res->cacheResource(0).deviceReuseBlockNum(), reuse_blocks);
+
+        for (int gid = 0; gid < config.groupNums(); ++gid) {
+            SCOPED_TRACE(gid);
+            const bool  is_full = config.group_types[gid] == CacheGroupType::FULL;
+            const bool  skip    = skipReuseCacheRegion(config.group_region_names[gid]);
+            const auto& blocks  = res->blocks(0, gid);
+            // CP4 fixed/SWA rows and FULL blocks both cover 512 canonical tokens.
+            ASSERT_EQ(blocks.size(), seq_len / reuse_unit);
+            for (int i = 0; i < reuse_blocks; ++i) {
+                const auto expected = !skip && (is_full || i == reuse_blocks - 1) ? snapshots[gid][i] : NULL_BLOCK_IDX;
+                EXPECT_EQ(blocks[i], expected) << "reused row=" << i;
+            }
+            const auto& pool = allocator->groupBlockPools()[gid];
+            for (int i = 0; i < cached_blocks; ++i) {
+                if (isNullBlockIdx(snapshots[gid][i])) {
+                    continue;
+                }
+                const bool selected = i < reuse_blocks && (is_full || i == reuse_blocks - 1);
+                EXPECT_EQ(pool->request_ref_counter_.getRefCounter(snapshots[gid][i]), selected ? 1 : 0)
+                    << "snapshot=" << i;
+            }
+        }
+        allocator->free(FreeInfo{res, tokens});
+        expectPoolCountersEq(allocator, counters_before);
+    }
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResource) {

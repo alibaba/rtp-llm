@@ -1,15 +1,32 @@
 """Exercise the actual RTP response/config path with CPU token-source fixtures."""
 
 import asyncio
+import io
 import json
+import threading
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import torch
+from PIL import Image
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.py_config_modules import GenerateEnvConfig
+from rtp_llm.config.py_config_modules import (
+    GenerateEnvConfig,
+    PyEnvConfigs,
+    RenderConfig,
+)
+from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.models.multimodal.deepseek_v41_processor import (
+    IMAGE_PLACEHOLDER,
+    V41ImageProcessorConfig,
+    preprocess_image,
+)
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
+from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.openai.renderers.deepseekv4_renderer import DeepseekV4Renderer
 from rtp_llm.openai.renderers.deepseekv41_renderer import DeepseekV41Renderer
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
@@ -43,7 +60,24 @@ def make_renderer():
     renderer.extra_stop_words = []
     renderer.extra_stop_word_ids_list = []
     renderer.stop_words_id_list = []
+    renderer.image_processor_config = V41ImageProcessorConfig()
     return renderer
+
+
+def make_endpoint(renderer):
+    endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
+    endpoint.chat_renderer = renderer
+    endpoint.tokenizer = renderer.tokenizer
+    endpoint.stop_words_str_list = []
+    endpoint.stop_words_id_list = [[0]]
+    endpoint.generate_env_config = GenerateEnvConfig()
+    endpoint.template_renderer = BasicRenderer(
+        renderer.tokenizer,
+        RendererParams("deepseek_v41", 1048576, 0, []),
+        endpoint.generate_env_config,
+        RenderConfig(),
+    )
+    return endpoint
 
 
 def request(**kwargs):
@@ -55,12 +89,26 @@ def request(**kwargs):
 class EndpointConfigTest(unittest.TestCase):
     def setUp(self):
         self.renderer = make_renderer()
-        self.endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
-        self.endpoint.chat_renderer = self.renderer
-        self.endpoint.tokenizer = self.renderer.tokenizer
+        self.endpoint = make_endpoint(self.renderer)
         self.endpoint.stop_words_str_list = ["engine_stop"]
-        self.endpoint.stop_words_id_list = [[0]]
-        self.endpoint.generate_env_config = GenerateEnvConfig()
+
+    def test_user_template_uses_basic_renderer_stop_and_thinking_rules(self):
+        for stop in ("STOP", ["STOP"]):
+            for streaming in (False, True):
+                with self.subTest(stop=stop, streaming=streaming):
+                    req = request(
+                        user_template="{{ messages[0].content }}",
+                        stop=stop,
+                        stream=streaming,
+                        thinking={"type": "enabled"},
+                    )
+                    config = self.endpoint._extract_generation_config(req)
+                    self.assertIn("STOP", config.stop_words_str)
+                    self.assertIn(
+                        self.renderer.tokenizer.encode("STOP"), config.stop_words_list
+                    )
+                    self.assertEqual(config.is_streaming, streaming)
+                    self.assertFalse(config.in_think_mode)
 
     def test_explicit_response_format_schema_survives_renderer_constraints(self):
         schema = {
@@ -132,7 +180,273 @@ class EndpointConfigTest(unittest.TestCase):
         self.assertIsNone(legacy._normalize_reasoning_effort("low"))
 
 
+class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_during_preparation_does_not_start_backend(self):
+        endpoint = make_endpoint(make_renderer())
+        loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+        finished = asyncio.Event()
+        release = threading.Event()
+        render_chat = endpoint.render_chat
+
+        def slow_render(req):
+            loop.call_soon_threadsafe(started.set)
+            try:
+                if not release.wait(10):
+                    raise TimeoutError("test did not release preparation")
+                return render_chat(req)
+            finally:
+                loop.call_soon_threadsafe(finished.set)
+
+        with patch.object(
+            endpoint, "render_chat", side_effect=slow_render
+        ), patch.object(endpoint, "_chat_completion_from_inputs") as start_backend:
+            task = asyncio.create_task(
+                endpoint.chat_completion_async(
+                    1, request(), SimpleNamespace(headers={})
+                )
+            )
+            try:
+                await asyncio.wait_for(started.wait(), timeout=5)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            finally:
+                release.set()
+                await asyncio.wait_for(finished.wait(), timeout=5)
+                await asyncio.gather(task, return_exceptions=True)
+            start_backend.assert_not_called()
+
+    async def test_slow_image_keeps_text_and_existing_sse_responsive(self):
+        class ImageTokenizer(CharacterTokenizer):
+            def encode(self, text, **kwargs):
+                tokens = []
+                for index, part in enumerate(text.split(IMAGE_PLACEHOLDER)):
+                    if index:
+                        tokens.append(129264)
+                    tokens.extend(super().encode(part, **kwargs))
+                return tokens
+
+            def convert_tokens_to_ids(self, text):
+                if text == IMAGE_PLACEHOLDER:
+                    return 129264
+                return super().convert_tokens_to_ids(text)
+
+        renderer = make_renderer()
+        renderer.tokenizer = ImageTokenizer()
+        endpoint = make_endpoint(renderer)
+        server = FrontendServer.__new__(FrontendServer)
+        server._openai_endpoint = endpoint
+        server._frontend_worker = SimpleNamespace(
+            is_streaming=lambda req: req.get("stream", False)
+        )
+        server._access_logger = MagicMock()
+        server._global_controller = MagicMock()
+        server._global_controller.increment.return_value = 1
+        server.py_env_configs = PyEnvConfigs()
+        server.rank_id = server.server_id = "0"
+        raw_request = SimpleNamespace(headers={})
+
+        async def connected():
+            return False
+
+        raw_request.is_disconnected = connected
+        loop = asyncio.get_running_loop()
+        loop_thread = threading.get_ident()
+        download_started = asyncio.Event()
+        release_download = threading.Event()
+        continue_sse = asyncio.Event()
+        received = []
+        preparation_threads = []
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (42, 84), color="red").save(image_bytes, format="PNG")
+
+        def slow_download(url):
+            preparation_threads.append(threading.get_ident())
+            loop.call_soon_threadsafe(download_started.set)
+            if not release_download.wait(10):
+                raise TimeoutError("test did not release image download")
+            return io.BytesIO(image_bytes.getvalue())
+
+        def prepare_image(*args, **kwargs):
+            preparation_threads.append(threading.get_ident())
+            return preprocess_image(*args, **kwargs)
+
+        def check_loop():
+            self.assertIs(asyncio.get_running_loop(), loop)
+            self.assertEqual(threading.get_ident(), loop_thread)
+
+        generate_choice = renderer.generate_choice
+
+        def create_choices(*args, **kwargs):
+            check_loop()
+            return generate_choice(*args, **kwargs)
+
+        class Visitor:
+            async def enqueue(self, inputs):
+                check_loop()
+                received.append(inputs)
+                is_sse = "sse" in inputs.v41_inputs.prompt
+
+                async def source():
+                    chunks = ("first", " second") if is_sse else ("answer STOP hidden",)
+                    count = 0
+                    for index, chunk in enumerate(chunks):
+                        if is_sse and index:
+                            await continue_sse.wait()
+                        check_loop()
+                        ids = [ord(char) for char in chunk]
+                        finished = index == len(chunks) - 1
+                        if finished:
+                            ids.append(0)
+                        count += len(ids)
+                        yield GenerateOutputs(
+                            generate_outputs=[
+                                GenerateOutput(
+                                    output_ids=torch.tensor([ids]),
+                                    finished=finished,
+                                    aux_info=AuxInfo(
+                                        input_len=inputs.token_ids.numel(),
+                                        output_len=count,
+                                    ),
+                                )
+                            ]
+                        )
+
+                return source()
+
+        endpoint.backend_rpc_server_visitor = Visitor()
+        image_request = request(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "image"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://image.invalid/slow.png"},
+                        },
+                    ],
+                }
+            ],
+            stop="STOP",
+        )
+        image_before = image_request.model_dump()
+        with patch.object(
+            renderer, "generate_choice", side_effect=create_choices
+        ), patch(
+            "rtp_llm.utils.multimodal_util.get_bytes_io_from_url",
+            side_effect=slow_download,
+        ), patch(
+            "rtp_llm.models.multimodal.deepseek_v41_processor.preprocess_image",
+            side_effect=prepare_image,
+        ):
+            sse = await server.chat_completion(
+                request(messages=[{"role": "user", "content": "sse"}], stream=True),
+                raw_request,
+            )
+            chunks = [await anext(sse.body_iterator), await anext(sse.body_iterator)]
+            image_task = asyncio.create_task(
+                server.chat_completion(image_request, raw_request)
+            )
+            try:
+                await asyncio.wait_for(download_started.wait(), timeout=5)
+                text = await asyncio.wait_for(
+                    server.chat_completion(request(stop="STOP"), raw_request), timeout=5
+                )
+                self.assertEqual(text.status_code, 200)
+                self.assertEqual(
+                    json.loads(text.body)["choices"][0]["message"]["content"], "answer "
+                )
+                continue_sse.set()
+
+                async def drain_sse():
+                    return [chunk async for chunk in sse.body_iterator]
+
+                chunks.extend(await asyncio.wait_for(drain_sse(), timeout=5))
+                self.assertEqual(chunks[-1], "data: [DONE]\r\n\r\n")
+                content = "".join(
+                    json.loads(chunk.removeprefix("data: "))["choices"][0]["delta"].get(
+                        "content", ""
+                    )
+                    for chunk in chunks[:-1]
+                )
+                self.assertEqual(content, "first second")
+                self.assertFalse(image_task.done())
+                self.assertEqual(len(received), 2)
+                self.assertTrue(all(not item.v41_inputs.images for item in received))
+            finally:
+                release_download.set()
+                continue_sse.set()
+                image_response = await asyncio.wait_for(image_task, timeout=10)
+                await sse.body_iterator.aclose()
+
+        self.assertEqual(image_response.status_code, 200)
+        self.assertEqual(
+            json.loads(image_response.body)["choices"][0]["message"]["content"],
+            "answer ",
+        )
+        self.assertEqual(len(received[-1].v41_inputs.images), 1)
+        self.assertEqual(len(preparation_threads), 2)
+        self.assertNotIn(loop_thread, preparation_threads)
+        self.assertEqual(image_request.model_dump(), image_before)
+        self.assertEqual(renderer.stop_words_id_list, [])
+        self.assertEqual(renderer.extra_stop_words, [])
+
+
 class EndpointStreamTest(unittest.IsolatedAsyncioTestCase):
+    async def test_user_template_entrypoint_stops_stream_and_complete_response(self):
+        endpoint = make_endpoint(make_renderer())
+        received = []
+
+        class Visitor:
+            async def enqueue(self, inputs):
+                received.append(inputs)
+
+                async def source():
+                    text = "answer STOP hidden"
+                    yield GenerateOutputs(
+                        generate_outputs=[
+                            GenerateOutput(
+                                output_ids=torch.tensor([[ord(char) for char in text]]),
+                                finished=True,
+                                aux_info=AuxInfo(input_len=5, output_len=len(text)),
+                            )
+                        ]
+                    )
+
+                return source()
+
+        endpoint.backend_rpc_server_visitor = Visitor()
+        for streaming in (False, True):
+            for async_entrypoint in (False, True):
+                with self.subTest(
+                    streaming=streaming, async_entrypoint=async_entrypoint
+                ):
+                    req = request(
+                        stream=streaming,
+                        user_template="{{ messages[0].content }}",
+                        stop="STOP",
+                    )
+                    args = (1, req, SimpleNamespace(headers={}))
+                    response = (
+                        await endpoint.chat_completion_async(*args)
+                        if async_entrypoint
+                        else endpoint.chat_completion(*args)
+                    )
+                    frames = [frame async for frame in response]
+                    complete = await response.gen_complete_response_once()
+                    self.assertEqual(complete.choices[0].message.content, "answer ")
+                    self.assertEqual(complete.choices[0].finish_reason, "stop")
+                    self.assertEqual(
+                        "".join(
+                            frame.choices[0].delta.content or "" for frame in frames
+                        ),
+                        "answer ",
+                    )
+                    self.assertIn("STOP", received[-1].generate_config.stop_words_str)
+                    self.assertIsNone(received[-1].v41_inputs)
+
     async def test_nonstream_entrypoint_stops_before_consuming_later_backend_chunks(
         self,
     ):
