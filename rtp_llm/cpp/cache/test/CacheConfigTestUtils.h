@@ -21,6 +21,23 @@
 
 namespace rtp_llm::test {
 
+// Used only when first-seen or merged publication order is itself the assertion.
+inline std::vector<std::string> publishedGroupTags(const CacheTopology& topology) {
+    std::vector<std::string> tags;
+    for (const auto& group : topology.groups()) {
+        tags.push_back(group.tag);
+    }
+    return tags;
+}
+
+inline std::vector<CacheGroupType> publishedGroupTypes(const CacheTopology& topology) {
+    std::vector<CacheGroupType> types;
+    for (const auto& group : topology.groups()) {
+        types.push_back(group.policy.group_type);
+    }
+    return types;
+}
+
 // Single-rank acceptance tests confirm the local candidate without collectives.
 inline CacheConfig finalizeCacheConfig(CacheConfig config) {
     config.finalizeBlockNums(config.block_num, RuntimeConfig{});

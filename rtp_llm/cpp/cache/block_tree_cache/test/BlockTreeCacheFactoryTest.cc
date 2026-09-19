@@ -771,8 +771,11 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteBackendResolverDoesNotKeepAttachedCacheA
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteMatchSkipsBackendWhenNoGroupSupportsPrefixReuse) {
-    auto config   = makeSingleConfig();
-    auto policies = config.groupPoliciesSnapshot();
+    auto config = makeSingleConfig();
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     ASSERT_EQ(policies.size(), 1u);
     policies[0].enable_prefix_reuse = false;
     test::setTestGroupPolicies(config, policies);
@@ -791,8 +794,11 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteMatchSkipsBackendWhenNoGroupSupportsPref
 }
 
 TEST_F(BlockTreeCacheFactoryTest, DiskCacheAllowsNoPrefixReusableGroups) {
-    auto config   = makeSingleConfig();
-    auto policies = config.groupPoliciesSnapshot();
+    auto config = makeSingleConfig();
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     ASSERT_EQ(policies.size(), 1u);
     policies[0].enable_prefix_reuse = false;
     test::setTestGroupPolicies(config, policies);
@@ -880,8 +886,11 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteBackendIsDroppedWhenRemoteCacheDisabled)
 }
 
 TEST_F(BlockTreeCacheFactoryTest, CpSwaWindowUsesCanonicalKeysWithoutChangingPhysicalLayout) {
-    auto config                     = makeSwaConfig(16);
-    auto policies                   = config.groupPoliciesSnapshot();
+    auto config = makeSwaConfig(16);
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     policies[0].sliding_window_size = 128;
     test::setTestGroupPolicies(config, policies);
     auto allocator = initAllocator<KVCacheAllocator>(config);
@@ -1777,7 +1786,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentPoolGroupSetDependsOnlyOnPublishedT
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->groupSets().size(), 2u);
     for (const auto& group_set : cache->groupSets()) {
-        EXPECT_EQ(group_set->topologyPtr()->groupTagsSnapshot(), topology->groupTagsSnapshot());
+        EXPECT_EQ(test::publishedGroupTags(*group_set->topologyPtr()), test::publishedGroupTags(*topology));
         EXPECT_GT(group_set->payloadBytes(), 0u);
     }
 }
@@ -2198,7 +2207,10 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     }
     test::configureIndexedTestGroups(
         cache_config, specs, {{0}, {1}, {2}}, {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::SWA});
-    auto policies                   = cache_config.groupPoliciesSnapshot();
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : cache_config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     policies[2].enable_prefix_reuse = true;
     policies[2].sliding_window_size = 2;
     test::setTestGroupPolicies(cache_config, policies);

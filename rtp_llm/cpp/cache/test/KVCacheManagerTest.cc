@@ -248,7 +248,10 @@ static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, ui
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
     auto config      = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     config.block_num = full_block_num;
-    auto policies    = config.groupPoliciesSnapshot();
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     for (auto& policy : policies) {
         if (policy.group_type == CacheGroupType::SWA) {
             policy.explicit_block_num = 2u * swa_batch_size;
@@ -515,7 +518,10 @@ TEST_F(KVCacheManagerTest, WarmupPreservesExplicitChargedIndependentPoolPolicy) 
     const int explicit_gid = config.groupIdForTag("hca_state");
     ASSERT_GE(explicit_gid, 0);
 
-    auto policies                                                      = config.groupPoliciesSnapshot();
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     policies[static_cast<size_t>(explicit_gid)].explicit_block_num     = 4;
     policies[static_cast<size_t>(explicit_gid)].charge_to_paged_budget = true;
     setTestGroupPolicies(config, policies);
@@ -770,7 +776,7 @@ TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysi
     ASSERT_TRUE(cache_manager->init());
     auto allocator = std::dynamic_pointer_cast<KVCacheAllocator>(cache_manager->allocator_);
     ASSERT_NE(allocator, nullptr);
-    EXPECT_EQ(cache_config.groupTagsSnapshot(), std::vector<std::string>({"linear", "full"}));
+    EXPECT_EQ(publishedGroupTags(cache_config.topology()), std::vector<std::string>({"linear", "full"}));
     const int full_gid   = cache_config.groupIdForTag("full");
     const int linear_gid = cache_config.groupIdForTag("linear");
     ASSERT_GE(full_gid, 0);
@@ -1017,6 +1023,11 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
+    EXPECT_ANY_THROW(cache_manager->blockBatchCopy(torch::zeros({1, 3}, torch::kInt32)));
+    EXPECT_ANY_THROW(cache_manager->blockBatchCopy(
+        torch::zeros({1, 2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))));
+    EXPECT_NO_THROW(cache_manager->blockBatchCopy(torch::empty({0, 2}, torch::kInt32)));
+
     auto&        spec    = cache_manager->cacheConfig().specForGroup(0);
     const size_t k_bytes = spec->k_block_size_bytes();
     const size_t v_bytes = spec->v_block_size_bytes();
@@ -1197,9 +1208,9 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
         EXPECT_EQ(resource->blocksNum(0, gid), 4) << "group " << gid;
     }
 
-    auto layout = manager->getMainModelCacheLayerLayout();
+    auto layout = manager->getMainModelGroupedCacheLayerLayout();
     ASSERT_EQ(layout.topology().groups().size(), static_cast<size_t>(kDsv4PoolNum));
-    EXPECT_EQ(layout.topology().groupTagsSnapshot(), kDsv4Tags);
+    EXPECT_EQ(publishedGroupTags(layout.topology()), kDsv4Tags);
     EXPECT_EQ(layout.topology().layers().size(), static_cast<size_t>(manager_config.layer_num));
 
     const int swa_gid       = manager_config.groupIdForTag("swa_kv");
@@ -1243,7 +1254,7 @@ TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern
     ASSERT_TRUE(manager->malloc(malloc_info).success);
 
     auto expectTagGroup = [&](int layer_id, const std::string& tag, int expected_gid) {
-        EXPECT_EQ(manager_config.groupIdForLayerTag(layer_id, tag), expected_gid)
+        EXPECT_EQ(&manager_config.groupForLayer(layer_id, tag), &manager_config.group(tag))
             << "layer=" << layer_id << " tag=" << tag;
         EXPECT_EQ(resource->blocksForLayer(/*batch_id=*/0, layer_id, tag), resource->blocks(0, expected_gid))
             << "layer=" << layer_id << " tag=" << tag;
@@ -1256,8 +1267,8 @@ TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern
 
     // Flash DSV4 layers 0/1 are SWA-only. Inference resolves typed block tables by semantic tag.
     expectTagGroup(/*layer_id=*/0, "swa_kv", manager_config.groupIdForTag("swa_kv"));
-    EXPECT_THROW((void)manager_config.groupIdForLayerTag(/*layer_id=*/0, "csa_kv"), std::exception);
-    EXPECT_THROW((void)manager_config.groupIdForLayerTag(/*layer_id=*/0, "hca_kv"), std::exception);
+    EXPECT_THROW((void)manager_config.groupForLayer(/*layer_id=*/0, "csa_kv"), std::exception);
+    EXPECT_THROW((void)manager_config.groupForLayer(/*layer_id=*/0, "hca_kv"), std::exception);
 
     // Layer 2 is CSA: CSA_KV + INDEXER_KV + INDEXER_STATE + CSA_STATE + SWA_KV.
     const int csa_layer =
@@ -1267,7 +1278,7 @@ TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern
     expectTagGroup(csa_layer, "indexer_state", manager_config.groupIdForTag("indexer_state"));
     expectTagGroup(csa_layer, "csa_state", manager_config.groupIdForTag("csa_state"));
     expectTagGroup(csa_layer, "swa_kv", manager_config.groupIdForTag("swa_kv"));
-    EXPECT_THROW((void)manager_config.groupIdForLayerTag(csa_layer, "hca_kv"), std::exception);
+    EXPECT_THROW((void)manager_config.groupForLayer(csa_layer, "hca_kv"), std::exception);
 
     // Layer 3 is HCA: HCA_KV + HCA_STATE + SWA_KV.
     const int hca_layer =
@@ -1275,7 +1286,7 @@ TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern
     expectTagGroup(hca_layer, "hca_kv", manager_config.groupIdForTag("hca_kv"));
     expectTagGroup(hca_layer, "hca_state", manager_config.groupIdForTag("hca_state"));
     expectTagGroup(hca_layer, "swa_kv", manager_config.groupIdForTag("swa_kv"));
-    EXPECT_THROW((void)manager_config.groupIdForLayerTag(hca_layer, "csa_kv"), std::exception);
+    EXPECT_THROW((void)manager_config.groupForLayer(hca_layer, "csa_kv"), std::exception);
 
     FreeInfo free_info{resource, tokens};
     manager->free(free_info);
@@ -2474,7 +2485,7 @@ TEST_F(KVCacheManagerTest, DSV4AllocationPressureEvictsCachedResources) {
 TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBlocks) {
     auto manager_config =
         makeProductionDSV4Config(/*full_block_num=*/8, /*max_concurrency=*/1, /*hca_state_pool_blocks=*/12);
-    ASSERT_EQ(manager_config.groupBlockNumsSnapshot().size(), static_cast<size_t>(kDsv4PoolNum));
+    ASSERT_EQ(manager_config.topology().groups().size(), static_cast<size_t>(kDsv4PoolNum));
     for (int gid : dsv4FixedTailGroupIds(manager_config)) {
         const uint32_t expected = isHcaStateGroup(manager_config, gid) ? 12u : 8u;
         ASSERT_EQ(manager_config.blockNumForGroup(static_cast<size_t>(gid)), expected) << "group " << gid;

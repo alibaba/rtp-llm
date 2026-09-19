@@ -191,14 +191,15 @@ bool DefaultLayerGroupPolicy::init() {
         RTP_LLM_LOG_ERROR("exist intersection between full and other [%s]", ss.str().c_str());
         return false;
     }
-    uint64_t    group_name_bithash = 1;
-    const auto& layer_group_ids    = topology_.layerGroupIdsSnapshot();
-    for (int layer = 0; layer < static_cast<int>(layer_group_ids.size()); ++layer) {
-        if (layer_group_ids.at(layer).empty()) {
+    uint64_t group_name_bithash = 1;
+    for (const auto& topology_layer : topology_.layers()) {
+        const int  layer           = topology_layer.layer_id;
+        const auto layer_group_ids = topology_.groupIdsForLayer(layer);
+        if (layer_group_ids.empty()) {
             RTP_LLM_LOG_ERROR("layer [%d] has no cache group id", layer);
             return false;
         }
-        for (const int group_idx : layer_group_ids.at(layer)) {
+        for (const int group_idx : layer_group_ids) {
             bool is_full_group = false;
             if (full_group_ids_.find(group_idx) != full_group_ids_.end()) {
                 is_full_group = true;

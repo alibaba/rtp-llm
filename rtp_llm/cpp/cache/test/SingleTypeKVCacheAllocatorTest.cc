@@ -1228,8 +1228,11 @@ TEST_F(SingleTypeKVCacheAllocatorTest, DeferredBackendMatchRetriesZeroReservePoo
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {
-    auto config   = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4);
-    auto policies = config.groupPoliciesSnapshot();
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4);
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     ASSERT_EQ(policies.size(), 1u);
     policies[0].enable_prefix_reuse = false;
     setTestGroupPolicies(config, policies);
@@ -1463,9 +1466,12 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
 
     auto layout = allocator_->allLayerCacheBase();
     ASSERT_EQ(layout.groups().size(), 1u);
-    EXPECT_EQ(layout.topology().layerGroupIdsSnapshot(), (std::vector<std::vector<int>>(4, std::vector<int>{0})));
-    EXPECT_EQ(layout.topology().groupTypesSnapshot(), std::vector<CacheGroupType>{CacheGroupType::FULL});
-    EXPECT_EQ(layout.topology().groupTagsSnapshot(), std::vector<std::string>{"default"});
+    ASSERT_EQ(layout.topology().layers().size(), 4u);
+    for (const auto& layer : layout.topology().layers()) {
+        EXPECT_EQ(layer.group_tags, std::vector<std::string>{"default"});
+    }
+    EXPECT_EQ(layout.topology().group("default").policy.group_type, CacheGroupType::FULL);
+    EXPECT_EQ(publishedGroupTags(layout.topology()), std::vector<std::string>{"default"});
     const auto& default_layout = layout.group("default");
     EXPECT_EQ(default_layout.size(), config.layer_num);
     EXPECT_EQ(default_layout.activeLayerCount(), config.layer_num);
@@ -1483,14 +1489,14 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ManagerLayoutsPreserveSingleTypeGroupTens
     ASSERT_TRUE(manager->init());
 
     const auto all_layout  = manager->allLayerCacheBase();
-    const auto main_layout = manager->getMainModelCacheLayerLayout();
+    const auto main_layout = manager->getMainModelGroupedCacheLayerLayout();
     ASSERT_EQ(all_layout.group("default").size(), 8u);
 
     auto verify_layout = [](const GroupedCacheLayerLayout& local_layout,
                             const GroupedCacheLayerLayout& all,
                             size_t                         global_begin) {
-        ASSERT_EQ(local_layout.topology().groupTypesSnapshot(), std::vector<CacheGroupType>{CacheGroupType::FULL});
-        ASSERT_EQ(local_layout.topology().groupTagsSnapshot(), std::vector<std::string>{"default"});
+        ASSERT_EQ(local_layout.topology().group("default").policy.group_type, CacheGroupType::FULL);
+        ASSERT_EQ(publishedGroupTags(local_layout.topology()), std::vector<std::string>{"default"});
         const auto& local_group = local_layout.group("default");
         const auto& all_group   = all.group("default");
         for (size_t local_layer = 0; local_layer < local_group.size(); ++local_layer) {
@@ -1511,10 +1517,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ManagerLayoutsPreserveSingleTypeGroupTens
     };
 
     verify_layout(main_layout, all_layout, /*global_begin=*/0);
-    verify_layout(manager->getMTPModuleCacheLayerLayout(0), all_layout, /*global_begin=*/2);
-    verify_layout(manager->getMTPModuleCacheLayerLayout(1), all_layout, /*global_begin=*/5);
-    EXPECT_THROW(manager->getMTPModuleCacheLayerLayout(-1), std::runtime_error);
-    EXPECT_THROW(manager->getMTPModuleCacheLayerLayout(2), std::runtime_error);
+    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(0), all_layout, /*global_begin=*/2);
+    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(1), all_layout, /*global_begin=*/5);
+    EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(-1), std::runtime_error);
+    EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(2), std::runtime_error);
 }
 
 // Test block copy

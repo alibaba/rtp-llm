@@ -261,9 +261,10 @@ T await(std::future<T>& future) {
                                                                /*local_head_num_kv=*/1,
                                                                /*size_per_head=*/2);
     std::vector<block_tree_cache_test::DeviceLayerBufferSpec> layer_specs;
-    const auto& layer_group_ids = result.cache_config.topology().layerGroupIdsSnapshot();
-    layer_specs.reserve(layer_group_ids.size());
-    for (const auto& group_ids : layer_group_ids) {
+    const auto& topology_layers = result.cache_config.topology().layers();
+    layer_specs.reserve(topology_layers.size());
+    for (const auto& topology_layer : topology_layers) {
+        const auto group_ids = result.cache_config.topology().groupIdsForLayer(topology_layer.layer_id);
         RTP_LLM_CHECK(group_ids.size() == 1u);
         const auto group_id = static_cast<size_t>(group_ids.front());
         layer_specs.push_back({result.cache_config.kvBlockStrideBytesForGroup(group_id),

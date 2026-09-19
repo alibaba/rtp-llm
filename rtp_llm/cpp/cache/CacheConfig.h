@@ -145,23 +145,6 @@ public:
         return topology().layerIdsForGroup(group_tag);
     }
 
-    std::vector<CacheGroupType> groupTypesSnapshot() const {
-        return topology().groupTypesSnapshot();
-    }
-
-    std::vector<std::string> groupTagsSnapshot() const {
-        return topology().groupTagsSnapshot();
-    }
-
-    std::vector<CacheGroupPolicy> groupPoliciesSnapshot() const {
-        std::vector<CacheGroupPolicy> policies;
-        policies.reserve(topology().groups().size());
-        for (const auto& group : topology().groups()) {
-            policies.push_back(group.policy);
-        }
-        return policies;
-    }
-
     std::vector<size_t> groupSeqBlockSizesSnapshot() const {
         std::vector<size_t> values;
         values.reserve(topology().groups().size());
@@ -189,15 +172,6 @@ public:
         return values;
     }
 
-    std::vector<uint32_t> groupBlockNumsSnapshot() const {
-        std::vector<uint32_t> block_nums;
-        block_nums.reserve(topology().groups().size());
-        for (const auto& group : topology().groups()) {
-            block_nums.push_back(group.block_num);
-        }
-        return block_nums;
-    }
-
     std::vector<size_t> groupBlockSizeBytesSnapshot() const {
         std::vector<size_t> result;
         result.reserve(static_cast<size_t>(groupNums()));
@@ -223,10 +197,6 @@ public:
             strides.push_back(group.kvScaleStrideBytes());
         }
         return strides;
-    }
-
-    std::vector<std::vector<int>> layerGroupIdsSnapshot() const {
-        return topology().layerGroupIdsSnapshot();
     }
 
     uint32_t blockNumForGroup(size_t gid) const {
@@ -327,11 +297,6 @@ public:
 
     CacheGroupPolicy policyForGroup(size_t gid) const {
         return topology().groupById(gid).policy;
-    }
-
-    int groupIdForLayerTag(int layer_id, const std::string& tag) const {
-        topology().groupForLayer(layer_id, tag);
-        return groupIdForTag(tag);
     }
 
     int groupIdFor(int layer_id) const {

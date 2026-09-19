@@ -141,7 +141,12 @@ void initializeTestGroupSet(const GroupSetPtr&                     group_set,
             policy, {0}, logical_layer_bytes, 0, 128, seq_size_per_block));
     }
     auto topology = block_transfer_engine_test::makeTestTopology(std::move(groups));
-    group_set->initialize(group_set_id, topology, topology->groupTagsSnapshot());
+    std::vector<std::string> group_tags;
+    group_tags.reserve(topology->groups().size());
+    for (const auto& group : topology->groups()) {
+        group_tags.push_back(group.tag);
+    }
+    group_set->initialize(group_set_id, topology, group_tags);
 }
 
 void initializeSingleMemberGroupSets(const std::vector<GroupSetPtr>&        group_sets,

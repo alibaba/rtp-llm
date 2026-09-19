@@ -66,24 +66,23 @@ TEST(CacheTopologyTest, SupportsDistinctOneToOneGroupsAndOneToManyLayers) {
     EXPECT_ANY_THROW(topology->soleGroupForLayer(2));
 }
 
-TEST(CacheTopologyTest, CompatibilitySnapshotsAreIndependentValues) {
+TEST(CacheTopologyTest, GroupPropertiesAndLayerMembershipUseCanonicalIdentity) {
     auto topology = CacheTopology::create({makeGroup("full"), makeGroup("linear", CacheGroupType::LINEAR)},
                                           {{0, {"full", "linear"}}});
 
-    auto        tags_first  = topology->groupTagsSnapshot();
-    const auto& tags_second = topology->groupTagsSnapshot();
-    EXPECT_EQ(tags_first, (std::vector<std::string>{"full", "linear"}));
-    EXPECT_EQ(topology->groupTypesSnapshot(),
-              (std::vector<CacheGroupType>{CacheGroupType::FULL, CacheGroupType::LINEAR}));
-    EXPECT_EQ(topology->layerGroupIdsSnapshot(), (std::vector<std::vector<int>>{{0, 1}}));
-    tags_first.clear();
-    EXPECT_EQ(tags_second.size(), 2u);
-    EXPECT_EQ(topology->groupTagsSnapshot().size(), 2u);
+    ASSERT_EQ(topology->groups().size(), 2u);
+    EXPECT_EQ(topology->groups()[0].tag, "full");
+    EXPECT_EQ(topology->groups()[1].tag, "linear");
+    EXPECT_EQ(topology->group("full").policy.group_type, CacheGroupType::FULL);
+    EXPECT_EQ(topology->group("linear").policy.group_type, CacheGroupType::LINEAR);
+    EXPECT_EQ(topology->layer(0).group_tags, (std::vector<std::string>{"full", "linear"}));
+    EXPECT_EQ(&topology->groupForLayer(0, "full"), &topology->group("full"));
+    EXPECT_EQ(&topology->groupForLayer(0, "linear"), &topology->group("linear"));
 }
 
 TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
     auto first    = CacheTopology::create({makeGroup("full"), makeGroup("linear", CacheGroupType::LINEAR)},
-                                       {{0, {"full", "linear"}}});
+                                          {{0, {"full", "linear"}}});
     auto reversed = CacheTopology::create({makeGroup("linear", CacheGroupType::LINEAR), makeGroup("full")},
                                           {{0, {"full", "linear"}}});
 

@@ -33,8 +33,13 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
             model_input_gatherer_config_.kernel_seq_size_per_block = cache_config.kernelSeqSizePerBlockForGroup(0);
         }
         model_input_gatherer_config_.kernel_blocks_per_kv_block = cache_config.topology().maxKernelBlocksPerKvBlock();
-        model_input_gatherer_config_.kv_cache_group_types       = cache_config.groupTypesSnapshot();
-        model_input_gatherer_config_.kv_cache_group_tags        = cache_config.groupTagsSnapshot();
+        const auto& topology_groups = cache_config.topology().groups();
+        model_input_gatherer_config_.kv_cache_group_types.reserve(topology_groups.size());
+        model_input_gatherer_config_.kv_cache_group_tags.reserve(topology_groups.size());
+        for (const auto& group : topology_groups) {
+            model_input_gatherer_config_.kv_cache_group_types.push_back(group.policy.group_type);
+            model_input_gatherer_config_.kv_cache_group_tags.push_back(group.tag);
+        }
     }
     model_input_gatherer_config_.warm_up                 = warm_up;
     model_input_gatherer_config_.enable_detail_log       = profiling_debug_logging_config.enable_detail_log;

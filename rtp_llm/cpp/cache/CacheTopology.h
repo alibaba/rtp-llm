@@ -82,11 +82,6 @@ public:
         return result;
     }
 
-    // Compatibility projections are values, never a second configuration source.
-    std::vector<std::string>      groupTagsSnapshot() const;
-    std::vector<CacheGroupType>   groupTypesSnapshot() const;
-    std::vector<std::vector<int>> layerGroupIdsSnapshot() const;
-
 private:
     CacheTopology(std::vector<GroupBase> groups, std::vector<LayerBase> layers);
     void validateAndBuildIndex();

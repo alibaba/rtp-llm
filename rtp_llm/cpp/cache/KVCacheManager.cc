@@ -157,7 +157,7 @@ GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       sourc
     for (const auto& target_group : target_topology->groups()) {
         std::vector<BlockBufferPtrInfo> layers(global_layer_ids.size());
         const auto&                     source_group = source.group(target_group.tag);
-        for (int local_layer_id : target_topology->layerIdsForGroup(target_topology->groupIdForTag(target_group.tag))) {
+        for (int local_layer_id : target_topology->layerIdsForGroup(target_group.tag)) {
             RTP_LLM_CHECK_WITH_INFO(local_layer_id >= 0
                                         && static_cast<size_t>(local_layer_id) < global_layer_ids.size(),
                                     "cache layout projection tag=%s invalid local layer=%d",
@@ -581,10 +581,6 @@ GroupedCacheLayerLayout KVCacheManager::getMainModelGroupedCacheLayerLayout() co
     return projectLayout(all_layout, std::move(main_topology), global_layer_ids);
 }
 
-GroupedCacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
-    return getMainModelGroupedCacheLayerLayout();
-}
-
 GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const {
     RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtp_sub_configs.size(),
                             "Invalid mtp_module_id: %d, must be in range [0, %zu)",
@@ -608,10 +604,6 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
         global_layer_ids.push_back(global_layer_id);
     }
     return projectLayout(allocator_->allLayerCacheBase(), mtp_sub_config->topologyPtr(), global_layer_ids);
-}
-
-GroupedCacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id) const {
-    return getMTPModuleGroupedCacheLayerLayout(mtp_module_id);
 }
 
 // 资源统计和信息查询
@@ -793,7 +785,11 @@ void KVCacheManager::initCacheEventPublisher() {
             return;
         }
 
-        const auto group_policies = config_.groupPoliciesSnapshot();
+        std::vector<CacheGroupPolicy> group_policies;
+        group_policies.reserve(config_.topology().groups().size());
+        for (const auto& group : config_.topology().groups()) {
+            group_policies.push_back(group.policy);
+        }
         // KVCM currently represents one complete prefix chain per key.  A
         // tail-sparse reuse group is still required by local reuse, but cannot
         // be represented in that contract; publishing only the FULL groups

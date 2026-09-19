@@ -221,24 +221,6 @@ size_t CacheTopology::totalGroupBlockSizeBytes() const {
     return total;
 }
 
-std::vector<std::string> CacheTopology::groupTagsSnapshot() const {
-    std::vector<std::string> tags;
-    tags.reserve(groups_.size());
-    for (const auto& group : groups_) {
-        tags.push_back(group.tag);
-    }
-    return tags;
-}
-
-std::vector<CacheGroupType> CacheTopology::groupTypesSnapshot() const {
-    std::vector<CacheGroupType> types;
-    types.reserve(groups_.size());
-    for (const auto& group : groups_) {
-        types.push_back(group.policy.group_type);
-    }
-    return types;
-}
-
 std::vector<int> CacheTopology::groupIdsForLayer(int layer_id) const {
     std::vector<int> group_ids;
     for (const auto& tag : layer(layer_id).group_tags) {
@@ -260,15 +242,6 @@ std::vector<int> CacheTopology::layerIdsForGroup(size_t group_id) const {
 
 std::vector<int> CacheTopology::layerIdsForGroup(std::string_view group_tag) const {
     return layerIdsForGroup(groupIdForTag(group_tag));
-}
-
-std::vector<std::vector<int>> CacheTopology::layerGroupIdsSnapshot() const {
-    std::vector<std::vector<int>> ids;
-    ids.reserve(layers_.size());
-    for (const auto& layer : layers_) {
-        ids.push_back(groupIdsForLayer(layer.layer_id));
-    }
-    return ids;
 }
 
 }  // namespace rtp_llm

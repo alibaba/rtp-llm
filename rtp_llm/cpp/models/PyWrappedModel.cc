@@ -433,16 +433,19 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
     const size_t group_count = static_cast<size_t>(inputs.kv_cache_kernel_block_id.size(0));
     RTP_LLM_CHECK_WITH_INFO(kv_cache_layer_layout_.has_value(),
                             "tagged attention inputs require the current model cache layout");
-    const auto& group_tags = inputs.kv_cache_group_tags;
-    RTP_LLM_CHECK_WITH_INFO(group_count > 0 && group_tags.size() == group_count
-                                && kv_cache_layer_layout_->topology().groups().size() == group_count,
-                            "KV block table group count=%zu must match payload and topology group counts (groups)",
+    const auto& group_tags   = inputs.kv_cache_group_tags;
+    const auto& model_groups = kv_cache_layer_layout_->topology().groups();
+    RTP_LLM_CHECK_WITH_INFO(group_count > 0 && group_tags.size() == group_count && !model_groups.empty(),
+                            "KV block table group count=%zu must match payload tags; model groups must not be empty",
                             group_count);
     std::unordered_set<std::string> seen_tags;
     for (const auto& tag : group_tags) {
         RTP_LLM_CHECK_WITH_INFO(
             !tag.empty() && seen_tags.insert(tag).second, "empty or duplicate KV payload group tag=%s", tag.c_str());
-        kv_cache_layer_layout_->topology().group(tag);
+    }
+    for (const auto& group : model_groups) {
+        RTP_LLM_CHECK_WITH_INFO(
+            seen_tags.count(group.tag) != 0, "KV payload is missing model cache group tag=%s", group.tag.c_str());
     }
     RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_group_types.defined()
                                 || (inputs.kv_cache_group_types.dim() == 1
@@ -456,8 +459,9 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                             "physical KV block table must match kernel table group and batch dimensions");
 
     torch_ext::AttentionInputsByTag by_tag;
-    for (size_t payload_row = 0; payload_row < group_count; ++payload_row) {
-        auto group_inputs                            = py_attn_inputs;
+    for (const auto& group : model_groups) {
+        const auto payload_row  = std::find(group_tags.begin(), group_tags.end(), group.tag) - group_tags.begin();
+        auto       group_inputs = py_attn_inputs;
         group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[payload_row];
         group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
         if (inputs.kv_cache_block_id.defined()) {
@@ -469,13 +473,13 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                                                                             group_inputs.kv_cache_block_id;
             }
         }
-        by_tag.emplace(group_tags[payload_row], std::move(group_inputs));
+        by_tag.emplace(group.tag, std::move(group_inputs));
     }
 
-    // A single global group keeps the direct fast path. Multiple groups are
-    // exposed only through the outer tag mapping.
-    py_attn_inputs = by_tag.at(group_tags.front());
-    if (group_count == 1) {
+    // The model topology, including placeholders, determines the input shape;
+    // extra rows in a shared target payload do not make a single-group model tagged.
+    py_attn_inputs = by_tag.at(model_groups.front().tag);
+    if (model_groups.size() == 1) {
         return {};
     }
     return by_tag;

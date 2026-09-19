@@ -1096,7 +1096,10 @@ TEST_F(StreamCacheResourceTest, testInitRejectsSuccessfulNonLoadAllocatorContext
 
 TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessUsesCpGroupPolicyReuseUnit) {
     auto cache_config = init_config();
-    auto policies     = cache_config.groupPoliciesSnapshot();
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : cache_config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     ASSERT_EQ(policies.size(), 1u);
     policies.front().cp_mapping = CpBlockMappingMode::NONE;
     test::setTestGroupPolicies(cache_config, policies);

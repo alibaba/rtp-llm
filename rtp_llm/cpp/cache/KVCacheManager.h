@@ -108,10 +108,8 @@ public:
 
     // for main model; grouped layout preserves layers that own multiple cache groups
     GroupedCacheLayerLayout getMainModelGroupedCacheLayerLayout() const;
-    GroupedCacheLayerLayout getMainModelCacheLayerLayout() const;
     // for mtp module
     GroupedCacheLayerLayout getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const;
-    GroupedCacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
 
     // 资源统计和信息查询
     size_t      freeBlocksNum() const;

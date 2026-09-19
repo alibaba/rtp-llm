@@ -1127,14 +1127,13 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<int> layer_gids;
         if (use_hybrid) {
-            const auto layer_group_ids = cfg.layerGroupIdsSnapshot();
-            RTP_LLM_CHECK_WITH_INFO(layer_id < layer_group_ids.size(),
-                                    "hybrid cache layer %zu missing layer_to_group_ids, size=%zu",
+            RTP_LLM_CHECK_WITH_INFO(layer_id < cfg.topology().layers().size(),
+                                    "hybrid cache layer %zu missing layer group membership, layers=%zu",
                                     layer_id,
-                                    layer_group_ids.size());
+                                    cfg.topology().layers().size());
+            layer_gids = cfg.topology().groupIdsForLayer(static_cast<int>(layer_id));
             RTP_LLM_CHECK_WITH_INFO(
-                !layer_group_ids[layer_id].empty(), "hybrid cache layer %zu has empty layer_to_group_ids", layer_id);
-            layer_gids = layer_group_ids[layer_id];
+                !layer_gids.empty(), "hybrid cache layer %zu has empty layer_to_group_ids", layer_id);
         } else {
             layer_gids.push_back(0);
         }

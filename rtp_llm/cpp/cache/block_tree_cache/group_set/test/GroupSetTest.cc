@@ -91,7 +91,7 @@ TEST(GroupSetTest, RejectsUnknownDuplicateAndMisalignedTagsBeforeInitialization)
     EXPECT_ANY_THROW(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_a, pool_b}, nullptr, nullptr)
                          ->initialize(0, topology, {topology->groupById(0).tag, topology->groupById(0).tag}));
     EXPECT_ANY_THROW(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_a}, nullptr, nullptr)
-                         ->initialize(0, topology, topology->groupTagsSnapshot()));
+                         ->initialize(0, topology, {topology->groupById(0).tag, topology->groupById(1).tag}));
 }
 
 TEST(GroupSetTest, ReleasesLowerTierTreeReferencesInBatch) {

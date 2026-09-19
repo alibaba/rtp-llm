@@ -84,9 +84,10 @@ struct GraphParams {
         RTP_LLM_CHECK_WITH_INFO(tokens_per_block > 0, "CUDA graph requires positive tokens/base cache-key block");
         if (cache_topology) {
             RTP_LLM_CHECK_WITH_INFO(!cache_topology->groups().empty(), "CUDA graph cache topology must not be empty");
-            kv_cache_group_tags            = cache_topology->groupTagsSnapshot();
+            kv_cache_group_tags.clear();
             max_kernel_blocks_per_kv_block = cache_topology->maxKernelBlocksPerKvBlock();
             for (const auto& group : cache_topology->groups()) {
+                kv_cache_group_tags.push_back(group.tag);
                 RTP_LLM_CHECK_WITH_INFO(group.seqSizePerBlock() >= static_cast<size_t>(tokens_per_block)
                                             && group.seqSizePerBlock() % tokens_per_block == 0,
                                         "CUDA graph tag=%s physical span must be a multiple of base key span",

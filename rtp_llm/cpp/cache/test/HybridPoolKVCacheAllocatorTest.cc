@@ -950,8 +950,13 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllLayerCacheBaseExposesPerLayerAndPerGro
     ASSERT_TRUE(allocator->init());
 
     auto layout = allocator->allLayerCacheBase();
-    EXPECT_EQ(layout.topology().layerGroupIdsSnapshot(), config.layerGroupIdsSnapshot());
-    EXPECT_EQ(layout.topology().groupTypesSnapshot(), config.groupTypesSnapshot());
+    ASSERT_EQ(layout.topology().layers().size(), config.topology().layers().size());
+    for (const auto& layer : config.topology().layers()) {
+        EXPECT_EQ(layout.topology().layer(layer.layer_id).group_tags, layer.group_tags);
+    }
+    for (const auto& group : config.topology().groups()) {
+        EXPECT_EQ(layout.topology().group(group.tag).policy.group_type, group.policy.group_type);
+    }
     EXPECT_EQ(layout.groups().size(), static_cast<size_t>(config.groupNums()));
     for (size_t i = 0; i < static_cast<size_t>(config.layer_all_num()); ++i) {
         const auto& layer = layout.topology().layer(static_cast<int>(i));
@@ -1082,8 +1087,11 @@ static void expectSameFinalPoolMetrics(const CachePoolMetricsSnapshot& expected,
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, AllPrefixReuseDisabledPoolMetricsFollowAllocatorLifecycle) {
-    auto config   = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/4);
-    auto policies = config.groupPoliciesSnapshot();
+    auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/4);
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     ASSERT_EQ(policies.size(), 2u);
     for (CacheGroupPolicy& policy : policies) {
         policy.enable_prefix_reuse = false;

@@ -525,7 +525,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                 generation_prefill_cuda_graph_init_status_ = GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE;
                 RTP_LLM_LOG_WARNING("generation prefill CUDA graph disabled reason=kv_cache_unavailable");
             } else if (!supportsGenerationPrefillCudaGraphCacheTopology(
-                           params.cache_manager->cacheConfig().groupTypesSnapshot())) {
+                           params.cache_manager->cacheConfig().topology().groups())) {
                 generation_prefill_cuda_graph_init_status_ = GenerationPrefillCudaGraphStatus::MODEL_NOT_SUPPORTED;
                 RTP_LLM_LOG_WARNING("generation prefill CUDA graph disabled reason=unsupported_cache_topology; "
                                     "the first version requires "

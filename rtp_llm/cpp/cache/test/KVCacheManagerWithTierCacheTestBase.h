@@ -611,8 +611,8 @@ expectDsv4TierTopology(const std::shared_ptr<KVCacheManager>& manager, const Cac
     const auto cache = manager->blockTreeCache();
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(config.groupNums(), kDsv4GroupCount);
-    ASSERT_EQ(config.groupTagsSnapshot(), kDsv4Tags);
-    ASSERT_EQ(config.groupTypesSnapshot(), kDsv4Types);
+    ASSERT_EQ(publishedGroupTags(config.topology()), kDsv4Tags);
+    ASSERT_EQ(publishedGroupTypes(config.topology()), kDsv4Types);
     ASSERT_EQ(config.linear_step, 1);
 
     const auto allocator_groups = manager->allocator_->cacheGroups();
