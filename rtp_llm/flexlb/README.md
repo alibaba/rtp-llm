@@ -183,7 +183,9 @@ export FLEXLB_CONFIG='{
     "health": {
       "statusPollIntervalMs": 20,
       "statusRpcTimeoutMs": 5000,
-      "statusStaleAfterMs": 10000
+      "statusStaleAfterMs": 10000,
+      "vitStatusRpcTimeoutMs": 2000,
+      "retainVitAliveOnTimeout": true
     },
     "cacheStatus": {
       "targetDiffSize": 30,
@@ -208,6 +210,16 @@ export FLEXLB_CONFIG='{
   }
 }'
 ```
+
+`workerRegistry.health.vitStatusRpcTimeoutMs` is a lower bound for VIT
+status RPCs; a larger `statusRpcTimeoutMs` still applies. With
+`retainVitAliveOnTimeout` enabled, VIT deadline failures preserve the last
+routing state until `statusStaleAfterMs` expires. They do not refresh the last
+successful poll time. Explicit dead responses and non-deadline errors retain
+their normal retirement behavior, and other worker roles are unaffected.
+`statusStaleAfterMs` must be at least twice both RPC timeout settings. These
+options belong to `FLEXLB_CONFIG`; the removed `VIT_*` environment variables
+remain unsupported.
 
 `maxProjectedDrainVsAverageMultiplier` limits estimated-TTFT outliers by the
 endpoint's known projected drain time. Candidates whose drain cannot be modeled

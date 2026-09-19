@@ -40,6 +40,53 @@ class ConfigServiceTest {
     }
 
     @Test
+    void vit_status_policy_uses_unified_configuration_and_original_defaults() {
+        WorkerRegistryConfig.HealthConfig defaults =
+                ConfigService.parse("{}").getWorkerRegistry().getHealth();
+        assertEquals(2000L, defaults.getVitStatusRpcTimeoutMs());
+        assertTrue(defaults.isRetainVitAliveOnTimeout());
+
+        WorkerRegistryConfig.HealthConfig configured = ConfigService.parse("""
+                {"workerRegistry":{"health":{
+                    "statusRpcTimeoutMs":20,
+                    "vitStatusRpcTimeoutMs":1000,
+                    "retainVitAliveOnTimeout":false,
+                    "statusStaleAfterMs":2000
+                }}}
+                """).getWorkerRegistry().getHealth();
+        assertEquals(20L, configured.getStatusRpcTimeoutMs());
+        assertEquals(1000L, configured.getVitStatusRpcTimeoutMs());
+        assertFalse(configured.isRetainVitAliveOnTimeout());
+    }
+
+    @Test
+    void vit_status_timeout_cannot_outlive_the_validated_stale_window() {
+        for (long invalidFloor : new long[]{0L, -1L, 5001L}) {
+            assertThrows(ConfigValidationException.class, () -> ConfigService.parse(
+                    "{\"workerRegistry\":{\"health\":{\"vitStatusRpcTimeoutMs\":"
+                            + invalidFloor + "}}}"));
+        }
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {"workerRegistry":{"health":{
+                    "statusRpcTimeoutMs":20,
+                    "vitStatusRpcTimeoutMs":1000,
+                    "statusStaleAfterMs":1999
+                }}}
+                """));
+    }
+
+    @Test
+    void vit_policy_does_not_reintroduce_removed_environment_variables() {
+        for (String name : new String[]{"VIT_SYNC_REQUEST_TIMEOUT_MS",
+                "VIT_RETAIN_ALIVE_ON_TIMEOUT", "VIT_WORKER_TIMEOUT_US"}) {
+            ConfigValidationException failure = assertThrows(
+                    ConfigValidationException.class,
+                    () -> new ConfigService(Map.of(name, "1")));
+            assertTrue(failure.getMessage().contains(name));
+        }
+    }
+
+    @Test
     void configured_document_must_not_be_blank() {
         assertThrows(ConfigValidationException.class,
                 () -> new ConfigService(Map.of(ConfigService.FLEXLB_CONFIG_ENV, "   ")));

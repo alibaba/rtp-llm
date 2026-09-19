@@ -128,7 +128,11 @@ public final class MasterEngineSynchronizer {
                         syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                         flexlbConfig.getWorkerRegistry().getCacheStatus()
                                 .isFullSnapshotDebugMode(),
-                        statusStaleAfterUs
+                        statusStaleAfterUs,
+                        flexlbConfig.getWorkerRegistry().getHealth()
+                                .getVitStatusRpcTimeoutMs(),
+                        flexlbConfig.getWorkerRegistry().getHealth()
+                                .isRetainVitAliveOnTimeout()
                 ));
             }
         } catch (Exception e) {

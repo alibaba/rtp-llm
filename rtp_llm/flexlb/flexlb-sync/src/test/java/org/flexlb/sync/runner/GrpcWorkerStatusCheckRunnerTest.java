@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.sync.schedule.ExpirationCleaner;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -158,6 +159,92 @@ class GrpcWorkerStatusCheckRunnerTest {
         verify(reporter, times(3)).reportStatusCheckerFail(
                 "test-model", BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
                 RoleType.VIT);
+    }
+
+    @Test
+    void should_useLongerTimeoutForVitStatusCheck() {
+        WorkerStatus status = discover(RoleType.VIT);
+        respond(response(RoleType.VIT, 1L, true));
+
+        pollWithPolicy(status, 20L, 1000L, true);
+
+        verify(grpc).getWorkerStatusAsync(
+                "127.0.0.1", 8081, -1L, 1000L, RoleType.VIT);
+    }
+
+    @Test
+    void should_notShortenGlobalTimeoutForVitStatusCheck() {
+        WorkerStatus status = discover(RoleType.VIT);
+        respond(response(RoleType.VIT, 1L, true));
+
+        pollWithPolicy(status, 5000L, 1000L, true);
+
+        verify(grpc).getWorkerStatusAsync(
+                "127.0.0.1", 8081, -1L, 5000L, RoleType.VIT);
+    }
+
+    @Test
+    void should_keepLastVitAliveStateWhenStatusCheckTimesOut() {
+        WorkerStatus status = alive(RoleType.VIT);
+        WorkerEndpoint endpoint = registry.get(RoleType.VIT, ADDRESS);
+        long lastSuccess = status.pollHealth().lastSuccessfulPollUs();
+        fail(Status.DEADLINE_EXCEEDED.asRuntimeException());
+
+        pollThreeTimes(status);
+
+        assertTrue(status.isActiveGeneration());
+        assertTrue(status.pollHealth().reportedAlive());
+        assertSame(endpoint, registry.get(RoleType.VIT, ADDRESS));
+        assertTrue(directory.isCurrentStatus(RoleType.VIT, ADDRESS, status));
+        assertEquals(lastSuccess, status.pollHealth().lastSuccessfulPollUs());
+        verify(reporter, times(3)).reportStatusCheckerFail(
+                "test-model", BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, RoleType.VIT);
+        verify(reporter, times(3)).reportStatusCheckerFail(
+                anyString(), any(BalanceStatusEnum.class), any(RoleType.class));
+    }
+
+    @Test
+    void should_markVitDeadWhenTimeoutRetentionIsDisabled() {
+        WorkerStatus status = alive(RoleType.VIT);
+        fail(Status.DEADLINE_EXCEEDED.asRuntimeException());
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            pollWithPolicy(status, 20L, 1000L, false);
+        }
+
+        assertRetired(status);
+        assertEquals(3L, status.pollHealth().consecutiveTransportFailures());
+    }
+
+    @Test
+    void retainedVitDeadlineStillExpiresFromLastSuccessfulPoll() {
+        WorkerStatus status = alive(RoleType.VIT);
+        long lastSuccess = status.pollHealth().lastSuccessfulPollUs();
+        fail(Status.DEADLINE_EXCEEDED.asRuntimeException());
+        pollThreeTimes(status);
+        assertTrue(status.isActiveGeneration());
+        assertEquals(lastSuccess, status.pollHealth().lastSuccessfulPollUs());
+
+        // As in ExpirationCleanerTest, a zero fixture interval makes the real
+        // cleaner cross the stale boundary without sleeping or changing clocks.
+        FlexlbConfig config = new FlexlbConfig();
+        config.getWorkerRegistry().getHealth().setStatusStaleAfterMs(0L);
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        new ExpirationCleaner(service, cache, directory).cleanExpiredWorkers();
+
+        assertRetired(status);
+        assertEquals(lastSuccess, status.pollHealth().lastSuccessfulPollUs());
+    }
+
+    private void pollWithPolicy(WorkerStatus status, long globalTimeoutMs,
+                                long vitTimeoutMs, boolean retainVitAlive) {
+        WorkerStatus.PollLease lease = status.tryBeginStatusPoll();
+        assertNotNull(lease);
+        new GrpcWorkerStatusRunner(
+                "test-model", ADDRESS, "test-site", status.getRole(), "test-group",
+                status, lease, directory, reporter, grpc, globalTimeoutMs,
+                cache, Runnable::run, vitTimeoutMs, retainVitAlive).run();
     }
 
     private void pollThreeTimes(WorkerStatus status) {
