@@ -21,13 +21,13 @@ decode stream FINISHED（tryReleaseKVBlock）
    ├─ (现状) 本地 insertIntoCache → decode 自己的树
    │
    └─ (新增) asyncWrite ──────────────► prefill rank0: StartWrite
-        hold blocks                      ├─ probe：prompt 全在 GPU，后缀无低层/忙碌节点冲突 → [p, p+k)
-        直到传输结束/超时                 ├─ mallocForExternalInsert：RAII 接管新块的分配引用
+        hold blocks                      ├─ admitWriteBackDecodeCache：校验 GPU prompt，本地 match → [p, p+k)
+        直到物理传输停止                 ├─ RAII 接管匹配和分配引用，复查超时/取消后提交本地加载
                                          ├─ 广播 recv routes 给 prefill workers
         ◄─ response {accepted: p, k, 接收端点} ─┘
    ├─ 广播 send routes 给 decode workers
    ├─ decode workers 按 route 发送（数据早已算完，一次全量发）
-   └─ prefill workers 收齐 → settle → BlockTreeCache::insert → 树上可见
+   └─ prefill workers 收齐且本地加载成功 → settle → BlockTreeCache::insert → 树上可见
 ```
 
 ---
@@ -42,11 +42,11 @@ decode stream FINISHED（tryReleaseKVBlock）
 
 **准入与增量由 prefill 判定**，规则三条：
 
-1. **先判断是否写回？prompt 前缀必须整段驻留 GPU，否则本次不写回**。StartWrite 请求带 `input_length`，prefill 由它推出 prompt 完整块数 prompt_blocks（不单独设字段，避免与 input_length 同义冗余）；prefill match 得到 **device 层连续命中前缀** p_dev（`BlockTreeMatchResult.matched_device_blocks`，零新机制），若 `p_dev < prompt_blocks`——prompt 有块被降级到 CPU/盘或已丢弃——直接拒绝，decode 释放 hold。理由：prompt 被挤出 GPU 说明该会话已冷或 prefill 显存高压，投机写回价值低；拒绝也避免为写回触发 load-back 或混合层挂载。
-2. **写回内容 = 两侧持有的差，服从规则 1，并检查已有后缀是否可插入**。通过价值门后，以 **device 层连续命中前缀 p 为界（p ≡ p_dev，与规则 1 同一个量）**，不取跨层命中。必然 p ≥ prompt_blocks；p 可能更大，因为相同前缀的并发写回已补过一段。`[p, 完整块数)` 是候选接受区间，但 p_dev 之后可能存在 HOST/DISK 节点，不能等同于树上不存在：现有 `insertNode` 不会把已有 HOST FULL 节点更新为 DEVICE，还会停止后续插入。**Phase 1 对候选路径上的低层 FULL 节点、忙碌或不完整且不可接纳的节点直接拒绝本次写回**，不触发 load-back、不覆盖节点；检查须为不持块、不登记加载的探测（接口要求见 R3）。只有该检查通过才接受 k 块，k=0 仍走快路径。具体冲突判据及 settle 时的重验见 §3.1。
+1. **先判断是否写回：prompt 前缀必须整段驻留 GPU，否则本次不写回**。StartWrite 请求带 `input_length`，prefill 由它推出 prompt 完整块数 prompt_blocks；纯探测得到 DEVICE 连续命中长度 p_dev。若 `p_dev < prompt_blocks`，说明 prompt 有块已降到 HOST/DISK 或丢弃，直接拒绝，decode 释放 hold。写回不为 prompt 触发加载；通过此价值门后，已有 response 后缀可以从本地低层加载。
+2. **写回内容只包含 Prefill 本地缺失的尾部**。通过价值门后，在同一把树锁内调用本地 match，接管已有 DEVICE 前缀的 REQUEST 引用，并为可复用的 HOST/DISK 后缀创建或加入已有加载。令 p 为本地连续匹配长度（有加载时取 `localMatchedBlocks()`，否则取 DEVICE 命中长度），因此 `p >= p_dev >= prompt_blocks`；n 为 Decode 声明的完整块数，只接收 `[p,n)`，k=n-p。本地 match 不访问远端 storage backend。低层数据通过既有 loader 升到 DEVICE，不能依靠普通 `insertNode` 覆盖 HOST 节点。k=0 时 Decode 无需发送，但 Prefill 如有本地加载，仍须后台持有资源并等待完成。冲突与最终发布规则见 §3.1。
 3. **通过准入的写回是一等公民：GPU 满照常驱逐腾位**。malloc k 块走与普通请求相同的分配路径（`FullKVCacheGroup::malloc → ensureFreeBlocks`，现成代码），空间不足时照常触发 LRU 驱逐更冷的缓存；驱逐后仍不足（极端）才拒绝。三条规则自洽：规则 1 已筛掉低价值写回，剩下的对应活跃会话，其数据配得上挤掉冷缓存的待遇。
 
-为什么增量判定必须在 prefill 而不是 decode 记账：① prefill 的树可能已淘汰部分块，"当初传过的"≠"现在还有的"；② 相同前缀的并发请求可能已写回一段，缺口比 decode 以为的晚；③ 已有 DEVICE 结果可复用，而已有低层或忙碌节点必须按冲突规则处理，不能无条件跳过同 key。价值门和后缀冲突检查需要 R3 中提出的纯探测接口；不能直接丢弃现有 `BlockTreeCache::match()` 的结果，因为它包含引用和加载状态。是否刷新 LRU 由该探测接口明确，不将现有 match 的行为直接当作无副作用的实现。
+增量判定必须在 prefill：树可能已经淘汰旧块，也可能被并发请求补齐，只有本地 match 能确定需要接收的范围。`matchForExternalInsert` 在同锁检查 GPU 前缀、通过价值门后复用 loader，并显式交接匹配引用和加载上下文；不再保留独立的只读准入查询接口。不能只读取 match 长度后丢弃结果。
 
 ### 1.2 块边界：只传完整块，跨界块自动划入增量
 
@@ -147,20 +147,21 @@ Phase 1 只实现结束后一次性回传，但入口按"游标从 0 直接推�
 
 ## 3. Prefill 侧：接收、保留、插树
 
-### 3.1 处理顺序（原子性是底线）
+### 3.1 处理顺序（生命周期是底线）
 
 ```
-纯探测准入及后缀冲突 → RAII 分配空闲块 → 注册 recv task → 收齐全部 (layer, tag, block)
-  → settle：同锁完整预检前缀和后缀，再插树 → 可见
+同锁检查 GPU prompt 并本地 match → RAII 接管匹配引用、分配加载落点及接收尾部
+  → 本地加载与 P2P 接收并行 → 两者均成功且物理结束
+  → settle：同锁确认已匹配/加载前缀仍在 DEVICE，再按普通 BlockTree 规则发布回传尾部
 ```
 
-insert 必须是全部数据到齐后的原子动作：任何一层、一块失败，就放弃插树，确认物理传输停止后释放全部已分配块。半截数据进树会污染前缀匹配——树上可见就意味着可被 match、可被后续请求复用。物理停止的判定和后台持有者仍需按 R1/R4 落实，不能将业务超时或 erase entry 当成物理传输停止。
+本地加载或 P2P 任一失败都不会进入 settle，任务等待两者物理结束后释放句柄。成功时复用普通 BlockTree insert：并发请求已经发布的 DEVICE block 直接复用，仍缺失的位置才采纳本次回传块。业务超时、取消或移除登记都不等于物理停止。
 
-malloc k 块是**一等公民分配**（§1.1 规则 3）：走与普通请求相同的路径（`FullKVCacheGroup::malloc → ensureFreeBlocks`），GPU 满照常触发 LRU 驱逐腾位，驱逐后仍不足（极端）才在 StartWrite response 里拒绝。多个 DP 副本并发写回的聚合压力由正常驱逐体系承接。
+本地加载落点和 k 个接收块都是**一等公民分配**（§1.1 规则 3）：复用普通请求的 `FullKVCacheGroup::malloc → ensureFreeBlocks`，GPU 满时正常驱逐，仍不足才拒绝。已有 DEVICE 块和加入已有加载的目标块直接复用，不重复分配。
 
 **接收侧分配引用：由新分配接口直接返回 owning RAII 句柄**。`FullKVCacheGroup::malloc()` 在分配成功后已调用一次 `incRef`（FullKVCacheGroup.cc:81–85）；`incrKVCacheRef()` 会再加一次引用（SingleTypeKVCacheAllocator.cc:454），其 deleter 只减自己增加的那一次。正向路径由 stream 的 `free()` 释放原始分配引用，写回接收侧没有这个 stream，不能照抄 `malloc → incrKVCacheRef → entry` 后只释放 guard。
 
-因此 `mallocForExternalInsert(...)` 的返回契约明确为：**RAII 句柄直接接管 malloc 产生的原始引用，不再额外调用 `incrKVCacheRef`**。allocator 在分配过程中负责回滚已经成功的部分；成功返回后，原始分配引用的唯一释放责任交给句柄的 deleter。deleter 保持 allocator/pool 存活，并对该句柄实际分配的所有块各减一次引用。entry 和接收任务共享同一个句柄的生命周期，不另造一份分配引用；单纯创建普通 `shared_ptr<KVCacheResource>` 不满足此契约。该接口属于 Slice 2，当前尚未实现。
+`admitWriteBackDecodeCache(keys, required_prefix_blocks, resource, start_block, load_context)` 返回 owning RAII 句柄、接收起点 p 和可选的未提交加载上下文。**句柄直接接管 match 增加的 REQUEST 引用和 malloc 产生的原始引用，不再调用 `incrKVCacheRef`**。块表覆盖 GPU 前缀、本地加载目标和接收尾部；加入已有加载时也接管为当前请求取得的目标引用。deleter 保持 group/pool 存活，对每个持有引用释放一次。部分分配失败先撤销未提交加载，再释放已接管引用；提交后由 AsyncWriteContext 覆盖本地加载和 P2P 的整个物理生命周期。
 
 引用账本（对每个新分配块，物理传输已停止时才允许最后一个接收句柄销毁）：
 
@@ -172,19 +173,22 @@ malloc k 块是**一等公民分配**（§1.1 规则 3）：走与普通请求�
 | settle 成功后销毁接收句柄 | 采纳的新块从 2 到 1，归树持有；因已有 DEVICE 副本而未采纳的新块从 1 到 0，归还空闲池 |
 | 分配/注册失败、接收失败、放弃插树 | 未发布的新块从 1 到 0；释放一次，不依赖 stream 的 `free()` |
 
-**entry 的创建与数据入树**。StartWrite 到达后，handleWrite 现场造 entry：元数据（unique_key/deadline/cache_keys/token_ids/input_length）抄自 RPC；纯探测过价值门及后缀冲突检查后得出 p，`mallocForExternalInsert` 返回 k 个落点块的 owning 句柄，将其交给 entry（现有 `addResource` 依赖 Meta，需增加直接传参重载）。注册失败由局部句柄回收；开始接收后，句柄必须覆盖全部在途任务的生命周期。成功或放弃后，所有新分配块的分配引用都要归还，不能只释放未被树采纳的块。
+已有 GPU 前缀通常由树持有一个 CACHE 引用，match 再提供一个 REQUEST 引用，由接收句柄持有；句柄销毁后仅归还自己的 REQUEST 引用。本地加载另由 LoadAsyncContext/ticket 管理 LOAD 引用，不能用接收句柄的 REQUEST 引用代替。新分配块的引用账本见上表。
 
-**已有 HOST 后缀的策略：Phase 1 明确放弃，不做节点升级**。例如 `{prompt_0, response_0}` 已在树中，prompt_0 在 DEVICE，response_0 只有 HOST，则 p_dev=1。即便 prompt 完整命中，普通 `insertNode({prompt_0, response_0, response_1}, ...)` 也会停在 response_0，response_1 不会被插入。`BlockTreeTest.InsertHardStopsAtExistingHostFullNode`（BlockTreeTest.cc:455）明确覆盖此行为，不能依靠“重复 key 自动跳过”补回 GPU。
+**后台持有与数据入树**。`P2PSchedulerPrefillWrite` 将 resource 和 load_context 交给 `P2PConnectorAsyncWriteContext`，不创建 Read ResourceStore entry。先提交本地加载，再为 `[p,n)` 注册接收；全部 rank START 成功才返回接收端点。任一失败都禁止 settle：取消未提交加载，对可能启动的 worker 发 CANCEL/QUERY；已提交加载和 P2P 都停止后才释放句柄。k=0 且无加载时立即完成；k=0 但有加载时不调用 worker，握手可立即返回，Prefill 上下文继续等待加载。
 
-对 `[p, p+k)` 候选路径中的既有 FULL group，准入及 settle 都按同一规则检查：
+**已有 HOST/DISK 后缀通过既有 loader 加载**。例如 prompt_0 在 DEVICE，response_0 在 HOST，response_1 缺失，则 p_dev=1、p=2、k=1：Prefill 本地加载 response_0，Decode 只发送 response_1。`insertNode` 不具备 HOST 节点升级能力，`BlockTreeTest.InsertHardStopsAtExistingHostFullNode` 仍成立；升级由 loader 的普通发布流程完成。
+
+本地 match 和最终 settle 分别承担以下工作：
 
 - 完整、稳定的 DEVICE 值可以复用，重复写回的新块由接收句柄归还。
-- 既有空节点只有在可安全接纳新值时才允许使用（当前对应 `is_removable()`）；不存在的节点可新建。
-- HOST/DISK-only、LOADING/DEMOTING 等忙碌状态，以及不完整且不可安全接纳的状态，都拒绝本次写回，记录 `existing_suffix_conflict`。本阶段不删除旧节点、不替换已有缓存、不触发 load-back。
+- match 可复用稳定的 HOST/DISK 值，并加入已有 LOADING；遇到 DEMOTING、未提交的 LOAD_PENDING 或不可用资源时，按普通 loader 规则截断本地匹配。
+- AsyncWriteContext 只有在本地 load 和 P2P 都成功后才调用 settle；settle 再确认 `[0,p)` 已完整发布到 DEVICE。
+- `[p,n)` 直接交给普通 BlockTree insert；并发 DEVICE 命中保持原值，空位置采纳回传块，不可接纳的位置沿用普通 hard-stop 规则。
 
-数据收齐后，新增 `insertExternalBlocks` 必须在 `BlockTreeCache::mutex_` 内先做**完整预检**：`[0, p)` 仍整段驻留 GPU，并且 `[p, p+k)` 的全部既有节点都符合上述规则，之后才挂载新块。准入后的 malloc 驱逐和传输期间的并发变化都可能让检查结果失效，因此 settle 必须重验。不能先调用普通 insert，再根据是否插完决定失败，因为前面的空节点可能已被采纳，形成部分发布。该接口须返回整体结果及实际采纳范围；它是 R3 要求的新接口，尚未实现。group 支持范围及非 FULL group 的完整性约束仍由 R6 明确。
+本地加载和接收都成功后，`insertExternalBlocks` 在 `BlockTreeCache::mutex_` 内检查 deadline 和 `[0,p)` DEVICE 前缀，然后直接复用 `BlockTreeStorer::storeLocked(..., DEVICE)`。是否采纳 `[p,n)` 中的回传块由 BlockTree 当前状态决定，不再维护一套写回专用的后缀校验。目前只支持可复用的 DEVICE FULL groups，不支持 sharded CP。
 
-**异常控制：传输窗口内前缀被驱逐 → 优雅退出**。准入时前缀全在 GPU，但飞行的几百毫秒内淘汰器仍可能动它——我们不 pin，引用也 pin 不住节点（`isEvictable` 不看 request ref，BlockTreeEvictor.cc:73-78）；在途接收的 k 个新块由 owning 句柄保活。settle 在树锁内完成重验并决定不发布；终态登记及资源回收在退出树锁后执行，不持有树锁等待物理传输停止：
+**异常控制：传输窗口内前缀被驱逐 → 放弃新尾部发布**。REQUEST 引用保住物理块，不能阻止树节点被逻辑淘汰（`isEvictable` 不看 request ref）。即使句柄还持有前缀块，settle 仍须检查树中前缀；终态登记及回收在退出树锁后执行，不持有树锁等待物理传输停止：
 
 ```
 ① 树锁内不调 insertNode（防止给缺失 key 造出空壳节点，BlockTree.cc:248）
@@ -194,16 +198,16 @@ malloc k 块是**一等公民分配**（§1.1 规则 3）：走与普通请求�
 decode 侧由传输回调/deadline 结束业务等待，物理保活约束见 R1
 ```
 
-不变量不变：prefill 要么整段发布、要么本次写回零发布且最终无资源残留；已有缓存不受影响。后缀冲突的放弃也走同一回收流程，原因记为 `existing_suffix_conflict`。
+不变量：load 或 P2P 失败时不调用 settle；所有在途访问停止后才回收请求引用。成功 settle 采用普通 BlockTree 的幂等插入语义，并发重复块不会覆盖已有值。
 
-**为什么 prefill 侧不 maintain stream**，两条理由：① **用不上**——写回接收块由 `mallocForExternalInsert` 返回 owning RAII 句柄，并交给 `P2PConnectorAsyncWriteContext` 持有至物理传输停止；分配与驱逐在 group 层完成，不需要 stream 或 Read 的 ResourceStore。② **养不起**——GenerateStream 是引擎状态机的参与者，为写回伪造一个意味着假输入、假状态推进，且它的收尾是"无条件插树"，与写回"收齐才插、失败零残留"相反；假 stream 有过事故（docs/references/deepseek/dsv4_mtp_fake_decode_host_memory_leak.md）。所以 prefill 对写回零长期 stream 状态，一致性全靠握手时 match、AsyncWriteContext 保活和 settle 时重验。
+**为什么 prefill 侧不 maintain stream**，两条理由：① **用不上**——写回接收块由 `admitWriteBackDecodeCache` 返回 owning RAII 句柄，并交给 `P2PConnectorAsyncWriteContext` 持有至物理传输停止；分配与驱逐在 group 层完成，不需要 stream 或 Read 的 ResourceStore。② **养不起**——GenerateStream 是引擎状态机的参与者，为写回伪造一个意味着假输入、假状态推进；假 stream 有过事故（docs/references/deepseek/dsv4_mtp_fake_decode_host_memory_leak.md）。所以 prefill 对写回零长期 stream 状态，一致性由握手时 match、AsyncWriteContext 保活和普通 BlockTree 插入共同保证。
 
 ### 3.2 保留、淘汰与热度：全部委托给 BlockTree，零新设计
 
 写回块插树后就是一个普通缓存节点，和本地请求留下的块没有任何区别，BlockTree 的既有机制自动生效：
 
 - **占用与回收**：受 watermark 淘汰管理、可降级 host/disk，"显存浪费"的上界由既有淘汰体系兜住；
-- **热度**：insert 时获得最新 `last_access_seq`，之后正常请求的 match 命中自动刷新；StartWrite 纯探测是否刷新热度由 R3 的接口契约明确；
+- **热度**：insert 时获得最新 `last_access_seq`；纯 probe 不刷新热度，StartWrite 后续的本地 match 沿用普通 loader 的热度更新；
 - **可选退路**：`insert` 的 `target_tier` 参数支持直落 HOST（settle 后 D2H、device 块即时归还，命中时走现有 load-back），留作配置项。
 
 因此写回对缓存管理的唯一控制点就是 §3.1 的准入；块进树之后的一切不需要任何新代码。
@@ -361,11 +365,12 @@ decode                                     prefill
 请求结束：本地插树 + hold 全部块（此刻还不知道 p）
    │
    ├─── StartWrite(keys + token_ids + prompt 边界) ─►  复算互校 → match：价值门 p_dev ≥ prompt_blocks，不满足即拒
-   │                                        malloc k 块（不足照常驱逐腾位），workers 注册落点
-   ◄────── 应答 {p, k, 接收端点} ───────────┤  （k=0：到此结束；驱逐后仍不足：拒绝）
+   │                                        本地 match 得 p，持有前缀，分配加载及接收落点
+   │                                        提交本地加载；k>0 时 workers 注册接收
+   ◄────── 应答 {p, k, 接收端点} ───────────┤  （k=0：Decode 结束；Prefill 仍等待已有加载）
    │
    ├═══ workers 推送 k 块 × 全部层 ═══════►  workers 按 key 接收进预分配块
-   │                                        收齐 → 同锁重验前缀仍全在 GPU + 原子插树
+   │                                        本地加载及接收均成功 → 同锁重验 + 原子发布新尾部
    └─ 完成或超时 → 释放 hold                  （重验/插入失败 → 优雅退出，全部释放）
 ```
 
@@ -404,7 +409,7 @@ message P2PConnectorStartWriteRequestPB {
 message P2PConnectorStartWriteResponsePB {
     int32 error_code      = 1;
     string error_message  = 2;
-    int32 accepted_start_block = 3;  // = p（device 层连续命中前缀 p_dev，§1.1 规则 2）
+    int32 accepted_start_block = 3;  // = p（本地连续匹配长度，含待加载的 HOST/DISK 后缀）
     int32 accepted_block_count = 4;  // = k；0 表示无需传输
     // 数据面端点。写回方向 prefill 是接收方，发送方（decode）必须拿到接收方 workers 的
     // transfer server 端点才能 push——与正向同构：正向把接收方（decode）端点放在 StartLoad
@@ -479,7 +484,7 @@ prefill 侧（响应）
 | route 下发 | `RouteCodec` + `P2PBroadcastClient::broadcastPerRank` | 同左，收发两侧的编码方向互换 | 编码内容本质是"发送方字段"（route_id、对端端点、src partition/slice）和"接收方字段"（dst partition/slice + 解析好的键），与角色无关；广播通道是通用的 rank0→worker 管道 | 大部分可复用。两点适配：encodeForPrefill/encodeForDecode 按角色命名，§5 统一改名为 encodeForSender/Receiver；正向发送方不下发键规则是靠"本地投影=route 键集"的白名单性质，非对称写回后 decode worker 的本地全量≠route 键集，KeyShardSpec 要编进 TransferRoutePB 下发 |
 | 数据面 rendezvous | decode 预注册 recv task，prefill push，`TransferTaskStore` 按 unique_key 汇合 | prefill 预注册，decode push | 汇合只认 unique_key 字符串和 recv task 的 block_infos，对谁是 prefill/decode 完全无感 | 原样复用（Phase 1 加的 `_wb_` 命名空间继续用） |
 | 传输后端 | `TransferBackendFactory` 同时产出 sender + receiver | 同左 | backend 工厂每进程建出收发对并双向 regMem（P2PConnector.cc:34-95）；当前未用半边在 init 时被丢弃，写回接给 `*Write` worker（§5.4），零新机制、少量接线 | 原样复用 |
-| 资源生命周期 | prefill 侧 ResourceStore 在握手前持块，发送上下文在传输期持块 | Decode 与 Prefill 的 AsyncWriteContext 分别持有源块和接收块 | owning 引用都保留到 worker stopped；Write 不复用 Read 的等待型 ResourceStore | 原样复用 ownership 原则 |
+| 资源生命周期 | prefill 侧 ResourceStore 在握手前持块，发送上下文在传输期持块 | Decode 持源块；Prefill 持匹配前缀、加载上下文及接收尾部 | worker stopped 且本地加载 done 后才释放；Write 不复用 Read 的 ResourceStore | 复用 ownership 原则 |
 | 原子落账 | decode asyncRead 的 settle（全部到齐才生效，失败全释放） | prefill 侧 settle 后才 insert | "全部传输单元到齐才生效"的判定只依赖 route×layer 的完成计数，与方向无关 | 原样复用（非对称时每个 rank 的完成条件仍是"覆盖它的所有 route×layer 到齐"，机制不变） |
 | 控制面 RPC | `DecodeLoadHelper`（原 PrefillLoadCaller，decode rank0 发起 StartLoad） | `DecodeWriteHelper`（decode rank0 → prefill rank0 发起 StartWrite） | 镜像新增，结构照抄；控制面只携带 cache_keys 与校验字段，不含并行度相关逻辑 | 可复用，仅对称性校验从"digest 相等"改为走 planner 白名单校验 |
 
@@ -500,10 +505,10 @@ prefill 侧（响应）
 
 **真正的新逻辑**——正向链路里没有对应物，是实现风险的集中点（即 §7.2 里的 ★真新逻辑，只有两处）：
 
-1. **prefill 侧"无 stream 的块生命周期管理 + 外部插树"**（`mallocForExternalInsert` / `insertExternalBlocks`）。k 个新块由分配接口返回的 owning RAII 句柄接管原始引用，再由接收上下文持有（§3.1），接收端不额外 `incrKVCacheRef`。settle 需要新增同锁接口：完整预检 GPU 前缀和整个后缀的节点冲突，通过后发布，再归还所有新块的分配引用；失败时保证零发布，并在物理传输停止后归还句柄；
+1. **prefill 侧无 stream 的块生命周期管理与外部插树**（`admitWriteBackDecodeCache` / `commitWriteBackDecodeCache`）。owning 句柄接管匹配 REQUEST 引用和加载/接收落点的原始分配引用（§3.1），不额外 `incrKVCacheRef`。本地加载与 P2P 均成功后，确认前缀并复用普通 BlockTree 插入；失败时不进入 settle。两条数据路径物理停止后才释放句柄；
 2. **握手协商语义**（match → accepted range）。正向是"decode 声明要什么、prefill 照给"；写回是"decode 报全量 key、prefill 算增量再回价"，两阶段协商是新协议逻辑。
 
-这两处与"是否保留 stream"无关：settle 的"收齐才插、失败零残留"和握手协商在任何方案下都要新写。接收端需要的是纯探测、owning 分配和同锁插入接口；StartWrite 返回后的任务持有者与完成汇总仍按 R4 单独明确，不能假定整条链都在握手 RPC 线程内完成。
+接收端使用同锁价值门与本地 match、owning 分配和同锁发布接口。StartWrite 返回后由 `P2PConnectorAsyncWriteContext` 汇总 worker 和本地加载状态；握手 RPC 线程不等待数据到齐，也不负责最终插树。
 
 传输基建没有新机制：双向 regMem 每进程已就绪（§6.1），写回只需留住 init 中被丢弃的半个 backend 并交给 `*Write` worker（§5.4）。第 1 处也是 §7.8 把"prefill 收侧"单独作为 Slice 2、用测试 RPC 先行验证的原因。
 
@@ -523,8 +528,8 @@ prefill 侧（响应）
 | `p2p/P2PKeyUtil.h` | `makeWriteBackRouteLayerKey()`（`_wb_` 命名空间） | 新增 |
 | `RemoteRpcServiceImpl`（model_rpc） | StartWrite 的 service 端接入，转发给 prefill 侧 P2PConnector | 扩展 |
 | `StreamCacheResource::tryReleaseKVBlock`（.cc:297） | FINISHED 分支内、free 之前调用 `cache_manager->asyncWriteBack`（生产链路无 coordinator，KVCacheManager.cc:800） | 修改（约 5 行） |
-| `KVCacheManager` / allocator | ① `asyncWriteBack()` 发送侧薄转发仍用 `incrKVCacheRef` hold；② 接收侧 `mallocForExternalInsert(...)` 返回接管原始分配引用的 owning RAII 句柄，含部分分配回滚；③ `insertExternalBlocks(...)` 接入新增的同锁完整预检与插入接口，显式返回整体结果和采纳范围 | 新增方法 |
-| `BlockTreeCache` | 纯探测后缀冲突；在一次锁持有期间完成 GPU 前缀、全部既有后缀节点状态检查及发布。Phase 1 对低层或忙碌节点冲突放弃，不新增节点升级能力 | 新增接口（Slice 2，见 R3、R8） |
+| `KVCacheManager` / allocator | 发送侧 `asyncWriteBack()` 用 `incrKVCacheRef` hold；接收侧 owning 句柄接管匹配及原始分配引用，返回本地加载上下文和接收起点；失败回滚；`insertExternalBlocks` 返回整体发布结果 | 新增方法 |
+| `BlockTreeCache` | 同锁检查 GPU prompt 并本地 match，复用普通 loader 加载 HOST/DISK；最终确认 DEVICE 前缀，再复用普通 insert 幂等采纳回传块 | 新增接口（Slice 2，见 R3、R8） |
 | decode 侧 `Meta::P2PRoutingContext` | prefill rank0 地址/`prefill_tp_size` 需存活到 stream 结束（现为 load 期使用，实现时确认生命周期）。注意它只有 rank0 的 RPC 地址（Meta.h:32-39），够发 StartWrite 控制面；数据面的 prefill worker 传输端点由 StartWrite 应答带回（§7.1） | 确认/微调 |
 
 ### 7.6 配置项
@@ -545,18 +550,17 @@ prefill 侧（响应）
 | decode 侧 planFor()/对称断言本地失败（validateTag 的全部检查在本地跑，此时已 hold） | 不发 RPC，立即释放 hold | 无 |
 | decode 本地校验通过，但 prefill 侧 digest 比对不一致 | prefill 拒绝，decode 释放 hold | 无 |
 | token_ids 复算 keys 与 cache_keys 不一致（两侧 hash 版本漂移，§1.1） | prefill 拒绝，decode 释放 hold | 无 |
-| prefill match 全命中（k=0） | 握手即结束 | 无（快路径） |
+| prefill 本地全命中（k=0） | Decode 无需发送；Prefill 如有加载仍等待 | 加载及 REQUEST 引用持有至物理结束 |
 | 价值门拒绝：prompt 前缀有块不在 GPU（p_dev < prompt_blocks，§1.1 规则 1） | prefill 拒绝，decode 释放 hold | 无 |
-| 准入发现候选后缀已有 HOST/DISK 或忙碌 FULL 节点 | 分配前拒绝，记录 existing_suffix_conflict；不覆盖或升级旧节点 | 已有缓存不变 |
+| 已有 HOST/DISK 后缀 | 通过本地 loader 加载，仅接收缺失尾部；加载失败禁止新尾部发布 | 已成功加载的已有缓存可以保留 |
 | prefill malloc 不足 | 照常驱逐腾位（规则 3）；驱逐后仍不足（极端）→ 拒绝，decode 释放 | 无 |
 | 接收资源登记失败或部分分配失败 | owning 句柄/分配接口回滚原始分配引用；已启动接收时先等待物理停止 | 无分配引用残留 |
 | 数据面部分传输失败 / 超时 | 标记业务失败并取消，不插树；两侧继续持有资源，全部相关 worker 确认 stopped 后释放 | 不提前复用在途块 |
 | 传输窗口内前缀被驱逐/降级出 GPU（严格档重验失败） | 优雅退出：不插树、释放 k 块、erase entry、记 writeback_abandoned | 无残留（白传一趟） |
-| settle 发现既有后缀已降到低层或进入忙碌状态 | 完整预检失败，零发布；记 existing_suffix_conflict，确认物理停止后归还分配句柄 | 已有缓存不变，新块无残留 |
 | decode 传输中途进程退出 | prefill 取消超时 recv task，待 backend 确认物理停止后释放 | 不发布失败结果 |
 | prefill settle 成功但控制响应丢失 | decode 继续 QUERY/CANCEL，确认发送 worker stopped 后释放 hold；prefill 树上已可见 | 可能仅 metric 记为超时 |
 
-所有路径共同的不变量：deadline 终止业务成功资格，不证明物理传输已停止；已提交 worker 的两侧资源必须等全部相关 worker stopped 后释放。Prefill 要么整段插树，要么确认物理停止后归还全部分配引用。
+所有路径共同的不变量：deadline 终止业务成功资格，不证明物理传输已停止；已提交 worker 的两侧资源必须等全部相关 worker stopped 后释放。失败时不调用 settle；成功时由普通 BlockTree insert 决定实际采纳的回传块。
 
 Prefill settle 后不回显式 ack：Decode 通过发送 worker 的 QUERY/CANCEL 确认物理停止，Prefill 独立确认接收成功并插树。Decode 的发送成功指标不代表 Prefill 已发布；Phase 1 不增加发布 ack。
 
@@ -570,7 +574,7 @@ Metrics（挂 `P2PConnectorMetrics`）：写回发起/跳过（分原因）/成�
 2. `P2PConnectorTest` 集成：成功回传 / k=0 快路径 / malloc 拒绝 / 传输超时释放 / decode 中途退出，五条路径；
 3. smoke（挂 `suites_h20_oss.bzl` decode_entrance 组）：两轮请求，第二轮 prompt = 第一轮 prompt + response，断言 aux_info 的 `prefill_local_reuse_len` 覆盖到 response 部分（该字段现成，见 `q_r_dp_sep_p2p_reuse.json` 的断言方式）。
 4. 接收引用账本：分配后仅一份引用；部分分配/登记失败回到原始空闲块数；成功插树后仅保留树引用；并发 DEVICE 重复结果对应的新块归零；超时但仍在途时不得提前释放。
-5. 后缀冲突：prompt 在 GPU、response 后缀在 HOST/DISK 时准入拒绝；准入后后缀降级时 settle 零发布；较早的空节点后接 HOST/忙碌节点时，前面的空节点也不得被部分填充；完整 DEVICE 重复前缀可安全复用并继续插入新后缀。
+5. 本地后缀：GPU prompt 后的 HOST/DISK 后缀真实加载并逐块逐层校验数据；本地加载与 P2P 两种完成顺序、加载失败、取消、k=0 仍需等待和并发加入已有加载；最终前缀丢失时不发布，重复 DEVICE 节点安全复用。
 
 实现切片共五片（Slice 0～4，每片独立可编译、可测）：
 
@@ -578,7 +582,7 @@ Metrics（挂 `P2PConnectorMetrics`）：写回发起/跳过（分原因）/成�
 | --- | --- | --- |
 | Slice 0：Read 重构 | §4 side channel 拆分及 §5 现有 scheduler/worker 改为 Read 命名 | 现有正向路径回归 |
 | Slice 1：写回基础设施 | proto、两个轻量 Write worker、backend 另一半持有、角色分发和广播控制接口；Decode 使用 `writePerRank → P2PWorkerDecodeWrite::write`，Prefill 使用 `processWritePerRank → P2PWorkerPrefillWrite::handleWrite`；connector 负责协议与操作分发，worker 接收内部 route plan | 显式下发任务验证注册、发送、查询和取消；真实 RPC/TCP 验证，无生产请求触发 |
-| Slice 2：Prefill 接收与插树 | `StartWrite` 服务处理、`handleWrite` / `processWrite`、`P2PSchedulerPrefillWrite`；准入与范围协商、owning 分配、接收汇总、settle/insert、失败释放；包括原始分配引用交接、HOST/DISK 后缀冲突拒绝和同锁完整预检与发布 | 测试发起方驱动完整接收流程，验证引用账本和失败收尾 |
+| Slice 2：Prefill 接收与插树 | `StartWrite`、`handleWrite` / `processWrite`、`P2PSchedulerPrefillWrite`；GPU prompt 准入、本地后缀加载、缺失尾部接收、引用交接、完成汇总、同锁发布及失败释放 | 测试发起方驱动完整流程，验证真实加载数据、引用账本和失败收尾 |
 | Slice 3：Decode 发起与收尾 | `P2PConnector::asyncWrite` / `P2PConnectorDecode::write`、`DecodeWriteHelper` 和 `P2PSchedulerDecodeWrite`；源块保活上下文、握手、routes 发送、取消与超时管理、CANCEL/QUERY 和释放 | 模拟 Prefill 服务驱动完整发起流程；使用测试提供的源块 hold 验证生命周期，不接入请求收尾触发 |
 | Slice 4：生产链路接通 | `KVCacheManager::asyncWriteBack`、`tryReleaseKVBlock` 触发接线，在 free 前同步建立源块 hold 并交给 Slice 3 上下文；确认 KV 就绪及 routing context 生命周期，连接真实两端 | 端到端集成、资源交接和异常路径测试、正向回归及写回 smoke |
 
@@ -599,7 +603,7 @@ Phase 1 走 planner、route 驱动、双端镜像，所以 Phase 2 基本收敛�
 
 ## 9. Review comments（待讨论）
 
-> R1–R6 保留原有待讨论意见，相关未决接口和行为继续按各条说明确认。R7/R8 是本轮补充的接收引用与后缀冲突问题，正文已明确处理策略，归属尚未实现的 Slice 2；不代表当前 Slice 0 存在接收写回泄漏或已实现节点升级。
+> 以下保留设计审阅时的原始问题与建议，不能将历史的“待实现”理解为当前实现状态。2026-09-17 更新了 R3/R7/R8 的落实情况；当前本地加载、引用交接及发布契约以 §1.1、§3.1 和实现文档 §7、§12 为准。
 
 ### R1 [P1] 超时不能直接释放传输中的块
 
@@ -621,6 +625,7 @@ Phase 1 走 planner、route 驱动、双端镜像，所以 Phase 2 基本收敛�
 - **问题与依据**：`block_tree_cache/load/BlockTreeLoader.cc` 的 `createMatchResult()` 会增加 device 块引用，并为低层命中登记 `LOAD_PENDING` 等加载状态。只读取 `matched_device_blocks` 后丢弃结果，会遗漏引用释放。另一个独立约束是：现有公开 `BlockTreeCache::match()` 和 `insert()` 分别加锁，外层顺序调用无法保证重验与插树原子执行。
 - **待讨论建议**：明确新增不持块、不登记加载的探测接口；同时在 BlockTreeCache 内提供“同锁重验前缀并插入”的接口，将 §3.1 的原子性要求落实到 API，明确准入拒绝与重复插入时的引用归还责任。
 - **验证要点**：准入拒绝后 refcount 不变、不留下加载状态；传输期间前缀被驱逐或降级时放弃插树；相同前缀并发写回时，未采纳的块正确释放。
+- **当前落实（2026-09-17）**：生产使用 `matchForExternalInsert` 同锁检查价值门并显式接管 match 引用和加载上下文，独立的只读准入查询接口已删除。通过准入后允许本地加载，最终发布仍独立同锁完整重验。
 
 ### R4 [P2] StartWrite 返回后的完成状态汇总与所有权尚未定义
 
@@ -646,11 +651,11 @@ Phase 1 走 planner、route 驱动、双端镜像，所以 Phase 2 基本收敛�
 ### R7 [P2] 接收侧原始分配引用缺少释放责任（本轮 comment 4）
 
 - **依据**：`FullKVCacheGroup::malloc` 已增加一次引用，`SingleTypeKVCacheAllocator::incrKVCacheRef` 再增加一次；后者的 guard 只减少一次，写回接收侧没有 stream 的 `free()` 释放原始引用。
-- **正文处理**：§3.1 选择由 `mallocForExternalInsert` 返回直接接管原始分配引用的 owning RAII 句柄；接收侧不再额外增引用。成功插树后也释放分配引用，树自行持有 CACHE 引用；未采纳的新块和失败分配由同一所有权规则回收。
-- **状态与验证**：Slice 2 待实现，引用账本和失败回滚测试见 §7.8。当前 Slice 0 没有写回接收分配路径，不将其归类为现有泄漏。
+- **正文处理**：§3.1 选择由 `admitWriteBackDecodeCache` 返回直接接管原始分配引用的 owning RAII 句柄；接收侧不再额外增引用。成功插树后也释放分配引用，树自行持有 CACHE 引用；未采纳的新块和失败分配由同一所有权规则回收。
+- **状态与验证（2026-09-17）**：Slice 2 已实现；句柄同时接管匹配 REQUEST 引用与 malloc 原始引用，失败回滚及引用计数有单测。物理释放需等待本地加载和 P2P 两者结束，详见实现文档 §7、§12。
 
 ### R8 [P2] HOST FULL 后缀会阻断普通插入（本轮 comment 5）
 
 - **依据**：`BlockTreeTest.InsertHardStopsAtExistingHostFullNode` 明确断言已有 HOST FULL 节点不被覆盖，后续新节点也不插入。p=p_dev 只能给出 GPU 连续前缀长度，不能证明后缀不存在。
-- **正文处理**：§1.1/§3.1 明确 Phase 1 对低层或忙碌 FULL 节点冲突放弃；准入及 settle 均检查，settle 在同一把树锁内完整预检后再发布。完整稳定的 DEVICE 重复结果可复用，未采纳的新块归还分配引用。
-- **状态与验证**：Slice 2 待实现；覆盖准入时已有 HOST 后缀、传输中降级、忙碌节点和部分发布防护。安全的 HOST→DEVICE 节点更新接口不在本阶段范围。
+- **历史处理**：初版选择拒绝已有 HOST/DISK 后缀，避免普通 insert 停在低层节点。
+- **当前处理（2026-09-19）**：已有低层后缀通过普通 loader 安全加载到 DEVICE，p 取本地匹配边界；只接收缺失尾部。AsyncWriteContext 先确认 load 和 P2P 均成功，settle 同锁重验 `[0,p)` 后复用普通 insert，由 BlockTree 幂等跳过并发重复块。数据校验及生命周期测试见实现文档 §12。

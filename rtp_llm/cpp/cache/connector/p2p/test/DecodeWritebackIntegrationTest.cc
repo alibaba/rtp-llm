@@ -307,7 +307,7 @@ protected:
         sender_->release();
         ASSERT_TRUE(await([&]() { return drained(); }));
         EXPECT_TRUE(write->success()) << write->errorInfo().ToString();
-        EXPECT_EQ(target_->probeExternalInsert(keys_, 1).matched_device_blocks, 3u);
+        EXPECT_EQ(target_->devicePrefixBlocksForTest(keys_), 3u);
     }
 
     P2PConnectorAsyncWriteContextChecker& checker() {
@@ -388,8 +388,7 @@ TEST_F(DecodeWritebackIntegrationTest, LastSampleAtBlockBoundaryIsExcluded) {
     EXPECT_EQ(write->resource_->cacheKeys().size(), 2u);
     sender_->release();
     ASSERT_TRUE(await([&]() { return drained(); }));
-    auto probe = target_->probeExternalInsert(keys_, 1);
-    EXPECT_EQ(probe.matched_device_blocks, 2u);
+    EXPECT_EQ(target_->devicePrefixBlocksForTest(keys_), 2u);
 }
 
 TEST_F(DecodeWritebackIntegrationTest, SpeculativeStopWordsKeepCompletedSuffixWriteback) {
@@ -477,7 +476,7 @@ TEST_F(DecodeWritebackIntegrationTest, DeadlineKeepsSourcePinnedUntilSenderStops
     sender_->release();
     ASSERT_TRUE(await([&]() { return drained(); }));
     EXPECT_EQ(sourceRefs(1), 1u);
-    EXPECT_EQ(target_->probeExternalInsert(keys_, 1).matched_device_blocks, 1u);
+    EXPECT_EQ(target_->devicePrefixBlocksForTest(keys_), 1u);
 }
 
 TEST_F(DecodeWritebackIntegrationTest, StopDrainsWithWorkerRpcStillAvailable) {

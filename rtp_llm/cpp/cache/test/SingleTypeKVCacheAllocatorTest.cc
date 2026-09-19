@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <vector>
 #include <set>
@@ -56,7 +57,7 @@ private:
 class ScopedSingleTypeDiskDirectory {
 public:
     ScopedSingleTypeDiskDirectory() {
-        std::string       pattern = "/tmp/rtp_llm_target_single_load_XXXXXX";
+        std::string pattern = (std::filesystem::temp_directory_path() / "rtp_llm_target_single_load_XXXXXX").string();
         std::vector<char> writable(pattern.begin(), pattern.end());
         writable.push_back('\0');
         char* result = ::mkdtemp(writable.data());
@@ -262,6 +263,17 @@ protected:
         return std::vector<uint8_t>(data, data + bytes);
     }
 
+    KVCacheResourcePtr allocateExternal(const CacheKeysType& keys, size_t prefix_blocks) {
+        KVCacheResourcePtr                resource;
+        size_t                            start = 0;
+        std::shared_ptr<LoadAsyncContext> load_context;
+        const auto error = allocator_->admitWriteBackDecodeCache(keys, prefix_blocks, resource, start, load_context);
+        EXPECT_TRUE(error.ok()) << error.ToString();
+        EXPECT_EQ(start, prefix_blocks);
+        EXPECT_EQ(load_context, nullptr);
+        return resource;
+    }
+
     std::shared_ptr<TestSingleTypeKVCacheAllocator> allocator_;
 };
 
@@ -269,56 +281,76 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ExternalAllocationOwnsExactlyTheOriginalR
     allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(createSingleTypeTestConfig(2, 10, 4));
     ASSERT_TRUE(allocator_->init());
     ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11}).success);
-    ASSERT_TRUE(allocator_->probeExternalInsert({11, 22, 33}, 1).error.ok());
     const auto pool  = allocator_->blockTreeCacheOwner()->groupSets().front()->devicePools().front();
     const auto free  = allocator_->freeBlocksNum();
-    auto       owner = allocator_->mallocForExternalInsert({11, 22, 33}, 1);
+    auto       owner = allocateExternal({11, 22, 33}, 1);
     ASSERT_NE(owner, nullptr);
     ASSERT_EQ(owner->blocks(0).size(), 3u);
-    EXPECT_EQ(owner->blocks(0)[0], NULL_BLOCK_IDX);
+    const auto prefix = owner->blocks(0)[0];
+    EXPECT_EQ(pool->refCount(prefix), 2u);
     const auto first = owner->blocks(0)[1];
     const auto last  = owner->blocks(0)[2];
     EXPECT_EQ(pool->refCount(first), 1u);
     EXPECT_EQ(pool->refCount(last), 1u);
     EXPECT_EQ(allocator_->freeBlocksNum(), free - 2);
     owner.reset();
+    EXPECT_EQ(pool->refCount(prefix), 1u);
     EXPECT_FALSE(pool->isAllocated(first));
     EXPECT_FALSE(pool->isAllocated(last));
     EXPECT_EQ(allocator_->freeBlocksNum(), free);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, ExternalProbeIsPureAndDuplicatePublicationReleasesUnusedBlocks) {
+TEST_F(SingleTypeKVCacheAllocatorTest, PopulateMatchedBlocksRejectsConflictAndReleasesMatchReference) {
+    const auto config = createSingleTypeTestConfig(2, 10, 4);
+    allocator_        = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+    ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11}).success);
+
+    const auto cache = allocator_->blockTreeCacheOwner();
+    const auto pool  = cache->groupSets().front()->devicePools().front();
+    auto       match = cache->match({11});
+    ASSERT_EQ(match.matched_device_resources.size(), 1u);
+    const auto matched = match.matched_device_resources.front().node_blocks.front().second.front();
+    EXPECT_EQ(pool->refCount(matched), 2u);
+
+    auto conflict = pool->malloc(1);
+    ASSERT_TRUE(conflict.has_value());
+    ASSERT_EQ(conflict->size(), 1u);
+    pool->incRef(*conflict);
+    ASSERT_NE(conflict->front(), matched);
+
+    KVCacheResource resource;
+    resource.initGroups(config.topologyPtr());
+    resource.mutableBlockIds(0).assign(*conflict);
+
+    const auto error = allocator_->populateMatchedBlocksForTest(match, resource);
+    EXPECT_TRUE(error.hasError());
+    EXPECT_EQ(error.ToString(), "matched KV cache block changed");
+    EXPECT_EQ(resource.blocks(0), *conflict);
+    EXPECT_EQ(pool->refCount(matched), 1u);
+    EXPECT_EQ(pool->refCount(conflict->front()), 1u);
+    pool->decRef(*conflict);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ExternalDuplicatePublicationReleasesUnusedBlocks) {
     allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(createSingleTypeTestConfig(2, 12, 4));
     ASSERT_TRUE(allocator_->init());
     ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11}).success);
-    const auto cache       = allocator_->blockTreeCacheOwner();
-    const auto pool        = cache->groupSets().front()->devicePools().front();
-    const auto prefix      = cache->tree()->findNode({11}).front()->group_set_resources.front().device_blocks.front();
-    const auto prefix_refs = pool->refCount(prefix);
-    const auto free        = allocator_->freeBlocksNum();
-    for (int i = 0; i < 3; ++i) {
-        const auto probe = allocator_->probeExternalInsert({11, 22, 33}, 1);
-        ASSERT_TRUE(probe.error.ok()) << probe.error.ToString();
-        EXPECT_EQ(probe.matched_device_blocks, 1u);
-    }
-    EXPECT_EQ(pool->refCount(prefix), prefix_refs);
-    EXPECT_EQ(allocator_->freeBlocksNum(), free);
-    auto owner = allocator_->mallocForExternalInsert({11, 22, 33}, 1);
+    const auto cache = allocator_->blockTreeCacheOwner();
+    const auto pool  = cache->groupSets().front()->devicePools().front();
+    auto       owner = allocateExternal({11, 22, 33}, 1);
     ASSERT_NE(owner, nullptr);
-    ASSERT_TRUE(allocator_->probeExternalInsert({11, 22, 33}, 1).error.ok());
-    auto duplicate = allocator_->mallocForExternalInsert({11, 22, 33}, 1);
+    auto duplicate = allocateExternal({11, 22, 33}, 1);
     ASSERT_NE(duplicate, nullptr);
     const auto published = owner->blocks(0)[1];
-    const auto result    = allocator_->insertExternalBlocks(*owner, 1, currentTimeMs() + 5000);
-    ASSERT_TRUE(result.error.ok()) << result.error.ToString();
-    EXPECT_EQ(result.adopted_block_indices, std::vector<size_t>({1, 2}));
+    const auto result    = allocator_->commitWriteBackDecodeCache(*owner, 1, currentTimeMs() + 5000);
+    ASSERT_TRUE(result.ok()) << result.ToString();
     EXPECT_EQ(pool->refCount(published), 2u);
     owner.reset();
     EXPECT_EQ(pool->refCount(published), 1u);
     const auto unused = duplicate->blocks(0)[1];
-    const auto again  = allocator_->insertExternalBlocks(*duplicate, 1, currentTimeMs() + 5000);
-    EXPECT_TRUE(again.error.ok()) << again.error.ToString();
-    EXPECT_TRUE(again.adopted_block_indices.empty());
+    const auto again  = allocator_->commitWriteBackDecodeCache(*duplicate, 1, currentTimeMs() + 5000);
+    EXPECT_TRUE(again.ok()) << again.ToString();
     duplicate.reset();
     EXPECT_FALSE(pool->isAllocated(unused));
     EXPECT_EQ(pool->refCount(published), 1u);
@@ -328,43 +360,38 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ExternalInsertRejectsInvalidTailWithoutPu
     allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(createSingleTypeTestConfig(2, 10, 4));
     ASSERT_TRUE(allocator_->init());
     ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11}).success);
-    ASSERT_TRUE(allocator_->probeExternalInsert({11, 22, 33}, 1).error.ok());
-    auto owner = allocator_->mallocForExternalInsert({11, 22, 33}, 1);
+    auto owner = allocateExternal({11, 22, 33}, 1);
     ASSERT_NE(owner, nullptr);
     KVCacheResource invalid;
     invalid.initGroups(allocator_->config_.topologyPtr());
     invalid.setCacheKeys(owner->cacheKeys());
     invalid.mutableBlockIds(0).assign({NULL_BLOCK_IDX, owner->blocks(0)[1], NULL_BLOCK_IDX});
-    EXPECT_TRUE(allocator_->insertExternalBlocks(invalid, 1, currentTimeMs() + 5000).error.hasError());
+    EXPECT_TRUE(allocator_->commitWriteBackDecodeCache(invalid, 1, currentTimeMs() + 5000).hasError());
     EXPECT_EQ(allocator_->blockTreeCacheOwner()->tree()->findNode({11, 22, 33}).size(), 1u);
-    EXPECT_TRUE(allocator_->insertExternalBlocks(*owner, 1, currentTimeMs() - 1).error.hasError());
+    EXPECT_TRUE(allocator_->commitWriteBackDecodeCache(*owner, 1, currentTimeMs() - 1).hasError());
     EXPECT_EQ(allocator_->blockTreeCacheOwner()->tree()->findNode({11, 22, 33}).size(), 1u);
-    EXPECT_GE(allocator_->blockTreeCacheOwner()->evictForGroup(0, 1), 1);
-    const auto lost = allocator_->insertExternalBlocks(*owner, 1, currentTimeMs() + 5000);
-    EXPECT_TRUE(lost.error.hasError());
-    EXPECT_EQ(lost.error.ToString(), "prefix_evicted_or_demoted");
+    const auto prefix = owner->blocks(0)[0];
+    EXPECT_EQ(allocator_->blockTreeCacheOwner()->evictForGroup(0, 1), 0);
+    EXPECT_TRUE(allocator_->getDeviceBlockPool()->isAllocated(prefix));
+    const auto lost = allocator_->commitWriteBackDecodeCache(*owner, 1, currentTimeMs() + 5000);
+    EXPECT_TRUE(lost.hasError());
+    EXPECT_EQ(lost.ToString(), "prefix_evicted_or_demoted");
     EXPECT_TRUE(allocator_->blockTreeCacheOwner()->tree()->findNode({11, 22, 33}).empty());
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, ExternalInsertRejectsHostSuffixWithoutLoadingOrPublishing) {
+TEST_F(SingleTypeKVCacheAllocatorTest, ExternalInsertDoesNotOverwriteHostSuffixCreatedAfterAllocation) {
     allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(createSingleTypeTestConfig(2, 10, 4));
     auto config = makeSingleTypeTieredConfig(Tier::HOST, "");
     allocator_->setBlockTreeCacheConfigForTest(config);
     ASSERT_TRUE(allocator_->init());
     const auto cache = allocator_->blockTreeCacheOwner();
     const auto free  = allocator_->freeBlocksNum();
-    ASSERT_TRUE(allocator_->probeExternalInsert({11, 22}, 0).error.ok());
-    auto owner = allocator_->mallocForExternalInsert({11, 22}, 0);
+    auto       owner = allocateExternal({11, 22}, 0);
     ASSERT_NE(owner, nullptr);
     const auto host = seedSingleTypeLowerTier(*cache, Tier::HOST, 11);
     ASSERT_NE(host, NULL_BLOCK_IDX);
-    const auto free_before_probe = allocator_->freeBlocksNum();
-    const auto probe             = allocator_->probeExternalInsert({11, 22}, 0);
-    EXPECT_TRUE(probe.error.hasError());
-    EXPECT_EQ(probe.error.ToString(), "existing_suffix_conflict");
-    EXPECT_EQ(allocator_->freeBlocksNum(), free_before_probe);
-    const auto result = allocator_->insertExternalBlocks(*owner, 0, currentTimeMs() + 5000);
-    EXPECT_TRUE(result.error.hasError());
+    const auto result = allocator_->commitWriteBackDecodeCache(*owner, 0, currentTimeMs() + 5000);
+    EXPECT_TRUE(result.ok()) << result.ToString();
     EXPECT_EQ(cache->tree()->findNode({11, 22}).size(), 1u);
     const auto& resource = cache->tree()->findNode({11}).front()->group_set_resources.front();
     EXPECT_EQ(resource.host_block, host);
@@ -381,8 +408,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ExternalAllocationUsesNormalCacheEviction
         *allocator_->blockTreeCacheOwner(), Tier::DEVICE, 0.0);
     ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11, 22, 33}).success);
     EXPECT_EQ(allocator_->freeBlocksNum(), 0u);
-    ASSERT_TRUE(allocator_->probeExternalInsert({44, 55}, 0).error.ok());
-    auto owner = allocator_->mallocForExternalInsert({44, 55}, 0);
+    auto owner = allocateExternal({44, 55}, 0);
     ASSERT_NE(owner, nullptr);
     EXPECT_EQ(owner->blocks(0).size(), 2u);
     EXPECT_LE(allocator_->blockTreeCacheOwner()->tree()->findNode({11, 22, 33}).size(), 1u);
@@ -390,22 +416,163 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ExternalAllocationUsesNormalCacheEviction
     EXPECT_GE(allocator_->freeBlocksNum(), 2u);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, ExternalInsertRechecksBusySuffixBeforePublishingNewTail) {
+TEST_F(SingleTypeKVCacheAllocatorTest, ExternalInsertDoesNotOverwriteBusySuffix) {
     allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(createSingleTypeTestConfig(2, 10, 4));
     ASSERT_TRUE(allocator_->init());
     ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11}).success);
-    ASSERT_TRUE(allocator_->probeExternalInsert({11, 22, 33}, 1).error.ok());
-    auto owner = allocator_->mallocForExternalInsert({11, 22, 33}, 1);
+    auto owner = allocateExternal({11, 22, 33}, 1);
     ASSERT_NE(owner, nullptr);
     ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11, 22}).success);
     const auto cache      = allocator_->blockTreeCacheOwner();
     auto&      suffix     = cache->tree()->findNode({11, 22}).back()->group_set_resources.front();
     suffix.transfer_state = GroupSetTransferState::DEMOTING;
-    EXPECT_EQ(allocator_->probeExternalInsert({11, 22, 33}, 1).error.ToString(), "existing_suffix_conflict");
-    const auto result = allocator_->insertExternalBlocks(*owner, 1, currentTimeMs() + 5000);
-    EXPECT_EQ(result.error.ToString(), "existing_suffix_conflict");
+    const auto result     = allocator_->commitWriteBackDecodeCache(*owner, 1, currentTimeMs() + 5000);
+    EXPECT_TRUE(result.ok()) << result.ToString();
     EXPECT_EQ(cache->tree()->findNode({11, 22, 33}).size(), 2u);
     suffix.transfer_state = GroupSetTransferState::IDLE;
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ExternalAllocationLoadsLowerTierSuffixAndHoldsGpuPrefix) {
+    for (const Tier tier : {Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(tierName(tier));
+        ScopedSingleTypeDiskDirectory disk_directory;
+        allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(createSingleTypeTestConfig(2, 10, 4));
+        allocator_->setBlockTreeCacheConfigForTest(makeSingleTypeTieredConfig(tier, disk_directory.path()));
+        ASSERT_TRUE(allocator_->init());
+        ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11}).success);
+        const auto cache  = allocator_->blockTreeCacheOwner();
+        const auto group  = cache->groupSets().front();
+        const auto pool   = group->devicePools().front();
+        std::vector<std::vector<uint8_t>> expected(4, std::vector<uint8_t>(group->payloadBytes()));
+        for (size_t block = 0; block < expected.size(); ++block) {
+            for (size_t byte = 0; byte < expected[block].size(); ++byte) {
+                expected[block][byte] = static_cast<uint8_t>((53 * (block + 1) + 17 * byte + byte / 256) % 251);
+            }
+        }
+        std::vector<std::vector<GroupSetResource>> slots(3, std::vector<GroupSetResource>(1));
+        for (size_t index = 1; index < slots.size(); ++index) {
+            const auto source = group->allocateSingleBlock(tier, BlockTreeRefType::CACHE);
+            ASSERT_NE(source, NULL_BLOCK_IDX);
+            if (tier == Tier::HOST) {
+                const auto buffer = group->hostPool()->blockBuffer(source);
+                ASSERT_EQ(buffer.payload_bytes, expected[index].size());
+                std::memcpy(buffer.addr, expected[index].data(), expected[index].size());
+            } else {
+                ASSERT_EQ(group->diskPool()->write(source, expected[index].data(), expected[index].size()),
+                          BlockIOStatus::OK);
+            }
+            slots[index][0].setBlocks(tier, {source});
+        }
+        cache->tree()->insertNode({11, 22, 33}, slots, /*collect_path=*/false);
+        for (size_t index = 1; index < slots.size(); ++index) {
+            group->releaseSingleBlock(tier, slots[index][0].getBlocks(tier).front(), BlockTreeRefType::CACHE);
+        }
+
+        KVCacheResourcePtr                resource;
+        size_t                            start = 0;
+        std::shared_ptr<LoadAsyncContext> load_context;
+        const auto error = allocator_->admitWriteBackDecodeCache({11, 22, 33, 44}, 1, resource, start, load_context);
+        ASSERT_TRUE(error.ok()) << error.ToString();
+        ASSERT_NE(load_context, nullptr);
+        EXPECT_EQ(start, 3u);
+        ASSERT_EQ(resource->blocks(0).size(), expected.size());
+        const auto prefix      = resource->blocks(0)[0];
+        const auto loaded      = resource->blocks(0)[1];
+        const auto loaded_next = resource->blocks(0)[2];
+        const auto tail        = resource->blocks(0)[3];
+        EXPECT_EQ(pool->refCount(prefix), 2u);
+        EXPECT_EQ(pool->refCount(loaded), 1u);
+        EXPECT_EQ(pool->refCount(loaded_next), 1u);
+        EXPECT_EQ(pool->refCount(tail), 1u);
+        ASSERT_EQ(load_context->loadDescs().size(), 2u);
+        EXPECT_EQ(load_context->loadDescs().front().target_blocks, BlockIndicesType{loaded});
+        EXPECT_EQ(load_context->loadDescs().back().target_blocks, BlockIndicesType{loaded_next});
+        for (size_t index = 0; index < expected.size(); ++index) {
+            size_t offset = 0;
+            for (int layer = 0; layer < 2; ++layer) {
+                for (const auto& buffer : pool->convertIndexToBuffer(layer, resource->blocks(0)[index])) {
+                    if (buffer.size_bytes == 0) {
+                        continue;
+                    }
+                    ASSERT_LE(offset + buffer.size_bytes, expected[index].size());
+                    const auto bytes = (index == 1 || index == 2) ? std::vector<uint8_t>(buffer.size_bytes, 0xFF) :
+                        std::vector<uint8_t>(expected[index].begin() + offset,
+                                             expected[index].begin() + offset + buffer.size_bytes);
+                    writeDeviceBytes(buffer.addr, bytes);
+                    offset += buffer.size_bytes;
+                }
+            }
+            ASSERT_EQ(offset, expected[index].size());
+        }
+        ASSERT_TRUE(load_context->commit());
+        load_context->waitDone();
+        ASSERT_TRUE(load_context->success()) << load_context->errorInfo().ToString();
+        const auto expect_block_bytes = [&](BlockIdxType block, const std::vector<uint8_t>& bytes) {
+            size_t offset = 0;
+            for (int layer = 0; layer < 2; ++layer) {
+                SCOPED_TRACE(layer);
+                for (const auto& buffer : pool->convertIndexToBuffer(layer, block)) {
+                    if (buffer.size_bytes == 0) {
+                        continue;
+                    }
+                    ASSERT_LE(offset + buffer.size_bytes, bytes.size());
+                    const std::vector<uint8_t> expected_bytes(bytes.begin() + offset,
+                                                               bytes.begin() + offset + buffer.size_bytes);
+                    EXPECT_EQ(readDeviceBytes(buffer.addr, buffer.size_bytes), expected_bytes);
+                    offset += buffer.size_bytes;
+                }
+            }
+            EXPECT_EQ(offset, bytes.size());
+        };
+        for (size_t index = 0; index < expected.size(); ++index) {
+            SCOPED_TRACE(index);
+            expect_block_bytes(resource->blocks(0)[index], expected[index]);
+        }
+        EXPECT_EQ(allocator_->devicePrefixBlocksForTest({11, 22, 33, 44}), 3u);
+        EXPECT_TRUE(allocator_->commitWriteBackDecodeCache(*resource, start, currentTimeMs() + 5000).ok());
+        resource.reset();
+        EXPECT_EQ(pool->refCount(prefix), 1u);
+        EXPECT_EQ(pool->refCount(loaded), 1u);
+        EXPECT_EQ(pool->refCount(loaded_next), 1u);
+        EXPECT_EQ(pool->refCount(tail), 1u);
+        const auto path = cache->tree()->findNode({11, 22, 33, 44});
+        ASSERT_EQ(path.size(), expected.size());
+        for (size_t index = 0; index < path.size(); ++index) {
+            SCOPED_TRACE(index);
+            expect_block_bytes(path[index]->group_set_resources[0].device_blocks[0], expected[index]);
+        }
+        allocator_.reset();
+    }
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ExternalAllocationFailureAbortsPendingLoadAndReleasesPrefix) {
+    allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(createSingleTypeTestConfig(2, 3, 4));
+    allocator_->setBlockTreeCacheConfigForTest(makeSingleTypeTieredConfig(Tier::HOST, ""));
+    ASSERT_TRUE(allocator_->init());
+    ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11}).success);
+    const auto cache  = allocator_->blockTreeCacheOwner();
+    const auto group  = cache->groupSets().front();
+    const auto source = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_NE(source, NULL_BLOCK_IDX);
+    std::vector<std::vector<GroupSetResource>> slots(2, std::vector<GroupSetResource>(1));
+    slots[1][0].host_block = source;
+    cache->tree()->insertNode({11, 22}, slots, /*collect_path=*/false);
+    group->releaseSingleBlock(Tier::HOST, source, BlockTreeRefType::CACHE);
+    allocator_->cacheGroups().front()->setEvictCallback([](size_t) { return 0; });
+    const auto         prefix = cache->tree()->findNode({11}).front()->group_set_resources[0].device_blocks[0];
+    const auto         free   = allocator_->freeBlocksNum();
+    KVCacheResourcePtr resource;
+    size_t             start = 0;
+    std::shared_ptr<LoadAsyncContext> load_context;
+    const auto error = allocator_->admitWriteBackDecodeCache({11, 22, 33}, 1, resource, start, load_context);
+    EXPECT_EQ(error.code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(resource, nullptr);
+    EXPECT_EQ(load_context, nullptr);
+    EXPECT_EQ(allocator_->freeBlocksNum(), free);
+    EXPECT_EQ(group->devicePools().front()->refCount(prefix), 1u);
+    EXPECT_EQ(group->hostPool()->treeRefCount(source), 1u);
+    EXPECT_EQ(cache->tree()->findNode({11, 22}).back()->group_set_resources[0].transfer_state,
+              GroupSetTransferState::IDLE);
 }
 
 // Test init

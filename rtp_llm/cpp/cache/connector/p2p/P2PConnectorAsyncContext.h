@@ -21,6 +21,8 @@
 
 namespace rtp_llm {
 
+class LoadAsyncContext;
+
 class P2PConnectorAsyncReadContext: public AsyncContext {
 public:
     P2PConnectorAsyncReadContext(const KVCacheResourcePtr&                               resource,
@@ -233,7 +235,8 @@ public:
                                   int64_t                             control_timeout_ms,
                                   Settle                              settle           = {},
                                   std::function<void()>               on_released      = {},
-                                  kmonitor::MetricsReporterPtr        metrics_reporter = nullptr);
+                                  kmonitor::MetricsReporterPtr        metrics_reporter = nullptr,
+                                  std::shared_ptr<LoadAsyncContext>   load_context     = nullptr);
 
     void               waitDone() override;
     bool               done() const override;
@@ -257,9 +260,11 @@ public:
     }
 
 private:
+    void finishTransferLocked(const ErrorInfo& error);
     void finishLocked(const ErrorInfo& error);
 
     KVCacheResourcePtr                                     resource_;
+    std::shared_ptr<LoadAsyncContext>                      load_context_;
     const std::string                                      unique_key_;
     const int64_t                                          deadline_ms_;
     const P2PConnectorBroadcastType                        type_;
@@ -279,6 +284,7 @@ private:
     bool                                                   done_{false};
     bool                                                   released_{false};
     bool                                                   control_submitting_{false};
+    bool                                                   transfer_stopped_{false};
     ErrorInfo                                              error_;
     kmonitor::MetricsReporterPtr                           metrics_reporter_;
     WriteSchedulerMetricsCollector                         metrics_;

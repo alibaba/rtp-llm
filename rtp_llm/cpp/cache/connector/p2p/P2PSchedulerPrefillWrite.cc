@@ -196,10 +196,6 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
         || calculateCacheKeys(request.token_ids().data(), blocks * block_size, block_size) != keys) {
         return invalid("writeback cache key hash mismatch");
     }
-    const auto probe = allocator_->probeExternalInsert(keys, prompt_blocks);
-    if (probe.error.hasError()) {
-        return reject(probe.error);
-    }
     if (currentTimeMs() >= request.deadline_ms()) {
         return reject(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired during admission"));
     }
@@ -207,27 +203,37 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
         return reject(ErrorInfo(ErrorCode::CANCELLED, "StartWrite cancelled"));
     }
 
-    // step2: allocate resource for the accepted range
-    const auto start = probe.matched_device_blocks;
+    // step2: admit the writeback and prepare the resource and load context
+    KVCacheResourcePtr                resource;
+    std::shared_ptr<LoadAsyncContext> load_context;
+    size_t                            start = 0;
+    const auto                        admission_error =
+        allocator_->admitWriteBackDecodeCache(keys, prompt_blocks, resource, start, load_context);
+    if (admission_error.hasError()) {
+        return reject(admission_error);
+    }
+    if (currentTimeMs() >= request.deadline_ms()) {
+        return reject(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired during admission"));
+    }
+    if (is_cancelled && is_cancelled()) {
+        return reject(ErrorInfo(ErrorCode::CANCELLED, "StartWrite cancelled"));
+    }
     const auto count = blocks - start;
-    if (count == 0) {
+    if (count == 0 && !load_context) {
         response.set_accepted_start_block(start);
         response.set_plan_digest(planned->plan.digest());
         report(ErrorInfo::OkStatus(), true);
         return;
     }
-    auto resource = allocator_->mallocForExternalInsert(keys, start);
-    if (!resource) {
-        return reject(ErrorInfo(ErrorCode::MALLOC_FAILED, "writeback receive allocation failed"));
-    }
 
     // step3: build the transfer routes
     P2PBroadcastClient::RankRoutes routes(transfer_addrs_.size());
     int64_t                        planned_bytes = 0;
-    const auto                     route_error   = buildPrefillRankRoutes(
-        planned->plan, *resource, start, count, routes, &planned_bytes);
-    if (route_error.hasError()) {
-        return reject(route_error);
+    if (count > 0) {
+        const auto route_error = buildPrefillRankRoutes(planned->plan, *resource, start, count, routes, &planned_bytes);
+        if (route_error.hasError()) {
+            return reject(route_error);
+        }
     }
 
     // step4: register the resource and kickoff the transfer
@@ -239,10 +245,11 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
         client_,
         config_.p2p_cancel_broadcast_timeout_ms,
         [allocator = allocator_, start, deadline = request.deadline_ms()](const KVCacheResourcePtr& owner) {
-            return allocator->insertExternalBlocks(*owner, start, deadline).error;
+            return allocator->commitWriteBackDecodeCache(*owner, start, deadline);
         },
         std::function<void()>{},
-        metrics_reporter_);
+        metrics_reporter_,
+        load_context);
     metrics_owned_by_context = true;
     context->setPlannedBytes(planned_bytes);
     if (!checker_.addContext(context)) {
@@ -252,6 +259,23 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
     if (!context->beginKickoff()) {
         return reject(context->errorInfo());
     }
+
+    // step5. submit the local load if needed
+    if (load_context && !load_context->commit()) {
+        const ErrorInfo error(ErrorCode::CACHE_STORE_STORE_FAILED, "writeback local load submission failed");
+        context->finishWithoutTransfer(error);
+        return reject(error);
+    }
+    if (count == 0) {
+        context->finishWithoutTransfer();
+        if (context->done() && !context->success()) {
+            return reject(context->errorInfo());
+        }
+        response.set_accepted_start_block(start);
+        response.set_plan_digest(planned->plan.digest());
+        return;
+    }
+    // step6. submit the transfer plan to the workers and wait for registration to complete
     try {
         context->setCallResults(client_->broadcastPerRank(request.request_id(),
                                                           P2PBroadcastClient::RankLayerCacheBuffers(routes.size()),

@@ -103,40 +103,14 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         match_end_time_us                        = currentTimeUs();
         match_cost_time_us                       = match_end_time_us - match_begin_time_us;
         load_attempted                           = match_result.async_context != nullptr;
-        load_context = std::dynamic_pointer_cast<LoadAsyncContext>(match_result.async_context);
-        match_result.async_context.reset();
-        matched_device_blocks               = match_result.matched_device_blocks;
-        total_logical_blocks                = load_context ? load_context->localMatchedBlocks() : matched_device_blocks;
-        BlockIndicesType ready_group_blocks =
-            block_tree_cache_->matchedBlocksForGroup(0, match_result.matched_device_resources);
+        load_context          = std::dynamic_pointer_cast<LoadAsyncContext>(match_result.async_context);
+        matched_device_blocks = match_result.matched_device_blocks;
+        total_logical_blocks  = load_context ? load_context->localMatchedBlocks() : matched_device_blocks;
         block_ids_0.assign(BlockIndicesType(total_logical_blocks, NULL_BLOCK_IDX));
-        for (size_t i = 0; i < ready_group_blocks.size(); ++i) {
-            block_ids_0.setAt(i, ready_group_blocks[i]);
+        if (populateMatchedBlocks(match_result, kv_resource->cacheResource(0)).hasError()) {
+            return rollback();
         }
-
-        if (load_context && !load_context->empty()) {
-            for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
-                const BlockIndicesType& source_blocks = load_context->loadDescs()[desc_index].source_blocks;
-                const size_t            path_index    = load_context->loadDescs()[desc_index].path_index;
-                if (load_context->loadDescs()[desc_index].source_tier == Tier::DEVICE) {
-                    const BlockIdxType current = block_ids_0.blocks()[path_index];
-                    if (!isNullBlockIdx(current) && current != source_blocks.front()) {
-                        return rollback();
-                    }
-                    block_ids_0.setAt(path_index, source_blocks.front());
-                    continue;
-                }
-                if (load_context->joinedLoads()[desc_index]) {
-                    const std::vector<BlockIdxType>& joined_targets =
-                        load_context->loadDescs()[desc_index].target_blocks;
-                    const BlockIdxType current = block_ids_0.blocks()[path_index];
-                    if (!isNullBlockIdx(current) && current != joined_targets.front()) {
-                        return rollback();
-                    }
-                    block_ids_0.setAt(path_index, joined_targets.front());
-                }
-            }
-        }
+        match_result.async_context.reset();
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(matched_device_blocks);
     }
 
@@ -207,25 +181,11 @@ bool SingleTypeKVCacheAllocator::materializeInitialBlocks(const MallocInfo& mall
     if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
         common_seq_len = cp_slot_mapper_->effectiveSeqLenForAlloc(config_, 0, common_seq_len);
     }
-    if (!full_kv_cache_group_->malloc(block_ids, common_seq_len, false, 0, nullptr, positions)) {
+    if (mallocAndBindLoadTargets(kv_resource.cacheResource(0), common_seq_len, false, context).hasError()) {
         return false;
     }
 
     if (context != nullptr) {
-        for (size_t i = 0; i < context->loadDescs().size(); ++i) {
-            const auto& desc = context->loadDescs()[i];
-            if (desc.path_index >= block_ids.blocksNum() || isNullBlockIdx(block_ids.blocks()[desc.path_index])) {
-                return false;
-            }
-            const BlockIdxType target = block_ids.blocks()[desc.path_index];
-            if (context->joinedLoads()[i]) {
-                if (desc.target_blocks.size() != 1 || target != desc.target_blocks.front()) {
-                    return false;
-                }
-            } else {
-                context->setTargetBlocks(i, {target});
-            }
-        }
         const auto& backend_handles = context->backendHandles();
         for (size_t key_index = 0; key_index < backend_handles.size(); ++key_index) {
             for (size_t handle_index = 0; handle_index < backend_handles[key_index].size(); ++handle_index) {

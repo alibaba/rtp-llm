@@ -30,15 +30,6 @@ struct BlockTreeKeySnapshot {
     int64_t                   version{0};
     std::vector<CacheKeyType> keys;
 };
-struct ExternalInsertProbe {
-    ErrorInfo error;
-    size_t    matched_device_blocks{0};
-};
-
-struct ExternalInsertResult {
-    ErrorInfo           error;
-    std::vector<size_t> adopted_block_indices;
-};
 // Unified configuration for BlockTreeCache behavior and pool sizing.
 struct BlockTreeCacheConfig {
     // ---- Tier enable flags ----
@@ -125,8 +116,10 @@ public:
     bool init();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
-    ExternalInsertProbe  probeExternalInsert(const CacheKeysType& cache_keys, size_t required_prefix_blocks) const;
-    ExternalInsertResult insertExternalBlocks(const CacheKeysType&                              cache_keys,
+    ErrorInfo            matchForExternalInsert(const CacheKeysType&  cache_keys,
+                                                size_t                required_prefix_blocks,
+                                                BlockTreeMatchResult& match_result);
+    ErrorInfo            insertExternalBlocks(const CacheKeysType&                              cache_keys,
                                               size_t                                            start_block,
                                               const std::vector<std::vector<GroupSetResource>>& resources,
                                               int64_t                                           deadline_ms);
@@ -185,8 +178,8 @@ public:
     }
 
 private:
-    ExternalInsertProbe probeExternalInsertLocked(const CacheKeysType& cache_keys, size_t required_prefix_blocks) const;
-    void checkWatermark();
+    ErrorInfo validateDevicePrefixLocked(const CacheKeysType& cache_keys, size_t required_prefix_blocks) const;
+    void      checkWatermark();
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark);
 

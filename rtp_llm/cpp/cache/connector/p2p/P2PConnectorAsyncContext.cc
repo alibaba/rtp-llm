@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -494,8 +495,10 @@ P2PConnectorAsyncWriteContext::P2PConnectorAsyncWriteContext(KVCacheResourcePtr 
                                                              int64_t                             control_timeout_ms,
                                                              Settle                              settle,
                                                              std::function<void()>               on_released,
-                                                             kmonitor::MetricsReporterPtr        metrics_reporter):
+                                                             kmonitor::MetricsReporterPtr        metrics_reporter,
+                                                             std::shared_ptr<LoadAsyncContext>   load_context):
     resource_(std::move(resource)),
+    load_context_(std::move(load_context)),
     unique_key_(std::move(unique_key)),
     deadline_ms_(deadline_ms),
     type_(type),
@@ -538,7 +541,7 @@ bool P2PConnectorAsyncWriteContext::beginKickoff() {
         return false;
     }
     if (cancelled_ || currentTimeMs() >= deadline_ms_) {
-        finishLocked(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired or cancelled before start"));
+        finishTransferLocked(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired or cancelled before start"));
         return false;
     }
     kickoff_started_ = true;
@@ -557,6 +560,37 @@ void P2PConnectorAsyncWriteContext::setCallResults(std::shared_ptr<P2PBroadcastC
     }
 }
 
+void P2PConnectorAsyncWriteContext::finishTransferLocked(const ErrorInfo& error) {
+    if (released_) {
+        return;
+    }
+    transfer_stopped_ = true;
+    if (error_.ok()) {
+        error_ = error;
+    }
+    if (load_context_) {
+        if (error_.hasError()) {
+            load_context_->abortPending();
+        }
+        if (!load_context_->done()) {
+            return;
+        }
+        if (error_.ok() && !load_context_->success()) {
+            error_ = ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "writeback local load failed");
+        }
+    }
+    if (error_.ok() && settle_) {
+        try {
+            error_ = settle_(resource_);
+        } catch (const std::exception& e) {
+            error_ = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, e.what());
+        } catch (...) {
+            error_ = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "writeback settle failed");
+        }
+    }
+    finishLocked(error_);
+}
+
 void P2PConnectorAsyncWriteContext::finishLocked(const ErrorInfo& error) {
     if (released_) {
         return;
@@ -571,6 +605,7 @@ void P2PConnectorAsyncWriteContext::finishLocked(const ErrorInfo& error) {
         on_released_ = {};
     }
     settle_ = {};
+    load_context_.reset();
     resource_.reset();
     if (metrics_reporter_) {
         metrics_.error              = error_;
@@ -587,9 +622,9 @@ void P2PConnectorAsyncWriteContext::finishLocked(const ErrorInfo& error) {
 void P2PConnectorAsyncWriteContext::finishWithoutTransfer(const ErrorInfo& error) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!calls_ready_) {
-        finishLocked(error.ok() && currentTimeMs() >= deadline_ms_ ?
-                         ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired before completion") :
-                         error);
+        finishTransferLocked(error.ok() && currentTimeMs() >= deadline_ms_ ?
+                                 ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired before completion") :
+                                 error);
     }
 }
 
@@ -605,7 +640,7 @@ void P2PConnectorAsyncWriteContext::cancel() {
     done_ = true;
     cv_.notify_all();
     if (!kickoff_started_) {
-        finishLocked(error_);
+        finishTransferLocked(error_);
     }
 }
 
@@ -635,13 +670,26 @@ void P2PConnectorAsyncWriteContext::checkDone(const std::shared_ptr<autil::Threa
             error_ = ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback transfer deadline exceeded");
         }
     }
+    if (load_context_ && load_context_->done() && !load_context_->success()) {
+        cancelled_ = true;
+        if (error_.ok()) {
+            error_ = ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "writeback local load failed");
+        }
+    }
     if (cancelled_) {
         done_ = true;
         cv_.notify_all();
+        if (load_context_) {
+            load_context_->abortPending();
+        }
         if (!kickoff_started_) {
-            finishLocked(error_);
+            finishTransferLocked(error_);
             return;
         }
+    }
+    if (transfer_stopped_) {
+        finishTransferLocked(error_);
+        return;
     }
     if (!calls_ready_) {
         return;
@@ -716,16 +764,7 @@ void P2PConnectorAsyncWriteContext::checkDone(const std::shared_ptr<autil::Threa
     if (result.ok() && currentTimeMs() >= deadline_ms_) {
         result = ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired before settle");
     }
-    if (result.ok() && settle_) {
-        try {
-            result = settle_(resource_);
-        } catch (const std::exception& e) {
-            result = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, e.what());
-        } catch (...) {
-            result = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "writeback settle failed");
-        }
-    }
-    finishLocked(result);
+    finishTransferLocked(result);
 }
 
 P2PConnectorAsyncWriteContextChecker::~P2PConnectorAsyncWriteContextChecker() {

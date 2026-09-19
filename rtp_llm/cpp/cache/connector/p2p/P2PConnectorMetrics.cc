@@ -85,9 +85,7 @@ void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, WriteSchedul
     write_tags.AddTag("side", collector->prefill ? "prefill" : "decode");
     write_tags.AddTag("submitted", collector->submitted ? "true" : "false");
     const auto& message = collector->error.ToString();
-    const auto  reason  = message == "existing_suffix_conflict" || message == "prefix_evicted_or_demoted" ?
-                              message :
-                              ErrorCodeToString(collector->error.code());
+    const auto  reason  = message == "prefix_evicted_or_demoted" ? message : ErrorCodeToString(collector->error.code());
     write_tags.AddTag("reason", collector->skip_reason ? collector->skip_reason : reason);
     tags = &write_tags;
     if (collector->skip_reason) {

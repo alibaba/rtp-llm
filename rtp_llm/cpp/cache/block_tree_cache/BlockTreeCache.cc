@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
-#include <set>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -152,125 +151,83 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
     return result;
 }
 
-ExternalInsertProbe BlockTreeCache::probeExternalInsert(const CacheKeysType& cache_keys,
-                                                        size_t               required_prefix_blocks) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return probeExternalInsertLocked(cache_keys, required_prefix_blocks);
-}
-
-ExternalInsertProbe BlockTreeCache::probeExternalInsertLocked(const CacheKeysType& cache_keys,
-                                                              size_t               required_prefix_blocks) const {
-    ExternalInsertProbe result;
-    const auto          reject = [&](const std::string& reason) {
-        result.error = ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, reason);
-        return result;
-    };
-    if (!config_.enable_device_cache || cache_keys.empty() || required_prefix_blocks > cache_keys.size()
-        || tree_->groupSets().empty()) {
-        return reject("external insert requires a device cache and a valid key range");
-    }
-    for (const auto& group : tree_->groupSets()) {
-        if (!group || group->groupType() != CacheGroupType::FULL) {
-            return reject("external insert currently requires FULL groups");
-        }
-    }
-    const auto path  = tree_->findNode(cache_keys);
-    const auto ready = [&](const GroupSetResource& resource, size_t group_id) {
-        return resource.isValidSteadyState() && !resource.transfer_detached && resource.hasCompleteDeviceValue()
-               && resource.device_blocks.size() == tree_->groupSets()[group_id]->devicePools().size();
-    };
-    for (const auto* node : path) {
-        bool complete = true;
-        for (size_t gid = 0; complete && gid < tree_->groupSets().size(); ++gid) {
-            complete = ready(node->group_set_resources[gid], gid);
-        }
-        if (!complete) {
-            break;
-        }
-        ++result.matched_device_blocks;
-    }
-
-    // check that the matched prefix is sufficient, at least the prompt blocks must be matched
-    if (result.matched_device_blocks < required_prefix_blocks) {
-        return reject("prefix_evicted_or_demoted");
-    }
-    for (size_t i = result.matched_device_blocks; i < path.size(); ++i) {
-        for (size_t gid = 0; gid < tree_->groupSets().size(); ++gid) {
-            const auto& resource = path[i]->group_set_resources[gid];
-            if (!ready(resource, gid) && (!resource.is_removable() || resource.transfer_detached)) {
-                return reject("existing_suffix_conflict");
-            }
-        }
-    }
-    return result;
-}
-
-ExternalInsertResult BlockTreeCache::insertExternalBlocks(const CacheKeysType&                              cache_keys,
-                                                          size_t                                            start_block,
-                                                          const std::vector<std::vector<GroupSetResource>>& resources,
-                                                          int64_t deadline_ms) {
-    ExternalInsertResult result;
-    StorageWriteTask     storage_write;
+ErrorInfo BlockTreeCache::matchForExternalInsert(const CacheKeysType&  cache_keys,
+                                                 size_t                required_prefix_blocks,
+                                                 BlockTreeMatchResult& match_result) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto                  error = validateDevicePrefixLocked(cache_keys, required_prefix_blocks);
+        if (error.hasError()) {
+            return error;
+        }
+        // Take the prefix references before eviction can invalidate the admission result.
+        match_result = loader_.matchLocked(cache_keys, /*allow_storage_backend_lookup=*/false);
+    }
+    metrics_reporter_.reportCacheReuseTimeMetrics(match_result.reuse_time_metrics_snapshots);
+    return ErrorInfo::OkStatus();
+}
+
+ErrorInfo BlockTreeCache::validateDevicePrefixLocked(const CacheKeysType& cache_keys,
+                                                     size_t               required_prefix_blocks) const {
+    // Check that the request targets a valid DEVICE cache range.
+    if (!config_.enable_device_cache || cache_keys.empty() || required_prefix_blocks > cache_keys.size()
+        || tree_->groupSets().empty()) {
+        return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED,
+                         "external insert requires a device cache and a valid key range");
+    }
+    for (const auto& group : tree_->groupSets()) {
+        // Check that every group uses the FULL layout supported by writeback.
+        if (!group || group->groupType() != CacheGroupType::FULL) {
+            return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "external insert currently requires FULL groups");
+        }
+    }
+    const auto path = tree_->findNode(cache_keys);
+    // Check that the complete required prefix still exists in the tree.
+    if (path.size() < required_prefix_blocks) {
+        return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "prefix_evicted_or_demoted");
+    }
+    for (size_t i = 0; i < required_prefix_blocks; ++i) {
+        for (size_t gid = 0; gid < tree_->groupSets().size(); ++gid) {
+            const auto& resource = path[i]->group_set_resources[gid];
+            // Check that each prefix block is complete and still resident on DEVICE.
+            if (!resource.isValidSteadyState() || resource.transfer_detached || !resource.hasCompleteDeviceValue()
+                || resource.device_blocks.size() != tree_->groupSets()[gid]->devicePools().size()) {
+                return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "prefix_evicted_or_demoted");
+            }
+        }
+    }
+    return ErrorInfo::OkStatus();
+}
+
+ErrorInfo BlockTreeCache::insertExternalBlocks(const CacheKeysType&                              cache_keys,
+                                               size_t                                            start_block,
+                                               const std::vector<std::vector<GroupSetResource>>& resources,
+                                               int64_t                                           deadline_ms) {
+    StorageWriteTask storage_write;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        // Do not publish a writeback after its request deadline.
         if (currentTimeMs() >= deadline_ms) {
-            result.error = ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "external insert expired before publication");
-            return result;
+            return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "external insert expired before publication");
         }
-        const auto probe = probeExternalInsertLocked(cache_keys, start_block);
-        if (probe.error.hasError()) {
-            result.error = probe.error;
-            return result;
+
+        // Confirm that matched and locally loaded blocks are still published on DEVICE.
+        const auto prefix_error = validateDevicePrefixLocked(cache_keys, start_block);
+        if (prefix_error.hasError()) {
+            return prefix_error;
         }
-        const auto& groups = tree_->groupSets();
-        if (resources.size() != cache_keys.size()) {
-            result.error = ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert resource count mismatch");
-            return result;
-        }
-        std::set<std::pair<const DeviceBlockPool*, BlockIdxType>> blocks;
-        for (size_t i = 0; i < resources.size(); ++i) {
-            if (resources[i].size() != groups.size()) {
-                result.error = ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert group count mismatch");
-                return result;
-            }
-            for (size_t gid = 0; gid < groups.size(); ++gid) {
-                const auto& resource = resources[i][gid];
-                bool        valid    = resource.isValidSteadyState() && !resource.transfer_detached;
-                if (i < start_block) {
-                    valid = valid && resource.is_empty();
-                } else {
-                    valid = valid && resource.hasCompleteDeviceValue()
-                            && resource.device_blocks.size() == groups[gid]->devicePools().size()
-                            && groups[gid]->hasAllocatedDeviceBlocks(resource.device_blocks);
-                    for (size_t member = 0; valid && member < resource.device_blocks.size(); ++member) {
-                        valid = blocks.emplace(groups[gid]->devicePools()[member].get(), resource.device_blocks[member])
-                                    .second;
-                    }
-                }
-                if (!valid) {
-                    result.error = ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid external insert resource");
-                    return result;
-                }
-            }
-        }
-        const auto path = tree_->findNode(cache_keys);
-        for (size_t i = start_block; i < cache_keys.size(); ++i) {
-            bool adopted = i >= path.size();
-            if (!adopted) {
-                for (const auto& resource : path[i]->group_set_resources) {
-                    adopted = adopted || resource.is_removable();
-                }
-            }
-            if (adopted) {
-                result.adopted_block_indices.push_back(i);
-            }
-        }
+
+        // Let the normal BlockTree insert reuse concurrent hits and adopt only missing blocks.
+        // Assume that any returned KV blocks already inserted into the BlockTree remain on DEVICE during this short
+        // settle window; immediate demotion to HOST is unlikely, so writeback does not handle it specially.
         storage_write = storer_.storeLocked(cache_keys, resources, Tier::DEVICE);
     }
+    // Persist the published blocks when a storage backend is configured.
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));
     }
-    return result;
+    return ErrorInfo::OkStatus();
 }
 
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
