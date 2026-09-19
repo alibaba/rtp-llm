@@ -89,6 +89,8 @@ class MlaFlashInferImplBase(MlaImplBase):
         Note: fmha_params is initialized in __init__, this method only updates it.
         forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
+        self._pinned_prefill_params = None
+        self._pinned_write_slots = None
         assert self.fmha_impl is not None
         assert (
             self.fmha_params is not None
@@ -359,6 +361,28 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 q, compressed_kv, k_pe, kv_cache, layer_id
             )
 
+    def _prepare_pinned_prefill(self) -> None:
+        if getattr(self, "_pinned_prefill_params", None) is not None:
+            return
+        # Host indptrs are already available; no GPU readback or sorting is needed.
+        indptr = self.fmha_params.decode_page_indptr_h.tolist()
+        table = torch.zeros_like(_select_mla_block_id_host(self.attn_inputs))
+        for batch, (begin, end) in enumerate(zip(indptr, indptr[1:])):
+            table[batch, : end - begin] = torch.arange(begin, end, dtype=table.dtype)
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        params.fill_params(
+            self.attn_inputs.prefix_lengths,
+            self.attn_inputs.sequence_lengths,
+            self.attn_inputs.input_lengths,
+            table,
+            self.seq_size_per_block,
+            False,
+        )
+        self.fmha_impl.plan(params)
+        if self.absorb_fmha is not None:
+            self.absorb_fmha.plan(params)
+        self._pinned_prefill_params = params
+
     def forward(
         self,
         q: torch.Tensor,
@@ -377,14 +401,52 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         # Apply RoPE to Q and K
         self.rope_impl.forward(q_pe, k_pe, self.rope_params)
 
-        # Write compressed KV and position-encoded K to cache
-        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
+        working_entry = getattr(self, "pinned_mla_groups", {}).get(layer_id)
+        attention_cache = kv_cache
+        if working_entry is None:
+            self.kv_cache_write_op.forward(
+                compressed_kv, k_pe, kv_cache, self.rope_params
+            )
+        else:
+            working, group_layer = working_entry
+            scratch = LayerKVCache()
+            scratch.kv_cache_base = torch.empty(
+                (q.shape[0], 1, kv_cache.kv_cache_base.shape[-1]),
+                dtype=kv_cache.kv_cache_base.dtype,
+                device=q.device,
+            )
+            if self._pinned_write_slots is None:
+                self._pinned_write_slots = torch.arange(
+                    q.shape[0], dtype=torch.int64, device=q.device
+                )
+            self.kv_cache_write_op.forward(
+                compressed_kv,
+                k_pe,
+                scratch,
+                self.rope_params,
+                slot_mapping_override=self._pinned_write_slots,
+            )
+            working.write(
+                group_layer,
+                self.rope_params.slot_mapping,
+                scratch.kv_cache_base.flatten(0, 1),
+            )
+            # Cold prefill consumes the freshly projected KV directly. Reuse
+            # needs only this request's pages, not a full logical-pool mirror.
+            if self.has_reuse_cache:
+                self._prepare_pinned_prefill()
+                attention_cache = LayerKVCache()
+                attention_cache.kv_cache_base = working.gather_pages(
+                    group_layer, self.fmha_params.page_indice_d
+                )
 
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
         assert self.fmha_impl is not None
-        return self.compute_prefill_context(q, compressed_kv, k_pe, kv_cache, layer_id)
+        return self.compute_prefill_context(
+            q, compressed_kv, k_pe, attention_cache, layer_id
+        )
 
 
 class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):

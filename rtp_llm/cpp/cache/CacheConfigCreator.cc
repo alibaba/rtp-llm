@@ -2,8 +2,11 @@
 
 #include <numeric>
 #include <algorithm>
+#include <cstdlib>
+#include <limits>
 
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
+#include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
@@ -98,6 +101,112 @@ void validateTypedKernelSeqSize(const ModelConfig& model_config,
                             config_name,
                             kernel_seq_size_per_block,
                             ratio);
+}
+
+size_t nonnegativeEnv(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) {
+        return 0;
+    }
+    const std::string text(value);
+    RTP_LLM_CHECK_WITH_INFO(std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; }),
+                            "%s must be a nonnegative integer",
+                            name);
+    return std::stoull(text);
+}
+
+// Keep wire/block strides unchanged. Only residency and logical capacity
+// change; connectors still address each layer's KV and indexer tensors.
+void configurePinnedMla(CacheConfig& config, const RuntimeConfig& runtime, size_t topk, size_t query_tokens) {
+    const size_t host_mb = nonnegativeEnv("RTP_LLM_DSA_MLA_HOST_CACHE_MB");
+    if (!host_mb) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(config.use_mla && config.is_sparse && topk > 0, "pinned MLA working set requires DSA MLA");
+    RTP_LLM_CHECK_WITH_INFO(host_mb <= std::numeric_limits<size_t>::max() / (1024 * 1024),
+                            "pinned MLA host budget overflows size_t");
+    const size_t tokens_per_block = config.seq_size_per_block;
+    size_t       mla_block_bytes  = 0;
+    size_t       groups           = 0;
+    if (config.use_independent_block_pools) {
+        for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
+            if (std::dynamic_pointer_cast<MLAKVCacheSpec>(config.cache_specs[gid]) != nullptr) {
+                const size_t layers = config.global_layer_ids[gid].size();
+                mla_block_bytes += layers * config.group_kv_block_stride_bytes[gid];
+                groups += layers;  // Conservative: one map per MLA layer.
+            }
+        }
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(config.groupNums() == 1, "pinned MLA requires independent hybrid pools");
+        mla_block_bytes = config.block_size_bytes - config.kv_scale_size_bytes;
+        groups          = config.layer_num;
+        for (const auto& sub : config.mtp_sub_configs) {
+            mla_block_bytes -= sub->kv_scale_size_bytes;
+            groups += sub->layer_num;
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(mla_block_bytes > 0 && mla_block_bytes % tokens_per_block == 0,
+                            "invalid pinned MLA block stride");
+    const size_t paged_block_bytes = effectivePagedBlockBytes(config, std::max(1, config.linear_step));
+    RTP_LLM_CHECK_WITH_INFO(paged_block_bytes >= mla_block_bytes, "invalid pinned MLA paged budget");
+    // The compressed Indexer pools remain in HBM for every logical block.
+    // Fixed KDA/Indexer-state pools were already reserved before this budget.
+    const size_t scale_bytes    = paged_block_bytes - mla_block_bytes;
+    const size_t mla_bytes      = mla_block_bytes / tokens_per_block;
+    const size_t resident_bytes = mla_bytes + groups * 20;
+    const size_t generation_block_bytes =
+        nonnegativeEnv("RTP_LLM_DSA_MLA_GENERATION_SNAPSHOT") == 1 ? groups * sizeof(int64_t) : 0;
+    const size_t logical_block_hbm = scale_bytes + groups * tokens_per_block * 8 + generation_block_bytes;
+    const size_t budget            = static_cast<size_t>(config.block_num) * paged_block_bytes;
+    const size_t requested         = nonnegativeEnv("RTP_LLM_DSA_MLA_RESIDENT_TOKENS");
+    const size_t selected          = static_cast<size_t>(runtime.max_generate_batch_size) * topk * query_tokens;
+    RTP_LLM_CHECK_WITH_INFO(!requested || requested >= selected,
+                            "pinned MLA resident tokens must cover the maximum decode/verify topk batch (%zu)",
+                            selected);
+    RTP_LLM_CHECK_WITH_INFO(
+        requested % tokens_per_block == 0, "pinned MLA resident tokens must be a multiple of %zu", tokens_per_block);
+    const size_t minimum =
+        requested ? requested :
+                    std::max<size_t>(1, (selected + tokens_per_block - 1) / tokens_per_block) * tokens_per_block;
+    RTP_LLM_CHECK_WITH_INFO(budget > groups * 4096 && minimum < (budget - groups * 4096) / resident_bytes,
+                            "pinned MLA HBM budget cannot hold the configured decode batch working set");
+    // Reserve the worst-case working set and the overflow Indexer's HBM first.
+    // Spend the remaining HBM on complete MLA blocks, never a host mirror.
+    const size_t remaining       = budget - minimum * resident_bytes - groups * 4096;
+    const size_t hbm_block_bytes = mla_block_bytes + logical_block_hbm;
+    // Block zero is reserved; keep at least one usable complete HBM block.
+    RTP_LLM_CHECK_WITH_INFO(remaining > 2 * hbm_block_bytes, "no HBM space for complete MLA blocks");
+    const size_t pin_blocks =
+        std::min(host_mb * 1024 * 1024 / mla_block_bytes, (remaining - 2 * hbm_block_bytes) / logical_block_hbm);
+    const size_t hbm_blocks = (remaining - pin_blocks * logical_block_hbm) / hbm_block_bytes;
+    const size_t blocks     = hbm_blocks + pin_blocks;
+    RTP_LLM_CHECK_WITH_INFO(pin_blocks > 0 && hbm_blocks > 1
+                                && blocks * tokens_per_block <= std::numeric_limits<int32_t>::max(),
+                            "invalid tiered MLA capacity: HBM=%zu pin=%zu",
+                            hbm_blocks,
+                            pin_blocks);
+    config.dsa_mla_resident_tokens = minimum;
+    config.dsa_mla_hbm_blocks      = hbm_blocks;
+    config.block_num               = static_cast<uint32_t>(blocks);
+    config.finalizeBlockNums(config.block_num, runtime);
+    for (auto& sub : config.mtp_sub_configs) {
+        sub->block_num               = config.block_num;
+        sub->dsa_mla_resident_tokens = minimum;
+        sub->dsa_mla_hbm_blocks      = hbm_blocks;
+        sub->finalizeBlockNums(config.block_num, runtime);
+    }
+    RTP_LLM_LOG_INFO("DSA MLA tiered cache: hbm_blocks=%zu pinned_blocks=%zu logical_tokens=%zu "
+                     "resident_tokens=%zu pinned_bytes=%zu indexer_hbm_bytes=%zu "
+                     "working_set_hbm_bytes=%zu full_block_hbm_bytes=%zu budget=%zu",
+                     hbm_blocks,
+                     pin_blocks,
+                     blocks * tokens_per_block,
+                     minimum,
+                     pin_blocks * mla_block_bytes,
+                     blocks * scale_bytes,
+                     minimum * resident_bytes,
+                     hbm_blocks * mla_block_bytes,
+                     budget);
 }
 
 }  // namespace
@@ -196,6 +305,10 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                             kv_cache_seq_len,
                             model_config.max_seq_len);
     }
+    configurePinnedMla(config,
+                       runtime_config,
+                       std::max(model_config.attn_config.indexer_topk, model_config.attn_config.sparse_attention_topk),
+                       1);
     return config;
 }
 
@@ -525,6 +638,11 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         RTP_LLM_LOG_INFO("CacheConfig debugString(sub_propose_model[%zu]):\n%s", i, sub->debugString().c_str());
     }
 
+    configurePinnedMla(
+        config,
+        runtime_config,
+        std::max(score_model_config.attn_config.indexer_topk, score_model_config.attn_config.sparse_attention_topk),
+        static_cast<size_t>(sp_config.gen_num_per_cycle) + 1);
     return config;
 }
 

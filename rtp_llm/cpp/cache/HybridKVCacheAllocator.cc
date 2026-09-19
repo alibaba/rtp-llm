@@ -281,8 +281,8 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                                        config_.group_types[static_cast<size_t>(gid)] :
                                        CacheGroupType::FULL;
         const int  group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, common_seq_len);
-        if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                block_ids_0, group_seq_len, malloc_info.reuse_cache, 0)) {
+        if (!kv_cache_groups_[static_cast<size_t>(gid)]->initMalloc(
+                block_ids_0, group_seq_len, malloc_info.reuse_cache)) {
             rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
             return {false, 0};
         }

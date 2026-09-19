@@ -42,6 +42,7 @@ def prepare_mla_cp_fmha(model, inputs, is_cuda_graph=False):
         cp_inputs,
         model.fmha_config,
         is_cuda_graph,
+        pinned_mla=bool(model.pinned_mla_groups),
     )
     fmha.glm53_cp_layout = cp_layout
     return fmha

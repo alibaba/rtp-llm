@@ -157,7 +157,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         return {false, 0, match_cost_time_us, capacity_status};
     }
 
-    if (!full_kv_cache_group_->malloc(block_ids_0, common_seq_len)) {
+    if (!full_kv_cache_group_->initMalloc(block_ids_0, common_seq_len)) {
         return {false, 0};
     }
 
@@ -292,6 +292,10 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
 
 CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
     CacheLayerLayout layout;
+    layout.dsa_mla_resident_tokens = config_.dsa_mla_resident_tokens;
+    layout.dsa_mla_hbm_blocks      = config_.dsa_mla_hbm_blocks;
+    layout.mla_hbm_cache_by_layer  = block_pool_->allLayerHbmCacheBase();
+    layout.block_generations       = block_pool_->blockGenerations();
     auto             layer_tensors = full_kv_cache_group_->allLayerCacheBase();
     auto             scale_tensors = full_kv_cache_group_->allLayerScaleCacheBase();
 

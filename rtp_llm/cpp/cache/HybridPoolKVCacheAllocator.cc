@@ -255,6 +255,25 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
                                 kv_cache_groups_.size());
     }
 
+    layout.dsa_mla_resident_tokens = config_.dsa_mla_resident_tokens;
+    layout.dsa_mla_hbm_blocks      = config_.dsa_mla_hbm_blocks;
+    if (config_.dsa_mla_resident_tokens > 0) {
+        layout.mla_hbm_cache_by_layer.resize(config_.layer_all_num);
+        layout.block_generations_by_layer.resize(config_.layer_all_num);
+        for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+            const auto& pool = group_block_pools_[gid];
+            const auto  hbm  = pool->allLayerHbmCacheBase();
+            if (hbm.empty()) {
+                continue;
+            }
+            const auto& ids = config_.global_layer_ids[gid];
+            RTP_LLM_CHECK_WITH_INFO(hbm.size() == ids.size(), "pinned MLA HBM layer mapping mismatch");
+            for (size_t local = 0; local < ids.size(); ++local) {
+                layout.mla_hbm_cache_by_layer[ids[local]]     = hbm[local];
+                layout.block_generations_by_layer[ids[local]] = pool->blockGenerations();
+            }
+        }
+    }
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
     const size_t region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
@@ -655,6 +674,14 @@ std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsS
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
         const auto& pool = group_block_pools_[gid];
         if (!pool) {
+            continue;
+        }
+        auto tiers = pool->tierMetricsSnapshots();
+        if (!tiers.empty()) {
+            for (auto& tier : tiers) {
+                tier.pool_index = gid;
+                snapshots.push_back(std::move(tier));
+            }
             continue;
         }
         KVCachePoolMetricsSnapshot snapshot;

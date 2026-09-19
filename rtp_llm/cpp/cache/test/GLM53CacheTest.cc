@@ -6,6 +6,7 @@
 
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
@@ -92,43 +93,40 @@ KVCacheConfig makeKvConfig() {
 
 }  // namespace
 
-TEST(GLM53CacheConfigTest, DiskCheckpointsReserveTransientBatchesEvenWithSmallPoolOverride) {
-    ScopedEnvVar      request_cache_mode("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
-    ParallelismConfig pc;
-    pc.role_type = RoleType::PREFILL;
+TEST(GLM53CacheConfigTest, PinnedMlaLeavesKdaAndKPoolOnDeviceAndBudgetsExpandedTopk) {
+    ScopedEnvVar host_budget("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "64");
+    ScopedEnvVar resident("RTP_LLM_DSA_MLA_RESIDENT_TOKENS", "0");
+    ScopedEnvVar request_cache("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
+    auto         model     = makeGlm53Config();
+    model.data_type        = DataType::TYPE_BF16;
+    auto options           = makeKvConfig();
+    options.test_block_num = 256;
     RuntimeConfig runtime;
-    runtime.max_generate_batch_size                      = 4;
-    runtime.fifo_scheduler_config.max_context_batch_size = 2;
-    auto model                                           = makeGlm53Config();
-    model.max_seq_len                                    = 1025;
-    auto kv_config                                       = makeKvConfig();
-    kv_config.reuse_cache                                = true;
-    kv_config.enable_memory_cache                        = true;
-    kv_config.enable_memory_cache_disk                   = true;
-    for (int step : {1, 3, 4}) {
-        kv_config.linear_step                      = step;
-        kv_config.linear_request_cache_pool_blocks = 0;
-        auto           config      = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
-        const uint32_t checkpoints = 1024 / (128 * step);
-        EXPECT_EQ(config.linear_disk_checkpoint_blocks, checkpoints);
-        config.finalizeBlockNums(10000, runtime);
-        EXPECT_EQ(config.group_block_nums[1], 12u + 4u * checkpoints);
-        kv_config.linear_request_cache_pool_blocks = 1;
-        config = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
-        config.finalizeBlockNums(10000, runtime);
-        EXPECT_EQ(config.group_block_nums[1], 8u + 4u * checkpoints);
+    runtime.max_generate_batch_size                      = 3;
+    runtime.fifo_scheduler_config.max_context_batch_size = 1;
+    const auto config = CacheConfigCreator::createConfig(model, ParallelismConfig(), runtime, options, std::nullopt);
+    EXPECT_EQ(config.dsa_mla_resident_tokens, 6272u);  // ceil(3 * 2051 / 128) * 128
+    EXPECT_GT(config.block_num, config.dsa_mla_hbm_blocks);
+    size_t host_bytes = 0;
+    for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
+        const auto  pool   = BlockPoolConfigHelper::createConfigForGroup(config, gid);
+        const auto& layout = pool.memory_layouts.front();
+        const bool  mla    = dynamic_cast<MLAKVCacheSpec*>(config.cache_specs[gid].get()) != nullptr;
+        EXPECT_EQ(pool.mla_tiered_cache, mla);
+        if (mla) {
+            EXPECT_EQ(layout.mla_hbm_blocks, config.dsa_mla_hbm_blocks);
+            EXPECT_EQ(layout.kv_scale_pool_size_bytes, 0u);
+            host_bytes += pool.total_size_bytes;
+            EXPECT_EQ(layout.mla_hbm_size_bytes,
+                      layout.layer_num * layout.kv_block_stride_bytes
+                          * (config.dsa_mla_hbm_blocks + config.dsa_mla_resident_tokens / 128));
+        } else {
+            EXPECT_EQ(layout.mla_resident_tokens, 0u);
+            EXPECT_EQ(layout.mla_hbm_size_bytes, 0u);
+        }
     }
-    pc.role_type       = RoleType::DECODE;
-    auto decode_config = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
-    EXPECT_EQ(decode_config.linear_disk_checkpoint_blocks, 0u);
-    decode_config.finalizeBlockNums(10000, runtime);
-    EXPECT_EQ(decode_config.group_block_nums[1], 8u);
-    pc.role_type                       = RoleType::PREFILL;
-    kv_config.enable_memory_cache_disk = false;
-    auto config                        = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
-    EXPECT_EQ(config.linear_disk_checkpoint_blocks, 0u);
-    config.finalizeBlockNums(10000, runtime);
-    EXPECT_EQ(config.group_block_nums[1], 8u);
+    EXPECT_GT(host_bytes, 0u);
+    EXPECT_LE(host_bytes, 64u * 1024 * 1024);
 }
 
 TEST(GLM53CacheConfigTest, AppendsKPoolRegionsOnlyToMlaLayers) {
@@ -497,6 +495,45 @@ TEST(GLM53CacheConfigTest, LinearRequestPoolBlockOverrideIsAppliedWithLiveReques
     EXPECT_EQ(config.group_block_nums[1], 128u);
 }
 
+TEST(GLM53CacheConfigTest, DiskCheckpointsReserveTransientBatchesEvenWithSmallPoolOverride) {
+    ScopedEnvVar      request_cache_mode("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
+    ParallelismConfig pc;
+    pc.role_type = RoleType::PREFILL;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size                      = 4;
+    runtime.fifo_scheduler_config.max_context_batch_size = 2;
+    auto model                                           = makeGlm53Config();
+    model.max_seq_len                                    = 1025;
+    auto kv_config                                       = makeKvConfig();
+    kv_config.reuse_cache                                = true;
+    kv_config.enable_memory_cache                        = true;
+    kv_config.enable_memory_cache_disk                   = true;
+    for (int step : {1, 3, 4}) {
+        kv_config.linear_step                      = step;
+        kv_config.linear_request_cache_pool_blocks = 0;
+        auto           config      = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
+        const uint32_t checkpoints = 1024 / (128 * step);
+        EXPECT_EQ(config.linear_disk_checkpoint_blocks, checkpoints);
+        config.finalizeBlockNums(10000, runtime);
+        EXPECT_EQ(config.group_block_nums[1], 12u + 4u * checkpoints);
+        kv_config.linear_request_cache_pool_blocks = 1;
+        config = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
+        config.finalizeBlockNums(10000, runtime);
+        EXPECT_EQ(config.group_block_nums[1], 8u + 4u * checkpoints);
+    }
+    pc.role_type       = RoleType::DECODE;
+    auto decode_config = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
+    EXPECT_EQ(decode_config.linear_disk_checkpoint_blocks, 0u);
+    decode_config.finalizeBlockNums(10000, runtime);
+    EXPECT_EQ(decode_config.group_block_nums[1], 8u);
+    pc.role_type                       = RoleType::PREFILL;
+    kv_config.enable_memory_cache_disk = false;
+    auto config                        = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
+    EXPECT_EQ(config.linear_disk_checkpoint_blocks, 0u);
+    config.finalizeBlockNums(10000, runtime);
+    EXPECT_EQ(config.group_block_nums[1], 8u);
+}
+
 TEST(GLM53CacheConfigTest, OfficialShapeCacheBytesMatchOneMillionTokenAccounting) {
     auto model       = makeGlm53Config();
     model.num_layers = 45;
@@ -522,8 +559,8 @@ TEST(GLM53CacheConfigTest, OfficialShapeCacheBytesMatchOneMillionTokenAccounting
     auto* mla_spec = dynamic_cast<MLAKVCacheSpec*>(prefill_config.cache_specs[0].get());
     ASSERT_NE(mla_spec, nullptr);
     EXPECT_EQ(11u * mla_spec->block_size_bytes(), 743424u);
-    EXPECT_EQ(11u * mla_spec->scale_block_size_bytes(), 185856u);
-    EXPECT_EQ(prefill_config.group_block_size_bytes[0], 929280u);
+    EXPECT_EQ(11u * mla_spec->scale_block_size_bytes(), 0u);
+    EXPECT_EQ(prefill_config.group_block_size_bytes[0], 743424u);
     EXPECT_EQ(prefill_config.group_block_size_bytes[1], 18452480u);
     EXPECT_EQ(prefill_config.group_block_size_bytes[2], 46464u);
 

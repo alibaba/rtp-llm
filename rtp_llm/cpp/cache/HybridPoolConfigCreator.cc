@@ -57,7 +57,13 @@ KVCacheSpecPtr createFullAttentionSpec(const ModelConfig&       model_config,
                                        uint32_t                 layer_num) {
     KVCacheSpecPtr spec;
     if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
-        spec = std::make_shared<MLAKVCacheSpec>(model_config.attn_config, parallelism_config);
+        auto mla = std::make_shared<MLAKVCacheSpec>(model_config.attn_config, parallelism_config);
+        // Compressed indexers own typed KPool storage; no legacy per-token
+        // Indexer buffer belongs alongside the MLA payload.
+        if (model_config.attn_config.indexer_compress_ratio > 1) {
+            mla->is_sparse = false;
+        }
+        spec = std::move(mla);
     } else {
         spec = std::make_shared<MHAKVCacheSpec>(model_config.attn_config, parallelism_config);
     }

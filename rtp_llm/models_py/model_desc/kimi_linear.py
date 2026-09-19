@@ -1096,6 +1096,11 @@ class KimiLinearDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.layer_idx = layer_idx
+        self._drain_pinned_mla_before_moe = (
+            os.environ.get("RTP_LLM_DSA_MLA_DRAIN_BEFORE_MOE", "1") == "1"
+            and layer_idx in config.moe_layer_index
+            and str(moe_config.moe_strategy).startswith("mega_moe")
+        )
         self.layer_type = config.hybrid_attention_config.hybrid_attention_types[
             layer_idx
         ]
@@ -1186,6 +1191,22 @@ class KimiLinearDecoderLayer(nn.Module):
                 weights[W.post_ln_gamma], eps=config.layernorm_eps
             )
 
+    def _wait_pinned_mla_before_moe(self, fmha_impl: FMHAImplBase) -> None:
+        if not getattr(self, "_drain_pinned_mla_before_moe", False):
+            return
+        implementation = fmha_impl
+        groups = getattr(implementation, "pinned_mla_groups", None)
+        if groups is None:
+            implementation = getattr(implementation, "fmha_impl", None)
+            groups = getattr(implementation, "pinned_mla_groups", {})
+        entry = groups.get(self.layer_idx)
+        if entry is not None:
+            # Do not restrict this to group_layer == 0: a shared-index group
+            # can begin with a dense layer followed by its first MoE layer.
+            working, _ = entry
+            if getattr(working, "started", True):
+                working.wait_prefetch_complete()
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1226,6 +1247,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 global_kv_cache=global_kv_cache,
             )
 
+        self._wait_pinned_mla_before_moe(fmha_impl)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return DecodeLayerOutput(hidden_states, residual)
@@ -1272,6 +1294,7 @@ class KimiLinearDecoderLayer(nn.Module):
         hidden_states = self.attn_hc.post(hidden_states, residual, post, comb)
         residual = hidden_states
         hidden_states, post, comb = self.ffn_hc.pre(residual)
+        self._wait_pinned_mla_before_moe(fmha_impl)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.ffn_hc.post(hidden_states, residual, post, comb)
@@ -1334,6 +1357,7 @@ class KimiLinearDecoderLayer(nn.Module):
         hidden_states = self.attn_hc.post(hidden_states, residual, post, comb)
         residual = hidden_states
         hidden_states, post, comb = self.ffn_hc.pre(residual)
+        self._wait_pinned_mla_before_moe(fmha_impl)
         hidden_states = self.post_attention_layernorm(hidden_states)
         if isinstance(self.mlp, GenericMoeLayer):
             hidden_states = self.mlp(hidden_states, sequence_parallel_layout=layout)
@@ -1399,6 +1423,7 @@ class KimiLinearDecoderLayer(nn.Module):
         residual, hidden_states, post, comb = self.ffn_hc.fused_post_pre(
             hidden_states, residual, post, comb
         )
+        self._wait_pinned_mla_before_moe(fmha_impl)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual, post, comb
@@ -1557,6 +1582,7 @@ class KimiLinearModel(GptModelBase):
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
+        fmha_impl.pinned_mla_groups = self.pinned_mla_groups
 
         if (
             self.prefill_sequence_parallel

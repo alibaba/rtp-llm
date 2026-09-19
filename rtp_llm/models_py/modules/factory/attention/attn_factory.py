@@ -77,6 +77,7 @@ def get_mla_impl(
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
+    pinned_mla: bool = False,
 ) -> MlaImplBase:
 
     # MTP target-verify arrives with is_prefill=True (sequence_lengths is empty in
@@ -126,6 +127,7 @@ def get_mla_impl(
         use_fast_path = (
             attn_inputs.is_prefill
             and not use_decode_mla
+            and not (pinned_mla and is_cuda_graph)
             and _supports_sparse_prefill_dense_fast_path(attn_configs)
             and attn_inputs.cu_kv_seqlens.max().item()
             <= _sparse_prefill_fast_path_limit(attn_configs)
@@ -149,7 +151,7 @@ def get_mla_impl(
             attn_configs.is_sparse
             and not use_fast_path
             and not impl.is_sparse()
-            and not allow_cuda_graph_prefill_absorb
+            and (pinned_mla or not allow_cuda_graph_prefill_absorb)
         ):
             continue
 
@@ -298,6 +300,7 @@ class AttnImplFactory(object):
         attn_inputs: PyAttentionInputs,
         fmha_config: Optional[FMHAConfig] = None,
         is_cuda_graph: bool = False,
+        pinned_mla: bool = False,
     ) -> FMHAImplBase:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(
@@ -315,6 +318,7 @@ class AttnImplFactory(object):
             is_cuda_graph,
             model_config.max_seq_len,
             parallelism_config,
+            **({"pinned_mla": True} if pinned_mla and key_str == "mla" else {}),
         )
         logging.debug(f"get fmha impl: {type(instance).__name__}")
         return instance

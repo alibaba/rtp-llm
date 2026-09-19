@@ -1,4 +1,23 @@
 # only can run in cu129 so mark as manual
+load("//bazel:arch_select.bzl", "requirement")
+
+requirement(["torch", "triton", "flash-mla"])
+
+py_test(
+    name = "pinned_mla_cache_test",
+    srcs = ["pinned_mla_cache_test.py"],
+    deps = [
+        "//rtp_llm/models_py:pinned_mla_cache",
+        "//rtp_llm:models",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        ":torch",
+        ":triton",
+        ":flash-mla",
+    ],
+    tags = ["manual"],
+    exec_properties = {"gpu": "H20"},
+)
+
 py_test(
     name = "sparse_mla_op_test",
     srcs = ["sparse_mla_op_test.py"],

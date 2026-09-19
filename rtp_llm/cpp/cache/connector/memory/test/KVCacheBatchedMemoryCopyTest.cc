@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -469,87 +470,111 @@ private:
 
 }  // namespace
 
-
-
-TEST(KVCacheBatchedMemoryCopyTest, WholeRequestReadOnlyRestoresSelectedCheckpoint) {
-    auto config                                  = makeTinyTypedHybridPoolConfig();
-    config.group_types[1]                        = CacheGroupType::LINEAR;
-    config.linear_group_num                      = 1;
-    config.enable_linear_attention_request_cache = true;
-    KVCacheConfig kv_config;
-    kv_config.memory_cache_size_mb         = 8;
-    kv_config.memory_cache_sync_timeout_ms = 1000;
-    auto allocator                         = std::make_shared<FakeTypedKVCacheAllocator>(config);
-    auto connector =
-        std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, std::vector<std::string>{"127.0.0.1:1"});
-    ASSERT_TRUE(connector->init());
-    KVCacheResource resource;
-    resource.cacheKeys() = {101, 102, 103, 104};
-    resource.initGroups(
-        2, config.layer_all_num, config.layer_to_group_id, 1, config.group_types, config.layer_region_to_group_id);
-    resource.mutableBlockIds(0).assign({1, 2, 3, 4});
-    // These output slots are allocated, but only the selected checkpoint
-    // at key 103 needs to be present in the external cache.
-    resource.mutableBlockIds(1).assign({5, 6, 7, 8});
-    resource.ensureLinearBlockDependencies();
-    const auto slots  = connector->layerRegionSlots();
-    const auto blocks = connector->resourceLayerRegionBlocks(resource, slots);
-    for (size_t index = 0; index < 3; ++index) {
-        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
-            if (kind == CacheBlockKind::STATE_SWA_KV && index != 2) {
-                continue;
+TEST(KVCacheBatchedMemoryCopyTest, Glm53PinnedMlaAndQuantizedKdaRoundTripTogether) {
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    ModelConfig model;
+    model.num_layers                                                = 2;
+    model.data_type                                                 = DataType::TYPE_BF16;
+    model.attn_config.use_mla                                       = true;
+    model.attn_config.is_sparse                                     = true;
+    model.attn_config.kv_lora_rank                                  = 512;
+    model.attn_config.rope_head_dim                                 = 0;
+    model.attn_config.tokens_per_block                              = 128;
+    model.attn_config.kernel_tokens_per_block                       = 128;
+    model.attn_config.indexer_head_dim                              = 128;
+    model.attn_config.indexer_head_num                              = 32;
+    model.attn_config.indexer_topk                                  = 512;
+    model.attn_config.indexer_compress_ratio                        = 4;
+    model.attn_config.sparse_attention_topk                         = 2051;
+    model.hybrid_attention_config.enable_hybrid_attention           = true;
+    model.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    model.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::LINEAR, HybridAttentionType::NONE};
+    model.linear_attention_config.linear_conv_kernel_dim = 4;
+    model.linear_attention_config.linear_key_head_dim    = 64;
+    model.linear_attention_config.linear_value_head_dim  = 64;
+    model.linear_attention_config.linear_num_key_heads   = 2;
+    model.linear_attention_config.linear_num_value_heads = 2;
+    model.linear_attention_config.ssm_state_dtype        = DataType::TYPE_FP32;
+    for (const auto& dtype : {"auto", "bf16"}) {
+        KVCacheConfig options;
+        options.seq_size_per_block = options.kernel_seq_size_per_block = 128;
+        options.memory_cache_size_mb                                   = 32;
+        options.memory_cache_sync_timeout_ms                           = 1000;
+        options.enable_prefix_tree_memory_cache                        = true;
+        options.enable_legacy_memory_connector_fallback                = false;
+        options.linear_cache_dtype                                     = dtype;
+        auto config      = HybridPoolConfigCreator::createConfig(model, ParallelismConfig(), options, false, 0);
+        config.block_num = 16;
+        config.enable_linear_attention_request_cache = true;
+        auto allocator                               = std::make_shared<FakeTypedKVCacheAllocator>(
+            config, 0, std::set<KVCacheRegionName>{KVCacheRegionName::DEFAULT}, std::set<int>{1});
+        auto connector = std::make_shared<KVCacheMemoryConnector>(
+            config, options, allocator, std::vector<std::string>{"127.0.0.1:1"});
+        ASSERT_TRUE(connector->init());
+        auto                       slots = connector->layerRegionSlots();
+        std::vector<torch::Tensor> expected;
+        for (const auto& slot : slots) {
+            auto buffers = allocator->convertIndexToBuffer(slot.layer_id, slot.region_name, 1);
+            ASSERT_EQ(buffers.size(), 1u);
+            setBlockInfosContent(buffers, 7);
+            if (config.group_types[slot.group_id] == CacheGroupType::LINEAR) {
+                const auto* spec = dynamic_cast<LinearKVCacheSpec*>(config.cache_specs[slot.group_id].get());
+                ASSERT_NE(spec, nullptr);
+                torch::from_blob(buffers[0].addr,
+                                 {static_cast<int64_t>(spec->k_block_size_bytes() / sizeof(float))},
+                                 torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32))
+                    .fill_(1.25);
             }
-            auto pool      = connector->memoryPoolFor(kind);
-            auto allocated = pool->malloc(1);
-            ASSERT_EQ(allocated.size(), 1u);
-            KVCacheMemoryConnector::CopyInfoPerKey copy;
-            copy.cache_key       = resource.cacheKeys()[index];
-            copy.kind            = kind;
-            copy.mem_block       = allocated[0];
-            copy.block_size      = connector->prefixKindBlockSize(kind, slots);
-            copy.slot_valid_mask = connector->prefixSlotValidMask(blocks, slots, index, kind);
-            connector->putPrefixToCache(copy, resource.blockDependencies()[index], slots);
+            expected.push_back(
+                torch::from_blob(
+                    buffers[0].addr,
+                    {static_cast<int64_t>(buffers[0].size_bytes)},
+                    torch::TensorOptions().dtype(torch::kUInt8).device(buffers[0].is_cuda ? torch::kCUDA : torch::kCPU))
+                    .cpu()
+                    .clone());
+        }
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        MemoryOperationRequestPB request;
+        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            auto pool =
+                kind == CacheBlockKind::COMPRESSED_KV ? connector->compressed_pool_ : connector->state_swa_pool_;
+            ASSERT_NE(pool, nullptr);
+            const auto blocks = pool->malloc(1);
+            ASSERT_EQ(blocks.size(), 1u);
+            auto* item = request.add_copy_items();
+            item->set_mem_block(blocks[0]);
+            item->set_backing_type(MemoryOperationRequestPB::MEMORY);
+            item->set_cache_block_kind(kind == CacheBlockKind::COMPRESSED_KV ? MemoryOperationRequestPB::COMPRESSED_KV :
+                                                                               MemoryOperationRequestPB::STATE_SWA_KV);
+            item->set_is_complete(true);
+            for (const auto& slot : slots) {
+                const bool active = connector->kindForSlot(slot) == kind;
+                item->add_gpu_blocks(active ? 1 : NULL_BLOCK_IDX);
+                item->add_slot_valid_mask(active);
+            }
+        }
+        request.set_copy_direction(MemoryOperationRequestPB::D2H);
+        MemoryOperationResponsePB response;
+        ASSERT_TRUE(connector->copyCache(request, response));
+        ASSERT_TRUE(response.success());
+        for (const auto& slot : slots) {
+            setBlockInfosContent(allocator->convertIndexToBuffer(slot.layer_id, slot.region_name, 1), 0);
+        }
+        request.set_copy_direction(MemoryOperationRequestPB::H2D);
+        response.Clear();
+        ASSERT_TRUE(connector->copyCache(request, response));
+        ASSERT_TRUE(response.success());
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const auto buffers = allocator->convertIndexToBuffer(slots[i].layer_id, slots[i].region_name, 1);
+            auto       actual =
+                torch::from_blob(
+                    buffers[0].addr,
+                    {static_cast<int64_t>(buffers[0].size_bytes)},
+                    torch::TensorOptions().dtype(torch::kUInt8).device(buffers[0].is_cuda ? torch::kCUDA : torch::kCPU))
+                    .cpu();
+            EXPECT_TRUE(torch::equal(actual, expected[i])) << dtype << " layer=" << slots[i].layer_id;
         }
     }
-    EXPECT_EQ(connector->matchWholeRequest(resource), 3u);
-    auto plan =
-        connector->buildPrefixCopyPlanForRead(resource.cacheKeys(), resource.blockDependencies(), blocks, slots, 0, 3);
-    ASSERT_NE(plan, nullptr);
-    ASSERT_EQ(plan->copy_infos.size(), 4u);
-    size_t states = 0;
-    for (const auto& copy : plan->copy_infos) {
-        if (copy.kind == CacheBlockKind::STATE_SWA_KV) {
-            EXPECT_EQ(copy.cache_key, 103);
-            ++states;
-        }
-    }
-    EXPECT_EQ(states, 1u);
-    bool no_write = false;
-    auto write    = connector->buildPrefixCopyPlanForWrite(
-        resource.cacheKeys(), resource.blockDependencies(), blocks, slots, 0, 4, no_write, 3);
-    ASSERT_NE(write, nullptr);
-    for (const auto& copy : write->copy_infos) {
-        if (copy.kind == CacheBlockKind::STATE_SWA_KV) {
-            EXPECT_GE(copy.cache_key, 103);
-        }
-    }
-}
-
-TEST(KVCacheBatchedMemoryCopyTest, AutomaticHostSplitKeepsAUsableLinearStateAtLowConcurrency) {
-    auto config                                  = makeTinyTypedHybridPoolConfig();
-    config.group_types[1]                        = CacheGroupType::LINEAR;
-    config.linear_group_num                      = 1;
-    config.enable_linear_attention_request_cache = true;
-    config.group_block_nums                      = {65536, 3};
-    config.group_block_size_bytes                = {4096, 4096};
-    KVCacheConfig kv_config;
-    kv_config.memory_cache_size_mb         = 8;
-    kv_config.memory_cache_sync_timeout_ms = 1000;
-    auto connector                         = std::make_shared<KVCacheMemoryConnector>(
-        config, kv_config, std::shared_ptr<KVCacheAllocator>(), std::vector<std::string>{"127.0.0.1:1"});
-    ASSERT_TRUE(connector->init());
-    EXPECT_EQ(connector->state_swa_pool_->freeBlocksNum(), 1u);
-    EXPECT_GT(connector->compressed_pool_->freeBlocksNum(), 100u);
 }
 
 TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout) {
@@ -933,9 +958,86 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
     EXPECT_EQ(plan->copy_infos[2].slot_valid_mask[swa_slot], 0);
 }
 
+TEST(KVCacheBatchedMemoryCopyTest, AutomaticHostSplitKeepsAUsableLinearStateAtLowConcurrency) {
+    auto config                                  = makeTinyTypedHybridPoolConfig();
+    config.group_types[1]                        = CacheGroupType::LINEAR;
+    config.linear_group_num                      = 1;
+    config.enable_linear_attention_request_cache = true;
+    config.group_block_nums                      = {65536, 3};
+    config.group_block_size_bytes                = {4096, 4096};
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb         = 8;
+    kv_config.memory_cache_sync_timeout_ms = 1000;
+    auto connector                         = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, std::shared_ptr<KVCacheAllocator>(), std::vector<std::string>{"127.0.0.1:1"});
+    ASSERT_TRUE(connector->init());
+    EXPECT_EQ(connector->state_swa_pool_->freeBlocksNum(), 1u);
+    EXPECT_GT(connector->compressed_pool_->freeBlocksNum(), 100u);
+}
 
-
-
+TEST(KVCacheBatchedMemoryCopyTest, WholeRequestReadOnlyRestoresSelectedCheckpoint) {
+    auto config                                  = makeTinyTypedHybridPoolConfig();
+    config.group_types[1]                        = CacheGroupType::LINEAR;
+    config.linear_group_num                      = 1;
+    config.enable_linear_attention_request_cache = true;
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb         = 8;
+    kv_config.memory_cache_sync_timeout_ms = 1000;
+    auto allocator                         = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto connector =
+        std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, std::vector<std::string>{"127.0.0.1:1"});
+    ASSERT_TRUE(connector->init());
+    KVCacheResource resource;
+    resource.cacheKeys() = {101, 102, 103, 104};
+    resource.initGroups(
+        2, config.layer_all_num, config.layer_to_group_id, 1, config.group_types, config.layer_region_to_group_id);
+    resource.mutableBlockIds(0).assign({1, 2, 3, 4});
+    // These output slots are allocated, but only the selected checkpoint
+    // at key 103 needs to be present in the external cache.
+    resource.mutableBlockIds(1).assign({5, 6, 7, 8});
+    resource.ensureLinearBlockDependencies();
+    const auto slots  = connector->layerRegionSlots();
+    const auto blocks = connector->resourceLayerRegionBlocks(resource, slots);
+    for (size_t index = 0; index < 3; ++index) {
+        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            if (kind == CacheBlockKind::STATE_SWA_KV && index != 2) {
+                continue;
+            }
+            auto pool      = connector->memoryPoolFor(kind);
+            auto allocated = pool->malloc(1);
+            ASSERT_EQ(allocated.size(), 1u);
+            KVCacheMemoryConnector::CopyInfoPerKey copy;
+            copy.cache_key       = resource.cacheKeys()[index];
+            copy.kind            = kind;
+            copy.mem_block       = allocated[0];
+            copy.block_size      = connector->prefixKindBlockSize(kind, slots);
+            copy.slot_valid_mask = connector->prefixSlotValidMask(blocks, slots, index, kind);
+            connector->putPrefixToCache(copy, resource.blockDependencies()[index], slots);
+        }
+    }
+    EXPECT_EQ(connector->matchWholeRequest(resource), 3u);
+    auto plan =
+        connector->buildPrefixCopyPlanForRead(resource.cacheKeys(), resource.blockDependencies(), blocks, slots, 0, 3);
+    ASSERT_NE(plan, nullptr);
+    ASSERT_EQ(plan->copy_infos.size(), 4u);
+    size_t states = 0;
+    for (const auto& copy : plan->copy_infos) {
+        if (copy.kind == CacheBlockKind::STATE_SWA_KV) {
+            EXPECT_EQ(copy.cache_key, 103);
+            ++states;
+        }
+    }
+    EXPECT_EQ(states, 1u);
+    bool no_write = false;
+    auto write    = connector->buildPrefixCopyPlanForWrite(
+        resource.cacheKeys(), resource.blockDependencies(), blocks, slots, 0, 4, no_write, 3);
+    ASSERT_NE(write, nullptr);
+    for (const auto& copy : write->copy_infos) {
+        if (copy.kind == CacheBlockKind::STATE_SWA_KV) {
+            EXPECT_GE(copy.cache_key, 103);
+        }
+    }
+}
 
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadRejectsCompressedOnlyWhenStateSwaRequired) {
     auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
