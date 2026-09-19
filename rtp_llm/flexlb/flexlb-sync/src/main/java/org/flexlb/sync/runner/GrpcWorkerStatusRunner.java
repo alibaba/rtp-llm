@@ -1,5 +1,7 @@
 package org.flexlb.sync.runner;
 
+import io.grpc.Status;
+
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
@@ -19,8 +21,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
-
-import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
 public class GrpcWorkerStatusRunner implements Runnable {
 
@@ -409,7 +409,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private void handleException(Throwable ex) {
         log("gRPC worker status check failed, msg=" + ex.getMessage());
         // Report specific error based on exception type
-        if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
+        if (Status.fromThrowable(ex).getCode() == Status.Code.DEADLINE_EXCEEDED) {
             logger.debug("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
             engineHealthReporter.reportStatusCheckerFail(
                     modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, roleType);
