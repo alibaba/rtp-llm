@@ -1,5 +1,7 @@
 package org.flexlb.sync.runner;
 
+import io.grpc.Status;
+
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
@@ -19,8 +21,6 @@ import org.slf4j.LoggerFactory;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.LongAdder;
-
-import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
 public class GrpcCacheStatusCheckRunner implements Runnable {
 
@@ -92,6 +92,11 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     public void run() {
         boolean asyncInitiated = false;
         try {
+            // VIT workers do not own KV cache. Keep the guard for direct
+            // callers as well as the EngineSyncRunner scheduling path.
+            if (roleType == RoleType.VIT) {
+                return;
+            }
             logger.debug("GrpcCacheStatusCheckRunner run for {}", ipPort);
             long prefillCacheStatusCheckInterval =
                     cacheIntervalService.getCurrentIntervalMs();
@@ -319,7 +324,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private void handleException(Throwable ex) {
         log("gRPC cache status check failed:ipPort:" + ipPort + ", with exception: " + ex.getMessage());
         // Report specific error based on exception type
-        if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
+        if (Status.fromThrowable(ex).getCode() == Status.Code.DEADLINE_EXCEEDED) {
             engineHealthReporter.reportCacheStatusCheckerFail(
                     modelName, BalanceStatusEnum.CACHE_GRPC_TIMEOUT, roleType);
         } else {

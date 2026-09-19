@@ -16,6 +16,7 @@ import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -329,6 +330,49 @@ class EngineSyncRunnerTest {
 
         verify(engineHealthReporter).reportRunningLoadVariance(
                 modelName, RoleType.PREFILL.toString(), 200.0);
+    }
+
+    @Test
+    void should_submit_only_worker_status_check_for_vit() {
+        WorkerHost host = new WorkerHost("127.0.0.1", 8080, "test-site");
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
+                .thenReturn(List.of(host));
+
+        createRunner(RoleType.VIT).run();
+
+        ArgumentCaptor<Runnable> taskCaptor = ArgumentCaptor.forClass(Runnable.class);
+        verify(statusCheckExecutor).submit(taskCaptor.capture());
+        assertTrue(taskCaptor.getValue() instanceof GrpcWorkerStatusRunner);
+        WorkerStatus workerStatus = workerDirectory.statusSnapshot(RoleType.VIT)
+                .get(host.getIpPort());
+        WorkerStatus.PollLease cacheLease = workerStatus.tryBeginCachePoll();
+        assertNotNull(cacheLease);
+        cacheLease.close();
+    }
+
+    @Test
+    void should_submit_worker_and_cache_status_checks_for_prefill() {
+        WorkerHost host = new WorkerHost("127.0.0.1", 8080, "test-site");
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(host));
+
+        createRunner(RoleType.PREFILL).run();
+
+        ArgumentCaptor<Runnable> taskCaptor = ArgumentCaptor.forClass(Runnable.class);
+        verify(statusCheckExecutor, times(2)).submit(taskCaptor.capture());
+        assertTrue(taskCaptor.getAllValues().stream()
+                .anyMatch(GrpcWorkerStatusRunner.class::isInstance));
+        assertTrue(taskCaptor.getAllValues().stream()
+                .anyMatch(GrpcCacheStatusCheckRunner.class::isInstance));
+    }
+
+    private EngineSyncRunner createRunner(RoleType actualRoleType) {
+        return new EngineSyncRunner(
+                modelName, workerDirectory, workerAddressService,
+                statusCheckExecutor, engineHealthReporter, engineGrpcService,
+                actualRoleType, localKvCacheAwareManager, cacheIntervalService,
+                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                false, STATUS_STALE_AFTER_US);
     }
 
     private EngineSyncRunner varianceRunner(WorkerDirectory directory) {

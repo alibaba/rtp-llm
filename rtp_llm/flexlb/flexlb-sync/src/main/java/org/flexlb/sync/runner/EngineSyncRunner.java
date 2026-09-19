@@ -177,6 +177,10 @@ public class EngineSyncRunner implements Runnable {
                     logger.debug("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
 
+                if (roleType == RoleType.VIT) {
+                    continue;
+                }
+
                 WorkerStatus.PollLease cachePollLease =
                         workerStatus.tryBeginCachePoll();
                 if (cachePollLease != null) {
