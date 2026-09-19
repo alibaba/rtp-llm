@@ -15,6 +15,9 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 import torch
 from PIL import Image, ImageOps
+from pillow_heif import register_heif_opener
+
+register_heif_opener()
 
 TEXT = -1
 IMAGE_START, IMAGE, IMAGE_NEW_LINE, IMAGE_END = range(4)
@@ -226,6 +229,7 @@ def prepare_vl_inputs_from_token_ids(
     *,
     prompt: str = "",
     url_loader=None,
+    max_image_bytes: int | None = None,
 ) -> V41PreparedInputs:
     """Expand upstream image markers without re-tokenizing any text or special IDs."""
     if sum(token == config.image_token_id for token in prompt_tokens) != len(images):
@@ -240,6 +244,8 @@ def prepare_vl_inputs_from_token_ids(
             token_types.append(TEXT)
             continue
         data = load_image_bytes(next(records), url_loader=url_loader)
+        if max_image_bytes is not None and len(data) > max_image_bytes:
+            raise ValueError("Multimodal file size is too large")
         try:
             with Image.open(io.BytesIO(data)) as image:
                 patches, vit_h, vit_w, llm_h, llm_w = preprocess_image(image, config)

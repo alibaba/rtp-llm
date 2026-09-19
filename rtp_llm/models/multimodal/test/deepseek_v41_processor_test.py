@@ -297,6 +297,65 @@ class V41ProcessorTest(TestCase):
 
 
 class V41TokenIdsProcessorTest(TestCase):
+    def test_image_byte_limit_checks_each_source_before_decode(self):
+        data = image_data(3, 5)
+        encoded = base64.b64encode(data).decode()
+        config = V41ImageProcessorConfig(vision_min_pixels=0)
+        for record in (
+            {"data": data},
+            {"data": encoded},
+            {"source": {"data": encoded}},
+            {"url": "data:image/png;base64," + encoded},
+            {"url": "https://example.test/image.png"},
+        ):
+            with self.subTest(record_type=next(iter(record))):
+                with patch.object(Image, "open", wraps=Image.open) as decode:
+                    with self.assertRaisesRegex(
+                        ValueError, "^Multimodal file size is too large$"
+                    ):
+                        prepare_vl_inputs_from_token_ids(
+                            [config.image_token_id],
+                            [record],
+                            config,
+                            url_loader=lambda url: data,
+                            max_image_bytes=len(data) - 1,
+                        )
+                    decode.assert_not_called()
+                prepared = prepare_vl_inputs_from_token_ids(
+                    [config.image_token_id],
+                    [record],
+                    config,
+                    url_loader=lambda url: data,
+                    max_image_bytes=len(data),
+                )
+                self.assertEqual(len(prepared.images), 1)
+
+    def test_native_processor_has_no_default_image_byte_limit(self):
+        data = image_data(3, 5).ljust(10 * 1024 * 1024 + 1, b"\0")
+        config = V41ImageProcessorConfig(vision_min_pixels=0)
+        ids = [config.image_token_id]
+        prepared = prepare_vl_inputs_from_token_ids(ids, [{"data": data}], config)
+        self.assertEqual(len(prepared.images), 1)
+        tokenizer = Mock()
+        tokenizer.encode.return_value = ids
+        native = prepare_vl_inputs("prompt", [{"data": data}], tokenizer, config)
+        self.assertEqual(native.image_content_hashes, prepared.image_content_hashes)
+
+    def test_heic_image_payload(self):
+        from pillow_heif import from_pillow
+
+        data = io.BytesIO()
+        from_pillow(Image.new("RGB", (64, 64), (255, 0, 0))).save(data, quality=100)
+        config = V41ImageProcessorConfig(vision_min_pixels=42 * 42)
+        prepared = prepare_vl_inputs_from_token_ids(
+            [config.image_token_id], [{"data": data.getvalue()}], config
+        )
+        self.assertEqual(len(prepared.images), 1)
+        patches = prepared.images[0].patches.float()
+        self.assertTrue(torch.isfinite(patches).all())
+        self.assertGreater(patches[:, 0].mean().item(), 0.9)
+        self.assertLess(patches[:, 1:].mean().item(), -0.9)
+
     def test_shared_expansion_preserves_special_ids_and_duplicate_order(self):
         config = V41ImageProcessorConfig(
             vision_patch_size=2,

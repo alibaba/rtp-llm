@@ -3901,6 +3901,77 @@ class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.__exit__.call_count, 2)
             self.assertNotEqual(*hashes)
 
+    async def test_image_size_boundary_before_decode(self):
+        from PIL import Image
+
+        limit = 10 * 1024 * 1024
+        for source in ("data_url", "http", "http_understated_length"):
+            for size in (limit - 1, limit, limit + 1):
+                with self.subTest(source=source, size=size):
+                    data = self.data.ljust(size, b"\0")
+                    url = "https://example.test/image.png"
+                    if source == "data_url":
+                        url = "data:image/png;base64," + base64.b64encode(data).decode()
+                    response = MagicMock()
+                    response.__enter__.return_value = SimpleNamespace(
+                        status_code=200,
+                        content=data,
+                        headers=(
+                            {"Content-Length": "1"}
+                            if source == "http_understated_length"
+                            else {}
+                        ),
+                    )
+                    with patch(
+                        "rtp_llm.utils.multimodal_util.request_get",
+                        return_value=response,
+                    ) as get, patch.object(Image, "open", wraps=Image.open) as decode:
+                        visitor, chunks = await self._run(self._request([url]))
+                    self.assertEqual(get.call_count, int(source != "data_url"))
+                    self.assertEqual(
+                        response.__exit__.call_count, int(source != "data_url")
+                    )
+                    if size <= limit:
+                        self.assertEqual(visitor.enqueue_called, 1)
+                        decode.assert_called_once()
+                        continue
+                    self.assertEqual(visitor.enqueue_called, 0)
+                    decode.assert_not_called()
+                    self.assertEqual(len(chunks), 1)
+                    payload = _dash_error_payload(chunks[0])[1]
+                    self.assertEqual(payload["status_code"], 400)
+                    self.assertEqual(payload["status_name"], "InvalidParameter")
+                    self.assertEqual(
+                        payload["status_message"], "Multimodal file size is too large"
+                    )
+                    self.assertEqual(
+                        _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+                    )
+                    params = chunks[0].infer_response.parameters
+                    self.assertEqual(params["status_code"].int64_param, 400)
+                    self.assertEqual(
+                        params["status_name"].string_param, "InvalidParameter"
+                    )
+
+    async def test_image_size_limit_is_per_file_with_duplicate_urls(self):
+        data = self.data.ljust(10 * 1024 * 1024, b"\0")
+        response = MagicMock()
+        response.__enter__.return_value = SimpleNamespace(status_code=200, content=data)
+        url = "https://example.test/image.png"
+        with patch(
+            "rtp_llm.utils.multimodal_util.request_get", return_value=response
+        ) as get:
+            visitor, _ = await self._run(
+                self._request([url, url]),
+                _parsed_input_ids([self.config.image_token_id] * 2),
+            )
+        self.assertEqual(visitor.enqueue_called, 1)
+        get.assert_called_once()
+        images = visitor.last_generate_input.v41_inputs.images
+        self.assertEqual(len(images), 2)
+        self.assertLess(images[0].start, images[1].start)
+        self.assertEqual(images[0].content_sha256, images[1].content_sha256)
+
     async def test_download_failure_is_sanitized_400(self):
         with patch(
             "rtp_llm.utils.multimodal_util.request_get",
