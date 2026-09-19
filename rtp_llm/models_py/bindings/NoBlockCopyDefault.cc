@@ -24,6 +24,10 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
 
 void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch&) {}
 
+bool execLinearCheckpointCopy(const BatchedMemoryCopyParams&, const std::vector<LinearCheckpointCopyTile>&, bool) {
+    return false;
+}
+
 void warmupNoBlockCopy() {}
 
 }  // namespace rtp_llm

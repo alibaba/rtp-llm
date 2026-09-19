@@ -144,3 +144,17 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "linear_checkpoint_copy_test",
+    srcs = ["LinearCheckpointCopyTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:no_block_copy",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    exec_properties = {"gpu": "H20"},
+)

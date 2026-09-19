@@ -32,9 +32,15 @@ cc_library(
 )
 
 cc_library(
+    name = "linear_checkpoint_hdr",
+    hdrs = ["LinearCheckpoint.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "no_block_copy_hdr",
     hdrs = ["NoBlockCopy.h"],
-    deps = torch_deps(),
+    deps = torch_deps() + [":linear_checkpoint_hdr"],
     copts = copts(),
     visibility = ["//visibility:public"],
 )

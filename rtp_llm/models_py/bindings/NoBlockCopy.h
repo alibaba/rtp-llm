@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/models_py/bindings/LinearCheckpoint.h"
 #include <cstddef>
 #include <torch/torch.h>
 #include <vector>
@@ -27,6 +28,10 @@ struct BatchedMemoryCopyParams {
     std::vector<BatchedMemoryCopyTile> tiles;
     int                                device_index = -1;
 };
+
+bool execLinearCheckpointCopy(const BatchedMemoryCopyParams&               params,
+                              const std::vector<LinearCheckpointCopyTile>& checkpoints,
+                              bool                                         host_to_device);
 
 enum class StagedMemoryCopyDirection {
     H2D = 0,

@@ -172,6 +172,15 @@ cc_library(
 )
 
 cc_library(
+    name = "linear_checkpoint_copy",
+    srcs = ["LinearCheckpointCopy.cu"],
+    hdrs = ["LinearCheckpointCopy.h"],
+    copts = cuda_copts(),
+    deps = [":cuda_host_utils", "//rtp_llm/models_py/bindings:linear_checkpoint_hdr"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "no_block_copy",
     srcs = ["NoBlockCopy.cc"],
     copts = copts(),
@@ -179,6 +188,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "//rtp_llm/cpp/utils:core_utils",
         ":split_kv_cache_copy",
+        ":linear_checkpoint_copy",
         ":cuda_host_utils",
     ] + torch_deps(),
     visibility = ["//visibility:public"],

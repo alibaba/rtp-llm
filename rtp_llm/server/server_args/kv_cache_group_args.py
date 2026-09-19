@@ -127,6 +127,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
 
     kv_cache_group.add_argument(
+        "--linear_cache_dtype",
+        env_name="LINEAR_CACHE_DTYPE",
+        bind_to=(kv_cache_config, "linear_cache_dtype"),
+        type=str,
+        choices=["auto", "bf16", "int8"],
+        default="auto",
+        help="闲置 Linear 检查点精度；bf16 保留指数范围，int8 按 K 通道量化；活跃状态保持 fp32。",
+    )
+    kv_cache_group.add_argument(
         "--ssm_state_dtype",
         env_name="SSM_STATE_DTYPE",
         bind_to=(kv_cache_config, "ssm_state_dtype"),

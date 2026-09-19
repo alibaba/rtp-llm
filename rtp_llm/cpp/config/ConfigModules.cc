@@ -130,6 +130,7 @@ std::string KVCacheConfig::to_string() const {
         << "linear_request_cache_pool_blocks: " << linear_request_cache_pool_blocks << "\n"
         << "int8_kv_cache: " << int8_kv_cache << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
+        << "linear_cache_dtype: " << linear_cache_dtype << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
         << "seq_size_per_block: " << seq_size_per_block << "\n"

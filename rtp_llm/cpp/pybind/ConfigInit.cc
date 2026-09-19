@@ -442,6 +442,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
+        .def_readwrite("linear_cache_dtype", &KVCacheConfig::linear_cache_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
         .def_readwrite("kernel_seq_size_per_block", &KVCacheConfig::kernel_seq_size_per_block)
@@ -547,7 +548,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.prefix_tree_memory_state_swa_pool_ratio,
                                       self.enable_dsv4_state_block_independent_eviction,
                                       self.linear_fixed_cap,
-                                      self.linear_request_cache_pool_blocks);
+                                      self.linear_request_cache_pool_blocks,
+                                      self.linear_cache_dtype);
             },
             [](py::tuple t) {
                 const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
@@ -636,6 +638,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                 }
                                 if (extra_count >= 8) {
                                     c.linear_request_cache_pool_blocks = t[extra_start + 7].cast<uint32_t>();
+                                }
+                                if (extra_count >= 9) {
+                                    c.linear_cache_dtype = t[extra_start + 8].cast<std::string>();
                                 }
                             }
                         }

@@ -8,6 +8,7 @@
 #include <string>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -224,6 +225,18 @@ bool KVCacheMemoryConnector::init() {
                             "init failed, disk sync timeout is invalid, sync timeout: %ld ms",
                             kv_cache_config_.memory_cache_disk_sync_timeout_ms);
 
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.linear_cache_dtype == "auto"
+                                || kv_cache_config_.linear_cache_dtype == "int8"
+                                || kv_cache_config_.linear_cache_dtype == "bf16",
+                            "linear_cache_dtype must be auto, bf16 or int8");
+    if (kv_cache_config_.linear_cache_dtype != "auto") {
+        RTP_LLM_CHECK_WITH_INFO(wholeStateRequestCache(), "quantized checkpoints require Linear request cache");
+        for (const auto& spec : cache_config_.cache_specs) {
+            auto linear = std::dynamic_pointer_cast<LinearKVCacheSpec>(spec);
+            RTP_LLM_CHECK_WITH_INFO(!linear || linear->ssm_state_dtype == DataType::TYPE_FP32,
+                                    "quantized idle checkpoints require fp32 active SSM state");
+        }
+    }
     checkLayerBlockStrideBytes();
 
     initBlockPool();
@@ -355,6 +368,13 @@ void KVCacheMemoryConnector::initBlockPool() {
                 state_swa_capacity  = state_bytes / state_swa_block_size_;
                 device_scaled       = true;
             }
+        }
+        if (device_scaled && !diskCacheEnabled() && state_swa_capacity < 2) {
+            // The active device pool can be tiny at low concurrency. A host
+            // cache still needs its null block plus at least one usable state.
+            state_swa_capacity       = 2;
+            const size_t state_bytes = state_swa_capacity * state_swa_block_size_;
+            compressed_capacity = total_bytes > state_bytes ? (total_bytes - state_bytes) / compressed_block_size_ : 0;
         }
         if (compressed_capacity == 0 || state_swa_capacity == 0) {
             // Legacy prefix-tree layouts keep one compressed and one state
@@ -638,6 +658,22 @@ std::vector<KVCacheMemoryConnector::LayerRegionSlot> KVCacheMemoryConnector::lay
             }
             slots.push_back(LayerRegionSlot{
                 static_cast<int>(layer), KVCacheRegionName::DEFAULT, gid, group_stride(gid, static_cast<int>(layer))});
+        }
+    }
+    if (kv_cache_config_.linear_cache_dtype != "auto" && wholeStateRequestCache()) {
+        for (auto& slot : slots) {
+            if (slot.group_id < 0 || static_cast<size_t>(slot.group_id) >= cache_config_.cache_specs.size()) {
+                continue;
+            }
+            auto spec = std::dynamic_pointer_cast<LinearKVCacheSpec>(cache_config_.cache_specs[slot.group_id]);
+            if (spec) {
+                const size_t state_bytes =
+                    kv_cache_config_.linear_cache_dtype == "bf16" ?
+                        spec->ssm_state_size() * sizeof(uint16_t) :
+                        spec->ssm_state_size()
+                            + static_cast<size_t>(spec->local_num_v_heads) * spec->head_k_dim * sizeof(float);
+                slot.stride_bytes = state_bytes + spec->v_block_size_bytes();
+            }
         }
     }
     return slots;
@@ -967,7 +1003,9 @@ bool KVCacheMemoryConnector::wholeStateRequestCache() const {
 
 CacheBlockKind KVCacheMemoryConnector::kindForSlot(const LayerRegionSlot& slot) const {
     if (wholeStateRequestCache()) {
-        return isFullOnlySlot(slot) ? CacheBlockKind::COMPRESSED_KV : CacheBlockKind::STATE_SWA_KV;
+        const bool linear = slot.group_id >= 0 && static_cast<size_t>(slot.group_id) < cache_config_.group_types.size()
+                            && cache_config_.group_types[slot.group_id] == CacheGroupType::LINEAR;
+        return linear ? CacheBlockKind::STATE_SWA_KV : CacheBlockKind::COMPRESSED_KV;
     }
     if (slot.group_id >= 0 && slot.group_id <= 2) {
         return CacheBlockKind::COMPRESSED_KV;
@@ -2002,15 +2040,18 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
         void*            data;
     };
     std::vector<DiskWrite>                disk_writes;
+    std::vector<LinearCheckpointCopyTile> checkpoints;
+    int                                   checkpoint_device = -1;
     size_t                                disk_index        = 0;
     std::vector<torch::Tensor>            dst_buffers;
     std::vector<torch::Tensor>            src_buffers;
     bool                                  batch_eligible = true;
     auto                                  flush          = [&]() {
-        if (dst_buffers.empty()) {
+        if (dst_buffers.empty() && checkpoints.empty()) {
             return true;
         }
         BatchedMemoryCopyParams params;
+        params.device_index                         = checkpoint_device;
         bool                               eligible = batch_eligible;
         std::vector<BatchedMemoryCopyTile> host_tiles;
         for (size_t i = 0; i < dst_buffers.size(); ++i) {
@@ -2032,7 +2073,11 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
             params.device_index = device;
             appendBatchedMemoryCopyTile(dst.data_ptr(), src.data_ptr(), src.nbytes(), params.tiles);
         }
-        if (memoryCacheCopyMode() == MemoryCacheCopyMode::LEGACY || !eligible
+        if (!checkpoints.empty()) {
+            if (!eligible || !execLinearCheckpointCopy(params, checkpoints, direction == CopyDirection::H2D)) {
+                return false;
+            }
+        } else if (memoryCacheCopyMode() == MemoryCacheCopyMode::LEGACY || !eligible
                    || !execBatchedMemoryCopy(params)) {
             execNoBlockCopy(MultiCopyParams{dst_buffers, src_buffers});
             return true;  // The fallback already includes host-to-host tiles.
@@ -2146,6 +2191,45 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
                 continue;
             }
             const auto gpu_buffers      = allocator_->convertIndexToBuffer(slot.layer_id, slot.region_name, gpu_block);
+            auto       linear_spec =
+                (kv_cache_config_.linear_cache_dtype != "auto" && slot.group_id >= 0
+                 && static_cast<size_t>(slot.group_id) < cache_config_.cache_specs.size()) ?
+                          std::dynamic_pointer_cast<LinearKVCacheSpec>(cache_config_.cache_specs[slot.group_id]) :
+                          nullptr;
+            if (linear_spec) {
+                if (gpu_buffers.size() != 1 || !gpu_buffers[0].is_cuda || !gpu_buffers[0].addr
+                    || gpu_buffers[0].size_bytes != linear_spec->block_size_bytes()
+                    || byte_off + slot.stride_bytes > backing_buffer.size_bytes) {
+                    return false;
+                }
+                const auto& gpu = gpu_buffers[0];
+                if (checkpoint_device >= 0 && checkpoint_device != gpu.device_index) {
+                    return false;
+                }
+                checkpoint_device = gpu.device_index;
+                auto* host        = static_cast<char*>(backing_buffer.addr) + byte_off;
+                checkpoints.push_back({static_cast<float*>(gpu.addr),
+                                       host,
+                                       static_cast<int>(linear_spec->local_num_v_heads),
+                                       static_cast<int>(linear_spec->head_v_dim),
+                                       static_cast<int>(linear_spec->head_k_dim),
+                                       kv_cache_config_.linear_cache_dtype == "bf16" ? LinearCheckpointDType::BF16 :
+                                                                                       LinearCheckpointDType::INT8});
+                // The small convolution history retains its original dtype.
+                BlockInfo conv  = gpu;
+                conv.addr       = static_cast<char*>(gpu.addr) + linear_spec->k_block_size_bytes();
+                conv.size_bytes = linear_spec->v_block_size_bytes();
+                if (!appendCopyBytesToBuffers(backing_buffer,
+                                              conv,
+                                              byte_off + slot.stride_bytes - conv.size_bytes,
+                                              direction,
+                                              dst_buffers,
+                                              src_buffers)) {
+                    return false;
+                }
+                byte_off += slot.stride_bytes;
+                continue;
+            }
             size_t     within_layer_off = 0;
             for (const auto& gpu_buffer : gpu_buffers) {
                 if (within_layer_off + gpu_buffer.size_bytes > slot.stride_bytes

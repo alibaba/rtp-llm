@@ -716,6 +716,7 @@ class KVCacheConfig:
     seq_size_per_block: int
     kernel_seq_size_per_block: int
     ssm_state_dtype: str
+    linear_cache_dtype: str
     test_block_num: int
     use_block_cache: int
     write_cache_sync: bool

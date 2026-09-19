@@ -471,6 +471,23 @@ private:
 
 
 
+TEST(KVCacheBatchedMemoryCopyTest, AutomaticHostSplitKeepsAUsableLinearStateAtLowConcurrency) {
+    auto config                                  = makeTinyTypedHybridPoolConfig();
+    config.group_types[1]                        = CacheGroupType::LINEAR;
+    config.linear_group_num                      = 1;
+    config.enable_linear_attention_request_cache = true;
+    config.group_block_nums                      = {65536, 3};
+    config.group_block_size_bytes                = {4096, 4096};
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb         = 8;
+    kv_config.memory_cache_sync_timeout_ms = 1000;
+    auto connector                         = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, std::shared_ptr<KVCacheAllocator>(), std::vector<std::string>{"127.0.0.1:1"});
+    ASSERT_TRUE(connector->init());
+    EXPECT_EQ(connector->state_swa_pool_->freeBlocksNum(), 1u);
+    EXPECT_GT(connector->compressed_pool_->freeBlocksNum(), 100u);
+}
+
 TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout) {
     KVCacheConfig            kv_config;
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};

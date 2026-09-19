@@ -1,6 +1,7 @@
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/models_py/bindings/common/kernels/sm_copy_kernel.h"
 #include "rtp_llm/models_py/bindings/cuda/SplitKvCacheCopy.h"
+#include "rtp_llm/models_py/bindings/cuda/LinearCheckpointCopy.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 
 #include <algorithm>
@@ -433,7 +434,75 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
 #endif
 }
 
-
+bool execLinearCheckpointCopy(const BatchedMemoryCopyParams&               params,
+                              const std::vector<LinearCheckpointCopyTile>& checkpoints,
+                              bool                                         host_to_device) {
+    if (checkpoints.empty()) {
+        return execBatchedMemoryCopy(params);
+    }
+    if (params.device_index < 0 || checkpoints.size() > 65535) {
+        return false;
+    }
+    const auto packedBytes = [](const LinearCheckpointCopyTile& tile) {
+        return static_cast<size_t>(tile.heads) * tile.key_dim
+               * (tile.dtype == LinearCheckpointDType::BF16 ? tile.value_dim * sizeof(uint16_t) :
+                                                              tile.value_dim * sizeof(int8_t) + sizeof(float));
+    };
+    size_t bytes        = 0;
+    int    max_channels = 0;
+    for (const auto& tile : checkpoints) {
+        if (!tile.state || !tile.host || tile.heads <= 0 || tile.value_dim <= 0 || tile.key_dim <= 0
+            || (static_cast<size_t>(tile.heads) * tile.value_dim * tile.key_dim) % sizeof(float) != 0) {
+            return false;
+        }
+        const int channels = tile.heads * tile.key_dim;
+        max_channels       = std::max(max_channels, channels);
+        bytes += packedBytes(tile);
+    }
+    c10::cuda::CUDAGuard       device_guard(params.device_index);
+    auto                       stream = getNoBlockCopyStream();
+    c10::cuda::CUDAStreamGuard stream_guard(stream);
+    auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, params.device_index);
+    auto packed  = torch::empty({static_cast<int64_t>(bytes)}, options);
+    auto metadata =
+        torch::empty({static_cast<int64_t>(checkpoints.size() * sizeof(LinearCheckpointDeviceTile))}, options);
+    auto  host_metadata            = torch::empty_like(metadata, options.device(torch::kCPU).pinned_memory(true));
+    auto* tiles                    = reinterpret_cast<LinearCheckpointDeviceTile*>(host_metadata.data_ptr());
+    BatchedMemoryCopyParams copies = params;
+    size_t                  offset = 0;
+    for (size_t i = 0; i < checkpoints.size(); ++i) {
+        const auto& tile    = checkpoints[i];
+        auto*       staging = static_cast<int8_t*>(packed.data_ptr()) + offset;
+        tiles[i]            = {tile.state, staging, tile.heads, tile.value_dim, tile.key_dim, tile.dtype};
+        const size_t size   = packedBytes(tile);
+        copies.tiles.push_back(host_to_device ? BatchedMemoryCopyTile{staging, tile.host, size} :
+                                                BatchedMemoryCopyTile{tile.host, staging, size});
+        offset += size;
+    }
+    auto error = cudaMemcpyAsync(
+        metadata.data_ptr(), host_metadata.data_ptr(), metadata.nbytes(), cudaMemcpyHostToDevice, stream.stream());
+    auto* device_tiles = reinterpret_cast<const LinearCheckpointDeviceTile*>(metadata.data_ptr());
+    if (error == cudaSuccess && !host_to_device) {
+        invokeLinearCheckpointCopy(device_tiles, checkpoints.size(), max_channels, false, stream.stream());
+        error = cudaGetLastError();
+    }
+    if (error == cudaSuccess) {
+        error = submitBatchedMemoryCopy(copies, stream.stream());
+    }
+    if (error == cudaSuccess && host_to_device) {
+        invokeLinearCheckpointCopy(device_tiles, checkpoints.size(), max_channels, true, stream.stream());
+        error = cudaGetLastError();
+    }
+    // Also drain on failure: staging and metadata must outlive submitted work.
+    const auto sync_error = cudaStreamSynchronize(stream.stream());
+    if (error == cudaSuccess) {
+        error = sync_error;
+    }
+    if (error != cudaSuccess) {
+        RTP_LLM_LOG_WARNING("Linear checkpoint copy failed: %s", cudaGetErrorString(error));
+    }
+    return error == cudaSuccess;
+}
 
 bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch* scratch) {
     if (params.tiles.empty()) {
