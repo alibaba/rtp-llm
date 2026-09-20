@@ -14,9 +14,8 @@ class _SinkhornNormalize(torch.autograd.Function):
         hidden_size = x.shape[1]
         output = torch.empty_like(x)
         fwd_kernel = _mhc_sinkhorn_fwd(hidden_size, 1, repeat, eps)
-        bwd_kernel = _mhc_sinkhorn_bwd(hidden_size, 32, repeat, eps)
         ctx.save_for_backward(x)
-        ctx.bwd_kernel = bwd_kernel
+        ctx.backward_args = (hidden_size, 32, repeat, eps)
         fwd_kernel(x, output)
         return output
 
@@ -26,7 +25,8 @@ class _SinkhornNormalize(torch.autograd.Function):
     ) -> tuple[torch.Tensor, None, None]:
         x = ctx.saved_tensors[0]
         grad_input = torch.empty_like(x)
-        ctx.bwd_kernel(grad_output, x, grad_input)
+        bwd_kernel = _mhc_sinkhorn_bwd(*ctx.backward_args)
+        bwd_kernel(grad_output, x, grad_input)
         return grad_input, None, None
 
 

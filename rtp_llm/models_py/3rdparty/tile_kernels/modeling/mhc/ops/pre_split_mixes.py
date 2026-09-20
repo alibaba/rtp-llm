@@ -39,12 +39,7 @@ class MHCPreSplitMixes(torch.autograd.Function):
             mhc_pre_eps,
             token_block_size=32,
         )
-        ctx.bwd_kernel = _mhc_pre_split_mixes_bwd(
-            mhc_mult,
-            mhc_post_mult_value,
-            token_block_size=32,
-            num_sms=get_num_sms(),
-        )
+        ctx.mhc_post_mult_value = mhc_post_mult_value
         ctx.num_sms = get_num_sms()
 
         ctx.fwd_kernel(
@@ -74,9 +69,13 @@ class MHCPreSplitMixes(torch.autograd.Function):
         post_layer_mix_grad: torch.Tensor,
         comb_res_mix_grad: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None]:
-        input_mixes, _pre_layer_mix, post_layer_mix, mhc_scale, mhc_base = (
-            ctx.saved_tensors
-        )
+        (
+            input_mixes,
+            _pre_layer_mix,
+            post_layer_mix,
+            mhc_scale,
+            mhc_base,
+        ) = ctx.saved_tensors
 
         input_mixes_grad = torch.empty_like(input_mixes)
 
@@ -95,7 +94,13 @@ class MHCPreSplitMixes(torch.autograd.Function):
 
         num_tokens = input_mixes.shape[0]
         mhc_mult = ctx.mhc_mult
-        ctx.bwd_kernel(
+        bwd_kernel = _mhc_pre_split_mixes_bwd(
+            mhc_mult,
+            ctx.mhc_post_mult_value,
+            token_block_size=32,
+            num_sms=ctx.num_sms,
+        )
+        bwd_kernel(
             # Gradient of output
             pre_layer_mix_grad.view(num_tokens, mhc_mult),
             post_layer_mix_grad.view(num_tokens, mhc_mult),

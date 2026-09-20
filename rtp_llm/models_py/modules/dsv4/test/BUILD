@@ -40,6 +40,13 @@ py_test(
 )
 
 py_test(
+    name = "test_mhc_lazy_backward",
+    srcs = ["test_mhc_lazy_backward.py"],
+    deps = _DSV4_TEST_DEPS,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_v41_delayed_hc_cuda_graph",
     srcs = ["test_v41_delayed_hc_cuda_graph.py"],
     deps = _DSV4_TEST_DEPS,
