@@ -181,6 +181,73 @@ py_test(
     tags = ["manual"],
 )
 
+# MegaMoE FP8 SE + GDN FlashInfer decode, bs16/32. Capture 1..32 so
+# enumerate mode (concurrency = max BS) can CUDA-graph both points.
+py_test(
+    name = "qwen35_397b_dp2_ep2_decode_bs16_32_24k_megamoe_gdn_flashinfer",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "qwen35_moe",
+        "--checkpoint_path", "/data8/nanjun.cp/Qwen3.5-397B-A17B-FP8",
+        "--tokenizer_path", "/data8/nanjun.cp/Qwen3.5-397B-A17B-FP8",
+        "--batch_size", "16,32",
+        "--input_len", "24576",
+        "--partial", "1",
+        "--decode_test_length", "16",
+        "--num_measures", "3",
+        "--profile_runs", "1",
+        "--tp_size", "1",
+        "--dp_size", "2",
+        "--ep_size", "2",
+        "--world_size", "2",
+        "--act_type", "BF16",
+        "--seq_size_per_block", "2048",
+        "--kernel_seq_size_per_block", "64",
+        "--max_seq_len", "30720",
+        "--warm_up", "0",
+        "--reuse_cache", "0",
+        "--mm_cache_item_num", "0",
+        "--url_cache_item_num", "0",
+        "--use_deepep_moe", "1",
+        "--use_deepep_low_latency", "1",
+        "--use_all_gather", "0",
+        "--use_deepep_internode", "0",
+        "--fp8_kv_cache", "0",
+        "--moe_strategy", "mega_moe_fp8_se",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32",
+        "--kv_cache_mem_mb", "49152",
+        "--reserver_runtime_mem_mb", "8192",
+        "--concurrency_limit", "32",
+        "--frontend_server_count", "1",
+        "--use_local", "1",
+    ],
+    env = {
+        "WORLD_SIZE": "2",
+        "MOE_STRATEGY": "mega_moe_fp8_se",
+        "RTP_QWEN35_GDN_DECODE_BACKEND": "flashinfer",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "30",
+        "PERF_GRID_WARMUP_RUNS": "1",
+        "PERF_FORMAL_WARMUP_RUNS": "1",
+        "PERF_MEASURE_RUNS": "3",
+        "PERF_PROFILE_RUNS": "1",
+        "PERF_REQUEST_WAIT_TIME": "1800",
+    },
+    tags = ["manual"],
+)
+
 # V4-Flash CP=4 + EP=4 prefill profile sweep from 64k to 1M input.
 # Manual-only — drives batch_size=1 prefill requests through the perf
 # test framework so per-input_len timeline JSONs land in TEST_UNDECLARED_
