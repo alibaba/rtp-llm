@@ -108,9 +108,9 @@ public class PrioritySchedulerReporter {
 
     /**
      * Report an inflight settle miss via {@code auto_tpm.inflight_settle_miss.count}
-     * (review P2-2): a finishYielded/PreemptedById found no inflight entry.
+     * (review P2-2): a finishPreemptedById found no inflight entry.
      *
-     * @param kind settle kind ("yielded" / "preempted")
+     * @param kind settle kind ("preempted")
      */
     public void reportInflightSettleMiss(String kind) {
         monitor.report(AUTO_TPM_INFLIGHT_SETTLE_MISS,

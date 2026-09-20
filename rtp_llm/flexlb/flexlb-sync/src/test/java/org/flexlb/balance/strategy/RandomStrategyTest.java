@@ -95,8 +95,8 @@ class RandomStrategyTest {
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 
         assertFalse(result.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), result.getCode());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg(), result.getMessage());
+        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), result.getCode());
+        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorMsg(), result.getMessage());
     }
 
     @Test
@@ -111,8 +111,8 @@ class RandomStrategyTest {
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 
         assertFalse(result.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), result.getCode());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg(), result.getMessage());
+        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), result.getCode());
+        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorMsg(), result.getMessage());
     }
 
     @Test
@@ -230,8 +230,8 @@ class RandomStrategyTest {
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, "group-b");
 
         assertFalse(result.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), result.getCode());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg(), result.getMessage());
+        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), result.getCode());
+        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorMsg(), result.getMessage());
     }
 
     @Test

@@ -35,6 +35,7 @@ import java.net.UnknownHostException;
 import java.nio.channels.UnresolvedAddressException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -259,11 +260,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private static String failureName(Throwable error) {
-        Throwable cause = error;
-        while (cause instanceof CompletionException && cause.getCause() != null) {
-            cause = cause.getCause();
-        }
-        return cause.getClass().getSimpleName();
+        Throwable cause = unwrapCompletion(error);
+        Status status = Status.fromThrowable(cause);
+        return status.getCode() == Status.Code.UNKNOWN
+                ? cause.getClass().getSimpleName() : status.getCode().name();
     }
 
     @Override
@@ -629,16 +629,23 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
     }
 
+    private static Throwable unwrapCompletion(Throwable error) {
+        while ((error instanceof CompletionException || error instanceof ExecutionException)
+                && error.getCause() != null) {
+            error = error.getCause();
+        }
+        return error;
+    }
+
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB buildErrorResponse(Throwable error) {
-        Throwable cause = error;
-        while (cause instanceof CompletionException && cause.getCause() != null) {
-            cause = cause.getCause();
+        Throwable cause = unwrapCompletion(error);
+        if (cause instanceof TimeoutException
+                || Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED) {
+            return buildErrorResponse(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+                    "request scheduling deadline exceeded");
         }
-        if (cause instanceof TimeoutException) {
-            return buildErrorResponse(8402, "NO_AVAILABLE_WORKER: schedule timeout");
-        }
-        return buildErrorResponse(500,
-                error.getMessage() != null ? error.getMessage() : "internal error");
+        return buildErrorResponse(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(),
+                cause.getMessage() != null ? cause.getMessage() : "internal scheduling error");
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB buildErrorResponse(int code, String message) {
@@ -651,6 +658,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB
     buildMasterForwardFailureResponse(String failure, String masterHost) {
+        // Master may already own the request. 8511 is terminal in the frontend;
+        // 8510 would cause a retry with a new request id, bypassing deduplication.
         StrategyErrorType errorType = StrategyErrorType.BATCH_SLO_EXPIRED;
         String detail = "Master scheduling failed (" + failure
                 + "); do not retry or route locally";
@@ -727,7 +736,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
                 FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder();
         if (response == null) {
-            return builder.setSuccess(false).setCode(500).setErrorMessage("null response").build();
+            return buildErrorResponse(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(),
+                    "null schedule response");
         }
         builder.setSuccess(response.isSuccess());
         builder.setCode(response.getCode());

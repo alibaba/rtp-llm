@@ -7,6 +7,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.util.PriorityNormalizer;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -141,6 +142,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * reserve) and re-checked at plan commit time to detect interference.
      */
     private final AtomicLong admissionVersion = new AtomicLong();
+    /** Lazily rebuilt on failure; guarded by admissionLock, never updated on successful admission. */
+    private AdmissionSnapshot admissionSnapshot;
 
     public DecodeEndpoint(WorkerStatus status) {
         super(status);
@@ -479,6 +482,79 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public RequestInflight reservationFor(long requestId) {
         return inflightRequests.get(requestId);
+    }
+
+    /**
+     * Failure attribution needs occupancy totals, not request identities. Reuse
+     * an immutable summary until the admission state or reported capacity changes.
+     * No registry collections or per-request objects escape the admission lock.
+     */
+    public AdmissionSnapshot admissionSnapshot() {
+        admissionLock.lock();
+        try {
+            long version = admissionVersion.get();
+            long kvTotal = realKvTotal();
+            if (admissionSnapshot != null && admissionSnapshot.version == version
+                    && admissionSnapshot.kvTotal == kvTotal) {
+                return admissionSnapshot;
+            }
+            long[] slots = new long[101];
+            long[] kv = new long[101];
+            inflightRequests.forEach((requestId, request) -> {
+                if (preemptionClaims.containsKey(requestId) || engineFenceProtections.containsKey(requestId)) {
+                    return;
+                }
+                int priority = PriorityNormalizer.isValid(request.priority()) ? request.priority() : 0;
+                if (!queuedPhase.contains(requestId)) {
+                    slots[priority]++;
+                }
+                kv[priority] += Math.max(0, request.releasableKvTokens());
+            });
+            trackedConfirmed.forEach((requestId, task) -> {
+                if (preemptionClaims.containsKey(requestId) || engineFenceProtections.containsKey(requestId)
+                        || !task.phase().isEngineConfirmed()) {
+                    return;
+                }
+                int priority = task.priorityKnown() && PriorityNormalizer.isValid(task.priority())
+                        ? task.priority() : 0;
+                slots[priority]++;
+                kv[priority] += Math.max(0, task.kvTokens());
+            });
+            admissionSnapshot = new AdmissionSnapshot(version, getEngineLoad(), realKvAvailable(),
+                    kvTotal, inflightHardKvReserved(), slots, kv);
+            return admissionSnapshot;
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
+    /** Immutable, fixed-size failure evidence. Priority 0 means unknown provenance. */
+    public static final class AdmissionSnapshot {
+        private final long version;
+        private final int engineLoad;
+        private final long kvAvailable;
+        private final long kvTotal;
+        private final long hardKvReserved;
+        private final long[] slotsByPriority;
+        private final long[] kvByPriority;
+
+        private AdmissionSnapshot(long version, int engineLoad, long kvAvailable, long kvTotal,
+                                  long hardKvReserved, long[] slotsByPriority, long[] kvByPriority) {
+            this.version = version;
+            this.engineLoad = engineLoad;
+            this.kvAvailable = kvAvailable;
+            this.kvTotal = kvTotal;
+            this.hardKvReserved = hardKvReserved;
+            this.slotsByPriority = slotsByPriority;
+            this.kvByPriority = kvByPriority;
+        }
+
+        public int engineLoad() { return engineLoad; }
+        public long kvAvailable() { return kvAvailable; }
+        public long kvTotal() { return kvTotal; }
+        public long hardKvReserved() { return hardKvReserved; }
+        public long slots(int priority) { return slotsByPriority[priority]; }
+        public long kvTokens(int priority) { return kvByPriority[priority]; }
     }
 
     /**
@@ -1490,9 +1566,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Mark a reserved request as committed into a prefill queue (N2). Called
-     * by the priority scheduler at plan-commit time; no-op when the id holds
-     * no reservation (legacy paths never call this).
+     * Mark a reserved request as committed into a Prefill queue. Both FIFO
+     * admission and priority plan commit call this before queue publication;
+     * no-op when the id holds no reservation. DIRECT reservations remain engine-facing.
      */
     public void markQueuedPhase(long requestId) {
         admissionLock.lock();
@@ -1500,6 +1576,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (inflightRequests.containsKey(requestId)) {
                 if (queuedPhase.add(requestId)) {
                     queuedPhaseCount.incrementAndGet();
+                    admissionVersion.incrementAndGet();
                 }
             }
         } finally {

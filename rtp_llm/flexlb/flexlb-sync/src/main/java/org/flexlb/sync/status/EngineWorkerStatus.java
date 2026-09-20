@@ -2,6 +2,7 @@ package org.flexlb.sync.status;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
@@ -33,6 +34,16 @@ public class EngineWorkerStatus {
         return result;
     }
 
+    public Map<String, PrefillEndpoint> selectPrefillWorkerStatus(RoleType role, String group) {
+        Map<String, PrefillEndpoint> result = new LinkedHashMap<>();
+        forEachPrefillWorkerEndpoint(role, group, result::put);
+        return result;
+    }
+
+    public int forEachPrefillWorkerEndpoint(RoleType role, String group, BiConsumer<String, PrefillEndpoint> action) {
+        return forEachEndpoint(endpointRegistry.getPrefillEndpoints(role), group, action);
+    }
+
     /**
      * Visit registered endpoints without materializing a temporary map.
      *
@@ -40,10 +51,14 @@ public class EngineWorkerStatus {
      */
     public int forEachModelWorkerEndpoint(RoleType roleType, String group,
                                           BiConsumer<String, WorkerEndpoint> action) {
+        return forEachEndpoint(endpointRegistry.getEndpoints(roleType), group, action);
+    }
+
+    private static <T extends WorkerEndpoint> int forEachEndpoint(
+            Map<String, ? extends T> endpoints, String group, BiConsumer<String, T> action) {
         int visited = 0;
-        for (Map.Entry<String, ? extends WorkerEndpoint> entry
-                : endpointRegistry.getEndpoints(roleType).entrySet()) {
-            WorkerEndpoint endpoint = entry.getValue();
+        for (Map.Entry<String, ? extends T> entry : endpoints.entrySet()) {
+            T endpoint = entry.getValue();
             WorkerStatus ws = endpoint.getStatus();
             if (ws == null) {
                 continue;

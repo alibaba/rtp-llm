@@ -23,6 +23,9 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 
 import java.util.List;
 import java.util.Map;
@@ -266,7 +269,7 @@ class ExternalFutureCancellationTest {
         assertEquals(RequestLifecycleState.TIMED_OUT, timedOut.state());
         Response response = item.future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
-        assertEquals(8511, response.getCode());
+        assertEquals(8431, response.getCode());
         assertEquals(0, scheduler.getInflightSize());
         verify(cancelChannel, never()).cancel(any(), anyLong(), anyLong());
     }
@@ -392,22 +395,32 @@ class ExternalFutureCancellationTest {
         assertEquals(0, scheduler.getInflightSize());
     }
 
-    @Test
-    void batchDeadlineSettlesAsTimedOutAfterEngineTombstone() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"prefill request slots exhausted", "decode engine slots exhausted"})
+    void claimedBatchDeadlineUsesQueueCauseAfterEngineTombstone(String waitReason) throws Exception {
         long requestId = 10_107L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
 
+        prefillEndpoint.getBatcher().setWaitReason(waitReason);
         RequestLifecycleSnapshot pending = scheduler.cancelRequest(
                 requestId, batchId, CancelReason.DEADLINE_EXCEEDED);
         assertEquals(RequestLifecycleState.CANCEL_REQUESTED, pending.state());
 
+        Map<String, Object> captured = item.ctx().getSchedulingDiagnostics();
+        prefillEndpoint.getBatcher().setWaitReason("queue changed after deadline");
         cancelResult.complete(EngineCancelChannel.CancelOutcome.tombstoned());
 
         Response response = item.future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
-        assertEquals(8511, response.getCode());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED, response.getAdmissionRejectReason());
+        assertTrue(response.getErrorMessage().contains(waitReason));
+        assertFalse(response.getErrorMessage().contains("queue changed after deadline"));
+        org.junit.jupiter.api.Assertions.assertSame(captured, item.ctx().getSchedulingDiagnostics(),
+                "late Cancel settlement must not recollect or replace deadline evidence");
+        assertTrue(item.ctx().getSchedulingDiagnostics().get("cause").toString().contains(waitReason));
         assertEquals(RequestLifecycleState.TIMED_OUT,
                 scheduler.getRequestState(requestId, batchId).state());
         assertEquals(0, scheduler.getInflightSize());
@@ -434,7 +447,7 @@ class ExternalFutureCancellationTest {
                 finished(RoleType.DECODE, requestId, batchId, 0));
         Response response = item.future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
-        assertEquals(8511, response.getCode(),
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode(),
                 "the admission deadline must not be relabeled as client cancellation");
         assertEquals(RequestLifecycleState.TIMED_OUT,
                 scheduler.getRequestState(requestId, batchId).state());
@@ -597,7 +610,7 @@ class ExternalFutureCancellationTest {
                     requestId, attemptToken),
                     "deadline first-cause must prevent a later priority RPC");
             assertTrue(scheduler.releasePreemptionClaim(requestId, attemptToken));
-            assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+            assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                     item.future().get(1, TimeUnit.SECONDS).getCode());
             assertEquals(RequestLifecycleState.TIMED_OUT,
                     scheduler.getRequestState(requestId, 0).state());
@@ -608,6 +621,7 @@ class ExternalFutureCancellationTest {
     void admissionDeadlineTakesOwnershipFromPriorityNotFound() throws Exception {
         long requestId = 10_118L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
+        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("dispatch before preemption", 0));
         long attemptToken = 507L;
         prepareNotFoundPreemption(item, attemptToken, 90_003L);
 
@@ -617,7 +631,7 @@ class ExternalFutureCancellationTest {
                 scheduler.getRequestState(requestId, 0).state());
         verify(cancelChannel, timeout(1_000)).cancel(any(), eq(requestId), anyLong());
         cancelResult.complete(EngineCancelChannel.CancelOutcome.tombstoned());
-        assertEquals(8511, item.future().get(1, TimeUnit.SECONDS).getCode());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), item.future().get(1, TimeUnit.SECONDS).getCode());
         assertEquals(RequestLifecycleState.TIMED_OUT,
                 scheduler.getRequestState(requestId, 0).state());
     }

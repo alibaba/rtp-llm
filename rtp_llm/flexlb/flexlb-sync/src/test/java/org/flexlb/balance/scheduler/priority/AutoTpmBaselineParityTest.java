@@ -1,17 +1,15 @@
 package org.flexlb.balance.scheduler.priority;
 
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.balance.scheduler.Router;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -21,9 +19,9 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -232,14 +230,8 @@ class AutoTpmBaselineParityTest {
             assertEquals(50, fullQueue.items().get(0).priority());
             assertEquals(QueuedRequestSnapshot.PREFILL_QUEUED,
                     fullQueue.items().get(0).state());
-            assertEquals(AdmissionRejectReason.SAME_PRIORITY_AHEAD,
-                    AdmissionFailureClassifier.classifyPrefill(
-                            new PriorityRequestEnvelope(32, 50, 128, 8,
-                                    System.currentTimeMillis(), 128, 136),
-                            fullQueue).reason());
-
-            // Prefill 队列已被先到的同优先级请求占满：Master 必须从
-            // 这一份队列快照判定 SAME_PRIORITY_AHEAD，不能按 QoS 阈值猜原因。
+            // Prefill 队列已被先到的同优先级请求占满：读取维护的占用计数，
+            // 不重扫队列，也不按 QoS 阈值猜原因。
             for (long id = 32; id <= 34; id++) {
                 Response r = on.submit(id, 50).get(2, TimeUnit.SECONDS);
                 assertFalse(r.isSuccess());
@@ -352,6 +344,7 @@ class AutoTpmBaselineParityTest {
             endpointRegistry.ensureEndpoint(RoleType.PREFILL, PREFILL_IP_PORT, prefillWs);
 
             WorkerStatus decodeWs = new WorkerStatus();
+            decodeWs.setAlive(true);
             decodeWs.setIp("10.0.0.2");
             decodeWs.setPort(8081);
             decodeWs.setGrpcPort(8082);
@@ -376,7 +369,7 @@ class AutoTpmBaselineParityTest {
         private Response routeAnswer(BalanceContext ctx) {
             DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
             if (decodeEp.getTotalLoad() + 1 > config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests()) {
-                return Response.error(StrategyErrorType.NO_DECODE_WORKER);
+                return SchedulingTestConfig.decodeCapacityFailure(ctx, endpointRegistry);
             }
             decodeEp.reserve(ctx.getRequestId(), 128, 136, ctx.getPriority());
             return successRoute(ctx.getRequestId());

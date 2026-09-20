@@ -1,7 +1,11 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityOrdering;
@@ -24,7 +28,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * delegating grouping decisions to a pluggable {@link BatcherAlgorithm}.
  *
  * <p>One instance per Prefill worker. Requests are submitted via
- * {@link #offer(BatchItem)} and grouped by the configured algorithm. A group
+ * {@link #tryOffer(BatchItem)} and grouped by the configured algorithm. A group
  * may be delivered through EnqueueBatch or as individual route decisions.
  *
  * <p>The context-owned active queue and ready-delivery backlog together are
@@ -116,67 +120,81 @@ public class WorkerBatcher {
         workerThread.start();
     }
 
-    public void offer(BatchItem item) {
-        if (stopped) {
-            decisionHandler.onOfferFailure(item,
-                    new IllegalStateException("FlexLB worker scheduling queue stopped"));
-            return;
-        }
-        int maxSize = ctx.maxQueueCapacity();
-        if (!reserveQueueSlot(maxSize)) {
-            decisionHandler.onOfferFailure(item,
-                    new IllegalStateException(
-                            "FlexLB worker scheduling queue full, maxSize=" + maxSize));
-            return;
-        }
-        if (!enqueue(item)) {
-            decisionHandler.onOfferFailure(item,
-                    new IllegalStateException("FlexLB worker scheduling queue stopped"));
-        }
-    }
-
-    /**
-     * priority scheduling variant of {@link #offer(BatchItem)} that reports failure via
-     * return value instead of the {@link DecisionGroupHandler#onOfferFailure}
-     * callback, letting the caller (PlanCommitter) roll back its decode
-     * reservation and decide on retry.
-     *
-     * @return true when the item was enqueued; false when the worker queue is
-     *         stopped or the queue is full (item not enqueued)
-     */
-    public boolean tryOffer(BatchItem item) {
-        if (stopped) {
-            return false;
-        }
-        if (!reserveQueueSlot(ctx.maxQueueCapacity())) {
-            return false;
-        }
-        return enqueue(item);
-    }
-
-    private boolean enqueue(BatchItem item) {
+    /** Return null on success, otherwise the cause captured under the queue lock. */
+    public Response tryOffer(BatchItem item) {
+        Response failure;
+        Map<String, Object> queueDiagnostics = null;
+        queueLock.lock();
         try {
-            algorithm.onOffer(ctx, item, System.currentTimeMillis());
-            queueLock.lock();
-            try {
-                // Linearize the final stopped check with shutdown/drain. An
-                // offer that reserved capacity just before shutdown must not
-                // enqueue after the drain has completed.
-                if (stopped) {
-                    queueDepth.decrementAndGet();
-                    return false;
-                }
-                queue.add(item);
-                queueVersion.incrementAndGet();
-                stateChanged.signal();
-                return true;
-            } finally {
-                queueLock.unlock();
+            failure = tryOfferLocked(item);
+            if (failure != null) {
+                queueDiagnostics = ctx.queueDiagnostics(item.priority());
             }
-        } catch (RuntimeException | Error e) {
-            queueDepth.decrementAndGet();
-            throw e;
+        } finally {
+            queueLock.unlock();
         }
+        if (failure != null) {
+            recordFailureDiagnostics(item, failure.getCode() == StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode()
+                    ? "prefill queue stopped before admission" : "prefill queue capacity exhausted", queueDiagnostics);
+        }
+        return failure;
+    }
+
+    /** Caller holds queueLock through capacity accounting and queue publication. */
+    private Response tryOfferLocked(BatchItem item) {
+        if (stopped) {
+            return Response.error(StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    AdmissionRejectReason.UNSPECIFIED, "Prefill queue stopped before admission: worker=" + key);
+        }
+        int capacity = ctx.maxQueueCapacity();
+        if (capacity > 0 && queueDepth.get() >= capacity) {
+            return ctx.queueFullResponse(item.priority(), capacity);
+        }
+        if (queueDepth.get() == 0) {
+            ctx.setWaitReason(null);
+        }
+        ctx.updateQueueDepth(item, 1);
+        try {
+            queue.add(item);
+        } catch (RuntimeException | Error failure) {
+            ctx.updateQueueDepth(item, -1);
+            throw failure;
+        }
+        item.ctx().setSchedulingDiagnostics(null);
+        queueVersion.incrementAndGet();
+        stateChanged.signal();
+        return null;
+    }
+
+    /** Capture only scalar counters before failure cleanup; Decode reads are weakly consistent. */
+    void recordFailureDiagnostics(BatchItem item, String cause) {
+        recordFailureDiagnostics(item, cause, ctx.queueDiagnostics(item.priority()));
+    }
+
+    /** Queue evidence is already captured; Decode reads and PV assembly run without queueLock. */
+    private void recordFailureDiagnostics(BatchItem item, String cause, Map<String, Object> queueDiagnostics) {
+        Map<String, Object> diagnostics = new HashMap<>();
+        diagnostics.put("cause", cause == null ? "scheduling failed" : cause);
+        diagnostics.put("capturedAtMs", System.currentTimeMillis());
+        diagnostics.put("prefill", List.of(queueDiagnostics));
+        diagnostics.put("decode", List.of());
+        DecodeEndpoint decode = item.decodeEp();
+        if (decode != null) {
+            Map<String, Object> values = new HashMap<>();
+            String endpoint = decode.ipPort();
+            if (endpoint != null) {
+                values.put("endpoint", endpoint);
+            }
+            values.put("reservedRequests", decode.getInflightCount());
+            values.put("totalLoad", decode.getTotalLoad());
+            values.put("engineLoad", decode.getEngineLoad());
+            values.put("kvAvailable", decode.realKvAvailable());
+            values.put("kvTotal", decode.realKvTotal());
+            values.put("hardKvReserved", decode.inflightHardKvReserved());
+            values.put("expectedKvReserved", decode.inflightExpectedKvReserved());
+            diagnostics.put("decode", List.of(Map.copyOf(values)));
+        }
+        item.ctx().setSchedulingDiagnostics(Map.copyOf(diagnostics));
     }
 
     public int queueSize() {
@@ -217,6 +235,14 @@ public class WorkerBatcher {
     /** priority scheduling queue facade (snapshot / estimateWait / atomic replace). */
     public PrefillQueueManager queueManager() {
         return queueManager;
+    }
+
+    String getWaitReason() {
+        return ctx.getWaitReason();
+    }
+
+    void setWaitReason(String reason) {
+        ctx.setWaitReason(reason);
     }
 
     /** Resolve a staged item as delivered or terminal and release its queue slot. */
@@ -268,7 +294,7 @@ public class WorkerBatcher {
         algorithm.onShutdown(ctx);
         for (BatchItem item : remaining) {
             try {
-                decisionHandler.onOfferFailure(item,
+                decisionHandler.onDeliveryFailure(item,
                         new CancellationException(
                                 "FlexLB worker scheduling queue stopped: " + key));
             } catch (Throwable callbackFailure) {
@@ -319,11 +345,16 @@ public class WorkerBatcher {
      */
     PrefillQueueManager.ReplaceOutcome tryReplaceVictimsPresent(
             List<Long> victimIds, BatchItem incoming) {
+        List<BatchItem> removed = new ArrayList<>(victimIds.size());
+        Response offerFailure;
+        Map<String, Object> queueDiagnostics = null;
         queueLock.lock();
         try {
             if (stopped) {
-                // Shutdown: zero-side-effect abort (caller replans / fails fast).
-                return PrefillQueueManager.ReplaceOutcome.victimGone(List.copyOf(victimIds));
+                return PrefillQueueManager.ReplaceOutcome.partialFailure(removed,
+                        Response.error(StrategyErrorType.BATCH_DISPATCH_FAILED,
+                                AdmissionRejectReason.UNSPECIFIED,
+                                "Prefill queue stopped before victim replacement: worker=" + key));
             }
             List<BatchItem> present = new ArrayList<>(victimIds.size());
             List<Long> missing = new ArrayList<>();
@@ -338,24 +369,38 @@ public class WorkerBatcher {
             if (!missing.isEmpty()) {
                 return PrefillQueueManager.ReplaceOutcome.victimGone(missing);
             }
-            List<BatchItem> removed = new ArrayList<>(present.size());
             for (BatchItem victim : present) {
                 if (!ctx.remove(victim)) {
                     // Unreachable under the lock discipline; victims already
                     // removed stay out (no re-insert, design doc 9.5).
-                    return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
+                    return PrefillQueueManager.ReplaceOutcome.partialFailure(removed,
+                            Response.error(StrategyErrorType.BATCH_DISPATCH_FAILED,
+                                    AdmissionRejectReason.UNSPECIFIED,
+                                    "queued victim removal failed: request_id=" + victim.requestId()));
                 }
                 removed.add(victim);
             }
-            if (!tryOffer(incoming)) {
-                return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
+            offerFailure = tryOfferLocked(incoming);
+            if (offerFailure != null) {
+                queueDiagnostics = ctx.queueDiagnostics(incoming.priority());
+                return PrefillQueueManager.ReplaceOutcome.partialFailure(removed, offerFailure);
             }
             return PrefillQueueManager.ReplaceOutcome.success(removed);
         } catch (RuntimeException | Error e) {
             Logger.error("WorkerBatcher[{}] presence-guarded victim replace failed", key, e);
-            return PrefillQueueManager.ReplaceOutcome.partialFailure(List.of());
+            return PrefillQueueManager.ReplaceOutcome.partialFailure(removed,
+                    Response.error(StrategyErrorType.BATCH_DISPATCH_FAILED,
+                            AdmissionRejectReason.UNSPECIFIED, "victim replacement failed: " + e));
         } finally {
             queueLock.unlock();
+            if (queueDiagnostics != null) {
+                try {
+                    recordFailureDiagnostics(incoming, "prefill queue capacity exhausted", queueDiagnostics);
+                } catch (RuntimeException | Error diagnosticFailure) {
+                    // Preserve the removed victims in the outcome so the caller can settle them.
+                    Logger.error("WorkerBatcher[{}] replacement failure diagnostics failed", key, diagnosticFailure);
+                }
+            }
         }
     }
 
@@ -454,19 +499,4 @@ public class WorkerBatcher {
         }
     }
 
-    private boolean reserveQueueSlot(int maxSize) {
-        if (maxSize <= 0) {
-            queueDepth.incrementAndGet();
-            return true;
-        }
-        while (true) {
-            int current = queueDepth.get();
-            if (current >= maxSize) {
-                return false;
-            }
-            if (queueDepth.compareAndSet(current, current + 1)) {
-                return true;
-            }
-        }
-    }
 }

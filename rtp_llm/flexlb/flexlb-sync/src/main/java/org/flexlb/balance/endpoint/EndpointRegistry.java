@@ -223,9 +223,16 @@ public class EndpointRegistry {
         vitEndpoints.values().forEach(WorkerEndpoint::close);
     }
 
-    /**
-     * Expose all prefill endpoints for per-worker metrics reporting.
-     */
+    /** Both Prefill and PDFusion use PrefillEndpoint; other roles violate this contract. */
+    public Map<String, PrefillEndpoint> getPrefillEndpoints(RoleType role) {
+        return switch (role) {
+            case PREFILL -> prefillEndpoints;
+            case PDFUSION -> pdFusionEndpoints;
+            default -> throw new IllegalArgumentException("Expected PREFILL or PDFUSION, got " + role);
+        };
+    }
+
+    /** Expose standalone Prefill endpoints for per-worker metrics reporting. */
     public ConcurrentHashMap<String, PrefillEndpoint> getPrefillEndpoints() {
         return prefillEndpoints;
     }

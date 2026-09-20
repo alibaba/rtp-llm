@@ -51,4 +51,10 @@ public class ServerStatus {
         result.setMessage(code.getErrorMsg());
         return result;
     }
+
+    public static ServerStatus code(StrategyErrorType code, String detail) {
+        ServerStatus result = code(code);
+        result.setMessage(detail);
+        return result;
+    }
 }

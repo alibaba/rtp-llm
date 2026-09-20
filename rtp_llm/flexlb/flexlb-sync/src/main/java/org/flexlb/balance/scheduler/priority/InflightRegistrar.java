@@ -17,8 +17,10 @@ public interface InflightRegistrar {
     /**
      * Register the item as inflight.
      *
-     * @return false when the request id is already inflight or terminal
-     *         (duplicate) — the item was NOT registered
+     * @return false when the admission generation is closed or the request id
+     *         is already inflight. While holding the generation monitor, callers
+     *         use {@link #isAdmissionOpen} to distinguish terminal ownership from
+     *         duplicate registration; false never implies capacity rejection.
      */
     boolean registerInflight(BatchItem item);
 
@@ -101,8 +103,8 @@ public interface InflightRegistrar {
     /**
      * Drive an evicted victim to its terminal state (design doc 9.5/17.3):
      * release its decode reservation, complete its future with
-     * {@code PRIORITY_PREEMPTED} and tombstone the request id. Reserved for
-     * victims the engine has already accepted (contract 5.3). Idempotent —
+     * {@code PRIORITY_PREEMPTED} and tombstone the request id, including
+     * victims still queued on Master. Idempotent —
      * repeated calls (or races with other terminal paths) take effect once.
      */
     void finishPreempted(BatchItem victim, String detail);
@@ -114,22 +116,6 @@ public interface InflightRegistrar {
      * idempotent like {@code finishPreempted}.
      */
     void finishPreemptedById(long requestId, String detail);
-
-    /**
-     * Drive a yielded victim — one the engine never saw (prefill queue
-     * eviction or decode reserved-only eviction, contract 5.3) — to its
-     * terminal state: same idempotent release/tombstone chain as
-     * {@link #finishPreempted}, but the client-visible terminal is the
-     * retryable {@code NO_AVAILABLE_WORKER} with the yield reason.
-     */
-    void finishYielded(BatchItem victim, String detail);
-
-    /**
-     * {@link #finishYielded} addressed by request id, for decode
-     * reserved-only victims whose {@code BatchItem} is not at hand. No-op
-     * when the id is not inflight; idempotent like {@code finishYielded}.
-     */
-    void finishYieldedById(long requestId, String detail);
 
     /** Atomically attach one victim to a token before endpoint mutation. */
     boolean claimForPreemption(long requestId, long attemptToken, String detail);

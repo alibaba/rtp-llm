@@ -4,14 +4,10 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.RequestInflight;
-import org.flexlb.balance.scheduler.priority.AdmissionFailure;
-import org.flexlb.balance.scheduler.priority.AdmissionFailureClassifier;
 import org.flexlb.balance.scheduler.priority.AdmissionLease;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.InflightRegistrar;
-import org.flexlb.balance.scheduler.priority.InflightRegistrar.PriorityCanceledObservation;
 import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
-import org.flexlb.balance.scheduler.priority.QueuedRequestSnapshot;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
@@ -349,14 +345,10 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                         || outstandingRequestCount.get() == OUTSTANDING_ADMISSION_CLOSED) {
                     completeError(future, StrategyErrorType.BATCH_DISPATCH_FAILED,
                             "priority scheduler is shutting down");
-                } else if (activeConfig.isPriorityOrdering()) {
-                    Response response = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
-                            AdmissionRejectReason.RESOURCE_EXHAUSTED);
-                    response.setErrorMessage(StrategyErrorType.RESOURCE_EXHAUSTED
-                            .buildErrorMessage("master outstanding capacity exhausted"));
-                    future.complete(response);
                 } else {
-                    completeError(future, StrategyErrorType.QUEUE_FULL, null);
+                    future.complete(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
+                            AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                            "master outstanding capacity exhausted"));
                 }
                 return future;
             }
@@ -371,18 +363,9 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
             long nowMs = System.currentTimeMillis();
             if (ctx.requestExpired(nowMs)) {
-                if (activeConfig.isPriorityOrdering()) {
-                    AdmissionFailure failure = AdmissionFailure.resourceExhausted();
-                    Response response = Response.error(
-                            failure.errorType(), failure.reason());
-                    response.setErrorMessage(failure.errorType().buildErrorMessage(
-                            "request expired: expires_at_ms="
-                                    + ctx.getRequestExpiresAtMs() + " now_ms=" + nowMs));
-                    future.complete(response);
-                } else {
-                    completeError(future, generation.deadlineErrorType,
-                            "request scheduling deadline has expired");
-                }
+                future.complete(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
+                        AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                        "Master placement did not complete within budget; context=before placement"));
                 return future;
             }
             // Arm the one absolute-expiration reducer before scheduling can
@@ -418,7 +401,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                     if (routeResponse != null) {
                         future.complete(routeResponse);
                     } else {
-                        completeError(future, StrategyErrorType.NO_AVAILABLE_WORKER, null);
+                        completeError(future, StrategyErrorType.BATCH_DISPATCH_FAILED,
+                                "router returned no route or failure decision");
                     }
                     return future;
                 }
@@ -454,7 +438,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 BatchItem item = new BatchItem(
                         ctx, future, routeResponse, copyOf(prefill), copyOf(decode),
                         prefillEp, decodeEp, System.currentTimeMillis());
-                InflightEntry entry = new InflightEntry(item, false);
+                InflightEntry entry = new InflightEntry(item);
                 submittedItem = item;
                 submittedEntry = entry;
                 StrategyErrorType commitError = null;
@@ -479,14 +463,15 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                             observeExternalFutureTerminal(entry);
                             ctx.setRouteSubmittedNanos(System.nanoTime());
                             try {
-                                if (!prefillEp.getBatcher().tryOffer(item)) {
+                                // QUEUE owns KV while waiting; claim an Engine slot only at delivery.
+                                if (decodeEp != null) {
+                                    decodeEp.markQueuedPhase(ctx.getRequestId());
+                                }
+                                Response offerFailure = prefillEp.getBatcher().tryOffer(item);
+                                if (offerFailure != null) {
                                     synchronized (entry) {
-                                        commitFailure = reduceOrdinaryTerminalLocked(
-                                                entry,
-                                                DeferredTerminal.failure(
-                                                        StrategyErrorType.BATCH_DISPATCH_FAILED,
-                                                        "Worker scheduling queue rejected request",
-                                                        false));
+                                        commitFailure = reduceOrdinaryTerminalLocked(entry,
+                                                DeferredTerminal.failure(offerFailure, false));
                                     }
                                 }
                             } catch (Throwable failure) {
@@ -754,9 +739,9 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         RequestLifecycleSnapshot terminal = lifecycle.timeout(detail);
         terminalStates.put(requestId, terminal);
         return ResponseCompletion.terminal(gate,
-                buildErrorResponse(gate == null
-                        ? StrategyErrorType.BATCH_SLO_EXPIRED
-                        : gate.deadlineErrorType, detail));
+                Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
+                        AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                        "Master placement did not complete within budget; context=" + detail));
     }
 
     // ==================== InflightRegistrar (priority commit protocol) ====================
@@ -771,22 +756,20 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         if (shuttingDown.get()) {
             return false;
         }
-        // This registrar is the priority-admission commit boundary. FIFO
-        // submit() constructs its entry directly with priorityAdmission=false.
         RequestGenerationGate gate = generationGates.get(item.requestId());
         if (gate == item.future()) {
             synchronized (gate) {
                 if (!gate.isOpen()) {
                     return false;
                 }
-                return registerInflightOpen(item, true);
+                return registerInflightOpen(item);
             }
         }
         if (gate != null || item.future().isDone()
                 || terminalStates.containsKey(item.requestId())) {
             return false;
         }
-        return registerInflightOpen(item, true);
+        return registerInflightOpen(item);
     }
 
     @Override
@@ -852,9 +835,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 terminalStates.put(requestId, terminal);
                 publication = ResponseCompletion.terminal(
                         generation,
-                        buildErrorResponse(
-                                cancelErrorType(generation.pendingAdmissionCancelReason,
-                                        generation.deadlineErrorType),
+                        buildAdmissionCancellationResponse(
+                                generation.pendingAdmissionCancelReason,
                                 terminal.detail()));
             } else if (future.isDone() && inflight.get(requestId) == null) {
                 generationGates.remove(requestId, generation);
@@ -863,12 +845,12 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         submitResponseCompletion(publication);
     }
 
-    private boolean registerInflightOpen(BatchItem item, boolean priorityAdmission) {
+    private boolean registerInflightOpen(BatchItem item) {
         if (shuttingDown.get() || item.future().isDone()
                 || terminalStates.containsKey(item.requestId())) {
             return false;
         }
-        InflightEntry entry = new InflightEntry(item, priorityAdmission);
+        InflightEntry entry = new InflightEntry(item);
         InflightEntry existing = inflight.putIfAbsent(item.requestId(), entry);
         if (existing == null && !terminalStates.containsKey(item.requestId())
                 && !shuttingDown.get()) {
@@ -1119,14 +1101,25 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     /**
      * Terminate an evicted victim with {@link StrategyErrorType#PRIORITY_PREEMPTED}
-     * (engine-accepted victims, contract 5.3): release its decode reservation,
+     * regardless of delivery stage: release its decode reservation,
      * complete its future and tombstone the request id. Mirrors
-     * {@link #onOfferFailure} and is idempotent — the lifecycle transition,
+     * {@link #onDeliveryFailure} and is idempotent — the lifecycle transition,
      * rollback CAS and future completion each apply at most once (design doc 17.3).
      */
     @Override
     public void finishPreempted(BatchItem victim, String detail) {
-        finishVictim(victim, StrategyErrorType.PRIORITY_PREEMPTED, detail);
+        InflightEntry entry = entryFor(victim);
+        if (entry != null) {
+            ResponseCompletion publication;
+            synchronized (entry) {
+                publication = reduceOrdinaryTerminalLocked(entry,
+                        DeferredTerminal.failure(StrategyErrorType.PRIORITY_PREEMPTED, detail, false));
+            }
+            submitResponseCompletion(publication);
+        } else if (!victim.future().isDone() && !terminalStates.containsKey(victim.requestId())) {
+            rollback(victim);
+            completeError(victim.future(), StrategyErrorType.PRIORITY_PREEMPTED, detail);
+        }
     }
 
     /**
@@ -1150,58 +1143,6 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             if (admissionScheduler != null) {
                 admissionScheduler.onInflightSettleMiss("preempted");
             }
-        }
-    }
-
-    /**
-     * Terminate a yielded victim — one the engine never saw (prefill queue
-     * eviction / decode reserved-only eviction, contract 5.3) — with the
-     * retryable {@link StrategyErrorType#NO_AVAILABLE_WORKER}. Shares the
-     * idempotent release/tombstone chain of {@link #finishPreempted}.
-     */
-    @Override
-    public void finishYielded(BatchItem victim, String detail) {
-        finishVictim(victim, StrategyErrorType.NO_AVAILABLE_WORKER, detail);
-    }
-
-    /**
-     * {@link #finishYielded} by request id (decode reserved-only victims).
-     * A missing inflight entry means the request already reached a terminal
-     * state — no-op, idempotent.
-     */
-    @Override
-    public void finishYieldedById(long requestId, String detail) {
-        InflightEntry entry = inflight.get(requestId);
-        if (entry != null) {
-            finishYielded(entry.item, detail);
-        } else {
-            // N1: same rationale as finishPreemptedById — no-op, but observable.
-            Logger.debug("finishYieldedById miss: request_id={} not inflight, detail={}",
-                    requestId, detail);
-            // P2-2: metric alongside the warn log.
-            if (admissionScheduler != null) {
-                admissionScheduler.onInflightSettleMiss("yielded");
-            }
-        }
-    }
-
-    /**
-     * Shared victim terminal chain: rollback CAS, lifecycle fail, future
-     * completion with the caller's terminal error type, tombstone. Each step
-     * applies at most once regardless of repeats or terminal-path races.
-     */
-    private void finishVictim(BatchItem victim, StrategyErrorType errorType, String detail) {
-        InflightEntry entry = entryFor(victim);
-        if (entry != null) {
-            ResponseCompletion publication;
-            synchronized (entry) {
-                publication = reduceOrdinaryTerminalLocked(entry,
-                        DeferredTerminal.failure(errorType, detail, false));
-            }
-            submitResponseCompletion(publication);
-        } else if (!victim.future().isDone() && !terminalStates.containsKey(victim.requestId())) {
-            rollback(victim);
-            completeError(victim.future(), errorType, detail);
         }
     }
 
@@ -1427,6 +1368,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     /** Token ownership is validated by the caller; called with entry locked. */
     private ResponseCompletion settlePriorityEntryLocked(InflightEntry entry, String detail) {
+        recordFailureDiagnostics(entry.item, detail);
         entry.preemption.state = PreemptionRegistrationState.SETTLED;
         entry.cleanupOwned = true;
         rollbackOnce(entry);
@@ -1571,9 +1513,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                         terminalStates.put(requestId, generationResult);
                         generationCompletion = ResponseCompletion.terminal(
                                 generation,
-                                buildErrorResponse(
-                                        cancelErrorType(reason,
-                                                generation.deadlineErrorType),
+                                buildAdmissionCancellationResponse(reason,
                                         generationResult.detail()));
                     }
                 } else if (generationEntry.item.future() == generation) {
@@ -1720,6 +1660,12 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                                 "cancel owner could not be installed for request " + requestId);
                     }
                 }
+                if (entry.cancellationReason != null) {
+                    // Capture the winning cause before asynchronous Cancel can outlive this queue state.
+                    entry.cancellationResponse = reason == CancelReason.DEADLINE_EXCEEDED
+                            ? buildExpirationResponse(entry, cancelDetail(reason))
+                            : buildErrorResponse(StrategyErrorType.REQUEST_CANCELLED, cancelDetail(reason));
+                }
             }
         }
 
@@ -1863,6 +1809,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
      * delivery fence across endpoint/queue cleanup.
      */
     private RequestLifecycleSnapshot finishLocalCancellation(InflightEntry entry) {
+        Response response = entry.cancellationResponse;
         releaseLocallyOwnedResources(entry, cancelDetail(entry.cancellationReason));
 
         ResponseCompletion publication = null;
@@ -1876,9 +1823,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                     entry.lifecycle,
                     entry.cancellationReason,
                     cancelDetail(entry.cancellationReason));
-            publication = errorPublicationLocked(entry,
-                    cancelErrorType(entry.cancellationReason,
-                            entry.deadlineErrorType), terminal.detail());
+            publication = responsePublicationLocked(entry, response);
             finishEntry(entry, terminal);
         }
         submitResponseCompletion(publication);
@@ -1888,14 +1833,13 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     /** Called with the request entry locked after an authoritative engine terminal. */
     private ResponseCompletion settleCancellationLocked(InflightEntry entry,
                                                         String proof) {
+        Response response = entry.cancellationResponse;
         releaseLocallyOwnedResources(entry, proof);
         RequestLifecycleSnapshot terminal = settleCancellationLifecycle(
                 entry.lifecycle,
                 entry.cancellationReason,
                 cancelDetail(entry.cancellationReason) + "; " + proof);
-        ResponseCompletion publication = errorPublicationLocked(entry,
-                cancelErrorType(entry.cancellationReason,
-                        entry.deadlineErrorType), terminal.detail());
+        ResponseCompletion publication = responsePublicationLocked(entry, response);
         finishEntry(entry, terminal);
         return publication;
     }
@@ -1916,12 +1860,12 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 : "request cancelled by client";
     }
 
-    private static StrategyErrorType cancelErrorType(
-            CancelReason reason,
-            StrategyErrorType deadlineErrorType) {
+    private static Response buildAdmissionCancellationResponse(CancelReason reason, String detail) {
         return reason == CancelReason.DEADLINE_EXCEEDED
-                ? deadlineErrorType
-                : StrategyErrorType.REQUEST_CANCELLED;
+                ? Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
+                        AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                        "Master placement did not complete within budget; context=" + detail)
+                : buildErrorResponse(StrategyErrorType.REQUEST_CANCELLED, detail);
     }
 
     // ==================== Completion from worker status ====================
@@ -2185,6 +2129,11 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             }
             return null;
         }
+        if (terminal.kind() == DeferredTerminalKind.TIMEOUT
+                && (entry.preemption == null || entry.preemption.pendingTerminal == null)) {
+            terminal = new DeferredTerminal(DeferredTerminalKind.TIMEOUT,
+                    buildExpirationResponse(entry, terminal.detail()), terminal.detail(), true, null);
+        }
         if (entry.preemption != null) {
             return deferOrdinaryTerminalLocked(entry, terminal);
         }
@@ -2310,6 +2259,10 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 return null;
             }
             case FAILURE -> {
+                // The failing decision may already have captured evidence before queue cleanup.
+                if (entry.item.ctx().getSchedulingDiagnostics() == null) {
+                    recordFailureDiagnostics(entry.item, terminal.detail());
+                }
                 // A failure can escape after priority scheduling registration/offer
                 // (for example from telemetry or timer setup). Remove any
                 // still-queued item before retiring the generation.
@@ -2319,13 +2272,13 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                     releasePrefillAccounting(entry);
                 }
                 RequestLifecycleSnapshot failed = entry.lifecycle.fail(terminal.detail());
-                ResponseCompletion publication = errorPublicationLocked(
-                        entry, terminal.errorType(), terminal.detail());
+                ResponseCompletion publication = responsePublicationLocked(entry,
+                        terminal.failure());
                 finishEntry(entry, failed);
                 return publication;
             }
             case TIMEOUT -> {
-                return timeoutEntry(entry, terminal.detail());
+                return timeoutEntry(entry, terminal.detail(), terminal.failure());
             }
             case WORKER -> {
                 return applyWorkerTerminalLocked(entry, terminal.workerObservation());
@@ -2358,6 +2311,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             publication = responsePublicationLocked(
                     entry, buildSuccessResponse(entry.item));
         } else {
+            recordFailureDiagnostics(entry.item, "worker error code " + observation.errorCode());
             terminal = entry.lifecycle.fail("worker error code " + observation.errorCode());
             publication = errorPublicationLocked(
                     entry, StrategyErrorType.WORKER_EXECUTION_FAILED,
@@ -2427,11 +2381,6 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     /** Production RTP-LLM raw {@code ErrorCode::PRIORITY_PREEMPTED}. */
     private static final long ENGINE_ERROR_PRIORITY_PREEMPTED = 8429;
-
-    /** Victim's decode endpoint key for the settle metric; "unknown" when absent. */
-    private static String decodeEndpointKey(BatchItem item) {
-        return item.decodeEp() != null ? item.decodeEp().ipPort() : "unknown";
-    }
 
     public RequestLifecycleSnapshot getRequestState(long requestId,
                                                     long expectedBatchId) {
@@ -2778,31 +2727,6 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     @Override
-    public void onOfferFailure(BatchItem item, Throwable error) {
-        // priority scheduling: over-capacity requests carry a dedicated non-retryable error code
-        // instead of the generic (retryable) delivery failure (design doc 8.3).
-        StrategyErrorType errorType = error instanceof BatchTokenCapacityExceededException
-                ? StrategyErrorType.BATCH_TOKEN_CAPACITY_EXCEEDED
-                : StrategyErrorType.BATCH_DISPATCH_FAILED;
-        String failureDetail = error == null ? "queue full" : error.getMessage();
-        InflightEntry entry = entryFor(item);
-        if (entry != null) {
-            ResponseCompletion publication;
-            synchronized (entry) {
-                publication = reduceOrdinaryTerminalLocked(entry, DeferredTerminal.failure(
-                        errorType,
-                        "Worker scheduling queue rejected request: " + failureDetail,
-                        false));
-            }
-            submitResponseCompletion(publication);
-        } else if (!item.future().isDone() && !terminalStates.containsKey(item.requestId())) {
-            rollback(item);
-            completeError(item.future(), errorType,
-                    "Worker scheduling queue rejected request: " + failureDetail);
-        }
-    }
-
-    @Override
     public void onDeliveryFailure(BatchItem item, Throwable error) {
         String detail = error == null || error.getMessage() == null
                 ? "unknown delivery failure"
@@ -2859,10 +2783,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 synchronized (entry) {
                     if (!item.future().isDone()
                             && !entry.lifecycle.isTerminal() && !entry.cleanupOwned) {
-                        DecodeEndpoint.DispatchClaimResult claim = item.decodeEp() == null
-                                ? DecodeEndpoint.DispatchClaimResult.CLAIMED
-                                : item.decodeEp().tryClaimEngineDispatch(
-                                        item.requestId(), decodeConcurrencyLimit);
+                        DecodeEndpoint.DispatchClaimResult claim = tryClaimDecodeDispatch(item, decodeConcurrencyLimit);
                         if (claim == DecodeEndpoint.DispatchClaimResult.CAPACITY_FULL) {
                             restorePendingDelivery(batcher, item);
                         } else if (claim == DecodeEndpoint.DispatchClaimResult.CLAIMED) {
@@ -2876,10 +2797,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                             // engine indefinitely.
                             if (entry.preemption == null) {
                                 publication = reduceOrdinaryTerminalLocked(entry,
-                                        DeferredTerminal.failure(
-                                                StrategyErrorType.BATCH_DISPATCH_FAILED,
-                                                "Decode dispatch ownership lost before send",
-                                                false));
+                                        DeferredTerminal.failure(StrategyErrorType.BATCH_DISPATCH_FAILED,
+                                                "Decode dispatch ownership lost before send", false));
                             }
                         }
                     }
@@ -3094,15 +3013,15 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
                     if (!prefillEp.tryCommitRequest(
                             item.requestId(), predictedMs, prefillRequestLimit)) {
+                        if (batcher != null) {
+                            batcher.setWaitReason("prefill request slots exhausted");
+                        }
                         restorePendingDelivery(batcher, item);
                         continue;
                     }
                     requestLedgerCommitted = true;
 
-                    DecodeEndpoint.DispatchClaimResult claim = item.decodeEp() == null
-                            ? DecodeEndpoint.DispatchClaimResult.CLAIMED
-                            : item.decodeEp().tryClaimEngineDispatch(
-                                    item.requestId(), decodeConcurrencyLimit);
+                    DecodeEndpoint.DispatchClaimResult claim = tryClaimDecodeDispatch(item, decodeConcurrencyLimit);
                     if (claim == DecodeEndpoint.DispatchClaimResult.CAPACITY_FULL) {
                         prefillEp.releaseRequest(item.requestId());
                         requestLedgerCommitted = false;
@@ -3114,10 +3033,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                         requestLedgerCommitted = false;
                         if (entry.preemption == null) {
                             publication = reduceOrdinaryTerminalLocked(entry,
-                                    DeferredTerminal.failure(
-                                            StrategyErrorType.BATCH_DISPATCH_FAILED,
-                                            "Decode dispatch ownership lost before route delivery",
-                                            false));
+                                    DeferredTerminal.failure(StrategyErrorType.BATCH_DISPATCH_FAILED,
+                                                "Decode dispatch ownership lost before route delivery", false));
                         }
                         decodeOwnershipLost = true;
                     } else {
@@ -3209,7 +3126,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     public void onDelivered(BatchItem item) {
         InflightEntry entry = entryFor(item);
         if (entry == null) {
-            // entry 已被 worker-status/cancel/timeout/onFailure/onOfferFailure 等终态路径移除，
+            // entry 已被 worker-status/cancel/timeout/onFailure/onDeliveryFailure 等终态路径移除，
             // 所有终态路径均在 finishEntry 前完成 future，故此处无需补发。
             return;
         }
@@ -3338,18 +3255,6 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             StrategyErrorType errorType,
             String message) {
         Response response = buildErrorResponse(errorType, message);
-        if (!claimResponseCompletionLocked(entry)) {
-            return null;
-        }
-        return ResponseCompletion.terminal(
-                entry.item.future(), response);
-    }
-
-    private static ResponseCompletion admissionErrorPublicationLocked(
-            InflightEntry entry,
-            AdmissionFailure failure,
-            String trigger) {
-        Response response = buildAdmissionErrorResponse(failure, trigger);
         if (!claimResponseCompletionLocked(entry)) {
             return null;
         }
@@ -4019,50 +3924,59 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     private ResponseCompletion timeoutEntry(InflightEntry entry, String detail) {
-        AdmissionFailure admissionFailure = null;
+        return timeoutEntry(entry, detail, buildExpirationResponse(entry, detail));
+    }
+
+    private ResponseCompletion timeoutEntry(InflightEntry entry, String detail, Response response) {
         PrefillEndpoint prefill = entry.item.prefillEp();
-        if (entry.priorityAdmission) {
-            admissionFailure = classifyAdmissionTimeout(entry.item, prefill);
-            if (prefill != null) {
-                prefill.getBatcher().queueManager().tryRemove(
-                        entry.item.requestId(), "ADMISSION_TIMEOUT");
-            }
+        if (prefill != null) {
+            prefill.getBatcher().queueManager().tryRemove(
+                    entry.item.requestId(), "ADMISSION_TIMEOUT");
         }
         RequestLifecycleSnapshot terminal = entry.lifecycle.timeout(detail);
         rollbackOnce(entry);
         releasePrefillAccounting(entry);
-        ResponseCompletion publication;
-        if (admissionFailure != null) {
-            Logger.debug("[priority] admission timeout classified: request_id={} "
-                            + "priority={} lifecycle={} error_code={} reason={} trigger={}",
-                    entry.item.requestId(), entry.item.priority(), terminal.state(),
-                    admissionFailure.errorType().getErrorCode(), admissionFailure.reason(), detail);
-            publication = admissionErrorPublicationLocked(entry, admissionFailure, detail);
-        } else {
-            publication = errorPublicationLocked(
-                    entry, entry.deadlineErrorType, detail);
-        }
+        ResponseCompletion publication = responsePublicationLocked(entry, response);
         finishEntry(entry, terminal);
         return publication;
     }
 
-    private static AdmissionFailure classifyAdmissionTimeout(BatchItem item,
-                                                              PrefillEndpoint prefill) {
-        if (prefill == null) {
-            return AdmissionFailure.resourceExhausted();
+    static DecodeEndpoint.DispatchClaimResult tryClaimDecodeDispatch(BatchItem item, long concurrencyLimit) {
+        DecodeEndpoint endpoint = item.decodeEp();
+        DecodeEndpoint.DispatchClaimResult claim = endpoint == null
+                ? DecodeEndpoint.DispatchClaimResult.CLAIMED
+                : endpoint.tryClaimEngineDispatch(item.requestId(), concurrencyLimit);
+        WorkerBatcher batcher = item.prefillEp() == null ? null : item.prefillEp().getBatcher();
+        if (batcher != null) {
+            batcher.setWaitReason(claim == DecodeEndpoint.DispatchClaimResult.CAPACITY_FULL
+                    ? "decode engine slots exhausted" : null);
         }
-        List<QueuedRequestSnapshot> ahead = new ArrayList<>();
-        for (QueuedRequestSnapshot queued
-                : prefill.getBatcher().queueManager().snapshot().items()) {
-            if (queued.requestId() == item.requestId()) {
-                return AdmissionFailureClassifier.classifyQueuedTimeout(
-                        item.priority(), ahead);
-            }
-            ahead.add(queued);
+        return claim;
+    }
+
+    /** Expiration only reads the queue's last decision; it never reruns scheduling. */
+    private Response buildExpirationResponse(InflightEntry entry, String trigger) {
+        BatchItem item = entry.item;
+        WorkerBatcher batcher = item.prefillEp() == null ? null : item.prefillEp().getBatcher();
+        String reason = batcher == null ? null : batcher.getWaitReason();
+        if (reason == null) {
+            reason = "queue has no recorded wait reason";
         }
-        // The item already left the queue (dispatch/expiry won); there is no
-        // queue-order evidence for HIGHER or SAME.
-        return AdmissionFailure.resourceExhausted();
+        recordFailureDiagnostics(item, reason + "; context=" + trigger);
+        return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED, AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                reason + "; context=" + trigger);
+    }
+
+    private static void recordFailureDiagnostics(BatchItem item, String cause) {
+        WorkerBatcher batcher = item.prefillEp() == null ? null : item.prefillEp().getBatcher();
+        if (batcher != null) {
+            batcher.recordFailureDiagnostics(item, cause);
+        } else {
+            item.ctx().setSchedulingDiagnostics(Map.of(
+                    "cause", cause == null ? "scheduling failed" : cause,
+                    "capturedAtMs", System.currentTimeMillis(),
+                    "prefill", List.of(), "decode", List.of()));
+        }
     }
 
     private static void completeError(CompletableFuture<Response> future,
@@ -4076,17 +3990,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     private static Response buildErrorResponse(StrategyErrorType errorType,
                                                String message) {
-        Response errorResp = Response.error(errorType);
-        errorResp.setErrorMessage(errorType.buildErrorMessage(message));
-        return errorResp;
-    }
-
-    private static Response buildAdmissionErrorResponse(AdmissionFailure failure,
-                                                        String trigger) {
-        Response errorResp = Response.error(failure.errorType(), failure.reason());
-        String detail = failure.message() + "; trigger=" + trigger;
-        errorResp.setErrorMessage(failure.errorType().buildErrorMessage(detail));
-        return errorResp;
+        return Response.error(errorType, AdmissionRejectReason.UNSPECIFIED, message);
     }
 
     private void finishEntry(InflightEntry entry,
@@ -4488,8 +4392,6 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     private static final class InflightEntry {
         final BatchItem item;
         final RequestLifecycle lifecycle;
-        final boolean priorityAdmission;
-        final StrategyErrorType deadlineErrorType;
         final AtomicBoolean rolledBack = new AtomicBoolean(false);
         AdmissionLease admissionLease;
         EngineOwnershipState engineOwnershipState = EngineOwnershipState.DECODE_PENDING;
@@ -4502,18 +4404,16 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         EngineFenceRegistration engineFence;
         /** Non-null only when the frontend-facing Cancel reducer won first cause. */
         CancelReason cancellationReason;
+        /** Failure evidence captured when cancellation wins; settlement only publishes it. */
+        Response cancellationResponse;
         /** Last full WorkerStatus snapshot which still listed this request as active. */
         private volatile long lastWorkerStatusAtMs;
 
-        InflightEntry(BatchItem item, boolean priorityAdmission) {
+        InflightEntry(BatchItem item) {
             this.item = Objects.requireNonNull(item);
             Objects.requireNonNull(item.prefill(), "BatchItem.prefill must not be null");
             this.lifecycle = new RequestLifecycle(item.requestId());
             this.lastWorkerStatusAtMs = lifecycle.snapshot().createdAtMs();
-            this.priorityAdmission = priorityAdmission;
-            this.deadlineErrorType = item.future() instanceof RequestGenerationGate generation
-                    ? generation.deadlineErrorType
-                    : StrategyErrorType.BATCH_SLO_EXPIRED;
         }
 
         public long createdAtMs() {
@@ -4541,8 +4441,6 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     private static final class RequestGenerationGate extends CompletableFuture<Response> {
         private boolean closed;
         private volatile boolean admissionMutationInProgress;
-        private volatile StrategyErrorType deadlineErrorType =
-                StrategyErrorType.BATCH_SLO_EXPIRED;
         private RequestLifecycle pendingAdmissionCancellation;
         private CancelReason pendingAdmissionCancelReason;
         private AtomicInteger outstandingCounter;
@@ -4987,7 +4885,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     /** First ordinary terminal observed while priority Cancel owns the entry. */
     private record DeferredTerminal(DeferredTerminalKind kind,
-                                    StrategyErrorType errorType,
+                                    Response failure,
                                     String detail,
                                     boolean releasePrefillAccounting,
                                     WorkerTerminalObservation workerObservation) {
@@ -4999,14 +4897,20 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         static DeferredTerminal failure(StrategyErrorType errorType,
                                         String detail,
                                         boolean releasePrefillAccounting) {
+            return failure(Response.error(Objects.requireNonNull(errorType),
+                    AdmissionRejectReason.UNSPECIFIED, detail),
+                    releasePrefillAccounting);
+        }
+
+        static DeferredTerminal failure(Response failure, boolean releasePrefillAccounting) {
             return new DeferredTerminal(DeferredTerminalKind.FAILURE,
-                    Objects.requireNonNull(errorType), detail,
+                    Objects.requireNonNull(failure), failure.getErrorMessage(),
                     releasePrefillAccounting, null);
         }
 
         static DeferredTerminal timeout(String detail) {
             return new DeferredTerminal(DeferredTerminalKind.TIMEOUT,
-                    StrategyErrorType.BATCH_SLO_EXPIRED, detail, true, null);
+                    null, detail, true, null);
         }
 
         static DeferredTerminal worker(WorkerTerminalObservation observation) {

@@ -242,13 +242,14 @@ class SchedulingConfigAndExpirationPerformanceTest {
             for (int index = 0; index < EARLY_COMPLETION_COUNT; index++) {
                 assertSame(earlySuccess, futures.get(index).join());
             }
-            assertEquals(8511, StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
-                    "request expiration must preserve the public 8511 contract");
             for (int index = EARLY_COMPLETION_COUNT; index < TIMER_REQUEST_COUNT; index++) {
                 Response timeout = futures.get(index).join();
                 assertFalse(timeout.isSuccess());
-                assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+                assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                         timeout.getCode());
+                assertEquals(org.flexlb.dao.loadbalance.AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                        timeout.getAdmissionRejectReason());
+                assertTrue(timeout.getErrorMessage().contains("Master placement did not complete within budget"));
             }
 
             awaitCondition(() -> scheduler.requestExpirationQueueSize() == 0, 1_000);

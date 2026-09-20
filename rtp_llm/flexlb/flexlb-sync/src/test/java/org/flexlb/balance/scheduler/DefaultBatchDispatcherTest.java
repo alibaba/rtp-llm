@@ -142,6 +142,35 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
+    void queuedDispatchWaitsForPreparationBeforeInvokingRpc() throws Exception {
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        CountDownLatch preparing = new CountDownLatch(1);
+        CountDownLatch releasePreparation = new CountDownLatch(1);
+        when(configService.loadBalanceConfig()).thenAnswer(invocation -> {
+            preparing.countDown();
+            assertTrue(releasePreparation.await(2, TimeUnit.SECONDS));
+            return config;
+        });
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenReturn(new CompletableFuture<>());
+        PrefillEndpoint endpoint = createPrefillEndpoint();
+        BatchItem first = createBatchItem(81L, 500, 200, endpoint);
+        BatchItem second = createBatchItem(82L, 500, 200, endpoint);
+        try {
+            dispatcher.dispatch(List.of(first), endpoint, 81L, 100, "phase test", callback);
+            assertTrue(preparing.await(1, TimeUnit.SECONDS));
+            dispatcher.dispatch(List.of(second), endpoint, 82L, 100, "phase test", callback);
+
+            verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
+        } finally {
+            releasePreparation.countDown();
+        }
+        verify(grpcClient, org.mockito.Mockito.timeout(1000).times(2))
+                .batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
+    }
+
+    @Test
     void dispatchHandlesRejectedExecutionAfterShutdown() {
         dispatcher.shutdown();
 

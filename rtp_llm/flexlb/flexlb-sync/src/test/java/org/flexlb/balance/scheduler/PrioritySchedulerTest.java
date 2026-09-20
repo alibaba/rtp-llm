@@ -127,17 +127,17 @@ class PrioritySchedulerTest {
     }
 
     @Test
-    void queueModeMatrixUsesOneSchedulingTimeoutCodeAcrossDispatchers() {
+    void expirationBeforePlacementReportsMasterAdmissionCapacityAcrossModes() {
         long expiredAtMs = System.currentTimeMillis() - 1;
 
         SchedulingTestConfig.useFifoQueue(config);
         SchedulingTestConfig.useNonBatchDispatcher(config);
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                 submitExpired(90_001L, expiredAtMs).getCode());
 
         SchedulingTestConfig.useFifoQueue(config);
         SchedulingTestConfig.useBatchDispatcher(config);
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                 submitExpired(90_002L, expiredAtMs).getCode());
 
         SchedulingTestConfig.usePriorityQueue(config);
@@ -300,7 +300,7 @@ class PrioritySchedulerTest {
                 server(RoleType.DECODE, "10.0.0.2", 8081, 8082, requestId),
                 prefill, throwingDecode, System.currentTimeMillis());
         assertTrue(scheduler.registerInflight(item));
-        prefill.getBatcher().offer(item);
+        prefill.getBatcher().tryOffer(item);
 
         Response response = item.future().get(2, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
@@ -413,7 +413,7 @@ class PrioritySchedulerTest {
         assertTrue(first.get(2, TimeUnit.SECONDS).isSuccess());
         Response secondResp = second.get(2, TimeUnit.SECONDS);
         assertFalse(secondResp.isSuccess());
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), secondResp.getCode());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), secondResp.getCode());
     }
 
     @Test
@@ -1149,7 +1149,7 @@ class PrioritySchedulerTest {
 
         Response rejected = scheduler.submit(context(42)).get(1, TimeUnit.SECONDS);
         assertFalse(rejected.isSuccess());
-        assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), rejected.getCode());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), rejected.getCode());
 
         releaseBlock.countDown();
     }
@@ -1220,7 +1220,7 @@ class PrioritySchedulerTest {
             int routedFailure = 0;
             for (CompletableFuture<Response> future : futures) {
                 Response response = future.get(2, TimeUnit.SECONDS);
-                if (response.getCode() == StrategyErrorType.QUEUE_FULL.getErrorCode()) {
+                if (response.getCode() == StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode()) {
                     queueFull++;
                 } else if (response.getCode()
                         == StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode()) {
@@ -1410,8 +1410,8 @@ class PrioritySchedulerTest {
         assertTrue(fifoRouteEntered.await(2, TimeUnit.SECONDS));
         Response fifoRejected = scheduler.submit(context(40_001L))
                 .get(1, TimeUnit.SECONDS);
-        assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), fifoRejected.getCode(),
-                "FIFO + NON_BATCH preserves the established queue-timeout contract");
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), fifoRejected.getCode(),
+                "FIFO + NON_BATCH reports admission capacity exhaustion");
         releaseFifoRoute.countDown();
         fifoSubmit.get(2, TimeUnit.SECONDS).get(2, TimeUnit.SECONDS);
         awaitCondition(() -> scheduler.outstandingRequestCount() == 0);
@@ -1447,42 +1447,32 @@ class PrioritySchedulerTest {
         assertFalse(first.isDone());
 
         // Second submit should fail because queue is full (maxSize=1)
-        CompletableFuture<Response> second = scheduler.submit(context(52));
+        BalanceContext rejected = context(52);
+        CompletableFuture<Response> second = scheduler.submit(rejected);
         Response response = second.get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
-    }
-
-    // ============ onOfferFailure error-code mapping (task10 P1-1) ============
-
-    @Test
-    void offer_failure_maps_token_capacity_exceeded_to_dedicated_error_code() throws Exception {
-        BatchItem item = offerFailureItem(61);
-
-        scheduler.onOfferFailure(item, new BatchTokenCapacityExceededException(
-                "seq_len exceeds batch token capacity"));
-
-        Response response = item.future().get(1, TimeUnit.SECONDS);
-        assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.BATCH_TOKEN_CAPACITY_EXCEEDED.getErrorCode(), response.getCode());
-        assertTrue(response.getErrorMessage().contains("batch token capacity"));
+        assertEquals("prefill queue capacity exhausted", rejected.getSchedulingDiagnostics().get("cause"),
+                "terminal publication must preserve the original offer failure evidence");
+        Map<?, ?> prefill = (Map<?, ?>) ((List<?>) rejected.getSchedulingDiagnostics().get("prefill")).getFirst();
+        assertEquals(1, prefill.get("queueDepth"));
     }
 
     @Test
-    void offer_failure_keeps_generic_dispatch_error_for_other_causes() throws Exception {
-        BatchItem item = offerFailureItem(62);
+    void delivery_failure_without_inflight_entry_completes_future() throws Exception {
+        BatchItem item = deliveryFailureItem(62);
 
-        scheduler.onOfferFailure(item, new IllegalStateException("queue stopped"));
+        scheduler.onDeliveryFailure(item, new IllegalStateException("queue stopped"));
 
         Response response = item.future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode());
         assertTrue(response.getErrorMessage().contains(
-                "Worker scheduling queue rejected request"));
+                "Decision delivery failed: queue stopped"));
     }
 
     @Test
     void staged_delivery_failure_uses_delivery_reducer_and_neutral_message() throws Exception {
-        BatchItem item = offerFailureItem(63);
+        BatchItem item = deliveryFailureItem(63);
         assertTrue(scheduler.registerInflight(item));
 
         scheduler.onDeliveryFailure(item,
@@ -1496,7 +1486,7 @@ class PrioritySchedulerTest {
         assertEquals(0, scheduler.getInflightSize());
     }
 
-    private BatchItem offerFailureItem(long requestId) {
+    private BatchItem deliveryFailureItem(long requestId) {
         Response route = successRoute(requestId);
         return new BatchItem(context(requestId), new CompletableFuture<>(), route,
                 PriorityScheduler.findServer(route, RoleType.PREFILL),
@@ -1617,11 +1607,11 @@ class PrioritySchedulerTest {
     // ==================== P0-1: onTimeout terminal handling (PR-D) ====================
 
     @Test
-    void onTimeout_beforeDeliveryClaim_settlesPriorityAdmissionAsResourceExhausted()
+    void onTimeout_withoutCapacityEvidence_retainsExpiration()
             throws Exception {
         // A timeout is locally terminal only before a batch delivery assigns a
         // batch id. The engine provably cannot have observed this item yet.
-        BatchItem item = offerFailureItem(301);
+        BatchItem item = deliveryFailureItem(301);
         assertTrue(scheduler.registerInflight(item));
 
         scheduler.onTimeout(item, new TimeoutException("test EnqueueBatch deadline"));
@@ -1669,7 +1659,7 @@ class PrioritySchedulerTest {
         scheduler.onRequestExpired(blockingItem.requestId(), blockingItem.future());
         Response timedOut = blockingItem.future().get(2, TimeUnit.SECONDS);
         assertFalse(timedOut.isSuccess());
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), timedOut.getCode());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), timedOut.getCode());
 
         allowCommit.countDown();
         flush.get(2, TimeUnit.SECONDS);
@@ -1907,7 +1897,7 @@ class PrioritySchedulerTest {
         // Two threads race to time out the same inflight entry. The
         // synchronized(entry) + RequestLifecycle.isTerminal() guard ensures
         // exactly one terminal verb settles the future (CAS-like idempotency).
-        BatchItem item = offerFailureItem(302);
+        BatchItem item = deliveryFailureItem(302);
         assertTrue(scheduler.registerInflight(item));
 
         CompletableFuture<Void> t1 = CompletableFuture.runAsync(() ->

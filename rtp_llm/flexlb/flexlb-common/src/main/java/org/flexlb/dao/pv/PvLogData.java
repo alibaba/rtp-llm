@@ -4,6 +4,8 @@ import lombok.Data;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 
+import java.util.Map;
+
 /** One completed FlexLB scheduling decision written to {@code pv.log}. */
 @Data
 public class PvLogData {
@@ -28,6 +30,7 @@ public class PvLogData {
     private long batchId;
     private String requestState;
     private String realMasterHost;
+    private Map<String, Object> schedulingDiagnostics;
 
     public PvLogData(BalanceContext ctx,
                      int code,
@@ -42,6 +45,7 @@ public class PvLogData {
         this.response = ctx.getResponse();
         this.error = ctx.getErrorMessage();
         this.success = ctx.isSuccess();
+        this.schedulingDiagnostics = success ? null : ctx.getSchedulingDiagnostics();
         this.enqueueTime = ctx.getEnqueueTime();
         this.startTime = ctx.getStartTime();
         this.requestTimeMs = ctx.getRequest().getRequestTimeMs();

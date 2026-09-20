@@ -79,7 +79,7 @@ class AdmissionLeasePostSuccessTest {
         verify(queue, never()).tryRemove(anyLong(), anyString());
         verify(decode, never()).release(anyLong());
         verify(registrar, never()).unregisterInflight(any());
-        verify(registrar, never()).finishYieldedById(anyLong(), anyString());
+        verify(registrar, never()).finishPreemptedById(anyLong(), anyString());
     }
 
     @Test

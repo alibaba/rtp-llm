@@ -1,7 +1,5 @@
 package org.flexlb.balance.strategy;
 
-import org.apache.commons.collections4.CollectionUtils;
-import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
@@ -16,7 +14,6 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
-import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
@@ -77,7 +74,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             return doSelect(balanceContext, roleType, group);
         } catch (Exception e) {
             Logger.warn("{} select failed", LoadBalanceStrategyEnum.SHORTEST_TTFT.getName(), e);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            return ServerStatus.code(StrategyErrorType.BATCH_DISPATCH_FAILED, e.getMessage());
         }
     }
 
@@ -104,14 +101,37 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
 
-        List<PrefillEndpoint> eligible = getAvailableEndpoints(
-                roleType,
-                group,
-                config.resourceMeasureFor(roleType),
-                balanceContext.getExcludedPrefillIpPort());
-        if (CollectionUtils.isEmpty(eligible)) {
-            Logger.debug("ShortestTTFT select failed: no available endpoints, request_id={}", requestId);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+        Map<String, PrefillEndpoint> workers = engineWorkerStatus.selectPrefillWorkerStatus(roleType, group);
+        if (workers.isEmpty()) {
+            return ServerStatus.code(roleType.getErrorType());
+        }
+        PrefillResourceMeasure measure = (PrefillResourceMeasure) resourceMeasureFactory.getMeasure(
+                config.resourceMeasureFor(roleType));
+        if (measure == null) {
+            throw new IllegalStateException("Prefill resource measure is not configured");
+        }
+        List<PrefillEndpoint> eligible = new ArrayList<>();
+        PrefillEndpoint excludedEligible = null;
+        boolean capacityBlocked = false;
+        for (PrefillEndpoint prefill : workers.values()) {
+            if (!prefill.getStatus().isAlive()) {
+                continue;
+            }
+            if (!measure.isResourceAvailable(prefill)) {
+                capacityBlocked = true;
+                continue;
+            }
+            if (prefill.ipPort().equals(balanceContext.getExcludedPrefillIpPort())) {
+                excludedEligible = prefill;
+            } else {
+                eligible.add(prefill);
+            }
+        }
+        if (eligible.isEmpty() && excludedEligible != null) {
+            eligible.add(excludedEligible);
+        }
+        if (eligible.isEmpty()) {
+            return ServerStatus.code(capacityBlocked ? StrategyErrorType.RESOURCE_EXHAUSTED : roleType.getErrorType());
         }
 
         Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
@@ -121,7 +141,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                 eligible, cacheMatchResults, balanceContext);
         if (scoredEndpoints.isEmpty()) {
             Logger.debug("ShortestTTFT select failed: no scored endpoints, request_id={}", requestId);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            return ServerStatus.code(StrategyErrorType.BATCH_DISPATCH_FAILED, "no usable Prefill estimate or candidate");
         }
         long candidateMaxHitTokens = scoredEndpoints.stream()
                 .mapToLong(scored -> calculateRoutingCacheMatchTokens(
@@ -138,7 +158,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         if (selected == null) {
             Logger.debug("{} select failed: no selectable endpoint, request_id={}",
                     LoadBalanceStrategyEnum.SHORTEST_TTFT.getName(), requestId);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            return ServerStatus.code(StrategyErrorType.BATCH_DISPATCH_FAILED, "no usable Prefill estimate or candidate");
         }
 
         Logger.debug("{} selected endpoint - ip: {}, port: {}, ttft: {}, hitCache: {}",
@@ -387,44 +407,6 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             return Long.MIN_VALUE;
         }
         return left + right;
-    }
-
-    // ==================== Endpoint Filtering (mirrors CostBasedPrefillStrategy) ====================
-
-    private List<PrefillEndpoint> getAvailableEndpoints(RoleType roleType,
-                                                        String group,
-                                                        ResourceMeasureIndicatorEnum indicator,
-                                                        String excludedIpPort) {
-        Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
-        if (MapUtils.isEmpty(workerEndpointMap)) {
-            return new ArrayList<>();
-        }
-        PrefillResourceMeasure measure = (PrefillResourceMeasure) resourceMeasureFactory.getMeasure(indicator);
-        if (measure == null) {
-            return new ArrayList<>();
-        }
-        List<PrefillEndpoint> result = new ArrayList<>();
-        PrefillEndpoint excludedEligible = null;
-        for (WorkerEndpoint ep : workerEndpointMap.values()) {
-            if (!(ep instanceof PrefillEndpoint pe)) {
-                continue;
-            }
-            if (!pe.getStatus().isAlive()) {
-                continue;
-            }
-            if (!measure.isResourceAvailable(pe)) {
-                continue;
-            }
-            if (excludedIpPort != null && excludedIpPort.equals(pe.ipPort())) {
-                excludedEligible = pe;
-                continue;
-            }
-            result.add(pe);
-        }
-        if (result.isEmpty() && excludedEligible != null) {
-            result.add(excludedEligible);
-        }
-        return result;
     }
 
     private Map<String, Integer> getCacheMatchResults(BalanceContext balanceContext, RoleType roleType, String group) {

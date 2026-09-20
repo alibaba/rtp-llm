@@ -40,6 +40,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -130,6 +131,7 @@ class PlanCommitConcurrencyRedesignTest {
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, PREFILL_IP_PORT, prefillWs);
 
         decodeWs = new WorkerStatus();
+        decodeWs.setAlive(true);
         decodeWs.setIp("10.0.0.2");
         decodeWs.setPort(8081);
         decodeWs.setGrpcPort(8082);
@@ -260,9 +262,9 @@ class PlanCommitConcurrencyRedesignTest {
         for (long id = 801; id <= 804; id++) {
             decodeEp.reserve(id, 128, 136, 50);
         }
-        // Router reports a decode-capacity failure (8403) → Phase 4 eviction path
+        // Router reports a typed Decode capacity failure → Phase 4 eviction path
         when(router.route(any(BalanceContext.class)))
-                .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
+                .thenAnswer(inv -> SchedulingTestConfig.decodeCapacityFailure(inv.getArgument(0), endpointRegistry));
 
         Response response = scheduler.submit(context(200)).get(2, TimeUnit.SECONDS);
 
@@ -279,7 +281,7 @@ class PlanCommitConcurrencyRedesignTest {
      * P1-4: a decode shadow reservation without a matching scheduler inflight
      * entry (e.g. interrupted between route() and registerInflight) must be
      * reclaimed by the periodic inflight cleanup once past the TTL; a miss on
-     * finishYieldedById must stay a harmless no-op.
+     * finishPreemptedById must stay a harmless no-op.
      */
     @Test
     void a1_orphan_decode_reservation_is_reclaimed_by_cleanup() throws Exception {
@@ -291,8 +293,8 @@ class PlanCommitConcurrencyRedesignTest {
         Thread.sleep(10); // ensure the orphan is past the (zero) TTL
         scheduler.cleanupInflight();
 
-        // finishYieldedById on an unknown id must remain a no-op either way
-        scheduler.finishYieldedById(888, "stale victim settle");
+        // finishPreemptedById on an unknown id must remain a no-op either way
+        scheduler.finishPreemptedById(888, "stale victim settle");
 
         assertEquals(0, decodeEp.getInflightCount(),
                 "orphan reservation must be reclaimed by cleanupInflight");
@@ -302,7 +304,7 @@ class PlanCommitConcurrencyRedesignTest {
     // ==================== B-1: request expiration carries a reason tag ====================
 
     @Test
-    void b1_preexpired_priority_request_preserves_admission_contract() throws Exception {
+    void b1_preexpired_priority_request_reportsMasterPlacementBudget() throws Exception {
         BalanceContext ctx = context(300);
         ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() - 1_000));
@@ -313,7 +315,7 @@ class PlanCommitConcurrencyRedesignTest {
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
         assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
                 response.getAdmissionRejectReason());
-        assertTrue(response.getErrorMessage().contains("request expired"));
+        assertTrue(response.getErrorMessage().contains("Master placement did not complete within budget"));
     }
 
     // ==================== D-1: infeasible log carries phase + candidate counters ====================
@@ -327,7 +329,7 @@ class PlanCommitConcurrencyRedesignTest {
             decodeEp.reserve(id, 128, 136, 50);
         }
         when(router.route(any(BalanceContext.class)))
-                .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
+                .thenAnswer(inv -> SchedulingTestConfig.decodeCapacityFailure(inv.getArgument(0), endpointRegistry));
 
         ch.qos.logback.classic.Logger flexlbLogger =
                 (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
@@ -368,7 +370,7 @@ class PlanCommitConcurrencyRedesignTest {
             BalanceContext ctx = inv.getArgument(0);
             if (routeCalls.incrementAndGet() == 1) {
                 // Concurrent enqueue between snapshot and commit → version bump
-                assertTrue(batcher.tryOffer(dummyItem(901)));
+                assertNull(batcher.tryOffer(dummyItem(901)));
             }
             endpointRegistry.getDecode(DECODE_IP_PORT)
                     .reserve(ctx.getRequestId(), 128, 136,
@@ -404,7 +406,7 @@ class PlanCommitConcurrencyRedesignTest {
         });
         // Fill the single queue slot so every tryOffer() fails
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
-        assertTrue(batcher.tryOffer(dummyItem(999)));
+        assertNull(batcher.tryOffer(dummyItem(999)));
 
         Response response = scheduler.submit(context(502)).get(2, TimeUnit.SECONDS);
 
@@ -429,8 +431,8 @@ class PlanCommitConcurrencyRedesignTest {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
         PrefillQueueManager queueManager = batcher.queueManager();
-        assertTrue(batcher.tryOffer(dummyItem(601))); // victim
-        assertTrue(batcher.tryOffer(dummyItem(602))); // unrelated churn → version bump
+        assertNull(batcher.tryOffer(dummyItem(601))); // victim
+        assertNull(batcher.tryOffer(dummyItem(602))); // unrelated churn → version bump
 
         PrefillQueueManager.ReplaceOutcome outcome =
                 queueManager.tryReplaceVictimsPresent(List.of(601L), dummyItem(612));
@@ -448,7 +450,7 @@ class PlanCommitConcurrencyRedesignTest {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
         PrefillQueueManager queueManager = batcher.queueManager();
-        assertTrue(batcher.tryOffer(dummyItem(701)));
+        assertNull(batcher.tryOffer(dummyItem(701)));
         int depthBefore = batcher.queueSize();
 
         PrefillQueueManager.ReplaceOutcome outcome =

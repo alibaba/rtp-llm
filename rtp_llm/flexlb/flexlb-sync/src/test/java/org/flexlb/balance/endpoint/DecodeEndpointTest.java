@@ -7,9 +7,16 @@ import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DecodeEndpointTest {
@@ -24,6 +31,122 @@ class DecodeEndpointTest {
         status.setPort(8080);
         status.setGrpcPort(8081);
         endpoint = new DecodeEndpoint(status);
+    }
+
+    @Test
+    void admissionSummaryIsReusedAndTracksQueueDispatchAndRelease() {
+        status.getTotalKvCacheTokens().set(20000);
+        updateStatus(null, null, 10000);
+        endpoint.reserve(1L, 128, 256, 70);
+        var reserved = endpoint.admissionSnapshot();
+        assertEquals(1, reserved.slots(70));
+        assertEquals(128, reserved.kvTokens(70));
+        assertEquals(9872, reserved.kvAvailable());
+        assertSame(reserved, endpoint.admissionSnapshot());
+
+        endpoint.markQueuedPhase(1L);
+        var queued = endpoint.admissionSnapshot();
+        assertNotSame(reserved, queued);
+        assertEquals(0, queued.slots(70));
+        assertEquals(0, queued.engineLoad());
+        assertEquals(128, queued.kvTokens(70));
+        assertEquals(1, reserved.slots(70), "published snapshots must remain immutable");
+        endpoint.markQueuedPhase(1L);
+        assertSame(queued, endpoint.admissionSnapshot());
+
+        endpoint.tryClaimEngineDispatch(1L, 1);
+        var dispatched = endpoint.admissionSnapshot();
+        assertEquals(1, dispatched.engineLoad());
+        assertEquals(1, dispatched.slots(70));
+        endpoint.release(1L);
+        var released = endpoint.admissionSnapshot();
+        assertEquals(0, released.slots(70));
+        assertEquals(0, released.hardKvReserved());
+        assertEquals(10000, released.kvAvailable());
+    }
+
+    @Test
+    void admissionSummaryRefreshesConfirmedProvenanceAndReportedCapacity() {
+        endpoint.reserve(1L, 128, 128, 70);
+        TaskInfo known = task(1L);
+        known.setPhase(TaskPhase.KV_ALLOCATED);
+        known.setInputLength(128);
+        TaskInfo foreign = task(2L);
+        foreign.setPhase(TaskPhase.RUNNING);
+        foreign.setInputLength(256);
+        updateStatus(Map.of("1", known, "2", foreign), null, 8000);
+        var confirmed = endpoint.admissionSnapshot();
+        assertEquals(1, confirmed.slots(70));
+        assertEquals(1, confirmed.slots(0));
+        assertEquals(256, confirmed.kvTokens(0));
+        assertEquals(8000, confirmed.kvAvailable());
+
+        status.getTotalKvCacheTokens().set(20000);
+        var resized = endpoint.admissionSnapshot();
+        assertEquals(20000, resized.kvTotal());
+        assertNotSame(confirmed, resized);
+        updateStatus(Map.of("2", foreign), Map.of("1", known), 9000);
+        var finished = endpoint.admissionSnapshot();
+        assertEquals(0, finished.slots(70));
+        assertEquals(1, finished.slots(0));
+        assertEquals(9000, finished.kvAvailable());
+    }
+
+    @Test
+    void admissionSummaryExcludesFencedOwnersWithoutLosingCapacityCharge() {
+        updateStatus(null, null, 10000);
+        endpoint.reserve(1L, 128, 128, 30);
+        var before = endpoint.admissionSnapshot();
+        assertTrue(endpoint.beginEngineFenceProtection(1L));
+        var fenced = endpoint.admissionSnapshot();
+        assertEquals(0, fenced.slots(30));
+        assertEquals(0, fenced.kvTokens(30));
+        assertEquals(1, fenced.engineLoad());
+        assertEquals(before.kvAvailable(), fenced.kvAvailable());
+        endpoint.release(1L);
+        assertEquals(0, endpoint.admissionSnapshot().engineLoad());
+    }
+
+    @Test
+    void admissionSummaryTracksPriorityClaimsAndInvalidPriorities() {
+        updateStatus(null, null, 10000);
+        endpoint.reserve(1L, 128, 128, 30);
+        endpoint.reserve(3L, 64, 64, 101);
+        var before = endpoint.admissionSnapshot();
+        assertEquals(1, before.slots(0));
+        assertEquals(64, before.kvTokens(0));
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                endpoint.beginPriorityPreemption(10L, List.of(1L), 2L, 128, 128, 70,
+                        endpoint.admissionVersion(), true));
+        var claimed = endpoint.admissionSnapshot();
+        assertNotSame(before, claimed);
+        assertEquals(0, claimed.slots(30));
+        assertEquals(0, claimed.kvTokens(30));
+        assertEquals(1, claimed.slots(70));
+        assertEquals(3, claimed.engineLoad(), "claimed victim still consumes capacity until confirmation");
+    }
+
+    @Test
+    void repeatedFailureReadsReuseOneSummaryForAllPriorities() throws Exception {
+        for (int i = 1; i <= 10000; i++) {
+            endpoint.reserve(i, 1, 1, (i % 100) + 1);
+        }
+        var summary = endpoint.admissionSnapshot();
+        try (var threads = Executors.newFixedThreadPool(4)) {
+            var readers = new ArrayList<Future<?>>();
+            for (int t = 0; t < 4; t++) {
+                readers.add(threads.submit(() -> {
+                    for (int i = 0; i < 1000; i++) {
+                        assertSame(summary, endpoint.admissionSnapshot());
+                    }
+                }));
+            }
+            for (var reader : readers) {
+                reader.get(5, TimeUnit.SECONDS);
+            }
+        }
+        assertEquals(100, summary.slots(70));
+        assertEquals(10000, summary.engineLoad());
     }
 
     @Test

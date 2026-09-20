@@ -20,6 +20,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -35,7 +36,7 @@ class PrefillRequestCapacityWakeTest {
                     @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
                         delivered.countDown();
                     }
-                    @Override public void onOfferFailure(BatchItem item, Throwable error) { }
+
                     @Override public void onDeliveryFailure(BatchItem item, Throwable error) { }
                 }, mock(BatchSchedulerReporter.class));
         try {
@@ -43,7 +44,7 @@ class PrefillRequestCapacityWakeTest {
             assertEquals(0, endpoint.availableRequestSlots(1));
 
             long beforeOfferVersion = endpoint.getBatcher().queueVersion();
-            assertTrue(endpoint.getBatcher().tryOffer(batchItem(2)));
+            assertNull(endpoint.getBatcher().tryOffer(batchItem(2)));
             awaitTrue(() -> endpoint.getBatcher().queueVersion() > beforeOfferVersion + 1);
             assertEquals(1, delivered.getCount());
 

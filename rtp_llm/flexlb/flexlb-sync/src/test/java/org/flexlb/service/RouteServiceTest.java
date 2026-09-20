@@ -163,7 +163,8 @@ class RouteServiceTest {
         Response actual = routeService.route(balanceContext).join();
 
         assertFalse(actual.isSuccess());
-        assertEquals(StrategyErrorType.BATCH_BUILD_FAILED.getErrorCode(), actual.getCode());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), actual.getCode());
+        assertEquals("missing serialized generate_input for batch dispatch", actual.getErrorMessage());
         verify(priorityScheduler, never()).submit(any(BalanceContext.class));
         verify(defaultRouter, never()).route(any(BalanceContext.class));
     }

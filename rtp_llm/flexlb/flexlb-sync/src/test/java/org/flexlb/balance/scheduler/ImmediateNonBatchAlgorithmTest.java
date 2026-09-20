@@ -57,7 +57,7 @@ class ImmediateNonBatchAlgorithmTest {
         ArgumentCaptor<DecisionGroupMetadata> metadata =
                 ArgumentCaptor.forClass(DecisionGroupMetadata.class);
         verify(handler).onDecisionGroupReady(items.capture(), metadata.capture());
-        verify(handler, never()).onOfferFailure(any(), any());
+
         assertEquals(List.of(item), items.getValue());
         assertEquals("non_batch_immediate", metadata.getValue().reason());
         assertEquals(0, context.size());

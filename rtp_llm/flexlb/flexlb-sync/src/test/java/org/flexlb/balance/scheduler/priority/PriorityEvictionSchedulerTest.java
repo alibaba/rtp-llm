@@ -55,8 +55,8 @@ import static org.mockito.Mockito.when;
  * Phase 3 tests for the prefill-queue eviction path of
  * {@link PriorityAdmissionScheduler} wired through
  * {@link PriorityScheduler#submit}: higher priority evicts strictly lower
- * priority on a full queue (the queued victim yields with the retryable
- * NO_AVAILABLE_WORKER, contract 5.3), equal priority never yields, admission
+ * priority on a full queue (the queued victim receives PRIORITY_PREEMPTED),
+ * equal priority never preempts, admission
  * retries remain fenced, and victim termination is idempotent.
  */
 class PriorityEvictionSchedulerTest {
@@ -149,12 +149,12 @@ class PriorityEvictionSchedulerTest {
 
         CompletableFuture<Response> incoming = scheduler.submit(context(2, 70));
 
-        // Queued victim yields with retryable NO_AVAILABLE_WORKER — the engine
-        // never saw it (contract 5.3); never PRIORITY_PREEMPTED.
+        // A queued victim is already admitted: eviction is preemption even before dispatch.
         Response victimResponse = victim.get(2, TimeUnit.SECONDS);
         assertFalse(victimResponse.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), victimResponse.getCode());
-        assertTrue(victimResponse.getErrorMessage().contains("yielded to higher-priority request 2"));
+        assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), victimResponse.getCode());
+        assertEquals("preempted by higher-priority request 2", victimResponse.getErrorMessage());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED, victimResponse.getAdmissionRejectReason());
 
         // Incoming replaced the victim in the single queue slot and stays queued
         await(() -> batcher.queueSize() == 1);
@@ -193,9 +193,9 @@ class PriorityEvictionSchedulerTest {
 
         Response firstResponse = firstVictim.get(2, TimeUnit.SECONDS);
         Response secondResponse = secondVictim.get(2, TimeUnit.SECONDS);
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
+        assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
                 firstResponse.getCode());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
+        assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
                 secondResponse.getCode());
 
         // The replacement remains committed even though both observer paths
@@ -209,7 +209,7 @@ class PriorityEvictionSchedulerTest {
                 eq(70), eq("prefill_queue_full"), eq("success"));
     }
 
-    // ==================== equal priority never yields ====================
+    // ==================== equal priority never preempts ====================
 
     @Test
     void equal_priority_is_never_evicted_and_incoming_fails_explicitly() throws Exception {
@@ -287,29 +287,6 @@ class PriorityEvictionSchedulerTest {
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), response.getCode());
         assertTrue(response.getErrorMessage().contains("preempted by higher-priority request 88"));
-
-        // Decode reservation released exactly once (no double release)
-        assertEquals(0, decodeEp.getInflightCount());
-        assertEquals(0, decodeEp.inflightHardKvReserved());
-        assertEquals(0, decodeEp.getTotalLoad());
-    }
-
-    @Test
-    void finish_yielded_is_idempotent_and_releases_decode_once() throws Exception {
-        DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-        decodeEp.reserve(78, 128, 136);
-        BatchItem item = dummyItem(78);
-        assertTrue(scheduler.registerInflight(item));
-
-        scheduler.finishYielded(item, "yielded to higher-priority request 88");
-        scheduler.finishYielded(item, "second call must be ignored");
-        // A racing preempt terminal must not override the yielded terminal
-        scheduler.finishPreempted(item, "late preempt must be ignored");
-
-        Response response = item.future().get(1, TimeUnit.SECONDS);
-        assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
-        assertTrue(response.getErrorMessage().contains("yielded to higher-priority request 88"));
 
         // Decode reservation released exactly once (no double release)
         assertEquals(0, decodeEp.getInflightCount());

@@ -9,6 +9,12 @@ import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.PriorityOrderingConfig;
 import org.flexlb.config.QueueSchedulerConfig;
 import org.flexlb.config.VictimStage;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.dao.route.RoleType;
 
 import java.util.EnumSet;
 
@@ -103,5 +109,12 @@ public final class SchedulingTestConfig {
     private static QueueSchedulerConfig activeQueueOrNew(FlexlbConfig config) {
         return config.getScheduler() instanceof QueueSchedulerConfig queue
                 ? queue : new QueueSchedulerConfig();
+    }
+
+    /** Model the Router's failure contract for tests focused on scheduling ownership. */
+    public static Response decodeCapacityFailure(BalanceContext ctx, EndpointRegistry registry) {
+        ServerStatus failure = ServerStatus.code(StrategyErrorType.RESOURCE_EXHAUSTED);
+        failure.setRole(RoleType.DECODE);
+        return DefaultRouter.buildFailureResponse(registry, ctx, failure);
     }
 }

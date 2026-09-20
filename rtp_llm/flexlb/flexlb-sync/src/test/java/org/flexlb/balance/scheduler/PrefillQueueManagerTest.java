@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -48,10 +49,10 @@ class PrefillQueueManagerTest {
         long now = System.currentTimeMillis();
 
         // Insertion order deliberately scrambled
-        assertTrue(batcher.tryOffer(item(1, 50, now + 5_000, now, 128)));
-        assertTrue(batcher.tryOffer(item(2, 70, now + 9_000, now + 100, 128)));
-        assertTrue(batcher.tryOffer(item(3, 50, now + 1_000, now + 200, 128)));
-        assertTrue(batcher.tryOffer(item(4, 50, now + 5_000, now - 100, 128)));
+        assertNull(batcher.tryOffer(item(1, 50, now + 5_000, now, 128)));
+        assertNull(batcher.tryOffer(item(2, 70, now + 9_000, now + 100, 128)));
+        assertNull(batcher.tryOffer(item(3, 50, now + 1_000, now + 200, 128)));
+        assertNull(batcher.tryOffer(item(4, 50, now + 5_000, now - 100, 128)));
 
         PrefillQueueSnapshot snapshot = batcher.queueManager().snapshot();
         List<Long> order = snapshot.items().stream().map(QueuedRequestSnapshot::requestId).toList();
@@ -74,10 +75,10 @@ class PrefillQueueManagerTest {
         // Same priority and supplied arrival timestamp still preserve the
         // actual offer sequence. requestId is only a defensive final tie-break
         // after the unique enqueue sequence.
-        assertTrue(batcher.tryOffer(item(1, 50, now + 9_000, now, 128)));
-        assertTrue(batcher.tryOffer(item(2, 50, now + 1_000, now, 128)));
-        assertTrue(batcher.tryOffer(item(4, 50, now + 9_000, now, 128)));
-        assertTrue(batcher.tryOffer(item(3, 50, now + 9_000, now, 128)));
+        assertNull(batcher.tryOffer(item(1, 50, now + 9_000, now, 128)));
+        assertNull(batcher.tryOffer(item(2, 50, now + 1_000, now, 128)));
+        assertNull(batcher.tryOffer(item(4, 50, now + 9_000, now, 128)));
+        assertNull(batcher.tryOffer(item(3, 50, now + 9_000, now, 128)));
 
         List<Long> order = batcher.queueManager().snapshot().items().stream()
                 .map(QueuedRequestSnapshot::requestId).toList();
@@ -91,9 +92,9 @@ class PrefillQueueManagerTest {
         long now = System.currentTimeMillis();
 
         // High priority arrives last: FIFO ordering must keep offer order.
-        assertTrue(batcher.tryOffer(item(1, 30, now + 1_000, now, 128)));
-        assertTrue(batcher.tryOffer(item(2, 50, now + 500, now + 100, 128)));
-        assertTrue(batcher.tryOffer(item(3, 70, now + 100, now + 200, 128)));
+        assertNull(batcher.tryOffer(item(1, 30, now + 1_000, now, 128)));
+        assertNull(batcher.tryOffer(item(2, 50, now + 500, now + 100, 128)));
+        assertNull(batcher.tryOffer(item(3, 70, now + 100, now + 200, 128)));
 
         List<Long> order = batcher.queueManager().snapshot().items().stream()
                 .map(QueuedRequestSnapshot::requestId).toList();
@@ -109,8 +110,8 @@ class PrefillQueueManagerTest {
         WorkerBatcher batcher = newBatcher();
         long now = System.currentTimeMillis();
         // Ancient arrivals zero out the head's remaining window for determinism
-        assertTrue(batcher.tryOffer(item(1, 50, now, now - 100_000, 128)));
-        assertTrue(batcher.tryOffer(item(2, 50, now, now - 100_000, 128)));
+        assertNull(batcher.tryOffer(item(1, 50, now, now - 100_000, 128)));
+        assertNull(batcher.tryOffer(item(2, 50, now, now - 100_000, 128)));
 
         PrefillQueueManager manager = batcher.queueManager();
         long waitP70 = manager.estimateWaitMs(70, 999);

@@ -6,6 +6,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -72,6 +73,10 @@ public class BalanceContext {
     private boolean success = true;
 
     private String errorMessage;
+
+    /** Scalar failure-time diagnostics for PV; never used to make scheduling decisions. */
+    @ToString.Exclude
+    private volatile Map<String, Object> schedulingDiagnostics;
 
     //===================== Scheduling =================//
 

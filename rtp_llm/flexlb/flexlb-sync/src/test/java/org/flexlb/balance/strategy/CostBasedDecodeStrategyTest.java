@@ -4,10 +4,21 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
+import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.service.RouteService;
+import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.balance.policy.GroupRoutingDecision;
+import org.flexlb.config.RoutingConfig;
+import org.flexlb.config.DirectSchedulerConfig;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.SchedulingMetadata;
+import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
@@ -34,8 +45,16 @@ class CostBasedDecodeStrategyTest {
     @BeforeEach
     void setUp() {
         configService = new ConfigService();
+        configService.loadBalanceConfig().setScheduler(new DirectSchedulerConfig());
         configService.loadBalanceConfig().getRouter().getRoles().getDecode()
                 .setSelector(new org.flexlb.config.RoutingConfig.KvUsageWeightedRandomConfig());
+        // DefaultRouter resolves every configured selector; only Decode is exercised here.
+        for (RoleType role : RoleType.values()) {
+            if (role != RoleType.DECODE && configService.loadBalanceConfig().strategyFor(role) != null) {
+                LoadBalanceStrategyFactory.register(configService.loadBalanceConfig().strategyFor(role),
+                        Mockito.mock(LoadBalanceStrategy.class));
+            }
+        }
     }
 
     @org.junit.jupiter.api.AfterEach
@@ -67,6 +86,109 @@ class CostBasedDecodeStrategyTest {
             ep.onWorkerStatusUpdate(ws, new WorkerStatusResponse());
         }
         return registry;
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"false,0", "false,30", "false,50", "false,70",
+            "true,0", "true,30", "true,50", "true,70"})
+    void fullDecodeUsesOccupantPriorityForBothSelectors(boolean random, int occupantPriority) {
+        configService.loadBalanceConfig().getRouter().getRoles().getDecode()
+                .getAvailability().setMaxEngineRequests(1L);
+        WorkerStatus worker = createWorkerStatus("127.0.0.1");
+        worker.setGroup("target");
+        worker.getTotalKvCacheTokens().set(10000);
+        worker.getAvailableKvCacheTokens().set(9000);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("127.0.0.1:8080", worker);
+        WorkerStatus otherWorker = createWorkerStatus("127.0.0.2");
+        otherWorker.setGroup("other");
+        EndpointRegistry registry = createDecodeRegistry(Map.of("127.0.0.1:8080", worker, "127.0.0.2:8080", otherWorker));
+        DecodeEndpoint other = Mockito.spy(registry.getDecode("127.0.0.2:8080"));
+        registry.getDecodeEndpoints().put("127.0.0.2:8080", other);
+        try {
+            DecodeEndpoint endpoint = Mockito.spy(registry.getDecode("127.0.0.1:8080"));
+            registry.getDecodeEndpoints().put("127.0.0.1:8080", endpoint);
+            if (occupantPriority > 0) {
+                endpoint.reserve(10L, 100L, 100L, occupantPriority);
+            } else {
+                TaskInfo running = new TaskInfo();
+                running.setRequestId(10L);
+                running.setPhase(TaskPhase.RUNNING);
+                running.setInputLength(100L);
+                WorkerStatusResponse update = new WorkerStatusResponse();
+                update.setRunningTaskInfo(Map.of("10", running));
+                endpoint.onWorkerStatusUpdate(worker, update);
+            }
+            ResourceMeasureFactory factory = Mockito.mock(ResourceMeasureFactory.class);
+            Mockito.when(factory.getMeasure(any())).thenReturn(new DecodeResourceMeasure(configService));
+            EngineWorkerStatus workers = new EngineWorkerStatus(registry);
+            LoadBalanceStrategy selector = random ? new RandomStrategy(workers, configService, factory)
+                    : new CostBasedDecodeStrategy(workers, factory);
+            BalanceContext context = decodeContext(128);
+
+            if (random) {
+                configService.loadBalanceConfig().getRouter().getRoles().getDecode()
+                        .setSelector(new RoutingConfig.RandomDecodeSelectorConfig());
+            }
+            DefaultRouter router = new DefaultRouter(configService, ctx -> new GroupRoutingDecision("target", "test"), registry);
+            Response result = new RouteService(configService, router, null,
+                    Mockito.mock(RecentCacheKeyTraceReporter.class)).route(context).join();
+
+            StrategyErrorType expected = occupantPriority == 0 ? StrategyErrorType.ADMISSION_UNAVAILABLE
+                    : occupantPriority < 50 ? StrategyErrorType.RESOURCE_EXHAUSTED
+                    : StrategyErrorType.PRIORITY_ADMISSION_REJECTED;
+            AdmissionRejectReason reason = occupantPriority == 0 ? AdmissionRejectReason.UNSPECIFIED
+                    : occupantPriority < 50 ? AdmissionRejectReason.RESOURCE_EXHAUSTED
+                    : occupantPriority == 50 ? AdmissionRejectReason.SAME_PRIORITY_AHEAD
+                    : AdmissionRejectReason.HIGHER_PRIORITY_AHEAD;
+            Assertions.assertEquals(expected.getErrorCode(), result.getCode());
+            Assertions.assertEquals(reason, result.getAdmissionRejectReason());
+            Assertions.assertEquals(1, ((java.util.List<?>) context.getSchedulingDiagnostics().get("decode")).size());
+            Mockito.verify(other, Mockito.never()).admissionSnapshot();
+            Mockito.verify(endpoint, Mockito.never()).layeredAdmissionView();
+            Assertions.assertNull(endpoint.reservationFor(context.getRequestId()), "rejection must not reserve KV");
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void kvWatermarkIsCapacityFailureEvenWhenPromptPhysicallyFits() {
+        configService.loadBalanceConfig().getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(50);
+        WorkerStatus worker = createWorkerStatus("127.0.0.1");
+        worker.getTotalKvCacheTokens().set(1000);
+        worker.getAvailableKvCacheTokens().set(400);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("127.0.0.1:8080", worker);
+        EndpointRegistry registry = createDecodeRegistry(Map.of("127.0.0.1:8080", worker));
+        DecodeEndpoint endpoint = Mockito.spy(registry.getDecode("127.0.0.1:8080"));
+        registry.getDecodeEndpoints().put("127.0.0.1:8080", endpoint);
+        try {
+            ResourceMeasureFactory factory = Mockito.mock(ResourceMeasureFactory.class);
+            Mockito.when(factory.getMeasure(any())).thenReturn(new DecodeResourceMeasure(configService));
+            CostBasedDecodeStrategy selector = new CostBasedDecodeStrategy(new EngineWorkerStatus(registry), factory);
+            DefaultRouter router = new DefaultRouter(configService, ctx -> GroupRoutingDecision.none(), registry);
+            Response result = new RouteService(configService, router, null,
+                    Mockito.mock(RecentCacheKeyTraceReporter.class)).route(decodeContext(128)).join();
+            Assertions.assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), result.getCode());
+            Assertions.assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED, result.getAdmissionRejectReason());
+            worker.setAlive(false);
+            Assertions.assertEquals(StrategyErrorType.NO_DECODE_WORKER.getErrorCode(),
+                    router.route(decodeContext(128)).getCode());
+            Mockito.verify(endpoint, Mockito.times(1)).admissionSnapshot();
+            Mockito.verify(endpoint, Mockito.never()).layeredAdmissionView();
+        } finally {
+            registry.close();
+        }
+    }
+
+    private BalanceContext decodeContext(long tokens) {
+        Request request = new Request();
+        request.setRequestId(1000L);
+        request.setSeqLen(tokens);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60000));
+        return context;
     }
 
     @Test
@@ -383,9 +505,11 @@ class CostBasedDecodeStrategyTest {
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
+        DefaultRouter router = new DefaultRouter(configService, ctx -> GroupRoutingDecision.none(), registry);
+        Response status = new RouteService(configService, router, null,
+                    Mockito.mock(RecentCacheKeyTraceReporter.class)).route(balanceContext).join();
 
         Assertions.assertFalse(status.isSuccess());
-        Assertions.assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), status.getCode());
+        Assertions.assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), status.getCode());
     }
 }

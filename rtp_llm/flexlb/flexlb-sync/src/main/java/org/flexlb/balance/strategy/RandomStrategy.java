@@ -62,7 +62,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
 
         if (MapUtils.isEmpty(workerEndpointMap)) {
             logger.warn("No worker status map found");
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            return ServerStatus.code(roleType.getErrorType());
         }
         List<WorkerEndpoint> endpoints = new ArrayList<>(workerEndpointMap.values());
 
@@ -70,27 +70,31 @@ public class RandomStrategy implements LoadBalanceStrategy {
         int size = endpoints.size();
         int startIndex = ThreadLocalRandom.current().nextInt(size);
         WorkerEndpoint selectedWorker = null;
+        boolean capacityBlocked = false;
         for (int i = 0; i < size; i++) {
             WorkerEndpoint ep = endpoints.get((startIndex + i) % size);
-            if (isWorkerAvailable(config, roleType, ep)) {
+            if (ep == null || !ep.getStatus().isAlive()) {
+                continue;
+            }
+            if (isResourceAvailable(config, roleType, ep)) {
                 selectedWorker = ep;
                 break;
             }
+            capacityBlocked = true;
         }
         if (selectedWorker == null) {
             logger.warn("No serviceable workers available out of {} total workers", size);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            boolean capacityRole = roleType == RoleType.PREFILL || roleType == RoleType.DECODE
+                    || roleType == RoleType.PDFUSION;
+            return ServerStatus.code(capacityBlocked && capacityRole
+                    ? StrategyErrorType.RESOURCE_EXHAUSTED : roleType.getErrorType());
         }
 
         logger.debug("Selected worker ip: {}, httpPort: {}", selectedWorker.getIp(), selectedWorker.getHttpPort());
         return buildServerStatus(selectedWorker, roleType, balanceContext, config);
     }
 
-    private boolean isWorkerAvailable(FlexlbConfig config, RoleType roleType, WorkerEndpoint ep) {
-        if (ep == null || !ep.getStatus().isAlive()) {
-            return false;
-        }
-
+    private boolean isResourceAvailable(FlexlbConfig config, RoleType roleType, WorkerEndpoint ep) {
         ResourceMeasureIndicatorEnum indicator = config.resourceMeasureFor(roleType);
         ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
         return resourceMeasure == null || resourceMeasure.isResourceAvailable(ep);
@@ -125,9 +129,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
             result.setSuccess(true);
         } catch (Exception e) {
             Logger.error("buildServerStatus error", e);
-            result.setSuccess(false);
-            result.setCode(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
-            result.setMessage(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg());
+            return ServerStatus.code(StrategyErrorType.BATCH_DISPATCH_FAILED, e.getMessage());
         }
         return result;
     }

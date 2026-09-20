@@ -10,6 +10,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SchedulingMetadataTest {
 
     @Test
+    void invalidCallerQosDoesNotBecomeExplicitDefaultPriority() {
+        for (int proto : new int[] {0, -1, 101}) {
+            for (String header : new String[] {null, "", "abc", "-1", "0", "101", "49.5"}) {
+                SchedulingMetadata metadata = SchedulingMetadata.of(proto, header, 10_000L, 50);
+                assertEquals(50, metadata.priority());
+                assertEquals(SchedulingMetadata.PrioritySource.DEFAULT, metadata.source());
+            }
+        }
+        for (int priority : new int[] {1, 49, 50, 100}) {
+            SchedulingMetadata header = SchedulingMetadata.of(0, String.valueOf(priority), 10_000L, 50);
+            assertEquals(priority, header.priority());
+            assertEquals(SchedulingMetadata.PrioritySource.EXPLICIT, header.source());
+            SchedulingMetadata proto = SchedulingMetadata.of(priority, "invalid", 10_000L, 50);
+            assertEquals(priority, proto.priority());
+            assertEquals(SchedulingMetadata.PrioritySource.EXPLICIT, proto.source());
+        }
+    }
+
+    @Test
     void normalizesPriorityAndKeepsCallerExpirationUnchanged() {
         long expiresAtMs = 1_893_456_000_000L;
 

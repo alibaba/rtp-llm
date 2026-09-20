@@ -24,14 +24,6 @@ public interface BatcherAlgorithm {
     void processQueue(BatcherContext ctx) throws InterruptedException;
 
     /**
-     * Hook called by {@link WorkerBatcher#offer} before enqueue. Gives the
-     * algorithm a chance to update arrival statistics or perform lightweight
-     * bookkeeping.
-     */
-    default void onOffer(BatcherContext ctx, BatchItem item, long nowMs) {
-    }
-
-    /**
      * Estimated time a new request would wait before its configured dispatch.
      */
     long queueWaitMs(BatcherContext ctx);

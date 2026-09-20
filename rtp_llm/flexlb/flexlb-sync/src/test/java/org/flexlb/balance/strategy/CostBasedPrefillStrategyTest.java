@@ -5,16 +5,25 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.service.RouteService;
+import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.balance.policy.GroupRoutingDecision;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DirectSchedulerConfig;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
@@ -97,6 +106,78 @@ class CostBasedPrefillStrategyTest {
             ws.setGrpcPort(9090);
             endpointRegistry.ensureEndpoint(RoleType.PREFILL, entry.getKey(), ws);
         }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"false,PREFILL", "true,PREFILL", "false,PDFUSION", "true,PDFUSION"})
+    void healthyPrefillAtPendingLimitIsCapacityFailureAndRecovers(boolean shortestTtft, RoleType role) {
+        endpointConfig.setScheduler(new DirectSchedulerConfig());
+        endpointConfig.getRouter().getRoles().getPrefill().getAvailability().setMaxPendingRequests(1);
+        ConfigService config = Mockito.mock(ConfigService.class);
+        Mockito.when(config.loadBalanceConfig()).thenReturn(endpointConfig);
+        PrefillResourceMeasure measure = new PrefillResourceMeasure(config);
+        Mockito.when(resourceMeasureFactory.getMeasure(any())).thenReturn(measure);
+        LoadBalanceStrategy selector = shortestTtft
+                ? new ShortestTTFTStrategy(engineWorkerStatus, cacheAwareService, resourceMeasureFactory, engineHealthReporter)
+                : strategy;
+        WorkerStatus worker = createUnregisteredWorker("10.0.0.1");
+        worker.setGroup("target");
+        worker.setRole(role);
+        PrefillEndpoint endpoint = (PrefillEndpoint) endpointRegistry.ensureEndpoint(role, "10.0.0.1:8080", worker);
+        endpoint.commitBatch(12345L, 1000, List.of(batchItem(12345L, 1000, 0)));
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(role).put("10.0.0.1:8080", worker);
+        BalanceContext context = buildContext(128, 42, endpointConfig);
+
+        LoadBalanceStrategyFactory.register(endpointConfig.strategyFor(role), selector);
+        DefaultRouter router = new DefaultRouter(config, ctx -> new GroupRoutingDecision("target", "test"), endpointRegistry);
+        Response full = new RouteService(config, router, batchScheduler,
+                Mockito.mock(RecentCacheKeyTraceReporter.class)).route(context).join();
+
+        assertFalse(full.isSuccess());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), full.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED, full.getAdmissionRejectReason());
+        assertEquals("admission capacity is temporarily exhausted", full.getErrorMessage());
+        var diagnostics = (List<?>) context.getSchedulingDiagnostics().get("prefill");
+        assertEquals(1, diagnostics.size());
+        assertEquals(1L, ((Map<?, ?>) diagnostics.getFirst()).get("pending"));
+
+        ServerStatus absentGroup = selector.select(context, role, "other");
+        assertEquals(role.getErrorType().getErrorCode(), absentGroup.getCode());
+        worker.setAlive(false);
+        assertEquals(role.getErrorType().getErrorCode(),
+                selector.select(context, role, "target").getCode());
+        worker.setAlive(true);
+        endpoint.releaseBatch(12345L);
+        Response recovered = new RouteService(config, router, batchScheduler,
+                Mockito.mock(RecentCacheKeyTraceReporter.class)).route(buildContext(128, 43, endpointConfig)).join();
+        assertTrue(recovered.isSuccess());
+        assertEquals(role, recovered.getServerStatus().getFirst().getRole());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void capacityRejectionRemainsTheCauseWhenHealthChangesAfterTheGate(boolean random) {
+        WorkerStatus worker = createWorker("10.0.0.1", 1000);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("10.0.0.1:8080", worker);
+        if (random) {
+            Mockito.when(prefillResourceMeasure.isResourceAvailable(any(WorkerEndpoint.class))).thenAnswer(invocation -> {
+                worker.setAlive(false);
+                return false;
+            });
+        } else {
+            Mockito.when(prefillResourceMeasure.isResourceAvailable(any(PrefillEndpoint.class))).thenAnswer(invocation -> {
+                worker.setAlive(false);
+                return false;
+            });
+        }
+        ConfigService config = Mockito.mock(ConfigService.class);
+        Mockito.when(config.loadBalanceConfig()).thenReturn(endpointConfig);
+        LoadBalanceStrategy selector = random
+                ? new RandomStrategy(engineWorkerStatus, config, resourceMeasureFactory)
+                : new ShortestTTFTStrategy(engineWorkerStatus, cacheAwareService, resourceMeasureFactory, engineHealthReporter);
+        ServerStatus failure = selector.select(buildContext(128, 42, endpointConfig), RoleType.PREFILL, null);
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), failure.getCode());
+        assertFalse(worker.isAlive());
     }
 
     @Test
@@ -199,6 +280,7 @@ class CostBasedPrefillStrategyTest {
 
         assertFalse(allUnavailable.isSuccess(),
                 "selection must retry elsewhere when no coherent wait snapshot exists");
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), allUnavailable.getCode());
     }
 
     @Test

@@ -10,6 +10,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -81,6 +82,10 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
 
+
+        lenient().when(endpointRegistry.getPrefillEndpoints(any(RoleType.class))).thenReturn(Map.of());
+        lenient().when(endpointRegistry.getDecodeEndpoints()).thenReturn(new java.util.concurrent.ConcurrentHashMap<>());
+
         // Mock config service
         when(configService.loadBalanceConfig()).thenReturn(loadBalanceConfig);
         when(loadBalanceConfig.strategyFor(any(RoleType.class))).thenAnswer(inv -> {
@@ -137,6 +142,41 @@ class DefaultRouterTest {
         } catch (Exception e) {
             fail("Failed to mock LoadBalanceStrategyFactory: " + e.getMessage());
         }
+    }
+
+    @Test
+    void preservesPrefillFailuresAndRollsBackDecode() {
+        var prefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        var decodeWorker = new org.flexlb.dao.master.WorkerStatus();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("10.0.0.1:8080", prefillWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("10.0.0.2:8080", decodeWorker);
+        ServerStatus selected = new ServerStatus();
+        selected.setSuccess(true);
+        selected.setRole(RoleType.DECODE);
+        selected.setServerIp("10.0.0.2");
+        selected.setHttpPort(8080);
+        selected.setGroup("target");
+        WorkerEndpoint endpoint = org.mockito.Mockito.mock(WorkerEndpoint.class);
+        when(endpointRegistry.get(RoleType.DECODE, "10.0.0.2:8080")).thenReturn(endpoint);
+        when(decodeStrategy.select(balanceContext, RoleType.DECODE, null)).thenReturn(selected);
+        java.util.List<Response> failures = java.util.List.of(
+                Response.error(StrategyErrorType.RESOURCE_EXHAUSTED, AdmissionRejectReason.RESOURCE_EXHAUSTED),
+                Response.error(StrategyErrorType.BATCH_DISPATCH_FAILED, AdmissionRejectReason.UNSPECIFIED, "invalid predictor"));
+        for (Response expected : failures) {
+            when(prefillStrategy.select(balanceContext, RoleType.PREFILL, "target"))
+                    .thenReturn(ServerStatus.code(StrategyErrorType.fromErrorCode(expected.getCode()),
+                            expected.getErrorMessage()));
+            Response actual = defaultRouter.route(balanceContext);
+            assertEquals(expected.getCode(), actual.getCode());
+            assertEquals(expected.getAdmissionRejectReason(), actual.getAdmissionRejectReason());
+            assertEquals(expected.getErrorMessage(), actual.getErrorMessage());
+            assertEquals(RoleType.PREFILL, actual.getFailedRole());
+            assertEquals("target", actual.getFailedGroup());
+            var json = new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(actual);
+            assertFalse(json.has("failedRole"));
+            assertFalse(json.has("failedGroup"));
+        }
+        verify(decodeStrategy, org.mockito.Mockito.times(failures.size())).rollBack(endpoint, 12345L);
     }
 
     @Test
@@ -201,6 +241,7 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
+        org.mockito.Mockito.verifyNoInteractions(endpointRegistry);
     }
 
     @Test
@@ -213,6 +254,7 @@ class DefaultRouterTest {
 
         ServerStatus prefillServerStatus = new ServerStatus();
         prefillServerStatus.setSuccess(false);
+        prefillServerStatus.setCode(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode());
         prefillServerStatus.setMessage("No prefill worker available");
         when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
 
@@ -260,6 +302,7 @@ class DefaultRouterTest {
 
         ServerStatus fusionServerStatus = new ServerStatus();
         fusionServerStatus.setSuccess(false);
+        fusionServerStatus.setCode(StrategyErrorType.NO_PDFUSION_WORKER.getErrorCode());
         fusionServerStatus.setMessage("No fusion worker available");
         when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
@@ -332,6 +375,7 @@ class DefaultRouterTest {
 
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(false);
+        vitServerStatus.setCode(StrategyErrorType.NO_VIT_WORKER.getErrorCode());
         vitServerStatus.setMessage("No vit worker available");
         when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
@@ -366,6 +410,7 @@ class DefaultRouterTest {
 
         ServerStatus decodeServerStatus = new ServerStatus();
         decodeServerStatus.setSuccess(false);
+        decodeServerStatus.setCode(StrategyErrorType.NO_DECODE_WORKER.getErrorCode());
         decodeServerStatus.setMessage("No decode worker available");
         when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
 
@@ -400,6 +445,7 @@ class DefaultRouterTest {
 
         ServerStatus prefillServerStatus = new ServerStatus();
         prefillServerStatus.setSuccess(false);
+        prefillServerStatus.setCode(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode());
         prefillServerStatus.setMessage("No prefill worker available");
         when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
 
@@ -449,6 +495,7 @@ class DefaultRouterTest {
 
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(false);
+        vitServerStatus.setCode(StrategyErrorType.NO_VIT_WORKER.getErrorCode());
         vitServerStatus.setMessage("No vit worker available");
         when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
 

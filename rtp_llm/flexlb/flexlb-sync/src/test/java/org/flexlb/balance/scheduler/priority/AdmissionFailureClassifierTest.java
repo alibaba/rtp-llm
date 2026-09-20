@@ -1,10 +1,19 @@
 package org.flexlb.balance.scheduler.priority;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.enums.DecodeTaskPhase;
+import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -13,13 +22,28 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class AdmissionFailureClassifierTest {
 
     @Test
+    void kvOccupancyWithoutTaskDetailsIsAdmissionUnavailable() {
+        Response failure = classifyDecode(incoming(50, 128),
+                List.of(endpoint(0, 0, 64, 2_000, List.of(), List.of(), List.of())));
+        assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE, AdmissionRejectReason.UNSPECIFIED);
+    }
+
+    @Test
+    void availabilityWatermarkIsNotAnUnexplainedSelectionFailure() {
+        DecodeEndpointSnapshot endpoint = endpoint(0, 0, 1_000, 2_000, List.of(), List.of(), List.of());
+        Response failure = classifyDecode(incoming(50, 128),
+                List.of(endpoint));
+        assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED, AdmissionRejectReason.RESOURCE_EXHAUSTED);
+    }
+
+    @Test
     void confirmedOccupantWithoutPriorityProvenanceIsAdmissionUnavailable() {
         DecodeRequestSnapshot unattributed = request(
                 1, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 128, false, false);
         DecodeEndpointSnapshot endpoint = endpoint(
                 1, 1, 1_000, 2_000, List.of(), List.of(unattributed), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
         assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
@@ -35,11 +59,12 @@ class AdmissionFailureClassifierTest {
                 1, 1, 1_000, 2_000,
                 List.of(higherQueued), List.of(), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
-        assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
-                AdmissionRejectReason.RESOURCE_EXHAUSTED);
+        // The one engine slot is occupied by an unreported request, not the queued reservation.
+        assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
+                AdmissionRejectReason.UNSPECIFIED);
     }
 
     @Test
@@ -50,7 +75,7 @@ class AdmissionFailureClassifierTest {
                 1, 1, 1_000, 2_000,
                 List.of(), List.of(), List.of(untrustedP70));
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
         assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
@@ -69,7 +94,7 @@ class AdmissionFailureClassifierTest {
                 1, 0, 0, 2_000,
                 List.of(sameQueued), List.of(higherAccepted), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
         assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
@@ -85,7 +110,7 @@ class AdmissionFailureClassifierTest {
                 1, 0, 0, 2_000,
                 List.of(unattributedQueued), List.of(), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
         assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
@@ -102,7 +127,7 @@ class AdmissionFailureClassifierTest {
                 "decode-1", 2, 2, 1_000, 2_000,
                 List.of(), List.of(unattributed, higher), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
         assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
@@ -119,7 +144,7 @@ class AdmissionFailureClassifierTest {
                 "decode-1", 2, 2, 2, 1_000, 2_000,
                 List.of(), List.of(unattributed, higher), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
         assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
@@ -138,7 +163,7 @@ class AdmissionFailureClassifierTest {
                 "decode-1", 3, 3, 2, 1_000, 2_000,
                 List.of(), List.of(unattributed, higher, same), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
         assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
@@ -155,7 +180,7 @@ class AdmissionFailureClassifierTest {
                 "decode-1", 0, 0, 0, 2_000,
                 List.of(), List.of(unattributed, same), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
         assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
@@ -172,7 +197,7 @@ class AdmissionFailureClassifierTest {
                 "decode-1", 0, 0, 0, 2_000,
                 List.of(), List.of(unattributed, higher), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
         assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
@@ -191,7 +216,7 @@ class AdmissionFailureClassifierTest {
                 "decode-1", 0, 0, 0, 2_000,
                 List.of(), List.of(unattributed, higher, same), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
         assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
@@ -209,7 +234,7 @@ class AdmissionFailureClassifierTest {
                 List.of(request(2, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         0, true, false)), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(higher, same));
 
         assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
@@ -227,7 +252,7 @@ class AdmissionFailureClassifierTest {
                 List.of(request(2, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         0, true, false)), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(unattributed, higher));
 
         assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
@@ -244,7 +269,7 @@ class AdmissionFailureClassifierTest {
                 "decode-capacity", 0, 0, 1_000, 2_000,
                 List.of(), List.of(), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(unattributed, snapshotHasCapacity));
 
         assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
@@ -262,7 +287,7 @@ class AdmissionFailureClassifierTest {
                 List.of(request(2, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         0, true, false)), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(first, second));
 
         assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
@@ -276,7 +301,7 @@ class AdmissionFailureClassifierTest {
         DecodeEndpointSnapshot second = endpoint(
                 "decode-2", 0, 0, 200, 200, List.of(), List.of(), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 256), List.of(first, second));
 
         assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
@@ -294,7 +319,7 @@ class AdmissionFailureClassifierTest {
                 List.of(request(2, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         0, true, false)), List.of());
 
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
+        Response failure = classifyDecode(
                 incoming(50, 128), List.of(tooSmallWithUnattributedOccupant, higher));
 
         // The first endpoint cannot fit the request even when empty, so its
@@ -302,136 +327,6 @@ class AdmissionFailureClassifierTest {
         // remaining endpoint causes differ and conservatively fold to 8431.
         assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
                 AdmissionRejectReason.RESOURCE_EXHAUSTED);
-    }
-
-    @Test
-    void prefillWithoutSnapshotDeficitIsResourceExhausted() {
-        PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
-                "prefill-1", 1, 4,
-                List.of(new QueuedRequestSnapshot(1, 70, 0,
-                        128, 0, QueuedRequestSnapshot.PREFILL_QUEUED)));
-
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
-                incoming(50, 128), queue);
-
-        assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
-                AdmissionRejectReason.RESOURCE_EXHAUSTED);
-    }
-
-    @Test
-    void prefillResidualBlockedByLegacyOccupantIsAdmissionUnavailable() {
-        PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
-                "prefill-1", 1, 1,
-                List.of(new QueuedRequestSnapshot(1, 0, 0,
-                        128, 0, QueuedRequestSnapshot.PREFILL_QUEUED)));
-
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
-                incoming(50, 128), queue);
-
-        assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
-                AdmissionRejectReason.UNSPECIFIED);
-    }
-
-    @Test
-    void prefillProvenHigherBlockerWinsWhenItCoversResidual() {
-        PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
-                "prefill-1", 1, 2,
-                List.of(
-                        queued(1, 70),
-                        new QueuedRequestSnapshot(2, 0, 0,
-                                128, 0, QueuedRequestSnapshot.PREFILL_QUEUED)));
-
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
-                incoming(50, 128), queue);
-
-        assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
-                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD);
-    }
-
-    @Test
-    void prefillUnattributedOccupantIsNeededBeyondKnownProtectedCapacity() {
-        PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
-                "prefill-1", 1, 1,
-                List.of(
-                        queued(1, 70),
-                        new QueuedRequestSnapshot(2, 0, 0,
-                                128, 0, QueuedRequestSnapshot.PREFILL_QUEUED)));
-
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
-                incoming(50, 128), queue);
-
-        assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
-                AdmissionRejectReason.UNSPECIFIED);
-    }
-
-    @Test
-    void prefillLegacyOccupantDoesNotMatterWhenLowerPriorityCapacityIsEnough() {
-        PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
-                "prefill-1", 1, 2,
-                List.of(
-                        new QueuedRequestSnapshot(1, 0, 0,
-                                128, 0, QueuedRequestSnapshot.PREFILL_QUEUED),
-                        queued(2, 30)));
-
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
-                incoming(50, 128), queue);
-
-        // Evicting the one lower-priority item would cover the one-slot
-        // deficit, so the unprioritized item is not causally relevant.
-        assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
-                AdmissionRejectReason.RESOURCE_EXHAUSTED);
-    }
-
-    @Test
-    void queuedTimeoutUsesHigherPriorityPrefix() {
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
-                50, List.of(
-                        queued(1, 50),
-                        queued(2, 70)));
-
-        assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
-                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD);
-    }
-
-    @Test
-    void queuedTimeoutUsesSamePriorityFifoPrefix() {
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
-                50, List.of(queued(1, 30), queued(2, 50)));
-
-        assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
-                AdmissionRejectReason.SAME_PRIORITY_AHEAD);
-    }
-
-    @Test
-    void queuedTimeoutWithoutProtectedPrefixIsResourceExhausted() {
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
-                50, List.of(queued(1, 30)));
-
-        assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
-                AdmissionRejectReason.RESOURCE_EXHAUSTED);
-    }
-
-    @Test
-    void queuedTimeoutWithUnattributedItemAheadIsAdmissionUnavailable() {
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
-                50, List.of(queued(1, 0)));
-
-        assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
-                AdmissionRejectReason.UNSPECIFIED);
-    }
-
-    @Test
-    void queuedTimeoutUsesProvenHigherBeforeUnattributedFallback() {
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
-                50, List.of(queued(1, 0), queued(2, 70)));
-
-        assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
-                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD);
-    }
-
-    private static QueuedRequestSnapshot queued(long requestId, int priority) {
-        return new QueuedRequestSnapshot(requestId, priority, requestId,
-                128, 0, QueuedRequestSnapshot.PREFILL_QUEUED);
     }
 
     private static DecodeEndpointSnapshot endpoint(
@@ -485,15 +380,54 @@ class AdmissionFailureClassifierTest {
                 kvTokens, kvTokens, priorityKnown, queued);
     }
 
+    private static Response classifyDecode(PriorityRequestEnvelope incoming, List<DecodeEndpointSnapshot> endpoints) {
+        var summaries = new ArrayList<DecodeEndpoint.AdmissionSnapshot>();
+        for (DecodeEndpointSnapshot fixture : endpoints) {
+            var status = new WorkerStatus();
+            var endpoint = Mockito.spy(new DecodeEndpoint(status));
+            var confirmed = new HashMap<String, TaskInfo>();
+            for (var layer : List.of(fixture.accepted(), fixture.running())) {
+                for (var occupant : layer) {
+                    if (occupant.priorityKnown()) {
+                        endpoint.reserve(occupant.requestId(), occupant.kvTokens(), occupant.kvTokens(), occupant.priority());
+                    }
+                    var task = new TaskInfo();
+                    task.setRequestId(occupant.requestId());
+                    task.setInputLength(occupant.kvTokens());
+                    task.setPhase(occupant.phase() == DecodeTaskPhase.RUNNING
+                            ? TaskPhase.RUNNING : TaskPhase.KV_ALLOCATED);
+                    confirmed.put(String.valueOf(occupant.requestId()), task);
+                }
+            }
+            var report = new WorkerStatusResponse();
+            report.setRunningTaskInfo(confirmed);
+            endpoint.onWorkerStatusUpdate(status, report);
+            for (var occupant : fixture.reserved()) {
+                endpoint.reserve(occupant.requestId(), occupant.kvTokens(), occupant.kvTokens(),
+                        occupant.priorityKnown() ? occupant.priority() : 0);
+                if (occupant.queued()) {
+                    endpoint.markQueuedPhase(occupant.requestId());
+                }
+            }
+            // Aggregate engine reports may exceed tracked requests; exercise that gap independently.
+            Mockito.doReturn(fixture.engineLoad()).when(endpoint).getEngineLoad();
+            Mockito.doReturn(fixture.realKvTotal()).when(endpoint).realKvTotal();
+            Mockito.doReturn(fixture.realKvAvailable()).when(endpoint).realKvAvailable();
+            summaries.add(endpoint.admissionSnapshot());
+        }
+        return AdmissionFailureClassifier.classifyDecode(incoming.priority(), incoming.hardKvTokens(),
+                endpoints.getFirst().concurrencyLimit(), summaries);
+    }
+
     private static PriorityRequestEnvelope incoming(int priority, long hardKvTokens) {
         return new PriorityRequestEnvelope(999, priority, hardKvTokens, 0,
                 0, hardKvTokens, hardKvTokens);
     }
 
-    private static void assertFailure(AdmissionFailure actual,
+    private static void assertFailure(Response actual,
                                       StrategyErrorType errorType,
                                       AdmissionRejectReason reason) {
-        assertEquals(errorType, actual.errorType());
-        assertEquals(reason, actual.reason());
+        assertEquals(errorType.getErrorCode(), actual.getCode());
+        assertEquals(reason, actual.getAdmissionRejectReason());
     }
 }

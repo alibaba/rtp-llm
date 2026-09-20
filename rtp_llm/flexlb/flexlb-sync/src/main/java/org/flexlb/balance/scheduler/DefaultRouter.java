@@ -3,6 +3,8 @@ package org.flexlb.balance.scheduler;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.DecodeEndpoint.AdmissionSnapshot;
+import org.flexlb.balance.scheduler.priority.AdmissionFailureClassifier;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
@@ -91,8 +93,12 @@ public class DefaultRouter implements Router {
             return buildSuccessResponse(routingResult.serverStatusList());
         }
 
-        rollBackRoutingFailure(balanceContext, routingResult);
-        return buildFailureResponse(routingResult);
+        ServerStatus failure = routingResult.failure();
+        try {
+            return buildFailureResponse(endpointRegistry, balanceContext, failure);
+        } finally {
+            rollBackRoutingFailure(balanceContext, routingResult);
+        }
     }
 
     /**
@@ -134,12 +140,21 @@ public class DefaultRouter implements Router {
 
         for (RoleType roleType : roleTypeList) {
             LoadBalanceStrategy loadBalanceStrategy = getLoadBalanceStrategy(roleType);
-            ServerStatus serverStatus = loadBalanceStrategy.select(balanceContext, roleType, group);
+            ServerStatus serverStatus;
+            try {
+                serverStatus = loadBalanceStrategy.select(balanceContext, roleType, group);
+            } catch (RuntimeException failure) {
+                Logger.warn("Worker selection failed for role {}", roleType, failure);
+                serverStatus = ServerStatus.code(StrategyErrorType.BATCH_DISPATCH_FAILED,
+                        roleType.getCode() + " selection failed: " + failure.getMessage());
+            }
 
             if (!serverStatus.isSuccess()) {
                 // Selection failed, return failure result
                 Logger.warn("Failed to select {} worker: {}", roleType.getCode(), serverStatus.getMessage());
-                return RoutingResult.failure(serverStatusList, roleType, serverStatus.getMessage());
+                serverStatus.setRole(roleType);
+                serverStatus.setGroup(group);
+                return RoutingResult.failure(serverStatusList, serverStatus);
             }
 
             // Record server selection metrics
@@ -194,14 +209,55 @@ public class DefaultRouter implements Router {
         return response;
     }
 
-    private Response buildFailureResponse(RoutingResult routingResult) {
-        StrategyErrorType errorType = routingResult.failedRoleType().getErrorType();
-        String detailMessage = routingResult.errorMessage();
-
-        Response response = new Response();
-        response.setSuccess(false);
-        response.setCode(errorType.getErrorCode());
-        response.setErrorMessage(errorType.getErrorMsg() + ": " + detailMessage);
+    /** Shared by ordinary routing and Prefill placement after Decode eviction. */
+    public static Response buildFailureResponse(EndpointRegistry registry, BalanceContext ctx, ServerStatus failure) {
+        Response response = Response.error(failure);
+        boolean classifyDecode = failure.getRole() == RoleType.DECODE
+                && StrategyErrorType.fromErrorCode(failure.getCode()).isCapacityRejection();
+        List<AdmissionSnapshot> decodes = new ArrayList<>();
+        String group = failure.getGroup();
+        RoleType role = failure.getRole();
+        List<Map<String, Object>> prefills = new ArrayList<>();
+        List<Map<String, Object>> decodeValues = new ArrayList<>();
+        RoleType prefillRole = role == RoleType.PDFUSION ? RoleType.PDFUSION : RoleType.PREFILL;
+        if (role == RoleType.PREFILL || role == RoleType.PDFUSION || role == RoleType.DECODE) {
+            registry.getPrefillEndpoints(prefillRole).forEach((id, endpoint) -> {
+                if (group == null || group.equals(endpoint.getStatus().getGroup())) {
+                    prefills.add(Map.of("endpoint", id, "alive", endpoint.getStatus().isAlive(),
+                            "queueDepth", endpoint.getBatcher().queueSize(), "pending", endpoint.realPendingCount()));
+                }
+            });
+        }
+        if (role == RoleType.PREFILL || role == RoleType.DECODE) {
+            registry.getDecodeEndpoints().forEach((id, endpoint) -> {
+                if (group != null && !group.equals(endpoint.getStatus().getGroup())) {
+                    return;
+                }
+                boolean alive = endpoint.getStatus().isAlive();
+                AdmissionSnapshot snapshot = classifyDecode && alive ? endpoint.admissionSnapshot() : null;
+                if (snapshot != null) {
+                    decodes.add(snapshot);
+                }
+                decodeValues.add(snapshot != null
+                        ? Map.of("endpoint", id, "alive", true, "engineLoad", snapshot.engineLoad(),
+                                "kvAvailable", snapshot.kvAvailable(), "kvTotal", snapshot.kvTotal(),
+                                "hardKvReserved", snapshot.hardKvReserved())
+                        : Map.of("endpoint", id, "alive", alive,
+                                "engineLoad", endpoint.getEngineLoad(), "kvAvailable", endpoint.realKvAvailable(),
+                                "kvTotal", endpoint.realKvTotal(), "hardKvReserved", endpoint.inflightHardKvReserved()));
+            });
+        }
+        if (!decodes.isEmpty()) {
+            Long limit = ctx.getConfig().getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests();
+            response = AdmissionFailureClassifier.classifyDecode(ctx.getPriority(), ctx.getRequest().getSeqLen(),
+                    limit == null ? 0 : limit, decodes);
+            response.setFailedRole(failure.getRole());
+            response.setFailedGroup(group);
+        }
+        ctx.setSchedulingDiagnostics(Map.of("cause", failure.getMessage() == null ? "worker selection failed" : failure.getMessage(),
+                "capturedAtMs", System.currentTimeMillis(), "role", role == null ? "" : role.getCode(),
+                "group", group == null ? "" : group, "prefill", List.copyOf(prefills), "decode", List.copyOf(decodeValues)));
         return response;
     }
+
 }

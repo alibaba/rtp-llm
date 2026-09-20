@@ -30,7 +30,6 @@ import org.mockito.Mockito;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -221,7 +220,7 @@ class CostBasedPrefillMultiNodeSelectionTest {
             ctx.setConfig(config);
             ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, now + 30_000));
             BatchItem item = new BatchItem(ctx, null, null, null, null, ep, null, now);
-            ep.getBatcher().offer(item);
+            ep.getBatcher().tryOffer(item);
         }
         assertEquals(count, ep.getBatcher().queueSize(),
                 "parked batcher queue must retain all items for " + ep.getIp());

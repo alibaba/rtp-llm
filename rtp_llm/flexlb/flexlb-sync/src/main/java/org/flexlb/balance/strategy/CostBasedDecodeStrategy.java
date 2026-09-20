@@ -52,11 +52,12 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
         EndpointFilterResult filterResult = getAvailableEndpoints(
                 roleType, group, config.resourceMeasureFor(roleType));
-        List<DecodeEndpoint> eligible = filterResult.endpoints();
+        List<DecodeEndpoint> eligible = filterResult.endpoints;
         if (CollectionUtils.isEmpty(eligible)) {
             Logger.debug("Decode select failed: no available endpoints, request_id={}, registered={}, eligible=0, rejections={}",
-                    balanceContext.getRequestId(), filterResult.registered(), filterResult.rejections());
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+                    balanceContext.getRequestId(), filterResult.registered, filterResult.rejections);
+            return ServerStatus.code(filterResult.errorType,
+                    "rejections=" + filterResult.rejections);
         }
 
         FilterResult hardFilterResult = applyHardFilters(eligible, seqLen,
@@ -73,41 +74,55 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                     roleType, balanceContext);
         }
 
-        Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
+        Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections);
         hardFilterResult.rejections().forEach((k, v) -> merged.merge(k, v, Integer::sum));
         Logger.debug("Decode select failed: all filtered out, request_id={}, rejections={}",
                 balanceContext.getRequestId(), merged);
-        return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+        return ServerStatus.code(filterResult.errorType.isCapacityRejection()
+                ? filterResult.errorType : hardFilterResult.errorType(),
+                "rejections=" + merged);
     }
 
-    private record EndpointFilterResult(List<DecodeEndpoint> endpoints, Map<String, Integer> rejections, int registered) {}
-    private record FilterResult(List<DecodeEndpoint> endpoints, Map<String, Integer> rejections) {}
+    private static final class EndpointFilterResult {
+        final List<DecodeEndpoint> endpoints;
+        final Map<String, Integer> rejections = new java.util.HashMap<>();
+        StrategyErrorType errorType;
+        int registered;
+
+        EndpointFilterResult(int capacity, StrategyErrorType errorType) {
+            this.endpoints = new ArrayList<>(capacity);
+            this.errorType = errorType;
+        }
+    }
+    private record FilterResult(List<DecodeEndpoint> endpoints, Map<String, Integer> rejections,
+                                StrategyErrorType errorType) {}
 
     private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
         DecodeResourceMeasure measure = (DecodeResourceMeasure) resourceMeasureFactory.getMeasure(indicator);
         if (measure == null) {
-            return new EndpointFilterResult(new ArrayList<>(), Map.of("NO_REGISTERED", 1), 0);
+            throw new IllegalStateException("Decode resource measure is not configured");
         }
-        List<DecodeEndpoint> result = new ArrayList<>(engineWorkerStatus.getModelWorkerCapacity(roleType));
-        Map<String, Integer> rejections = new java.util.HashMap<>();
-        int registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
+        EndpointFilterResult result = new EndpointFilterResult(
+                engineWorkerStatus.getModelWorkerCapacity(roleType), roleType.getErrorType());
+        result.registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
             if (!(ep instanceof DecodeEndpoint de)) {
                 return;
             }
             if (!de.getStatus().isAlive()) {
-                rejections.merge("NOT_ALIVE", 1, Integer::sum);
+                result.rejections.merge("NOT_ALIVE", 1, Integer::sum);
                 return;
             }
             if (!measure.isResourceAvailable(de)) {
-                rejections.merge("RESOURCE_UNAVAILABLE", 1, Integer::sum);
+                result.errorType = StrategyErrorType.RESOURCE_EXHAUSTED;
+                result.rejections.merge("RESOURCE_UNAVAILABLE", 1, Integer::sum);
                 return;
             }
-            result.add(de);
+            result.endpoints.add(de);
         });
-        if (registered == 0) {
-            return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1), 0);
+        if (result.registered == 0) {
+            result.rejections.put("NO_REGISTERED", 1);
         }
-        return new EndpointFilterResult(result, rejections, registered);
+        return result;
     }
 
     @Override
@@ -145,12 +160,14 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         long avgCacheUsed = sumCacheUsed / n;
 
         List<DecodeEndpoint> survivors = new ArrayList<>(n);
+        StrategyErrorType errorType = StrategyErrorType.BATCH_DISPATCH_FAILED;
         Map<String, Integer> rejections = new java.util.HashMap<>();
         for (int i = 0; i < n; i++) {
             DecodeEndpoint ep = eligible.get(i);
             long availableKv = ep.realKvAvailable();
             long totalKv = ep.realKvTotal();
             if (totalKv > 0 && availableKv < seqLen) {
+                errorType = StrategyErrorType.RESOURCE_EXHAUSTED;
                 rejections.merge("KV_CAPACITY", 1, Integer::sum);
                 continue;
             }
@@ -167,7 +184,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             survivors.add(ep);
         }
 
-        return new FilterResult(survivors, rejections);
+        return new FilterResult(survivors, rejections, errorType);
     }
 
     private DecodeEndpoint minimumCostSelection(
@@ -295,9 +312,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             result.setRequestId(requestId);
         } catch (Exception e) {
             Logger.error("buildServerStatus error", e);
-            result.setSuccess(false);
-            result.setCode(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
-            result.setMessage(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg());
+            return ServerStatus.code(StrategyErrorType.BATCH_DISPATCH_FAILED, e.getMessage());
         }
         return result;
     }

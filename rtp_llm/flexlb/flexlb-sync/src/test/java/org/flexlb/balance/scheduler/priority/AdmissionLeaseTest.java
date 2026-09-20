@@ -287,7 +287,7 @@ class AdmissionLeaseTest {
         assertEquals(0, activeCount.get()); // counter decremented
         // Resources NOT released (engine owns them)
         verify(registrar, never()).unregisterInflight(any());
-        verify(registrar, never()).finishYieldedById(anyLong(), anyString());
+        verify(registrar, never()).finishPreemptedById(anyLong(), anyString());
     }
 
     /**
@@ -317,7 +317,7 @@ class AdmissionLeaseTest {
 
         // Resources released exactly once (by close())
         verify(registrar, times(1)).unregisterInflight(item);
-        verify(registrar, never()).finishYieldedById(anyLong(), anyString());
+        verify(registrar, never()).finishPreemptedById(anyLong(), anyString());
     }
 
     /**

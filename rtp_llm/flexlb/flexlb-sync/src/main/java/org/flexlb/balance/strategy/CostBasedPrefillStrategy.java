@@ -54,7 +54,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return doSelect(balanceContext, roleType, group);
         } catch (Exception e) {
             Logger.warn("{} select failed", LoadBalanceStrategyEnum.COST_BASED_PREFILL.getName(), e);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            return ServerStatus.code(StrategyErrorType.BATCH_DISPATCH_FAILED, e.getMessage());
         }
     }
 
@@ -74,11 +74,12 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
         EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group,
                 config.resourceMeasureFor(roleType), balanceContext.getExcludedPrefillIpPort());
-        CandidateSet eligible = filterResult.endpoints();
+        CandidateSet eligible = filterResult.endpoints;
         if (eligible.size() == 0) {
             Logger.debug("Prefill select failed: no available endpoints, request_id={}, rejections={}",
-                    requestId, filterResult.rejections());
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+                    requestId, filterResult.rejections);
+            return ServerStatus.code(filterResult.errorType,
+                    "rejections=" + filterResult.rejections);
         }
 
         Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
@@ -99,11 +100,12 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 survivors, minScore, balanceContext, roleType, group, seqLen, config);
 
         if (selectedIndex < 0) {
-            Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
+            Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections);
             hardFilterResult.rejections().forEach((k, v) -> merged.merge(k, v, Integer::sum));
             Logger.debug("Prefill select failed: all filtered out, request_id={}, rejections={}",
                     requestId, merged);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            return ServerStatus.code(StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "rejections=" + merged);
         }
 
         PrefillEndpoint best = survivors.endpoint(selectedIndex);
@@ -236,7 +238,16 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         return selectedIndex;
     }
 
-    private record EndpointFilterResult(CandidateSet endpoints, Map<String, Integer> rejections) {}
+    private static final class EndpointFilterResult {
+        final CandidateSet endpoints;
+        final Map<String, Integer> rejections = new java.util.HashMap<>();
+        StrategyErrorType errorType;
+
+        EndpointFilterResult(CandidateSet endpoints, StrategyErrorType errorType) {
+            this.endpoints = endpoints;
+            this.errorType = errorType;
+        }
+    }
     protected static final class CandidateSet {
         private PrefillEndpoint[] endpoints = new PrefillEndpoint[0];
         private long[] cacheHits = new long[0];
@@ -460,21 +471,19 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         result.reset(engineWorkerStatus.getModelWorkerCapacity(roleType));
         PrefillResourceMeasure measure = (PrefillResourceMeasure) resourceMeasureFactory.getMeasure(indicator);
         if (measure == null) {
-            return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1));
+            throw new IllegalStateException("Prefill resource measure is not configured");
         }
-        Map<String, Integer> rejections = new java.util.HashMap<>();
+        EndpointFilterResult filtered = new EndpointFilterResult(result, roleType.getErrorType());
 
         PrefillEndpoint[] excludedEligible = new PrefillEndpoint[1];
-        int registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
-            if (!(ep instanceof PrefillEndpoint pe)) {
-                return;
-            }
+        int registered = engineWorkerStatus.forEachPrefillWorkerEndpoint(roleType, group, (ipPort, pe) -> {
             if (!pe.getStatus().isAlive()) {
-                rejections.merge("NOT_ALIVE", 1, Integer::sum);
+                filtered.rejections.merge("NOT_ALIVE", 1, Integer::sum);
                 return;
             }
             if (!measure.isResourceAvailable(pe)) {
-                rejections.merge("RESOURCE_UNAVAILABLE", 1, Integer::sum);
+                filtered.errorType = StrategyErrorType.RESOURCE_EXHAUSTED;
+                filtered.rejections.merge("RESOURCE_UNAVAILABLE", 1, Integer::sum);
                 return;
             }
             // P1-4: skip the worker whose queue just rejected the offer — the
@@ -482,13 +491,13 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             // the only eligible worker).
             if (excludedIpPort != null && excludedIpPort.equals(ipPort)) {
                 excludedEligible[0] = pe;
-                rejections.merge("EXCLUDED_RETRY", 1, Integer::sum);
+                filtered.rejections.merge("EXCLUDED_RETRY", 1, Integer::sum);
                 return;
             }
             result.addEndpoint(pe);
         });
         if (registered == 0) {
-            return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1));
+            filtered.rejections.put("NO_REGISTERED", 1);
         }
         if (result.size() == 0 && excludedEligible[0] != null) {
             // P1-4: single-worker (or fully-filtered) cluster — excluding the
@@ -496,7 +505,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             // NO_AVAILABLE_WORKER; retain that worker as the retry candidate.
             result.addEndpoint(excludedEligible[0]);
         }
-        return new EndpointFilterResult(result, rejections);
+        return filtered;
     }
 
     private static final class FormulaEstimateMemo {

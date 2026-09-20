@@ -1,7 +1,5 @@
 package org.flexlb.balance.scheduler.priority;
 
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.BatchDispatcher;
@@ -9,6 +7,14 @@ import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
+import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.policy.GroupRoutingDecision;
+import org.flexlb.balance.resource.DecodeResourceMeasure;
+import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
+import org.flexlb.config.VictimStage;
+import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -31,6 +37,8 @@ import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -46,6 +54,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -56,6 +65,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -131,6 +141,7 @@ class PriorityAdmissionSchedulerTest {
 
         // Decode worker matching successRoute()
         WorkerStatus decodeWs = new WorkerStatus();
+        decodeWs.setAlive(true);
         decodeWs.setIp("10.0.0.2");
         decodeWs.setPort(8081);
         decodeWs.setGrpcPort(8082);
@@ -143,6 +154,53 @@ class PriorityAdmissionSchedulerTest {
     void tearDown() {
         priorityScheduler.shutdown();
         scheduler.shutdown();
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"false,false", "true,false", "true,true"})
+    void realRouterCollectsFailureEvidenceAndOnlyPreemptionCapturesAPlanningView(boolean priority, boolean preemption) throws Exception {
+        scheduler.shutdown();
+        priorityScheduler.shutdown();
+        if (!priority) {
+            SchedulingTestConfig.useFifoQueue(config);
+        } else if (preemption) {
+            SchedulingTestConfig.allowVictim(config, VictimStage.DECODE_RESERVED);
+        }
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
+        DecodeEndpoint decode = spy(endpointRegistry.getDecode(DECODE_IP_PORT));
+        endpointRegistry.getDecodeEndpoints().put(DECODE_IP_PORT, decode);
+        decode.reserve(9000L, 128, 136, 70);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(DECODE_IP_PORT, decode.getStatus());
+        ResourceMeasureFactory measures = mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
+        when(measures.getMeasure(any())).thenReturn(measure);
+        EngineWorkerStatus workers = new EngineWorkerStatus(endpointRegistry);
+        new CostBasedDecodeStrategy(workers, measures);
+        new org.flexlb.balance.strategy.CostBasedPrefillStrategy(workers,
+                mock(org.flexlb.cache.service.CacheAwareService.class), measures,
+                mock(org.flexlb.service.monitor.EngineHealthReporter.class));
+        new org.flexlb.balance.strategy.RandomStrategy(workers, configService, measures);
+        DefaultRouter realRouter = new DefaultRouter(configService, ctx -> GroupRoutingDecision.none(), endpointRegistry);
+        priorityScheduler = new PriorityAdmissionScheduler(configService, realRouter, endpointRegistry,
+                new PlanCommitter(), priorityReporter, reporter, new UnsupportedEngineCancelChannel());
+        scheduler = new PriorityScheduler(configService, realRouter, endpointRegistry,
+                new DefaultBatchDispatcher(grpcClient, configService, null), reporter, priorityScheduler, null,
+                new UnsupportedEngineCancelChannel());
+        try {
+            BalanceContext incoming = context(9001L, 50);
+            Response failure = scheduler.submit(incoming).get(2, TimeUnit.SECONDS);
+            assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(), failure.getCode());
+            assertEquals(AdmissionRejectReason.HIGHER_PRIORITY_AHEAD, failure.getAdmissionRejectReason());
+            verify(decode, times(1)).admissionSnapshot();
+            verify(decode, times(preemption ? 1 : 0)).layeredAdmissionView();
+            assertNull(decode.reservationFor(9001L));
+            assertTrue(decode.reservationFor(9000L) != null);
+            assertTrue(sentBatches.isEmpty());
+            assertEquals(1, ((List<?>) incoming.getSchedulingDiagnostics().get("decode")).size());
+            assertTrue(incoming.getSchedulingDiagnostics().get("prefill") instanceof List<?>);
+        } finally {
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().remove(DECODE_IP_PORT);
+        }
     }
 
     // ==================== switch off: legacy path parity ====================
@@ -165,6 +223,8 @@ class PriorityAdmissionSchedulerTest {
 
     @Test
     void switch_on_no_pressure_places_on_router_selected_pd_pair() throws Exception {
+        DecodeEndpoint decodeEndpoint = spy(endpointRegistry.getDecode(DECODE_IP_PORT));
+        endpointRegistry.getDecodeEndpoints().put(DECODE_IP_PORT, decodeEndpoint);
         CompletableFuture<Response> first = scheduler.submit(context(1));
         CompletableFuture<Response> second = scheduler.submit(context(2));
 
@@ -184,6 +244,7 @@ class PriorityAdmissionSchedulerTest {
         assertEquals("10.0.0.1", prefill.getServerIp());
         assertEquals("10.0.0.2", decode.getServerIp());
         verify(priorityReporter, times(2)).reportNormalPlacement(eq(50));
+        verify(decodeEndpoint, never()).layeredAdmissionView();
         verify(router, times(2)).route(any(BalanceContext.class));
     }
 
@@ -205,14 +266,14 @@ class PriorityAdmissionSchedulerTest {
     }
 
     @Test
-    void request_without_priority_field_and_no_worker_isResourceExhausted() throws Exception {
+    void null_route_without_priority_isSchedulingFailure() throws Exception {
         when(router.route(any(BalanceContext.class))).thenReturn(null);
 
         Response response = scheduler.submit(context(62, 0)).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED,
                 response.getAdmissionRejectReason());
         verify(priorityScheduler).schedule(any(), any(), any());
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
@@ -221,7 +282,7 @@ class PriorityAdmissionSchedulerTest {
     // ==================== request expiration ====================
 
     @Test
-    void expired_priority_request_remains_resource_exhausted() throws Exception {
+    void expired_priority_request_reportsMasterPlacementBudget() throws Exception {
         BalanceContext ctx = context(71);
         ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() - 1_000));
@@ -230,15 +291,14 @@ class PriorityAdmissionSchedulerTest {
 
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                response.getAdmissionRejectReason());
-        assertTrue(response.getErrorMessage().contains("request expired"));
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED, response.getAdmissionRejectReason());
+        assertTrue(response.getErrorMessage().contains("Master placement did not complete within budget"));
         verify(router, never()).route(any(BalanceContext.class));
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
 
     @Test
-    void expired_fifo_request_remains_batch_slo_expired() throws Exception {
+    void expired_fifo_request_reportsMasterPlacementBudget() throws Exception {
         SchedulingTestConfig.useFifoQueue(config);
         BalanceContext ctx = context(72);
         ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
@@ -247,8 +307,8 @@ class PriorityAdmissionSchedulerTest {
         Response response = scheduler.submit(ctx).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.UNSPECIFIED,
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
                 response.getAdmissionRejectReason());
         verify(priorityScheduler, never()).schedule(any(), any(), any());
         verify(router, never()).route(any(BalanceContext.class));
@@ -461,28 +521,28 @@ class PriorityAdmissionSchedulerTest {
     // ==================== infeasible: no available worker ====================
 
     @Test
-    void null_route_fails_with_no_available_worker() throws Exception {
+    void null_route_isSchedulingFailure() throws Exception {
         when(router.route(any(BalanceContext.class))).thenReturn(null);
 
         Response response = scheduler.submit(context(21)).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED,
                 response.getAdmissionRejectReason());
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
 
     @Test
-    void routerCapacityFailureIsResourceExhaustedWithoutCausalSnapshot() throws Exception {
+    void routerFailureWithoutCausalSnapshotKeepsOriginalCode() throws Exception {
         when(router.route(any(BalanceContext.class)))
                 .thenReturn(Response.error(StrategyErrorType.NO_PREFILL_WORKER));
 
         Response response = scheduler.submit(context(22)).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED,
                 response.getAdmissionRejectReason());
     }
 
@@ -504,7 +564,7 @@ class PriorityAdmissionSchedulerTest {
         // numeric sentinel/value is not trusted priority provenance.
         assertFalse(decodeEp.layeredAdmissionView().confirmed().getFirst().priorityKnown());
         when(router.route(any(BalanceContext.class)))
-                .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
+                .thenAnswer(inv -> SchedulingTestConfig.decodeCapacityFailure(inv.getArgument(0), endpointRegistry));
 
         Response response = scheduler.submit(context(23)).get(1, TimeUnit.SECONDS);
 
@@ -531,7 +591,7 @@ class PriorityAdmissionSchedulerTest {
 
         // Fill the single queue slot so tryOffer() must fail (P offer second)
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
-        assertTrue(batcher.tryOffer(dummyItem(999)));
+        assertNull(batcher.tryOffer(dummyItem(999)));
 
         Response response = scheduler.submit(context(31)).get(2, TimeUnit.SECONDS);
 
@@ -547,11 +607,131 @@ class PriorityAdmissionSchedulerTest {
         assertEquals(0, decodeEp.getTotalLoad());
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {90, 50, 0, 10})
+    void victimGoneRetryExhaustionRetainsFinalOfferCause(int blockerPriority) throws Exception {
+        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.PREFILL_QUEUED);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
+        DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
+        AtomicLong occupantId = new AtomicLong(800);
+        AtomicInteger attempts = new AtomicInteger();
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            attempts.incrementAndGet();
+            batcher.queueManager().tryRemove(occupantId.get(), "previous occupant left");
+            assertNull(batcher.tryOffer(dummyItem(occupantId.incrementAndGet(), 10)));
+            decodeEp.reserve(ctx.getRequestId(), 128, 136, ctx.getPriority());
+            return successRoute(ctx.getRequestId());
+        });
+        doAnswer(invocation -> {
+            batcher.queueManager().tryRemove(occupantId.get(), "selected victim left");
+            // Earlier attempts have a different cause; only the last offer is authoritative.
+            int priority = attempts.get() == 4 ? blockerPriority : 90;
+            assertNull(batcher.tryOffer(dummyItem(occupantId.incrementAndGet(), priority)));
+            return null;
+        }).when(priorityReporter).reportEvictionPlan(eq(50), eq("prefill_queue_full"), eq("feasible"));
+
+        Response response = scheduler.submit(contextWithBudget(8000)).get(2, TimeUnit.SECONDS);
+
+        Response expected = switch (blockerPriority) {
+            case 90 -> Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                    AdmissionRejectReason.HIGHER_PRIORITY_AHEAD);
+            case 50 -> Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                    AdmissionRejectReason.SAME_PRIORITY_AHEAD);
+            case 0 -> Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
+            default -> Response.error(StrategyErrorType.RESOURCE_EXHAUSTED, AdmissionRejectReason.RESOURCE_EXHAUSTED);
+        };
+        assertEquals(expected.getCode(), response.getCode());
+        assertEquals(expected.getAdmissionRejectReason(), response.getAdmissionRejectReason());
+        assertEquals(expected.getErrorMessage(), response.getErrorMessage());
+        assertEquals(4, attempts.get());
+        assertEquals(0, decodeEp.getInflightCount());
+        assertEquals(0, scheduler.getInflightSize());
+        assertEquals(0, priorityScheduler.activeAdmissionCount());
+    }
+
+    @Test
+    void capacityFreedAfterInfeasibleVictimPlanIsAdmittedByTheQueue() throws Exception {
+        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.PREFILL_QUEUED);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
+        assertNull(batcher.tryOffer(dummyItem(8004, 50)));
+        doAnswer(invocation -> {
+            batcher.queueManager().tryRemove(8004, "occupant completed");
+            return null;
+        }).when(priorityReporter).reportEvictionPlan(eq(50), eq("prefill_queue_full"), eq("infeasible"));
+
+        CompletableFuture<Response> incoming = scheduler.submit(contextWithBudget(8005));
+
+        assertFalse(incoming.isDone());
+        assertEquals(8005, batcher.queueManager().snapshot().items().getFirst().requestId());
+        verify(router, times(1)).route(any());
+        scheduler.cancelRequest(8005, 0, org.flexlb.balance.scheduler.CancelReason.CLIENT_CANCELLED);
+        assertEquals(8504, incoming.get(1, TimeUnit.SECONDS).getCode());
+        assertEquals(0, endpointRegistry.getDecode(DECODE_IP_PORT).getInflightCount());
+        assertEquals(0, priorityScheduler.activeAdmissionCount());
+    }
+
+    @Test
+    void openGenerationDuplicateRegistrationIsInvalidRequestNotPlanConflict() throws Exception {
+        InflightRegistrar registrar = openRegistrar();
+        CompletableFuture<Response> response = new CompletableFuture<>();
+
+        priorityScheduler.schedule(contextWithBudget(8001), response, registrar);
+
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.get().getCode());
+        assertTrue(response.get().getErrorMessage().contains("duplicate request_id: 8001"));
+        verify(router, times(1)).route(any());
+        assertEquals(0, endpointRegistry.getDecode(DECODE_IP_PORT).getInflightCount());
+        assertEquals(0, endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher().queueSize());
+        assertEquals(0, priorityScheduler.activeAdmissionCount());
+    }
+
+    @Test
+    void generationClosedDuringRegistrationLeavesTerminalToItsOwner() {
+        InflightRegistrar registrar = openRegistrar();
+        CompletableFuture<Response> response = new CompletableFuture<>();
+        when(registrar.registerInflight(any())).thenAnswer(invocation -> {
+            when(registrar.isAdmissionOpen(anyLong(), any())).thenReturn(false);
+            return false;
+        });
+
+        priorityScheduler.schedule(contextWithBudget(8002), response, registrar);
+
+        assertFalse(response.isDone(), "a closed gate must not publish a synthetic rejection");
+        verify(router, times(1)).route(any());
+        assertEquals(0, endpointRegistry.getDecode(DECODE_IP_PORT).getInflightCount());
+        assertEquals(0, endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher().queueSize());
+        response.complete(Response.error(StrategyErrorType.REQUEST_CANCELLED));
+        assertEquals(0, priorityScheduler.activeAdmissionCount());
+    }
+
+    @Test
+    void priorityAdmissionEntryBudgetUsesSameClassificationAsSubmit() throws Exception {
+        BalanceContext ctx = context(8003);
+        ctx.setSchedulingMetadata(SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1000));
+        CompletableFuture<Response> response = new CompletableFuture<>();
+
+        priorityScheduler.schedule(ctx, response, openRegistrar());
+
+        assertEquals(8431, response.get().getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED, response.get().getAdmissionRejectReason());
+        verify(router, never()).route(any());
+        assertEquals(0, priorityScheduler.activeAdmissionCount());
+    }
+
     // ==================== helpers ====================
 
     private BatchItem dummyItem(long requestId) {
+        return dummyItem(requestId, 50);
+    }
+
+    private BatchItem dummyItem(long requestId, int priority) {
         Response route = successRoute(requestId);
-        return new BatchItem(context(requestId), new CompletableFuture<>(), route,
+        return new BatchItem(context(requestId, priority), new CompletableFuture<>(), route,
                 PriorityScheduler.findServer(route, RoleType.PREFILL),
                 PriorityScheduler.findServer(route, RoleType.DECODE),
                 endpointRegistry.getPrefill(PREFILL_IP_PORT), null,
