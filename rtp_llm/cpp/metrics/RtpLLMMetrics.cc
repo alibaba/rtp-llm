@@ -275,6 +275,25 @@ void RtpEmbeddingGlobalMetrics::report(const kmonitor::MetricsTags*        tags,
     }
 }
 
+bool RtpEmbeddingStageMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(tokenizer_latency_us_metric, "rtp_llm_tokenizer_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(vision_latency_us_metric, "rtp_llm_vision_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(result_process_latency_us_metric, "rtp_llm_result_process_latency_us");
+    return true;
+}
+
+void RtpEmbeddingStageMetrics::report(const kmonitor::MetricsTags* tags, RtpEmbeddingStageMetricsCollector* collector) {
+    if (collector->tokenizer_latency_us >= 0) {
+        REPORT_MUTABLE_METRIC(tokenizer_latency_us_metric, collector->tokenizer_latency_us);
+    }
+    if (collector->vision_latency_us >= 0) {
+        REPORT_MUTABLE_METRIC(vision_latency_us_metric, collector->vision_latency_us);
+    }
+    if (collector->result_process_latency_us >= 0) {
+        REPORT_MUTABLE_METRIC(result_process_latency_us_metric, collector->result_process_latency_us);
+    }
+}
+
 bool RtpEmbeddingStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(wait_latency_us_metric, "rtp_llm_wait_latency_us");
