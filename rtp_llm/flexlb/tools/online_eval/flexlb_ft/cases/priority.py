@@ -3094,7 +3094,7 @@ def atpm_error_code_family(ctx: CaseContext):
     source="design §2.4 #13 — AT1",
 )
 def atpm_config_strict_reject(ctx: CaseContext):
-    """Startup rejects removed fields, inactive FIFO settings and missing decision lifetime."""
+    """Startup rejects removed fields, inactive FIFO settings and missing request timeout."""
     report = GradeReport(run_grade=ctx.grade)
 
     cfg1 = json.loads(_prio_config())
@@ -3106,8 +3106,8 @@ def atpm_config_strict_reject(ctx: CaseContext):
     variants.append(("fifo_with_defaultPriority", json.dumps(cfg2)))
 
     cfg3 = json.loads(_prio_config())
-    del cfg3["requestLifecycle"]["decision"]["lifetime"]
-    variants.append(("missing_decision_lifetime", json.dumps(cfg3)))
+    del cfg3["requestLifecycle"]["request"]["timeoutMs"]
+    variants.append(("missing_request_timeout", json.dumps(cfg3)))
 
     results = []
     try:

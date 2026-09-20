@@ -162,6 +162,31 @@ class ShellFlexlbConfigTest(unittest.TestCase):
             self.assertEqual({"needConsistency", "zookeeperConfig"},
                              set(json.loads(result["FLEXLB_SYNC_CONSISTENCY_CONFIG"])))
 
+    def test_discovery_file_replaces_static_hosts(self):
+        with TemporaryDirectory() as tmp:
+            endpoint_file = Path(tmp) / "endpoints.json"
+            model = {
+                "service_id": "aigc.text-generation.generation.engine_service",
+                "hosts": {"mock.prefill.hosts.address": ["127.0.0.1:8000"]},
+                "role_endpoints": [],
+            }
+            endpoint_file.write_text(json.dumps({"env": {
+                "MODEL_SERVICE_CONFIG": json.dumps(model),
+            }}))
+            manager = EnvManager(Path(tmp), verbose=False)
+            for discovery in ("file", "discovery_file"):
+                with self.subTest(discovery=discovery):
+                    env = SimpleNamespace(
+                        spec=EnvSpec(discovery=discovery), endpoint_file=endpoint_file,
+                        discovery_file=Path(tmp) / "discovery.json")
+                    result = json.loads(manager._master_env(env)["MODEL_SERVICE_CONFIG"])
+                    if discovery == "file":
+                        self.assertEqual(model, result)
+                    else:
+                        self.assertNotIn("hosts", result)
+                        self.assertEqual(str(env.discovery_file), result["discovery_file"])
+                        self.assertEqual(model["role_endpoints"], result["role_endpoints"])
+
     def test_preemption_schema_contains_only_implemented_decode_stages(self):
         for stages in (["DECODE_RESERVED"], ["DECODE_ENGINE_OWNED"],
                        ["DECODE_RESERVED", "DECODE_ENGINE_OWNED"]):
