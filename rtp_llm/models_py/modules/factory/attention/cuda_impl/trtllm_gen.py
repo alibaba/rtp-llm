@@ -1,3 +1,6 @@
+import os
+import threading
+import weakref
 from typing import NamedTuple, Optional
 
 import flashinfer
@@ -7,10 +10,21 @@ import triton.language as tl
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.models_py.utils.arch import is_blackwell, is_sm12x
-from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
+from rtp_llm.models_py.triton_kernels.common.fused_fp8_qkv_cache import (
+    fused_fp8_qkv_cache,
+    quantize_fp8_query,
+)
+from rtp_llm.models_py.utils.arch import is_blackwell, is_sm10x, is_sm12x
+from rtp_llm.ops import (
+    AttentionConfigs,
+    FMHAType,
+    KvCacheDataType,
+    ParallelismConfig,
+    RopeStyle,
+)
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
+    FusedRopeKVCachePrefillOpQKVOut,
     FusedRopeKVCachePrefillOpQOut,
     LayerKVCache,
     PyAttentionInputs,
@@ -23,7 +37,87 @@ DEFAULT_TRT_WORKSPACE_SIZE_MB = (
 
 # Global workspace buffer pool
 _g_trt_workspace_pool: list[torch.Tensor] = []
-_g_trt_pool_lock = __import__("threading").Lock()
+_g_trt_pool_lock = threading.Lock()
+_g_trt_graph_workspaces = weakref.WeakValueDictionary()
+_g_trt_graph_workspace_lock = threading.Lock()
+
+
+def use_native_fp8_attention(attn_configs: AttentionConfigs) -> bool:
+    """Opt in to the Qwen3.5 SM100 FP8-Q/FP8-KV path.
+
+    KV storage uses RTP's existing static unit-scale contract. The kernel page
+    size and speculative/CUDA-graph metadata remain independent of this gate.
+    """
+    return (
+        os.getenv("RTP_QWEN35_NATIVE_FP8_ATTN", "0") == "1"
+        and attn_configs.dtype == torch.bfloat16
+        and attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+        and attn_configs.need_rope_kv_cache
+        and (
+            attn_configs.rope_config.style == RopeStyle.Mrope
+            or (
+                attn_configs.rope_config.style == RopeStyle.Base
+                and attn_configs.rope_config.index_factor == 1
+            )
+        )
+        and attn_configs.size_per_head == 256
+        and attn_configs.kernel_tokens_per_block == 64
+        and is_sm10x()
+    )
+
+
+def _fused_fp8_prefill_query(impl, qkv: torch.Tensor, kv_cache: LayerKVCache):
+    config = impl.attn_configs
+    if config.rope_config.style == RopeStyle.Base and (
+        impl.rope_params.position_ids is None
+        or impl.rope_params.position_ids.numel() == 0
+    ):
+        raise ValueError("Native FP8 Base RoPE positions were not prepared")
+    # QKV-output mode only rotates; do not ask this RTP-Kernel mode to write
+    # cache. Fuse all three conversions with the explicit paged-cache store.
+    rotated = impl.rope_kvcache_impl.forward(qkv, None, impl.rope_params)
+    paged_cache = common.reshape_paged_kv_cache(
+        kv_cache.kv_cache_base,
+        config.kv_head_num,
+        config.kernel_tokens_per_block,
+        config.size_per_head,
+    )
+    return fused_fp8_qkv_cache(
+        rotated,
+        paged_cache,
+        impl.attn_inputs.kv_cache_kernel_block_id_device,
+        impl.attn_inputs.cu_seqlens_device,
+        impl.attn_inputs.prefix_lengths_device,
+        num_q_heads=config.head_num,
+        num_kv_heads=config.kv_head_num,
+        head_dim=config.size_per_head,
+        page_size=config.kernel_tokens_per_block,
+        max_query_len=impl.rope_params.max_seq_len,
+    )
+
+
+def _init_native_base_positions(impl):
+    """Materialize implicit Base positions once per metadata preparation."""
+    impl._base_position_max_q = 0
+    positions = impl.rope_params.position_ids
+    if (
+        impl.native_fp8
+        and impl.attn_configs.rope_config.style == RopeStyle.Base
+        and (positions is None or positions.numel() == 0)
+    ):
+        impl._base_position_max_q = max(1, impl.rope_params.max_seq_len)
+        capacity = impl._cg.N * impl._base_position_max_q
+        impl.rope_params.position_ids = torch.empty(
+            capacity,
+            device=impl.attn_inputs.cu_seqlens_device.device,
+            dtype=torch.int32,
+        )
+        impl._cg = impl._cg._replace(
+            grid=(max(impl._cg.grid[0], triton.cdiv(capacity, impl._cg.BLOCK_SIZE)),)
+        )
+        # Also covers the eager datatype warmup before graph capture. Replay
+        # updates this same buffer from GPU prefix/cu metadata in-place.
+        impl.prepare_cuda_graph(impl.attn_inputs)
 
 
 def get_trt_workspace_buffer(device: str = "cuda") -> torch.Tensor:
@@ -58,6 +152,42 @@ def release_trt_workspace_buffer(buffer: torch.Tensor) -> None:
     """
     with _g_trt_pool_lock:
         _g_trt_workspace_pool.append(buffer)
+
+
+class _TRTGraphWorkspaceLease:
+    def __init__(self, table: torch.Tensor):
+        # Keep the owner allocation alive: its address must not be recycled
+        # while a captured graph can still access this workspace.
+        self.storage = table.untyped_storage()
+        self.buffer = get_trt_workspace_buffer(device=str(table.device))
+
+    def __del__(self):
+        buffer = getattr(self, "buffer", None)
+        if buffer is not None:
+            release_trt_workspace_buffer(buffer)
+
+
+def _native_base_graph_workspace(attn_configs, attn_inputs):
+    if not (
+        use_native_fp8_attention(attn_configs)
+        and attn_configs.rope_config.style == RopeStyle.Base
+        and attn_inputs.is_cuda_graph
+    ):
+        return None
+    table = attn_inputs.kv_cache_kernel_block_id_device
+    if table is None or table.numel() == 0:
+        return None
+    # CudaGraphRunner allocates one block-table storage per runner/cache tag;
+    # every capture bucket only slices it. These graphs already share mutable
+    # inputs and are ordered by the runner's forward event. Other runners and
+    # eager execution must retain independent scratch, even on the same GPU.
+    key = (table.device, table.untyped_storage().data_ptr())
+    with _g_trt_graph_workspace_lock:
+        lease = _g_trt_graph_workspaces.get(key)
+        if lease is None:
+            lease = _TRTGraphWorkspaceLease(table)
+            _g_trt_graph_workspaces[key] = lease
+        return lease
 
 
 class FlashInferTRTLLMParams(object):
@@ -139,6 +269,33 @@ def _prepare_cg_decode_kernel(
 
 
 @triton.jit
+def _prepare_base_positions(
+    pid,
+    prefix_ptr,
+    cu_seqlens_ptr,
+    positions_ptr,
+    N,
+    MAX_QUERY_LEN: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    flat = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    batch = flat // MAX_QUERY_LEN
+    local = flat % MAX_QUERY_LEN
+    in_bounds = batch < N
+    start = tl.load(cu_seqlens_ptr + batch, mask=in_bounds, other=0)
+    end = tl.load(cu_seqlens_ptr + batch + 1, mask=in_bounds, other=0)
+    prefix = tl.load(prefix_ptr + batch, mask=in_bounds, other=0)
+    tl.store(
+        positions_ptr + start + local,
+        prefix + local,
+        mask=in_bounds & (local < end - start),
+    )
+    # Packed valid rows and trailing graph padding occupy disjoint ranges.
+    total = tl.load(cu_seqlens_ptr + N)
+    tl.store(positions_ptr + flat, 0, mask=in_bounds & (flat >= total))
+
+
+@triton.jit
 def _prepare_cg_spec_decode_kernel(
     prefix_ptr,
     q_len_ptr,
@@ -149,6 +306,9 @@ def _prepare_cg_spec_decode_kernel(
     M,
     total_bm,
     BLOCK_SIZE: tl.constexpr,
+    base_positions_ptr=None,
+    cu_seqlens_ptr=None,
+    MAX_BASE_QUERY_LEN: tl.constexpr = 0,
 ):
     """Spec-decode: seq_lens_out = prefix + q_len, block_id -> kv_offset.
 
@@ -172,6 +332,16 @@ def _prepare_cg_spec_decode_kernel(
         total_bm,
         BLOCK_SIZE,
     )
+    if MAX_BASE_QUERY_LEN > 0:
+        _prepare_base_positions(
+            pid,
+            prefix_ptr,
+            cu_seqlens_ptr,
+            base_positions_ptr,
+            N,
+            MAX_BASE_QUERY_LEN,
+            BLOCK_SIZE,
+        )
 
 
 @triton.jit
@@ -186,6 +356,9 @@ def _prepare_cg_prefill_kernel(
     M,
     total_bm,
     BLOCK_SIZE: tl.constexpr,
+    base_positions_ptr=None,
+    cu_seqlens_ptr=None,
+    MAX_BASE_QUERY_LEN: tl.constexpr = 0,
 ):
     """Prefill: seq_lens_out = input_lens + prefix_lens,
     cu_kv_seqlens_out = [0, cumsum(seq_lens)],
@@ -215,6 +388,16 @@ def _prepare_cg_prefill_kernel(
         total_bm,
         BLOCK_SIZE,
     )
+    if MAX_BASE_QUERY_LEN > 0:
+        _prepare_base_positions(
+            pid,
+            prefix_lens_ptr,
+            cu_seqlens_ptr,
+            base_positions_ptr,
+            N,
+            MAX_BASE_QUERY_LEN,
+            BLOCK_SIZE,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -312,18 +495,26 @@ class FlashInferTRTLLMPrefillOp(object):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        workspace_lease: Optional[_TRTGraphWorkspaceLease] = None,
     ):
         self.attn_configs = attn_configs
+        self.native_fp8 = use_native_fp8_attention(attn_configs)
         self.head_dim = attn_configs.size_per_head
         self.head_num = attn_configs.head_num
         self.scaling = self.head_dim**-0.5
         self.local_head_num = attn_configs.head_num
         self.local_head_kv_num = attn_configs.kv_head_num
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
-        self.workspace_buffer = get_trt_workspace_buffer()
+        self._workspace_lease = workspace_lease
+        self.workspace_buffer = (
+            workspace_lease.buffer
+            if workspace_lease is not None
+            else get_trt_workspace_buffer()
+        )
 
     def __del__(self):
-        release_trt_workspace_buffer(self.workspace_buffer)
+        if self._workspace_lease is None:
+            release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
         # TllmGenFmhaRunner cubin covers sm_90a / sm_100a only; sm_120a
@@ -358,9 +549,7 @@ class FlashInferTRTLLMPrefillOp(object):
             device="cuda",
             dtype=attention_inputs.input_lengths.dtype,
         )
-        cu_kv_seqlens[1:] = torch.cumsum(
-            sequence_lengths, dim=0, dtype=torch.int32
-        )
+        cu_kv_seqlens[1:] = torch.cumsum(sequence_lengths, dim=0, dtype=torch.int32)
         return FlashInferTRTLLMParams(
             batch_size=attention_inputs.input_lengths.size(0),
             max_q_len=attention_inputs.input_lengths.max().item(),
@@ -377,17 +566,14 @@ class FlashInferTRTLLMPrefillOp(object):
         q: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         fmha_params: FlashInferTRTLLMParams,
+        *,
+        q_scale: float = 1.0,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
     ) -> torch.Tensor:
-        q_type = q.dtype
-        o_type = q_type
-        # Keep the model activation dtype. FlashInfer dispatches BF16-Q/FP8-KV
-        # to its mixed-dtype path; casting Q to FP8 here loses its scale and
-        # silently corrupts the attention result.
-        q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
-        q_scale = 1.0
-        k_scale = 1.0
+        o_type = self.attn_configs.dtype if self.native_fp8 else q.dtype
         bmm1_scale = q_scale * k_scale * self.scaling
-        bmm2_scale = 1.0
+        bmm2_scale = v_scale
         if kv_cache:
             kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
                 kv_cache.kv_cache_base.shape[0],
@@ -396,6 +582,17 @@ class FlashInferTRTLLMPrefillOp(object):
                 self.seq_size_per_block,
                 self.head_dim,
             )
+
+        if self.native_fp8 and q.dtype != torch.float8_e4m3fn:
+            q = quantize_fp8_query(
+                q,
+                scale=q_scale,
+                kv_cache=kv_cache.kv_cache_base,
+                block_table=fmha_params.block_tables,
+                seq_lens=fmha_params.seq_lens,
+            )
+
+        q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
 
         o = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
             query=q,
@@ -416,25 +613,33 @@ class FlashInferTRTLLMPrefillOp(object):
             out_dtype=o_type,  # model_runner.dtype
         )
 
-        return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
+        return o.view(-1, self.local_head_num * self.head_dim).to(o_type)
 
 
 class FlashInferTRTLLMDecodeOp(object):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        workspace_lease: Optional[_TRTGraphWorkspaceLease] = None,
     ):
         self.attn_configs = attn_configs
+        self.native_fp8 = use_native_fp8_attention(attn_configs)
         self.head_dim = attn_configs.size_per_head
         self.head_num = attn_configs.head_num
         self.scaling = self.head_dim**-0.5
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.local_head_num = attn_configs.head_num
         self.local_head_kv_num = attn_configs.kv_head_num
-        self.workspace_buffer = get_trt_workspace_buffer()
+        self._workspace_lease = workspace_lease
+        self.workspace_buffer = (
+            workspace_lease.buffer
+            if workspace_lease is not None
+            else get_trt_workspace_buffer()
+        )
 
     def __del__(self):
-        release_trt_workspace_buffer(self.workspace_buffer)
+        if self._workspace_lease is None:
+            release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
         if not is_blackwell():
@@ -497,18 +702,14 @@ class FlashInferTRTLLMDecodeOp(object):
         q: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         fmha_params: FlashInferTRTLLMParams,
+        *,
+        q_scale: float = 1.0,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
     ) -> torch.Tensor:
-        q_type = q.dtype
-        o_type = q_type
-        # Keep the model activation dtype. FlashInfer dispatches BF16-Q/FP8-KV
-        # to its mixed-dtype path; casting Q to FP8 here loses its scale and
-        # silently corrupts both decode and MTP target verification.
-
-        q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
-        q_scale = 1.0
-        k_scale = 1.0
+        o_type = self.attn_configs.dtype if self.native_fp8 else q.dtype
         bmm1_scale = q_scale * k_scale * self.scaling
-        bmm2_scale = 1.0
+        bmm2_scale = v_scale
         # sink: additional value per head in the denominator of the softmax.
         if kv_cache:
             kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
@@ -518,6 +719,17 @@ class FlashInferTRTLLMDecodeOp(object):
                 self.seq_size_per_block,
                 self.head_dim,
             )
+
+        if self.native_fp8 and q.dtype != torch.float8_e4m3fn:
+            q = quantize_fp8_query(
+                q,
+                scale=q_scale,
+                kv_cache=kv_cache.kv_cache_base,
+                block_table=fmha_params.block_tables,
+                seq_lens=fmha_params.seq_lens,
+            )
+
+        q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
 
         # Call TRT-LLM kernel
         # raw_out: like q, [bs, acc_q_len, num_q_heads, head_dim] but with output dtype
@@ -536,7 +748,7 @@ class FlashInferTRTLLMDecodeOp(object):
             out_dtype=o_type,  # model_runner.dtype
             q_len_per_req=q.shape[0] // fmha_params.seq_lens.shape[0],
         )
-        return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
+        return o.view(-1, self.local_head_num * self.head_dim).to(o_type)
 
 
 # ---------------------------------------------------------------------------
@@ -553,8 +765,17 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = FlashInferTRTLLMPrefillOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
+        self.fmha_impl = FlashInferTRTLLMPrefillOp(
+            attn_configs, _native_base_graph_workspace(attn_configs, attn_inputs)
+        )
+        self.native_fp8 = self.fmha_impl.native_fp8
+        self.attn_configs = attn_configs
+        rope_op = (
+            FusedRopeKVCachePrefillOpQKVOut
+            if self.native_fp8
+            else FusedRopeKVCachePrefillOpQOut
+        )
+        self.rope_kvcache_impl = rope_op(attn_configs)
         self.attn_inputs = attn_inputs
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
@@ -567,12 +788,16 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
             self.fmha_params.cu_kv_seqlens,
             self.rope_params.kv_cache_offset,
         )
+        _init_native_base_positions(self)
 
     @classmethod
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        if common.requires_native_bf16_fp8_prefill(attn_configs):
+        if common.requires_native_bf16_fp8_prefill(attn_configs) and not (
+            use_native_fp8_attention(attn_configs)
+            and attn_inputs.context_parallel_info is None
+        ):
             return False
         fmha_impl = FlashInferTRTLLMPrefillOp(attn_configs)
         return fmha_impl.support(attn_inputs)
@@ -583,7 +808,10 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
         kv_cache: Optional[LayerKVCache],
         layer_idx: int,
     ) -> torch.Tensor:
-        if self.need_rope_kv_cache:
+        if self.native_fp8:
+            assert kv_cache is not None
+            fmha_input = _fused_fp8_prefill_query(self, qkv, kv_cache)
+        elif self.need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
         else:
             fmha_input = qkv
@@ -606,6 +834,9 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
             p.M,
             p.total_bm,
             BLOCK_SIZE=p.BLOCK_SIZE,
+            base_positions_ptr=self.rope_params.position_ids,
+            cu_seqlens_ptr=attn_inputs.cu_seqlens_device,
+            MAX_BASE_QUERY_LEN=self._base_position_max_q,
         )
 
 
@@ -618,8 +849,16 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
+        self.fmha_impl = FlashInferTRTLLMDecodeOp(
+            attn_configs, _native_base_graph_workspace(attn_configs, attn_inputs)
+        )
+        self.native_fp8 = self.fmha_impl.native_fp8
+        rope_op = (
+            FusedRopeKVCachePrefillOpQKVOut
+            if self.native_fp8
+            else FusedRopeKVCachePrefillOpQOut
+        )
+        self.rope_kvcache_impl = rope_op(attn_configs)
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
@@ -632,6 +871,7 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
             self.fmha_params.seq_lens,
             self.rope_params.kv_cache_offset,
         )
+        _init_native_base_positions(self)
 
     @classmethod
     def support(
@@ -648,7 +888,10 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         kv_cache: Optional[LayerKVCache],
         layer_idx: int,
     ) -> torch.Tensor:
-        if self.need_rope_kv_cache:
+        if self.native_fp8:
+            assert kv_cache is not None
+            fmha_input = _fused_fp8_prefill_query(self, qkv, kv_cache)
+        elif self.need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
         else:
             fmha_input = qkv
@@ -682,6 +925,9 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
                 p.M,
                 p.total_bm,
                 BLOCK_SIZE=p.BLOCK_SIZE,
+                base_positions_ptr=self.rope_params.position_ids,
+                cu_seqlens_ptr=attn_inputs.cu_seqlens_device,
+                MAX_BASE_QUERY_LEN=self._base_position_max_q,
             )
 
 

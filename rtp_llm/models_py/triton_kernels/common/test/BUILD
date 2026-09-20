@@ -55,3 +55,15 @@ py_test(
     },
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "fused_fp8_qkv_cache_test",
+    srcs = ["fused_fp8_qkv_cache_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    # Native E4M3FN conversion requires SM89 or newer.
+    tags = ["L20"],
+    exec_properties = {'gpu':'L20', 'gpu_count': '1'},
+)

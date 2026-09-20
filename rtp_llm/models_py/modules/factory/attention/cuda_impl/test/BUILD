@@ -54,6 +54,18 @@ py_test (
     target_compatible_with = CUDA13_ARM_ONLY,
 )
 
+py_test(
+    name = "native_fp8_mha_test",
+    srcs = ["native_fp8_mha_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["open_skip", "SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
 flashinfer_test_deps = py_test_deps + select({
     "@//:using_cuda13_x86": flashinfer_deps,
     "//conditions:default": [],
