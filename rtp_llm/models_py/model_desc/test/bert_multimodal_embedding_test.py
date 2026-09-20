@@ -1,4 +1,5 @@
-from unittest import SkipTest, TestCase, main
+import os
+from unittest import SkipTest, TestCase, main, mock
 
 import torch
 from torch.nn import functional as F
@@ -73,6 +74,62 @@ class BertMultimodalEmbeddingTest(TestCase):
     def setUp(self) -> None:
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
+
+    def test_user_mask_routes_only_text_markers_to_flashinfer(self):
+        with mock.patch.dict(os.environ, {"USE_VISION_BERT_UQI_BLOCK_MASK": "1"}):
+            model = self._build_model()
+        inputs = _build_inputs()
+        inputs.input_ids = torch.tensor(
+            [101, 2, 102, 2], dtype=torch.int32, device="cuda"
+        )
+        inputs.embedding_inputs.text_tokens_mask = torch.tensor(
+            [1, 1, 1, 0], device="cuda"
+        )
+        attention = PyAttentionInputs()
+        attention.is_prefill = True
+        attention.input_lengths = torch.tensor([4], dtype=torch.int32)
+        attention.cu_seqlens_device = torch.tensor(
+            [0, 4], dtype=torch.int32, device="cuda"
+        )
+        inputs.attention_inputs = attention
+        path = "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha.PyFlashinferPrefillImpl"
+        with mock.patch(path) as backend:
+            self.assertIs(model.prepare_fmha_impl(inputs), backend.return_value)
+            mask = backend.call_args.kwargs["custom_mask"].reshape(4, 4)
+        self.assertEqual(
+            mask.tolist(),
+            [
+                [True, False, False, True],
+                [True, True, True, True],
+                [True, True, True, True],
+                [True, False, False, True],
+            ],
+        )
+        with self.assertRaisesRegex(ValueError, "CUDA graphs"):
+            model.prepare_fmha_impl(inputs, is_cuda_graph=True)
+
+    def test_no_user_profile_routes_to_native_flashinfer_without_mask(self):
+        with mock.patch.dict(os.environ, {"USE_VISION_BERT_UQI_BLOCK_MASK": "1"}):
+            model = self._build_model()
+        inputs = _build_inputs()
+        # A vision placeholder equal to CLS_UQI must not create a profile mask.
+        inputs.input_ids = torch.tensor(
+            [101, 200, 102, 2], dtype=torch.int32, device="cuda"
+        )
+        inputs.embedding_inputs.text_tokens_mask = torch.tensor(
+            [1, 1, 1, 0], device="cuda"
+        )
+        attention = PyAttentionInputs()
+        attention.is_prefill = True
+        attention.input_lengths = torch.tensor([4], dtype=torch.int32)
+        attention.cu_seqlens_device = torch.tensor(
+            [0, 4], dtype=torch.int32, device="cuda"
+        )
+        inputs.attention_inputs = attention
+        path = "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha.PyFlashinferPrefillImpl"
+        with mock.patch(path) as backend:
+            self.assertIs(model.prepare_fmha_impl(inputs), backend.return_value)
+            self.assertIsNone(backend.call_args.kwargs["custom_mask"])
 
     def _build_model(
         self,

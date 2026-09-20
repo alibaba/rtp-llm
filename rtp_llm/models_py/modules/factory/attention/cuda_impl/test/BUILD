@@ -52,6 +52,16 @@ flashinfer_platforms = [
 
 flashinfer_attention_tests = [
     {
+        "name": "test_bert_uqi_schedule",
+        "main": "test_flashinfer_prefill/test_bert_uqi_schedule.py",
+        "extra_srcs": [],
+    },
+    {
+        "name": "test_bert_uqi_two_pass",
+        "main": "test_flashinfer_prefill/test_bert_uqi_two_pass.py",
+        "extra_srcs": [],
+    },
+    {
         "name": "test_py_flashinfer_mha_decode",
         "main": "test_py_flashinfer_mha_decode.py",
         "extra_srcs": [
