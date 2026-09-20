@@ -26,6 +26,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.ops import (
     CacheReusePolicyDesc,
+    CacheTailPolicyDesc,
     DataType,
     HybridAttentionType,
     KVCacheSpecDesc,
@@ -71,8 +72,15 @@ def ple_state_desc(
     desc.entry_count_mode = OpaqueBlockEntryCountMode.EXPLICIT
     desc.explicit_entry_count = state_len
     reuse = CacheReusePolicyDesc()
-    reuse.enable_prefix_reuse = False
+    # Page-level state chain: the model resumes from the page holding the last
+    # prefix token ((prefix-1)//page_size) for page-aligned prefixes. Opaque
+    # state descs default to the SWA group policy, which keeps only tail
+    # blocks; this region materializes every page, so clear that tail policy.
+    reuse.enable_prefix_reuse = True
     desc.reuse = reuse
+    tail = CacheTailPolicyDesc()
+    tail.active_tail_blocks = 0
+    desc.tail = tail
     return desc
 
 
@@ -96,8 +104,13 @@ def ple_ngram_ctx_desc(ngram_size: int) -> KVCacheSpecDesc:
     desc.entry_count_mode = OpaqueBlockEntryCountMode.EXPLICIT
     desc.explicit_entry_count = context_len
     reuse = CacheReusePolicyDesc()
-    reuse.enable_prefix_reuse = False
+    # Page-level context chain, restored together with the conv state above;
+    # same SWA tail-policy override as the state region.
+    reuse.enable_prefix_reuse = True
     desc.reuse = reuse
+    tail = CacheTailPolicyDesc()
+    tail.active_tail_blocks = 0
+    desc.tail = tail
     return desc
 
 
