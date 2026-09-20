@@ -95,6 +95,21 @@ def fp8_paged_indexer_score(
     downstream topk needs ``-inf`` there; default False to save the
     extra mask).
     """
+    if block_size == 16:
+        from rtp_llm.models_py.modules.dsv4.fp8._indexer_small_page import (
+            small_page_indexer_score,
+        )
+
+        return small_page_indexer_score(
+            q_fp8,
+            w_fold,
+            kv_pool_uint8,
+            block_table,
+            context_lens,
+            block_size,
+            max_ctx_len,
+        )
+
     assert _HAS_DEEP_GEMM, "deep_gemm.fp8_paged_mqa_logits not available"
     assert q_fp8.dtype == torch.float8_e4m3fn, f"q_fp8 dtype={q_fp8.dtype}"
     assert q_fp8.dim() == 4 and q_fp8.shape[-1] == INDEXER_HEAD_DIM

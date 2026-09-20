@@ -36,6 +36,7 @@ _DSV4_FP8_TESTS = [
     "test_ring_write_mask",
     "test_fp8_mqa_prefill_indexer_score",
     "test_fp8_paged_indexer_score",
+    "test_small_page_indexer_score",
     "test_indexer_compute_q_flat_input",
     "test_indexer_fp8_prefill_chain",
     "test_indexer_fp8_prefill_meta",
