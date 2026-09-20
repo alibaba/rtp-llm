@@ -8,6 +8,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace rtp_llm {
@@ -25,16 +26,16 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer);
 
+    grpc::Status EnqueueBatch(grpc::ServerContext*         context,
+                              const EnqueueBatchRequestPB* request,
+                              EnqueueBatchResponsePB*      response);
+
     ::grpc::Status StartLoad(::grpc::ServerContext*                context,
                              const P2PConnectorStartLoadRequestPB* request,
                              P2PConnectorStartLoadResponsePB*      response);
 
     ::grpc::Status
     GetPeerInfo(::grpc::ServerContext* context, const GetPeerInfoRequestPB* request, GetPeerInfoResponsePB* response);
-
-    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
-                                   const BatchGenerateInputPB* request,
-                                   BatchGenerateOutputsPB*     response) override;
 
 private:
     // Per-onflight tracker for [HANG-DIAG] watchdog. Each GenerateStreamCall
@@ -69,11 +70,16 @@ private:
     };
 
     void               hangDiagTick();
+    void               batchContextCleanupTick();
     static const char* stepName(int step);
 
     mutable std::mutex                                            onflight_trackers_mutex_;
     std::unordered_map<int64_t, std::shared_ptr<OnflightTracker>> onflight_trackers_;
     autil::LoopThreadPtr                                          hang_diag_thread_;
+    autil::LoopThreadPtr                                          batch_context_cleanup_thread_;
+    std::mutex                                                    batch_contexts_mutex_;
+    std::unordered_map<int64_t, std::unique_ptr<GenerateContext>> batch_contexts_;
+    std::unordered_set<int64_t>                                   batch_request_ids_;
     int64_t                                                       hang_diag_warn_threshold_ms_{60 * 1000};
 
 };

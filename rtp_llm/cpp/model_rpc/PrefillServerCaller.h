@@ -7,7 +7,6 @@
 
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/PrefillServerCallerContext.h"
-#include "rtp_llm/cpp/model_rpc/PrefillBatchCallerContext.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 
@@ -35,9 +34,6 @@ public:
     grpc::Status callPrefill(grpc::ServerContext*                   server_context,
                              const GenerateInputPB*                 request,
                              grpc::ServerWriter<GenerateOutputsPB>* response_writer);
-
-    ErrorResult<std::unique_ptr<PrefillBatchCallerContext>>
-    callPrefillBatch(const BatchGenerateInputPB& request, const std::string& address, int64_t deadline_ms);
 
     // Fetch once for each PD request; only the RPC connection is reused.
     ErrorResult<PrefillPeerInfo> getPrefillPeerInfo(const std::string& ip, uint32_t port, int32_t request_timeout_ms);

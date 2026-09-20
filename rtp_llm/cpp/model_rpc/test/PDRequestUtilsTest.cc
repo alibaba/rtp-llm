@@ -52,6 +52,12 @@ GenerateInputPB makeMMRequest() {
 
 }  // namespace
 
+TEST(PDRequestUtilsTest, MasterEnqueuedHandoffKeyIsStablePerRequest) {
+    EXPECT_EQ(masterEnqueuedHandoffUniqueKey(42), "master_enqueued_42");
+    EXPECT_EQ(masterEnqueuedHandoffUniqueKey(42), masterEnqueuedHandoffUniqueKey(42));
+    EXPECT_NE(masterEnqueuedHandoffUniqueKey(42), masterEnqueuedHandoffUniqueKey(43));
+}
+
 TEST(PDRequestUtilsTest, TextPreprocessingPreservesRequestAndAppliesSameSpPolicy) {
     const auto request = makeRequest();
     for (bool is_mtp_eagle : {false, true}) {

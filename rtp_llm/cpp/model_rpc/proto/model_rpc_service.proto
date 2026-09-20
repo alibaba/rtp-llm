@@ -264,6 +264,8 @@ message GenerateInputPB {
     // priority). Used as a metrics tag on engine-side TPS
     // reporting; never affects engine scheduling.
     int32 priority = 10;
+    // Master has already admitted this request to the selected Prefill.
+    bool enqueued_by_master = 11;
 }
 
 message AuxInfoPB {

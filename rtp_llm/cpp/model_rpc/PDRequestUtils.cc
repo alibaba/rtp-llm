@@ -2,6 +2,10 @@
 
 namespace rtp_llm {
 
+std::string masterEnqueuedHandoffUniqueKey(int64_t request_id) {
+    return "master_enqueued_" + std::to_string(request_id);
+}
+
 PDSupportDecision checkPDSupport(const GenerateInputPB& request) {
     const auto& config = request.generate_config();
     if (!config.can_use_pd_separation()) {
@@ -17,17 +21,6 @@ PDSupportDecision checkPDSupport(const GenerateInputPB& request) {
         return {false, "PD does not support multiple return sequences"};
     }
     return {true, ""};
-}
-
-ErrorInfo checkPDBatchSupport(const BatchGenerateInputPB& request, bool& pd_separation) {
-    pd_separation = request.inputs_size() > 0 && checkPDSupport(request.inputs(0)).supported;
-    for (const auto& input : request.inputs()) {
-        if (checkPDSupport(input).supported != pd_separation) {
-            return ErrorInfo(ErrorCode::INVALID_PARAMS,
-                             "mixing PD and non-PD requests in one atomic batch is not supported");
-        }
-    }
-    return ErrorInfo::OkStatus();
 }
 
 ErrorInfo validatePDHandoff(const GenerateInputPB& request) {

@@ -32,10 +32,6 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
-    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
-                                   const BatchGenerateInputPB* request,
-                                   BatchGenerateOutputsPB*     response) override;
-
 private:
     grpc::Status        preparePDRequest(const GenerateInputPB&          request,
                                          int64_t                         deadline_ms,

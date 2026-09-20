@@ -151,39 +151,6 @@ PrefillServerCaller::callPrefill(const GenerateInputPB* request,
     return std::move(context);
 }
 
-ErrorResult<std::unique_ptr<PrefillBatchCallerContext>> PrefillServerCaller::callPrefillBatch(
-    const BatchGenerateInputPB& request, const std::string& address, int64_t deadline_ms) {
-    if (request.inputs_size() == 0 || deadline_ms <= currentTimeMs()) {
-        return ErrorInfo(request.inputs_size() == 0 ? ErrorCode::INVALID_PARAMS : ErrorCode::GENERATE_TIMEOUT,
-                         "Prefill BatchGenerateCall empty batch or expired deadline peer=" + address);
-    }
-    auto connection = rpc_pool_->getConnection(address);
-    if (!connection.ok()) {
-        return ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
-                         "Prefill BatchGenerateCall getConnection peer=" + address + ": "
-                             + connection.status().ToString());
-    }
-    auto context      = std::make_unique<PrefillBatchCallerContext>();
-    context->address_ = address;
-    context->stub_    = connection.value().stub;
-    context->request_.CopyFrom(request);
-    for (auto& input : *context->request_.mutable_inputs()) {
-        input.set_client_id(process_id_);
-        input.set_start_time(currentTimeUs());
-    }
-    context->client_context_.set_deadline(
-        std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms)));
-    context->reader_ =
-        context->stub_->AsyncBatchGenerateCall(&context->client_context_, context->request_, &context->queue_);
-    if (!context->reader_) {
-        return ErrorInfo(ErrorCode::RPC_FINISH_FAILED,
-                         "Prefill BatchGenerateCall async reader creation failed peer=" + address);
-    }
-    context->reader_->Finish(&context->response_, &context->status_, context.get());
-    context->started_ = true;
-    return std::move(context);
-}
-
 grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*                   server_context,
                                               const GenerateInputPB*                 request,
                                               grpc::ServerWriter<GenerateOutputsPB>* response_writer) {

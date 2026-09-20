@@ -37,6 +37,16 @@ public:
         }
     }
 
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response) override {
+        if (decode_entrance_) {
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
+                                "/batch_infer is not supported with decode_entrance");
+        }
+        return LocalRpcServiceImpl::BatchGenerateCall(context, request, response);
+    }
+
     grpc::Status
     RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) override {
         if (!prefill_server_) {
@@ -50,6 +60,9 @@ public:
     grpc::Status EnqueueBatch(grpc::ServerContext*         context,
                               const EnqueueBatchRequestPB* request,
                               EnqueueBatchResponsePB*      response) override {
+        if (prefill_server_new2_) {
+            return prefill_server_new2_->EnqueueBatch(context, request, response);
+        }
         if (!prefill_server_) {
             auto error_msg = "server not implement EnqueueBatch";
             RTP_LLM_LOG_ERROR(error_msg);

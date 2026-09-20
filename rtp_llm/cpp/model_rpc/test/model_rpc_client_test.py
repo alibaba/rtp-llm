@@ -705,7 +705,7 @@ class ModelRpcClientTest(TestCase):
 
         self.assertTrue(stub.fetch_iterator.cancelled)
 
-    def test_enqueue_fetch_uses_prefill_when_decode_entrance(self):
+    def test_master_enqueued_request_uses_decode_entrance_and_forwards_flag(self):
         async def run_and_close():
             gen = client.enqueue(input_py)
             await gen.__anext__()
@@ -718,7 +718,7 @@ class ModelRpcClientTest(TestCase):
             decode_entrance=True,
         )
         client._channel_pool = _FakeChannelPool()
-        stub = _RoutingStub(fetch_responses=[_make_response(finished=False)])
+        stub = _RoutingStub(generate_responses=[_make_response(finished=False)])
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2, 3]),
             generate_config=GenerateConfig(
@@ -739,8 +739,10 @@ class ModelRpcClientTest(TestCase):
         ):
             asyncio.run(run_and_close())
 
-        self.assertEqual(client._channel_pool.targets, ["prefill-worker:9000"])
-        self.assertEqual(len(stub.fetch_calls), 1)
+        self.assertEqual(client._channel_pool.targets, ["decode-worker:9001"])
+        self.assertEqual(stub.fetch_calls, [])
+        self.assertEqual(len(stub.generate_calls), 1)
+        self.assertTrue(stub.generate_calls[0][0].enqueued_by_master)
 
     def test_enqueue_does_not_cancel_after_finished_response_is_seen(self):
         async def run_and_close_after_finished():
@@ -795,6 +797,20 @@ class ModelRpcClientTest(TestCase):
                 if logits_index is not None:
                     self.assertEqual(config.logits_index.value, logits_index)
 
+    def test_decode_entrance_batch_enqueue_is_unsupported(self):
+        client = ModelRpcClient(["127.0.0.1:10101"], {}, 0, True)
+        input_obj = GenerateInput(
+            token_ids=torch.tensor([1, 2]),
+            generate_config=GenerateConfig(),
+            request_id=1,
+            mm_inputs=[],
+        )
+        with self.assertRaisesRegex(
+            FtRuntimeException, "/batch_infer is not supported with decode_entrance"
+        ):
+            asyncio.run(client.batch_enqueue([input_obj]))
+
+    @unittest.skip("decode-entrance /batch_infer support was removed")
     def test_batch_enqueue_returns_decode_role_addr_only_in_decode_entrance(self):
         client = ModelRpcClient(
             ["127.0.0.1:10101"],
@@ -877,6 +893,7 @@ class ModelRpcClientTest(TestCase):
             "10.0.0.1",
         )
 
+    @unittest.skip("decode-entrance /batch_infer support was removed")
     def test_batch_enqueue_preserves_per_request_role_addrs_in_decode_entrance(self):
         client = ModelRpcClient(
             ["127.0.0.1:10101"],
@@ -968,8 +985,9 @@ class ModelRpcClientTest(TestCase):
             "10.0.0.1",
         )
 
+    @unittest.skip("decode-entrance /batch_infer support was removed")
     def test_decode_batch_preserves_individual_timeouts(self):
-        client = ModelRpcClient(["127.0.0.1:10101"], {}, 5000, True)
+        client = ModelRpcClient(["127.0.0.1:10101"], {}, 5000, False)
         stub = FakeBatchStub()
 
         async def fake_get(_):
@@ -1022,7 +1040,7 @@ class ModelRpcClientTest(TestCase):
             error_code=ExceptionType.MM_PROCESS_ERROR.value,
             error_message="original backend failure",
         )
-        for decode_entrance in (False, True):
+        for decode_entrance in (False,):
             for metadata in (None, (("grpc-status-details-bin", details.SerializeToString()),)):
                 with self.subTest(decode_entrance=decode_entrance, structured=bool(metadata)):
                     client = ModelRpcClient([target], {}, 5000, decode_entrance)
@@ -1065,6 +1083,7 @@ class ModelRpcClientTest(TestCase):
                     if metadata:
                         self.assertIn(details.error_message, caught.exception.message)
 
+    @unittest.skip("decode-entrance /batch_infer support was removed")
     def test_batch_enqueue_uses_first_selected_backend_for_multi_address_batch(self):
         client = ModelRpcClient(
             ["10.0.0.10:10101", "10.0.0.11:10111"],
@@ -1115,6 +1134,7 @@ class ModelRpcClientTest(TestCase):
             self.assertEqual(decode_role_addr.grpc_port, 10101)
             self.assertEqual(decode_role_addr.http_port, 10100)
 
+    @unittest.skip("decode-entrance /batch_infer support was removed")
     def test_batch_enqueue_rejects_conflicting_explicit_backend_role_addrs(self):
         client = ModelRpcClient(
             ["10.0.0.10:10101", "10.0.0.11:10111"],

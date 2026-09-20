@@ -5,12 +5,13 @@ import json
 import os
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, Callable, List
-from unittest import IsolatedAsyncioTestCase, main
+from unittest import IsolatedAsyncioTestCase, main, skip
 
 import torch
 from typing_extensions import override
 
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode, RoleAddr, RoleType
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -2985,6 +2986,14 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         ]
         return visitor, inputs
 
+    async def test_batch_enqueue_decode_entrance_is_unsupported(self):
+        visitor, inputs = self._decode_batch_visitor_and_inputs()
+        with self.assertRaisesRegex(
+            FtRuntimeException, "/batch_infer is not supported with decode_entrance"
+        ):
+            await visitor.batch_enqueue(inputs)
+
+    @skip("decode-entrance /batch_infer support was removed")
     async def test_batch_enqueue_decode_entrance_uses_one_batch_rpc(self):
         visitor, inputs = self._decode_batch_visitor_and_inputs()
         calls = []
@@ -3002,6 +3011,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertIs(await visitor.batch_enqueue(inputs), outputs)
         self.assertEqual(calls, [inputs])
 
+    @skip("decode-entrance /batch_infer support was removed")
     async def test_batch_enqueue_decode_entrance_routes_once(self):
         visitor, inputs = self._decode_batch_visitor_and_inputs()
         visitor.host_service.service_available = True
@@ -3018,6 +3028,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         await visitor.batch_enqueue(inputs)
         self.assertEqual(routed, [11])
 
+    @skip("decode-entrance /batch_infer support was removed")
     async def test_batch_enqueue_decode_entrance_propagates_batch_error(self):
         visitor, inputs = self._decode_batch_visitor_and_inputs()
 
@@ -3028,6 +3039,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "batch item 1 failed"):
             await visitor.batch_enqueue(inputs)
 
+    @skip("decode-entrance /batch_infer support was removed")
     async def test_batch_enqueue_decode_entrance_cancels_batch_rpc(self):
         visitor, inputs = self._decode_batch_visitor_and_inputs()
         started = asyncio.Event()
@@ -3052,7 +3064,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         visitor, _ = self._decode_batch_visitor_and_inputs()
         self.assertEqual(await visitor.batch_enqueue([]), [])
 
-    async def test_batch_enqueue_routes_only_first_request_for_batch_infer(self):
+    async def test_batch_enqueue_routes_each_request_for_batch_infer(self):
         pd_sep_config = PDSepConfig()
         pd_sep_config.role_type = RoleType.FRONTEND
         pd_sep_config.decode_entrance = False
@@ -3078,10 +3090,11 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             ]
 
         async def _fake_batch_enqueue(inputs: list[GenerateInput]):
-            self.assertEqual(route_calls, [41])
+            self.assertEqual(route_calls, [41, 42])
             self.assertEqual(len(inputs[0].generate_config.role_addrs), 1)
             self.assertEqual(inputs[0].generate_config.role_addrs[0].ip, "10.0.0.10")
-            self.assertEqual(inputs[1].generate_config.role_addrs, [])
+            self.assertEqual(len(inputs[1].generate_config.role_addrs), 1)
+            self.assertEqual(inputs[1].generate_config.role_addrs[0].ip, "10.0.0.10")
             return []
 
         visitor.route_ips = _fake_route

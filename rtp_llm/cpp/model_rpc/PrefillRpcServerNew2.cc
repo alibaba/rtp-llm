@@ -3,12 +3,40 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew2.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <exception>
+#include <tuple>
 #include <utility>
 
 namespace rtp_llm {
 
+namespace {
+
+void addBatchSuccess(EnqueueBatchResponsePB* response, int64_t request_id) {
+    response->add_successes()->set_request_id(request_id);
+}
+
+void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, int64_t code, const std::string& message) {
+    auto* error = response->add_errors();
+    error->set_request_id(request_id);
+    error->mutable_error_info()->set_error_code(code);
+    error->mutable_error_info()->set_error_message(message);
+}
+
+}  // namespace
+
 PrefillRpcServerNew2::~PrefillRpcServerNew2() {
+    if (batch_context_cleanup_thread_) {
+        batch_context_cleanup_thread_->stop();
+        batch_context_cleanup_thread_.reset();
+    }
+    {
+        std::lock_guard<std::mutex> lock(batch_contexts_mutex_);
+        batch_contexts_.clear();
+        batch_request_ids_.clear();
+    }
     if (hang_diag_thread_) {
         hang_diag_thread_->stop();
         hang_diag_thread_.reset();
@@ -70,6 +98,25 @@ void PrefillRpcServerNew2::hangDiagTick() {
     }
 }
 
+void PrefillRpcServerNew2::batchContextCleanupTick() {
+    std::vector<std::unique_ptr<GenerateContext>> completed;
+    {
+        std::lock_guard<std::mutex> lock(batch_contexts_mutex_);
+        for (auto it = batch_contexts_.begin(); it != batch_contexts_.end();) {
+            auto& stream = it->second->getStream();
+            if (stream && (stream->hasError() || stream->getStatus() == StreamState::FINISHED)) {
+                batch_request_ids_.erase(it->first);
+                completed.push_back(std::move(it->second));
+                it = batch_contexts_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    // GenerateContext destruction publishes the final RuntimeMeta snapshot.
+    completed.clear();
+}
+
 grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                                maga_init_params,
                                         std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                                         py::object                                             mm_process_engine) {
@@ -100,6 +147,12 @@ grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                 
         autil::LoopThread::createLoopThread([this]() { hangDiagTick(); }, 30 * 1000 * 1000, "PrefillNew2HangDiag");
     if (!hang_diag_thread_) {
         RTP_LLM_LOG_WARNING("prefill rpc server new2: failed to start hang_diag_thread_, watchdog disabled");
+    }
+    batch_context_cleanup_thread_ = autil::LoopThread::createLoopThread(
+        [this]() { batchContextCleanupTick(); }, 10 * 1000, "P2PBatchCleanup");
+    if (!batch_context_cleanup_thread_) {
+        RTP_LLM_LOG_WARNING("prefill rpc server new2: failed to start batch cleanup thread");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to start P2P batch cleanup thread");
     }
     return grpc::Status::OK;
 }
@@ -210,76 +263,169 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
     return generate_context.error_status;
 }
 
-grpc::Status PrefillRpcServerNew2::BatchGenerateCall(grpc::ServerContext*        context,
-                                                     const BatchGenerateInputPB* request,
-                                                     BatchGenerateOutputsPB*     response) {
+grpc::Status PrefillRpcServerNew2::EnqueueBatch(grpc::ServerContext*         context,
+                                                const EnqueueBatchRequestPB* request,
+                                                EnqueueBatchResponsePB*      response) {
     c10::InferenceMode inference_guard(true);
+    RTP_LLM_PROFILE_FUNCTION();
+    AtomicGuard request_guard(onflight_requests_);
     response->Clear();
-    if (request->inputs_size() == 0)
-        return grpc::Status::OK;
-    bool pd      = false;
-    auto support = checkPDBatchSupport(*request, pd);
-    if (!support.ok())
-        return serializeErrorMsg("batch", support);
-    if (!pd)
-        return LocalRpcServer::BatchGenerateCall(context, request, response);
-    AtomicGuard                                 request_guard(onflight_requests_);
-    std::vector<std::shared_ptr<GenerateInput>> inputs;
-    std::unordered_set<std::string>             keys;
-    std::vector<int64_t> local_deadlines;
-    for (int i = 0; i < request->inputs_size(); ++i) {
-        const auto& item   = request->inputs(i);
-        auto        status = validatePDHandoff(item);
-        if (!status.ok())
-            return serializeErrorMsg("batch item " + std::to_string(i), status);
-        local_deadlines.push_back(engine_->getCacheManager()->prefillRequestDeadline(
-            item.generate_config().unique_key(), item.generate_config().timeout_ms()));
-        if (!keys.insert(item.generate_config().unique_key()).second) {
-            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "duplicate batch handoff key");
+    response->set_batch_id(request->batch_id());
+
+    const auto& parallelism_config = maga_init_params_.parallelism_config;
+    RTP_LLM_CHECK_WITH_INFO(parallelism_config.dp_size == 1,
+                            "P2P EnqueueBatch only supports single-DP mode, dp_size=%ld",
+                            parallelism_config.dp_size);
+    const int local_dp_rank = static_cast<int>(parallelism_config.dp_rank);
+
+    int                         input_count = 0;
+    std::unordered_set<int64_t> request_ids;
+    bool                        duplicate_request_id = false;
+    for (const auto& dp_slot : request->dp_slots()) {
+        for (const auto& external_input : dp_slot.requests()) {
+            ++input_count;
+            if (external_input.has_input()
+                && !request_ids.insert(external_input.input().request_id()).second) {
+                duplicate_request_id = true;
+            }
         }
     }
-    for (int i = 0; i < request->inputs_size(); ++i) {
-        if (context->IsCancelled())
-            return grpc::Status(grpc::StatusCode::CANCELLED, "batch cancelled by user");
-        const auto& item   = request->inputs(i);
-        auto        input  = QueryConverter::transQuery(&item);
-        input->request_deadline_ms = local_deadlines[i];
-        auto        status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
-        if (!status.ok())
-            return serializeErrorMsg("batch item " + std::to_string(i), status);
-        inputs.push_back(std::move(input));
+    if (duplicate_request_id) {
+        for (const auto& dp_slot : request->dp_slots()) {
+            for (const auto& external_input : dp_slot.requests()) {
+                addBatchError(response,
+                              external_input.has_input() ? external_input.input().request_id() : 0,
+                              grpc::StatusCode::ALREADY_EXISTS,
+                              "duplicate request_id in P2P EnqueueBatch");
+            }
+        }
+        return grpc::Status::OK;
     }
-    std::vector<GenerateStreamPtr>                streams;
-    std::vector<std::unique_ptr<GenerateContext>> contexts;
-    std::vector<std::unique_ptr<OnflightScope>>   scopes;
-    for (const auto& input : inputs) {
-        auto stream = engine_->makeStream(input);
-        auto item   = std::make_unique<GenerateContext>(
-            input->request_id, input->generate_config->timeout_ms, context, metrics_reporter_, meta_);
-        item->setStream(stream);
-        streams.push_back(std::move(stream));
-        contexts.push_back(std::move(item));
-        scopes.emplace_back(std::make_unique<OnflightScope>(this, input->request_id));
-        scopes.back()->markStep(GenerateStreamStep::kAfterTransQuery);
+
+    std::vector<std::shared_ptr<GenerateInput>> inputs;
+    std::vector<int64_t>                        admitted_request_ids;
+    const auto release_request_id = [this](int64_t request_id) {
+        std::lock_guard<std::mutex> lock(batch_contexts_mutex_);
+        batch_request_ids_.erase(request_id);
+    };
+    const auto release_admitted_request_ids = [this, &admitted_request_ids]() {
+        std::lock_guard<std::mutex> lock(batch_contexts_mutex_);
+        for (const auto request_id : admitted_request_ids) {
+            batch_request_ids_.erase(request_id);
+        }
+    };
+    inputs.reserve(input_count);
+    admitted_request_ids.reserve(input_count);
+    for (const auto& dp_slot : request->dp_slots()) {
+        for (const auto& external_input : dp_slot.requests()) {
+            if (!external_input.has_input()) {
+                addBatchError(response, 0, grpc::StatusCode::INVALID_ARGUMENT, "P2P EnqueueBatch input is missing");
+                continue;
+            }
+            const auto request_id = external_input.input().request_id();
+            if (dp_slot.dp_rank() != local_dp_rank) {
+                addBatchError(response,
+                              request_id,
+                              grpc::StatusCode::INVALID_ARGUMENT,
+                              "P2P EnqueueBatch dp_rank mismatch, request dp_rank "
+                                  + std::to_string(dp_slot.dp_rank()) + ", local dp_rank "
+                                  + std::to_string(local_dp_rank));
+                continue;
+            }
+            if (context && context->IsCancelled()) {
+                release_admitted_request_ids();
+                return grpc::Status(grpc::StatusCode::CANCELLED, "P2P EnqueueBatch cancelled before admission");
+            }
+            {
+                std::lock_guard<std::mutex> lock(batch_contexts_mutex_);
+                if (!batch_request_ids_.insert(request_id).second) {
+                    addBatchError(response,
+                                  request_id,
+                                  grpc::StatusCode::ALREADY_EXISTS,
+                                  "request_id is already active in P2P EnqueueBatch");
+                    continue;
+                }
+            }
+
+            GenerateInputPB item;
+            item.CopyFrom(external_input.input());
+            item.set_group_size(input_count);
+            item.mutable_group_id()->set_value(request->batch_id());
+            auto* config = item.mutable_generate_config();
+            config->set_unique_key(masterEnqueuedHandoffUniqueKey(request_id));
+            config->set_timeout_ms(clampRpcTimeoutMsToInt32(normalizeRpcTimeoutMs(
+                config->timeout_ms(), maga_init_params_.pd_sep_config.max_rpc_timeout_ms)));
+            auto input = QueryConverter::transQuery(&item);
+            input->request_deadline_ms = engine_->getCacheManager()->prefillRequestDeadline(
+                config->unique_key(), config->timeout_ms());
+            if (input->request_deadline_ms <= currentTimeMs()) {
+                release_request_id(request_id);
+                addBatchError(response,
+                              request_id,
+                              grpc::StatusCode::DEADLINE_EXCEEDED,
+                              "P2P EnqueueBatch request expired before admission");
+                continue;
+            }
+            const auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
+            if (!preprocess_status.ok()) {
+                release_request_id(request_id);
+                addBatchError(response,
+                              request_id,
+                              static_cast<int64_t>(preprocess_status.code()),
+                              preprocess_status.ToString());
+                continue;
+            }
+            admitted_request_ids.push_back(request_id);
+            inputs.push_back(std::move(input));
+        }
     }
-    // Recheck the whole batch after MM processing, before queue admission.
-    for (const auto& input : inputs) {
-        if (input->request_deadline_ms <= currentTimeMs())
-            return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "prefill batch request expired");
+    if (inputs.empty()) {
+        return grpc::Status::OK;
     }
-    if (context->IsCancelled())
-        return grpc::Status(grpc::StatusCode::CANCELLED, "batch cancelled by user");
-    if (engine_->batchEnqueue(streams) != streams) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, "batchEnqueue changed prepared stream identity or order");
+
+    std::vector<bool>              enqueue_successes;
+    std::vector<GenerateStreamPtr> streams;
+    try {
+        std::tie(enqueue_successes, streams) = engine_->enqueueMultiple(inputs);
+    } catch (const std::exception& e) {
+        release_admitted_request_ids();
+        return grpc::Status(grpc::StatusCode::INTERNAL,
+                            "P2P EnqueueBatch enqueueMultiple exception: " + std::string(e.what()));
+    } catch (...) {
+        release_admitted_request_ids();
+        return grpc::Status(grpc::StatusCode::INTERNAL, "P2P EnqueueBatch enqueueMultiple unknown exception");
     }
-    for (auto& scope : scopes)
-        scope->markStep(GenerateStreamStep::kAfterEngineEnqueue);
-    auto status = pollBatchStreamOutput(context, streams, response);
-    for (auto& item : contexts)
-        item->error_status = status;
-    for (auto& scope : scopes)
-        scope->markStep(GenerateStreamStep::kAfterPollStream);
-    return status;
+    if (enqueue_successes.size() != inputs.size() || streams.size() != inputs.size()) {
+        release_admitted_request_ids();
+        return grpc::Status(grpc::StatusCode::INTERNAL, "P2P EnqueueBatch result size mismatch");
+    }
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        if (enqueue_successes[i]) {
+            auto batch_context = std::make_unique<GenerateContext>(admitted_request_ids[i],
+                                                                    inputs[i]->generate_config->timeout_ms,
+                                                                    /*server_context=*/nullptr,
+                                                                    metrics_reporter_,
+                                                                    meta_);
+            batch_context->setStream(streams[i]);
+            {
+                std::lock_guard<std::mutex> lock(batch_contexts_mutex_);
+                batch_contexts_.emplace(admitted_request_ids[i], std::move(batch_context));
+            }
+            addBatchSuccess(response, admitted_request_ids[i]);
+            continue;
+        }
+        auto error = streams[i] ? streams[i]->statusInfo() : ErrorInfo(ErrorCode::UNKNOWN_ERROR, "null stream");
+        release_request_id(admitted_request_ids[i]);
+        addBatchError(response,
+                      admitted_request_ids[i],
+                      static_cast<int64_t>(error.code()),
+                      error.hasError() ? error.ToString() : "scheduler rejected request");
+    }
+    RTP_LLM_CHECK_WITH_INFO(response->successes_size() + response->errors_size() == input_count,
+                            "P2P EnqueueBatch result size mismatch: request=%d response=%d",
+                            input_count,
+                            response->successes_size() + response->errors_size());
+    return grpc::Status::OK;
 }
 
 ::grpc::Status PrefillRpcServerNew2::StartLoad(::grpc::ServerContext*                context,

@@ -468,6 +468,9 @@ def _trans_jsonable_options(
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
+    input_pb.enqueued_by_master = bool(
+        getattr(input_py, "enqueued_by_master", False)
+    )
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.start_time = int(time.time() * 1_000_000)
     input_pb.group_size = input_py.group_size
@@ -1086,7 +1089,10 @@ class ModelRpcClient(object):
         rpc_status = None
         stream_state = StreamState()
         include_all_sequences = not input_py.generate_config.has_num_beams()
-        use_fetch_response = bool(getattr(input_py, "enqueued_by_master", False))
+        use_fetch_response = bool(
+            getattr(input_py, "enqueued_by_master", False)
+            and not self._decode_entrance
+        )
         selected_role = None
 
         if use_fetch_response:
@@ -1354,21 +1360,18 @@ class ModelRpcClient(object):
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         if not inputs:
             return []
-
-        item_timeouts = [
-            self._compute_grpc_timeout(inp.generate_config.timeout_ms) for inp in inputs
-        ]
         if self._decode_entrance:
-            grpc_timeout_seconds = max(item_timeouts)
-        else:
-            max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)
-            grpc_timeout_seconds = self._compute_grpc_timeout(max_timeout_ms)
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "/batch_infer is not supported with decode_entrance",
+            )
+
+        max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)
+        grpc_timeout_seconds = self._compute_grpc_timeout(max_timeout_ms)
 
         batch_input_pb = BatchGenerateInputPB()
-        for inp, item_timeout in zip(inputs, item_timeouts):
-            inp.generate_config.timeout_ms = int(
-                (item_timeout if self._decode_entrance else grpc_timeout_seconds) * 1000
-            )
+        for inp in inputs:
+            inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
             input_pb = trans_input(inp)
             batch_input_pb.inputs.append(input_pb)
 

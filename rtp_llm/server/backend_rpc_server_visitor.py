@@ -102,6 +102,7 @@ class BackendRPCServerVisitor:
         # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
         max_rpc_timeout_ms = pd_sep_config.max_rpc_timeout_ms
         decode_entrance = pd_sep_config.decode_entrance
+        self.decode_entrance = decode_entrance
 
         # Get client_config from grpc_config if provided, otherwise use empty dict
         if grpc_config is not None:
@@ -728,21 +729,22 @@ class BackendRPCServerVisitor:
 
     @torch.inference_mode()
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        if not inputs:
+            return []
+        if self.decode_entrance:
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "/batch_infer is not supported with decode_entrance",
+            )
         for input in inputs:
             self.fill_request_info(input)
             self._validate_input(input)
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
 
-        if not inputs:
-            return []
-
         if self.host_service.service_available:
-            # /batch_infer sends the whole batch to one backend. Route only the
-            # first request here; ModelRpcClient.batch_enqueue will keep the
-            # batch on that target and reject only truly conflicting explicit
-            # backend selections carried by later requests.
-            await self.route_ips(inputs[0])
+            for input in inputs:
+                await self.route_ips(input)
 
         return await self.model_rpc_client.batch_enqueue(inputs)
 
