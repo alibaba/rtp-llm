@@ -14,6 +14,14 @@ from example.k3 import kimi_k3_full_model_two_host_pd_smoke_driver as driver
 
 
 class ForwardedOptionalEnvironmentTest(unittest.TestCase):
+    def test_role_specific_ssm_storage_dtype(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            for role in ("prefill", "decode"):
+                self.assertEqual(driver.forwarded_optional_environment(role)["SSM_STATE_DTYPE"], "fp32")
+        with mock.patch.dict(os.environ, {"PREFILL_SSM_STATE_DTYPE": "bf16", "DECODE_SSM_STATE_DTYPE": "fp32"}, clear=True):
+            self.assertEqual(driver.forwarded_optional_environment("prefill")["SSM_STATE_DTYPE"], "bf16")
+            self.assertEqual(driver.forwarded_optional_environment("decode")["SSM_STATE_DTYPE"], "fp32")
+
     def test_draft_mode_defaults_and_explicit_overrides(self) -> None:
         for settings, expected in (
             ({}, ("mtp", "kimi_k3_mtp")),

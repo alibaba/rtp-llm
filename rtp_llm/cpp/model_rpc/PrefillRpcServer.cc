@@ -340,6 +340,12 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
             continue;
         }
         alloc_request.set_prefill_ssm_state_dtype(static_cast<int32_t>(linear_spec->ssm_state_dtype));
+        if (maga_init_params_.model_config_.model_type == "kimi_k3") {
+            RTP_LLM_CHECK_WITH_INFO(linear_spec->ssm_state_dtype == DataType::TYPE_FP32
+                                        || linear_spec->ssm_state_dtype == DataType::TYPE_BF16,
+                                    "K3 Prefill SSM storage must be FP32 or BF16");
+            alloc_request.set_prefill_ssm_transfer_dtype(static_cast<int32_t>(DataType::TYPE_FP32));
+        }
         alloc_request.set_prefill_conv_state_dtype(static_cast<int32_t>(linear_spec->conv_state_dtype));
         break;
     }

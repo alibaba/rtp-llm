@@ -143,6 +143,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 captured_kv_cache.kv_scale_base :
                 torch::Tensor();
         kv_cache_info.linear_cache_segment_sizes = captured_kv_cache.cache_store_segment_sizes;
+        kv_cache_info.linear_ssm_bf16_to_fp32 = captured_kv_cache.cache_store_ssm_bf16_to_fp32;
         execWriteCacheStore(inputs, kv_cache_info, captured_cache_store.mla_kvcache, captured_cache_store.cache_store);
     };
 

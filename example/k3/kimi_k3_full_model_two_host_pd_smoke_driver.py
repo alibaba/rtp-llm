@@ -276,6 +276,9 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
     )
     if binary is not None:
         result["RTP_LLM_SERVER_BINARY"] = binary
+    result["SSM_STATE_DTYPE"] = env_default(
+        f"{role.upper()}_SSM_STATE_DTYPE", "fp32"
+    )
     return result
 
 

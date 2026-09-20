@@ -57,6 +57,28 @@ def make_args() -> argparse.Namespace:
 
 
 class KimiK3FullModelPdCasesTest(unittest.TestCase):
+    def test_flow_hit_prompts_contain_a_complete_reuse_stripe(self) -> None:
+        args = make_args()
+        args.block_size = 1024
+        args.reuse_unit_tokens = 8192
+        args.decode_role_addrs = args.decode_role_addrs[:2]
+        runner = Runner(args)
+        stages = {}
+        with (
+            mock.patch.object(runner, "fit_prompt", side_effect=lambda h, t, n: (h + t, [0] * n)),
+            mock.patch.object(runner, "run_stage", side_effect=lambda n, c, **kw: stages.update({n: c})),
+        ):
+            runner.run_flow()
+        cold = stages["flow_uneven_miss"]
+        warm = stages["flow_uneven_hit_rotated"]
+        self.assertEqual(len(cold), 5)
+        self.assertEqual(len(warm), len(cold))
+        for miss, hit in zip(cold, reversed(warm)):
+            self.assertGreater(miss.expected_input_len, args.reuse_unit_tokens)
+            self.assertEqual(miss.prompt, hit.prompt)
+            self.assertEqual(hit.reuse, "hit")
+            self.assertEqual(hit.decode_owner_rank, (miss.decode_owner_rank + 1) % 2)
+
     def test_trimmed_suite_keeps_boundaries_and_restores_multi_dp_cases(self) -> None:
         for dp in (1, 2):
             with self.subTest(dp=dp):
@@ -385,6 +407,25 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
             "multimodal_mtp_chunk_prefill_miss",
         ):
             self.assertIn(name, stages)
+
+    def test_plain_decode_keeps_multimodal_checks_without_mtp_requirement(self) -> None:
+        args = make_args()
+        args.require_mtp = False
+        runner = Runner(args)
+        stages = {}
+        with (
+            mock.patch.object(Runner, "run_prefix_branches"),
+            mock.patch.object(Runner, "run_padding_boundaries"),
+            mock.patch.object(Runner, "run_page_rr_boundaries"),
+            mock.patch.object(runner, "run_stage", side_effect=lambda n, c, **kw: stages.update({n: c})),
+            mock.patch.object(runner, "run_long_prefix_case"),
+        ):
+            runner.run_all()
+        self.assertTrue(all(not case.require_mtp for cases in stages.values() for case in cases))
+        multimodal = stages["multimodal_mtp_chunk_prefill_miss"][0]
+        self.assertTrue(multimodal.require_multimodal)
+        self.assertTrue(multimodal.require_chunk)
+        self.assertEqual(multimodal.expected_regex, numbered_answer_pattern(6241))
 
     def test_all_suite_defines_dedicated_semantic_and_mtp_budgets(self) -> None:
         runner = Runner(make_args())

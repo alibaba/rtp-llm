@@ -172,6 +172,15 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     }
 
     const auto& param = cache_store_inputs;
+    // The async writer runs on another host thread. Select the tensor's device
+    // before allocating or recording the conversion completion event.
+    std::unique_ptr<DeviceGuard> transfer_device_guard;
+    if (kv_cache.linear_ssm_bf16_to_fp32) {
+        RTP_LLM_CHECK_WITH_INFO(kv_cache.kv_cache_buffer.is_cuda()
+                                    && !kv_cache.linear_cache_segment_sizes.empty(),
+                                "K3 SSM widening requires a CUDA segmented linear cache");
+        transfer_device_guard = std::make_unique<DeviceGuard>(kv_cache.kv_cache_buffer.device());
+    }
 
     RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.defined(), "failed to get host_kv_cache_offset");
     const int32_t* offset_addr          = nullptr;
@@ -316,7 +325,8 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         }
 
         auto request_id     = *(param.request_id.data_ptr<int64_t>() + batch_id);
-        auto event          = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
+        auto event          = kv_cache.linear_ssm_bf16_to_fp32 ? runtimeCreateEvent() :
+                              (param.pre_created_event ? param.pre_created_event : runtimeCreateEvent());
         auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
 
         // An explicit plan is authoritative: attention may execute a terminal
@@ -389,9 +399,22 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                                             segment_size);
                     void* segment_addr = static_cast<void*>(static_cast<int8_t*>(kv_addr) + segment_offset);
                     std::shared_ptr<void> segment_block_addr(kv_cache_owner, segment_addr);
+                    size_t wire_size = segment_size;
+                    if (segment_id == 0 && kv_cache.linear_ssm_bf16_to_fp32) {
+                        RTP_LLM_CHECK_WITH_INFO(segment_size % sizeof(at::BFloat16) == 0
+                                                    && segment_size <= std::numeric_limits<uint32_t>::max() / 2,
+                                                "invalid BF16 SSM segment size=%zu", segment_size);
+                        auto source = torch::from_blob(
+                            segment_addr,
+                            {static_cast<int64_t>(segment_size / sizeof(at::BFloat16))},
+                            kv_cache.kv_cache_buffer.options().dtype(torch::kBFloat16));
+                        auto staging = std::make_shared<torch::Tensor>(source.to(torch::kFloat32));
+                        segment_block_addr = std::shared_ptr<void>(staging, staging->data_ptr());
+                        wire_size = staging->nbytes();
+                    }
                     request_blocks->addBlock(makeLinearCacheSegmentKey(segment_id, cache_key),
                                              segment_block_addr,
-                                             static_cast<uint32_t>(segment_size),
+                                             static_cast<uint32_t>(wire_size),
                                              kv_gpu_mem,
                                              true);
                     segment_offset += segment_size;
@@ -481,6 +504,16 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         }
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);
+        }
+
+        if (kv_cache.linear_ssm_bf16_to_fp32) {
+            // Re-record our private event after every conversion for this request.
+            // Never re-record the producer event shared with other publications.
+#if USING_CUDA
+            event->record(at::cuda::getCurrentCUDAStream());
+#else
+            event->record(at::hip::getCurrentHIPStream(at::hip::current_device()));
+#endif
         }
 
         auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {

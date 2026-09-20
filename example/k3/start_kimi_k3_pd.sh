@@ -633,7 +633,7 @@ server_args=(
     --fp8_kv_cache "${FP8_KV_CACHE:-0}"
     --linear_step "${linear_step}"
     --kimi_k3_kda_pool_blocks "${kimi_k3_kda_pool_blocks}"
-    --ssm_state_dtype fp32
+    --ssm_state_dtype "${SSM_STATE_DTYPE:-fp32}"
     --warm_up 0
     --reuse_cache "${reuse_cache}"
     --enable_device_cache 1

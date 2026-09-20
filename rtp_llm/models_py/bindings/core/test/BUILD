@@ -19,6 +19,9 @@ cc_test(
     name = "exec_ops_test",
     srcs = ["ExecOpsTest.cc"],
     deps = [
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+        "//rtp_llm/cpp/utils:kv_cache_utils",
+        "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",

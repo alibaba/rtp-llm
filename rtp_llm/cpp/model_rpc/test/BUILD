@@ -114,3 +114,13 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "k3_state_transfer_test",
+    srcs = ["K3StateTransferTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/model_rpc:k3_state_transfer",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

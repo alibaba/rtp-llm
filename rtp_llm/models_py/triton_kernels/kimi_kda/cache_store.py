@@ -260,8 +260,8 @@ def kimi_kda_load_recurrent_state(
     tensors = (prefix_lengths, linear_block_map, ssm_cache)
     if any(not tensor.is_cuda for tensor in tensors):
         raise ValueError("KDA recurrent gather requires CUDA tensors")
-    if ssm_cache.dtype != torch.float32:
-        raise ValueError(f"KDA recurrent cache must be FP32, got {ssm_cache.dtype}")
+    if ssm_cache.dtype not in (torch.float32, torch.bfloat16):
+        raise ValueError(f"KDA recurrent cache must be FP32 or BF16, got {ssm_cache.dtype}")
     if prefix_lengths.dtype not in (torch.int32, torch.int64):
         raise ValueError("KDA recurrent prefix lengths must be int32/int64")
     if linear_block_map.dtype not in (torch.int32, torch.int64):
@@ -271,7 +271,7 @@ def kimi_kda_load_recurrent_state(
     batch = int(prefix_lengths.numel())
     output = torch.empty(
         (batch, *ssm_cache.shape[1:]),
-        dtype=ssm_cache.dtype,
+        dtype=torch.float32,
         device=ssm_cache.device,
     )
     heads, key_dim, value_dim = ssm_cache.shape[1:]
@@ -342,8 +342,10 @@ def kimi_kda_store_recurrent_checkpoints(
     )
     if any(not tensor.is_cuda for tensor in tensors):
         raise ValueError("KDA recurrent checkpoint store requires CUDA tensors")
-    if checkpoints.dtype != torch.float32 or ssm_cache.dtype != torch.float32:
-        raise ValueError("KDA recurrent checkpoints/cache must be FP32")
+    if checkpoints.dtype != torch.float32 or ssm_cache.dtype not in (
+        torch.float32, torch.bfloat16
+    ):
+        raise ValueError("KDA checkpoints must be FP32 and cache FP32 or BF16")
     if linear_block_map.dtype not in (torch.int32, torch.int64):
         raise ValueError("KDA recurrent LINEAR block map must be int32/int64")
     if metadata.store_checkpoint_indices.numel() == 0:

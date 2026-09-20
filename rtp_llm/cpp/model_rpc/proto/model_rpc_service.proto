@@ -351,6 +351,10 @@ message GenerateRequestPB {
     int32 prefill_mla_fp8_format = 20;
     float prefill_mla_fp8_q_scale = 21;
     float prefill_mla_fp8_kv_scale = 22;
+    // Actual wire dtype; absent means the legacy local storage dtype above.
+    oneof prefill_ssm_transfer_dtype_presence {
+        int32 prefill_ssm_transfer_dtype = 23;
+    }
 }
 
 // in tp case, decode master broadcast to decode worker

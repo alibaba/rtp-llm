@@ -1229,14 +1229,19 @@ class Runner:
                          decode_owner_rank=owner)],
             )
         owner_ranks = [0] * 4 + [owner for owner in range(1, owners)]
-        batch = [
-            Case(
-                f"flow_uneven_{idx}",
-                make_flow_prompt(f"{self.args.namespace}/uneven/{idx}"),
-                r".", "miss", decode_owner_rank=owner,
+        batch = []
+        for idx, owner in enumerate(owner_ranks):
+            # A reusable KDA checkpoint spans an entire Page-RR stripe. A
+            # fixed character count can produce fewer tokens than that span.
+            prompt, tokens = self.fit_prompt(
+                f"四层流程测试标识：{self.args.namespace}/uneven/{idx}。\n",
+                "\n请回复任意一个非空字符。",
+                self.reuse_unit_tokens + self.args.block_size * (idx + 1),
             )
-            for idx, owner in enumerate(owner_ranks)
-        ]
+            batch.append(Case(
+                f"flow_uneven_{idx}", prompt, r".", "miss",
+                decode_owner_rank=owner, expected_input_len=len(tokens),
+            ))
         self.run_stage("flow_uneven_miss", batch, concurrent=True)
         self.run_stage(
             "flow_uneven_hit_rotated",
@@ -1442,7 +1447,7 @@ class Runner:
                     numbered_answer_pattern(6241),
                     "miss",
                     require_chunk=True,
-                    require_mtp=True,
+                    require_mtp=getattr(self.args, "require_mtp", False),
                     require_multimodal=True,
                     max_tokens=max(
                         self.args.max_tokens,

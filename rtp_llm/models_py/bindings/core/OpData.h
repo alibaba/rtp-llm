@@ -252,6 +252,7 @@ struct KvCacheInfo {
     // Store each logical segment under a distinct key so CacheStore can
     // scatter it into the destination allocator's matching segments.
     std::vector<size_t> linear_cache_segment_sizes;
+    bool linear_ssm_bf16_to_fp32 = false;
 };
 
 struct CacheStoreInputs {

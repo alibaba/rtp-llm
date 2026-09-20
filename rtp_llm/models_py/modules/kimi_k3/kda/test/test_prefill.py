@@ -180,7 +180,7 @@ class KimiK3KDAGeometryRoutingTest(TestCase):
         state.conv.fill_(7)
         state.conv[2].fill_(19)
         state.recurrent.fill_(11)
-        state.recurrent[2].fill_(23)
+        state.recurrent[2].fill_(23.003)
         state.valid_requests.add(2)
         metadata.recurrent_checkpoints.fill_(13)
         metadata.recurrent_checkpoints[0, 1].fill_(29)
@@ -206,8 +206,15 @@ class KimiK3KDAGeometryRoutingTest(TestCase):
             )
         torch.testing.assert_close(
             cula.call_args.args[5],
-            torch.stack((torch.full((1, 2, 2), 23.0), physical[1])),
+            torch.stack((torch.full((1, 2, 2), 23.003), physical[1])),
         )
+        self.assertEqual(cula.call_args.args[5].dtype, torch.float32)
+        self.assertEqual(metadata.recurrent_checkpoints.dtype, torch.float32)
+        self.assertEqual(state.recurrent.dtype, torch.float32)
+        self.assertFalse(torch.equal(
+            cula.call_args.args[5][0],
+            cula.call_args.args[5][0].bfloat16().float(),
+        ))
         self.assertEqual(cula.call_args.kwargs["checkpoint_interval"], 1024)
         self.assertEqual(
             executor.cache.load_recurrent_state.call_args.kwargs["checkpoint_tokens"], 1024

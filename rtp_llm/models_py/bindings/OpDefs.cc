@@ -53,6 +53,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("cache_store_segment_sizes",
                        &LayerKVCache::cache_store_segment_sizes,
                        "Contiguous source segment sizes for asymmetric-TP cache-store transfer")
+        .def_readwrite("cache_store_ssm_bf16_to_fp32", &LayerKVCache::cache_store_ssm_bf16_to_fp32)
         .def_readonly("cache_store_tensor_is_kernel_block_view", &LayerKVCache::cache_store_tensor_is_kernel_block_view)
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")

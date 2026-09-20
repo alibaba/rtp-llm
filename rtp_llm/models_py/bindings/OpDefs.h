@@ -34,6 +34,8 @@ struct LayerKVCache {
     // asymmetric-TP linear-state transfer. The destination allocator exposes
     // matching non-contiguous segments through MemoryLayoutStrategy.
     std::vector<size_t> cache_store_segment_sizes;
+    // K3 only: widen the first (SSM) segment for an FP32 Decode receiver.
+    bool cache_store_ssm_bf16_to_fp32 = false;
     // True when dim(0) indexes kernel pages rather than physical cache
     // blocks. CacheStore uses this explicit bit instead of guessing from the
     // tensor rank, because both views can be 3-D.

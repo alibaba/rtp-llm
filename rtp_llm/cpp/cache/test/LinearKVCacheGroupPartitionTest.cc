@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <tuple>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
@@ -11,7 +12,7 @@
 namespace rtp_llm {
 namespace test {
 
-class LinearKVCacheGroupPartitionTest: public ::testing::TestWithParam<int> {};
+class LinearKVCacheGroupPartitionTest: public ::testing::TestWithParam<std::tuple<int, DataType>> {};
 
 TEST_P(LinearKVCacheGroupPartitionTest, PartitionSlicesEveryKdaHeadSegment) {
     auto spec                = std::make_shared<LinearKVCacheSpec>();
@@ -24,7 +25,7 @@ TEST_P(LinearKVCacheGroupPartitionTest, PartitionSlicesEveryKdaHeadSegment) {
     spec->head_k_dim         = 2;
     spec->head_v_dim         = 2;
     spec->conv_kernel_dim    = 3;
-    spec->ssm_state_dtype    = DataType::TYPE_FP32;
+    spec->ssm_state_dtype    = std::get<1>(GetParam());
     spec->conv_state_dtype   = DataType::TYPE_FP16;
     spec->seq_size_per_block = 4;
 
@@ -43,7 +44,7 @@ TEST_P(LinearKVCacheGroupPartitionTest, PartitionSlicesEveryKdaHeadSegment) {
     ASSERT_EQ(whole.size(), 1u);
     auto* base = static_cast<char*>(whole[0].addr);
 
-    const int partitions = GetParam();
+    const int partitions = std::get<0>(GetParam());
     const size_t ssm_bytes = spec->k_block_size_bytes();
     const size_t q_bytes =
         static_cast<size_t>(spec->local_num_k_heads) * spec->head_k_dim * getTypeSize(spec->conv_state_dtype);
@@ -91,7 +92,10 @@ TEST_P(LinearKVCacheGroupPartitionTest, PartitionSlicesEveryKdaHeadSegment) {
     block_pool->requestFree(allocated);
 }
 
-INSTANTIATE_TEST_SUITE_P(PrefillTP, LinearKVCacheGroupPartitionTest, ::testing::Values(8, 16));
+INSTANTIATE_TEST_SUITE_P(
+    PrefillTP, LinearKVCacheGroupPartitionTest,
+    ::testing::Combine(::testing::Values(1, 2, 4, 8, 16),
+                       ::testing::Values(DataType::TYPE_FP32, DataType::TYPE_BF16)));
 
 }  // namespace test
 }  // namespace rtp_llm

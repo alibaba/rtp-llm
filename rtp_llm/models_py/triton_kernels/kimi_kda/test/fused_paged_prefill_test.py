@@ -257,6 +257,11 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
         torch.testing.assert_close(second_final, full_final, rtol=0, atol=0)
 
     def test_recurrent_gather_and_store_use_physical_blocks(self) -> None:
+        for dtype in (torch.float32, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                self._check_recurrent_gather_and_store(dtype)
+
+    def _check_recurrent_gather_and_store(self, dtype: torch.dtype) -> None:
         lengths = [130, 77, 2]
         prefixes = [0, 128, 64]
         page_size = 64
@@ -267,15 +272,17 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
         value_dim = 12
         block_map = self._linear_block_map(batch, pages)
         block_count = int(block_map.max().item()) + 3
-        initial_cache = torch.randn(
-            block_count,
-            heads,
-            key_dim,
-            value_dim,
-            dtype=torch.float32,
-            device="cuda",
+        # Leave a conv-sized sentinel tail in each physical block. SSM views
+        # have the real padded block stride, rather than a packed allocation.
+        state_elements = heads * key_dim * value_dim
+        initial_backing = torch.randn(
+            block_count, state_elements + 32, dtype=dtype, device="cuda"
         )
-        actual_cache = initial_cache.clone()
+        actual_backing = initial_backing.clone()
+        initial_cache = initial_backing[:, :state_elements].view(
+            block_count, heads, key_dim, value_dim
+        )
+        actual_cache = actual_backing[:, :state_elements].view_as(initial_cache)
         prefix_lengths = torch.tensor(prefixes, dtype=torch.int32, device="cuda")
         input_lengths_host = torch.tensor(lengths, dtype=torch.int32)
         input_lengths = input_lengths_host.cuda()
@@ -284,6 +291,8 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
         actual_initial = kimi_kda_load_recurrent_state(
             prefix_lengths, block_map, actual_cache, page_size
         )
+        self.assertEqual(actual_initial.dtype, torch.float32)
+        self.assertTrue(actual_initial.is_contiguous())
         expected_initial = torch.zeros_like(actual_initial)
         for sequence, prefix in enumerate(prefixes):
             if prefix:
@@ -307,7 +316,8 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
             dtype=torch.float32,
             device="cuda",
         )
-        expected_cache = initial_cache.clone()
+        expected_backing = initial_backing.clone()
+        expected_cache = expected_backing[:, :state_elements].view_as(initial_cache)
         checkpoint = 0
         for sequence, (prefix, length) in enumerate(zip(prefixes, lengths)):
             count = (length + page_size - 1) // page_size
@@ -324,15 +334,22 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
             actual_cache,
         )
         torch.cuda.synchronize()
+        torch.testing.assert_close(actual_backing, expected_backing, rtol=0, atol=0)
         torch.testing.assert_close(actual_cache, expected_cache, rtol=0, atol=0)
         torch.testing.assert_close(actual_cache[0], initial_cache[0], rtol=0, atol=0)
 
     def test_out_of_range_physical_id_cannot_access_cache(self) -> None:
+        for dtype in (torch.float32, torch.bfloat16):
+            for block_id in (-1, 0, 99):
+                with self.subTest(dtype=dtype, block_id=block_id):
+                    self._check_invalid_slot(dtype, block_id)
+
+    def _check_invalid_slot(self, dtype: torch.dtype, block_id: int) -> None:
         page_size = 64
-        cache = torch.randn(4, 1, 4, 4, dtype=torch.float32, device="cuda")
+        cache = torch.randn(4, 1, 4, 4, dtype=dtype, device="cuda")
         initial_cache = cache.clone()
         prefix_lengths = torch.tensor([64], dtype=torch.int32, device="cuda")
-        block_map = torch.tensor([[99]], dtype=torch.int32, device="cuda")
+        block_map = torch.tensor([[block_id]], dtype=torch.int32, device="cuda")
 
         gathered = kimi_kda_load_recurrent_state(
             prefix_lengths, block_map, cache, page_size
@@ -491,6 +508,7 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
             linear_block_map: torch.Tensor,
             conv_cache: torch.Tensor,
             ssm_cache: torch.Tensor,
+            round_reference: bool = False,
         ) -> torch.Tensor:
             cu_host = torch.tensor(
                 [0, *torch.tensor(batch_lengths).cumsum(0).tolist()],
@@ -554,8 +572,9 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
             )
             self.assertIsNone(final_state)
             self.assertEqual(published.data_ptr(), checkpoints.data_ptr())
+            self.assertEqual(checkpoints.dtype, torch.float32)
             kimi_kda_store_recurrent_checkpoints(
-                checkpoints,
+                checkpoints.bfloat16().float() if round_reference else checkpoints,
                 checkpoint_metadata,
                 linear_block_map,
                 ssm_cache,
@@ -617,6 +636,37 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
         torch.testing.assert_close(split_output, unsplit_output, rtol=0, atol=0)
         torch.testing.assert_close(split_conv, unsplit_conv, rtol=0, atol=0)
         torch.testing.assert_close(split_ssm, unsplit_ssm, rtol=0, atol=0)
+
+        # A persistent BF16 prefix must match explicit rounding at the same
+        # boundary in an FP32 pool, including the next cuLA invocation.
+        bf16_ssm = initial_ssm.bfloat16()
+        reference_ssm = bf16_ssm.float()
+        bf16_conv, reference_conv = initial_conv.clone(), initial_conv.clone()
+        first_outputs = []
+        tail_outputs = []
+        for cache, conv, reference in (
+            (bf16_ssm, bf16_conv, False),
+            (reference_ssm, reference_conv, True),
+        ):
+            first_outputs.append(run_batch(
+                torch.cat([mixed_qkv[item] for item in first_round_slices]),
+                torch.cat([raw_gate[item] for item in first_round_slices]),
+                torch.cat([raw_beta[item] for item in first_round_slices]),
+                first_round_lengths, [0, 0, 0], block_map, conv, cache,
+                round_reference=reference,
+            ))
+            tail_outputs.append(run_batch(
+                mixed_qkv[last_token : last_token + 1],
+                raw_gate[last_token : last_token + 1],
+                raw_beta[last_token : last_token + 1],
+                [1], [1024], block_map[2:3], conv, cache,
+                round_reference=reference,
+            ))
+        torch.testing.assert_close(first_outputs[0], first_outputs[1], rtol=0, atol=0)
+        torch.testing.assert_close(tail_outputs[0], tail_outputs[1], rtol=0, atol=0)
+        torch.testing.assert_close(bf16_ssm.float(), reference_ssm, rtol=0, atol=0)
+        torch.testing.assert_close(bf16_conv, reference_conv, rtol=0, atol=0)
+
 
 
 if __name__ == "__main__":

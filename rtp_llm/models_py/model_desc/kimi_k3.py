@@ -247,6 +247,9 @@ class KimiK3DecoderLayer(nn.Module):
         kv_cache.cache_store_segment_sizes = list(
             self.self_attn.cache_store_segment_sizes
         )
+        kv_cache.cache_store_ssm_bf16_to_fp32 = (
+            self.self_attn.cache.converter.ssm_state_dtype == torch.bfloat16
+        )
 
     @staticmethod
     def _local_projection(x: torch.Tensor, weight) -> torch.Tensor:

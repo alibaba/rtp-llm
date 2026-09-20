@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/CacheStoreRetryPolicy.h"
+#include "rtp_llm/cpp/model_rpc/K3StateTransfer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -209,8 +210,7 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                 continue;
             }
             GRPC_RET_IF_ERROR(decode_context,
-                              allocate_request.prefill_ssm_state_dtype()
-                                      == static_cast<int32_t>(linear_spec->ssm_state_dtype)
+                              supportsK3StateTransfer(allocate_request, linear_spec->ssm_state_dtype)
                                   && allocate_request.prefill_conv_state_dtype()
                                          == static_cast<int32_t>(linear_spec->conv_state_dtype),
                               grpc::StatusCode::INVALID_ARGUMENT,

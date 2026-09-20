@@ -109,3 +109,14 @@ cc_library(
         ":model_rpc_pool",
     ],
 )
+
+cc_library(
+    name = "k3_state_transfer",
+    hdrs = ["K3StateTransfer.h"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/models_py/bindings/core:types",
+    ],
+    visibility = ["//visibility:public"],
+)
