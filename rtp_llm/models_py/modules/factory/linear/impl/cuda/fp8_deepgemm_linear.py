@@ -29,6 +29,8 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     supports_fused_silu_quant = True
     supports_deferred_bias = True
     supports_fused_bias_gelu_quant = True
+    supports_prequantized_activation = True
+    fused_activation_quant_format = "fp8_ue8m0_block128_colmajor"
 
     # 全局共享的 scale cache，key = (device, K, max_len)
     _global_scale_cache: dict = {}
@@ -87,7 +89,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # Check if DeepGEMM is available
         if not has_deep_gemm():
-            error_msg = "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
+            error_msg = (
+                "DeepGEMM is not available. Please install the `deep_gemm` "
+                "package to enable DeepGEMM kernels."
+            )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
         # Check weight and weight scale dimensions
@@ -313,7 +318,12 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             disable_ue8m0_cast=not self.scale_ue8m0,
         )
         if apply_bias and self.bias is not None:
-            output.add_(self.bias.to(output.dtype))
+            if output.is_cuda:
+                from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+                rtp_llm_ops.fused_bias_add(output, self.bias.to(output.dtype))
+            else:
+                output.add_(self.bias.to(output.dtype))
         return output
 
     def forward(
@@ -377,6 +387,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         if not self.scale_ue8m0 or self.bias is None or self.N % 128 != 0:
             return None
         output = self.forward_without_bias(input)
+        return self._bias_gelu_quantize_output(output)
+
+    def _bias_gelu_quantize_output(
+        self, output: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         output_fp8 = torch.empty_like(output, dtype=torch.float8_e4m3fn)
         output_scales = create_per_token_group_quant_fp8_output_scale(
             x_shape=output.shape,
@@ -392,3 +407,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             output, self.bias.to(output.dtype), output_fp8, output_scales
         )
         return output_fp8, output_scales
+
+    def forward_quantized_with_bias_gelu_quantized(
+        self, input: torch.Tensor, input_scales: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        if not self.scale_ue8m0 or self.bias is None or self.N % 128 != 0:
+            return None
+        output = self.forward_quantized(input, input_scales, apply_bias=False)
+        return self._bias_gelu_quantize_output(output)

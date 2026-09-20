@@ -21,6 +21,7 @@ class CudaFp8GEMMLinear(LinearBase):
     supports_fused_silu_quant = True
     supports_deferred_bias = True
     supports_fused_bias_gelu_quant = True
+    supports_prequantized_activation = True
 
     @classmethod
     def can_handle(
@@ -197,4 +198,11 @@ class CudaFp8GEMMLinear(LinearBase):
     ) -> torch.Tensor:
         return self._deepgemm_linear.forward_quantized(
             input, input_scales, apply_bias=apply_bias
+        )
+
+    def forward_quantized_with_bias_gelu_quantized(
+        self, input: torch.Tensor, input_scales: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        return self._deepgemm_linear.forward_quantized_with_bias_gelu_quantized(
+            input, input_scales
         )
