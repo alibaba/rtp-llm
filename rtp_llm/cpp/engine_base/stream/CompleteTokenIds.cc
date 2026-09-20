@@ -109,9 +109,11 @@ std::vector<int> CompleteTokenIds::getLatestTokens(size_t token_num) {
     return std::vector<int>(ptr, ptr + token_num);
 }
 
-bool CompleteTokenIds::matchEosToken(int batch_id, int token_id) {
+bool CompleteTokenIds::matchEosToken(int batch_id, int token_id, int min_seq_length) {
     int* token_ids = data(batch_id);
-    for (size_t i = start_check_seq_length_; i <= seq_length_; ++i) {
+    // A speculative update can cross the minimum generation length. Only
+    // endpoints at or beyond that boundary may terminate the sequence.
+    for (int i = std::max({start_check_seq_length_, min_seq_length, 1}); i <= seq_length_; ++i) {
         if (token_id == token_ids[i - 1]) {
             seq_length_ = i;
             return true;
@@ -120,9 +122,13 @@ bool CompleteTokenIds::matchEosToken(int batch_id, int token_id) {
     return false;
 }
 
-bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& stop_words) {
-    int* token_ids = data(batch_id);
-    for (size_t i = start_check_seq_length_; i <= seq_length_; ++i) {
+bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& stop_words, int min_seq_length) {
+    if (stop_words.empty() || stop_words.size() > static_cast<size_t>(seq_length_)) {
+        return false;
+    }
+    int*      token_ids    = data(batch_id);
+    const int search_begin = std::max({start_check_seq_length_, min_seq_length, static_cast<int>(stop_words.size())});
+    for (int i = search_begin; i <= seq_length_; ++i) {
         bool   match_one   = true;
         size_t begin_index = i - stop_words.size();
         for (auto& token : stop_words) {

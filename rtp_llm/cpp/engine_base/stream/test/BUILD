@@ -57,6 +57,8 @@ cc_test(
     deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
+        # The process-cached flag must be set before any stream is constructed.
+        "RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING": "true",
     },
     exec_properties = {'gpu':'H20'},
 )

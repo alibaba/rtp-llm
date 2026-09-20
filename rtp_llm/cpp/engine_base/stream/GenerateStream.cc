@@ -1050,8 +1050,9 @@ void GenerateStream::matchEosToken() {
 }
 
 void GenerateStream::matchEosToken(int batch_id) {
+    const int min_seq_length = inputLength() + std::max(generate_input_->generate_config->min_new_tokens, 1);
     if ((!generate_input_->generate_config->ignore_eos)
-        && complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id)) {
+        && complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id, min_seq_length)) {
         markSubGenerateFinished(batch_id);
     }
 }
@@ -1085,6 +1086,7 @@ void GenerateStream::matchStopWordsList() {
 
 void GenerateStream::matchStopWordsList(int batch_id) {
     RTP_LLM_PROFILE_FUNCTION();
+    const int min_seq_length = inputLength() + std::max(generate_input_->generate_config->min_new_tokens, 1);
     // note: stop_words_list in generate_config contains stop_words_list in special_tokens
     bool match = false;
     for (auto& stop_words : generate_input_->generate_config->stop_words_list) {
@@ -1092,7 +1094,7 @@ void GenerateStream::matchStopWordsList(int batch_id) {
             && stop_words[0] == special_tokens_.eos_token_id) {
             continue;
         }
-        if (complete_token_ids_->matchStopWordsList(batch_id, stop_words)) {
+        if (complete_token_ids_->matchStopWordsList(batch_id, stop_words, min_seq_length)) {
             match = true;
             break;
         }

@@ -154,6 +154,59 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, testSpeculativeStopRespectsMinimumGenerationLength) {
+    for (bool use_eos : {false, true}) {
+        auto config             = std::make_shared<GenerateConfig>();
+        config->min_new_tokens  = 4;
+        config->max_new_tokens  = 20;
+        config->stop_words_list = use_eos ? std::vector<std::vector<int>>{} : std::vector<std::vector<int>>{{7}};
+        auto stream             = GenerateStreamBuilder().createContextStream({1}, config);
+        stream->special_tokens_.eos_token_id = use_eos ? 7 : 0;
+        stream->update({torch::tensor({{7, 8, 9, 10}}, torch::kInt32), 4});
+        EXPECT_EQ(stream->completeTokenIdsVec(), (std::vector<int>{1, 7, 8, 9, 10}));
+        EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+        stream->update({torch::tensor({{11, 7, 12}}, torch::kInt32), 3});
+        EXPECT_EQ(stream->completeTokenIdsVec(), (std::vector<int>{1, 7, 8, 9, 10, 11, 7}));
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+
+        auto exact                          = GenerateStreamBuilder().createContextStream({1}, config);
+        exact->special_tokens_.eos_token_id = use_eos ? 7 : 0;
+        exact->update({torch::tensor({{8, 9, 10, 7, 12}}, torch::kInt32), 5});
+        EXPECT_EQ(exact->completeTokenIdsVec(), (std::vector<int>{1, 8, 9, 10, 7}));
+        EXPECT_TRUE(exact->hasEvent(StreamEvents::GenerateDone));
+
+        config->max_new_tokens               = config->min_new_tokens;
+        auto capped                          = GenerateStreamBuilder().createContextStream({1}, config);
+        capped->special_tokens_.eos_token_id = use_eos ? 7 : 0;
+        capped->update({torch::tensor({{7, 8, 9, 10}}, torch::kInt32), 4});
+        EXPECT_EQ(capped->completeTokenIdsVec(), (std::vector<int>{1, 7, 8, 9, 10}));
+        EXPECT_TRUE(capped->hasEvent(StreamEvents::GenerateDone));
+    }
+}
+
+TEST_F(GenerateStreamTest, testStopWordSpansUpdatesAtMinimumGenerationLength) {
+    auto config             = std::make_shared<GenerateConfig>();
+    config->min_new_tokens  = 3;
+    config->max_new_tokens  = 20;
+    config->stop_words_list = {{8, 9}};
+    auto stream             = GenerateStreamBuilder().createContextStream({1}, config);
+    stream->update({torch::tensor({{7, 8}}, torch::kInt32), 2});
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+    stream->update({torch::tensor({{9, 10}}, torch::kInt32), 2});
+    EXPECT_EQ(stream->completeTokenIdsVec(), (std::vector<int>{1, 7, 8, 9}));
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+}
+
+TEST_F(GenerateStreamTest, testEmptyAndLongStopWordsDoNotMatchShortSequence) {
+    auto config             = std::make_shared<GenerateConfig>();
+    config->max_new_tokens  = 20;
+    config->stop_words_list = {{}, {1, 2, 3, 4, 5}};
+    auto stream             = GenerateStreamBuilder().createContextStream({1}, config);
+    stream->update({torch::tensor({{2}}, torch::kInt32), 1});
+    EXPECT_EQ(stream->completeTokenIdsVec(), (std::vector<int>{1, 2}));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+}
+
 TEST_F(GenerateStreamTest, testAuxInfoKeepsIndependentReturnSequenceLengths) {
     auto config                  = std::make_shared<GenerateConfig>();
     config->aux_info             = true;
