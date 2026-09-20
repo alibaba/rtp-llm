@@ -16,6 +16,7 @@ pool failures are raised and never cached.
 
 from __future__ import annotations
 
+import copy
 import faulthandler
 import functools
 import json
@@ -65,6 +66,7 @@ class _GrammarCheckResult(NamedTuple):
     ok: bool
     compile_error: str = ""
     cacheable: bool = False
+    normalized_spec: str | None = None
 
 
 def _rebuild_dup_fd(dup_fd: Any) -> Any:
@@ -250,6 +252,90 @@ def _enable_worker_faulthandler(fault_file: BinaryIO) -> None:
     faulthandler.enable(file=fault_file, all_threads=True)
 
 
+def _strip_xgrammar_string_length_bounds(node: Any, *, in_json_schema: bool) -> bool:
+    """Remove string bounds only from schemas, preserving instance-valued keywords."""
+    normalized = False
+    if isinstance(node, list):
+        for value in node:
+            normalized = (
+                _strip_xgrammar_string_length_bounds(
+                    value, in_json_schema=in_json_schema
+                )
+                or normalized
+            )
+        return normalized
+    if not isinstance(node, dict):
+        return False
+
+    if in_json_schema:
+        node_type = node.get("type")
+        if node_type == "string" or (
+            isinstance(node_type, list) and "string" in node_type
+        ):
+            for length_key in ("minLength", "maxLength"):
+                if length_key in node:
+                    # Draft 7 does not inspect newer schema positions such as
+                    # $defs/prefixItems. Check each bound before deleting it.
+                    Draft7Validator.check_schema({length_key: node[length_key]})
+                    del node[length_key]
+                    normalized = True
+
+        for key, value in node.items():
+            if key in (
+                "properties",
+                "patternProperties",
+                "definitions",
+                "$defs",
+                "dependencies",
+                "dependentSchemas",
+            ):
+                if isinstance(value, dict):
+                    for schema in value.values():
+                        normalized = (
+                            _strip_xgrammar_string_length_bounds(
+                                schema, in_json_schema=True
+                            )
+                            or normalized
+                        )
+            elif key in (
+                "items",
+                "additionalItems",
+                "contains",
+                "additionalProperties",
+                "propertyNames",
+                "not",
+                "if",
+                "then",
+                "else",
+                "allOf",
+                "anyOf",
+                "oneOf",
+                "prefixItems",
+                "unevaluatedProperties",
+                "unevaluatedItems",
+            ):
+                normalized = (
+                    _strip_xgrammar_string_length_bounds(value, in_json_schema=True)
+                    or normalized
+                )
+        return normalized
+
+    legacy_schema_item = "schema" in node and "begin" in node and "end" in node
+    for key, value in node.items():
+        child_is_schema = key == "json_schema" or (
+            legacy_schema_item and key == "schema" and value is not None
+        )
+        if child_is_schema:
+            # Validate the original schema before removing bounds: an invalid
+            # negative/fractional bound must not become a valid grammar.
+            Draft7Validator.check_schema(value)
+        normalized = (
+            _strip_xgrammar_string_length_bounds(value, in_json_schema=child_is_schema)
+            or normalized
+        )
+    return normalized
+
+
 class GrammarCheckUnavailable(RuntimeError):
     """The grammar check could not get an answer for transient infrastructure reasons.
     Callers may reject the request, but this result must not be cached as invalid."""
@@ -356,51 +442,138 @@ class GrammarValidator:
     # -- public entry points (shape checks first, then maybe compile) ------- #
 
     def validate_json(self, schema: str | dict, request_id: str = "") -> bool:
+        return self.validate_and_norm_json(schema, request_id)[0]
+
+    def validate_and_norm_json(
+        self, schema: str | dict, request_id: str = ""
+    ) -> tuple[bool, str | None]:
         _req_ctx.rid = request_id
         return self._check_grammar("json", schema)
 
     def validate_structural_tag(
         self, payload: str | dict, request_id: str = ""
     ) -> bool:
+        return self.validate_and_norm_structural_tag(payload, request_id)[0]
+
+    def validate_and_norm_structural_tag(
+        self, payload: str | dict, request_id: str = ""
+    ) -> tuple[bool, str | None]:
         _req_ctx.rid = request_id
         return self._check_grammar("structural_tag", payload)
 
     def validate_response_format(
         self, response_format: str | dict, request_id: str = ""
     ) -> bool:
+        return self.validate_and_norm_response_format(response_format, request_id)[0]
+
+    def validate_and_norm_response_format(
+        self, response_format: str | dict, request_id: str = ""
+    ) -> tuple[bool, str | None]:
         """Validate and trial-compile one OpenAI-style response_format envelope."""
         _req_ctx.rid = request_id
         payload = self._as_nonempty_dict(response_format)
         if payload is None:
-            return False
+            return False, None
 
         fmt_type = payload.get("type")
         if fmt_type == "text":
-            return True
+            return True, None
         if fmt_type == "json_object":
             return self._check_grammar("json", _JSON_OBJECT_RESPONSE_SCHEMA)
         if fmt_type == "json_schema":
-            schema = payload.get("json_schema")
-            if isinstance(schema, dict) and "schema" in schema:
-                schema = schema["schema"]
-            return self._check_grammar("json", schema)
+            inner = payload.get("json_schema")
+            schema = (
+                inner["schema"]
+                if isinstance(inner, dict) and "schema" in inner
+                else inner
+            )
+            ok, normalized = self._check_grammar("json", schema)
+            if normalized is None:
+                return ok, None
+            normalized_schema = json.loads(normalized)
+            if isinstance(inner, dict) and "schema" in inner:
+                normalized_schema = {**inner, "schema": normalized_schema}
+            return ok, json.dumps({**payload, "json_schema": normalized_schema})
         if fmt_type == "regex":
             pattern = payload.get("pattern")
             if not isinstance(pattern, str) or not pattern.strip():
-                return False
+                return False, None
             return self._check_grammar("regex", pattern)
         if fmt_type == "ebnf":
             grammar = payload.get("grammar")
             if not isinstance(grammar, str) or not grammar.strip():
-                return False
+                return False, None
             return self._check_grammar("ebnf", grammar)
         if fmt_type == "structural_tag":
-            return self._check_grammar("structural_tag", payload.get("structural_tag"))
-        return False
+            ok, normalized = self._check_grammar(
+                "structural_tag", payload.get("structural_tag")
+            )
+            if normalized is None:
+                return ok, None
+            return ok, json.dumps({**payload, "structural_tag": json.loads(normalized)})
+        return False, None
+
+    @staticmethod
+    def normalize_json_for_xgrammar(
+        schema: str | dict,
+    ) -> tuple[str | None, str | None]:
+        payload = GrammarValidator._as_nonempty_dict(schema)
+        if payload is None:
+            return None, "invalid JSON schema"
+        if isinstance(schema, dict):
+            payload = copy.deepcopy(payload)
+        try:
+            Draft7Validator.check_schema(payload)
+            normalized = _strip_xgrammar_string_length_bounds(
+                payload, in_json_schema=True
+            )
+        except Exception:
+            return None, "invalid Draft 7 JSON schema"
+        return (json.dumps(payload) if normalized else None), None
+
+    @staticmethod
+    def normalize_structural_tag_for_xgrammar(
+        structural_tag: str | dict,
+    ) -> tuple[str | None, str | None]:
+        payload = GrammarValidator._as_nonempty_dict(structural_tag)
+        if payload is None:
+            return None, "invalid structural tag"
+        if isinstance(structural_tag, dict):
+            payload = copy.deepcopy(payload)
+        try:
+            normalized = _strip_xgrammar_string_length_bounds(
+                payload, in_json_schema=False
+            )
+        except Exception:
+            return None, "invalid Draft 7 JSON schema"
+        return (json.dumps(payload) if normalized else None), None
+
+    @staticmethod
+    def normalize_response_format_for_xgrammar(
+        response_format: str | dict,
+    ) -> tuple[str | None, str | None]:
+        payload = GrammarValidator._as_nonempty_dict(response_format)
+        if payload is None:
+            return None, "invalid response_format"
+        if payload.get("type") != "json_schema":
+            return None, None
+
+        inner = payload.get("json_schema")
+        schema = (
+            inner["schema"] if isinstance(inner, dict) and "schema" in inner else inner
+        )
+        normalized, error = GrammarValidator.normalize_json_for_xgrammar(schema)
+        if error is not None or normalized is None:
+            return None, error
+
+        normalized_schema = json.loads(normalized)
+        if isinstance(inner, dict) and "schema" in inner:
+            normalized_schema = {**inner, "schema": normalized_schema}
+        return json.dumps({**payload, "json_schema": normalized_schema}), None
 
     # -- grammar admission check ------------------------------------------- #
 
-    def _check_grammar(self, kind: str, spec: Any) -> bool:
+    def _check_grammar(self, kind: str, spec: Any) -> tuple[bool, str | None]:
         """Memoized full admission result for ``spec``. Once grammar validation is enabled, an
         unavailable check rejects the request instead of letting a risky grammar reach the engine.
         """
@@ -428,7 +601,7 @@ class GrammarValidator:
             result = self._check_grammar_singleflight(kind, spec_str)
             if result.compile_error:
                 raise GrammarCompilationError(result.compile_error)
-            return result.ok
+            return result.ok, result.normalized_spec
         except GrammarCompilationError:
             raise
         except GrammarCheckUnavailable as e:
@@ -552,28 +725,44 @@ class GrammarValidator:
         result: _GrammarCheckResult | None = None
         try:
             if kind == "json":
-                if not self.validate_json_schema(spec_str):
+                normalized_spec, error = self.normalize_json_for_xgrammar(spec_str)
+                if error is not None:
                     result = _GrammarCheckResult(False)
                     return result
             elif kind == "structural_tag":
-                if not self.check_structural_tag(spec_str):
+                normalized_spec, error = self.normalize_structural_tag_for_xgrammar(
+                    spec_str
+                )
+                if error is not None:
+                    result = _GrammarCheckResult(False)
+                    return result
+                if not self.check_structural_tag(normalized_spec or spec_str):
                     result = _GrammarCheckResult(False)
                     return result
             elif kind in ("regex", "ebnf"):
                 if not spec_str.strip():
                     result = _GrammarCheckResult(False)
                     return result
+                normalized_spec = None
             else:
                 raise ValueError(f"unsupported grammar kind {kind!r}")
 
+            compile_spec = normalized_spec or spec_str
             try:
                 result = _GrammarCheckResult(
-                    self._compile_in_worker(kind, spec_str), cacheable=True
+                    self._compile_in_worker(kind, compile_spec),
+                    cacheable=True,
+                    normalized_spec=normalized_spec,
                 )
             except GrammarCompilationError as e:
                 # GrammarCompilationError is raised only for an explicit INVALID reply
                 # from a healthy worker, so this deterministic verdict is cacheable.
-                result = _GrammarCheckResult(False, str(e), cacheable=True)
+                result = _GrammarCheckResult(
+                    ok=False,
+                    compile_error=str(e),
+                    cacheable=True,
+                    normalized_spec=normalized_spec,
+                )
             return result
         finally:
             if result is None:

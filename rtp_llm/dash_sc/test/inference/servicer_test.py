@@ -58,6 +58,7 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCheckTimeout,
     GrammarCheckUnavailable,
     GrammarCompilationError,
+    GrammarValidator,
 )
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
@@ -3572,26 +3573,176 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         for error, expected_status in cases:
             with self.subTest(error=type(error).__name__):
                 validator = MagicMock()
-                validator.validate_response_format.side_effect = error
+                validator.validate_and_norm_response_format.side_effect = error
                 servicer = DashScInferenceServicer(
                     backend_visitor=self._terminal_visitor(),
                     grammar_validator=validator,
                 )
-                sampling = MagicMock(
-                    structural_tag=None,
-                    response_format={"type": "json_object"},
-                    json_format=False,
+                sampling = SamplingParams(response_format='{"type":"json_object"}')
+
+                error_info, returned_sampling = (
+                    await servicer._validate_request_grammar(
+                        sampling, "grammar-status-test"
+                    )
                 )
 
-                status, message = await servicer._validate_request_grammar(
-                    sampling, "grammar-status-test"
-                )
-
+                self.assertIs(returned_sampling, sampling)
+                status, message = error_info
                 self.assertEqual(status, expected_status)
                 if isinstance(error, GrammarCheckOverloaded):
                     self.assertEqual("Too many requests.", message)
                 else:
                     self.assertIn(str(error), message)
+
+    async def test_normalized_grammar_preserves_other_sampling_fields(self) -> None:
+        for field in ("response_format", "structural_tag"):
+            with self.subTest(field=field):
+                validator = MagicMock()
+                validate = getattr(validator, "validate_and_norm_" + field)
+                validate.return_value = (True, '{"normalized":true}')
+                servicer = DashScInferenceServicer(
+                    backend_visitor=self._terminal_visitor(),
+                    grammar_validator=validator,
+                )
+                sampling = SamplingParams(
+                    max_new_tokens=17, temperature=0.25, **{field: '{"original":true}'}
+                )
+
+                error_info, normalized = await servicer._validate_request_grammar(
+                    sampling, "normalize-request"
+                )
+
+                self.assertIsNone(error_info)
+                self.assertIsNot(normalized, sampling)
+                self.assertEqual(getattr(normalized, field), '{"normalized":true}')
+                self.assertEqual(getattr(sampling, field), '{"original":true}')
+                self.assertEqual(normalized.max_new_tokens, 17)
+                self.assertEqual(normalized.temperature, 0.25)
+                validate.assert_called_once_with(
+                    '{"original":true}', "normalize-request"
+                )
+
+    async def test_normalized_grammar_reaches_backend(self) -> None:
+        schema = {"type": "string", "minLength": 1, "maxLength": 256}
+        normalized_schema = {"type": "string"}
+        cases = (
+            (
+                "response_format",
+                "response_format",
+                {
+                    "type": "json_schema",
+                    "json_schema": {"name": "value", "schema": schema},
+                },
+                {
+                    "type": "json_schema",
+                    "json_schema": {"name": "value", "schema": normalized_schema},
+                },
+            ),
+            (
+                "tool_call_structural_tag",
+                "structural_tag",
+                {
+                    "type": "structural_tag",
+                    "format": {"type": "json_schema", "json_schema": schema},
+                },
+                {
+                    "type": "structural_tag",
+                    "format": {"type": "json_schema", "json_schema": normalized_schema},
+                },
+            ),
+        )
+        for parameter, field, original, normalized in cases:
+            with self.subTest(field=field):
+                validator = MagicMock()
+                getattr(validator, "validate_and_norm_" + field).return_value = (
+                    True,
+                    json.dumps(normalized),
+                )
+                visitor = self._terminal_visitor()
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor, grammar_validator=validator
+                )
+                request = self._valid_infer_request()
+                request.parameters[parameter].string_param = json.dumps(original)
+                _add_input_tensor(
+                    request, "max_new_tokens", "INT32", [1], struct.pack("<i", 17)
+                )
+
+                await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([request]), _FakeGrpcContext())
+                )
+
+                self.assertEqual(visitor.enqueue_called, 1)
+                config = visitor.last_generate_input.generate_config
+                self.assertIsNone(config.response_format)
+                if field == "response_format":
+                    self.assertEqual(config.json_schema, normalized_schema)
+                    self.assertIsNone(config.structural_tag)
+                else:
+                    self.assertEqual(config.structural_tag, normalized)
+                    self.assertIsNone(config.json_schema)
+                self.assertEqual(config.max_new_tokens, 17)
+
+    async def test_normalized_structural_response_format_keeps_backend_envelope(
+        self,
+    ) -> None:
+        tag = {
+            "type": "structural_tag",
+            "format": {
+                "type": "json_schema",
+                "json_schema": {"type": "string", "minLength": 1},
+            },
+        }
+        normalized_tag = {
+            "type": "structural_tag",
+            "format": {"type": "json_schema", "json_schema": {"type": "string"}},
+        }
+        validator = GrammarValidator.__new__(GrammarValidator)
+        validator._check_grammar = MagicMock(
+            return_value=(True, json.dumps(normalized_tag))
+        )
+        servicer = DashScInferenceServicer(
+            backend_visitor=self._terminal_visitor(), grammar_validator=validator
+        )
+        original = json.dumps({"type": "structural_tag", "structural_tag": tag})
+        sampling = SamplingParams(
+            max_new_tokens=17, temperature=0.25, response_format=original
+        )
+
+        error_info, normalized = await servicer._validate_request_grammar(
+            sampling, "structural-envelope"
+        )
+
+        self.assertIsNone(error_info)
+        config = normalized.to_generate_config()
+        self.assertEqual(config.response_format.type, "structural_tag")
+        self.assertEqual(config.response_format.structural_tag, normalized_tag)
+        self.assertEqual(config.max_new_tokens, 17)
+        self.assertEqual(config.temperature, 0.25)
+        self.assertEqual(sampling.response_format, original)
+
+    async def test_grammar_without_normalization_preserves_sampling(self) -> None:
+        sampling = SamplingParams(response_format='{"type":"json_object"}')
+        for validator in (None, MagicMock()):
+            with self.subTest(validation_enabled=validator is not None):
+                if validator is not None:
+                    validator.validate_and_norm_response_format.return_value = (
+                        True,
+                        None,
+                    )
+                servicer = DashScInferenceServicer(
+                    backend_visitor=self._terminal_visitor(),
+                    grammar_validator=validator,
+                )
+
+                error_info, returned_sampling = (
+                    await servicer._validate_request_grammar(
+                        sampling, "unchanged-request"
+                    )
+                )
+
+                self.assertIsNone(error_info)
+                self.assertIs(returned_sampling, sampling)
 
     async def test_model_stream_infer_passes_multimodal_payload_to_backend(
         self,
