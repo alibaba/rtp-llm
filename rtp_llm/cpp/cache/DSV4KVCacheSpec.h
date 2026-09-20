@@ -18,12 +18,22 @@ namespace rtp_llm {
 inline constexpr uint32_t DSV4_FP8_KV_ENTRY_BYTES            = 584;
 inline constexpr uint32_t DSV4_FP8_INDEXER_ENTRY_BYTES       = 132;
 inline constexpr size_t   DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 576;
+// V4.1 FlashMLA stores the entire 512-dimensional SWA key in FP8, with
+// sixteen group-32 UE8M0 scales. Payload and scales occupy separate planes
+// within each block; FlashMLA requires the payload block stride to be 512B aligned.
+inline constexpr uint32_t DSV41_FP8_SWA_ENTRY_BYTES           = 528;
+inline constexpr size_t   DSV41_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 512;
 // SWA window in tokens. A full SWA_KV ring has >= this many entries; a CP slice
 // has fewer. Used to tell them apart in DSV4StateSpec::block_size_bytes().
 inline constexpr uint32_t DSV4_SWA_WINDOW_ENTRIES = 128;
 
 inline size_t alignDsv4Fp8KvBlockBytes(size_t natural, size_t extra_multiple = 1) {
     const size_t align = std::lcm(DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES, std::max<size_t>(extra_multiple, 1));
+    return ((natural + align - 1) / align) * align;
+}
+
+inline size_t alignDsv41Fp8KvBlockBytes(size_t natural, size_t extra_multiple = 1) {
+    const size_t align = std::lcm(DSV41_FP8_MLA_BLOCK_ALIGNMENT_BYTES, std::max<size_t>(extra_multiple, 1));
     return ((natural + align - 1) / align) * align;
 }
 
@@ -125,10 +135,10 @@ struct DSV4StateSpec: public KVCacheSpec {
                   DataType          storage_dtype,
                   uint32_t          seq_size_per_blk,
                   size_t            block_size_bytes_override_value = 0) {
-        cache_type        = cache_region;
-        state_dim         = state_elements;
-        entries_per_block = block_entries;
-        store_dtype       = storage_dtype;
+        cache_type                = cache_region;
+        state_dim                 = state_elements;
+        entries_per_block         = block_entries;
+        store_dtype               = storage_dtype;
         block_size_bytes_override = block_size_bytes_override_value;
 
         // KVCacheSpec base fields
@@ -165,6 +175,9 @@ struct DSV4StateSpec: public KVCacheSpec {
         const size_t natural = natural_block_size_bytes();
         if (state_dim == DSV4_FP8_KV_ENTRY_BYTES && entries_per_block >= DSV4_SWA_WINDOW_ENTRIES) {
             return alignDsv4Fp8KvBlockBytes(natural);
+        }
+        if (cache_type == KVCacheRegionName::SWA_KV && state_dim == DSV41_FP8_SWA_ENTRY_BYTES) {
+            return alignDsv41Fp8KvBlockBytes(natural);
         }
         return natural;
     }

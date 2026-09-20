@@ -28,12 +28,12 @@ constexpr uint32_t kDsv4KvEntryBytesFp8       = 584;
 constexpr uint32_t kDsv4IndexerEntryBytesFp8  = 132;
 // V4.1-Flash FP4 pools (fixed; no dtype switch): the GLOBAL regions hold the
 // official compressed-KV form (256B packed e2m1 payload + 32B E4M3 group-16
-// scales, row-interleaved), the INDEXER_KV region holds the official index
-// form (64B e2m1 payload + 4B packed UE8M0 group-32 scales per entry, stored
+// scales, in separate payload/scale planes). INDEXER_KV holds the official
+// index form (64B e2m1 payload + 4B packed UE8M0 group-32 scales per entry, stored
 // as a per-block payload plane followed by a scale plane for DeepGEMM).
 constexpr uint32_t kDsv4KvEntryBytesFp4      = 288;
 constexpr uint32_t kDsv4IndexerEntryBytesFp4 = 68;
-constexpr size_t   kDsv4PoolNum               = 7;
+constexpr size_t   kDsv4PoolNum              = 7;
 
 struct DSV4LayerSets {
     std::vector<int> csa_layers;
@@ -155,13 +155,17 @@ uint32_t maybeAdjustSwaEntriesForCpSharding(uint32_t entries, const ParallelismC
     return alignUpToMultiple(entries, cp_size);
 }
 
-size_t maybeSwaPrefillCpByteSliceBytes(uint32_t entries_per_block, const ParallelismConfig& parallelism_config) {
+size_t maybeSwaPrefillCpByteSliceBytes(uint32_t                 entries_per_block,
+                                       const ParallelismConfig& parallelism_config,
+                                       uint32_t                 entry_bytes = DSV4_FP8_KV_ENTRY_BYTES) {
     const auto cp_size = fixedRegionCpSize(parallelism_config);
     if (cp_size <= 1 || !isPrefillCpSliced(parallelism_config)) {
         return 0;
     }
-    const size_t full_natural_bytes = static_cast<size_t>(entries_per_block) * DSV4_FP8_KV_ENTRY_BYTES;
-    const size_t full_stride_bytes  = alignDsv4Fp8KvBlockBytes(full_natural_bytes, cp_size);
+    const size_t full_natural_bytes = static_cast<size_t>(entries_per_block) * entry_bytes;
+    const size_t full_stride_bytes  = entry_bytes == DSV41_FP8_SWA_ENTRY_BYTES ?
+                                          alignDsv41Fp8KvBlockBytes(full_natural_bytes, cp_size) :
+                                          alignDsv4Fp8KvBlockBytes(full_natural_bytes, cp_size);
     RTP_LLM_CHECK_WITH_INFO(full_stride_bytes % cp_size == 0,
                             "DSV4 SWA_KV full stride %zu must be divisible by cp_size %u",
                             full_stride_bytes,
@@ -302,9 +306,8 @@ std::vector<DSV4PoolDesc> buildDSV41PoolDescs(const DSV4LayerSets&     sets,
                                               const ParallelismConfig& parallelism_config,
                                               int                      gen_num_per_cycle) {
     // V4.1: the GLOBAL and INDEXER_KV pools are fixed to the V4.1-Flash FP4
-    // layouts (feature enablement, not a dtype option). The SWA_KV pool keeps
-    // the shared FP8 typed layout, so the FP8 cache-dtype requirement below
-    // still guards the SWA region.
+    // layouts (feature enablement, not a dtype option). SWA_KV uses the native
+    // FlashMLA 528B FP8 layout with per-block payload and scale planes.
     RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8,
                             "DeepSeek V4.1 requires FP8 typed SWA KV pools");
     auto pools = buildDSV4PoolDescs(
@@ -319,10 +322,13 @@ std::vector<DSV4PoolDesc> buildDSV41PoolDescs(const DSV4LayerSets&     sets,
     pools[4].entry_elems       = 2 * model_config.attn_config.size_per_head;
     pools[4].entries_per_block = maybeAdjustFixedEntriesForCpSharding(
         computeStateRing(2, 0, gen_num_per_cycle), parallelism_config, KVCacheRegionName::CSA_STATE);
-    pools[5].layer_ids = &sets.empty_layers;
+    pools[5].layer_ids   = &sets.empty_layers;
     pools[0].entry_elems = kDsv4KvEntryBytesFp4;
     pools[1].entry_elems = kDsv4KvEntryBytesFp4;
     pools[2].entry_elems = kDsv4IndexerEntryBytesFp4;
+    pools[6].entry_elems = DSV41_FP8_SWA_ENTRY_BYTES;
+    pools[6].block_size_bytes_override =
+        maybeSwaPrefillCpByteSliceBytes(pools[6].entries_per_block, parallelism_config, DSV41_FP8_SWA_ENTRY_BYTES);
     return pools;
 }
 
@@ -384,8 +390,12 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
                      parallelism_config.prefill_cp_config.kv_cache_sharded,
                      parallelism_config.tp_size);
 
-    auto       sets   = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
-    const bool is_v41 = !model_config.attn_config.v41_kv_source_layer_ids.empty();
+    auto sets = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
+    // SWA-only DSpARK has no global source layers, but must use the same
+    // FlashMLA SWA byte layout as its V4.1 target model.
+    const bool is_v41 = !model_config.attn_config.v41_kv_source_layer_ids.empty()
+                        || model_config.model_type == "deepseek_v41"
+                        || model_config.model_type == "deepseek_v41_dspark";
     if (is_v41) {
         sets.csa_layers.clear();
         sets.hca_layers.clear();

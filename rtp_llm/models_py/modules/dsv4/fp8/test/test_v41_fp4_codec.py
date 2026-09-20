@@ -1,6 +1,6 @@
 """Self-contained V4.1 FP4 codec regression tests for Blackwell GPUs.
 
-Exercise GLOBAL (288B row-interleaved) and INDEX_K (68B planar) layouts,
+Exercise GLOBAL (288B planar) and INDEX_K (68B planar) layouts,
 pool roundtrips and the DeepGEMM MX-mode score contract with synthetic data.
 CPU nearest-value quantization and literal known answers supply the numerical
 reference; no model weights or external reference kernels are required.
@@ -49,8 +49,8 @@ def _reference_fp4(values, group, scale_fp8):
     return payload.to(values.device), scale_bytes.to(values.device)
 
 
-def _pool(entries, entry_bytes, blocks, device):
-    stride = entries * entry_bytes
+def _pool(entries, entry_bytes, blocks, device, *, padding=0):
+    stride = entries * entry_bytes + padding
     storage = torch.full((blocks, stride), 0x5A, dtype=torch.uint8, device=device)
     return storage.as_strided((blocks, entries, entry_bytes), (stride, entry_bytes, 1))
 
@@ -165,30 +165,50 @@ class V41Fp4CodecGpuTest(unittest.TestCase):
 
     def test_global_pool_bytes_match_reference(self):
         torch.manual_seed(7)
-        rows, entries = 257, 128
-        values = torch.randn(rows, 512, device="cuda", dtype=torch.bfloat16)
-        values[0].zero_()
-        values[1].fill_(1.5)
-        pool = _pool(entries, FP4_GLOBAL_ENTRY_BYTES, 4, values.device)
-        slots = (
-            torch.arange(rows, dtype=torch.int64, device="cuda") % (entries * 3)
-            + entries
-        )  # spread over three pages, page 0 untouched
-        quantize_and_insert_k_cache_fp4(values, pool, slots)
-        expected_payload, expected_scales = _reference_fp4(values, 16, True)
-        for row in range(rows):
-            slot = int(slots[row])
-            block, offset = slot // entries, slot % entries
-            actual = pool[block, offset]
-            self.assertEqual(tuple(actual[:256].shape), (256,), "payload plane width")
-            torch.testing.assert_close(
-                actual[:256], expected_payload[row], rtol=0, atol=0
-            )
-            torch.testing.assert_close(
-                actual[256:], expected_scales[row], rtol=0, atol=0
-            )
-        # Untouched page zero keeps its marker bytes.
-        self.assertTrue((pool[0] == 0x5A).all())
+        for entries, padding in ((64, 0), (128, 512)):
+            with self.subTest(entries=entries, padding=padding):
+                rows = entries * 2 + 1
+                values = torch.randn(rows, 512, device="cuda", dtype=torch.bfloat16)
+                values[0].zero_()
+                values[1].fill_(1.5)
+                pool = _pool(
+                    entries, FP4_GLOBAL_ENTRY_BYTES, 4, values.device, padding=padding
+                )
+                # Reverse slot order across three pages, including a partial
+                # last page. Page zero and the physical stride padding stay poison.
+                slots = torch.arange(
+                    entries, entries + rows, dtype=torch.int64, device="cuda"
+                ).flip(0)
+                quantize_and_insert_k_cache_fp4(values, pool, slots)
+                expected_payload, expected_scales = _reference_fp4(values, 16, True)
+                physical = pool.as_strided((4, pool.stride(0)), (pool.stride(0), 1))
+                expected = torch.full_like(physical, 0x5A)
+                for row, slot in enumerate(slots.cpu().tolist()):
+                    block, offset = divmod(slot, entries)
+                    expected[block, offset * 256 : (offset + 1) * 256] = (
+                        expected_payload[row]
+                    )
+                    scale_start = entries * 256 + offset * 32
+                    expected[block, scale_start : scale_start + 32] = expected_scales[
+                        row
+                    ]
+                torch.testing.assert_close(physical, expected, rtol=0, atol=0)
+                raw = gather_k_cache_bytes_fp4(pool, slots)
+                torch.testing.assert_close(
+                    raw,
+                    torch.cat((expected_payload, expected_scales), 1),
+                    rtol=0,
+                    atol=0,
+                )
+                expected_values = _decode_e2m1(expected_payload) * _decode_e4m3_scale(
+                    expected_scales
+                ).repeat_interleave(16, dim=-1)
+                torch.testing.assert_close(
+                    dequantize_k_cache_slots_fp4(pool, slots).float(),
+                    expected_values,
+                    rtol=0,
+                    atol=0,
+                )
 
     def test_indexer_pool_bytes_match_reference(self):
         torch.manual_seed(11)
@@ -241,9 +261,11 @@ class V41Fp4CodecGpuTest(unittest.TestCase):
         direct = dequantize_k_cache_slots_fp4(pool, slots)
         raw = gather_k_cache_bytes_fp4(pool, slots)
         self.assertEqual(tuple(raw.shape), (rows, FP4_GLOBAL_ENTRY_BYTES))
-        # The gathered bytes are exactly the pool's 288B rows.
-        pool_flat = pool.reshape(-1, FP4_GLOBAL_ENTRY_BYTES)
-        torch.testing.assert_close(raw, pool_flat[slots], rtol=0, atol=0)
+        # Transport serializes each slot from the two physical page planes.
+        expected_payload, expected_scales = _reference_fp4(values, 16, True)
+        torch.testing.assert_close(
+            raw, torch.cat((expected_payload, expected_scales), 1), rtol=0, atol=0
+        )
         # Dequantizing the gathered bytes reproduces the direct dequant.
         from_bytes = dequantize_k_cache_bytes_fp4(raw)
         torch.testing.assert_close(from_bytes, direct, rtol=0, atol=0)
@@ -257,6 +279,44 @@ class V41Fp4CodecGpuTest(unittest.TestCase):
         torch.testing.assert_close(
             dequantize_k_cache_bytes_fp4(raw_sentinel)[2], direct[5], rtol=0, atol=0
         )
+
+    def test_global_cp_owner_sum_preserves_serialized_bytes(self):
+        """Simulate four page-RR owners, including a partial final physical page."""
+        torch.manual_seed(29)
+        for entries in (64, 128):
+            with self.subTest(entries=entries):
+                rows = entries * 4 + 7
+                values = torch.randn(rows, 512, device="cuda", dtype=torch.bfloat16)
+                logical_slots = torch.arange(rows, device="cuda", dtype=torch.int64)
+                logical_pages = logical_slots // entries
+                owners = logical_pages % 4
+                local_slots = (
+                    logical_pages // 4 + 1
+                ) * entries + logical_slots % entries
+                raw_by_rank = []
+                for rank in range(4):
+                    pool = _pool(entries, FP4_GLOBAL_ENTRY_BYTES, 3, values.device)
+                    slots = torch.where(owners == rank, local_slots, -1)
+                    quantize_and_insert_k_cache_fp4(values, pool, slots)
+                    raw = gather_k_cache_bytes_fp4(pool, slots)
+                    self.assertTrue(bool((raw[owners != rank] == 0).all()))
+                    raw_by_rank.append(raw)
+                # NCCL SUM is lossless because exactly one rank owns each byte.
+                summed = (
+                    torch.stack(raw_by_rank).sum(0, dtype=torch.int32).to(torch.uint8)
+                )
+                payload, scales = _reference_fp4(values, 16, True)
+                expected = torch.cat((payload, scales), 1)
+                torch.testing.assert_close(summed, expected, rtol=0, atol=0)
+                expected_values = _decode_e2m1(payload) * _decode_e4m3_scale(
+                    scales
+                ).repeat_interleave(16, dim=-1)
+                torch.testing.assert_close(
+                    dequantize_k_cache_bytes_fp4(summed).float(),
+                    expected_values,
+                    rtol=0,
+                    atol=0,
+                )
 
     def test_indexer_gather_and_dequant_roundtrip(self):
         torch.manual_seed(17)

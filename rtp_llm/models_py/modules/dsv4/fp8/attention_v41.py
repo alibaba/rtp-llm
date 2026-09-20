@@ -23,6 +23,7 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
 )
 from rtp_llm.models_py.modules.dsv4.cp import _cp_restore_gathered_full_2d
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_indexer as prefill_indexer
+from rtp_llm.models_py.modules.dsv4.fp8 import _v41_swa_triton as swa_codec
 from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
     cp_kv_slot_mapping,
     cp_state_slot_mapping,
@@ -41,6 +42,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
 )
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
 from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
+from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 # Bound both CP hidden-state transfers and the subsequent projections.
@@ -291,6 +293,7 @@ class AttentionV41FP8(AttentionFP8):
             )
             self.index_weights = w[W.v4_indexer_weights_proj_w]
         self._pool_spec[CSA_STATE] = (torch.float32, 2 * self.head_dim)
+        self._pool_spec[SWA_KV] = (torch.uint8, swa_codec.ENTRY_BYTES)
         # V4.1-Flash FP4 pools: GLOBAL regions 288B/entry, INDEX_K 68B/entry
         # (fixed layouts; see _v41_fp4_triton and DSV4CacheConfigHelper).
         self._pool_spec[CSA_KV] = (torch.uint8, FP4_GLOBAL_ENTRY_BYTES)
@@ -338,6 +341,43 @@ class AttentionV41FP8(AttentionFP8):
         # V4.1 has no independent compressor module or nested index compressor.
         return
 
+    def _swa_entries_per_block(self):
+        if self._swa_cp_byte_sliced():
+            raw = self._pool_raw_u8(SWA_KV)
+            if raw is not None:
+                return raw.shape[1] * self._cp_ctx.cp_size // swa_codec.ENTRY_BYTES
+        return self._pool_entries_per_block(SWA_KV)
+
+    def _decode_write_swa_fp8(self, kv, bsz, q_len, attn_metadata):
+        slots = attn_metadata.pool_write_slot_mappings.get(SWA_KV)
+        pool = self._pool_view_3d_fp8(SWA_KV)
+        if slots is not None and pool is not None:
+            swa_codec.quantize_and_insert_swa_k_cache(
+                kv.reshape(-1, self.head_dim), pool, slots[: bsz * q_len]
+            )
+
+    def _prefill_write_swa_fp8_paged(self, common, kv_full):
+        meta = common.swa_meta
+        if meta is None or meta.slot_mapping is None:
+            return
+        kv = kv_full.reshape(-1, self.head_dim).to(torch.bfloat16)
+        if self._swa_cp_byte_sliced():
+            raw = self._pool_raw_u8(SWA_KV)
+            if raw is not None:
+                swa_codec.quantize_and_insert_k_cache_cp_byte_sliced(
+                    kv,
+                    raw,
+                    meta.slot_mapping,
+                    full_entries_per_block=self._swa_entries_per_block(),
+                    cp_rank=common.cp_ctx.cp_rank,
+                    cp_size=common.cp_ctx.cp_size,
+                    compaction=meta.slot_compaction,
+                )
+        else:
+            pool = self._pool_view_3d_fp8(SWA_KV)
+            if pool is not None:
+                swa_codec.quantize_and_insert_swa_k_cache(kv, pool, meta.slot_mapping)
+
     def _build_shared_prefill_meta(self, *args, **kwargs):
         # Every V4.1 layer needs the full SWA prefix metadata, including global
         # layers. Build through the mature SWA planner with this layer's RoPE.
@@ -366,6 +406,7 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention["global"] = {}
             self._shared_attention["topk"] = {}
             self._shared_attention["candidates"] = None
+            self._shared_attention.pop("candidate_mask", None)
             # ``_prefill_chunk_meta`` caches per-source-group chunk offsets for
             # the duration of one forward; drop them with the rest of the
             # per-forward shared state.
@@ -844,17 +885,24 @@ class AttentionV41FP8(AttentionFP8):
 
     def _swa_prefill_workspace(self, qkv, common):
         """Return BF16 [request, prefix tail + new tokens] for sparse prefill."""
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as dq
-
-        meta = common.swa_meta
         lengths_host = self._host_prefill_lengths(common)
         if not common.any_cont:
             return list(qkv.kv_full.split(lengths_host)), [0] * len(lengths_host)
+        buf = self._swa_prefill_concat(qkv, common)
+        prefixes_host = self._host_prefill_prefixes(common)
+        tails = [min(int(p), self.window_size - 1) for p in prefixes_host]
+        return [
+            buf[b, : tails[b] + int(lengths_host[b])] for b in range(common.batch_size)
+        ], [int(p) - t for p, t in zip(prefixes_host, tails)]
+
+    def _swa_prefill_concat(self, qkv, common):
+        """Read the 528B prefix before a new chunk overwrites the SWA ring."""
+        meta = common.swa_meta
         B, D = common.batch_size, self.head_dim
         buf = torch.zeros(B, meta.M, D, dtype=torch.bfloat16, device=qkv.kv_full.device)
         if meta.prefix_len_max > 0:
             if self._swa_cp_byte_sliced():
-                dq.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                swa_codec.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
                     out=buf,
                     k_cache_raw=self._pool_raw_u8(SWA_KV),
                     slot_mapping=meta.cache_slot_mapping,
@@ -866,7 +914,7 @@ class AttentionV41FP8(AttentionFP8):
                     compaction=meta.cache_compaction,
                 )
             else:
-                dq.dequantize_and_gather_k_cache_slots(
+                swa_codec.dequantize_and_gather_k_cache_slots(
                     out=buf,
                     k_cache=self._pool_view_3d_fp8(SWA_KV),
                     slot_mapping=meta.cache_slot_mapping,
@@ -874,11 +922,7 @@ class AttentionV41FP8(AttentionFP8):
                     offset=0,
                 )
         buf.view(-1, D).index_copy_(0, meta.slot_in_flat, qkv.kv_full)
-        prefixes_host = self._host_prefill_prefixes(common)
-        tails = [min(int(p), self.window_size - 1) for p in prefixes_host]
-        return [buf[b, : tails[b] + int(lengths_host[b])] for b in range(B)], [
-            int(p) - t for p, t in zip(prefixes_host, tails)
-        ]
+        return buf
 
     def _prefill_chunk_meta(self, globals_by_req, swa, swa_starts, req_ids, device):
         """Per-request chunk offsets for the sparse-prefill index build.
@@ -965,8 +1009,27 @@ class AttentionV41FP8(AttentionFP8):
             if self.compress_ratio
             else (None, None)
         )
+        swa_only_workspace = (
+            self._swa_prefill_concat(qkv, common)
+            if not self.compress_ratio
+            and common.any_cont
+            and self._kv_cache is not None
+            else None
+        )
         self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
         if not self.compress_ratio:
+            if swa_only_workspace is not None:
+                qkv = self._materialize_prefill_q(qkv, common)
+                dispose_tensor(qkv.kv_full)
+                meta = common.swa_meta
+                return self._flash_mla_sparse_fwd_chunked_projected(
+                    q=qkv.q,
+                    kv=swa_only_workspace.view(-1, 1, self.head_dim),
+                    indices=meta.combined_indices.unsqueeze(1),
+                    topk_length=meta.combined_lens,
+                    freqs_cis=common.freqs_cis,
+                    profile_name="dsv41.prefill.swa_concat.flash_mla",
+                )
             return self._forward_prefill_swa_only(qkv, common)
         positions = (
             common.cp_ctx.global_positions.long()
@@ -1224,16 +1287,53 @@ class AttentionV41FP8(AttentionFP8):
             and (capacity + candidate_size - 1) // candidate_size > candidate_blocks
         )
         if publish:
+            shared.pop("candidate_mask", None)
             shared["candidates"] = (
                 torch.empty(T, candidate_blocks, dtype=torch.int32, device=x.device)
                 if use_candidates
                 else None
             )
+        visible_i32 = visible_per_token.to(torch.int32)
+        if paged:
+            from rtp_llm.models_py.modules.dsv4.fp8 import (
+                _v41_decode_topk as decode_topk,
+            )
+
+            candidates = shared.get("candidates")
+            cached_mask = shared.get("candidate_mask")
+            compatible_mask = (
+                candidate_size > 0
+                and cached_mask is not None
+                and cached_mask[0] is candidates
+                and cached_mask[1].shape
+                == (T, (capacity + candidate_size - 1) // candidate_size)
+                and cached_mask[2] == candidate_size
+            )
+            if decode_topk.is_supported(all_logits, visible_i32, self.index_topk) and (
+                candidates is None or publish or compatible_mask
+            ):
+                # DeepGEMM already returned rows for all B*S tokens. Keep the
+                # selection batched instead of launching once per request.
+                if candidates is not None:
+                    if publish:
+                        candidates, flags = decode_topk.select_candidates(
+                            all_logits, visible_i32, candidate_size, candidate_blocks
+                        )
+                        shared["candidates"] = candidates
+                        shared["candidate_mask"] = (candidates, flags, candidate_size)
+                    elif candidate_source >= 0 and self.layer_id > candidate_source:
+                        decode_topk.mask_candidates(
+                            all_logits, cached_mask[1], candidate_size
+                        )
+                output = decode_topk.select_tokens(
+                    all_logits, visible_i32, self.index_topk
+                )
+                shared["topk"] = {self.layer_id: output}
+                return output
         output = torch.full(
             (T, self.index_topk), -1, dtype=torch.int32, device=x.device
         )
         columns = None if paged else torch.arange(capacity, device=x.device)
-        visible_i32 = visible_per_token.to(torch.int32)
         for b in range(B):
             for start in range(b * S, (b + 1) * S, 16):
                 end = min(start + 16, (b + 1) * S)
@@ -1371,7 +1471,7 @@ class AttentionV41FP8(AttentionFP8):
                     q_len=S,
                     num_heads=self.n_heads,
                     topk=self.window_size,
-                    extra_attn_type=None,
+                    extra_attn_type=self._global_region(),
                 ),
                 fp8_op=self._get_fp8_decode_op(),
             )

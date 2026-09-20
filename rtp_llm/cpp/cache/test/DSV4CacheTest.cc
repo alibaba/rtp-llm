@@ -906,6 +906,7 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
 
 static ModelConfig makeV41ModelConfig() {
     auto mc                                 = makeFlashModelConfig();
+    mc.model_type                           = "deepseek_v41";
     mc.num_layers                           = 40;
     mc.attn_config.layer_compress_ratios    = std::vector<int>(40, 1);
     mc.attn_config.layer_compress_ratios[0] = 0;
@@ -933,10 +934,12 @@ TEST(HybridPoolConfigCreatorTest, V41AllocatesGlobalPoolsOnlyOnSources) {
     auto* ratio1 = dynamic_cast<DSV4KVSpec*>(config.cache_specs[1].get());
     auto* index  = dynamic_cast<DSV4KVSpec*>(config.cache_specs[2].get());
     auto* state  = dynamic_cast<DSV4StateSpec*>(config.cache_specs[4].get());
+    auto* swa    = dynamic_cast<DSV4StateSpec*>(config.cache_specs[6].get());
     ASSERT_NE(ratio2, nullptr);
     ASSERT_NE(ratio1, nullptr);
     ASSERT_NE(index, nullptr);
     ASSERT_NE(state, nullptr);
+    ASSERT_NE(swa, nullptr);
     EXPECT_EQ(ratio2->entries_per_block, 64u);
     EXPECT_EQ(ratio1->entries_per_block, 128u);
     EXPECT_EQ(index->entries_per_block, 128u);
@@ -949,11 +952,60 @@ TEST(HybridPoolConfigCreatorTest, V41AllocatesGlobalPoolsOnlyOnSources) {
     EXPECT_EQ(index->block_size_bytes(), 128u * 68u);
     EXPECT_EQ(state->state_dim, 1024u);
     EXPECT_EQ(state->entries_per_block, 6u);
+    EXPECT_EQ(swa->state_dim, 528u);
+    EXPECT_EQ(swa->entries_per_block, 132u);
+    EXPECT_EQ(swa->block_size_bytes(), 70144u);  // 132 * 528 rounded up to 512B.
+    EXPECT_EQ(config.group_kv_block_stride_bytes[6], swa->block_size_bytes());
+}
+
+TEST(HybridPoolConfigCreatorTest, V41SwaFlashMlaLayoutMatchesPrefillCpByteSlices) {
+    auto mc = makeV41ModelConfig();
+    for (int cp_size : {2, 4, 8}) {
+        for (int gen_num_per_cycle : {0, 3, 5}) {
+            SCOPED_TRACE("cp_size=" + std::to_string(cp_size) + " gen_num=" + std::to_string(gen_num_per_cycle));
+            ParallelismConfig pc;
+            pc.role_type                          = RoleType::PREFILL;
+            pc.tp_size                            = cp_size;
+            pc.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+            pc.prefill_cp_config.kv_cache_sharded = true;
+            pc.prefill_cp_config.prefill_cp_size  = cp_size;
+            auto prefill =
+                HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, gen_num_per_cycle);
+            pc.role_type = RoleType::DECODE;
+            pc.tp_size   = 1;
+            pc.dp_size   = cp_size;
+            auto decode =
+                HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, gen_num_per_cycle);
+
+            auto* prefill_swa = dynamic_cast<DSV4StateSpec*>(prefill.cache_specs[6].get());
+            auto* decode_swa  = dynamic_cast<DSV4StateSpec*>(decode.cache_specs[6].get());
+            ASSERT_NE(prefill_swa, nullptr);
+            ASSERT_NE(decode_swa, nullptr);
+            const uint32_t ring_entries = ((128 + gen_num_per_cycle + 1) / 2 * 2 + cp_size - 1) / cp_size * cp_size;
+            const size_t   full_stride  = (static_cast<size_t>(ring_entries) * 528 + 511) / 512 * 512;
+            EXPECT_EQ(prefill_swa->state_dim, 528u);
+            EXPECT_EQ(decode_swa->state_dim, 528u);
+            EXPECT_EQ(prefill_swa->entries_per_block, ring_entries);
+            EXPECT_EQ(decode_swa->entries_per_block, ring_entries);
+            EXPECT_EQ(prefill_swa->block_size_bytes_override, full_stride / cp_size);
+            EXPECT_EQ(prefill_swa->block_size_bytes(), full_stride / cp_size);
+            EXPECT_EQ(decode_swa->block_size_bytes_override, 0u);
+            EXPECT_EQ(decode_swa->block_size_bytes(), full_stride);
+            EXPECT_EQ(decode_swa->block_size_bytes() % 512, 0u);
+            // PD transport concatenates the CP ranks' physical byte slices.
+            EXPECT_EQ(prefill.group_kv_block_stride_bytes[6] * cp_size, decode.group_kv_block_stride_bytes[6]);
+            EXPECT_EQ(prefill.group_seq_size_per_block[6], decode.group_seq_size_per_block[6]);
+            const auto prefill_pool = BlockPoolConfigHelper::createConfigForGroup(prefill, 6);
+            const auto decode_pool  = BlockPoolConfigHelper::createConfigForGroup(decode, 6);
+            EXPECT_EQ(prefill_pool.total_size_bytes * cp_size, decode_pool.total_size_bytes);
+        }
+    }
 }
 
 TEST(HybridPoolConfigCreatorTest, V41DSparkEmptyRegionsInitializeWithoutBacking) {
     auto target                             = makeV41ModelConfig();
     auto draft                              = target;
+    draft.model_type                        = "deepseek_v41_dspark";
     draft.num_layers                        = 3;
     draft.attn_config.layer_compress_ratios = {0, 0, 0};
     draft.attn_config.v41_kv_source_layer_ids.clear();
@@ -985,6 +1037,16 @@ TEST(HybridPoolConfigCreatorTest, V41DSparkEmptyRegionsInitializeWithoutBacking)
         ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
         EXPECT_EQ(config.global_layer_ids[6].size(), 43u);
         EXPECT_EQ(config.mtp_sub_configs[0]->global_layer_ids[6], std::vector<int>({40, 41, 42}));
+        const auto* target_swa = dynamic_cast<const DSV4StateSpec*>(config.cache_specs[6].get());
+        const auto* draft_swa  = dynamic_cast<const DSV4StateSpec*>(config.mtp_sub_configs[0]->cache_specs[6].get());
+        ASSERT_NE(target_swa, nullptr);
+        ASSERT_NE(draft_swa, nullptr);
+        EXPECT_EQ(target_swa->state_dim, 528u);
+        EXPECT_EQ(draft_swa->state_dim, 528u);
+        EXPECT_EQ(target_swa->entries_per_block, 136u);
+        EXPECT_EQ(draft_swa->entries_per_block, 136u);
+        EXPECT_EQ(target_swa->block_size_bytes(), role == RoleType::PREFILL ? 18048u : 72192u);
+        EXPECT_EQ(target_swa->block_size_bytes(), draft_swa->block_size_bytes());
 
         // Exercise exactly the group helper used by allocator startup, for
         // both the merged main/draft layout and its SWA-only draft descriptor.

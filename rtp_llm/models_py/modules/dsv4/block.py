@@ -89,11 +89,22 @@ class Block(nn.Module):
 
         attn_cls = CommitOnlyAttentionFP8 if commit_only else AttentionFP8
         attn_extra = {}
-        if v41_config is not None and not commit_only:
-            from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import AttentionV41FP8
+        if v41_config is not None:
+            if commit_only:
+                from rtp_llm.models_py.modules.dsv4.fp8.attention_v41_commit import (
+                    CommitOnlyAttentionV41FP8,
+                )
 
-            attn_cls = AttentionV41FP8
-            attn_extra = dict(v41_config=v41_config, shared_attention=shared_attention)
+                attn_cls = CommitOnlyAttentionV41FP8
+            else:
+                from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (
+                    AttentionV41FP8,
+                )
+
+                attn_cls = AttentionV41FP8
+                attn_extra = dict(
+                    v41_config=v41_config, shared_attention=shared_attention
+                )
         self.attn = attn_cls(
             layer_id=layer_id,
             dim=dim,

@@ -70,6 +70,15 @@ _DSV4_FP8_CPU_TESTS = [
 ]
 
 py_test(
+    name = "test_v41_swa_codec",
+    srcs = ["test_v41_swa_codec.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
+
+py_test(
     name = "test_v41_decode_global",
     srcs = ["test_v41_decode_global.py"],
     deps = _DSV4_FP8_TEST_DEPS,
