@@ -554,7 +554,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
             ],
         )
 
-    def test_nonzero_prefix_cannot_fall_through_to_local_prefill(self):
+    def test_nonzero_prefix_requires_the_paged_bridge_not_local_prefill(self):
         events = []
 
         class _RecordingWriter(self._IdentityRopeWriter):
@@ -591,7 +591,10 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                 side_effect=AssertionError("local sparse prefill must not run"),
             ),
         ):
-            with self.assertRaisesRegex(RuntimeError, "explicit MTP draft mode"):
+            # The prefix case must route to the ragged paged bridge; without a
+            # main KV cache the bridge refuses before any local prefill or
+            # cache write can run.
+            with self.assertRaisesRegex(RuntimeError, "requires the main KV cache"):
                 impl.forward(qkv, selected_indices=selected)
 
         self.assertEqual(events, [])
