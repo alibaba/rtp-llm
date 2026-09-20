@@ -45,7 +45,7 @@ py_test(
         "TestCudaNoQuantFallbackStrategies",
         "TestCudaFp8PerBlockNoDPStrategy.test_can_handle_single_gpu",
         "TestCudaFp8PerBlockNoDPStrategy.test_can_handle_tp_equal_ep",
-        "TestCudaFp8PerBlockNoDPStrategy.test_can_handle_false_cuda_graph",
+        "TestCudaFp8PerBlockNoDPStrategy.test_can_handle_cuda_graph",
         "TestCudaFp8PerBlockNoDPStrategy.test_rejects_backend_missing_required_executor_symbols",
         "TestCudaFp8PerTensorNoDPStrategy.test_can_handle_fp8_per_tensor_compressed",
         "TestCudaFp8PerTensorNoDPStrategy.test_can_handle_fp8_dynamic_per_tensor",

@@ -6,6 +6,8 @@ import torch
 import rtp_llm.ops  # isort: skip
 from rtp_llm.models_py.kernels.cuda.fp8_quant import (  # isort: skip
     _transform_scale_ue8m0,
+    per_block_cast_to_fp8,
+    quant_weight_ue8m0,
     scaled_fp8_per_tensor_quant,
     scaled_fp8_per_token_quant,
     sgl_per_token_group_quant_fp8,
@@ -16,6 +18,48 @@ class Fp8QuantRegressionTest(TestCase):
     def setUp(self) -> None:
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
+
+    def test_ue8m0_weight_conversion_preserves_source_dtype_support(self):
+        for device in ("cpu", "cuda"):
+            for dtype in (torch.float16, torch.bfloat16, torch.float32):
+                with self.subTest(device=device, dtype=dtype):
+                    source = (
+                        torch.linspace(-3.0, 5.0, 129 * 131, device=device)
+                        .reshape(129, 131)
+                        .to(dtype)
+                    )
+                    weight, scale = quant_weight_ue8m0(source, [128, 128])
+                    expected_weight, expected_scale = per_block_cast_to_fp8(
+                        source, use_ue8m0=True
+                    )
+                    self.assertEqual(weight.shape, source.shape)
+                    self.assertEqual(scale.shape, (2, 2))
+                    self.assertTrue(torch.isfinite(weight.float()).all())
+                    torch.testing.assert_close(
+                        weight.float(), expected_weight.float(), rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(scale, expected_scale, rtol=0, atol=0)
+
+    def test_block_fp8_quantization_matches_saturated_reference(self):
+        source = torch.linspace(-17.0, 23.0, 128 * 128, device="cuda").reshape(128, 128)
+        for use_ue8m0 in (False, True):
+            with self.subTest(use_ue8m0=use_ue8m0):
+                weight, scale = per_block_cast_to_fp8(source, use_ue8m0)
+                expected_scale = source.abs().amax().clamp_min(1e-4) / 448.0
+                if use_ue8m0:
+                    expected_scale = torch.pow(
+                        2.0, torch.ceil(torch.log2(expected_scale))
+                    )
+                info = torch.finfo(weight.dtype)
+                expected = (
+                    (source / expected_scale).clamp(info.min, info.max).to(weight.dtype)
+                )
+                torch.testing.assert_close(
+                    weight.float(), expected.float(), rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    scale, expected_scale.reshape(1, 1), rtol=0, atol=0
+                )
 
     def test_forced_legacy_rejects_v2_only_features(self):
         x = torch.ones((2, 256), dtype=torch.bfloat16, device="cuda")

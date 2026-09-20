@@ -406,7 +406,7 @@ def per_block_cast_to_fp8(
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
     sf = x_amax / 448.0
     sf = ceil_to_ue8m0(sf) if use_ue8m0 else sf
-    x_scaled = (x_view * (1.0 / sf)).to(torch.float8_e4m3fn)
+    x_scaled = (x_view * (1.0 / sf)).clamp(fp8_min, fp8_max).to(fp8_dtype)
     return x_scaled.view_as(x_padded)[:m, :n].contiguous(), sf.view(
         x_view.size(0), x_view.size(2)
     )
@@ -424,9 +424,9 @@ def quant_weight_ue8m0(
             f"UE8M0 weight conversion requires block size [128, 128], got "
             f"{weight_block_size!r}"
         )
-    if weight_dequant.dtype != torch.bfloat16:
+    if weight_dequant.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(
-            "UE8M0 weight conversion requires bfloat16 input, got "
+            "UE8M0 weight conversion requires float16, bfloat16 or float32 input, got "
             f"{weight_dequant.dtype} with shape {tuple(weight_dequant.shape)}"
         )
     *batch_dims, n, k = weight_dequant.shape
