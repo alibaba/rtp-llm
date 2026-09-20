@@ -25,6 +25,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_bf16.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
 
 using namespace rtp_llm;
@@ -277,6 +278,14 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("workspace"),
                   py::arg("k"),
                   py::arg("max_seq_len"));
+
+    rtp_ops_m.def("deepselect_bf16_available", &deepselect_bf16_available);
+    rtp_ops_m.def("deepselect_bf16",
+                  &deepselect_bf16,
+                  "BF16 K512 DeepSelect for candidate-only V4.1 prefill",
+                  py::arg("logits"),
+                  py::arg("ends"),
+                  py::arg("output"));
 
     // Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill).
     // Per-row TopK over [row_starts[r], row_ends[r]); returned indices

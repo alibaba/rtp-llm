@@ -198,6 +198,18 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
         torch.testing.assert_close(logits, expected, rtol=0, atol=0)
 
     @torch.no_grad()
+    def test_sparse_publication_skips_unused_bitmap(self):
+        logits, visible = make_case(17, 32769)
+        expected = reference_select(logits, visible, 8, 2048)
+        with patch.dict(os.environ, {"DSV41_PREFILL_CANDIDATE_FLAGS_MAX_BYTES": "0"}):
+            result = fused.select_candidates(
+                logits, visible, 8, 2048, build_bitmap=False
+            )
+        self.assertIsNotNone(result)
+        self.assertIsNone(result[1])
+        torch.testing.assert_close(result[0], expected, rtol=0, atol=0)
+
+    @torch.no_grad()
     def test_dynamic_cuda_graph_replay(self):
         rows, width = 17, 2059
         logits, visible = make_case(rows, width)

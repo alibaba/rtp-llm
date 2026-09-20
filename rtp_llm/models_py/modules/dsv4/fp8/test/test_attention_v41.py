@@ -643,7 +643,7 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
         expected_ids = torch.tensor([[0, 1], [2, 4], [6, 8]], dtype=torch.int32)
         expected_flags = torch.tensor([[3, 0, 0], [20, 0, 0], [320, 0, 0]])
 
-        def select(logits, visible, block_size, topk, *, out, flags):
+        def select(logits, visible, block_size, topk, *, out, flags, build_bitmap=True):
             self.assertEqual(
                 out.untyped_storage().data_ptr(),
                 candidates.untyped_storage().data_ptr(),
@@ -703,7 +703,7 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
         expected_ids = torch.tensor([[0, 2], [1, 3], [4, 5]], dtype=torch.int32)
         expected_flags = torch.tensor([[5, 0, 0], [10, 0, 0], [48, 0, 0]])
 
-        def select(logits, visible, block_size, topk, *, out, flags):
+        def select(logits, visible, block_size, topk, *, out, flags, build_bitmap=True):
             self.assertNotEqual(
                 out.untyped_storage().data_ptr(),
                 candidates.untyped_storage().data_ptr(),

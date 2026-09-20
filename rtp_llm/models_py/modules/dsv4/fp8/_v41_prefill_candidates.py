@@ -120,10 +120,12 @@ def _prefill_candidate_store_bitmap_kernel(
     OUT_STRIDE: tl.constexpr,
     FLAG_WORDS: tl.constexpr,
     FLAG_STRIDE: tl.constexpr,
+    WRITE_FLAGS: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
-    word = tl.arange(0, triton.next_power_of_2(FLAG_WORDS))
-    tl.store(flags + row * FLAG_STRIDE + word, 0, word < FLAG_WORDS)
+    if WRITE_FLAGS:
+        word = tl.arange(0, triton.next_power_of_2(FLAG_WORDS))
+        tl.store(flags + row * FLAG_STRIDE + word, 0, word < FLAG_WORDS)
     columns = tl.arange(0, triton.next_power_of_2(OUT_K))
     score = tl.load(values + row * K + columns, columns < K, other=-float("inf"))
     index = tl.load(indices + row * K + columns, columns < K, other=-1).to(tl.int32)
@@ -134,9 +136,12 @@ def _prefill_candidate_store_bitmap_kernel(
         tl.where(valid, index, -1),
         columns < OUT_K,
     )
-    tl.debug_barrier()
-    bit = (1 << (index & 31)).to(tl.int32)
-    tl.atomic_or(flags + row * FLAG_STRIDE + (index >> 5), bit, valid, sem="relaxed")
+    if WRITE_FLAGS:
+        tl.debug_barrier()
+        bit = (1 << (index & 31)).to(tl.int32)
+        tl.atomic_or(
+            flags + row * FLAG_STRIDE + (index >> 5), bit, valid, sem="relaxed"
+        )
 
 
 @triton.jit
@@ -208,7 +213,8 @@ def select_candidates(
     *,
     out: torch.Tensor | None = None,
     flags: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor] | None:
+    build_bitmap: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None] | None:
     """Return sorted candidate IDs and bitmap, or None before launching on fallback.
 
     ``visible`` must contain request-local lengths in [0, logits.shape[1]].
@@ -216,6 +222,8 @@ def select_candidates(
     the complete bounded cross-layer cache; use bitmap_is_bounded on its full
     allocation before making chunk views. Extra cache words are cleared, too.
     The output may have extra candidate columns, which are padded with -1.
+    Candidate-only scoring sets ``build_bitmap=False`` and consumes IDs
+    directly. A dense fallback can still rebuild its own bounded chunk mask.
     """
     if not is_supported(logits, visible, block_size, topk_blocks):
         return None
@@ -229,12 +237,18 @@ def select_candidates(
         return None
     if flags is not None and not _valid_output(flags, rows, words, logits.device):
         return None
-    if flags is None and not bitmap_is_bounded(rows, width, block_size):
+    if (
+        build_bitmap
+        and flags is None
+        and not bitmap_is_bounded(rows, width, block_size)
+    ):
         return None
     if out is None:
         out = torch.empty((rows, count), dtype=torch.int32, device=logits.device)
-    if flags is None:
+    if build_bitmap and flags is None:
         flags = torch.empty((rows, words), dtype=torch.int32, device=logits.device)
+    if not build_bitmap:
+        flags = None
     scores = torch.empty((rows, nblocks), dtype=logits.dtype, device=logits.device)
     _prefill_candidate_pool_kernel[(rows, triton.cdiv(nblocks, 128))](
         logits,
@@ -256,8 +270,9 @@ def select_candidates(
         count,
         out.shape[1],
         out.stride(0),
-        flags.shape[1],
-        flags.stride(0),
+        flags.shape[1] if flags is not None else 1,
+        flags.stride(0) if flags is not None else 1,
+        build_bitmap,
     )
     return out, flags
 

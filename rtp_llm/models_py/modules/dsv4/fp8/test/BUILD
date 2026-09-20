@@ -62,6 +62,7 @@ _DSV4_FP8_TESTS = [
 
 _DSV4_FP8_CPU_TESTS = [
     "test_attention_v41",
+    "test_attention_v41_sparse_selection",
     "test_v41_prefill_indexer",
     "test_attention_cp_prefill_paths",
     "test_attention_csa_overlap",
@@ -71,6 +72,33 @@ _DSV4_FP8_CPU_TESTS = [
     "test_indexer_forward_with_pending_nested",
     "test_prefill_mixed_layer_cache_store",
 ]
+
+[
+    py_test(
+        name = t,
+        srcs = [t + ".py"],
+        deps = _DSV4_FP8_TEST_DEPS,
+        tags = ["SM100_ARM"],
+        exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+        timeout = "moderate",
+    )
+    for t in [
+        "test_v41_deepselect",
+    ]
+]
+
+py_test(
+    name = "test_v41_sparse_prefill_indexer",
+    srcs = ["test_v41_sparse_prefill_indexer.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {
+        "DSV41_TEST_SPARSE_PREFILL_GPU": "1",
+        "DSV41_TEST_SPARSE_DEEPSELECT_GPU": "1",
+    },
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
 
 py_test(
     name = "test_v41_swa_codec",

@@ -20,6 +20,24 @@ dsv4_indexer_topk_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_103', '--cuda-gpu-arch=sm_103',
 ]
 
+# DeepSelect uses Blackwell TMA and 256-bit memory operations. Compile only
+# architecture-specific cubins. The small vendored subset uses C++17 syntax
+# to work with RTP's Bazel CUDA wrapper as well as GCC 13 / CUDA 13.2.
+deepselect_bf16_cuda_copts = [
+    "-DRTP_DEEPSELECT_BF16_ENABLED",
+    "-O3",
+    "-U__CUDA_NO_HALF_OPERATORS__",
+    "-U__CUDA_NO_HALF_CONVERSIONS__",
+    "-U__CUDA_NO_HALF2_OPERATORS__",
+    "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+    "-nvcc_options=expt-relaxed-constexpr",
+    "-nvcc_options=expt-extended-lambda",
+    "-nvcc_options=use_fast_math",
+    "-nvcc_options=ftz=false",
+    "--cuda-include-ptx=sm_100a", "--cuda-gpu-arch=sm_100a",
+    "--cuda-include-ptx=sm_103a", "--cuda-gpu-arch=sm_103a",
+]
+
 cuda_deps = [
     "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
     ":cuda_utils_common",
@@ -203,6 +221,33 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
     copts = dsv4_indexer_topk_cuda_copts,
+    visibility = ["//visibility:public"],
+)
+
+# MIT BF16-only K512 subset from vllm-project/DeepSelect @ d96d33afe1fa.
+# Older CUDA builds retain a queryable unsupported stub and the FP32 fallback.
+cc_library(
+    name = "deepselect_bf16",
+    srcs = ["deepselect_bf16.cu"],
+    hdrs = ["deepselect_bf16.h"] + glob([
+        "deepselect/**/*.h",
+        "deepselect/**/*.cuh",
+    ]),
+    copts = copts() + cuda_default_copts_without_arch() + select({
+        "@//:using_cuda13_x86": deepselect_bf16_cuda_copts,
+        "@//:using_cuda13_arm": deepselect_bf16_cuda_copts,
+        "@//:using_cuda12_9": deepselect_bf16_cuda_copts,
+        "//conditions:default": [],
+    }),
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + select({
+        "@//:using_cuda13_x86": ["@cutlass_cu13//:cutlass"],
+        "@//:using_cuda13_arm": ["@cutlass_cu13//:cutlass"],
+        "@//:using_cuda12_9": ["@cutlass//:cutlass"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 

@@ -22,11 +22,15 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     SWA_KV,
 )
 from rtp_llm.models_py.modules.dsv4.cp import _cp_restore_gathered_full_2d
+from rtp_llm.models_py.modules.dsv4.fp8 import _v41_deepselect as prefill_deepselect
 from rtp_llm.models_py.modules.dsv4.fp8 import (
     _v41_prefill_candidates as prefill_candidates,
 )
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_indexer as prefill_indexer
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_topk as prefill_topk
+from rtp_llm.models_py.modules.dsv4.fp8 import (
+    _v41_sparse_prefill_indexer as sparse_prefill_indexer,
+)
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_swa_triton as swa_codec
 from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
     cp_kv_slot_mapping,
@@ -277,7 +281,13 @@ def _apply_prefill_candidates(shared, logits, visible, rows, block_size, topk, p
     )
     if publish:
         result = prefill_candidates.select_candidates(
-            logits, visible, block_size, topk, out=candidates[rows], flags=flags
+            logits,
+            visible,
+            block_size,
+            topk,
+            out=candidates[rows],
+            flags=flags,
+            build_bitmap=not shared.get("prefill_sparse_candidates", False),
         )
         if result is None:
             block_ids = select_candidate_blocks(logits, visible, block_size, topk)
@@ -297,6 +307,37 @@ def _apply_prefill_candidates(shared, logits, visible, rows, block_size, topk, p
             logits, flags, block_size
         ):
             mask_candidate_logits(logits, candidates[rows], block_size)
+
+
+def _prefill_sparse_plan(shared, key, candidates, visible, key_count, block_size):
+    """Forward-local, byte-bounded reuse across the four HCA index sources.
+
+    ``key`` identifies request, row range, logical K width and compression.
+    The candidate tensor itself identifies the current L20 publication.
+    Requests and their prefix positions are invariant within one forward.
+    Plans beyond the aggregate limit are rebuilt for that chunk, not retained.
+    """
+    source = shared["candidates"]
+    cache = shared.get("prefill_sparse_plans")
+    if cache is None or cache[0] is not source:
+        cache = [source, {}, 0]
+        shared["prefill_sparse_plans"] = cache
+    if key in cache[1]:
+        return cache[1][key]
+    plan = sparse_prefill_indexer.prepare_plan(
+        candidates, visible, key_count, block_size
+    )
+    if plan is None:
+        raise RuntimeError(
+            "V4.1 sparse prefill plan rejected a supported scoring chunk"
+        )
+    limit = max(
+        0, int(os.environ.get("DSV41_SPARSE_PREFILL_PLAN_MAX_BYTES", 256 * 1024**2))
+    )
+    if cache[2] + plan.nbytes <= limit:
+        cache[1][key] = plan
+        cache[2] += plan.nbytes
+    return plan
 
 
 class AttentionV41FP8(AttentionFP8):
@@ -471,6 +512,8 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention["candidates"] = None
             self._shared_attention.pop("candidate_mask", None)
             self._shared_attention.pop("prefill_candidate_mask", None)
+            self._shared_attention.pop("prefill_sparse_candidates", None)
+            self._shared_attention.pop("prefill_sparse_plans", None)
             # ``_prefill_chunk_meta`` caches per-source-group chunk offsets for
             # the duration of one forward; drop them with the rest of the
             # per-forward shared state.
@@ -822,6 +865,14 @@ class AttentionV41FP8(AttentionFP8):
         )
         if publish_candidates:
             shared.pop("prefill_candidate_mask", None)
+            shared.pop("prefill_sparse_plans", None)
+            shared["prefill_sparse_candidates"] = (
+                os.environ.get("DSV41_SPARSE_PREFILL_INDEXER", "1") != "0"
+                and self.index_topk == 512
+                and self.index_n_heads == 32
+                and candidate_size == 8
+                and prefill_deepselect.is_available(x.device)
+            )
             max_blocks = max(
                 (
                     (len(k) + candidate_size - 1) // candidate_size
@@ -841,6 +892,7 @@ class AttentionV41FP8(AttentionFP8):
             )
             if (
                 shared["candidates"] is not None
+                and not shared["prefill_sparse_candidates"]
                 and x.is_cuda
                 and os.environ.get("DSV41_FUSED_PREFILL_CANDIDATES", "1") != "0"
                 and prefill_candidates.bitmap_is_bounded(
@@ -898,10 +950,34 @@ class AttentionV41FP8(AttentionFP8):
                     else torch.where(req_ids == b)[0]
                 )
                 key_count = len(keys)
+                candidates = shared.get("candidates")
+                probe = slice(0, 1) if single_request else rows[:1]
+                sparse_request = (
+                    fused_indexer
+                    and candidates is not None
+                    and candidate_source >= 0
+                    and self.layer_id > candidate_source
+                    and self.index_topk == 512
+                    and prefill_deepselect.is_available(x.device)
+                    and sparse_prefill_indexer.is_supported(
+                        q_fp4[probe],
+                        q_sf[probe],
+                        keys,
+                        weights[probe],
+                        candidates[probe],
+                        positions[probe],
+                        candidate_size,
+                        self.index_topk,
+                    )
+                )
                 chunk_rows = (
-                    prefill_indexer.logits_chunk_rows(key_count)
-                    if fused_indexer
-                    else 64
+                    sparse_prefill_indexer.MAX_CHUNK_ROWS
+                    if sparse_request
+                    else (
+                        prefill_indexer.logits_chunk_rows(key_count)
+                        if fused_indexer
+                        else 64
+                    )
                 )
                 for chunk_index, chunk in enumerate(rows.split(chunk_rows)):
                     output_rows = (
@@ -910,11 +986,58 @@ class AttentionV41FP8(AttentionFP8):
                         else chunk
                     )
                     visible = (positions[chunk] + 1) // self.compress_ratio
+                    if sparse_request:
+                        with record_function_range(
+                            "dsv41.prefill.indexer.sparse_logits"
+                        ):
+                            plan = _prefill_sparse_plan(
+                                shared,
+                                (
+                                    b,
+                                    chunk_index,
+                                    len(chunk),
+                                    key_count,
+                                    self.compress_ratio,
+                                    candidate_size,
+                                ),
+                                candidates[output_rows],
+                                visible,
+                                key_count,
+                                candidate_size,
+                            )
+                            logits = sparse_prefill_indexer.score(
+                                q_fp4[output_rows],
+                                q_sf[output_rows],
+                                keys,
+                                weights[output_rows],
+                                plan,
+                            )
+                            if logits is None:
+                                raise RuntimeError(
+                                    "V4.1 sparse prefill score layout changed after dispatch"
+                                )
+                        with record_function_range("dsv41.prefill.indexer.deepselect"):
+                            selected = prefill_deepselect.try_select_sparse_tokens(
+                                logits, plan.end
+                            )
+                            if selected is None:
+                                raise RuntimeError(
+                                    "V4.1 sparse prefill DeepSelect layout is unsupported"
+                                )
+                            mapped = sparse_prefill_indexer.remap(
+                                selected,
+                                plan,
+                                logits=logits,
+                                out=out[output_rows] if single_request else None,
+                            )
+                            if mapped is None:
+                                raise RuntimeError(
+                                    "V4.1 sparse prefill remap layout is unsupported"
+                                )
+                            if not single_request:
+                                out[output_rows] = mapped
+                        continue
                     if fused_indexer:
-                        from rtp_llm.models_py.modules.dsv4._profiler import (
-                            record_function_range,
-                        )
-
                         with record_function_range(
                             "dsv41.prefill.indexer.fused_logits"
                         ):
