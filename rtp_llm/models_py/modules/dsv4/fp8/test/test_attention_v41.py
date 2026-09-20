@@ -19,6 +19,35 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (
 
 
 class AttentionV41Test(unittest.TestCase):
+    def test_small_cp_x_gather_ceiling_covers_mid_size_batches(self):
+        # The single-shot raw-x all-gather must cover the shared-prefix batch
+        # band (8x8192 = 65536 global rows and every smaller multi-request
+        # forward) while leaving large-context single requests on the tiled
+        # owner-projected path.
+        for padded, expected in [
+            (8192, True),
+            (16384, True),
+            (32768, True),
+            (40960, True),
+            (49152, True),
+            (57344, True),
+            (65536, True),
+            (65537, False),
+            (131072, False),
+        ]:
+            with self.subTest(padded=padded):
+                ctx = SimpleNamespace(padded_seq_len=padded)
+                self.assertEqual(
+                    attention_v41_module._use_small_cp_x_gather(ctx), expected
+                )
+        with patch.object(attention_v41_module, "_SMALL_CP_X_GATHER_MAX_ROWS", 32768):
+            ctx = SimpleNamespace(padded_seq_len=49152)
+            self.assertFalse(attention_v41_module._use_small_cp_x_gather(ctx))
+            self.assertTrue(
+                attention_v41_module._use_small_cp_x_gather(
+                    SimpleNamespace(padded_seq_len=32768)
+                )
+            )
     def test_cp_hidden_tiles_restore_padded_multiple_requests(self):
         for cp_size in (2, 4):
             lengths = (5, 19, 1, 32)
