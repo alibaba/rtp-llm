@@ -8,6 +8,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.EngineCancellationConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
@@ -690,6 +691,62 @@ class RequestRegistryTest {
         verify(fenceLease).close();
         verify(registered.item().decodeEp(), never())
                 .releaseReservationExact(registered.item().decodeReservation());
+    }
+
+    @Test
+    void returnedEngineCancellationSkipsTheFenceCancelRpc() {
+        SchedulingTestConfig.engineCancellation(config)
+                .setMode(EngineCancellationConfig.Mode.RETURN);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setServerIp("127.0.0.1");
+        prefill.setGrpcPort(8090);
+        Registered registered = registerItem(6041L, prefill);
+        DecodeEndpoint.EngineFenceLease fenceLease =
+                mock(DecodeEndpoint.EngineFenceLease.class);
+        when(registered.item().decodeEp().beginEngineFenceProtection(
+                registered.item().decodeReservation())).thenReturn(fenceLease);
+        RequestLifecycleTestSupport.bind(lifecycle, registered);
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(
+                registered.item(), 7041L, () -> true);
+        assertNotNull(claim);
+        lifecycle.complete(claim, DeliveryResult.delivered());
+
+        RequestState requested = lifecycle.cancelRequest(
+                "6041", 7041L, CancelReason.CLIENT_CANCELLED);
+
+        assertEquals(RequestState.Phase.CANCEL_REQUESTED, requested.state());
+        verify(engineCancelChannel, never()).cancel(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.eq("6041"),
+                org.mockito.ArgumentMatchers.anyLong());
+    }
+
+    @Test
+    void rpcEngineCancellationStillSendsTheFenceCancelRpc() {
+        SchedulingTestConfig.engineCancellation(config)
+                .setMode(EngineCancellationConfig.Mode.RPC);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setServerIp("127.0.0.1");
+        prefill.setGrpcPort(8090);
+        Registered registered = registerItem(6042L, prefill);
+        DecodeEndpoint.EngineFenceLease fenceLease =
+                mock(DecodeEndpoint.EngineFenceLease.class);
+        when(registered.item().decodeEp().beginEngineFenceProtection(
+                registered.item().decodeReservation())).thenReturn(fenceLease);
+        RequestLifecycleTestSupport.bind(lifecycle, registered);
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(
+                registered.item(), 7042L, () -> true);
+        assertNotNull(claim);
+        lifecycle.complete(claim, DeliveryResult.delivered());
+
+        RequestState requested = lifecycle.cancelRequest(
+                "6042", 7042L, CancelReason.CLIENT_CANCELLED);
+
+        assertEquals(RequestState.Phase.CANCEL_REQUESTED, requested.state());
+        verify(engineCancelChannel).cancel(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.eq("6042"),
+                org.mockito.ArgumentMatchers.anyLong());
     }
 
     @Test

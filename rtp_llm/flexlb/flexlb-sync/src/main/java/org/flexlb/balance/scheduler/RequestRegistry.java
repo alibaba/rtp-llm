@@ -12,7 +12,9 @@ import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimTerminal;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.EngineCancellationConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
@@ -1166,6 +1168,7 @@ public class RequestRegistry {
             RequestSlot.EngineFenceRegistration fence,
             CancelTarget target,
             long timeoutMs) {
+        ScheduledRequest deliveredItem;
         synchronized (slot) {
             RequestSlot.FenceReduction reduction = slot.applyFenceUpdate(
                     fence, RequestSlot.FenceUpdate.CANCEL_STARTED);
@@ -1174,6 +1177,11 @@ public class RequestRegistry {
                 return;
             }
             requireNoFenceEffect(reduction, "Cancel start");
+            deliveredItem = slot.activeItem();
+        }
+        if (cancellationReturnsForFence(slot.requestId(), target, deliveredItem)) {
+            awaitAuthoritativeTerminal(slot, fence);
+            return;
         }
 
         try {
@@ -1203,6 +1211,38 @@ public class RequestRegistry {
             // reach the engine. Retain the fence until endpoint evidence wins.
             awaitAuthoritativeTerminal(slot, fence);
         }
+    }
+
+    /**
+     * RETURN delivers cancellation instructions to the Engine on a new incoming
+     * schedule response, which a timer-driven fence never has. The fence then
+     * awaits the WorkerStatus terminal instead of issuing a Cancel it cannot
+     * address.
+     */
+    private boolean cancellationReturnsForFence(
+            String requestId, CancelTarget target, ScheduledRequest item) {
+        if (item == null
+                || !engineCancellationReturns(item.ctx().getConfig())) {
+            return false;
+        }
+        Logger.warn(
+                "[auto-tpm] engineCancellation.mode=RETURN cannot carry this "
+                        + "fence cancel for request_id={} to {}:{}: RETURN needs a "
+                        + "new incoming schedule response, so the Engine Cancel RPC "
+                        + "is skipped and the WorkerStatus terminal is awaited.",
+                requestId, target.prefillIp(), target.prefillGrpcPort());
+        return true;
+    }
+
+    private static boolean engineCancellationReturns(FlexlbConfig config) {
+        if (config == null || !config.isQueue()) {
+            return false;
+        }
+        return config.queueScheduler().getOrdering().preemptionPolicy()
+                .map(PreemptionConfig::getEngineCancellation)
+                .map(EngineCancellationConfig::getMode)
+                .map(mode -> mode == EngineCancellationConfig.Mode.RETURN)
+                .orElse(false);
     }
 
     /** Consume an exact TOMBSTONED proof or retain it for admission replay. */
