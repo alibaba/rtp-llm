@@ -69,7 +69,14 @@ protected:
         device_bytes_ = device_offset;
         ASSERT_EQ(cudaHostAlloc(reinterpret_cast<void**>(&host_), host_bytes_, cudaHostAllocPortable), cudaSuccess);
         ASSERT_EQ(cudaMalloc(reinterpret_cast<void**>(&device_), device_bytes_), cudaSuccess);
+        ASSERT_NO_FATAL_FAILURE(clearDevice());
+    }
+
+    void clearDevice() {
         ASSERT_EQ(cudaMemset(device_, 0, device_bytes_), cudaSuccess);
+        // Copy APIs own independent streams. Complete fixture writes before
+        // handing the destination to a different stream.
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     }
 
     void release() {
@@ -234,17 +241,18 @@ TEST_F(NoBlockCopyBenchmarkTest, CorrectnessAndObservedLatency) {
             auto          staged = stagedDirectH2DParams(blocks);
             if (h2d) {
                 fillHostPattern(seed);
-                ASSERT_EQ(cudaMemset(device_, 0, device_bytes_), cudaSuccess);
+                ASSERT_NO_FATAL_FAILURE(clearDevice());
                 execNoBlockCopy(legacy);
                 ASSERT_NO_FATAL_FAILURE(verifyDevicePattern(seed));
-                ASSERT_EQ(cudaMemset(device_, 0, device_bytes_), cudaSuccess);
+                ASSERT_NO_FATAL_FAILURE(clearDevice());
                 ASSERT_TRUE(execBatchedMemoryCopy(batch));
                 ASSERT_NO_FATAL_FAILURE(verifyDevicePattern(seed));
-                ASSERT_EQ(cudaMemset(device_, 0, device_bytes_), cudaSuccess);
+                ASSERT_NO_FATAL_FAILURE(clearDevice());
                 ASSERT_TRUE(execStagedMemoryCopy(staged, &scratch));
                 ASSERT_NO_FATAL_FAILURE(verifyDevicePattern(seed));
             } else {
                 fillDevicePattern(seed);
+                ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
                 std::memset(host_, 0, host_bytes_);
                 execNoBlockCopy(legacy);
                 ASSERT_NO_FATAL_FAILURE(verifyHostPattern(seed));
@@ -263,7 +271,7 @@ TEST_F(NoBlockCopyBenchmarkTest, CorrectnessAndObservedLatency) {
                 if (blocks == 51) {
                     for (const int sm_blocks : {8, 16, 32, 64, 128}) {
                         auto limited_staged = stagedDirectH2DParams(blocks, sm_blocks);
-                        ASSERT_EQ(cudaMemset(device_, 0, device_bytes_), cudaSuccess);
+                        ASSERT_NO_FATAL_FAILURE(clearDevice());
                         ASSERT_TRUE(execStagedMemoryCopy(limited_staged, &scratch));
                         ASSERT_NO_FATAL_FAILURE(verifyDevicePattern(seed));
                         const auto limited_result =

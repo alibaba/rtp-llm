@@ -664,7 +664,7 @@ void execNoBlockCopy(const CopyParams& params) {
         copy_device = static_cast<int>(getDeviceId());
     }
     DeviceGuard guard(copy_device);
-    auto        stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false).stream();
+    auto        stream = getCacheCopyStream();
     check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), src.nbytes(), cudaMemcpyDefault, stream));
     check_cuda_value(cudaStreamSynchronize(stream));
     check_cuda_error();

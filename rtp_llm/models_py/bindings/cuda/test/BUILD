@@ -58,3 +58,18 @@ cc_test(
     ] + torch_deps() + cuda13_torch_link_deps,
     exec_properties = {"gpu": "H20"},
 )
+
+cc_test(
+    name = "copy_stream_isolation_test",
+    srcs = ["CopyStreamIsolationTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/cuda:no_block_copy",
+        "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    exec_properties = {"gpu": "H20"},
+)

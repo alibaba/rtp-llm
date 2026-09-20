@@ -17,15 +17,10 @@ namespace rtp_llm {
 
 namespace {
 
-at::cuda::CUDAStream& getNoBlockCopyStream() {
+at::cuda::CUDAStream getNoBlockCopyStream() {
     int device = 0;
     check_cuda_value(cudaGetDevice(&device));
-    static thread_local std::map<int, at::cuda::CUDAStream> streams;
-    auto                                                    it = streams.find(device);
-    if (it == streams.end()) {
-        it = streams.emplace(device, at::cuda::getStreamFromPool(/*isHighPriority=*/false, device)).first;
-    }
-    return it->second;
+    return at::cuda::getStreamFromExternal(getCacheCopyStream(), device);
 }
 
 enum class HostCoverage {

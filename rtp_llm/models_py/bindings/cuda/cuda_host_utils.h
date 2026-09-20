@@ -48,6 +48,8 @@ float                      timing_function(const std::function<void(cudaStream_t
 int                        getDevice();
 int                        getDeviceCount();
 int                        currentDeviceId();
+// Thread-local, device-specific stream that never aliases the framework stream pool.
+cudaStream_t               getCacheCopyStream();
 void                       priorityRange(int* low_priority, int* high_priority, int device_id = -1);
 std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm);
 std::string                getDriverVersion();

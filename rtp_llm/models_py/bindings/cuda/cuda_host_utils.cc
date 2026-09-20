@@ -33,6 +33,32 @@ namespace rtp_llm {
 
 bool CaptureCheck::in_cuda_graph_capture = false;
 
+cudaStream_t getCacheCopyStream() {
+    struct Streams {
+        std::unordered_map<int, cudaStream_t> devices;
+        ~Streams() {
+            int previous = -1;
+            if (cudaGetDevice(&previous) != cudaSuccess) {
+                return;  // The CUDA runtime may already be shutting down.
+            }
+            for (const auto& [device, stream] : devices) {
+                if (cudaSetDevice(device) == cudaSuccess) {
+                    cudaStreamDestroy(stream);
+                }
+            }
+            cudaSetDevice(previous);
+        }
+    };
+    static thread_local Streams streams;
+    int                         device;
+    check_cuda_value(cudaGetDevice(&device));
+    auto it = streams.devices.try_emplace(device, nullptr).first;
+    if (it->second == nullptr) {
+        check_cuda_value(cudaStreamCreateWithFlags(&it->second, cudaStreamNonBlocking));
+    }
+    return it->second;
+}
+
 static const char* _cudaGetErrorEnum(cudaError_t error) {
     return cudaGetErrorString(error);
 }
