@@ -45,7 +45,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.condition_checker import (
     ConditionChecker,
 )
-from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.ops import MoeConfig, ParallelismConfig, RoleType
 from rtp_llm.server.server_args.moe_group_args import MOE_STRATEGY_CHOICES
 
 
@@ -246,6 +246,26 @@ class StrategyRegistryDiagnosticsTest(unittest.TestCase):
         self.assertEqual(config.decode_max_tokens_per_rank, 32)
         self.assertEqual(config.prefill_max_tokens_per_rank, 4096)
         self.assertEqual(config.max_tokens_per_rank, 4096)
+
+    def test_decode_role_does_not_size_buffers_from_prefill_seq_len(self):
+        model_config = ModelConfig()
+        model_config.max_seq_len = 65536
+        model_config.moe_prefill_max_tokens_per_rank = 16 * 65536
+        moe_config = MoeConfig()
+        moe_config.ll_num_max_token = 240
+        parallelism_config = ParallelismConfig()
+        parallelism_config.role_type = RoleType.DECODE
+
+        config = MoEConfigAdapter(
+            model_config=model_config,
+            parallelism_config=parallelism_config,
+            moe_config=moe_config,
+            max_generate_batch_size=240,
+        )
+
+        self.assertEqual(config.decode_max_tokens_per_rank, 240)
+        self.assertEqual(config.prefill_max_tokens_per_rank, 1048576)
+        self.assertEqual(config.max_tokens_per_rank, 240)
 
     def test_eplb_physical_expert_count_reaches_executor_contract(self):
         model_config = ModelConfig()

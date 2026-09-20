@@ -20,7 +20,7 @@ from rtp_llm.models.qwen_v2_moe import Qwen2Moe
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
+from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig, RoleType
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import W
 
@@ -123,6 +123,79 @@ class MoeConfigPropagationTest(unittest.TestCase):
                 )
                 self.assertEqual(adapter.prefill_max_tokens_per_rank, expected)
                 self.assertEqual(adapter.max_tokens_per_rank, max(32, expected))
+
+    def test_decode_role_uses_generate_concurrency_not_prefill_seq_len(self):
+        config = ModelConfig()
+        config.max_seq_len = 65536
+        config.moe_prefill_max_tokens_per_rank = 16 * 65536
+        moe_config = MoeConfig()
+        moe_config.ll_num_max_token = 240
+        parallelism_config = ParallelismConfig()
+        parallelism_config.role_type = RoleType.DECODE
+
+        adapter = MoEConfigAdapter(
+            model_config=config,
+            parallelism_config=parallelism_config,
+            moe_config=moe_config,
+            max_generate_batch_size=240,
+        )
+
+        self.assertEqual(adapter.prefill_max_tokens_per_rank, 1048576)
+        self.assertEqual(adapter.decode_max_tokens_per_rank, 240)
+        self.assertEqual(adapter.max_tokens_per_rank, 240)
+
+    def test_pdfusion_role_keeps_prefill_capacity(self):
+        config = ModelConfig()
+        config.max_seq_len = 65536
+        config.moe_prefill_max_tokens_per_rank = 16 * 65536
+        moe_config = MoeConfig()
+        moe_config.ll_num_max_token = 240
+        parallelism_config = ParallelismConfig()
+        parallelism_config.role_type = RoleType.PDFUSION
+
+        adapter = MoEConfigAdapter(
+            model_config=config,
+            parallelism_config=parallelism_config,
+            moe_config=moe_config,
+            max_generate_batch_size=240,
+        )
+
+        self.assertEqual(adapter.max_tokens_per_rank, 1048576)
+
+    def test_decode_role_falls_back_to_generate_batch_when_ll_unset(self):
+        config = ModelConfig()
+        config.max_seq_len = 65536
+        config.moe_prefill_max_tokens_per_rank = 16 * 65536
+        parallelism_config = ParallelismConfig()
+        parallelism_config.role_type = RoleType.DECODE
+
+        adapter = MoEConfigAdapter(
+            model_config=config,
+            parallelism_config=parallelism_config,
+            moe_config=MoeConfig(),
+            max_generate_batch_size=240,
+        )
+
+        self.assertEqual(adapter.decode_max_tokens_per_rank, 0)
+        self.assertEqual(adapter.max_tokens_per_rank, 240)
+
+    def test_prefill_role_keeps_prefill_capacity(self):
+        config = ModelConfig()
+        config.max_seq_len = 65536
+        config.moe_prefill_max_tokens_per_rank = 16 * 65536
+        moe_config = MoeConfig()
+        moe_config.ll_num_max_token = 240
+        parallelism_config = ParallelismConfig()
+        parallelism_config.role_type = RoleType.PREFILL
+
+        adapter = MoEConfigAdapter(
+            model_config=config,
+            parallelism_config=parallelism_config,
+            moe_config=moe_config,
+            max_generate_batch_size=240,
+        )
+
+        self.assertEqual(adapter.max_tokens_per_rank, 1048576)
 
     def test_declared_moe_w1_layout_reaches_adapter(self):
         config = ModelConfig()

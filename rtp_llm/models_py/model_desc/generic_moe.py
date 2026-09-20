@@ -110,6 +110,7 @@ class GenericMoeLayer(nn.Module):
             moe_config=moe_config,
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
+            max_generate_batch_size=max_generate_batch_size,
         )
         config_adapter.layer_id = layer_id
         config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights

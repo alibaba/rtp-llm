@@ -3,11 +3,36 @@ Adapter to provide a unified interface from individual config objects.
 This allows Router and Executor classes to work with specific config objects.
 """
 
+import logging
 from typing import Optional
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import QuantizationConfig
-from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.ops import MoeConfig, ParallelismConfig, RoleType
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_generic_moe_max_tokens_per_rank(
+    decode_max_tokens_per_rank: int,
+    prefill_max_tokens_per_rank: int,
+    *,
+    is_decode_role: bool,
+    max_generate_batch_size: int = 0,
+) -> int:
+    """Size generic MegaMoE buffers from the tokens this role can actually admit.
+
+    Prefill / PDFUSION keep the larger of decode concurrency and the scheduler
+    prefill batch. Decode never sees that prefill batch, so MAX_SEQ_LEN must
+    not inflate the symmetric buffer.
+    """
+    if is_decode_role:
+        return max(
+            int(decode_max_tokens_per_rank),
+            int(max_generate_batch_size or 0),
+            1,
+        )
+    return max(int(decode_max_tokens_per_rank), int(prefill_max_tokens_per_rank), 1)
 
 
 class MoEConfigAdapter:
@@ -23,6 +48,7 @@ class MoEConfigAdapter:
         moe_config: Optional[MoeConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         enable_cuda_graph: bool = False,
+        max_generate_batch_size: int = 0,
     ):
         self.model_config = model_config
         self.parallelism_config = parallelism_config
@@ -91,17 +117,37 @@ class MoEConfigAdapter:
         self.local_expert_end = self.local_expert_start + self.n_local_experts
         # Decode concurrency and prefill sequence length are independent
         # capacity requirements. A configured low-latency decode limit must
-        # not shrink buffers needed by a longer prefill request.
+        # not shrink buffers needed by a longer prefill request. Decode
+        # roles, however, never admit that prefill batch, so size MegaMoE
+        # buffers from generate concurrency instead of MAX_SEQ_LEN.
         self.decode_max_tokens_per_rank = int(self.moe_config.ll_num_max_token or 0)
         prefill_capacity = model_config.moe_prefill_max_tokens_per_rank
         self.prefill_max_tokens_per_rank = int(
             model_config.max_seq_len if prefill_capacity is None else prefill_capacity
         )
-        self.max_tokens_per_rank = max(
+        is_decode_role = (
+            getattr(parallelism_config, "role_type", RoleType.PDFUSION)
+            == RoleType.DECODE
+        )
+        self.max_tokens_per_rank = resolve_generic_moe_max_tokens_per_rank(
             self.decode_max_tokens_per_rank,
             self.prefill_max_tokens_per_rank,
-            1,
+            is_decode_role=is_decode_role,
+            max_generate_batch_size=max_generate_batch_size,
         )
+        if (
+            is_decode_role
+            and self.prefill_max_tokens_per_rank > self.max_tokens_per_rank
+        ):
+            logger.info(
+                "[MoEConfigAdapter] decode MoE token budget: "
+                "max_tokens_per_rank=%d (decode_concurrency=%d, "
+                "max_generate_batch_size=%d, ignored_prefill=%d)",
+                self.max_tokens_per_rank,
+                self.decode_max_tokens_per_rank,
+                int(max_generate_batch_size or 0),
+                self.prefill_max_tokens_per_rank,
+            )
         # Generic execution is not chunked, so JIT warmup only needs the
         # request-visible bucket representatives rather than the capacity cap.
         self.warmup_include_capacity = False
