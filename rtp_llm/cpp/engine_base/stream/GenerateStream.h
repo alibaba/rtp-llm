@@ -529,6 +529,10 @@ public:
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
         torch::Tensor draft_all_probs_gpu;
+        // Current-first committed token history [1, 4], including the last
+        // accepted replacement/bonus token. Published only by the main CUDA
+        // stream; host bookkeeping must never overwrite this next-round state.
+        torch::Tensor engram_token_window_gpu;
         // True host seqLength observed when this state is published. MTP async
         // uses it as the base for the next KV allocation upper bound.
         // -1 = unset (first iter / cleared).
@@ -587,6 +591,9 @@ public:
     }
     const torch::Tensor& getDraftAllProbsGpu() const {
         return mtp_async_state_.draft_all_probs_gpu;
+    }
+    const torch::Tensor& getEngramTokenWindowGpu() const {
+        return mtp_async_state_.engram_token_window_gpu;
     }
     void clearSpecDecodeDeviceState() {
         // Unconditional legacy/testing escape hatch. Active MTP decode paths

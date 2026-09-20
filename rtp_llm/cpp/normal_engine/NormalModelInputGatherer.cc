@@ -312,7 +312,8 @@ void NormalModelInputGatherer::initializeKvCacheMetadata(GptModelInputs& model_i
 }
 
 absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     model_input,
-                                                            const StreamGroups& stream_groups) const {
+                                                            const StreamGroups& stream_groups,
+                                                            TensorHolder&       host_holder) const {
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
 
@@ -331,6 +332,20 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     }
     std::vector<torch::Tensor> normal_combo_tokens_gpu;
     std::vector<torch::Tensor> normal_sequence_lengths_gpu;
+    // MTP invokes this gatherer with decode-only groups. Select device state
+    // per request so adding a fresh PD stream never sends established streams
+    // back to the host history currently being updated by bookkeeping.
+    const bool use_engram_device_state =
+        config_.use_mtp_engram_device_state && config_.has_engram && stream_groups.totalDecodeBatchSize() > 0;
+    RTP_LLM_CHECK_WITH_INFO(
+        !use_engram_device_state || (stream_groups.totalContextBatchSize() == 0 && !ctx.need_cal_position_id),
+        "MTP Engram device history requires decode-only groups without host position-id generation");
+    std::vector<torch::Tensor> engram_windows_gpu;
+    std::vector<torch::Tensor> engram_sequence_lengths_gpu;
+    if (use_engram_device_state) {
+        engram_windows_gpu.reserve(stream_groups.totalDecodeBatchSize());
+        engram_sequence_lengths_gpu.reserve(stream_groups.totalDecodeBatchSize());
+    }
     if (use_normal_device_state) {
         normal_combo_tokens_gpu.reserve(stream_groups.totalDecodeBatchSize());
         normal_sequence_lengths_gpu.reserve(stream_groups.totalDecodeBatchSize());
@@ -346,7 +361,19 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 
         for (auto i = 0; i < current_batch_size; ++i) {
             model_input.trace_ids.push_back(stream->traceId());
-            if (use_normal_device_state) {
+            const auto& engram_window           = stream->getEngramTokenWindowGpu();
+            const bool  use_stream_engram_state = use_engram_device_state && engram_window.defined();
+            if (use_stream_engram_state) {
+                const auto& next_seq_len = stream->getNextSeqLenGpu();
+                RTP_LLM_CHECK_WITH_INFO(current_batch_size == 1 && engram_window.is_cuda()
+                                            && engram_window.scalar_type() == torch::kInt32 && engram_window.dim() == 2
+                                            && engram_window.size(0) == 1 && engram_window.size(1) == 4
+                                            && next_seq_len.defined() && next_seq_len.is_cuda(),
+                                        "Engram decode state must contain CUDA history [1,4] and next sequence length");
+                engram_windows_gpu.push_back(engram_window);
+                engram_sequence_lengths_gpu.push_back((next_seq_len.reshape({1}) - 1).to(torch::kInt32));
+                ctx.input_lengths[ctx.batch_idx] = stream->inputLength();
+            } else if (use_normal_device_state) {
                 const auto&             state = stream->getNormalAsyncDeviceState();
                 static std::atomic<int> debug_log_budget{200};
                 if (asyncDebugEnabled() && stream->hasPendingAsyncBookkeeping()
@@ -365,6 +392,9 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
                 ctx.input_lengths[ctx.batch_idx] = stream->inputLength();
             } else {
+                RTP_LLM_CHECK_WITH_INFO(!use_engram_device_state || !stream->hasPendingAsyncBookkeeping(),
+                                        "Engram stream %ld has pending bookkeeping but no device history",
+                                        stream->streamId());
                 auto currentTokens = stream->currentExecuteTokens(i);
                 if (currentTokens[0] >= ctx.input_vocab_size) {
                     std::ostringstream error_msg;
@@ -385,6 +415,14 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                     stream->generateNextPositionId(ctx.combo_position_ids
                                                    + ctx.batch_idx * config_.position_id_len_factor);
                 }
+                if (use_engram_device_state) {
+                    // Only a new stream seeds its four-token tail from the
+                    // host. Keep pinned sources alive until the copies finish.
+                    engram_windows_gpu.push_back(
+                        publishInt32ToCuda(model_input.engram_token_windows.narrow(0, ctx.batch_idx, 1), host_holder));
+                    engram_sequence_lengths_gpu.push_back(
+                        publishInt32ToCuda(model_input.sequence_lengths.narrow(0, ctx.batch_idx, 1), host_holder));
+                }
             }
             copyKvCacheBlocksToModelInput(
                 model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
@@ -397,6 +435,11 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     if (use_normal_device_state) {
         model_input.combo_tokens     = torch::cat(normal_combo_tokens_gpu, 0).to(torch::kInt32);
         model_input.sequence_lengths = torch::cat(normal_sequence_lengths_gpu, 0).to(torch::kInt32);
+    }
+    if (use_engram_device_state) {
+        model_input.engram_token_windows = torch::cat(engram_windows_gpu, 0);
+        model_input.combo_tokens         = model_input.engram_token_windows.select(1, 0).contiguous();
+        model_input.sequence_lengths     = torch::cat(engram_sequence_lengths_gpu, 0);
     }
     return absl::OkStatus();
 }
@@ -550,7 +593,7 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
                       stream_groups.decodeStreams().size());
     auto model_input = allocateModelInputBuffers(stream_groups);
     initializeKvCacheMetadata(model_input);
-    RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
+    RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups, host_holder));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
     if (config_.enable_model_inputs_log) {
         if (model_input.combo_tokens.defined() && !model_input.combo_tokens.is_cuda()) {

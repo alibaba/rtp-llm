@@ -507,6 +507,11 @@ std::vector<int> GenerateStream::completeTokenIdsVec(int batch_idx) {
 }
 
 int GenerateStream::currentExecuteTokenSize() {
+    // Decode contributes one input token per sequence. Counting it must not
+    // read the CPU token history while MTP bookkeeping is updating that history.
+    if (!isContextStream()) {
+        return currentBatchSize();
+    }
     return currentExecuteTokens(0).size() * currentBatchSize();
 }
 

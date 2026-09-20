@@ -1249,6 +1249,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         executor_collector.gather_model_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    // Preserve the round-head history before proposal/verify expands it into
+    // candidate windows. Rejection publishes the next history from accepted
+    // tokens on this stream, independently of asynchronous CPU bookkeeping.
+    const auto engram_anchor_windows = model_input.engram_token_windows;
+
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_input_rank0)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -1556,6 +1561,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     return dispatchDecodeOutput(stream_groups,
                                 streams,
                                 speculative_sampler_output,
+                                engram_anchor_windows,
                                 std::move(draft_prefill_model_output),
                                 std::move(draft_prefill_sampler_output),
                                 std::move(rejection_event),
@@ -1993,17 +1999,25 @@ void MtpExecutor::collectDecodeMetrics(const StreamGroups&                      
 absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&                          stream_groups,
                                                const std::list<GenerateStreamPtr>&          streams,
                                                const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                               const torch::Tensor&                         engram_anchor_windows,
                                                GptModelOutputs                              draft_prefill_model_output,
                                                SamplerOutput                 draft_prefill_sampler_output,
                                                std::shared_ptr<torch::Event> rejection_event,
                                                std::shared_ptr<torch::Event> draft_event) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output)");
+    torch::Tensor next_engram_windows;
+    if (engram_anchor_windows.defined()) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(advance_engram_history)");
+        next_engram_windows = MtpBatchStreamProcessor::advanceEngramTokenWindows(
+            engram_anchor_windows, speculative_sampler_output.accept_tokens, speculative_sampler_output.accept_len);
+    }
     absl::Status result;
     if (useStreamAsync()) {
         // Hand off to a worker that waits on main-stream rejection/draft events
         // via cudaStreamWaitEvent; the main thread returns immediately.
         result = dispatchDecodeAsync(stream_groups,
                                      speculative_sampler_output,
+                                     next_engram_windows,
                                      {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)},
                                      std::move(rejection_event),
                                      std::move(draft_event));
@@ -2013,7 +2027,8 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
         result =
             batch_stream_processor_->dispatchDecode(stream_groups, speculative_sampler_output, draft_prefill_output);
         if (result.ok()) {
-            publishSyncMtpDeviceState(stream_groups, speculative_sampler_output, draft_prefill_output);
+            publishSyncMtpDeviceState(
+                stream_groups, speculative_sampler_output, next_engram_windows, draft_prefill_output);
         }
     }
     return result;
@@ -2115,9 +2130,9 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     // bookkeeping round. DROP_BROAD_SYNC lets draft/verify consume the state
     // already published on GPU and waits only at later host consumers such as
     // spec-logits processing and target sampling.
-    // Engram's previous-token window still reads committed host history and
-    // must be current before prepareStreams and model-input gathering.
-    if (useStreamAsync() && (!useDropBroadSync() || batch_stream_processor_->hasEngram())) {
+    // Engram history is also published on GPU before the worker launches, so
+    // it does not require an additional entry synchronization.
+    if (useStreamAsync() && !useDropBroadSync()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.wait_prev_bookkeeping(stream_count=%zu)", streams.size());
         spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
     }
@@ -2402,6 +2417,7 @@ bool MtpExecutor::useAsyncPrepare() const {
 
 void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                          stream_groups,
                                             const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                            const torch::Tensor&                         next_engram_windows,
                                             const MergedOutput&                          draft_prefill_output) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(publish_sync_mtp_device_state)");
 
@@ -2480,6 +2496,8 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
             propose_tokens_all.defined() ? propose_tokens_all.narrow(0, idx, 1) : torch::Tensor();
         state.next_seq_len_gpu       = next_seq_len_owned.narrow(0, idx, 1);
         state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
+        state.engram_token_window_gpu =
+            next_engram_windows.defined() ? next_engram_windows.narrow(0, idx, 1) : torch::Tensor();
 
         const auto next_batch_size = stream->nextBatchSize();
         if (draft_probs_all.defined() && next_batch_size > 0) {
@@ -2497,6 +2515,7 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
 
 absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&                          stream_groups,
                                               const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                              const torch::Tensor&                         next_engram_windows,
                                               MergedOutput                                 draft_prefill_output,
                                               std::shared_ptr<torch::Event>                rejection_event,
                                               std::shared_ptr<torch::Event>                draft_event) {
@@ -2578,6 +2597,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             propose_tokens_gpu_all.defined() ? propose_tokens_gpu_all.narrow(0, idx, 1) : torch::Tensor();
         state.next_seq_len_gpu       = next_seq_len_all.narrow(0, idx, 1);
         state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
+        state.engram_token_window_gpu =
+            next_engram_windows.defined() ? next_engram_windows.narrow(0, idx, 1) : torch::Tensor();
 
         const auto next_batch_size = stream->nextBatchSize();
         if (draft_probs_all.defined() && next_batch_size > 0) {

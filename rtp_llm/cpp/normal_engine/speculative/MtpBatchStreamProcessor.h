@@ -19,7 +19,10 @@ public:
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
-        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)) {}
+        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)) {
+        model_input_gatherer_config_.use_mtp_engram_device_state = true;
+        model_input_gatherer_ = std::make_unique<NormalModelInputGatherer>(model_input_gatherer_config_);
+    }
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -104,6 +107,14 @@ public:
     // and candidates without reading sampled CUDA tokens back to the host.
     static torch::Tensor makeEngramVerifyWindows(const torch::Tensor& anchor_windows,
                                                  const torch::Tensor& verify_tokens);
+
+    // Commit only the accepted prefix (including the target's replacement or
+    // bonus token) to the four-token history. accept_len remains on device.
+    // Inputs: [batch,4], [batch,width], [batch], all int32 on one device.
+    // The result owns storage independent of the verify input and graph buffers.
+    static torch::Tensor advanceEngramTokenWindows(const torch::Tensor& anchor_windows,
+                                                   const torch::Tensor& accept_tokens,
+                                                   const torch::Tensor& accept_len);
 
     void updateDSparkTargetVerifyModelInput(const DSparkRoundHead& round_head,
                                             GptModelInputs&        model_input,

@@ -250,7 +250,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
               toVec<float>(sampler_inputs.temperature));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {
+TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBeginAndAllowsThinkEnd) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -316,7 +316,9 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     float neg_inf = -std::numeric_limits<float>::max();
     for (int i = 0; i < 3; ++i) {
         EXPECT_EQ(neg_inf, logits_cpu[i][7].item<float>());
-        EXPECT_EQ(neg_inf, logits_cpu[i][8].item<float>());
+        // NO_THINK blocks the begin token, but allows end tokens so DeepSeek
+        // can close its thinking boundary and terminate normally.
+        EXPECT_EQ(0, logits_cpu[i][8].item<float>());
         EXPECT_EQ(0, logits_cpu[i][9].item<float>());
     }
 }
@@ -1030,6 +1032,112 @@ TEST_F(MtpBatchStreamProcessorTest, testEngramVerifyWindowsCPUAndCUDA) {
     }
 }
 
+static torch::Tensor
+engramCommitOracle(const torch::Tensor& history, const torch::Tensor& tokens, const torch::Tensor& lengths) {
+    auto history_cpu = history.cpu().contiguous();
+    auto tokens_cpu  = tokens.cpu().contiguous();
+    auto lengths_cpu = lengths.cpu().contiguous();
+    auto output      = torch::empty({history.size(0), 4}, torch::kInt32);
+    for (int64_t row = 0; row < history.size(0); ++row) {
+        std::vector<int> committed;
+        for (int lag = 3; lag >= 0; --lag) {
+            committed.push_back(history_cpu.data_ptr<int32_t>()[row * 4 + lag]);
+        }
+        for (int col = 0; col < lengths_cpu.data_ptr<int32_t>()[row]; ++col) {
+            committed.push_back(tokens_cpu.data_ptr<int32_t>()[row * tokens.size(1) + col]);
+        }
+        fillEngramTokenWindows(committed, committed.size() - 1, 1, output.data_ptr<int32_t>() + row * 4);
+    }
+    return output;
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testEngramCommitUsesAcceptedPrefixAndReplacementCPUAndCUDA) {
+    constexpr int64_t width = 6;
+    // Include zero accepted rows for padding, every partial prefix, and the
+    // full-accept bonus token. Rejected suffix entries must never enter history.
+    auto history = torch::tensor({{50, 40, 30, 20},
+                                  {7, -1, -1, -1},
+                                  {8, 2, -1, -1},
+                                  {9, 129264, 2, -1},
+                                  {60, 50, 40, 30},
+                                  {70, 60, 50, 40},
+                                  {80, 70, 60, 50}},
+                                 torch::kInt32);
+    auto tokens  = torch::arange(100, 100 + 7 * width, torch::kInt32).reshape({7, width});
+    auto lengths = torch::arange(0, 7, torch::kInt32);
+    for (const auto device : {torch::kCPU, torch::kCUDA}) {
+        auto current = history.to(device);
+        for (int round = 0; round < 3; ++round) {
+            auto actual =
+                MtpBatchStreamProcessor::advanceEngramTokenWindows(current, tokens.to(device), lengths.to(device));
+            auto expected = engramCommitOracle(current, tokens, lengths);
+            EXPECT_EQ(actual.device().type(), device);
+            EXPECT_TRUE(actual.is_contiguous());
+            EXPECT_TRUE(torch::equal(actual.cpu(), expected));
+            EXPECT_NE(actual.data_ptr(), current.data_ptr());
+            current = actual;
+            tokens.add_(1000);
+            lengths = lengths.roll({1}, {0});
+        }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testEngramGatherMixedFreshAndPendingStreamsUsesDeviceHistory) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig logging_config;
+    CacheConfig                 cache_config;
+    SpeculativeExecutionConfig  sp_config;
+    model_config.max_seq_len                         = 2048;
+    model_config.vocab_size                          = 256;
+    model_config.num_layers                          = 1;
+    model_config.attn_config.v41_kv_source_layer_ids = {0};
+    cache_config.group_types                         = {CacheGroupType::FULL};
+    sp_config.type                                   = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle                      = 5;
+    ResourceContext resource_context;
+    // Stale host history even has out-of-vocabulary ids, so entering the old
+    // currentExecuteTokens path would reject the request before window gather.
+    auto steady = createContextStream(model_config, runtime_config, resource_context, {9000, 9001}, 1);
+    auto fresh  = createContextStream(model_config, runtime_config, resource_context, {20, 21, 22}, 2);
+    steady->setIsContextStream(false);
+    fresh->setIsContextStream(false);
+    GenerateStream::MtpAsyncDeviceState state;
+    state.accept_len_gpu          = torch::tensor({2}, torch::kInt32).to(torch::kCUDA);
+    state.accept_tokens_gpu       = torch::tensor({{101, 102, 0, 0, 0, 0}}, torch::kInt32).to(torch::kCUDA);
+    state.next_seq_len_gpu        = torch::tensor({10}, torch::kInt32).to(torch::kCUDA);
+    state.engram_token_window_gpu = torch::tensor({{102, 101, 50, 40}}, torch::kInt32).to(torch::kCUDA);
+    steady->setMtpAsyncDeviceState(std::move(state));
+    steady->incPendingAsyncBookkeeping();
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
+    for (const bool reverse : {false, true}) {
+        StreamGroups groups(reverse ? std::list<GenerateStreamPtr>{fresh, steady} :
+                                      std::list<GenerateStreamPtr>{steady, fresh});
+        TensorHolder holder;
+        auto         result = processor.gatherDecodeModelInput(groups, holder);
+        EXPECT_TRUE(result.ok()) << result.status();
+        if (!result.ok()) {
+            break;
+        }
+        const auto& input = result.value();
+        EXPECT_TRUE(input.engram_token_windows.is_cuda());
+        EXPECT_TRUE(input.combo_tokens.is_cuda());
+        EXPECT_TRUE(input.sequence_lengths.is_cuda());
+        EXPECT_EQ(toVec<int32_t>(input.combo_tokens),
+                  reverse ? (std::vector<int32_t>{22, 102}) : (std::vector<int32_t>{102, 22}));
+        EXPECT_EQ(toVec<int32_t>(input.sequence_lengths),
+                  reverse ? (std::vector<int32_t>{2, 9}) : (std::vector<int32_t>{9, 2}));
+        EXPECT_EQ(toVec<int32_t>(input.engram_token_windows),
+                  reverse ? (std::vector<int32_t>{22, 21, 20, -1, 102, 101, 50, 40}) :
+                            (std::vector<int32_t>{102, 101, 50, 40, 22, 21, 20, -1}));
+        auto head = processor.buildDSparkRoundHead(groups, input, holder);
+        EXPECT_TRUE(torch::equal(head.anchors, input.combo_tokens));
+        EXPECT_EQ(head.committed_ends.data_ptr(), input.sequence_lengths.data_ptr());
+    }
+    steady->decPendingAsyncBookkeepingAndMaybeRelease();
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testDSparkVerifyEngramHistoryStaysOnCUDAAndAdvancesTail) {
     constexpr int64_t           gamma = 5;
     ModelConfig                 model_config;
@@ -1071,6 +1179,35 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkVerifyEngramHistoryStaysOnCUDAAndA
 }
 
 #if USING_CUDA
+TEST_F(MtpBatchStreamProcessorTest, testEngramCommitGraphReplayUsesChangedAcceptedLengths) {
+    auto history_cpu = torch::tensor({{50, 40, 30, 20}, {7, 6, -1, -1}}, torch::kInt32);
+    auto tokens_cpu  = torch::tensor({{60, 70, 80, 90, 100, 110}, {8, 9, 10, 11, 12, 13}}, torch::kInt32);
+    auto lengths_cpu = torch::tensor({1, 6}, torch::kInt32);
+    auto history     = history_cpu.to(torch::kCUDA);
+    auto tokens      = tokens_cpu.to(torch::kCUDA);
+    auto lengths     = lengths_cpu.to(torch::kCUDA);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    c10::cuda::CUDAStreamGuard stream_guard(c10::cuda::getStreamFromPool());
+    auto                       output = MtpBatchStreamProcessor::advanceEngramTokenWindows(history, tokens, lengths);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    at::cuda::CUDAGraph graph;
+    graph.capture_begin();
+    output = MtpBatchStreamProcessor::advanceEngramTokenWindows(history, tokens, lengths);
+    graph.capture_end();
+    for (int round = 0; round < 3; ++round) {
+        history.copy_(history_cpu);
+        tokens.copy_(tokens_cpu);
+        lengths.copy_(lengths_cpu);
+        graph.replay();
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        auto expected = engramCommitOracle(history_cpu, tokens_cpu, lengths_cpu);
+        EXPECT_TRUE(torch::equal(output.cpu(), expected));
+        history_cpu = expected;
+        tokens_cpu.add_(1000);
+        lengths_cpu = torch::tensor({2 + round, 5 - round}, torch::kInt32);
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testEngramVerifyWindowsGraphReplayUsesChangedHistoryAndCandidates) {
     auto history_cpu = torch::tensor({{50, 40, 30, 20}, {7, 6, -1, -1}}, torch::kInt32);
     auto tokens_cpu  = torch::tensor({{50, 60, 70, 80, 90, 100}, {7, 8, 9, 10, 11, 12}}, torch::kInt32);

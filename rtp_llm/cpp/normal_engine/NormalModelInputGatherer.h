@@ -23,6 +23,7 @@ struct NormalModelInputGathererConfig {
     bool                        has_positional_encoding{};
     bool                        is_multimodal{};
     bool                        has_engram{};
+    bool                        use_mtp_engram_device_state{};
     PositionIdsStyle            mm_position_ids_style{};
     size_t                      position_id_len_factor{};
     RoleType                    role_type{};
@@ -56,7 +57,9 @@ public:
 private:
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;
     void           initializeKvCacheMetadata(GptModelInputs& model_input) const;
-    absl::Status   processDecodeStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
+    absl::Status   processDecodeStreams(GptModelInputs&     model_input,
+                                        const StreamGroups& stream_groups,
+                                        TensorHolder&       host_holder) const;
     absl::Status   processContextStreams(GptModelInputs&     model_input,
                                          const StreamGroups& stream_groups,
                                          TensorHolder&       host_holder) const;

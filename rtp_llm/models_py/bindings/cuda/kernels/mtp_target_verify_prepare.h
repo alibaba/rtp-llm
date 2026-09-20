@@ -37,4 +37,18 @@ void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,
                                    int64_t              batch_size,
                                    cudaStream_t         stream);
 
+// Current-first Engram history. Inputs and output must be contiguous CUDA
+// int32 tensors. Verify expands [B,4] + [B,W] into [B*W,4]; commit advances
+// [B,4] by each row's accepted prefix, where 0 <= accept_len[b] <= W.
+void invokeMtpEngramVerifyWindows(const torch::Tensor& anchor_windows,
+                                  const torch::Tensor& verify_tokens,
+                                  torch::Tensor&       output,
+                                  cudaStream_t         stream);
+
+void invokeMtpAdvanceEngramTokenWindows(const torch::Tensor& anchor_windows,
+                                        const torch::Tensor& accept_tokens,
+                                        const torch::Tensor& accept_len,
+                                        torch::Tensor&       output,
+                                        cudaStream_t         stream);
+
 }  // namespace rtp_llm
