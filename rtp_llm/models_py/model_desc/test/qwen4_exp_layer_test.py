@@ -1508,6 +1508,62 @@ class Qwen4ExpPLERuntimeTest(TestCase):
                 inputs,
             )
 
+    def test_page_aligned_prefix_prefill_matches_one_full_prefill(self):
+        """Prefix reuse: resumed prefills equal the same tokens in one prefill.
+
+        Request 1 prefills two pages; requests 2 and 3 reuse the stored prefix
+        page by page. Each step's outputs -- and therefore the state/context
+        the previous step wrote -- must match the single 32-token prefill.
+        """
+        chunk = self._PAGE
+        steps = (
+            (0, 2 * chunk, 0),
+            (2 * chunk, chunk, 2 * chunk),
+            (3 * chunk, chunk, 3 * chunk),
+        )
+        # One request walks four logical pages, so the block tables need four
+        # columns (the shared fixture only has three).
+        state_blocks = torch.tensor([[1, 5, 7, 3]], dtype=torch.int32)
+        ctx_blocks = torch.tensor([[3, 1, 9, 4]], dtype=torch.int32)
+
+        torch.manual_seed(11)
+        ids = torch.arange(1, 4 * chunk + 1, dtype=torch.long)
+        hyper = torch.randn(4 * chunk, _HC * _HIDDEN, dtype=torch.bfloat16)
+
+        outputs = []
+        for lo, length, prefix_len in steps:
+            inputs = {
+                PLE_STATE_TAG: self._side_inputs(
+                    True,
+                    torch.tensor([length], dtype=torch.int32),
+                    torch.tensor([prefix_len], dtype=torch.int32),
+                    torch.empty(0, dtype=torch.int32),
+                    state_blocks,
+                ),
+                PLE_NGRAM_CTX_TAG: self._side_inputs(
+                    True,
+                    torch.tensor([length], dtype=torch.int32),
+                    torch.tensor([prefix_len], dtype=torch.int32),
+                    torch.empty(0, dtype=torch.int32),
+                    ctx_blocks,
+                ),
+            }
+            got = self.model._apply_ple(
+                1, hyper[lo : lo + length], ids[lo : lo + length], inputs
+            )
+            outputs.append((lo, got))
+
+        full_history = torch.cat(
+            [ids.new_full((1, self.ple.ple_embedding.context_len), 7), ids.view(1, -1)],
+            dim=1,
+        )
+        full_out, _ = self.ple.prefill(hyper.view(1, -1, _HC * _HIDDEN), full_history)
+        for lo, got in outputs:
+            length = int(got.shape[0])
+            torch.testing.assert_close(
+                got, hyper[lo : lo + length] + full_out[0, lo : lo + length, :]
+            )
+
     def test_multi_page_ragged_prefill_writes_only_terminal_then_decodes(self):
         lengths = (self._PAGE + 3, 2 * self._PAGE)
         token_count = sum(lengths)
