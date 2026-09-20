@@ -54,6 +54,12 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.model_weight import W
 
+# Bring-up fault injection for the speculative target-commit transaction:
+# "<attn_tp_rank>:<prepare|commit|finalize>" makes exactly that rank raise in
+# the named phase, so a real multi-rank run can verify the rank-symmetric
+# rollback / fail-stop rendezvous. Unset in any normal run.
+_SPEC_FAULT_INJECT_ENV = "RTP_LLM_QWEN4_SPEC_FAULT_INJECT"
+
 
 @dataclass
 class _PLETargetLayerStage:
@@ -810,6 +816,23 @@ class Qwen4ExpModel(Qwen35Model):
         if transaction.prefixes.is_cuda:
             torch.cuda.synchronize(transaction.prefixes.device)
 
+    def _maybe_inject_speculative_fault(self, phase: str) -> None:
+        """Raise on the injected rank/phase of the target-commit transaction."""
+        spec = os.environ.get(_SPEC_FAULT_INJECT_ENV, "").strip()
+        if not spec:
+            return
+        rank_text, _, phase_name = spec.partition(":")
+        if phase_name != phase:
+            return
+        try:
+            rank = int(rank_text)
+        except ValueError:
+            return
+        if rank == int(self.parallelism_config.get_attn_tp_rank()):
+            raise RuntimeError(
+                f"qwen4_exp speculative target {phase} fault injection on TP rank {rank}"
+            )
+
     def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
         """Select accepted PLE snapshots and prepare undo without writing pools."""
         transaction = getattr(self, "_ple_target_transaction", None)
@@ -820,6 +843,7 @@ class Qwen4ExpModel(Qwen35Model):
                 )
             # QSA-only or PLE-disabled qwen4 targets need no PLE side-state commit.
             return
+        self._maybe_inject_speculative_fault("prepare")
         if (
             transaction.prepared_writes is not None
             or transaction.commit_started
@@ -953,6 +977,8 @@ class Qwen4ExpModel(Qwen35Model):
         transaction = getattr(self, "_ple_target_transaction", None)
         if transaction is None:
             return
+        if commit:
+            self._maybe_inject_speculative_fault("commit")
         if not commit:
             if transaction.commit_started:
                 assert transaction.prepared_writes is not None
@@ -988,6 +1014,7 @@ class Qwen4ExpModel(Qwen35Model):
         transaction = getattr(self, "_ple_target_transaction", None)
         if transaction is None:
             return
+        self._maybe_inject_speculative_fault("finalize")
         if not transaction.tentative_committed:
             raise RuntimeError(
                 "qwen4_exp PLE target transaction cannot finalize before commit"

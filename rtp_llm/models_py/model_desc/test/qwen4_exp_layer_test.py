@@ -261,6 +261,35 @@ class Qwen4ExpDecoderLayerTest(TestCase):
         self.assertEqual(gdn_cls.call_args.kwargs.get("norm_activation"), "sigmoid")
 
 
+class Qwen4ExpSpecFaultInjectionTest(TestCase):
+    """The env-gated bring-up fault injection used by the multi-rank runs.
+
+    ``RTP_LLM_QWEN4_SPEC_FAULT_INJECT=<rank>:<phase>`` must raise on exactly
+    that TP rank and phase, and stay inert for every other rank/phase or when
+    unset.
+    """
+
+    def _stub(self, tp_rank):
+        return SimpleNamespace(
+            parallelism_config=SimpleNamespace(get_attn_tp_rank=lambda: tp_rank)
+        )
+
+    def test_injection_matches_only_the_configured_rank_and_phase(self):
+        call = qwen4_exp.Qwen4ExpModel._maybe_inject_speculative_fault
+        stub = self._stub(3)
+
+        with patch.dict("os.environ", {qwen4_exp._SPEC_FAULT_INJECT_ENV: "3:commit"}):
+            with self.assertRaisesRegex(RuntimeError, "commit fault injection"):
+                call(stub, "commit")
+            call(stub, "prepare")  # other phase: inert
+
+        with patch.dict("os.environ", {qwen4_exp._SPEC_FAULT_INJECT_ENV: "5:commit"}):
+            call(stub, "commit")  # other rank: inert
+
+        with patch.dict("os.environ", {}, clear=True):
+            call(stub, "commit")  # unset: inert
+
+
 class Qwen4ExpModelConstructionTest(TestCase):
     """The real construction path: GptModelBase.__init__ then Qwen4ExpModel.
 
