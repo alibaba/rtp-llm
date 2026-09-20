@@ -6,7 +6,7 @@ import tempfile
 import threading
 import time
 import weakref
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, List, Optional
 from unittest import TestCase, main, mock
 
@@ -18,6 +18,7 @@ from rtp_llm.multimodal.mm_scheduler import (
     MMScheduler,
     MMSchedulerExecutionError,
     MMSchedulerOverloadError,
+    MMSchedulerTimeoutError,
     OutputCountMismatchError,
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import MMWorkEstimate
@@ -1079,6 +1080,167 @@ class MMSchedulerCostTest(TestCase):
                 scheduler.submit_and_wait([self.item(6, 60) for _ in range(3)])
             self.assertLessEqual(len(fake.calls), 2)
         finally:
+            scheduler.close()
+
+
+def _until(predicate, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError("expected scheduler state was not reached")
+        time.sleep(0.001)
+
+
+class MMSchedulerAdmissionTest(TestCase):
+    def test_serial_video_burst_144_waits_before_preparation(self):
+        part = _FakeMMPart(delay=0.001)
+        lock = threading.Lock()
+        active, peak, prepared = 0, 0, 0
+
+        def prepare(data, types):
+            nonlocal active, peak, prepared
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                prepared += 1
+            time.sleep(0.001)
+            with lock:
+                active -= 1
+            return data
+
+        part.prepare_embedding_inputs = prepare
+        scheduler = MMScheduler(
+            part, max_batch_size=1, batch_wait_ms=0, max_queue_size=1024
+        )
+        barrier = threading.Barrier(144)
+        items = [_FakeWorkItem(timeout_ms=15000) for _ in range(144)]
+        cache_completions = []
+        for index, item in enumerate(items):
+            item.complete_cache = lambda result, index=index: cache_completions.append(
+                index
+            )
+        try:
+
+            def submit(item):
+                barrier.wait(timeout=5)
+                scheduler.submit_and_wait([item])
+
+            with ThreadPoolExecutor(max_workers=144) as pool:
+                list(pool.map(submit, items))
+            self.assertEqual(prepared, 144)
+            self.assertEqual(peak, 1)
+            self.assertEqual(part.calls, [1] * 144)
+            self.assertTrue(all(item.embedding_result is not None for item in items))
+            self.assertEqual(sorted(cache_completions), list(range(144)))
+            self.assertEqual(scheduler._preparation_admitted, 0)
+            self.assertEqual(len(scheduler._admission_waiters), 0)
+        finally:
+            scheduler.close()
+
+    def test_serial_cpu_queue_is_bounded_without_gpu_preparation(self):
+        gate = threading.Event()
+        part = _FakeMMPart(block_until=gate)
+        prepared = []
+
+        def prepare(data, types):
+            prepared.append(data)
+            return data
+
+        part.prepare_embedding_inputs = prepare
+        scheduler = MMScheduler(
+            part, max_batch_size=1, batch_wait_ms=0, max_queue_size=3
+        )
+        try:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                first = pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                self.assertTrue(part.forward_entered.wait(3))
+                second = pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                _until(lambda: scheduler._waiting.qsize() == 1)
+                third = pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                _until(lambda: len(scheduler._admission_waiters) == 1)
+                fourth = pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                _until(lambda: len(scheduler._admission_waiters) == 2)
+                try:
+                    self.assertEqual(len(prepared), 2)
+                    self.assertEqual(scheduler._preparation_admitted, 1)
+                    with self.assertRaises(MMSchedulerOverloadError):
+                        scheduler.submit_and_wait([_FakeWorkItem()])
+                finally:
+                    gate.set()
+                for future in (first, second, third, fourth):
+                    future.result(timeout=3)
+        finally:
+            gate.set()
+            scheduler.close()
+
+    def test_cpu_admission_timeout_releases_slot_and_does_not_prepare(self):
+        gate = threading.Event()
+        part = _FakeMMPart(block_until=gate)
+        prepared = []
+        part.prepare_embedding_inputs = lambda data, types: (
+            prepared.append(data) or data
+        )
+        scheduler = MMScheduler(
+            part, max_batch_size=1, batch_wait_ms=0, max_queue_size=3
+        )
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                self.assertTrue(part.forward_entered.wait(3))
+                second = pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                _until(lambda: scheduler._waiting.qsize() == 1)
+                try:
+                    with self.assertRaisesRegex(
+                        MMSchedulerTimeoutError, "waiting for input preparation"
+                    ):
+                        scheduler.submit_and_wait([_FakeWorkItem(timeout_ms=20)])
+                    self.assertEqual(len(prepared), 2)
+                    self.assertEqual(len(scheduler._admission_waiters), 0)
+                finally:
+                    gate.set()
+                first.result(timeout=3)
+                second.result(timeout=3)
+            scheduler.submit_and_wait([_FakeWorkItem()])
+            self.assertEqual(scheduler._preparation_admitted, 0)
+        finally:
+            gate.set()
+            scheduler.close()
+
+    def test_close_wakes_cpu_waiter_while_forward_remains_running(self):
+        gate = threading.Event()
+        part = _FakeMMPart(block_until=gate)
+        prepared = []
+        part.prepare_embedding_inputs = lambda data, types: (
+            prepared.append(data) or data
+        )
+        scheduler = MMScheduler(
+            part, max_batch_size=1, batch_wait_ms=0, max_queue_size=3
+        )
+        try:
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                first = pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                self.assertTrue(part.forward_entered.wait(3))
+                second = pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                _until(lambda: scheduler._waiting.qsize() == 1)
+                third = pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                _until(lambda: len(scheduler._admission_waiters) == 1)
+                try:
+                    self.assertFalse(scheduler.close(timeout=0.01))
+                    with self.assertRaisesRegex(
+                        RuntimeError, "closed before input preparation"
+                    ):
+                        third.result(timeout=1)
+                    self.assertEqual(len(prepared), 2)
+                finally:
+                    gate.set()
+                first.result(timeout=3)
+                with self.assertRaisesRegex(
+                    RuntimeError, "closed before request completed"
+                ):
+                    second.result(timeout=3)
+            self.assertEqual(scheduler._preparation_admitted, 0)
+        finally:
+            gate.set()
             scheduler.close()
 
 

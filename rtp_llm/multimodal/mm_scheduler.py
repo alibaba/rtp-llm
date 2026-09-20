@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 import traceback
+from collections import deque
 from concurrent.futures import Future, InvalidStateError
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import AbstractContextManager, nullcontext
@@ -135,13 +136,20 @@ class _EmbeddingRequest:
                   shared lock resolves the cancel-vs-start race.
     """
 
-    __slots__ = ("work_items", "n_images", "future", "work_estimate")
+    __slots__ = (
+        "work_items",
+        "n_images",
+        "future",
+        "work_estimate",
+        "preparation_reserved",
+    )
 
     def __init__(self, work_items: List[MMWorkItem]):
         self.work_items = work_items
         self.n_images = sum(len(wi.mm_inputs) for wi in work_items)
         self.future: Future[None] = Future()
         self.work_estimate = MMWorkEstimate()
+        self.preparation_reserved = False
 
 
 # Fallback for hand-built work items without a positive request timeout.
@@ -239,6 +247,11 @@ class MMScheduler:
         # Orders submit's (stopped-check + enqueue) against close's set-stopped
         # so a submission can't slip in after close has drained the queue.
         self._lock = threading.Lock()
+        # CPU callers wait without preparing GPU inputs. Ready/preparing requests
+        # retain a slot through collection until the executor claims their batch.
+        self._admission = threading.Condition(self._lock)
+        self._admission_waiters = deque()
+        self._preparation_admitted = 0
 
         # Startup handshake: the executor binds the device before signaling ready,
         # so a bad device fails construction fast instead of stranding every
@@ -334,37 +347,79 @@ class MMScheduler:
             GaugeMetrics.VIT_EMBEDDING_RT_METRIC, (time.monotonic() - started) * 1000.0
         )
 
+    def _reserve_preparation(self, req: _EmbeddingRequest, deadline: float) -> None:
+        with self._admission:
+            if self._stopped.is_set():
+                raise RuntimeError("MMScheduler is closed, request rejected")
+            limit = self._waiting.maxsize
+            if len(self._admission_waiters) + self._preparation_admitted >= limit:
+                kmonitor.report(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
+                raise MMSchedulerOverloadError(
+                    f"MMScheduler queue full (admission_limit={limit}), request rejected"
+                )
+            self._admission_waiters.append(req)
+            try:
+                while True:
+                    if self._stopped.is_set():
+                        raise RuntimeError(
+                            "MMScheduler closed before input preparation"
+                        )
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise MMSchedulerTimeoutError(
+                            "MMScheduler timed out waiting for input preparation"
+                        )
+                    if (
+                        self._admission_waiters[0] is req
+                        and self._preparation_admitted < self._preparation_limit
+                    ):
+                        self._admission_waiters.popleft()
+                        self._preparation_admitted += 1
+                        self._preparing += 1
+                        req.preparation_reserved = True
+                        self._admission.notify_all()
+                        return
+                    self._admission.wait(timeout=remaining)
+            finally:
+                if not req.preparation_reserved:
+                    self._admission_waiters.remove(req)
+                    self._admission.notify_all()
+
+    def _release_preparation_locked(self, req: _EmbeddingRequest) -> None:
+        # Caller holds _lock (also the Condition's lock). This flag makes cleanup
+        # idempotent across timeout, a cancelled queue entry and scheduler close.
+        if req.preparation_reserved:
+            req.preparation_reserved = False
+            self._preparation_admitted -= 1
+            self._admission.notify_all()
+
     def _submit_chunk_and_wait(
         self, work_items: List[MMWorkItem], timeout_ms: float
     ) -> None:
         req = _EmbeddingRequest(work_items)
         req.work_estimate = self._estimate_work(work_items)
         timeout_s = timeout_ms / 1000.0
+        deadline = time.monotonic() + timeout_s
 
         submit_ms = current_time_ms()
 
         prepare = getattr(self._mm_part, "prepare_embedding_inputs", None)
         reserved = False
         try:
-            with self._lock:
-                if self._stopped.is_set():
-                    raise RuntimeError("MMScheduler is closed, request rejected")
-                limit = (
-                    self._preparation_limit
-                    if prepare is not None
-                    else self._waiting.maxsize
-                )
-                if self._waiting.qsize() + self._preparing >= limit:
-                    kmonitor.report(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
-                    raise MMSchedulerOverloadError(
-                        f"MMScheduler queue full (admission_limit={limit}), "
-                        "request rejected"
-                    )
-                if prepare is None:
+            if prepare is not None:
+                self._reserve_preparation(req, deadline)
+                reserved = True
+            else:
+                with self._lock:
+                    if self._stopped.is_set():
+                        raise RuntimeError("MMScheduler is closed, request rejected")
+                    if self._waiting.full():
+                        kmonitor.report(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
+                        raise MMSchedulerOverloadError(
+                            f"MMScheduler queue full (admission_limit={self._waiting.maxsize}), "
+                            "request rejected"
+                        )
                     self._waiting.put_nowait(req)
-                else:
-                    self._preparing += 1
-                    reserved = True
 
             if prepare is not None:
                 # Work/image budgets were validated before admitting GPU work.
@@ -378,10 +433,8 @@ class MMScheduler:
                     raise OutputCountMismatchError(
                         "prepare_embedding_inputs returned the wrong item count"
                     )
-                timeout_s -= (current_time_ms() - submit_ms) / 1000.0
+                timeout_s = deadline - time.monotonic()
                 with self._lock:
-                    self._preparing -= 1
-                    reserved = False
                     if self._stopped.is_set():
                         raise RuntimeError("MMScheduler closed during preparation")
                     if timeout_s <= 0:
@@ -391,10 +444,13 @@ class MMScheduler:
                     for wi, data in zip(work_items, prepared):
                         wi.preprocess_result = data
                     self._waiting.put_nowait(req)
+                    self._preparing -= 1
+                    reserved = False
         finally:
             if reserved:
                 with self._lock:
                     self._preparing -= 1
+                    self._release_preparation_locked(req)
             # The work items own prepared inputs after enqueue. Do not keep
             # extra tensor references in this caller frame if forward fails.
             prepared = data = wi = None
@@ -485,6 +541,8 @@ class MMScheduler:
         source_type = "RuntimeError"
         source_message = "MMScheduler closed before request completed"
         for req in batch:
+            with self._lock:
+                self._release_preparation_locked(req)
             # done() skips already-resolved/cancelled requests; the try guards the
             # TOCTOU where a caller cancels a still-PENDING request concurrently.
             if not req.future.done():
@@ -574,6 +632,8 @@ class MMScheduler:
         self._pending = None
         queued.extend(self._drain(self._waiting))
         for req in queued:
+            with self._lock:
+                self._release_preparation_locked(req)
             # Guard set_exception: a caller may cancel concurrently (its submit
             # timing out); a dropped delivery is then fine.
             try:
@@ -603,6 +663,8 @@ class MMScheduler:
                     continue
             if not first.future.cancelled():
                 break
+            with self._lock:
+                self._release_preparation_locked(first)
         batch = [first]
         n_images = first.n_images
         batch_work = first.work_estimate
@@ -630,6 +692,8 @@ class MMScheduler:
                 except queue.Empty:
                     continue
             if req.future.cancelled():
+                with self._lock:
+                    self._release_preparation_locked(req)
                 continue  # caller already timed out; don't spend budget on it
 
             # The while guard caps the count; here only stop on image overflow.
@@ -658,7 +722,12 @@ class MMScheduler:
         with self._lock:
             if self._stopped.is_set():
                 return None
-            return [req for req in batch if req.future.set_running_or_notify_cancel()]
+            claimed = []
+            for req in batch:
+                if req.future.set_running_or_notify_cancel():
+                    claimed.append(req)
+                self._release_preparation_locked(req)
+            return claimed
 
     def _execute_batch(self, batch: List[_EmbeddingRequest]) -> None:
         """Run the batched forward and write results back.
@@ -735,6 +804,8 @@ class MMScheduler:
         # so close must not touch _pending / _waiting while it is alive.
         with self._lock:
             self._stopped.set()
+            if self._admission_waiters:
+                self._admission.notify_all()
         self._executor.join(timeout=timeout)
         if self._executor.is_alive():
             # A forward is still stuck past the join timeout. The executor's finally
