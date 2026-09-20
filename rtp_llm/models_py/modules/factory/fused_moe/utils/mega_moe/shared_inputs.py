@@ -69,5 +69,58 @@ def stage_shared_scales(destination, source, block_m):
         *destination.stride(),
         block_m,
         triton.cdiv(block_m, 128) * 128,
-        256
+        256,
     )
+
+
+@triton.jit
+def _expand_packed_activation_scales(
+    source,
+    destination,
+    N: tl.constexpr,
+    COLS: tl.constexpr,
+    S0: tl.constexpr,
+    S1: tl.constexpr,
+    D0: tl.constexpr,
+    D1: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    idx = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    row, col = idx % N, idx // N
+    bits = tl.load(source + row * S0 + (col // 4) * S1, idx < N * COLS, 0).to(tl.uint32)
+    exponent = (bits >> ((col % 4) * 8)) & 255
+    tl.store(
+        destination + row * D0 + col * D1,
+        exponent * 0x01010101,
+        idx < N * COLS,
+    )
+
+
+def expand_packed_activation_scales(destination, source):
+    """Write group-128 UE8M0 scales as four identical group-32 scales.
+
+    The source is already packed by the activation quantizer. Replicating its
+    exponent bytes preserves the quantization exactly, without the device-to-host
+    checks in the general floating-point unpack/repack path. Destination rows
+    beyond the local token count remain untouched, including for an empty batch.
+    """
+    if source.dtype != torch.int32 or destination.dtype != torch.int32:
+        raise ValueError("Expected packed int32 UE8M0 activation scales")
+    if source.ndim != 2 or destination.ndim != 2:
+        raise ValueError("Expected per-token scale matrices")
+    n = source.shape[0]
+    if destination.shape[0] < n or destination.shape[1] != source.shape[1] * 4:
+        raise ValueError("Activation scale geometry mismatch")
+    if source.device != destination.device or not source.is_cuda:
+        raise ValueError("Expected activation scales on the same CUDA device")
+    if n:
+        cols = destination.shape[1]
+        _expand_packed_activation_scales[(triton.cdiv(n * cols, 256),)](
+            source,
+            destination,
+            n,
+            cols,
+            *source.stride(),
+            *destination.stride(),
+            256,
+        )

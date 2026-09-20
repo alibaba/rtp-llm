@@ -138,5 +138,152 @@ class MegaMoeFp8SelectionTest(unittest.TestCase):
         self.assertEqual(mega_moe_fp8_capacity(config) % 256, 0)
 
 
+class MegaMoeFp8ScaleLifetimeTest(unittest.TestCase):
+    def test_checkpoint_scales_released_only_after_success(self):
+        import gc
+        import os
+        import weakref
+
+        import torch
+
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors import (
+            mega_moe_fp8 as module,
+        )
+        from rtp_llm.utils.model_weight import W
+
+        config = SimpleNamespace(
+            max_tokens_per_rank=256,
+            moe_inter_dim=128,
+            hidden_size=128,
+            n_local_experts=1,
+            moe_w1_layout="gate_up",
+        )
+        for fail in (False, True):
+            with self.subTest(conversion_failure=fail):
+                weights = {
+                    key: torch.ones(4)
+                    for key in (W.moe_w1, W.moe_w2, W.moe_s1, W.moe_s2)
+                }
+                owner_alias = weights
+                refs = [weakref.ref(weights[key]) for key in (W.moe_s1, W.moe_s2)]
+                packed = (
+                    (weights[W.moe_w1], torch.ones(16)),
+                    (weights[W.moe_w2], torch.ones(16)),
+                )
+
+                def prepare(*args):
+                    if fail:
+                        raise ValueError("conversion failed")
+                    return packed
+
+                # Use a plain function: Mock.call_args would retain old scales.
+                with patch.dict(
+                    os.environ, {"RTP_QWEN35_FUSED_MEGAMOE_GATED_SE": "0"}
+                ), patch.object(
+                    module, "mega_moe_fp8_available", return_value=True
+                ), patch.object(
+                    module, "get_validated_world_ep_group", return_value=None
+                ), patch.object(
+                    module, "prepare_mega_moe_fp8_weights", new=prepare
+                ), patch.object(
+                    torch.cuda, "Event"
+                ), patch.object(
+                    torch.cuda, "current_stream"
+                ):
+                    if fail:
+                        with self.assertRaisesRegex(ValueError, "conversion failed"):
+                            MegaMoeFp8Executor(config, None, weights)
+                        self.assertTrue(all(ref() is not None for ref in refs))
+                        self.assertIn(W.moe_s1, owner_alias)
+                        self.assertIn(W.moe_s2, owner_alias)
+                    else:
+                        executor = MegaMoeFp8Executor(config, None, weights)
+                        gc.collect()
+                        self.assertIs(executor.weights, owner_alias)
+                        self.assertTrue(all(ref() is None for ref in refs))
+                        self.assertNotIn(W.moe_s1, owner_alias)
+                        self.assertNotIn(W.moe_s2, owner_alias)
+                        self.assertIs(executor.l1, packed[0])
+                        self.assertIs(executor.l2, packed[1])
+
+
+class MegaMoeActivationScaleTest(unittest.TestCase):
+    def test_full_buffer_equivalence_and_reuse(self):
+        import torch
+
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required for packed scale conversion")
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_weights import (
+            expand_fp8_scale,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_inputs import (
+            expand_packed_activation_scales,
+            stage_shared_scales,
+        )
+
+        capacity, hidden, shared_rows = 65536, 4096, 537600
+        routed = [
+            torch.full((32, capacity), 123, dtype=torch.int32, device="cuda").t()
+            for _ in range(2)
+        ]
+        shared = [
+            torch.full((32, shared_rows), 456, dtype=torch.int32, device="cuda").t()
+            for _ in range(2)
+        ]
+
+        def check(source, block_m):
+            n = source.shape[0]
+            expand_packed_activation_scales(routed[1], source)
+            if n:
+                expected = expand_fp8_scale(source, n, hidden)
+                routed[0][:n].copy_(expected)
+                stage_shared_scales(shared[0], expected, block_m)
+                stage_shared_scales(shared[1], routed[1][:n], block_m)
+            self.assertTrue(torch.equal(routed[0], routed[1]))
+            self.assertTrue(torch.equal(shared[0], shared[1]))
+
+        # All exponent byte values, strided input, tails, block padding, and
+        # large/small/empty reuse of the same complete destination buffers.
+        for n, block_m in (
+            (1, 64),
+            (127, 128),
+            (128, 160),
+            (129, 192),
+            (257, 240),
+            (24601, 240),
+            (49202, 240),
+            (37, 256),
+            (0, 240),
+            (49202, 128),
+            (1, 240),
+            (0, 64),
+        ):
+            with self.subTest(tokens=n, block_m=block_m):
+                source = (
+                    torch.arange(8 * max(1, n) * 4, device="cuda")
+                    .to(torch.uint8)
+                    .reshape(8, max(1, n) * 4)
+                    .view(torch.int32)
+                    .t()[:n]
+                )
+                check(source, block_m)
+
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
+            DeepepNormalRouterBase,
+            is_deep_gemm_e8m0_used,
+        )
+
+        # Other GPU architectures can use a floating-point scale producer.
+        # The byte-layout checks above apply independently of that producer.
+        if not is_deep_gemm_e8m0_used():
+            return
+        for n in (1, 129, 24601, 49202):
+            with self.subTest(real_quantizer_tokens=n):
+                x = torch.randn((n, hidden), dtype=torch.bfloat16, device="cuda")
+                x[0].zero_()
+                _, source = DeepepNormalRouterBase._do_quant_fp8_per_block(None, x)
+                check(source, 240)
+
+
 if __name__ == "__main__":
     unittest.main()
