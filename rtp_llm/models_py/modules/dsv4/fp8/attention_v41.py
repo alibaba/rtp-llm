@@ -80,6 +80,38 @@ def _use_small_cp_x_gather(cp_ctx) -> bool:
     return cp_ctx.padded_seq_len <= _SMALL_CP_X_GATHER_MAX_ROWS
 
 
+def _prefill_request_row_slices(common):
+    """Build host query boundaries before entering the attention layer loop.
+
+    CP packs each request's two zigzag halves, including padding, together.
+    Global unpadded input lengths therefore cannot describe local query rows.
+    Non-CP metadata can require one device read here; layers only use slices.
+    """
+    if common.batch_size == 1:
+        return (slice(0, common.seqlen),)
+    if common.cp_on:
+        lengths = getattr(common.cp_ctx, "chunk_lengths_per_req", None)
+    else:
+        lengths = common.input_lengths
+        if lengths is not None:
+            lengths = lengths.detach().cpu().tolist()
+    if lengths is None:
+        return None
+    if len(lengths) != common.batch_size:
+        raise ValueError("V4.1 query row lengths do not match the request count")
+    slices = []
+    start = 0
+    for length in lengths:
+        if length < 0:
+            raise ValueError("V4.1 query row lengths must be nonnegative")
+        stop = start + length
+        slices.append(slice(start, stop))
+        start = stop
+    if start != common.seqlen:
+        raise ValueError("V4.1 query row lengths do not cover the local queries")
+    return tuple(slices)
+
+
 class _V41AsyncXGather:
     """One in-flight, globally ordered hidden-state tile."""
 
@@ -492,7 +524,12 @@ class AttentionV41FP8(AttentionFP8):
         self.compress_ratio = 0
         kwargs["reuse_common_meta"] = None
         try:
-            return super()._build_shared_prefill_meta(*args, **kwargs)
+            common = super()._build_shared_prefill_meta(*args, **kwargs)
+            if os.environ.get("DSV41_PREFILL_REQUEST_SLICES", "1") != "0":
+                common = common._replace(
+                    request_row_slices=_prefill_request_row_slices(common)
+                )
+            return common
         finally:
             self.compress_ratio = ratio
 
@@ -916,11 +953,27 @@ class AttentionV41FP8(AttentionFP8):
         # these globals; republishing them invalidates that cache.
         self._shared_attention.pop("prefill_chunk_meta", None)
 
-    def _select_indices(self, x, qr, positions, req_ids):
+    def _select_indices(self, x, qr, positions, req_ids, *, request_row_slices=None):
         shared = self._shared_attention
         if not self.is_index_source:
             return shared["topk"][self.index_source_layer_id]
         globals_by_req = shared["global"][self.kv_source_layer_id]
+        if request_row_slices is not None:
+            if len(request_row_slices) != len(globals_by_req):
+                raise ValueError("V4.1 query slices do not match the request count")
+            end = 0
+            for rows in request_row_slices:
+                if (
+                    not isinstance(rows, slice)
+                    or rows.step not in (None, 1)
+                    or rows.start != end
+                    or rows.stop is None
+                    or rows.stop < end
+                ):
+                    raise ValueError("V4.1 query slices must form contiguous ranges")
+                end = rows.stop
+            if end != x.shape[0]:
+                raise ValueError("V4.1 query slices do not cover the local queries")
         out = torch.full(
             (x.shape[0], self.index_topk), -1, dtype=torch.int32, device=x.device
         )
@@ -1026,14 +1079,22 @@ class AttentionV41FP8(AttentionFP8):
                     q = fp8_roundtrip(q)
             single_request = len(globals_by_req) == 1
             for b, (_, keys) in enumerate(globals_by_req):
-                # One-argument ``torch.where`` is ``nonzero``: it syncs to size
-                # its output. With a single request every token belongs to
-                # request 0, so the row selection is just the full range.
-                rows = None if single_request else torch.where(req_ids == b)[0]
-                row_count = positions.shape[0] if single_request else rows.numel()
+                # Production queries are packed in request order. Host slices
+                # avoid nonzero's D2H sizing sync and all row gather/scatter.
+                # Keep indexed selection for callers without that contract.
+                contiguous = request_row_slices is not None or single_request
+                if request_row_slices is not None:
+                    rows = request_row_slices[b]
+                elif single_request:
+                    rows = slice(0, x.shape[0])
+                else:
+                    rows = torch.where(req_ids == b)[0]
+                row_count = rows.stop - rows.start if contiguous else rows.numel()
+                if row_count == 0:
+                    continue
                 key_count = len(keys)
                 candidates = shared.get("candidates")
-                probe = slice(0, 1) if single_request else rows[:1]
+                probe = slice(rows.start, rows.start + 1) if contiguous else rows[:1]
                 sparse_request = (
                     fused_indexer
                     and candidates is not None
@@ -1063,23 +1124,31 @@ class AttentionV41FP8(AttentionFP8):
                 )
                 request_bounds = None
                 if (
-                    single_request
+                    contiguous
                     and fused_indexer
                     and os.environ.get("DSV41_FUSED_PREFILL_METADATA", "1") != "0"
                 ):
                     cache = shared.setdefault("prefill_score_bounds", {})
-                    bounds_key = (b, row_count, key_count, self.compress_ratio)
+                    bounds_key = (
+                        b,
+                        rows.start,
+                        rows.stop,
+                        key_count,
+                        self.compress_ratio,
+                    )
                     request_bounds = cache.get(bounds_key)
                     if request_bounds is None:
                         request_bounds = prefill_metadata.try_score_bounds(
-                            positions, key_count, self.compress_ratio
+                            positions[rows], key_count, self.compress_ratio
                         )
                         if request_bounds is not None:
                             cache[bounds_key] = request_bounds
                 for chunk_index, start in enumerate(range(0, row_count, chunk_rows)):
                     stop = min(start + chunk_rows, row_count)
                     output_rows = (
-                        slice(start, stop) if single_request else rows[start:stop]
+                        slice(rows.start + start, rows.start + stop)
+                        if contiguous
+                        else rows[start:stop]
                     )
                     chunk = output_rows
                     bounds = (
@@ -1134,13 +1203,13 @@ class AttentionV41FP8(AttentionFP8):
                                 selected,
                                 plan,
                                 logits=logits,
-                                out=out[output_rows] if single_request else None,
+                                out=out[output_rows] if contiguous else None,
                             )
                             if mapped is None:
                                 raise RuntimeError(
                                     "V4.1 sparse prefill remap layout is unsupported"
                                 )
-                            if not single_request:
+                            if not contiguous:
                                 out[output_rows] = mapped
                         continue
                     if fused_indexer:
@@ -1178,7 +1247,7 @@ class AttentionV41FP8(AttentionFP8):
                                 publish_candidates,
                             )
                     k = min(self.index_topk, key_count)
-                    target = out[output_rows, :k] if single_request else None
+                    target = out[output_rows, :k] if contiguous else None
                     selected = prefill_topk.try_select_tokens(
                         logits,
                         visible,
@@ -1431,7 +1500,13 @@ class AttentionV41FP8(AttentionFP8):
                 projected_tiles=projected_tiles,
             )
             del x_full
-        selected = self._select_indices(x, qkv.qr, positions, req_ids)
+        selected = self._select_indices(
+            x,
+            qkv.qr,
+            positions,
+            req_ids,
+            request_row_slices=getattr(common, "request_row_slices", None),
+        )
         globals_by_req = self._shared_attention["global"][self.kv_source_layer_id]
         offsets, ns, swstart = self._prefill_chunk_meta(
             globals_by_req, swa, swa_starts, req_ids, x.device, common=common

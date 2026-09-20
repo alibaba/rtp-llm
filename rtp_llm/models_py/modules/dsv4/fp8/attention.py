@@ -862,6 +862,9 @@ class PrefillMeta(NamedTuple):
     # ``freqs_cis``. ratio0 uses base RoPE while ratio4/128 use compressed
     # RoPE, so cross-ratio frequency reuse is valid only when this id matches.
     freqs_cis_source_id: int = 0
+    # Host row boundaries for packed local queries, including CP padding.
+    # None means the caller has not supplied a contiguous request layout.
+    request_row_slices: Optional[Tuple[slice, ...]] = None
 
 
 class PrefillQKV(NamedTuple):
