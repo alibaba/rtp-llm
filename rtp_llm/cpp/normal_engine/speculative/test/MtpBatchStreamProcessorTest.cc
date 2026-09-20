@@ -905,7 +905,7 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecMaskExcludesPaddedSamplerLogitsWitho
     EXPECT_TRUE(torch::equal(model_output.logits, original_logits));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {
+TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputAppliesThinkVerificationMask) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -929,9 +929,28 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
 
     GptModelInputs  model_input;
     GptModelOutputs model_output;
-    model_output.logits = torch::zeros({3, 16}, torch::kFloat32);
+    model_output.logits = torch::zeros({3, 16}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
 
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_input, model_output);
+    // Stateful constraints are evaluated by the verify runner, not reapplied
+    // against the same committed state for every speculative row.
+    SpecLogitsVerifyRunner             runner;
+    SpecLogitsVerifyRunner::LaunchTask task;
+    task.total_streams     = 1;
+    task.propose_step      = sp_config.gen_num_per_cycle;
+    task.vocab_size        = model_config.vocab_size;
+    task.draft_tokens      = torch::tensor({{1, 2}}, torch::kInt32);
+    size_t processor_index = 0;
+    for (const auto& logits_processor : stream->getAllLogitsProcessorPtr()) {
+        auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(logits_processor);
+        if (spec_processor) {
+            task.active.push_back({spec_processor, 0, processor_index, static_cast<uint64_t>(stream->streamId())});
+        }
+        ++processor_index;
+    }
+    ASSERT_EQ(task.active.size(), 1u);
+    auto mask = runner.buildInline(task);
+    ASSERT_TRUE(mask.has_active_processor);
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_input, model_output, mask);
     ASSERT_TRUE(sampler_inputs_status.ok());
     auto sampler_inputs = sampler_inputs_status.value();
 
@@ -941,7 +960,8 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     float neg_inf = -std::numeric_limits<float>::max();
     for (int i = 0; i < 3; ++i) {
         EXPECT_EQ(neg_inf, sampler_inputs.logits[i][7].item<float>());
-        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][8].item<float>());
+        // The end tag remains legal; only a new begin tag is masked.
+        EXPECT_EQ(0, sampler_inputs.logits[i][8].item<float>());
         EXPECT_EQ(0, sampler_inputs.logits[i][9].item<float>());
     }
 }
@@ -977,7 +997,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     MergedOutput target_output;
     target_output.model_output.all_hidden_states =
         torch::tensor({0.1f, 0.2f, 1.1f, 1.2f, 1.3f, 1.4f}, torch::kFloat32).reshape({3, 2});
-    target_output.sampler_output.token_ids = torch::tensor({2, -1, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3});
+    target_output.sampler_output.token_ids =
+        torch::tensor({2, -1, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3}).to(torch::kCUDA);
     target_output.sampler_output.all_probs = torch::tensor({0.1f, 0.9f, 0.2f, 0.8f}, torch::kFloat32).reshape({2, 2});
 
     MergedOutput draft_output;
@@ -991,6 +1012,11 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
 
     auto status = processor.dispatchPrefill(stream_groups, target_output, draft_output);
     EXPECT_TRUE(status.ok());
+    target_output.sampler_output.token_ids.zero_();
+    ASSERT_TRUE(stream1->getSPOutputBuffer()->target_token_gpu.is_cuda());
+    ASSERT_TRUE(stream2->getSPOutputBuffer()->target_token_gpu.is_cuda());
+    EXPECT_EQ(toVec<int32_t>(stream1->getSPOutputBuffer()->target_token_gpu), (std::vector<int32_t>{1}));
+    EXPECT_EQ(toVec<int32_t>(stream2->getSPOutputBuffer()->target_token_gpu), (std::vector<int32_t>{3}));
     draft_output.model_output.all_hidden_states.fill_(9.0f);
     draft_output.model_output.mtp_indexer_topk.fill_(99);
     EXPECT_EQ(toVec<int32_t>(stream1->getMtpAsyncDeviceState().mtp_indexer_topk_gpu), (std::vector<int32_t>{1, 2, -1}));
@@ -1145,10 +1171,11 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, stream2->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, stream2->seqLength());
+    // The executor publishes device state after the host dispatch completes.
+    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, -1);
+    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, -1);
+    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, -1);
+    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, -1);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {

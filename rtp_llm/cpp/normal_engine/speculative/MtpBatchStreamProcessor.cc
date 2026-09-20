@@ -1110,6 +1110,13 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     RTP_LLM_CHECK(total_batch_size_out == (size_t)new_all_token_ids.size(0));
     const size_t token_stride = new_all_token_ids.size(1);
+    // Publish the sampled target token along with the draft token. An absent
+    // mirror must not become a zero token at the first verification step.
+    // Own one compact batch so later sampler buffer reuse cannot change it.
+    const auto target_tokens_gpu = new_all_token_ids.select(1, token_stride - 1)
+                                       .to(torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA),
+                                           /*non_blocking=*/false,
+                                           /*copy=*/true);
 
     // TODO(async): stream bookkeeping below still iterates token_ids/success
     // on CPU. Keep the .cpu() explicit until spec-update assembly is
@@ -1174,7 +1181,7 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
                                      std::move(last_hidden_states),
                                      std::move(propose_all_probs),
                                      torch::Tensor(),
-                                     torch::Tensor(),
+                                     target_tokens_gpu.narrow(0, batch_idx_out, next_batch_size),
                                      std::move(compact_target_logprobs.token_logprobs),
                                      std::move(compact_target_logprobs.top_logprob_token_ids),
                                      std::move(compact_target_logprobs.top_logprobs),

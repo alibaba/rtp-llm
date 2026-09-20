@@ -1206,21 +1206,17 @@ makeFakeSPOutputBuffer(DataType data_type, size_t hidden_size, size_t vocab_size
 }
 
 static void ensureSpOutputTokenGpuMirrors(const SpeculativeExecutorStreamOutputPtr& sp_buffer) {
-    // Mirrors should already be device-resident from the buffer's construction
-    // site (MtpExecutor::prepareStreams + makeFakeSPOutputBuffer). Only the
-    // legacy P2P-injection path (StreamCacheResource::applyP2PSideChannel) and
-    // dispatchDecodeAsync intentionally replace them with values from a payload.
-    // This function exists as a defensive fallback for older paths; it should be
-    // a no-op in steady-state and never trigger an H2D sync.
+    // Normal prefill/decode publishes device mirrors directly. Legacy inputs
+    // without mirrors must copy their actual tokens, never zero placeholders.
     if (!sp_buffer || !sp_buffer->tokens.defined() || sp_buffer->tokens.numel() < 2) {
         return;
     }
     const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     if (!sp_buffer->target_token_gpu.defined() || !sp_buffer->target_token_gpu.is_cuda()) {
-        sp_buffer->target_token_gpu = torch::zeros({1}, cuda_i32);
+        sp_buffer->target_token_gpu = sp_buffer->tokens.select(1, 0).to(cuda_i32);
     }
     if (!sp_buffer->propose_tokens_gpu.defined() || !sp_buffer->propose_tokens_gpu.is_cuda()) {
-        sp_buffer->propose_tokens_gpu = torch::zeros({1}, cuda_i32);
+        sp_buffer->propose_tokens_gpu = sp_buffer->tokens.select(1, sp_buffer->tokens.size(1) - 1).to(cuda_i32);
     }
 }
 
