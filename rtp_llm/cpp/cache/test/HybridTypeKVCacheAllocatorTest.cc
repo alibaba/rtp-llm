@@ -324,6 +324,45 @@ protected:
     }
 };
 
+TEST_F(HybridTypeKVCacheAllocatorTest, DenseManagersFollowBoundTopologyOrder) {
+    for (const bool reverse_topology : {false, true}) {
+        auto config = makeTinyHybridConfig();
+        if (reverse_topology) {
+            auto groups = config.groups();
+            std::reverse(groups.begin(), groups.end());
+            config.setTopology(std::move(groups), config.topology().layers());
+        }
+        const auto bound_topology = config.topologyPtr();
+        auto       allocator      = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
+
+        // Replace the caller's topology before initialization: the allocator owns its binding.
+        auto replacement_groups = config.groups();
+        std::reverse(replacement_groups.begin(), replacement_groups.end());
+        config.setTopology(std::move(replacement_groups), config.topology().layers());
+        ASSERT_NE(config.topologyPtr(), bound_topology);
+        ASSERT_TRUE(allocator->init());
+        const auto  managers  = allocator->cacheGroups();
+        const auto& pools     = allocator->groupBlockPools();
+        const auto  snapshots = allocator->poolMetricsSnapshots();
+        ASSERT_EQ(managers.size(), bound_topology->groupTags().size());
+        ASSERT_EQ(pools.size(), managers.size());
+        ASSERT_EQ(snapshots.size(), managers.size());
+        for (size_t row = 0; row < managers.size(); ++row) {
+            const auto& tag = bound_topology->groupTags()[row];
+            EXPECT_EQ(managers[row]->tag(), tag);
+            EXPECT_EQ(managers[row]->blockPool(), pools[row]);
+            EXPECT_EQ(snapshots[row].pool_index, row);
+            EXPECT_EQ(snapshots[row].pool_name, pools[row]->poolName());
+            for (const int layer_id : bound_topology->layerIdsForGroup(tag)) {
+                const auto expected = managers[row]->convertIndexToAddr(layer_id, 1);
+                const auto actual   = allocator->convertIndexToAddr(layer_id, tag, 1);
+                EXPECT_EQ(actual.kv_addr, expected.kv_addr);
+                EXPECT_EQ(actual.kv_scale_addr, expected.kv_scale_addr);
+            }
+        }
+    }
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigAllowsOnlyFullGroups) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/2);
     setHybridLayerDescs(cfg, {HybridAttentionType::NONE, HybridAttentionType::NONE});
@@ -748,13 +787,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateSpConfigPreservesQwenPackingAlignme
     auto allocator = std::dynamic_pointer_cast<KVCacheAllocator>(manager->allocator_);
     ASSERT_NE(allocator, nullptr);
     ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
-    const auto  full_pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, full_gid);
+    const auto  full_pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("full"));
     const auto& full_layouts     = full_pool_config.memory_layouts;
     ASSERT_EQ(full_layouts.size(), 3u);
     EXPECT_EQ(full_layouts[0].layer_num, 2u);
     EXPECT_EQ(full_layouts[1].layer_num, 1u);
     EXPECT_EQ(full_layouts[2].layer_num, 1u);
-    const auto  linear_pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, linear_gid);
+    const auto  linear_pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("linear"));
     const auto& linear_layouts     = linear_pool_config.memory_layouts;
     ASSERT_EQ(linear_layouts.size(), 1u);
     EXPECT_EQ(linear_layouts[0].layer_num, 6u);
@@ -1950,8 +1989,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseS
 
     const auto linear_group_id = static_cast<size_t>(config.groupIdForTag("linear"));
     const auto full_group_id   = static_cast<size_t>(config.groupIdForTag("full1"));
-    auto       linear_buf      = base->convertIndexToBufferByTag(/*layer_id=*/0, "linear", /*block_id=*/1);
-    auto       full_buf        = base->convertIndexToBufferByTag(/*layer_id=*/2, "full1", /*block_id=*/1);
+    auto       linear_buf      = base->convertIndexToBuffer(/*layer_id=*/0, "linear", /*block_id=*/1);
+    auto       full_buf        = base->convertIndexToBuffer(/*layer_id=*/2, "full1", /*block_id=*/1);
     ASSERT_FALSE(linear_buf.empty());
     ASSERT_FALSE(full_buf.empty());
     EXPECT_NE(linear_buf[0].addr, nullptr);

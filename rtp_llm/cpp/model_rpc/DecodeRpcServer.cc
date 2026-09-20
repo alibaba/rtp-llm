@@ -1156,7 +1156,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         if (load_context.prefill_cp_size <= 1 || static_cast<int>(gid) >= cfg.groupNums()) {
             return false;
         }
-        return cpMapperForGroup(cfg, gid).layoutForGroup(cfg, gid).slice != CpBlockSliceMode::NONE;
+        return cpMapperForGroup(cfg, gid).layoutForGroup(cfg, groupTag(cfg, gid)).slice != CpBlockSliceMode::NONE;
     };
     auto shouldLoadGroupFromPeer = [&](const CacheConfig& cfg, CacheGroupType group_type, size_t gid, int peer_idx) {
         if (!is_page_level_rr) {
@@ -1183,7 +1183,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         if (!is_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
             return parts;
         }
-        return cpMapperForGroup(cfg, gid).sliceBlockForPeer(cfg, gid, std::move(parts), static_cast<size_t>(peer_idx));
+        return cpMapperForGroup(cfg, gid).sliceBlockForPeer(
+            cfg, groupTag(cfg, gid), std::move(parts), static_cast<size_t>(peer_idx));
     };
     // One projection shared by the main model and MTP, mirroring the producer.
     auto groupLoadPlan = [&](const CacheConfig& cfg, bool cfg_use_hybrid, size_t gid, size_t local_block_num) {
@@ -1250,9 +1251,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                     const bool             use_whole_kv_block = is_page_level_rr || use_kv_key_prefix;
                     std::vector<BlockInfo> parts;
                     if (use_whole_kv_block) {
-                        parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag);
+                        parts = cache_manager->convertIndexToBuffer(layer_id, tag, block_id);
                     } else {
-                        parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag, peer_cnt, i);
+                        parts = cache_manager->convertIndexToBuffer(layer_id, tag, block_id, peer_cnt, i);
                     }
 
                     parts            = sliceCpDestinationForPeer(std::move(parts), cache_config, gid, i);
@@ -1392,10 +1393,10 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                 const bool mtp_use_whole_kv_block = is_page_level_rr || mtp_use_kv_key_prefix;
                                 std::vector<BlockInfo> parts;
                                 if (mtp_use_whole_kv_block) {
-                                    parts = cache_manager->convertIndexToBufferByTag(block_id, global_layer_id, tag);
+                                    parts = cache_manager->convertIndexToBuffer(global_layer_id, tag, block_id);
                                 } else {
-                                    parts = cache_manager->convertIndexToBufferByTag(
-                                        block_id, global_layer_id, tag, peer_cnt, i);
+                                    parts = cache_manager->convertIndexToBuffer(
+                                        global_layer_id, tag, block_id, peer_cnt, i);
                                 }
 
                                 parts            = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, gid, i);

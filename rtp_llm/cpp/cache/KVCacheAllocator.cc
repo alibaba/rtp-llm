@@ -31,18 +31,16 @@ inline CacheKeysType cpCanonicalCacheKeys(const std::shared_ptr<CPSlotMapper>& m
 }
 
 inline bool
-cpBlockRoundRobinGroup(const std::shared_ptr<CPSlotMapper>& mapper, const CacheConfig& config, int group_id) {
-    return mapper && mapper->isSharded() && group_id >= 0
-           && mapper->blockRoundRobinGroup(config, static_cast<size_t>(group_id));
+cpBlockRoundRobinGroup(const std::shared_ptr<CPSlotMapper>& mapper, const CacheConfig& config, std::string_view tag) {
+    return mapper && mapper->isSharded() && mapper->blockRoundRobinGroup(config, tag);
 }
 
 inline int cpEffectiveSeqLenForGroup(const std::shared_ptr<CPSlotMapper>& mapper,
                                      const CacheConfig&                   config,
-                                     int                                  group_id,
+                                     std::string_view                     tag,
                                      int                                  seq_len) {
-    return cpBlockRoundRobinGroup(mapper, config, group_id) ?
-               mapper->effectiveSeqLenForAlloc(config, static_cast<size_t>(group_id), seq_len) :
-               seq_len;
+    return cpBlockRoundRobinGroup(mapper, config, tag) ? mapper->effectiveSeqLenForAlloc(config, tag, seq_len) :
+                                                         seq_len;
 }
 
 }  // namespace
@@ -51,9 +49,9 @@ namespace {
 
 inline int cpEffectiveSeqLenForReserve(const std::shared_ptr<CPSlotMapper>& mapper,
                                        const CacheConfig&                   config,
-                                       size_t                               group_id,
+                                       std::string_view                     tag,
                                        int                                  seq_len) {
-    return (mapper && mapper->isSharded()) ? mapper->effectiveSeqLenForAlloc(config, group_id, seq_len) : seq_len;
+    return (mapper && mapper->isSharded()) ? mapper->effectiveSeqLenForAlloc(config, tag, seq_len) : seq_len;
 }
 
 void appendPoolSummary(std::ostringstream&          os,
@@ -331,24 +329,14 @@ void KVCacheAllocator::blockBatchCopy(const torch::Tensor& copy_mapping) {
                                    mappings[i].src,
                                    mappings[i].dst});
     }
-    blockBatchCopyByTag(tagged_mappings);
+    blockBatchCopyByGroup(tagged_mappings);
 }
 
-bool KVCacheAllocator::cpShardThisGroupForCapacity(size_t gid) const {
-    return cp_slot_mapper_ && cp_slot_mapper_->isSharded() && cp_slot_mapper_->blockRoundRobinGroup(config_, gid);
-}
-
-size_t KVCacheAllocator::logicalSeqSizePerBlockForCapacity(size_t gid) const {
+size_t KVCacheAllocator::logicalSeqSizePerBlockForCapacity(const std::string& tag) const {
     if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
-        return cp_slot_mapper_->logicalSeqSizePerBlock(config_, gid);
+        return cp_slot_mapper_->logicalSeqSizePerBlock(config_, tag);
     }
-    return config_.seqSizePerBlockForGroup(gid);
-}
-
-int KVCacheAllocator::cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const {
-    return (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) ?
-               cp_slot_mapper_->effectiveSeqLenForAlloc(config_, gid, seq_len) :
-               seq_len;
+    return config_.topology().group(tag).seqSizePerBlock();
 }
 
 int KVCacheAllocator::deviceCacheMetricTokensPerBlock() const {
@@ -374,7 +362,7 @@ std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots()
             continue;
         }
 
-        const size_t               pool_index = static_cast<size_t>(group->group_id());
+        const size_t               pool_index = groupIdForTag(group->tag());
         KVCachePoolMetricsSnapshot snapshot;
         snapshot.pool_index                 = pool_index;
         snapshot.pool_name                  = pool->poolName();
@@ -399,17 +387,16 @@ std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots()
     return snapshots;
 }
 
-bool KVCacheAllocator::cpCompactSwaGroup(size_t group_id, const std::shared_ptr<CPSlotMapper>& mapper) const {
-    return mapper && mapper->isSharded() && group_id < kv_cache_groups_.size()
-           && mapper->compactLastRankGroup(config_, group_id);
+bool KVCacheAllocator::cpCompactSwaGroup(const std::string& tag, const std::shared_ptr<CPSlotMapper>& mapper) const {
+    return mapper && mapper->isSharded() && mapper->compactLastRankGroup(config_, tag);
 }
 
 size_t KVCacheAllocator::loadTargetPosition(size_t                               path_index,
-                                            size_t                               group_id,
+                                            const std::string&                   tag,
                                             const std::shared_ptr<CPSlotMapper>& mapper,
                                             int                                  cp_scale) const {
-    const CacheGroupType type = config_.typeForGroup(group_id);
-    return type == CacheGroupType::LINEAR || (type == CacheGroupType::SWA && !cpCompactSwaGroup(group_id, mapper)) ?
+    const CacheGroupType type = config_.topology().group(tag).policy.group_type;
+    return type == CacheGroupType::LINEAR || (type == CacheGroupType::SWA && !cpCompactSwaGroup(tag, mapper)) ?
                (path_index + 1) * static_cast<size_t>(cp_scale) - 1 :
                path_index;
 }
@@ -432,7 +419,9 @@ std::shared_ptr<LoadAsyncContext> KVCacheAllocator::prepareKVCache(const CacheKe
         for (const auto& group_set : group_sets) {
             for (const size_t group_id : group_set->groupIds()) {
                 const size_t reuse_size =
-                    loadTargetPosition(prepared.total_logical_blocks - 1, group_id, cp_mapper, cp_scale) + 1;
+                    loadTargetPosition(
+                        prepared.total_logical_blocks - 1, config_.groupTags()[group_id], cp_mapper, cp_scale)
+                    + 1;
                 kv_resource.mutableBlockIds(0, static_cast<int>(group_id))
                     .assign(BlockIndicesType(reuse_size, NULL_BLOCK_IDX));
             }
@@ -443,7 +432,8 @@ std::shared_ptr<LoadAsyncContext> KVCacheAllocator::prepareKVCache(const CacheKe
         const auto& group_ids = group_sets[group_set_id]->groupIds();
         for (size_t member_group_id = 0; member_group_id < group_ids.size(); ++member_group_id) {
             const size_t group_id        = group_ids[member_group_id];
-            const size_t target_position = loadTargetPosition(path_index, group_id, cp_mapper, cp_scale);
+            const size_t target_position =
+                loadTargetPosition(path_index, config_.groupTags()[group_id], cp_mapper, cp_scale);
             kv_resource.mutableBlockIds(0, static_cast<int>(group_id)).setAt(target_position, blocks[member_group_id]);
             prepared.referenced_blocks[group_id].push_back(blocks[member_group_id]);
         }
@@ -556,12 +546,14 @@ bool KVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_info,
         for (const GroupSetPtr& group_set : block_tree_cache_->groupSets()) {
             for (size_t group_id : group_set->groupIds()) {
                 kv_resource.mutableBlockIds(0, static_cast<int>(group_id))
-                    .resize(loadTargetPosition(matched_blocks - 1, group_id, cp_mapper, cp_scale) + 1);
+                    .resize(loadTargetPosition(matched_blocks - 1, config_.groupTags()[group_id], cp_mapper, cp_scale)
+                            + 1);
             }
         }
     }
     auto add_target = [&](size_t path, size_t group_id) {
-        prepared.required_positions[group_id].insert(loadTargetPosition(path, group_id, cp_mapper, cp_scale));
+        prepared.required_positions[group_id].insert(
+            loadTargetPosition(path, config_.groupTags()[group_id], cp_mapper, cp_scale));
     };
     if (context != nullptr) {
         for (size_t i = 0; i < context->loadDescs().size(); ++i) {
@@ -592,7 +584,7 @@ bool KVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_info,
         std::vector<size_t> backfilled_positions;
         if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
                 block_ids,
-                cpEffectiveSeqLenForGroup(cp_mapper, config_, group_id, common_seq_len),
+                cpEffectiveSeqLenForGroup(cp_mapper, config_, config_.groupTags()[group_id], common_seq_len),
                 malloc_info.reuse_cache,
                 0,
                 &backfilled_positions,
@@ -609,7 +601,9 @@ bool KVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_info,
         BlockIndicesType blocks;
         for (size_t group_id : block_tree_cache_->groupSets()[group_set_id]->groupIds()) {
             blocks.push_back(kv_resource.blocks(
-                0, static_cast<int>(group_id))[loadTargetPosition(path, group_id, cp_mapper, cp_scale)]);
+                0,
+                static_cast<int>(
+                    group_id))[loadTargetPosition(path, config_.groupTags()[group_id], cp_mapper, cp_scale)]);
         }
         return blocks;
     };
@@ -627,10 +621,8 @@ bool KVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_info,
                 context->setBackendTargetBlock(
                     key_index,
                     handle_index,
-                    kv_resource.blocks(
-                        0,
-                        static_cast<int>(
-                            handle.group_id))[loadTargetPosition(key_index, handle.group_id, cp_mapper, cp_scale)]);
+                    kv_resource.blocks(0, static_cast<int>(handle.group_id))[loadTargetPosition(
+                        key_index, config_.groupTags()[handle.group_id], cp_mapper, cp_scale)]);
             }
         }
     }
@@ -691,7 +683,8 @@ MallocResult KVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     for (int b = 0; b < batch_size; ++b) {
         for (int group_id = 0; group_id < kv_resource->groupNums(); ++group_id) {
             auto&     block_ids        = kv_resource->mutableBlockIds(b, group_id);
-            const int group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, group_id, raw_seq_len);
+            const int group_seq_len =
+                cpEffectiveSeqLenForGroup(cp_mapper, config_, config_.groupTags()[group_id], raw_seq_len);
             auto&     filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
             if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
                     block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions)) {
@@ -811,10 +804,10 @@ void KVCacheAllocator::insertIntoCache(const InsertInfo& insert_info, size_t& re
                     break;
                 }
                 const auto type = config_.typeForGroup(static_cast<size_t>(group_id));
-                const bool sparse_logical =
-                    cp_active
-                    && (type == CacheGroupType::LINEAR
-                        || (type == CacheGroupType::SWA && !cpCompactSwaGroup(group_id, cp_mapper)));
+                const bool sparse_logical = cp_active
+                                            && (type == CacheGroupType::LINEAR
+                                                || (type == CacheGroupType::SWA
+                                                    && !cpCompactSwaGroup(config_.groupTags()[group_id], cp_mapper)));
                 const auto& blocks = kv_cache_resource->blocks(batch_id, group_id);
                 for (size_t i = 0; i < insert_keys.size(); ++i) {
                     const size_t position = sparse_logical ? (i + 1) * static_cast<size_t>(cp_mapper->cpSize()) - 1 : i;
@@ -1241,8 +1234,10 @@ int KVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
     int extra_blocks_total  = 0;
     for (int group_id = 0; group_id < static_cast<int>(kv_cache_groups_.size()); ++group_id) {
         const auto group            = kv_cache_groups_[static_cast<size_t>(group_id)];
-        const int  group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, config_, group_id, raw_common_seq_len);
-        const int  group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, group_id, raw_seq_len);
+        const int  group_common_seq =
+            cpEffectiveSeqLenForGroup(cp_mapper, config_, config_.groupTags()[group_id], raw_common_seq_len);
+        const int group_seq_len =
+            cpEffectiveSeqLenForGroup(cp_mapper, config_, config_.groupTags()[group_id], raw_seq_len);
         const auto need             = kv_cache_groups_[static_cast<size_t>(group_id)]->getNeedBlocks(
             group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
         common_blocks_total += need.common_blocks;
@@ -1289,10 +1284,11 @@ void KVCacheAllocator::checkCPShardedMallocResult(const MallocInfo& malloc_info)
 
     for (int batch_id = 0; batch_id < kv_resource->batchSize(); ++batch_id) {
         for (int group_id = 0; group_id < kv_resource->groupNums(); ++group_id) {
-            if (!cpBlockRoundRobinGroup(cp_slot_mapper_, config_, group_id)) {
+            if (!cpBlockRoundRobinGroup(cp_slot_mapper_, config_, config_.groupTags()[group_id])) {
                 continue;
             }
-            const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group_id, seq_len);
+            const int effective_seq_len =
+                cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, config_.groupTags()[group_id], seq_len);
             const int expected_blocks =
                 kv_cache_groups_[static_cast<size_t>(group_id)]->needBlocksNum(effective_seq_len, 0, reserve_step);
             const int actual_blocks = kv_resource->blocksNum(batch_id, group_id);
@@ -1319,7 +1315,8 @@ int KVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch
                                             int                            reserve_step) const {
     int need_blocks = 0;
     for (int group_id = 0; group_id < batch_kv_cache_resource->groupNums(); ++group_id) {
-        const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group_id, seq_len);
+        const int effective_seq_len =
+            cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, config_.groupTags()[group_id], seq_len);
         const int cur_blocks        = batch_kv_cache_resource->blocksNum(0, group_id);
         need_blocks +=
             kv_cache_groups_[static_cast<size_t>(group_id)]->needBlocksNum(effective_seq_len, cur_blocks, reserve_step);
@@ -1342,10 +1339,11 @@ bool KVCacheAllocator::doInit() {
 
     std::vector<DeviceBlockPoolConfig> group_pool_configs;
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
-    for (int group_id = 0; group_id < group_nums; ++group_id) {
-        DeviceBlockPoolConfig pool_config =
-            DeviceBlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(group_id));
-        const CacheGroupPolicy policy = config_.policyForGroup(static_cast<size_t>(group_id));
+    const auto& topology_groups = config_.topology().groups();
+    for (const auto& group : topology_groups) {
+        const int              group_id    = static_cast<int>(group_pool_configs.size());
+        DeviceBlockPoolConfig  pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config_, group);
+        const CacheGroupPolicy policy      = group.policy;
         if (policy.memory_placement == CacheMemoryPlacement::DEVICE) {
             pool_config.use_pinned_cpu_backing = allocation_type_ == AllocationType::HOST;
             pool_config.use_device_malloc_backing =
@@ -1359,8 +1357,8 @@ bool KVCacheAllocator::doInit() {
                               group_id);
             return false;
         }
-        const auto tag        = config_.tagForGroup(static_cast<size_t>(group_id));
-        const auto group_type = config_.typeForGroup(static_cast<size_t>(group_id));
+        const auto tag        = group.tag;
+        const auto group_type = group.policy.group_type;
         appendPoolSummary(pool_summary, has_pool, group_id, tag, group_type, pool_config);
         pool_total_bytes += pool_config.total_size_bytes;
         pool_total_blocks += pool_config.physical_block_count;
@@ -1377,16 +1375,15 @@ bool KVCacheAllocator::doInit() {
                          pool_total_blocks);
     }
 
-    for (int group_id = 0; group_id < group_nums; ++group_id) {
+    int group_id = 0;
+    for (const auto& cache_group : topology_groups) {
         const auto& pool_config = group_pool_configs[static_cast<size_t>(group_id)];
-        const auto  group_type  = config_.typeForGroup(static_cast<size_t>(group_id));
+        const auto  group_type  = cache_group.policy.group_type;
         auto group_pool = std::make_shared<DeviceBlockPool>(std::make_shared<const DeviceBlockPoolConfig>(pool_config));
         RTP_LLM_CHECK_WITH_INFO(group_pool->init(),
                                 "Failed to initialize block pool %s(group %d)",
                                 pool_config.pool_name.c_str(),
                                 group_id);
-
-        const auto& cache_group = config_.topology().groupById(static_cast<size_t>(group_id));
 
         KVCacheGroupPtr group;
         if (group_type == CacheGroupType::LINEAR) {
@@ -1400,16 +1397,27 @@ bool KVCacheAllocator::doInit() {
             full_group_ids_.push_back(group_id);
         }
 
-        RTP_LLM_CHECK_WITH_INFO(group->init(config_.layerIdsForGroup(static_cast<size_t>(group_id))),
+        RTP_LLM_CHECK_WITH_INFO(group->init(config_.layerIdsForGroup(cache_group.tag)),
                                 "Failed to initialize KVCacheGroup %s(group_id %d)",
                                 pool_config.pool_name.c_str(),
                                 group_id);
+        RTP_LLM_CHECK_WITH_INFO(group->tag() == cache_group.tag && group->blockPool() == group_pool,
+                                "cache manager/pool binding mismatch for tag %s",
+                                cache_group.tag.c_str());
         group_block_pools_.push_back(group_pool);
         kv_cache_groups_.push_back(group);
+        ++group_id;
     }
 
     RTP_LLM_LOG_INFO("KVCacheAllocator init success, group pools=%zu", group_block_pools_.size());
     return true;
+}
+
+size_t KVCacheAllocator::groupIdForTag(std::string_view tag) const {
+    const auto& tags = config_.groupTags();
+    const auto  it   = std::find(tags.begin(), tags.end(), tag);
+    RTP_LLM_CHECK_WITH_INFO(it != tags.end(), "unknown cache group tag %.*s", static_cast<int>(tag.size()), tag.data());
+    return static_cast<size_t>(std::distance(tags.begin(), it));
 }
 
 int KVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
@@ -1417,7 +1425,7 @@ int KVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
         RTP_LLM_FAIL("invalid layer_id=%d", layer_id);
     }
     const auto& group    = config_.topology().soleGroupForLayer(layer_id);
-    const int   group_id = static_cast<int>(config_.topology().groupIdForTag(group.tag));
+    const int   group_id = static_cast<int>(groupIdForTag(group.tag));
     RTP_LLM_CHECK_WITH_INFO(group_id >= 0 && group_id < static_cast<int>(kv_cache_groups_.size()),
                             "invalid default group id %d for layer %d",
                             group_id,
@@ -1434,11 +1442,7 @@ int KVCacheAllocator::validateGroupIdForLayer(int layer_id, int group_id) const 
                             "invalid layer id %d for layer_all_num=%u",
                             layer_id,
                             config_.layer_all_num());
-    const auto group_ids = config_.groupIdsForLayer(layer_id);
-    RTP_LLM_CHECK_WITH_INFO(std::find(group_ids.begin(), group_ids.end(), group_id) != group_ids.end(),
-                            "layer %d does not own cache group %d",
-                            layer_id,
-                            group_id);
+    (void)config_.groupForLayer(layer_id, config_.groupTags()[static_cast<size_t>(group_id)]);
     return group_id;
 }
 
@@ -1468,7 +1472,7 @@ GroupedCacheLayerLayout KVCacheAllocator::allLayerCacheBase() const {
                                     layers.size());
             layers[static_cast<size_t>(layer_id)].kv_scale_addr = tensor;
         }
-        groups.emplace(topology->groupById(group_id).tag, CacheLayerLayout(std::move(layers)));
+        groups.emplace(topology->groups()[group_id].tag, CacheLayerLayout(std::move(layers)));
     }
     return GroupedCacheLayerLayout(topology, std::move(groups));
 }
@@ -1490,43 +1494,22 @@ KVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id, int partition
         layer_id, block_id, partition_count, partition_id);
 }
 
-BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, int group_id, int block_id) const {
-    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology group id=%d", group_id);
-    return convertIndexToAddrByTag(layer_id, config_.topology().groupById(static_cast<size_t>(group_id)).tag, block_id);
-}
-
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(int layer_id, int group_id, int block_id) const {
-    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology group id=%d", group_id);
-    return convertIndexToBufferByTag(
-        layer_id, config_.topology().groupById(static_cast<size_t>(group_id)).tag, block_id);
-}
-
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
-    int layer_id, int group_id, int block_id, int partition_count, int partition_id) const {
-    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology group id=%d", group_id);
-    return convertIndexToBufferByTag(layer_id,
-                                     config_.topology().groupById(static_cast<size_t>(group_id)).tag,
-                                     block_id,
-                                     partition_count,
-                                     partition_id);
-}
-
-BlockAddrInfo KVCacheAllocator::convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const {
-    const auto group_id = static_cast<int>(config_.topology().groupIdForTag(tag));
+BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const {
+    const auto group_id = static_cast<int>(groupIdForTag(group_tag));
     validateGroupIdForLayer(layer_id, group_id);
     return kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToAddr(layer_id, block_id);
 }
 
 std::vector<BlockInfo>
-KVCacheAllocator::convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const {
-    const auto group_id = static_cast<int>(config_.topology().groupIdForTag(tag));
+KVCacheAllocator::convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const {
+    const auto group_id = static_cast<int>(groupIdForTag(group_tag));
     validateGroupIdForLayer(layer_id, group_id);
     return kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToBuffer(layer_id, block_id);
 }
 
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBufferByTag(
-    int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const {
-    const auto group_id = static_cast<int>(config_.topology().groupIdForTag(tag));
+std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
+    int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const {
+    const auto group_id = static_cast<int>(groupIdForTag(group_tag));
     validateGroupIdForLayer(layer_id, group_id);
     return kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToBuffer(
         layer_id, block_id, partition_count, partition_id);
@@ -1546,23 +1529,23 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
             tagged_mappings.push_back({group.tag, it->src, it->dst});
         }
     }
-    blockBatchCopyByTag(tagged_mappings);
+    blockBatchCopyByGroup(tagged_mappings);
 }
 
-void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping) {
+void KVCacheAllocator::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping) {
     if (copy_mapping.empty()) {
         return;
     }
 
     size_t copy_nums[BatchCopyParams::TYPE_SIZE] = {};
     for (const auto& mapping : copy_mapping) {
-        const auto group_id = static_cast<int>(config_.topology().groupIdForTag(mapping.tag));
+        const auto group_id = static_cast<int>(groupIdForTag(mapping.tag));
         RTP_LLM_CHECK_WITH_INFO(
             static_cast<size_t>(group_id) < group_block_pools_.size(), "missing block pool for group %d", group_id);
         const auto copy_type =
             BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
                                            group_block_pools_[static_cast<size_t>(group_id)]->where());
-        for (int layer_id : config_.layerIdsForGroup(static_cast<size_t>(group_id))) {
+        for (int layer_id : config_.layerIdsForGroup(mapping.tag)) {
             const auto& physical_group = config_.physicalGroupForLayer(layer_id, mapping.tag);
             copy_nums[copy_type] += physical_group.kvScaleStrideBytes() > 0 ? 2 : 1;
         }
@@ -1574,14 +1557,14 @@ void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>&
     }
 
     for (const auto& mapping : copy_mapping) {
-        const auto group_id = static_cast<int>(config_.topology().groupIdForTag(mapping.tag));
+        const auto group_id = static_cast<int>(groupIdForTag(mapping.tag));
         RTP_LLM_CHECK_WITH_INFO(
             static_cast<size_t>(group_id) < group_block_pools_.size(), "missing block pool for group %d", group_id);
         const auto copy_type =
             BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
                                            group_block_pools_[static_cast<size_t>(group_id)]->where());
 
-        for (int layer_id : config_.layerIdsForGroup(static_cast<size_t>(group_id))) {
+        for (int layer_id : config_.layerIdsForGroup(mapping.tag)) {
             const auto&  physical_group      = config_.physicalGroupForLayer(layer_id, mapping.tag);
             const size_t kv_block_size_bytes = physical_group.kvBlockStrideBytes();
             const size_t scale_block_bytes   = physical_group.kvScaleStrideBytes();
@@ -1636,10 +1619,11 @@ size_t KVCacheAllocator::minTokenCapacity(bool use_available_blocks, bool full_g
     }
 
     auto calculate = [&](bool only_full_groups) {
-        size_t min_tokens = std::numeric_limits<size_t>::max();
-        bool   saw_group  = false;
+        size_t      min_tokens = std::numeric_limits<size_t>::max();
+        bool        saw_group  = false;
+        const auto& groups     = config_.topology().groups();
         for (size_t group_id = 0; group_id < group_block_pools_.size(); ++group_id) {
-            if (only_full_groups && config_.typeForGroup(group_id) != CacheGroupType::FULL) {
+            if (only_full_groups && groups[group_id].policy.group_type != CacheGroupType::FULL) {
                 continue;
             }
             if (!group_block_pools_[group_id]) {
@@ -1648,7 +1632,7 @@ size_t KVCacheAllocator::minTokenCapacity(bool use_available_blocks, bool full_g
             saw_group        = true;
             const auto block = use_available_blocks ? group_block_pools_[group_id]->availableBlocksNum() :
                                                       group_block_pools_[group_id]->totalBlocksNum();
-            min_tokens       = std::min(min_tokens, block * logicalSeqSizePerBlockForCapacity(group_id));
+            min_tokens       = std::min(min_tokens, block * logicalSeqSizePerBlockForCapacity(groups[group_id].tag));
         }
         return std::make_pair(saw_group, min_tokens);
     };
@@ -1697,7 +1681,7 @@ KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t default_seq_size_per
         if (!pool) {
             continue;
         }
-        const size_t seq_size = config_.seqSizePerBlockForGroup(group_id);
+        const size_t seq_size = config_.topology().groups()[group_id].seqSizePerBlock();
         total_tokens          = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
         available_tokens      = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
         has_pool              = true;
@@ -1724,10 +1708,11 @@ int64_t KVCacheAllocator::getMrCostTimeMs() const {
 }
 
 size_t KVCacheAllocator::totalReservableFreeBlocks() const {
-    size_t total = 0;
+    size_t      total  = 0;
+    const auto& groups = config_.topology().groups();
     for (size_t group_id = 0; group_id < group_block_pools_.size(); ++group_id) {
         if (!group_block_pools_[group_id] || group_id >= kv_cache_groups_.size() || !kv_cache_groups_[group_id]
-            || !kv_cache_groups_[group_id]->isReservable() || config_.usesExplicitIndependentBlocks(group_id)) {
+            || !kv_cache_groups_[group_id]->isReservable() || groups[group_id].policy.explicit_block_num > 0) {
             continue;
         }
         total += group_block_pools_[group_id]->freeBlocksNum();
@@ -1740,9 +1725,10 @@ size_t KVCacheAllocator::reservableFreeBlocksNum() const {
 }
 
 size_t KVCacheAllocator::reserveBlocksForPool(size_t group_id) const {
+    const auto& groups = config_.topology().groups();
     if (group_id >= group_block_pools_.size() || group_id >= kv_cache_groups_.size() || !group_block_pools_[group_id]
         || !kv_cache_groups_[group_id] || !kv_cache_groups_[group_id]->isReservable()
-        || config_.usesExplicitIndependentBlocks(group_id)) {
+        || groups[group_id].policy.explicit_block_num > 0) {
         return 0;
     }
 
@@ -1750,7 +1736,7 @@ size_t KVCacheAllocator::reserveBlocksForPool(size_t group_id) const {
     for (size_t current_group_id = 0; current_group_id < group_block_pools_.size(); ++current_group_id) {
         if (!group_block_pools_[current_group_id] || current_group_id >= kv_cache_groups_.size()
             || !kv_cache_groups_[current_group_id] || !kv_cache_groups_[current_group_id]->isReservable()
-            || config_.usesExplicitIndependentBlocks(current_group_id)) {
+            || groups[current_group_id].policy.explicit_block_num > 0) {
             continue;
         }
         total_reservable_blocks += group_block_pools_[current_group_id]->totalBlocksNum();
@@ -1799,8 +1785,10 @@ KVCacheAllocator::evaluateInitCapacityImpl(const MallocInfo&                    
     const RequiredPositions no_required_positions;
     for (int group_id = 0; group_id < static_cast<int>(kv_cache_groups_.size()); ++group_id) {
         const size_t group_index     = static_cast<size_t>(group_id);
-        const int   group_common_seq = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_common_seq_len);
-        const int   group_seq_len    = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_seq_len);
+        const int    group_common_seq =
+            cpEffectiveSeqLenForReserve(cp_mapper, config_, config_.groupTags()[group_index], raw_common_seq_len);
+        const int group_seq_len =
+            cpEffectiveSeqLenForReserve(cp_mapper, config_, config_.groupTags()[group_index], raw_seq_len);
         const int   group_reuse_blocks_len = malloc_info.batch_kv_cache_resource->blocksNum(0, group_id);
         const auto& group_required_positions =
             required_positions == nullptr ? no_required_positions : (*required_positions)[group_index];
@@ -1936,7 +1924,8 @@ void KVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
         const size_t group_index   = static_cast<size_t>(gid);
         const auto   group_type    = config_.typeForGroup(group_index);
-        const int    group_seq_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, planning_raw_seq_len);
+        const int    group_seq_len =
+            cpEffectiveSeqLenForReserve(cp_mapper, config_, config_.groupTags()[group_index], planning_raw_seq_len);
 
         int    need_blocks          = 0;
         int    need_slots           = 0;
@@ -1961,7 +1950,8 @@ void KVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
             need_blocks = 0;
             need_slots  = 0;
         } else {
-            const int  group_common_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_common_len);
+            const int group_common_len =
+                cpEffectiveSeqLenForReserve(cp_mapper, config_, config_.groupTags()[group_index], raw_common_len);
             const int  reuse_blocks_len = malloc_info.reuse_cache ? resource->blocksNum(0, gid) : 0;
             const auto need             = kv_cache_groups_[group_index]->getNeedBlocks(
                 group_common_len, group_seq_len, reserve_step, reuse_blocks_len, malloc_info.reuse_cache);

@@ -645,7 +645,7 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteResolverMatchesAllocatorForNonContiguous
             ASSERT_TRUE(blocks.has_value());
             pool->incRef(*blocks);
             for (int layer_id : config.layerIdsForGroup(group_id)) {
-                const auto expected = allocator->convertIndexToBufferByTag(layer_id, group.tag, blocks->front());
+                const auto expected = allocator->convertIndexToBuffer(layer_id, group.tag, blocks->front());
                 const auto actual   = backend->resolve(layer_id, group_id, blocks->front());
                 ASSERT_FALSE(expected.empty());
                 ASSERT_FALSE(actual.empty());
@@ -676,16 +676,16 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
     const std::array<uint8_t, 3> patterns{0x21, 0x43, 0x65};
     const std::array<size_t, 3>  bytes{32, 64, 64};
     for (int layer = 0; layer < 3; ++layer) {
-        writeDevicePattern(allocator->convertIndexToAddrByTag(layer, "default", src).kv_addr,
+        writeDevicePattern(allocator->convertIndexToAddr(layer, "default", src).kv_addr,
                            bytes[static_cast<size_t>(layer)],
                            patterns[static_cast<size_t>(layer)]);
         writeDevicePattern(
-            allocator->convertIndexToAddrByTag(layer, "default", dst).kv_addr, bytes[static_cast<size_t>(layer)], 0);
+            allocator->convertIndexToAddr(layer, "default", dst).kv_addr, bytes[static_cast<size_t>(layer)], 0);
     }
-    allocator->blockBatchCopyByTag({{"default", src, dst}});
+    allocator->blockBatchCopyByGroup({{"default", src, dst}});
     runtimeSyncAndCheck();
     for (int layer = 0; layer < 3; ++layer) {
-        expectDevicePattern(allocator->convertIndexToAddrByTag(layer, "default", dst).kv_addr,
+        expectDevicePattern(allocator->convertIndexToAddr(layer, "default", dst).kv_addr,
                             bytes[static_cast<size_t>(layer)],
                             patterns[static_cast<size_t>(layer)]);
     }
@@ -707,7 +707,7 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
     for (int layer = 0; layer < 3; ++layer) {
         const auto resolved = backend->resolve(layer, /*group=*/0, src);
         ASSERT_EQ(resolved.size(), 1u);
-        EXPECT_EQ(resolved.front().addr, allocator->convertIndexToAddrByTag(layer, "default", src).kv_addr);
+        EXPECT_EQ(resolved.front().addr, allocator->convertIndexToAddr(layer, "default", src).kv_addr);
         EXPECT_EQ(resolved.front().size_bytes, bytes[static_cast<size_t>(layer)]);
     }
 
@@ -718,12 +718,12 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
         {TransferDescriptor::deviceToHost(group_set->groupSetId(), {src}, *host_block)})));
     for (int layer = 0; layer < 3; ++layer) {
         writeDevicePattern(
-            allocator->convertIndexToAddrByTag(layer, "default", src).kv_addr, bytes[static_cast<size_t>(layer)], 0);
+            allocator->convertIndexToAddr(layer, "default", src).kv_addr, bytes[static_cast<size_t>(layer)], 0);
     }
     EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
         {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, {src})})));
     for (int layer = 0; layer < 3; ++layer) {
-        expectDevicePattern(allocator->convertIndexToAddrByTag(layer, "default", src).kv_addr,
+        expectDevicePattern(allocator->convertIndexToAddr(layer, "default", src).kv_addr,
                             bytes[static_cast<size_t>(layer)],
                             patterns[static_cast<size_t>(layer)]);
     }

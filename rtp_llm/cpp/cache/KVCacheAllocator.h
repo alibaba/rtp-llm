@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -71,14 +72,10 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo>
                           convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
-    virtual BlockAddrInfo convertIndexToAddr(int layer_id, int group_id, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
-    virtual std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, int group_id, int block_id, int partition_count, int partition_id) const;
-    virtual BlockAddrInfo          convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBufferByTag(
-        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const;
+    virtual BlockAddrInfo convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
     virtual std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector = false);
     virtual GroupedCacheLayerLayout allLayerCacheBase() const;
@@ -104,7 +101,7 @@ public:
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
-    virtual void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    virtual void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
     virtual const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const {
         return group_block_pools_;
@@ -201,9 +198,7 @@ protected:
                                                      int  target_batch_size) const;
     virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
     virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
-    bool          cpShardThisGroupForCapacity(size_t gid) const;
-    size_t        logicalSeqSizePerBlockForCapacity(size_t gid) const;
-    int           cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const;
+    size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;
     int           deviceCacheMetricTokensPerBlock() const;
     static size_t maxReusableMatchKeys(int seq_len, int reuse_unit_tokens) {
         if (seq_len <= 1 || reuse_unit_tokens <= 0) {
@@ -212,7 +207,8 @@ protected:
         return static_cast<size_t>(seq_len - 1) / static_cast<size_t>(reuse_unit_tokens);
     }
 
-    CacheConfig                        config_;
+    // Own the immutable configuration binding for all dense manager/pool rows.
+    const CacheConfig                  config_;
     AllocationType                     allocation_type_;
     BlockTreeCachePtr                  block_tree_cache_;
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
@@ -263,10 +259,10 @@ protected:
                                           bool              incremental,
                                           int               failed_need_blocks) const;
     size_t               loadTargetPosition(size_t                               path_index,
-                                            size_t                               group_id,
+                                            const std::string&                   tag,
                                             const std::shared_ptr<CPSlotMapper>& mapper,
                                             int                                  cp_scale) const;
-    bool                 cpCompactSwaGroup(size_t group_id, const std::shared_ptr<CPSlotMapper>& mapper) const;
+    bool                 cpCompactSwaGroup(const std::string& tag, const std::shared_ptr<CPSlotMapper>& mapper) const;
     void                 rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size);
     void                 rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                             const std::vector<BlockIndicesType>& referenced_blocks,
@@ -289,6 +285,9 @@ protected:
     size_t                          reserveBlocksForPool(size_t group_id) const;
     std::vector<DeviceBlockPoolPtr> group_block_pools_;
     RoleType                        role_type_{RoleType::PDFUSION};
+
+private:
+    size_t groupIdForTag(std::string_view tag) const;
 };
 
 using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;

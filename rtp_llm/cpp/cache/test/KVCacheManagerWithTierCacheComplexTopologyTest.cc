@@ -52,13 +52,13 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
             const auto type = cache_config_.typeForGroup(raw_group_id);
             if (type == CacheGroupType::FULL) {
                 saw_full = true;
-                EXPECT_TRUE(cp_mapper->blockRoundRobinGroup(cache_config_, raw_group_id));
-                EXPECT_FALSE(cp_mapper->compactLastRankGroup(cache_config_, raw_group_id));
+                EXPECT_TRUE(cp_mapper->blockRoundRobinGroup(cache_config_, cache_config_.groupTags()[raw_group_id]));
+                EXPECT_FALSE(cp_mapper->compactLastRankGroup(cache_config_, cache_config_.groupTags()[raw_group_id]));
             } else {
                 ASSERT_EQ(type, CacheGroupType::SWA);
                 saw_swa = true;
-                EXPECT_FALSE(cp_mapper->blockRoundRobinGroup(cache_config_, raw_group_id));
-                EXPECT_TRUE(cp_mapper->compactLastRankGroup(cache_config_, raw_group_id));
+                EXPECT_FALSE(cp_mapper->blockRoundRobinGroup(cache_config_, cache_config_.groupTags()[raw_group_id]));
+                EXPECT_TRUE(cp_mapper->compactLastRankGroup(cache_config_, cache_config_.groupTags()[raw_group_id]));
             }
             const auto position =
                 cpCanonicalBlockPosition(*cp_mapper, cache_config_, static_cast<int>(raw_group_id), 0);

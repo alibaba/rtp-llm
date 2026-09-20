@@ -157,7 +157,7 @@ GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       sourc
     for (const auto& target_group : target_topology->groups()) {
         std::vector<BlockBufferPtrInfo> layers(global_layer_ids.size());
         const auto&                     source_group = source.group(target_group.tag);
-        for (int local_layer_id : target_topology->layerIdsForGroup(target_topology->groupIdForTag(target_group.tag))) {
+        for (int local_layer_id : target_topology->layerIdsForGroup(target_group.tag)) {
             RTP_LLM_CHECK_WITH_INFO(local_layer_id >= 0
                                         && static_cast<size_t>(local_layer_id) < global_layer_ids.size(),
                                     "cache layout projection tag=%s invalid local layer=%d",
@@ -524,8 +524,8 @@ void KVCacheManager::blockBatchCopy(const BlockIdPair* copy_mapping_begin, const
     return allocator_->blockBatchCopy(copy_mapping_begin, copy_mapping_end);
 }
 
-void KVCacheManager::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping) {
-    return allocator_->blockBatchCopyByTag(copy_mapping);
+void KVCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping) {
+    return allocator_->blockBatchCopyByGroup(copy_mapping);
 }
 
 bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
@@ -553,31 +553,18 @@ KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int partitio
     return allocator_->convertIndexToBuffer(layer_id, block_index, partition_count, partition_id);
 }
 
-BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id, int group_id) const {
-    return allocator_->convertIndexToAddr(layer_id, group_id, block_index);
-}
-
-std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int group_id) const {
-    return allocator_->convertIndexToBuffer(layer_id, group_id, block_index);
-}
-
-std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
-    int block_index, int layer_id, int group_id, int partition_count, int partition_id) const {
-    return allocator_->convertIndexToBuffer(layer_id, group_id, block_index, partition_count, partition_id);
-}
-
-BlockAddrInfo KVCacheManager::convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const {
-    return allocator_->convertIndexToAddrByTag(layer_id, tag, block_index);
+BlockAddrInfo KVCacheManager::convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const {
+    return allocator_->convertIndexToAddr(layer_id, group_tag, block_id);
 }
 
 std::vector<BlockInfo>
-KVCacheManager::convertIndexToBufferByTag(int block_index, int layer_id, const std::string& tag) const {
-    return allocator_->convertIndexToBufferByTag(layer_id, tag, block_index);
+KVCacheManager::convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const {
+    return allocator_->convertIndexToBuffer(layer_id, group_tag, block_id);
 }
 
-std::vector<BlockInfo> KVCacheManager::convertIndexToBufferByTag(
-    int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const {
-    return allocator_->convertIndexToBufferByTag(layer_id, tag, block_index, partition_count, partition_id);
+std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
+    int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const {
+    return allocator_->convertIndexToBuffer(layer_id, group_tag, block_id, partition_count, partition_id);
 }
 
 GroupedCacheLayerLayout KVCacheManager::allLayerCacheBase() const {

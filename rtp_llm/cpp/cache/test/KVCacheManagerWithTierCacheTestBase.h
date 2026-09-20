@@ -930,7 +930,8 @@ cpCanonicalBlockPosition(const CPSlotMapper& mapper, const CacheConfig& config, 
         return std::nullopt;
     }
     const size_t gid = static_cast<size_t>(group_id);
-    if (mapper.blockRoundRobinGroup(config, gid) || mapper.compactLastRankGroup(config, gid)) {
+    if (mapper.blockRoundRobinGroup(config, config.groupTags()[gid])
+        || mapper.compactLastRankGroup(config, config.groupTags()[gid])) {
         return path_index;
     }
     return (path_index + 1) * static_cast<size_t>(mapper.cpSize()) - 1;
@@ -1068,9 +1069,9 @@ inline bool requestReusesExpectedCpCanonicalPath(const BlockTreeCache&          
             }
             const auto group_type = config.typeForGroup(static_cast<size_t>(group_id));
             if ((group_type == CacheGroupType::FULL
-                 && !mapper.blockRoundRobinGroup(config, static_cast<size_t>(group_id)))
+                 && !mapper.blockRoundRobinGroup(config, config.groupTags()[static_cast<size_t>(group_id)]))
                 || (group_type == CacheGroupType::SWA
-                    && !mapper.compactLastRankGroup(config, static_cast<size_t>(group_id)))) {
+                    && !mapper.compactLastRankGroup(config, config.groupTags()[static_cast<size_t>(group_id)]))) {
                 return false;
             }
             const auto& request_blocks = request_resource->blocks(0, group_id);

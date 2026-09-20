@@ -150,7 +150,7 @@ static std::vector<BlockInfo>
 sliceStateBlockForPeer(const KVCacheSpec& spec, std::vector<BlockInfo> parts, int cp_size, size_t peer_idx) {
     auto         config = makeSingleStateCpConfig(spec, cp_size);
     CPSlotMapper mapper(0, cp_size, static_cast<int>(config.seq_size_per_block));
-    return mapper.sliceBlockForPeer(config, /*gid=*/0, std::move(parts), peer_idx);
+    return mapper.sliceBlockForPeer(config, spec.tag, std::move(parts), peer_idx);
 }
 
 static std::vector<CacheStoreBlockPair>
@@ -158,7 +158,7 @@ buildSwaStorePlan(size_t total_logical_blocks, size_t reuse_block_size, bool use
     auto         spec   = makeResolvedOpaqueSpec(/*state_cache=*/true, "swa", DataType::TYPE_UINT8, 2, 1);
     auto         config = makeSingleStateCpConfig(*spec, cp_size);
     CPSlotMapper mapper(/*cp_rank=*/0, cp_size, static_cast<int>(config.seq_size_per_block));
-    return mapper.buildStorePlan(config, /*gid=*/0, total_logical_blocks, reuse_block_size, use_hybrid);
+    return mapper.buildStorePlan(config, spec->tag, total_logical_blocks, reuse_block_size, use_hybrid);
 }
 
 class DSV4CacheTestEnvironment: public ::testing::Environment {
@@ -428,7 +428,7 @@ TEST(CacheConfigCreatorTest, SparseIndexerUsesIndependentNaturalStridePool) {
 
     ASSERT_GT(config.groupNums(), 1);
     for (const auto& tag : config.groupTagsSnapshot()) {
-        const auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.groupIdForTag(tag));
+        const auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group(tag));
         ASSERT_FALSE(pool_config.memory_layouts.empty());
         for (const auto& layout : pool_config.memory_layouts) {
             EXPECT_FALSE(layout.enable_hybrid_attention);
@@ -836,8 +836,8 @@ TEST(CacheConfigCreatorTest, BasicConfigUsesModelDefaultPhysicalAndKernelBlockSi
     EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "swa_kv")),
               config.specForGroup(gidForTag(config, "swa_kv"))->block_size_bytes());
 
-    auto full_pool = DeviceBlockPoolConfigHelper::createConfigForGroup(config, gidForTag(config, "csa_kv"));
-    auto swa_pool  = DeviceBlockPoolConfigHelper::createConfigForGroup(config, gidForTag(config, "swa_kv"));
+    auto full_pool = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("csa_kv"));
+    auto swa_pool  = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("swa_kv"));
     ASSERT_EQ(full_pool.memory_layouts.size(), 1u);
     ASSERT_EQ(swa_pool.memory_layouts.size(), 1u);
     EXPECT_EQ(full_pool.memory_layouts[0].kernel_blocks_per_kv_block, 1u);
@@ -891,8 +891,8 @@ TEST(CacheConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGroupBpk)
     EXPECT_EQ(config.kvBlockStrideBytesForGroup(idx_kv_gid), idx_kv->block_size_bytes());
     EXPECT_EQ(config.kvBlockStrideBytesForGroup(swa_kv_gid), swa_kv->block_size_bytes());
 
-    auto full_pool_bpk = DeviceBlockPoolConfigHelper::createConfigForGroup(config, csa_kv_gid);
-    auto swa_pool_bpk  = DeviceBlockPoolConfigHelper::createConfigForGroup(config, swa_kv_gid);
+    auto full_pool_bpk = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("csa_kv"));
+    auto swa_pool_bpk  = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("swa_kv"));
     ASSERT_EQ(full_pool_bpk.memory_layouts.size(), 1u);
     ASSERT_EQ(swa_pool_bpk.memory_layouts.size(), 1u);
     EXPECT_EQ(full_pool_bpk.memory_layouts[0].kernel_blocks_per_kv_block, 128u);
@@ -1008,7 +1008,7 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolConfig)
 
     EXPECT_GT(config.groupNums(), 1);
     for (const auto& tag : config.groupTagsSnapshot()) {
-        const auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.groupIdForTag(tag));
+        const auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group(tag));
         ASSERT_FALSE(pool_config.memory_layouts.empty());
         for (const auto& layout : pool_config.memory_layouts) {
             EXPECT_FALSE(layout.enable_hybrid_attention);
@@ -2735,7 +2735,7 @@ TEST_F(DSV4AllocatorTest, AddressLookupAllGroups) {
     for (int gid = 0; gid < 7; gid++) {
         ASSERT_FALSE(config.layerIdsForGroup(gid).empty()) << "group " << gid << " has no layers";
         int  layer_id = config.layerIdsForGroup(gid)[0];
-        auto addr     = allocator->convertIndexToAddr(layer_id, gid, /*block_id=*/1);
+        auto addr     = allocator->convertIndexToAddr(layer_id, config.groupTags()[gid], /*block_id=*/1);
         EXPECT_NE(addr.kv_addr, nullptr) << "null kv_addr for group " << gid << " layer " << layer_id;
     }
 }
@@ -2766,7 +2766,7 @@ TEST_F(DSV4AllocatorTest, ConvertIndexToBufferAllGroups) {
     // convertIndexToBuffer should work for layers in each of the 7 groups
     for (int gid = 0; gid < 7; gid++) {
         int  layer_id = config.layerIdsForGroup(gid)[0];
-        auto buf      = allocator->convertIndexToBuffer(layer_id, gid, /*block_id=*/1);
+        auto buf      = allocator->convertIndexToBuffer(layer_id, config.groupTags()[gid], /*block_id=*/1);
         ASSERT_FALSE(buf.empty()) << "empty buffer for group " << gid;
         EXPECT_NE(buf[0].addr, nullptr) << "null addr for group " << gid;
     }
@@ -2884,7 +2884,7 @@ TEST_F(DSV4AllocatorTest, FlashAddressLookupAllGroups) {
     for (int gid = 0; gid < 7; gid++) {
         ASSERT_FALSE(config.layerIdsForGroup(gid).empty()) << "Flash group " << gid << " has no layers";
         int  layer_id = config.layerIdsForGroup(gid)[0];
-        auto addr     = allocator->convertIndexToAddr(layer_id, gid, /*block_id=*/1);
+        auto addr     = allocator->convertIndexToAddr(layer_id, config.groupTags()[gid], /*block_id=*/1);
         EXPECT_NE(addr.kv_addr, nullptr) << "Flash null kv_addr for group " << gid;
     }
 }
@@ -3690,7 +3690,10 @@ TEST(CacheConfigCreatorTest, WarmupReturnsCompleteExplicitPoolCapacityWithoutBud
     EXPECT_EQ(config.blockNumForGroup(config.groupIdForTag("state")), 7u);
     EXPECT_TRUE(config.mtp_sub_configs.empty());
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        EXPECT_GT(DeviceBlockPoolConfigHelper::createConfigForGroup(config, gid).total_size_bytes, 0u);
+        EXPECT_GT(
+            DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.topology().group(config.groupTags()[gid]))
+                .total_size_bytes,
+            0u);
     }
 }
 
@@ -3718,7 +3721,8 @@ TEST(CacheConfigCreatorTest, MergedBudgetUsesEachPhysicalSegmentOnce) {
             ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
             const auto gid       = static_cast<size_t>(config.groupIdForTag("full"));
             const auto state_gid = static_cast<size_t>(config.groupIdForTag("state"));
-            const auto pool      = DeviceBlockPoolConfigHelper::createConfigForGroup(config, gid);
+            const auto pool      = DeviceBlockPoolConfigHelper::createConfigForGroup(
+                config, config.topology().group(config.groupTags()[gid]));
             ASSERT_EQ(pool.memory_layouts.size(), 3u);
             EXPECT_EQ(pool.memory_layouts[1].kv_block_stride_bytes, 2 * pool.memory_layouts[0].kv_block_stride_bytes);
             for (const auto& sub : config.mtp_sub_configs) {
@@ -3730,7 +3734,9 @@ TEST(CacheConfigCreatorTest, MergedBudgetUsesEachPhysicalSegmentOnce) {
                 for (size_t id = 0; id < static_cast<size_t>(candidate.groupNums()); ++id) {
                     const auto policy = candidate.policyForGroup(id);
                     if (policy.explicit_block_num == 0 || policy.charge_to_paged_budget) {
-                        bytes += DeviceBlockPoolConfigHelper::createConfigForGroup(candidate, id).total_size_bytes;
+                        bytes += DeviceBlockPoolConfigHelper::createConfigForGroup(
+                                     candidate, candidate.topology().group(candidate.groupTags()[id]))
+                                     .total_size_bytes;
                     }
                 }
                 return bytes;
@@ -3799,7 +3805,10 @@ TEST(CacheConfigCreatorTest, MtpRejectsUnknownDraftTagsButAllowsUnusedTargetGrou
     EXPECT_EQ(config.mtp_sub_configs[0]->groupTagsSnapshot(), config.groupTagsSnapshot());
     const auto state_gid = static_cast<size_t>(config.groupIdForTag("state"));
     EXPECT_TRUE(config.mtp_sub_configs[0]->layerIdsForGroup(state_gid).empty());
-    EXPECT_EQ(DeviceBlockPoolConfigHelper::createConfigForGroup(config, state_gid).memory_layouts.size(), 1u);
+    EXPECT_EQ(DeviceBlockPoolConfigHelper::createConfigForGroup(config,
+                                                                config.topology().group(config.groupTags()[state_gid]))
+                  .memory_layouts.size(),
+              1u);
 }
 
 TEST(CacheConfigCreatorTest, MtpRejectsIncompatiblePoolPolicyAndTokenSpans) {

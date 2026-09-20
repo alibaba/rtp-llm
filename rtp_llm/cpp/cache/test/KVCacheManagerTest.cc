@@ -307,7 +307,7 @@ static void writeDsv4RegionPattern(const std::shared_ptr<KVCacheManager>& manage
                                    int                                    group_id,
                                    size_t                                 bytes,
                                    uint8_t                                pattern) {
-    auto addr_info = manager->convertIndexToAddr(block_id, layer_id, group_id);
+    auto addr_info = manager->convertIndexToAddr(layer_id, manager->cacheConfig().groupTags()[group_id], block_id);
     ASSERT_NE(addr_info.kv_addr, nullptr);
 
     auto dst =
@@ -323,7 +323,7 @@ static void assertDsv4RegionPatternEq(const std::shared_ptr<KVCacheManager>& man
                                       int                                    group_id,
                                       size_t                                 bytes,
                                       uint8_t                                expected) {
-    auto addr_info = manager->convertIndexToAddr(block_id, layer_id, group_id);
+    auto addr_info = manager->convertIndexToAddr(layer_id, manager->cacheConfig().groupTags()[group_id], block_id);
     ASSERT_NE(addr_info.kv_addr, nullptr);
 
     auto dev_t =
@@ -418,6 +418,48 @@ TEST_F(CacheHitRateWindowTest, ConcurrentRequestsDoNotLoseTokens) {
     EXPECT_FLOAT_EQ(window.kv_cache_hit_rate, 30.0f);
     EXPECT_FLOAT_EQ(window.device_hit_rate, 20.0f);
     EXPECT_FLOAT_EQ(window.host_hit_rate, 10.0f);
+}
+
+TEST_F(KVCacheManagerTest, TaggedAddressLookupIgnoresGroupOrderAndPreservesLayerBlockOrder) {
+    for (const bool reversed : {false, true}) {
+        auto config      = makeSimpleMhaCacheConfig(2, 5, 2, DataType::TYPE_FP16);
+        auto narrow_spec = makeResolvedMhaSpec(config.dtype, 1, 1, 2, "narrow");
+        auto wide_spec   = makeResolvedMhaSpec(config.dtype, 2, 4, 2, "wide");
+        config.fromGroupedSpecs(
+            {narrow_spec, wide_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"narrow", "wide"});
+        rtp_llm::test::setGroupBlockLayout(
+            config,
+            {"narrow", "wide"},
+            {5, 5},
+            {narrow_spec->block_size_bytes(), wide_spec->block_size_bytes()},
+            {narrow_spec->scale_block_size_bytes(), wide_spec->scale_block_size_bytes()});
+        if (reversed) {
+            auto groups = config.topology().groups();
+            std::reverse(groups.begin(), groups.end());
+            config.setTopology(std::move(groups), config.topology().layers());
+        }
+        KVCacheManager manager(config);
+        ASSERT_TRUE(manager.init());
+        for (const auto& tag : {std::string("narrow"), std::string("wide")}) {
+            const int     layer_id = tag == "narrow" ? 0 : 1;
+            constexpr int block_id = 3;
+            const auto    addr     = manager.convertIndexToAddr(layer_id, tag, block_id);
+            const auto    buffers  = manager.convertIndexToBuffer(layer_id, tag, block_id);
+            ASSERT_FALSE(buffers.empty());
+            EXPECT_EQ(addr.kv_addr, buffers.front().addr);
+            EXPECT_EQ(addr.kv_addr, manager.convertIndexToAddr(block_id, layer_id).kv_addr);
+            EXPECT_EQ(buffers.front().size_bytes, config.group(tag).kvBlockStrideBytes());
+            const auto base = manager.convertIndexToAddr(layer_id, tag, 0);
+            EXPECT_EQ(static_cast<char*>(addr.kv_addr) - static_cast<char*>(base.kv_addr),
+                      block_id * config.group(tag).kvBlockStrideBytes());
+            const auto partition = manager.convertIndexToBuffer(layer_id, tag, block_id, 1, 0);
+            ASSERT_FALSE(partition.empty());
+            EXPECT_EQ(partition.front().addr, addr.kv_addr);
+        }
+        EXPECT_ANY_THROW(manager.convertIndexToAddr(1, "missing", 3));
+        EXPECT_ANY_THROW(manager.convertIndexToBuffer(1, "narrow", 3));
+        EXPECT_ANY_THROW(manager.convertIndexToBuffer(0, "wide", 3, 1, 0));
+    }
 }
 
 TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
@@ -525,7 +567,7 @@ TEST_F(KVCacheManagerTest, LayoutWithoutCapacityCannotAllocatePool) {
     groups.front().block_num = 0;
     ASSERT_NO_THROW(config.setTopology(std::move(groups), config.topology().layers()));
     EXPECT_EQ(config.group("default").block_num, 0u);
-    EXPECT_ANY_THROW(DeviceBlockPoolConfigHelper::createConfigForGroup(config, 0));
+    EXPECT_ANY_THROW(DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("default")));
     EXPECT_ANY_THROW(KVCacheManager(config, /*warmup=*/true));
     EXPECT_ANY_THROW(KVCacheManager(config, /*warmup=*/false));
 }
@@ -1182,16 +1224,16 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     const int hca_state_gid = manager_config.groupIdForTag("hca_state");
     const int csa_layer     = manager_config.layerIdsForGroup(static_cast<size_t>(csa_gid))[0];
     const int hca_layer     = manager_config.layerIdsForGroup(static_cast<size_t>(hca_gid))[0];
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, csa_gid)[0], csa_layer, csa_gid).kv_addr, nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, indexer_gid)[0], csa_layer, indexer_gid).kv_addr,
+    EXPECT_NE(manager->convertIndexToAddr(csa_layer, "csa_kv", resource->blocks(0, csa_gid)[0]).kv_addr, nullptr);
+    EXPECT_NE(manager->convertIndexToAddr(csa_layer, "indexer_kv", resource->blocks(0, indexer_gid)[0]).kv_addr,
               nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, csa_state_gid)[2], csa_layer, csa_state_gid).kv_addr,
+    EXPECT_NE(manager->convertIndexToAddr(csa_layer, "csa_state", resource->blocks(0, csa_state_gid)[2]).kv_addr,
               nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, hca_state_gid).back(), hca_layer, hca_state_gid).kv_addr,
+    EXPECT_NE(manager->convertIndexToAddr(hca_layer, "hca_state", resource->blocks(0, hca_state_gid).back()).kv_addr,
               nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, hca_gid)[0], hca_layer, hca_gid).kv_addr, nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, swa_gid)[2], csa_layer, swa_gid).kv_addr, nullptr);
-    EXPECT_ANY_THROW((void)manager->convertIndexToAddr(resource->blocks(0, hca_gid)[0], csa_layer, hca_gid));
+    EXPECT_NE(manager->convertIndexToAddr(hca_layer, "hca_kv", resource->blocks(0, hca_gid)[0]).kv_addr, nullptr);
+    EXPECT_NE(manager->convertIndexToAddr(csa_layer, "swa_kv", resource->blocks(0, swa_gid)[2]).kv_addr, nullptr);
+    EXPECT_ANY_THROW((void)manager->convertIndexToAddr(csa_layer, "hca_kv", resource->blocks(0, hca_gid)[0]));
 
     FreeInfo free_info{resource, tokens};
     manager->free(free_info);
@@ -1321,7 +1363,7 @@ TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
     for (const auto& group : manager_config.topology().groups()) {
         copy_mapping.push_back({group.tag, src_block, dst_block});
     }
-    manager->blockBatchCopyByTag(copy_mapping);
+    manager->blockBatchCopyByGroup(copy_mapping);
     runtimeSyncAndCheck();
 
     for (const auto& region_case : cases) {
