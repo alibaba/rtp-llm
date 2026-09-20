@@ -394,7 +394,7 @@ TEST(FullPruneTest, PrunesDependentFullSubtreeAcrossTiers) {
     ASSERT_EQ(environment.host_pool->freeBlocksNum(), host_free_before - 1);
     ASSERT_EQ(environment.disk_pool->freeBlocksNum(), disk_free_before - 1);
 
-    EXPECT_EQ(environment.cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 2);
+    EXPECT_EQ(environment.cache->evictForGroup("group0", /*num_blocks=*/1), 2);
 
     const auto remaining_path = environment.cache->tree()->findNode({100, 200, 300, 400, 500});
     ASSERT_EQ(remaining_path.size(), 1u);
@@ -430,7 +430,7 @@ TEST(FullPruneTest, PrunesBranchedFullSubtreeBottomUp) {
     right_resources[2][0].host_block    = right_host_block;
     ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*environment.cache, {100, 200, 400}, right_resources));
 
-    EXPECT_EQ(environment.cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
+    EXPECT_EQ(environment.cache->evictForGroup("group0", /*num_blocks=*/1), 1);
 
     EXPECT_EQ(environment.cache->tree()->findNode({100, 200, 300}).size(), 1u);
     EXPECT_EQ(environment.cache->tree()->findNode({100, 200, 400}).size(), 1u);
@@ -453,7 +453,7 @@ TEST(FullPruneTest, DetachesBusyClosureAndKeepsTransferSourceAlive) {
     alternative[0][0].device_blocks = {20};
     ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*environment.cache, {600}, alternative));
 
-    EXPECT_EQ(environment.cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
+    EXPECT_EQ(environment.cache->evictForGroup("group0", /*num_blocks=*/1), 1);
 
     EXPECT_EQ(environment.cache->tree()->findNode({100, 200, 300, 400}).size(), 3u);
     EXPECT_EQ(environment.cache->tree()->findNode({600}).size(), 1u);
@@ -495,7 +495,7 @@ TEST(FullPruneTest, PrunesCascadedDescendantGroupResourcesAndTopology) {
     resources[2][1].device_blocks = {22};
     ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, {100, 200, 300}, resources));
 
-    EXPECT_EQ(cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
+    EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
 
     const auto path = cache->tree()->findNode({100, 200, 300});
     ASSERT_EQ(path.size(), 1u);
@@ -583,7 +583,7 @@ TEST(FullPruneTest, DetachesBusyDescendantGroupResource) {
     GroupSetResource& busy_resource = path[2]->group_set_resources[1];
     busy_resource.transfer_state    = GroupSetTransferState::LOAD_PENDING;
 
-    EXPECT_EQ(cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
+    EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
 
     path = cache->tree()->findNode({100, 200, 300});
     ASSERT_EQ(path.size(), 3u);
@@ -625,7 +625,7 @@ TEST(FullPruneTest, DetachesBusyClosureRootGroupResource) {
     GroupSetResource& busy_resource = path[1]->group_set_resources[1];
     busy_resource.transfer_state    = GroupSetTransferState::LOAD_PENDING;
 
-    EXPECT_EQ(cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
+    EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
 
     path = cache->tree()->findNode({100, 200});
     ASSERT_EQ(path.size(), 2u);
@@ -662,7 +662,7 @@ TEST(FullPruneTest, ReverseDirectDropPrunesCascadedFullSubtree) {
     resources[1][1].device_blocks = {21};
     ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, {100, 200, 300}, resources));
 
-    EXPECT_EQ(cache->evictForGroup(/*group_id=*/1, /*num_blocks=*/1), 1);
+    EXPECT_EQ(cache->evictForGroup("group1", /*num_blocks=*/1), 1);
 
     const auto remaining_path = cache->tree()->findNode({100, 200, 300});
     EXPECT_TRUE(remaining_path.empty());
@@ -701,7 +701,7 @@ TEST(FullPruneTest, ReverseDirectDropAttachesOneClosureForMultipleFullGroups) {
     resources[1][2].device_blocks = {31};
     ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, {100, 200, 300}, resources));
 
-    EXPECT_EQ(cache->evictForGroup(/*group_id=*/2, /*num_blocks=*/1), 1);
+    EXPECT_EQ(cache->evictForGroup("group2", /*num_blocks=*/1), 1);
 
     const auto remaining_path = cache->tree()->findNode({100, 200, 300});
     EXPECT_TRUE(remaining_path.empty());

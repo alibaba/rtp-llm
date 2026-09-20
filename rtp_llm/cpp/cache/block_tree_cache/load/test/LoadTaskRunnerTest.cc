@@ -40,7 +40,8 @@ GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0) {
                                   /*usable_count=*/2,
                                   "/tmp",
                                   std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK));
-    return makeTestGroupSet(group_set_id, topology, {0}, {std::move(pool)}, std::move(host_pool), std::move(disk_pool));
+    return makeTestGroupSet(
+        group_set_id, topology, {"group0"}, {std::move(pool)}, std::move(host_pool), std::move(disk_pool));
 }
 
 LoadTaskRunner::TaskPtr makeLoadTask(std::vector<TransferDescriptor> descriptors) {

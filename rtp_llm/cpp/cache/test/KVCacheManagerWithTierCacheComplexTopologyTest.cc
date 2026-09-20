@@ -47,7 +47,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     bool saw_swa  = false;
     for (const auto& group_set : cache->groupSets()) {
         ASSERT_NE(group_set, nullptr);
-        for (const size_t raw_group_id : group_set->groupIds()) {
+        for (const auto& tag : group_set->groupTags()) {
+            const size_t raw_group_id = group_set->topologyPtr()->groupIdForTag(tag);
             ASSERT_LT(raw_group_id, static_cast<size_t>(cache_config_.groupNums()));
             const auto type = cache_config_.typeForGroup(raw_group_id);
             if (type == CacheGroupType::FULL) {
@@ -75,7 +76,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
 
     std::vector<std::shared_ptr<IBlockPool>> device_pools;
     for (const auto& group_set : cache->groupSets()) {
-        ASSERT_EQ(group_set->devicePools().size(), group_set->groupIds().size());
+        ASSERT_EQ(group_set->devicePools().size(), group_set->groupTags().size());
         device_pools.insert(device_pools.end(), group_set->devicePools().begin(), group_set->devicePools().end());
     }
     const auto device_ratio = oneUsedBlockWatermarkRatio(device_pools);
@@ -112,7 +113,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         EXPECT_EQ(descriptor.target_tier, Tier::HOST);
         const GroupSetPtr& group_set = cache->groupSets()[descriptor.group_set_id];
         BlockIndicesType   expected_blocks;
-        for (const size_t group_id : group_set->groupIds()) {
+        for (const auto& tag : group_set->groupTags()) {
+            const size_t                group_id = group_set->topologyPtr()->groupIdForTag(tag);
             const std::optional<size_t> position =
                 cpCanonicalBlockPosition(*cp_mapper, cache_config_, static_cast<int>(group_id), 0);
             ASSERT_TRUE(position.has_value());
@@ -203,9 +205,10 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         EXPECT_EQ(resource.getTopTier(), Tier::DISK);
         EXPECT_EQ(resource.disk_block, disk_sources[group_set_id]);
         EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_block), 2u);
-        ASSERT_EQ(group_set->groupIds().size(), group_set->devicePools().size());
-        for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
-            const int                   group_id = static_cast<int>(group_set->groupIds()[member_index]);
+        ASSERT_EQ(group_set->groupTags().size(), group_set->devicePools().size());
+        for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
+            const int group_id =
+                static_cast<int>(group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_index]));
             const std::optional<size_t> position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, group_id, 0);
             ASSERT_TRUE(position.has_value());
             const BlockIndicesType& blocks = load_resource->blocks(0, group_id);
@@ -534,7 +537,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
         const auto&  group_set   = cache->groupSets()[group_set_id];
         const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
         const size_t reuse_begin = 3 - reuse_count;
-        for (const size_t raw_group_id : group_set->groupIds()) {
+        for (const auto& tag : group_set->groupTags()) {
+            const size_t            raw_group_id = group_set->topologyPtr()->groupIdForTag(tag);
             const BlockIndicesType& blocks =
                 prefill_stream->streamCacheResource().kvCache().blocks(0, static_cast<int>(raw_group_id));
             for (size_t path = reuse_begin; path < 3; ++path) {
@@ -606,8 +610,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                 EXPECT_EQ(group_set->hostPool()->treeRefCount(state.host_block), 1u);
                 continue;
             }
-            for (const size_t raw_group_id : group_set->groupIds()) {
-                const int               group_id = static_cast<int>(raw_group_id);
+            for (const auto& tag : group_set->groupTags()) {
+                const int               group_id = static_cast<int>(group_set->topologyPtr()->groupIdForTag(tag));
                 const BlockIndicesType& blocks   = load_resource->blocks(0, group_id);
                 ASSERT_GE(blocks.size(), 3u);
                 ASSERT_FALSE(isNullBlockIdx(blocks[path]));
@@ -655,9 +659,10 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
             const Tier expected = path >= reuse_begin || path == 0 ? Tier::DEVICE : Tier::HOST;
             EXPECT_EQ(state.getTopTier(), expected) << "path=" << path << " group_set=" << group_set_id;
             if (expected == Tier::DEVICE) {
-                ASSERT_EQ(state.device_blocks.size(), group_set->groupIds().size());
-                for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
-                    const int group_id = static_cast<int>(group_set->groupIds()[member_index]);
+                ASSERT_EQ(state.device_blocks.size(), group_set->groupTags().size());
+                for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
+                    const int group_id =
+                        static_cast<int>(group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_index]));
                     EXPECT_TRUE(groupBlockPayloadMatches(
                         manager_, cache_config_, group_id, state.device_blocks[member_index], path));
                 }
@@ -800,8 +805,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
         ASSERT_LE(reuse_count, static_cast<size_t>(logical_blocks));
         expected_load_descriptors += reuse_count;
         const size_t reuse_begin = static_cast<size_t>(logical_blocks) - reuse_count;
-        for (const size_t raw_group_id : group_set->groupIds()) {
-            const int               group_id = static_cast<int>(raw_group_id);
+        for (const auto& tag : group_set->groupTags()) {
+            const int               group_id = static_cast<int>(group_set->topologyPtr()->groupIdForTag(tag));
             const BlockIndicesType& blocks   = resource->blocks(0, group_id);
             ASSERT_EQ(blocks.size(), static_cast<size_t>(logical_blocks + 1));
             for (size_t path_index = reuse_begin; path_index < static_cast<size_t>(logical_blocks); ++path_index) {

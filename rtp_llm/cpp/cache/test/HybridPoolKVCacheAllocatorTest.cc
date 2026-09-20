@@ -601,8 +601,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ResidentInsertProtectsAllReusableGroups) 
         EXPECT_TRUE(node->is_resident);
     }
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
-    EXPECT_EQ(cache->evictForGroup(0, 12), 0);
-    EXPECT_EQ(cache->evictForGroup(1, 12), 0);
+    EXPECT_EQ(cache->evictForGroup(config.groupTags()[0], 12), 0);
+    EXPECT_EQ(cache->evictForGroup(config.groupTags()[1], 12), 0);
     BlockTreeMatchResult match = cache->match({100, 200});
     EXPECT_EQ(match.matched_device_blocks, 2u);
     block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
@@ -2347,8 +2347,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionCascadesFromFullToLo
     const auto target_group_set = std::find_if(group_sets.begin(), group_sets.end(), [&](const GroupSetPtr& group_set) {
         return group_set != nullptr
                && std::find(
-                      group_set->groupIds().begin(), group_set->groupIds().end(), static_cast<size_t>(target_group_id))
-                      != group_set->groupIds().end();
+                      group_set->groupTags().begin(), group_set->groupTags().end(), config.groupTags()[target_group_id])
+                      != group_set->groupTags().end();
     });
     ASSERT_NE(target_group_set, group_sets.end());
 
@@ -2380,16 +2380,16 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionCascadesFromFullToLo
     const size_t reclaimed = target_free_after - target_free_before;
     EXPECT_EQ(reclaimed, expected_canonical.size());
 
-    std::unordered_set<size_t> reclaimed_group_ids((*target_group_set)->groupIds().begin(),
-                                                   (*target_group_set)->groupIds().end());
+    std::unordered_set<std::string> reclaimed_group_tags((*target_group_set)->groupTags().begin(),
+                                                         (*target_group_set)->groupTags().end());
     for (const auto& group_set : group_sets) {
         if (group_set->groupType() == CacheGroupType::SWA || group_set->groupType() == CacheGroupType::LINEAR) {
-            reclaimed_group_ids.insert(group_set->groupIds().begin(), group_set->groupIds().end());
+            reclaimed_group_tags.insert(group_set->groupTags().begin(), group_set->groupTags().end());
         }
     }
     for (size_t group_id = 0; group_id < allocator->groupBlockPools().size(); ++group_id) {
         const auto& pool = allocator->groupBlockPools()[group_id];
-        if (reclaimed_group_ids.find(group_id) != reclaimed_group_ids.end()) {
+        if (reclaimed_group_tags.find(config.groupTags()[group_id]) != reclaimed_group_tags.end()) {
             // FULL subtree pruning also releases unreachable descendants, so a
             // cascaded group may reclaim more blocks than the triggering pool.
             EXPECT_GE(pool->freeBlocksNum(), free_before[group_id] + reclaimed) << "group_id=" << group_id;

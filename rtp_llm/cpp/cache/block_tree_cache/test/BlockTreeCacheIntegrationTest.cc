@@ -261,7 +261,7 @@ public:
             return std::make_shared<CompletedAsyncContext>(
                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "manual transfer test exited before completion"));
         }
-        auto context = std::make_shared<ManuallyCompletedAsyncContext>();
+        auto        context     = std::make_shared<ManuallyCompletedAsyncContext>();
         const auto& descriptors = task.descriptors();
         descriptors_.insert(descriptors_.end(), descriptors.begin(), descriptors.end());
         contexts_.push_back(context);
@@ -472,9 +472,9 @@ void expectAggregatedReadyResult(const BlockTreeCache&       cache,
                                  const BlockTreeMatchResult& result,
                                  size_t                      full_blocks,
                                  size_t                      swa_blocks) {
-    EXPECT_EQ(cache.matchedBlocksForGroup(0, result.matched_device_resources).size(), full_blocks);
-    EXPECT_EQ(cache.matchedBlocksForGroup(1, result.matched_device_resources).size(), full_blocks);
-    EXPECT_EQ(cache.matchedBlocksForGroup(2, result.matched_device_resources).size(), swa_blocks);
+    EXPECT_EQ(cache.matchedBlocksForGroup("group0", result.matched_device_resources).size(), full_blocks);
+    EXPECT_EQ(cache.matchedBlocksForGroup("group1", result.matched_device_resources).size(), full_blocks);
+    EXPECT_EQ(cache.matchedBlocksForGroup("group2", result.matched_device_resources).size(), swa_blocks);
     ASSERT_EQ(result.matched_device_resources.size(), 2u);
     EXPECT_EQ(result.matched_device_resources[0].group_set_id, 0);
     EXPECT_EQ(result.matched_device_resources[0].tier, Tier::DEVICE);
@@ -600,12 +600,12 @@ TEST_F(BlockTreeCacheIntegrationTest, WatermarkChecksLowerTierBeforeUpperTier) {
 
     auto group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
     BlockTreeCacheConfig config;
-    config.enable_host_cache                                  = true;
-    config.enable_disk_cache                                  = true;
-    config.watermark_device                                   = {/*low_ratio=*/0.01, /*high_ratio=*/0.02};
-    config.watermark_host                                     = {/*low_ratio=*/0.01, /*high_ratio=*/0.02};
-    config.task_pool_size                                     = 1;
-    config.max_descriptors_per_transfer_batch                 = 1;
+    config.enable_host_cache                  = true;
+    config.enable_disk_cache                  = true;
+    config.watermark_device                   = {/*low_ratio=*/0.01, /*high_ratio=*/0.02};
+    config.watermark_host                     = {/*low_ratio=*/0.01, /*high_ratio=*/0.02};
+    config.task_pool_size                     = 1;
+    config.max_descriptors_per_transfer_batch = 1;
 
     std::vector<GroupSetPtr> groups{group};
     auto                     cache = makeBlockTreeCacheForTest(std::move(groups), config);
@@ -651,7 +651,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     auto full     = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
     auto topology = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
-    full->initialize(0, topology, {0});
+    full->initialize(0, topology, topology->groupTags());
     const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     std::vector<GroupSetPtr> groups = {full};
@@ -876,12 +876,12 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedStoreCo
         auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
         auto topology = block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(
             defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, kBlockBytes)});
-        full->initialize(0, topology, {0});
+        full->initialize(0, topology, topology->groupTags());
 
         BlockTreeCacheConfig config;
-        config.enable_device_cache = false;
-        config.enable_host_cache   = true;
-        auto cache                 = makeBlockTreeCacheForTest({full}, config);
+        config.enable_device_cache  = false;
+        config.enable_host_cache    = true;
+        auto cache                  = makeBlockTreeCacheForTest({full}, config);
         auto manual_transfer_engine = std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(
             std::vector<GroupSetPtr>{full}, cache->isDiskCacheEnabled());
         manual_transfer_engine->enableManualCompletion();
@@ -952,7 +952,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedLoadCon
         auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
         auto topology = block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(
             defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, kBlockBytes)});
-        full->initialize(0, topology, {0});
+        full->initialize(0, topology, topology->groupTags());
         std::vector<GroupSetPtr> groups = {full};
         BlockTreeCacheConfig     config;
         config.enable_device_cache = true;
@@ -1106,7 +1106,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
     auto path = cache->tree()->findNode({100, 200});
     ASSERT_EQ(path.size(), 2u);
     EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::DEMOTING);
-    EXPECT_EQ(cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
+    EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
     EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
     EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
     EXPECT_TRUE(host_pool->isAllocated(host_source));
@@ -1145,7 +1145,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCom
     auto path = cache->tree()->findNode({100, 200});
     ASSERT_EQ(path.size(), 2u);
     EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::LOAD_PENDING);
-    EXPECT_EQ(cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
+    EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
     EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
     EXPECT_TRUE(host_pool->isAllocated(host_source));
 
@@ -1209,7 +1209,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
     auto path = cache->tree()->findNode({100, 200});
     ASSERT_EQ(path.size(), 2u);
     EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::LOADING);
-    EXPECT_EQ(cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
+    EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
     EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
     EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
     EXPECT_TRUE(host_pool->isAllocated(host_source));
@@ -1564,7 +1564,6 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
     }
 }
 
-
 class JoinedParentSettlementTest: public ::testing::TestWithParam<bool> {};
 
 TEST_P(JoinedParentSettlementTest, OwnedChildPublishesOnlyAfterJoinedParentSettlement) {
@@ -1842,7 +1841,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     auto             disk_pool     = makeDiskPool(payload_bytes, 4, std::make_unique<MemoryDiskBlockIO>());
     auto topology = block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(
         defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, payload_bytes)});
-    auto group    = block_transfer_engine_test::makeTestGroupSet(0, topology, {0}, {device_pool}, nullptr, disk_pool);
+    auto group =
+        block_transfer_engine_test::makeTestGroupSet(0, topology, {"group0"}, {device_pool}, nullptr, disk_pool);
 
     BlockTreeCacheConfig config;
     config.enable_device_cache      = false;
@@ -2382,7 +2382,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     }
     const CacheStats          candidates_before = environment->cache->getStats();
     const std::vector<size_t> host_free_before  = {environment->host_pools[0]->freeBlocksNum(),
-                                                   environment->host_pools[1]->freeBlocksNum()};
+                                                  environment->host_pools[1]->freeBlocksNum()};
 
     BlockTreeMatchResult              result  = environment->cache->match(environment->keys);
     std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
@@ -2524,7 +2524,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
 
     const std::vector<GroupSetResource> resources_before = environment->resourcesForPathNode(0);
     const std::vector<size_t>           host_free_before = {environment->host_pools[0]->freeBlocksNum(),
-                                                            environment->host_pools[1]->freeBlocksNum()};
+                                                  environment->host_pools[1]->freeBlocksNum()};
     BlockTreeMatchResult                result           = environment->cache->match(environment->keys);
     std::shared_ptr<LoadAsyncContext>   context          = takeLoadContext(result);
     ASSERT_NE(context, nullptr);
@@ -2958,7 +2958,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadRequestReleaseKeepsCandidateMemb
     context.reset();
     environment->releaseMatch(result);
     EXPECT_EQ(environment->cache->getStats().device_heap_total_size, device_candidates_after_release);
-    EXPECT_EQ(environment->cache->evictForGroup(0, 2), 2);
+    EXPECT_EQ(environment->cache->evictForGroup("group0", 2), 2);
     for (const auto& [pool, block] : device_sources) {
         EXPECT_FALSE(pool->isAllocated(block));
     }
@@ -3053,7 +3053,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionKeepsRequestSourc
     for (const auto& [pool, block] : device_sources) {
         EXPECT_EQ(pool->refCount(block), 1u);
     }
-    EXPECT_EQ(environment->cache->evictForGroup(0, 2), 2);
+    EXPECT_EQ(environment->cache->evictForGroup("group0", 2), 2);
     for (const auto& [pool, block] : device_sources) {
         EXPECT_FALSE(pool->isAllocated(block));
     }

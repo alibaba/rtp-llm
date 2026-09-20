@@ -87,9 +87,9 @@ bool BlockTreeLoader::validMatch(std::vector<TreeNode*>& path, std::vector<bool>
     return valid_block_count > 0;
 }
 
-BlockIndicesType BlockTreeLoader::matchedBlocksForGroup(size_t                                group_id,
+BlockIndicesType BlockTreeLoader::matchedBlocksForGroup(std::string_view                      group_tag,
                                                         const std::vector<MultiNodeResource>& matched_resources) const {
-    const ReusableGroupLocation* location = tree_->reusableGroupLocation(group_id);
+    const ReusableGroupLocation* location = tree_->reusableGroupLocation(group_tag);
     if (location == nullptr) {
         return {};
     }
@@ -253,8 +253,8 @@ StorageRequest BlockTreeLoader::makeStorageRequest(const CacheKeysType& cache_ke
                            local_matched_blocks_num};
     for (auto& key_handles : request.handles) {
         for (const auto& group_set : tree_->groupSets()) {
-            for (size_t group_id : group_set->groupIds()) {
-                key_handles.push_back({group_id, NULL_BLOCK_IDX});
+            for (const auto& tag : group_set->groupTags()) {
+                key_handles.push_back({group_set->topologyPtr()->groupIdForTag(tag), NULL_BLOCK_IDX});
             }
         }
     }

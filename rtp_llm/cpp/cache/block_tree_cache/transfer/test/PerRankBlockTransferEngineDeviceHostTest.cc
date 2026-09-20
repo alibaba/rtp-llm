@@ -170,11 +170,10 @@ static GroupSetPtr makeDeviceHostGroup(size_t                                  g
                                        std::vector<TestGroupConfig>            groups,
                                        std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = nullptr) {
     auto                topology = makeTestTopology(std::move(groups));
-    std::vector<size_t> group_ids(device_pools.size());
-    std::iota(group_ids.begin(), group_ids.end(), 0);
-    auto group = makeTestGroupSet(group_set_id,
+    auto                group_tags = topology->groupTags();
+    auto                group      = makeTestGroupSet(group_set_id,
                                   std::move(topology),
-                                  std::move(group_ids),
+                                  std::move(group_tags),
                                   std::move(device_pools),
                                   std::move(host_pool),
                                   std::move(disk_pool));

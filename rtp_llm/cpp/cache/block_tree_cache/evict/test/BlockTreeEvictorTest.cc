@@ -202,8 +202,10 @@ void initializeGroups(const std::vector<GroupSetPtr>&                          g
     RTP_LLM_CHECK(groups.size() == device_pools.size());
     RTP_LLM_CHECK(groups.size() == group_bases.size());
     auto topology = block_transfer_engine_test::makeTestTopology(std::move(group_bases));
-    for (size_t group_set_id = 0; group_set_id < groups.size(); ++group_set_id) {
-        groups[group_set_id]->initialize(group_set_id, topology, {group_set_id});
+    size_t group_set_id = 0;
+    for (const auto& tag : topology->groupTags()) {
+        groups[group_set_id]->initialize(group_set_id, topology, {tag});
+        ++group_set_id;
     }
 }
 
@@ -1159,7 +1161,7 @@ TEST_F(BlockTreeEvictorTest, PendingReleasesCountEveryDeviceMemberBlock) {
                                                       block_transfer_engine_test::makeTestGroupBase(policy, {1}, 16)});
     group_ =
         std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool_, device_pool_}, nullptr, nullptr);
-    group_->initialize(0, std::move(topology), {0, 1});
+    group_->initialize(0, topology, topology->groupTags());
     groups_  = {group_};
     tree_    = std::make_unique<BlockTree>(groups_);
     evictor_ = evictor_runtime_.make(tree_.get());
@@ -1219,7 +1221,7 @@ TEST_F(BlockTreeEvictorTest, PendingReleaseSettlementIsTransactionalAcrossDevice
                                                       block_transfer_engine_test::makeTestGroupBase(policy, {1}, 16)});
     group_ = std::make_shared<FullGroupSet>(
         std::vector<DeviceBlockPoolPtr>{device_pool_, second_device_pool}, nullptr, nullptr);
-    group_->initialize(0, std::move(topology), {0, 1});
+    group_->initialize(0, topology, topology->groupTags());
     groups_  = {group_};
     tree_    = std::make_unique<BlockTree>(groups_);
     evictor_ = evictor_runtime_.make(tree_.get());
@@ -1987,7 +1989,7 @@ TEST_F(BlockTreeEvictorTest, DeviceWatermarkUsesMaximumDeficitAcrossMemberPools)
         block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(policy, {0}, 16),
                                                       block_transfer_engine_test::makeTestGroupBase(policy, {1}, 16)});
     group_ = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{narrow_pool, wide_pool}, nullptr, nullptr);
-    group_->initialize(0, std::move(topology), {0, 1});
+    group_->initialize(0, topology, topology->groupTags());
     groups_  = {group_};
     tree_    = std::make_unique<BlockTree>(groups_);
     evictor_ = evictor_runtime_.make(tree_.get());

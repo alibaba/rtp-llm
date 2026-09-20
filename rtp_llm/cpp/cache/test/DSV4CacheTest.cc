@@ -47,10 +47,10 @@ const std::vector<std::string> kDsv4FlashFirstSeenTags     = {
 const std::vector<std::string> kDsv4ProFirstSeenTags = {
     "hca_kv", "hca_state", "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state"};
 
-bool containsReusableGroup(const BlockTreeCache& cache, size_t group_id) {
-    return std::any_of(cache.groupSets().begin(), cache.groupSets().end(), [group_id](const GroupSetPtr& group_set) {
-        return std::find(group_set->groupIds().begin(), group_set->groupIds().end(), group_id)
-               != group_set->groupIds().end();
+bool containsReusableGroup(const BlockTreeCache& cache, std::string_view tag) {
+    return std::any_of(cache.groupSets().begin(), cache.groupSets().end(), [tag](const GroupSetPtr& group_set) {
+        return std::find(group_set->groupTags().begin(), group_set->groupTags().end(), tag)
+               != group_set->groupTags().end();
     });
 }
 
@@ -2994,10 +2994,12 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     for (int gid = 0; gid < 7; gid++) {
         const auto& tag = config.tagForGroup(gid);
         if (tag == "hca_state") {
-            EXPECT_FALSE(containsReusableGroup(*allocator->blockTreeCacheOwner(), static_cast<size_t>(gid)));
+            EXPECT_FALSE(containsReusableGroup(*allocator->blockTreeCacheOwner(), config.groupTags()[gid]));
             continue;
         }
-        EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(gid, match.matched_device_resources).size(),
+        EXPECT_EQ(allocator->blockTreeCacheOwner()
+                      ->matchedBlocksForGroup(config.groupTags()[gid], match.matched_device_resources)
+                      .size(),
                   config.typeForGroup(gid) == CacheGroupType::FULL ? 3u : 1u)
             << tag;
     }
@@ -3055,10 +3057,12 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     for (int gid = 0; gid < 7; gid++) {
         const auto& tag = config.tagForGroup(gid);
         if (tag == "hca_state") {
-            EXPECT_FALSE(containsReusableGroup(*allocator->blockTreeCacheOwner(), static_cast<size_t>(gid)));
+            EXPECT_FALSE(containsReusableGroup(*allocator->blockTreeCacheOwner(), config.groupTags()[gid]));
             continue;
         }
-        EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(gid, match.matched_device_resources).size(),
+        EXPECT_EQ(allocator->blockTreeCacheOwner()
+                      ->matchedBlocksForGroup(config.groupTags()[gid], match.matched_device_resources)
+                      .size(),
                   config.typeForGroup(gid) == CacheGroupType::FULL ? 3u : 1u)
             << tag;
     }
@@ -3141,9 +3145,9 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
         if (group_set->groupType() == CacheGroupType::FULL) {
             continue;
         }
-        ASSERT_FALSE(group_set->groupIds().empty());
+        ASSERT_FALSE(group_set->groupTags().empty());
         for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
-            ASSERT_GT(allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupIds().front(), 1), 0)
+            ASSERT_GT(allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupTags().front(), 1), 0)
                 << "path_index=" << path_index;
         }
     }
@@ -3225,9 +3229,9 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
         if (group_set->groupType() == CacheGroupType::FULL) {
             continue;
         }
-        ASSERT_FALSE(group_set->groupIds().empty());
+        ASSERT_FALSE(group_set->groupTags().empty());
         for (size_t path_index = 1; path_index < cached_keys.size(); ++path_index) {
-            ASSERT_GT(allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupIds().front(), 1), 0)
+            ASSERT_GT(allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupTags().front(), 1), 0)
                 << "path_index=" << path_index;
         }
     }

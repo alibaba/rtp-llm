@@ -30,7 +30,7 @@ TEST(StoreTaskRunnerTest, PrepareTaskCreatesHostTransferAndTemporaryHolds) {
     const std::shared_ptr<const CacheTopology> topology    = makeTestTopology({group});
     DeviceBlockPoolPtr                         device_pool = makeTestDevicePool({{16, 0}}, 2, "store_task_runner");
     std::shared_ptr<HostBlockPool>             host_pool   = block_transfer_engine_test::makeHostPool(16, 1);
-    GroupSetPtr                                group_set = makeTestGroupSet(0, topology, {0}, {device_pool}, host_pool);
+    GroupSetPtr group_set = makeTestGroupSet(0, topology, {"group0"}, {device_pool}, host_pool);
     const std::vector<GroupSetPtr>             group_sets{group_set};
     StoreTaskRunner                            runner(group_sets);
 
@@ -71,7 +71,7 @@ TEST(StoreTaskRunnerTest, PrepareTaskRecordsPathIndexInTransferDescriptors) {
     const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
     DeviceBlockPoolPtr             device_pool = makeTestDevicePool({{16, 0}}, 4, "store_task_runner_path_index");
     std::shared_ptr<HostBlockPool> host_pool   = block_transfer_engine_test::makeHostPool(16, 2);
-    GroupSetPtr                    group_set   = makeTestGroupSet(0, topology, {0}, {device_pool}, host_pool);
+    GroupSetPtr                    group_set = makeTestGroupSet(0, topology, {"group0"}, {device_pool}, host_pool);
     const std::vector<GroupSetPtr> group_sets{group_set};
     StoreTaskRunner                runner(group_sets);
 
@@ -99,7 +99,7 @@ TEST(StoreTaskRunnerTest, ReleaseTaskResourcesDropsTemporaryHolds) {
     const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
     DeviceBlockPoolPtr             device_pool          = makeTestDevicePool({{16, 0}}, 2, "store_task_runner_release");
     std::shared_ptr<HostBlockPool> host_pool            = block_transfer_engine_test::makeHostPool(16, 1);
-    GroupSetPtr                    group_set            = makeTestGroupSet(0, topology, {0}, {device_pool}, host_pool);
+    GroupSetPtr                    group_set = makeTestGroupSet(0, topology, {"group0"}, {device_pool}, host_pool);
     const std::vector<GroupSetPtr> group_sets{group_set};
     StoreTaskRunner                runner(group_sets);
 
@@ -158,7 +158,7 @@ TEST(StoreTaskRunnerTest, RunTransferReturnsDispatcherFailure) {
     const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
     DeviceBlockPoolPtr             device_pool = makeTestDevicePool({{16, 0}}, 2, "store_task_runner_transfer");
     std::shared_ptr<HostBlockPool> host_pool   = block_transfer_engine_test::makeHostPool(16, 1);
-    GroupSetPtr                    group_set   = makeTestGroupSet(0, topology, {0}, {device_pool}, host_pool);
+    GroupSetPtr                    group_set = makeTestGroupSet(0, topology, {"group0"}, {device_pool}, host_pool);
     const std::vector<GroupSetPtr> group_sets{group_set};
     StoreTaskRunner                runner(group_sets);
 
@@ -186,8 +186,9 @@ TEST(StoreTaskRunnerTest, TransferSubmissionFollowsTargetTier) {
     const auto                     group    = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL));
     const auto                     topology = makeTestTopology({group});
     const std::vector<GroupSetPtr> group_sets{
-        makeTestGroupSet(0, topology, {0}, {makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission_0")}),
-        makeTestGroupSet(1, topology, {0}, {makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission_1")})};
+        makeTestGroupSet(0, topology, {"group0"}, {makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission_0")}),
+        makeTestGroupSet(
+            1, topology, {"group0"}, {makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission_1")})};
     StoreTaskRunner               runner(group_sets);
     BlockTreeCacheMetricsReporter metrics_reporter{nullptr};
 

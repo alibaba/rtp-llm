@@ -173,6 +173,7 @@ private:
     const bool                         use_device_malloc_block_pool_;
     const bool                         warmup_;
     KVCacheEventPublisherPtr           cache_event_publisher_;
+    bool                               hasTailSparseReuseGroup() const;
     void                               initCacheEventPublisher();
     void                               stopCacheEventPublisher();
 

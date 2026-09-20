@@ -765,10 +765,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ResidentPrefixRemainsMatchableUnderAlloca
     pressure_malloc.enable_cache_lookup = false;
     EXPECT_FALSE(allocator_->malloc(pressure_malloc).success);
     EXPECT_EQ(pressure->curBlocksNum(), 0);
-    EXPECT_EQ(cache->evictForGroup(0, 1), 0);
+    EXPECT_EQ(cache->evictForGroup("default", 1), 0);
     BlockTreeMatchResult match = cache->match({100});
     EXPECT_EQ(match.matched_device_blocks, 1u);
-    EXPECT_EQ(cache->matchedBlocksForGroup(0, match.matched_device_resources), (BlockIndicesType{seed_block}));
+    EXPECT_EQ(cache->matchedBlocksForGroup("default", match.matched_device_resources), (BlockIndicesType{seed_block}));
     block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
 }
 
@@ -839,15 +839,17 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCachePublishesOnlyBatchZero) {
 
     auto batch_zero_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{100});
     ASSERT_EQ(batch_zero_match.matched_device_blocks, 1u);
-    ASSERT_EQ(allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, batch_zero_match.matched_device_resources),
-              (BlockIndicesType{blocks[0]}));
+    ASSERT_EQ(
+        allocator_->blockTreeCacheOwner()->matchedBlocksForGroup("default", batch_zero_match.matched_device_resources),
+        (BlockIndicesType{blocks[0]}));
     block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(),
                                                      batch_zero_match.matched_device_resources);
 
     auto batch_one_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{200});
     EXPECT_EQ(batch_one_match.matched_device_blocks, 0u);
-    EXPECT_TRUE(
-        allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, batch_one_match.matched_device_resources).empty());
+    EXPECT_TRUE(allocator_->blockTreeCacheOwner()
+                    ->matchedBlocksForGroup("default", batch_one_match.matched_device_resources)
+                    .empty());
     block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(),
                                                      batch_one_match.matched_device_resources);
 
@@ -910,8 +912,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
 
     auto canonical_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{101, 103});
     ASSERT_EQ(canonical_match.matched_device_blocks, 2u);
-    EXPECT_EQ(allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, canonical_match.matched_device_resources),
-              seed_blocks);
+    EXPECT_EQ(
+        allocator_->blockTreeCacheOwner()->matchedBlocksForGroup("default", canonical_match.matched_device_resources),
+        seed_blocks);
     block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(),
                                                      canonical_match.matched_device_resources);
 
@@ -1161,7 +1164,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
     const auto before_watermark_retry = cache->getKeySnapshot();
     // Logical eviction succeeds, but the API reports newly freed blocks. The
     // two request holders keep the block allocated, so the reclaimed count is 0.
-    EXPECT_EQ(cache->evictForGroup(0, 1), 0);
+    EXPECT_EQ(cache->evictForGroup("default", 1), 0);
     EXPECT_EQ(cache->getKeySnapshot().version, before_watermark_retry.version + 1);
     EXPECT_TRUE(cache->tree()->findNode(CacheKeysType{100}).empty());
     EXPECT_TRUE(device_pool->isAllocated(published_target));

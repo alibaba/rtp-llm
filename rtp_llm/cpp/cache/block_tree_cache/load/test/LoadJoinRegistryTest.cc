@@ -24,7 +24,7 @@ protected:
             makeTestDevicePool({{group_config.group.kvBlockStrideBytes(), group_config.group.kvScaleStrideBytes()}},
                                16,
                                "load_join_registry");
-        const GroupSetPtr group_set = makeTestGroupSet(0, makeTestTopology({group_config}), {0}, {device_pool_});
+        const GroupSetPtr group_set = makeTestGroupSet(0, makeTestTopology({group_config}), {"group0"}, {device_pool_});
         tree_                       = std::make_unique<BlockTree>(std::vector<GroupSetPtr>{group_set});
         target_blocks_              = device_pool_->malloc(10).value();
         coordinator_ = std::make_shared<LoadContextCoordinator>([](const auto&) { return true; }, [](auto&) {});

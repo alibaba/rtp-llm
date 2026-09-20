@@ -84,13 +84,13 @@ std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupConfi
 
 GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
                              std::shared_ptr<const CacheTopology> topology,
-                             std::vector<size_t>                  group_ids,
+                             std::vector<std::string>             group_tags,
                              std::vector<DeviceBlockPoolPtr>      device_pools,
                              std::shared_ptr<HostBlockPool>       host_pool,
                              BlockTreeDiskBlockPoolPtr            disk_pool) {
     RTP_LLM_CHECK(topology != nullptr);
-    RTP_LLM_CHECK(!group_ids.empty());
-    const auto& first = topology->groupById(group_ids.front());
+    RTP_LLM_CHECK(!group_tags.empty());
+    const auto& first = topology->group(group_tags.front());
 
     GroupSetPtr group_set;
     switch (first.policy.group_type) {
@@ -109,7 +109,7 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
             break;
     }
     RTP_LLM_CHECK(group_set != nullptr);
-    group_set->initialize(group_set_id, std::move(topology), std::move(group_ids));
+    group_set->initialize(group_set_id, std::move(topology), std::move(group_tags));
     return group_set;
 }
 

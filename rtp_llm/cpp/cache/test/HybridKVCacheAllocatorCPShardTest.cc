@@ -231,7 +231,8 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVir
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{101, 103});
     ASSERT_EQ(match.matched_device_blocks, 2u);
-    ASSERT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(full_group_id, match.matched_device_resources),
+    ASSERT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(config.groupTags()[full_group_id],
+                                                                      match.matched_device_resources),
               full_blocks);
     block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
 }

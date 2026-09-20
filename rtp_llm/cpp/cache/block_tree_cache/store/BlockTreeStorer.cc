@@ -85,9 +85,10 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
             if (!resource.hasCompleteDeviceValue()) {
                 continue;
             }
-            const auto& group_ids = tree_->groupSets()[group_set]->groupIds();
-            for (size_t member = 0; member < group_ids.size(); ++member) {
-                key_handles.push_back({group_ids[member], resource.device_blocks[member]});
+            const auto& group = *tree_->groupSets()[group_set];
+            for (size_t member = 0; member < group.groupTags().size(); ++member) {
+                key_handles.push_back(
+                    {group.topologyPtr()->groupIdForTag(group.groupTags()[member]), resource.device_blocks[member]});
             }
         }
     }

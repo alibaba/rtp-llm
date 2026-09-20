@@ -97,7 +97,7 @@ TEST_F(FullSWALinearEvictionTest, OrdinarySuffixCanBeEvictedWithoutReadmittingRe
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
     BlockTreeMatchResult match = cache_->match({100, 200, 300});
     EXPECT_EQ(match.matched_device_blocks, 2u);
-    EXPECT_EQ(cache_->matchedBlocksForGroup(0, match.matched_device_resources), (BlockIndicesType{10, 11}));
+    EXPECT_EQ(cache_->matchedBlocksForGroup("group0", match.matched_device_resources), (BlockIndicesType{10, 11}));
     block_tree_cache_test::releaseRequestRefsForTest(*cache_, match.matched_device_resources);
 }
 

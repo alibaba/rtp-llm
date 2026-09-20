@@ -257,7 +257,7 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
     std::vector<std::pair<std::string, rtp_llm::CacheGroupType>> group_specs;
     std::vector<size_t>                                          layer_strides;
     std::vector<size_t>                                          layer_counts;
-    std::vector<size_t>                                          group_ids;
+    std::vector<std::string>                                     group_tags;
     std::vector<size_t>                                          sliding_windows;
     size_t                                                       tile_count = 0;
     bool                                                         is_swa     = false;
@@ -275,7 +275,7 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
         group_specs.emplace_back(member->tag, type);
         layer_strides.push_back(member->layer_stride_bytes);
         layer_counts.push_back(member->layer_count);
-        group_ids.push_back(member_index);
+        group_tags.push_back(member->tag);
         sliding_windows.push_back(member->sliding_window_size);
         tile_count += member->layer_count;
         is_swa |= member->type == CacheGroupType::SWA;
@@ -289,12 +289,12 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
                                                               disk_pool,
                                                               0,
                                                               topology,
-                                                              group_ids,
+                                                              group_tags,
                                                               gs_info.sliding_window_size,
                                                               profile_.tokens_per_block);
     } else {
         setup.group_set =
-            BenchmarkFixture::createFullGroupSet(setup.device_pools, host_pool, disk_pool, 0, topology, group_ids);
+            BenchmarkFixture::createFullGroupSet(setup.device_pools, host_pool, disk_pool, 0, topology, group_tags);
     }
 
     std::vector<GroupSetPtr> engine_group_sets{setup.group_set};
@@ -307,18 +307,18 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
             std::vector<std::pair<std::string, rtp_llm::CacheGroupType>> capacity_specs;
             std::vector<size_t>                                          capacity_strides;
             std::vector<size_t>                                          capacity_layer_counts;
-            std::vector<size_t>                                          capacity_group_ids;
+            std::vector<std::string>                                     capacity_group_tags;
             std::vector<size_t>                                          capacity_sliding_windows;
             std::vector<DeviceBlockPoolPtr>                              capacity_device_pools;
-            for (size_t index = 0; index < capacity_info.member_tags.size(); ++index) {
-                const auto* member = profile_.findGroup(capacity_info.member_tags[index]);
+            for (const auto& tag : capacity_info.member_tags) {
+                const auto* member = profile_.findGroup(tag);
                 RTP_LLM_CHECK(member != nullptr);
                 const auto type =
                     member->type == CacheGroupType::SWA ? rtp_llm::CacheGroupType::SWA : rtp_llm::CacheGroupType::FULL;
                 capacity_specs.emplace_back(member->tag, type);
                 capacity_strides.push_back(member->layer_stride_bytes);
                 capacity_layer_counts.push_back(member->layer_count);
-                capacity_group_ids.push_back(index);
+                capacity_group_tags.push_back(member->tag);
                 capacity_sliding_windows.push_back(member->sliding_window_size);
                 capacity_device_pools.push_back(
                     BenchmarkFixture::createDevicePool(member->layer_stride_bytes,
@@ -339,12 +339,12 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
                                                                                 nullptr,
                                                                                 group_set_id,
                                                                                 capacity_topology,
-                                                                                capacity_group_ids,
+                                                                                capacity_group_tags,
                                                                                 capacity_info.sliding_window_size,
                                                                                 profile_.tokens_per_block));
             } else {
                 engine_group_sets.push_back(BenchmarkFixture::createFullGroupSet(
-                    capacity_device_pools, nullptr, nullptr, group_set_id, capacity_topology, capacity_group_ids));
+                    capacity_device_pools, nullptr, nullptr, group_set_id, capacity_topology, capacity_group_tags));
             }
         }
     }

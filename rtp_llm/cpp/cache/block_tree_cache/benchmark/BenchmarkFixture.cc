@@ -152,9 +152,9 @@ GroupSetPtr BenchmarkFixture::createFullGroupSet(std::vector<DeviceBlockPoolPtr>
                                                  BlockTreeDiskBlockPoolPtr            disk_pool,
                                                  size_t                               group_set_id,
                                                  std::shared_ptr<const CacheTopology> topology,
-                                                 const std::vector<size_t>&           group_ids) {
-    auto group_set = std::make_shared<FullGroupSet>(device_pools, host_pool, disk_pool);
-    group_set->initialize(group_set_id, std::move(topology), group_ids);
+                                                 const std::vector<std::string>&      group_tags) {
+    auto                     group_set = std::make_shared<FullGroupSet>(device_pools, host_pool, disk_pool);
+    group_set->initialize(group_set_id, std::move(topology), group_tags);
     return group_set;
 }
 
@@ -163,12 +163,12 @@ GroupSetPtr BenchmarkFixture::createSWAGroupSet(std::vector<DeviceBlockPoolPtr> 
                                                 BlockTreeDiskBlockPoolPtr            disk_pool,
                                                 size_t                               group_set_id,
                                                 std::shared_ptr<const CacheTopology> topology,
-                                                const std::vector<size_t>&           group_ids,
+                                                const std::vector<std::string>&      group_tags,
                                                 size_t                               sliding_window_size,
                                                 size_t                               tokens_per_block) {
     auto group_set =
         std::make_shared<SWAGroupSet>(sliding_window_size, tokens_per_block, device_pools, host_pool, disk_pool);
-    group_set->initialize(group_set_id, std::move(topology), group_ids);
+    group_set->initialize(group_set_id, std::move(topology), group_tags);
     return group_set;
 }
 
