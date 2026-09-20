@@ -1,8 +1,8 @@
 """Fuse V4.1 decode compression, normalization, RoPE and typed cache stores.
 
 The two-stage organization follows vLLM's V4.1 fused compressor/indexer
-stores, with RTP's FP4 main cache (288B row-interleaved: 256B e2m1 payload
-+ 32B E4M3 group-16 scales) and FP4 index cache (planar 64B payload +
+stores, with RTP's FP4 main cache (per-page planes of 256B e2m1 payload
+and 32B E4M3 group-16 scales per entry) and FP4 index cache (planar 64B payload +
 packed-UE8M0 int32 scales per entry). Stage A reads the previous
 speculative state before any state writes. Stage B runs after the unchanged
 BF16 index projection, and commits state. This kernel boundary prevents a
@@ -170,14 +170,16 @@ def _compress_norm_main_store_kernel(
             tl.float8e4nv, fp_downcast_rounding="rtne"
         )
         scale = scale_fp8.to(tl.float32)
-        normalized = tl.minimum(tl.maximum(tl.div_rn(grouped, scale[:, None]), -6.0), 6.0)
+        normalized = tl.minimum(
+            tl.maximum(tl.div_rn(grouped, scale[:, None]), -6.0), 6.0
+        )
         codes = _round_e2m1(normalized).reshape((256, 2))
         even, odd = tl.split(codes)
         payload = even | (odd << 4)
         base = main_cache + block * MAIN_CACHE_STRIDE
-        tl.store(base + offset * 288 + tl.arange(0, 256), payload)
+        tl.store(base + offset * 256 + tl.arange(0, 256), payload)
         tl.store(
-            base + offset * 288 + 256 + tl.arange(0, 32),
+            base + MAIN_EB * 256 + offset * 32 + tl.arange(0, 32),
             scale_fp8.to(tl.uint8, bitcast=True),
         )
 
@@ -242,7 +244,9 @@ def _index_norm_store_state_kernel(
         grouped = tl.reshape(rotated, (4, 32))
         maxima = tl.maximum(tl.max(tl.abs(grouped), 1), 6.0 * (2.0**-126))
         scale, exponent = _round_power_of_two_scale(maxima, 1.0 / 6.0)
-        normalized = tl.minimum(tl.maximum(tl.div_rn(grouped, scale[:, None]), -6.0), 6.0)
+        normalized = tl.minimum(
+            tl.maximum(tl.div_rn(grouped, scale[:, None]), -6.0), 6.0
+        )
         codes = _round_e2m1(normalized).reshape((64, 2))
         even, odd = tl.split(codes)
         payload = even | (odd << 4)

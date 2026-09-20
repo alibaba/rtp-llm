@@ -219,8 +219,10 @@ def _write_mask(case, region):
             start = entries * 64 + offset * 4
             mask[block, start : start + 4] = True
         else:
-            # Row-interleaved 288B entries: payload + E4M3 scales per row.
-            mask[block, offset * 288 : (offset + 1) * 288] = True
+            # GLOBAL is also planar, with group-16 E4M3 scales.
+            mask[block, offset * 256 : (offset + 1) * 256] = True
+            start = entries * 256 + offset * 32
+            mask[block, start : start + 32] = True
     return mask.reshape_as(pool).to(pool.device)
 
 
@@ -240,7 +242,7 @@ def _canonical_cache_zero_signs(pool, region):
         payload = raw[:, : entries * 64]
         payload.masked_fill_((payload & 0x77) == 0, 0)
     else:
-        data = raw.view(blocks, entries, 288)[..., :256]
+        data = raw[:, : entries * 256]
         data.masked_fill_((data & 0x77) == 0, 0)
     return canonical
 

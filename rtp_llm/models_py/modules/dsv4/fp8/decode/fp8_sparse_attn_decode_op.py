@@ -45,8 +45,8 @@ class SparseAttnV4DecodeFp8Op:
 
     Args (forward):
       q          : ``[B, q_len, n_heads, head_dim]`` bf16
-      kv_cache   : ``[num_blocks, block_size, 584]`` uint8 packed FP8
-        primary pool (SWA in dual-pool mode).
+      kv_cache   : ``[num_blocks, block_size, entry_bytes]`` uint8 packed FP8
+        primary pool (584B V4 or 528B V4.1 SWA in dual-pool mode).
       attn_sink  : ``[n_heads]`` fp32 — per-head learned sink
       topk_idxs  : ``[B, q_len, topk]`` int32 — per-request global slot
         ids into the primary pool.
@@ -56,8 +56,8 @@ class SparseAttnV4DecodeFp8Op:
         slot ids from ``topk_idxs`` directly.
       topk_length        : optional ``[B]`` int32 — per-request leftmost
         valid length on ``topk_idxs``.
-      extra_k_cache      : optional secondary FP8 pool (CMP). Triggers
-        FlashMLA's dual-pool path.
+      extra_k_cache      : optional secondary packed pool (584B V4 FP8 or
+        288B V4.1 FP4). Triggers FlashMLA's dual-pool path.
       extra_topk_idxs    : optional ``[B, q_len, extra_topk]`` int32 —
         global slot ids into ``extra_k_cache``.
       extra_topk_length  : optional ``[B]`` int32 — per-request leftmost
@@ -106,9 +106,8 @@ class SparseAttnV4DecodeFp8Op:
 
         ``return_lse=True`` additionally returns FlashMLA's softmax LSE
         ``[B, num_heads_q, seq_len_q]`` fp32 (the raw ``log Z`` — unaffected
-        by ``attn_sink``). V4.1's FP4 GLOBAL reader merges it with its own
-        Triton softmax; empty rows report ``+inf`` and must be guarded by
-        the consumer.
+        by ``attn_sink``). Empty rows report ``+inf`` and must be guarded
+        by the consumer.
         """
         assert _FLASH_MLA_AVAILABLE, (
             "flash_mla wheel is required for FP8 sparse decode "

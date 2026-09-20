@@ -293,8 +293,9 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
             head_dim = 4
             eps = 1e-6
 
-            def __init__(self, byte_sliced: bool) -> None:
+            def __init__(self, byte_sliced: bool, entry_bytes: int) -> None:
                 self._byte_sliced = byte_sliced
+                self._entry_bytes = entry_bytes
                 self._kv_cache = None
                 self._block_tables_by_type = {}
                 self._cp_ctx = None
@@ -314,7 +315,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
                 return self._byte_sliced
 
             def _pool_view_3d_fp8(self, _region: int) -> torch.Tensor:
-                return torch.zeros((4, 16, 1), dtype=torch.uint8)
+                return torch.zeros((4, 16, self._entry_bytes), dtype=torch.uint8)
 
             def _pool_raw_u8(self, _region: int) -> torch.Tensor:
                 return self.raw_pool
@@ -331,10 +332,15 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         gathered_positions = torch.tensor([10, 12, 11, 13], dtype=torch.int32)
         expected_slots = torch.tensor([26, 28, 27, 29], dtype=torch.long)
 
-        for byte_sliced in (False, True):
-            with self.subTest(byte_sliced=byte_sliced):
+        for byte_sliced, entry_bytes in (
+            (False, 584),
+            (True, 584),
+            (False, 528),
+            (True, 528),
+        ):
+            with self.subTest(byte_sliced=byte_sliced, entry_bytes=entry_bytes):
                 model = _dspark_harness(gamma=1)
-                attention = FakeAttention(byte_sliced)
+                attention = FakeAttention(byte_sliced, entry_bytes)
                 model.v4 = SimpleNamespace(layers=[SimpleNamespace(attn=attention)])
                 model.kv_cache = object()
                 commit_cp_ctx = SimpleNamespace(cp_rank=1, cp_size=2)
@@ -361,6 +367,14 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
                         "rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton."
                         "quantize_and_insert_k_cache_cp_byte_sliced"
                     ) as sliced_writer,
+                    patch(
+                        "rtp_llm.models_py.modules.dsv4.fp8._v41_swa_triton."
+                        "quantize_and_insert_swa_k_cache"
+                    ) as v41_regular_writer,
+                    patch(
+                        "rtp_llm.models_py.modules.dsv4.fp8._v41_swa_triton."
+                        "quantize_and_insert_k_cache_cp_byte_sliced"
+                    ) as v41_sliced_writer,
                 ):
                     model._commit_layer_features(
                         layer_idx=0,
@@ -385,20 +399,145 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
                 )
                 if byte_sliced:
                     regular_writer.assert_not_called()
-                    sliced_writer.assert_called_once()
-                    kwargs = sliced_writer.call_args.kwargs
+                    v41_regular_writer.assert_not_called()
+                    chosen_writer = (
+                        v41_sliced_writer if entry_bytes == 528 else sliced_writer
+                    )
+                    other_writer = (
+                        sliced_writer if entry_bytes == 528 else v41_sliced_writer
+                    )
+                    other_writer.assert_not_called()
+                    chosen_writer.assert_called_once()
+                    kwargs = chosen_writer.call_args.kwargs
                     self.assertEqual(kwargs["cp_rank"], 1)
                     self.assertEqual(kwargs["cp_size"], 2)
                     self.assertIs(kwargs["compaction"], attention.compaction)
                     self.assertTrue(
-                        torch.equal(sliced_writer.call_args.args[2], expected_slots)
+                        torch.equal(chosen_writer.call_args.args[2], expected_slots)
                     )
                 else:
                     sliced_writer.assert_not_called()
-                    regular_writer.assert_called_once()
-                    self.assertTrue(
-                        torch.equal(regular_writer.call_args.kwargs["kv"], gathered_kv)
-                    )
+                    v41_sliced_writer.assert_not_called()
+                    if entry_bytes == 528:
+                        regular_writer.assert_not_called()
+                        v41_regular_writer.assert_called_once()
+                        written_kv = v41_regular_writer.call_args.args[0]
+                        self.assertIs(
+                            v41_regular_writer.call_args.args[2], expected_slots
+                        )
+                    else:
+                        v41_regular_writer.assert_not_called()
+                        regular_writer.assert_called_once()
+                        written_kv = regular_writer.call_args.kwargs["kv"]
+                    self.assertTrue(torch.equal(written_kv, gathered_kv))
+
+    def test_v41_proposal_writer_flattens_graph_rows(self) -> None:
+        kv = torch.randn((2, 5, 512), dtype=torch.bfloat16)
+        slots = torch.arange(10, dtype=torch.int32)
+        pool = torch.zeros((2, 136, 528), dtype=torch.uint8)
+        with (
+            patch.object(dspark_model_module, "decode_write_swa_fp8") as v4_writer,
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8._v41_swa_triton."
+                "quantize_and_insert_swa_k_cache"
+            ) as v41_writer,
+        ):
+            dspark_model_module._write_dspark_swa(
+                kv=kv,
+                slot_mapping=slots,
+                swa_pool_3d=pool,
+                bsz=2,
+                q_len=5,
+                head_dim=512,
+            )
+        v4_writer.assert_not_called()
+        v41_writer.assert_called_once()
+        rows, written_pool, written_slots = v41_writer.call_args.args
+        self.assertEqual(rows.shape, (10, 512))
+        self.assertEqual(rows.data_ptr(), kv.data_ptr())
+        self.assertIs(written_pool, pool)
+        self.assertIs(written_slots, slots)
+
+    def test_v41_commit_only_block_keeps_minimal_weights_and_cache_geometry(
+        self,
+    ) -> None:
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.block import Block
+        from rtp_llm.models_py.modules.dsv4.fp8.attention_v41_commit import (
+            CommitOnlyAttentionV41FP8,
+        )
+        from rtp_llm.utils.model_weight import W
+
+        weights = {
+            W.v4_attn_wkv_w: torch.empty((512, 8), dtype=torch.bfloat16),
+            W.v4_attn_wkv_s: torch.ones((1, 1)),
+            W.v4_attn_kv_norm: torch.ones((512,), dtype=torch.bfloat16),
+        }
+        with (
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.attention._v4_fp8_linear",
+                return_value=torch.nn.Identity(),
+            ) as make_linear,
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.attention.precompute_freqs_cis",
+                return_value=torch.ones((16, 32), dtype=torch.complex64),
+            ),
+        ):
+            block = Block(
+                layer_id=0,
+                dim=8,
+                n_heads=64,
+                q_lora_rank=8,
+                head_dim=512,
+                rope_head_dim=64,
+                o_lora_rank=8,
+                o_groups=8,
+                window_size=128,
+                compress_ratio=0,
+                compress_rope_theta=10000.0,
+                rope_theta=10000.0,
+                rope_factor=1.0,
+                beta_fast=32,
+                beta_slow=1,
+                original_seq_len=0,
+                max_batch_size=4,
+                max_seq_len=16,
+                index_n_heads=64,
+                index_head_dim=128,
+                index_topk=512,
+                moe_inter_dim=8,
+                n_routed_experts=1,
+                n_activated_experts=1,
+                n_shared_experts=0,
+                score_func="softmax",
+                route_scale=1.0,
+                swiglu_limit=0.0,
+                n_hash_layers=0,
+                vocab_size=17,
+                hc_mult=4,
+                hc_sinkhorn_iters=1,
+                hc_eps=1e-6,
+                layer_weights=weights,
+                commit_only=True,
+                v41_config={},
+                shared_attention={},
+            )
+        make_linear.assert_called_once()
+        attn = block.attn
+        self.assertIsInstance(attn, CommitOnlyAttentionV41FP8)
+        self.assertEqual(attn._pool_spec[SWA_KV], (torch.uint8, 528))
+        self.assertIsNone(attn.wq_a)
+        self.assertIsNone(attn.wo_b)
+        self.assertIsNone(attn.compressor)
+        self.assertIsNone(block.ffn)
+        for cp_size, stride in ((1, 72192), (4, 18048)):
+            with self.subTest(cp_size=cp_size):
+                raw = torch.zeros((2, stride), dtype=torch.uint8)
+                attn._kv_cache = SimpleNamespace(
+                    get_layer_cache=lambda *_args: SimpleNamespace(kv_cache_base=raw)
+                )
+                attn._cp_ctx = SimpleNamespace(cp_size=cp_size, kv_cache_sharded=True)
+                self.assertEqual(attn._swa_entries_per_block(), 136)
 
 
 if __name__ == "__main__":

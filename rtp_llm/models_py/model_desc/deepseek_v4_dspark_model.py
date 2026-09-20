@@ -68,6 +68,27 @@ from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
+def _write_dspark_swa(*, kv, slot_mapping, swa_pool_3d, bsz, q_len, head_dim):
+    """Proposal and commit share the writer selected by their allocated ABI."""
+    if int(swa_pool_3d.shape[-1]) == 528:
+        from rtp_llm.models_py.modules.dsv4.fp8._v41_swa_triton import (
+            quantize_and_insert_swa_k_cache,
+        )
+
+        quantize_and_insert_swa_k_cache(
+            kv.reshape(bsz * q_len, head_dim), swa_pool_3d, slot_mapping
+        )
+    else:
+        decode_write_swa_fp8(
+            kv=kv,
+            slot_mapping=slot_mapping,
+            swa_pool_3d=swa_pool_3d,
+            bsz=bsz,
+            q_len=q_len,
+            head_dim=head_dim,
+        )
+
+
 class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     """DeepSeek-V4 implementation of the shared DSpark proposer.
 
@@ -487,9 +508,14 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 # only its byte slice of every block — route through the
                 # target pool's CP-sliced FP8 writer (used by the target's
                 # own SWA layers) instead of the plain 3-D writer.
-                from rtp_llm.models_py.modules.dsv4.fp8 import (
-                    _swa_kv_insert_triton as insert_ops,
-                )
+                if int(pool.shape[-1]) == 528:
+                    from rtp_llm.models_py.modules.dsv4.fp8 import (
+                        _v41_swa_triton as insert_ops,
+                    )
+                else:
+                    from rtp_llm.models_py.modules.dsv4.fp8 import (
+                        _swa_kv_insert_triton as insert_ops,
+                    )
 
                 compaction = attn._build_swa_cp_byte_compaction(
                     context_slots,
@@ -512,7 +538,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     compaction=compaction,
                 )
             else:
-                decode_write_swa_fp8(
+                _write_dspark_swa(
                     kv=context_kv,
                     slot_mapping=context_slots,
                     swa_pool_3d=pool,
@@ -669,7 +695,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 entries_per_block,
                 tokens_per_block,
             )
-            decode_write_swa_fp8(
+            _write_dspark_swa(
                 kv=qkv.kv,
                 slot_mapping=query_slots,
                 swa_pool_3d=pool,

@@ -8,8 +8,10 @@ The official split is preserved exactly: compressed-KV rows use group-16
 E4M3 scales (fp4_max 6.0, amax floor 6*2^-9), indexer keys and queries use
 group-32 UE8M0 scales (amax floor 6*2^-126). Pool byte layouts:
 
-  * GLOBAL ``[blocks, entries, 288]`` uint8, row-interleaved: each entry is
-    256B of packed e2m1 payload followed by 32 one-byte E4M3 group scales.
+  * GLOBAL nominal ``[blocks, entries, 288]`` uint8 view over a per-block
+    planar layout: ``entries * 256`` packed e2m1 payload bytes followed by
+    ``entries * 32`` one-byte E4M3 group scales, as consumed by FlashMLA.
+    Gathered transport rows remain ``[payload (256B), scales (32B)]``.
   * INDEX_K nominal ``[blocks, entries, 68]`` uint8 view over a per-block
     planar layout: ``entries * 64`` payload bytes followed by ``entries * 4``
     scale bytes (one packed-UE8M0 int32 per entry). This is DeepGEMM's fused
@@ -100,7 +102,7 @@ def _pack_e2m1_payload(normalized, DIM: tl.constexpr):
 
 
 # ---------------------------------------------------------------------------
-# GLOBAL pool: quantize/insert and dequantize (row-interleaved 288B entries)
+# GLOBAL pool: quantize/insert and dequantize (per-block payload/scale planes)
 # ---------------------------------------------------------------------------
 @triton.jit(do_not_specialize=["T", "block_stride", "num_cache_blocks"])
 def _fp4_global_insert_kernel(
@@ -130,17 +132,18 @@ def _fp4_global_insert_kernel(
     maximum = tl.max(tl.abs(x), axis=1)
     # Training's compressed KV: keep even an all-zero group's scale nonzero.
     maximum = tl.maximum(maximum, 6.0 * (2.0**-9))
-    scale_fp8 = tl.div_rn(maximum, 6.0).to(
-        tl.float8e4nv, fp_downcast_rounding="rtne"
-    )
+    scale_fp8 = tl.div_rn(maximum, 6.0).to(tl.float8e4nv, fp_downcast_rounding="rtne")
     scale = scale_fp8.to(tl.float32)
     normalized = tl.minimum(tl.maximum(tl.div_rn(x, scale[:, None]), -6.0), 6.0)
     payload = _pack_e2m1_payload(normalized, DIM)
 
-    base = cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64) + offset * ROW_BYTES
-    tl.store(base + tl.arange(0, DIM // 2), payload)
+    base = cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64)
+    tl.store(base + offset * (DIM // 2) + tl.arange(0, DIM // 2), payload)
     tl.store(
-        base + DIM // 2 + tl.arange(0, DIM // GROUP),
+        base
+        + cache_block_size * (DIM // 2)
+        + offset * (DIM // GROUP)
+        + tl.arange(0, DIM // GROUP),
         scale_fp8.to(tl.uint8, bitcast=True),
     )
 
@@ -170,10 +173,15 @@ def _fp4_global_dequant_kernel(
         return
     block_idx = slot // cache_block_size
     offset = slot % cache_block_size
-    base = cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64) + offset * ROW_BYTES
-    packed = tl.load(base + channels // 2)
+    base = cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64)
+    packed = tl.load(base + offset * (DIM // 2) + channels // 2)
     code = (packed.to(tl.int32) >> ((channels % 2) * 4)) & 15
-    scale = tl.load(base + DIM // 2 + channels // GROUP)
+    scale = tl.load(
+        base
+        + cache_block_size * (DIM // 2)
+        + offset * (DIM // GROUP)
+        + channels // GROUP
+    )
     scale_value = scale.to(tl.float8e4nv, bitcast=True).to(tl.float32)
     values = _e2m1_to_float(code) * scale_value
     tl.store(out_row, values.to(OUT_DTYPE))
@@ -184,7 +192,7 @@ def quantize_and_insert_k_cache_fp4(
     k_cache: torch.Tensor,  # [num_blocks, block_size, 288] uint8
     slot_mapping: torch.Tensor,  # [T] int64; -1 = skip
 ) -> None:
-    """Quantize post-RoPE compressed keys to FP4 and write 288B pool entries."""
+    """Quantize keys to the GLOBAL pool's per-page payload and scale planes."""
     if slot_mapping.dtype != torch.int64:
         slot_mapping = slot_mapping.to(torch.int64)
     num_tokens = int(slot_mapping.shape[0])
@@ -210,9 +218,11 @@ def quantize_and_insert_k_cache_fp4(
 def _fp4_global_gather_bytes_kernel(
     cache_ptr,  # [num_blocks, block_size, 288] uint8
     slot_mapping_ptr,  # [N] int64; <0 = zero-fill
-    out_ptr,  # [N, 288] uint8 (raw pool bytes)
+    out_ptr,  # [N, 288] uint8 (serialized payload + scale rows)
     N,
     ROW_BYTES: tl.constexpr,
+    PAYLOAD_BYTES: tl.constexpr,
+    SCALE_BYTES: tl.constexpr,
     ARANGE: tl.constexpr,  # power-of-2 cover of ROW_BYTES (triton arange)
     cache_block_size: tl.constexpr,
     block_stride,
@@ -230,8 +240,13 @@ def _fp4_global_gather_bytes_kernel(
         return
     block_idx = slot // cache_block_size
     offset = slot % cache_block_size
-    base = cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64) + offset * ROW_BYTES
-    tl.store(out_row, tl.load(base + cols, mask=mask, other=0), mask=mask)
+    base = cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64)
+    byte_offset = tl.where(
+        cols < PAYLOAD_BYTES,
+        offset * PAYLOAD_BYTES + cols,
+        cache_block_size * PAYLOAD_BYTES + offset * SCALE_BYTES + cols - PAYLOAD_BYTES,
+    )
+    tl.store(out_row, tl.load(base + byte_offset, mask=mask, other=0), mask=mask)
 
 
 def dequantize_k_cache_slots_fp4(
@@ -244,7 +259,9 @@ def dequantize_k_cache_slots_fp4(
     """Per-slot dequant of 288B FP4 entries to ``[N, 512] out_dtype``."""
     N = int(slot_indices.numel())
     if out is None:
-        out = torch.empty((N, FP4_GLOBAL_HEAD_DIM), dtype=out_dtype, device=pool_3d.device)
+        out = torch.empty(
+            (N, FP4_GLOBAL_HEAD_DIM), dtype=out_dtype, device=pool_3d.device
+        )
     if N == 0:
         return out
     slots_i64 = slot_indices.reshape(-1).to(torch.int64).contiguous()
@@ -273,12 +290,13 @@ def gather_k_cache_bytes_fp4(
     pool_3d: torch.Tensor,  # [num_blocks, block_size, 288] uint8
     slot_indices: torch.Tensor,  # [N] int (flat slot ids; <0 = zero-fill)
 ) -> torch.Tensor:
-    """Gather raw 288B FP4 pool entries to a contiguous ``[N, 288]`` uint8 tensor.
+    """Serialize planar FP4 slots into ``[N, 288]`` payload-plus-scale rows.
 
     Byte-first CP transport: each rank reads only its owned slots (others
     zero-filled) so an all-reduce over the gathered bytes — every byte has
     exactly one owner — reassembles the full entry set at one quarter of the
-    BF16 dequantized wire size.
+    BF16 dequantized wire size. The transport rows are independent of the
+    physical pool page layout; each row contains 256 payload and 32 scale bytes.
     """
     N = int(slot_indices.numel())
     out = torch.zeros(
@@ -293,6 +311,8 @@ def gather_k_cache_bytes_fp4(
         out,
         N,
         ROW_BYTES=FP4_GLOBAL_ENTRY_BYTES,
+        PAYLOAD_BYTES=FP4_GLOBAL_HEAD_DIM // 2,
+        SCALE_BYTES=FP4_GLOBAL_HEAD_DIM // FP4_GLOBAL_GROUP,
         ARANGE=triton.next_power_of_2(FP4_GLOBAL_ENTRY_BYTES),
         cache_block_size=int(pool_3d.shape[1]),
         block_stride=int(pool_3d.stride(0)),
@@ -311,19 +331,19 @@ def dequantize_k_cache_bytes_fp4(
     """Dequantize contiguous 288B FP4 entries to ``[N, 512] out_dtype``.
 
     The receiving side of the byte-first transport: the all-reduced raw bytes
-    are viewed as a single-block pool so the existing dequant kernel applies
-    unchanged.
+    are viewed as N single-entry pages. A single-entry planar page has exactly
+    the serialized row layout, so the pool dequant kernel needs no repack.
     """
     N = int(raw_bytes.shape[0])
     if out is None:
-        out = torch.empty((N, FP4_GLOBAL_HEAD_DIM), dtype=out_dtype, device=raw_bytes.device)
+        out = torch.empty(
+            (N, FP4_GLOBAL_HEAD_DIM), dtype=out_dtype, device=raw_bytes.device
+        )
     if N == 0:
         return out
-    pool_view = raw_bytes.view(1, N, FP4_GLOBAL_ENTRY_BYTES)
+    pool_view = raw_bytes.view(N, 1, FP4_GLOBAL_ENTRY_BYTES)
     slots = torch.arange(N, dtype=torch.int64, device=raw_bytes.device)
-    return dequantize_k_cache_slots_fp4(
-        pool_view, slots, out_dtype=out_dtype, out=out
-    )
+    return dequantize_k_cache_slots_fp4(pool_view, slots, out_dtype=out_dtype, out=out)
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +383,9 @@ def _fp4_indexer_insert_kernel(
     block_base = cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64)
     tl.store(block_base + offset * (D // 2) + tl.arange(0, D // 2), payload)
     tl.store(
-        block_base + cache_block_size * (D // 2) + offset * (D // GROUP)
+        block_base
+        + cache_block_size * (D // 2)
+        + offset * (D // GROUP)
         + tl.arange(0, D // GROUP),
         scale_bytes,
     )
@@ -387,8 +409,10 @@ def _fp4_indexer_gather_kernel(
         return
     slot = tl.load(slot_mapping_ptr + pid).to(tl.int64)
     if slot < 0:
-        tl.store(payload_ptr + pid * (D // 2) + tl.arange(0, D // 2),
-                 tl.zeros((D // 2,), dtype=tl.int8))
+        tl.store(
+            payload_ptr + pid * (D // 2) + tl.arange(0, D // 2),
+            tl.zeros((D // 2,), dtype=tl.int8),
+        )
         tl.store(sf_ptr + pid, 0)
         return
     block_idx = slot // cache_block_size
@@ -396,7 +420,8 @@ def _fp4_indexer_gather_kernel(
     block_base = cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64)
     payload = tl.load(block_base + offset * (D // 2) + tl.arange(0, D // 2))
     sf = tl.load(
-        (block_base + cache_block_size * (D // 2)).to(tl.pointer_type(tl.int32)) + offset
+        (block_base + cache_block_size * (D // 2)).to(tl.pointer_type(tl.int32))
+        + offset
     )
     tl.store(payload_ptr + pid * (D // 2) + tl.arange(0, D // 2), payload.to(tl.int8))
     tl.store(sf_ptr + pid, sf)
@@ -511,7 +536,9 @@ def dequantize_indexer_k_fp4(
     slot_mapping = slot_mapping.contiguous()
     N = slot_mapping.shape[0]
     if out is None:
-        out = torch.empty(N, FP4_INDEXER_HEAD_DIM, dtype=out_dtype, device=kv_cache_packed.device)
+        out = torch.empty(
+            N, FP4_INDEXER_HEAD_DIM, dtype=out_dtype, device=kv_cache_packed.device
+        )
     if N == 0:
         return out
     _OUT_DTYPE = {
@@ -573,7 +600,9 @@ def quantize_rows_fp4(
     """
     shape = x.shape
     rows = x.numel() // FP4_INDEXER_HEAD_DIM
-    payload = torch.empty(rows, FP4_INDEXER_HEAD_DIM // 2, dtype=torch.int8, device=x.device)
+    payload = torch.empty(
+        rows, FP4_INDEXER_HEAD_DIM // 2, dtype=torch.int8, device=x.device
+    )
     sf = torch.empty(rows, dtype=torch.int32, device=x.device)
     if rows:
         _fp4_row_quant_kernel[(rows,)](
