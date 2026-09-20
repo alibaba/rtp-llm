@@ -81,7 +81,10 @@ def _working_directory(path: Path):
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
+        # KVCM listens on the IPv4 wildcard address.  Probing loopback alone
+        # can select a port already occupied on another local interface, which
+        # then makes an otherwise healthy integration server fail its bind.
+        sock.bind(("0.0.0.0", 0))
         return sock.getsockname()[1]
 
 
