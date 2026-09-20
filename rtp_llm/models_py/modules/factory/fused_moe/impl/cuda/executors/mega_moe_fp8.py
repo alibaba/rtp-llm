@@ -22,6 +22,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_weights impo
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.group import (
     get_validated_world_ep_group,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_inputs import (
+    expand_packed_activation_scales,
+)
 from rtp_llm.utils.model_weight import W
 
 _BUFFER_CACHE = {}
@@ -111,6 +114,12 @@ class MegaMoeFp8Executor(FusedMoeExpertExecutor):
             config.moe_inter_dim,
             config.moe_w1_layout,
         )
+        # Routed weights are owned by this backend after packing. Drop the
+        # checkpoint scales from the shared layer dictionary, otherwise the
+        # model/weight manager keep their GPU storage alive alongside l1/l2.
+        # Only release after both conversions succeed; backend changes already
+        # require a model reload because weight storage is repacked in place.
+        del weights[W.moe_s1], weights[W.moe_s2]
         self._weight_ready = torch.cuda.Event()
         self._weight_ready.record(torch.cuda.current_stream())
         self._ready_streams = set()
@@ -268,8 +277,8 @@ class MegaMoeFp8Executor(FusedMoeExpertExecutor):
             # Preserve the existing 128-element input quantization exactly.
             q, sf = DeepepNormalRouterBase._do_quant_fp8_per_block(None, x)
             sym.x[:n].copy_(q)
-            expanded_sf = expand_fp8_scale(sf, n, h)
-            sym.x_sf[:n].copy_(expanded_sf)
+            expand_packed_activation_scales(sym.x_sf, sf)
+            expanded_sf = sym.x_sf[:n]
             if self.uses_shared_expert_gates:
                 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_inputs import (
                     stage_shared_scales,
