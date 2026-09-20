@@ -329,7 +329,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
         if (hasTypedHybridPoolLayout(score_model_config)) {
-            validateDsv4KernelSeqSize(score_config.seq_size_per_block, kernel_seq_size_per_block, "score");
+            validateTypedKernelSeqSize(
+                score_model_config, score_config.seq_size_per_block, kernel_seq_size_per_block, "score");
         } else {
             RTP_LLM_CHECK_WITH_INFO(score_config.seq_size_per_block % kernel_seq_size_per_block == 0,
                                     "score seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
@@ -337,7 +338,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                     kernel_seq_size_per_block);
         }
         if (hasTypedHybridPoolLayout(propose_model_config)) {
-            validateDsv4KernelSeqSize(propose_config.seq_size_per_block, kernel_seq_size_per_block, "propose");
+            validateTypedKernelSeqSize(
+                propose_model_config, propose_config.seq_size_per_block, kernel_seq_size_per_block, "propose");
         } else {
             RTP_LLM_CHECK_WITH_INFO(
                 propose_config.seq_size_per_block % kernel_seq_size_per_block == 0,

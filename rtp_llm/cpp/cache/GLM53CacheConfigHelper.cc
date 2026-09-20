@@ -137,10 +137,11 @@ void GLM53CacheConfigHelper::appendIndexerPools(CacheConfig&             config,
     RTP_LLM_CHECK_WITH_INFO(!indexer_layers.empty(), "GLM-5.3-Flash has no MLA layer owning KPool cache");
 
     const uint32_t indexer_entries = kernel_tokens_per_block / static_cast<uint32_t>(ratio);
-    RTP_LLM_CHECK_WITH_INFO(indexer_entries == 32 || indexer_entries == 64 || indexer_entries == 128,
-                            "GLM-5.3-Flash KPool kernel block must contain 32, 64, or 128 pooled entries, got %u",
+    RTP_LLM_CHECK_WITH_INFO(indexer_entries == 16 || indexer_entries == 32 || indexer_entries == 64
+                                || indexer_entries == 128,
+                            "GLM-5.3-Flash KPool kernel block must contain 16, 32, 64, or 128 pooled entries, got %u",
                             indexer_entries);
-    const uint32_t fixed_cp_size     = fixedRegionCpSize(parallelism_config);
+    const uint32_t fixed_cp_size = fixedRegionCpSize(parallelism_config);
     const uint32_t full_state_entries =
         alignUpToMultiple(evenCeil(static_cast<uint32_t>(ratio + gen_num_per_cycle)), fixed_cp_size);
     const bool     prefill_cp_sliced = parallelism_config.role_type == RoleType::PREFILL && fixed_cp_size > 1;

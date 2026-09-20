@@ -304,6 +304,45 @@ TEST(GLM53CacheConfigTest, EagleMtpOwnsIndependentTypedPools) {
     EXPECT_NE(local_state_group, state_group);
 }
 
+TEST(GLM53CacheConfigTest, EagleSmallPagesUseGlmValidationForBothModels) {
+    for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        auto score                         = makeGlm53Config();
+        score.attn_config.tokens_per_block = score.attn_config.kernel_tokens_per_block = 64;
+        auto propose                                                                   = score;
+        propose.num_layers                                                             = 1;
+        propose.hybrid_attention_config.hybrid_attention_types                         = {HybridAttentionType::NONE};
+        propose.attn_config.indexer_layer_ids                                          = {0};
+        propose.linear_attention_config                                                = {};
+        ParallelismConfig pc;
+        pc.role_type = role;
+        pc.tp_size   = role == RoleType::PREFILL ? 4 : 1;
+        pc.dp_size   = role == RoleType::DECODE ? 4 : 1;
+        pc.ep_size = pc.world_size            = 4;
+        pc.prefill_cp_config.kv_cache_sharded = true;
+        pc.prefill_cp_config.prefill_cp_size  = 4;
+        pc.prefill_cp_config.method = role == RoleType::DECODE ? CPRotateMethod::PREFILL_CP : CPRotateMethod::DISABLED;
+        RuntimeConfig runtime;
+        auto          kv      = makeKvConfig();
+        kv.seq_size_per_block = kv.kernel_seq_size_per_block = 64;
+        kv.test_block_num                                    = 8;
+        SpeculativeExecutionConfig sp;
+        sp.type              = SP_TYPE_EAGLE;
+        sp.gen_num_per_cycle = 3;
+        auto config = CacheConfigCreator::createSpConfig(score, propose, pc, runtime, kv, sp, std::nullopt, true, true);
+        EXPECT_EQ(config.seq_size_per_block, 64u);
+        EXPECT_EQ(config.kernel_seq_size_per_block, 64u);
+        ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+        const auto& draft = *config.mtp_sub_configs[0];
+        EXPECT_EQ(draft.kernel_seq_size_per_block, 64u);
+        const auto region = static_cast<size_t>(KVCacheRegionName::INDEXER_KV);
+        const int  group  = draft.layer_region_to_group_id[0][region];
+        ASSERT_GE(group, 0);
+        auto* indexer = dynamic_cast<DSV4KVSpec*>(draft.cache_specs[group].get());
+        ASSERT_NE(indexer, nullptr);
+        EXPECT_EQ(indexer->entries_per_block, 16u);
+    }
+}
+
 TEST(GLM53CacheConfigTest, SplitPhysicalBlocksScaleOnlyPagedKPool) {
     ParallelismConfig pc;
     auto              kv_config         = makeKvConfig();
@@ -319,6 +358,22 @@ TEST(GLM53CacheConfigTest, SplitPhysicalBlocksScaleOnlyPagedKPool) {
     auto* state = dynamic_cast<DSV4StateSpec*>(config.cache_specs[3].get());
     ASSERT_NE(state, nullptr);
     EXPECT_EQ(config.group_kv_block_stride_bytes[3], state->block_size_bytes());
+}
+
+TEST(GLM53CacheConfigTest, SmallPagesPreserveKPoolAndStateGeometry) {
+    ParallelismConfig pc;
+    auto              kv_config  = makeKvConfig();
+    kv_config.seq_size_per_block = kv_config.kernel_seq_size_per_block = 64;
+    auto model                                                         = makeGlm53Config();
+    model.attn_config.tokens_per_block = model.attn_config.kernel_tokens_per_block = 64;
+    auto  config  = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 3);
+    auto* indexer = dynamic_cast<DSV4KVSpec*>(config.cache_specs[2].get());
+    ASSERT_NE(indexer, nullptr);
+    EXPECT_EQ(indexer->entries_per_block, 16u);
+    EXPECT_EQ(config.group_kv_block_stride_bytes[2], 16u * 132u);
+    auto* state = dynamic_cast<DSV4StateSpec*>(config.cache_specs[3].get());
+    ASSERT_NE(state, nullptr);
+    EXPECT_EQ(state->entries_per_block, 8u);
 }
 
 TEST(GLM53CacheConfigTest, PhysicalMlaSpecIsNotExpandedTwice) {
@@ -348,8 +403,8 @@ TEST(GLM53CacheConfigTest, RejectsInvalidGeometryAndOwnership) {
     bad_owner.attn_config.indexer_layer_ids = {0};
     EXPECT_DEATH(HybridPoolConfigCreator::createConfig(bad_owner, pc, kv_config, false, 0), "");
 
-    kv_config.seq_size_per_block        = 64;
-    kv_config.kernel_seq_size_per_block = 64;
+    kv_config.seq_size_per_block        = 96;
+    kv_config.kernel_seq_size_per_block = 96;
     EXPECT_DEATH(HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 0), "");
 }
 
@@ -462,17 +517,17 @@ TEST(GLM53CacheConfigTest, LinearPoolIsTokenIndependentAndRoleSized) {
 
     prefill_config.finalizeBlockNums(10000, prefill_runtime);
     decode_config.finalizeBlockNums(10000, decode_runtime);
-    EXPECT_EQ(prefill_config.group_block_nums[1], 64u * 3u);
-    EXPECT_EQ(decode_config.group_block_nums[1], 8u * 5u);
-    EXPECT_GE(prefill_config.fixed_pool_reserve_bytes, 64u * 3u * prefill_config.linear_block_size_bytes);
-    EXPECT_GE(decode_config.fixed_pool_reserve_bytes, 8u * 5u * decode_config.linear_block_size_bytes);
+    EXPECT_EQ(prefill_config.group_block_nums[1], 64u * 4u + 1u);
+    EXPECT_EQ(decode_config.group_block_nums[1], 8u * 6u + 1u);
+    EXPECT_GE(prefill_config.fixed_pool_reserve_bytes, (64u * 4u + 1u) * prefill_config.linear_block_size_bytes);
+    EXPECT_GE(decode_config.fixed_pool_reserve_bytes, (8u * 6u + 1u) * decode_config.linear_block_size_bytes);
 
     // Paged MLA/indexer capacity may change with the global token budget, but
     // the LINEAR pool remains bounded only by live-request concurrency.
     prefill_config.finalizeBlockNums(20000, prefill_runtime);
     decode_config.finalizeBlockNums(20000, decode_runtime);
-    EXPECT_EQ(prefill_config.group_block_nums[1], 64u * 3u);
-    EXPECT_EQ(decode_config.group_block_nums[1], 8u * 5u);
+    EXPECT_EQ(prefill_config.group_block_nums[1], 64u * 4u + 1u);
+    EXPECT_EQ(decode_config.group_block_nums[1], 8u * 6u + 1u);
 }
 
 TEST(GLM53CacheConfigTest, LinearRequestPoolBlockOverrideIsAppliedWithLiveRequestFloor) {
@@ -492,7 +547,7 @@ TEST(GLM53CacheConfigTest, LinearRequestPoolBlockOverrideIsAppliedWithLiveReques
     kv_config.linear_request_cache_pool_blocks = 32;
     config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 3);
     config.finalizeBlockNums(10000, runtime);
-    EXPECT_EQ(config.group_block_nums[1], 128u);
+    EXPECT_EQ(config.group_block_nums[1], 193u);
 }
 
 TEST(GLM53CacheConfigTest, DiskCheckpointsReserveTransientBatchesEvenWithSmallPoolOverride) {
@@ -515,23 +570,23 @@ TEST(GLM53CacheConfigTest, DiskCheckpointsReserveTransientBatchesEvenWithSmallPo
         const uint32_t checkpoints = 1024 / (128 * step);
         EXPECT_EQ(config.linear_disk_checkpoint_blocks, checkpoints);
         config.finalizeBlockNums(10000, runtime);
-        EXPECT_EQ(config.group_block_nums[1], 12u + 4u * checkpoints);
+        EXPECT_EQ(config.group_block_nums[1], 13u + 4u * checkpoints);
         kv_config.linear_request_cache_pool_blocks = 1;
         config = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
         config.finalizeBlockNums(10000, runtime);
-        EXPECT_EQ(config.group_block_nums[1], 8u + 4u * checkpoints);
+        EXPECT_EQ(config.group_block_nums[1], 13u + 4u * checkpoints);
     }
     pc.role_type       = RoleType::DECODE;
     auto decode_config = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
     EXPECT_EQ(decode_config.linear_disk_checkpoint_blocks, 0u);
     decode_config.finalizeBlockNums(10000, runtime);
-    EXPECT_EQ(decode_config.group_block_nums[1], 8u);
+    EXPECT_EQ(decode_config.group_block_nums[1], 13u);
     pc.role_type                       = RoleType::PREFILL;
     kv_config.enable_memory_cache_disk = false;
     auto config                        = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
     EXPECT_EQ(config.linear_disk_checkpoint_blocks, 0u);
     config.finalizeBlockNums(10000, runtime);
-    EXPECT_EQ(config.group_block_nums[1], 8u);
+    EXPECT_EQ(config.group_block_nums[1], 13u);
 }
 
 TEST(GLM53CacheConfigTest, OfficialShapeCacheBytesMatchOneMillionTokenAccounting) {

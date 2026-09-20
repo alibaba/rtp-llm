@@ -351,8 +351,8 @@ def setup_default_args(py_env_configs):
         )
 
     # One KPool entry represents four raw tokens. DeepGEMM's paged indexer
-    # accepts 32/64/128 entries per kernel block, so the generic 64-token
-    # default is invalid for GLM-5.3-Flash.
+    # accepts 32/64/128 entries per kernel block. The small-page indexer
+    # supports 16 entries for explicitly selected 64-token cache blocks.
     if py_env_configs.model_args.model_type == "glm5_3_flash":
         kv_config = py_env_configs.kv_cache_config
         if kv_config.seq_size_per_block == 0:
@@ -361,12 +361,14 @@ def setup_default_args(py_env_configs):
         if kv_config.kernel_seq_size_per_block == 0:
             kv_config.kernel_seq_size_per_block = kv_config.seq_size_per_block
         kernel_tokens = kv_config.kernel_seq_size_per_block
-        if (
-            kv_config.seq_size_per_block % kernel_tokens != 0
-            or kernel_tokens // 4 not in (32, 64, 128)
+        if kv_config.seq_size_per_block % kernel_tokens != 0 or kernel_tokens not in (
+            64,
+            128,
+            256,
+            512,
         ):
             raise ValueError(
-                "GLM-5.3-Flash cache blocks require kernel tokens 128, 256, "
+                "GLM-5.3-Flash cache blocks require kernel tokens 64, 128, 256, "
                 "or 512 and seq_size_per_block divisible by the kernel block; "
                 f"got seq_size_per_block={kv_config.seq_size_per_block}, "
                 f"kernel_seq_size_per_block={kernel_tokens}"

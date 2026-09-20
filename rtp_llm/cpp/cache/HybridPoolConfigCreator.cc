@@ -328,11 +328,17 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.use_mla                         = model_config.attn_config.use_mla;
     config.dtype                           = dtype;
     config.linear_step                     = std::max(1, kv_cache_config.linear_step);
-    config.linear_fixed_cap                = std::max(0, kv_cache_config.linear_fixed_cap);
+    config.linear_fixed_cap                 = std::max(0, kv_cache_config.linear_fixed_cap);
     config.linear_request_cache_pool_blocks = kv_cache_config.linear_request_cache_pool_blocks;
+    // Match KVCacheManager::setCPSlotMapper geometry; decode DP ranks with TP1
+    // retain their unsharded Linear block table even when loading CP-prefill KV.
+    config.linear_request_cache_alignment_blocks =
+        parallelism_config.prefill_cp_config.kv_cache_sharded ?
+            static_cast<uint32_t>(std::max<int64_t>(1, parallelism_config.tp_size)) :
+            1;
     config.linear_speculative_reserve_step = gen_num_per_cycle > 0 ? gen_num_per_cycle + 1 : 0;
     config.role_type                       = parallelism_config.role_type;
-    const char* linear_request_cache_env    = std::getenv("ENABLE_LINEAR_ATTN_REQUEST_CACHE");
+    const char* linear_request_cache_env   = std::getenv("ENABLE_LINEAR_ATTN_REQUEST_CACHE");
     config.enable_linear_attention_request_cache =
         linear_request_cache_env != nullptr && std::string(linear_request_cache_env) == "1";
     if (config.role_type != RoleType::DECODE && config.enable_linear_attention_request_cache

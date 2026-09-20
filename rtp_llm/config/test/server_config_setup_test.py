@@ -5,8 +5,8 @@ from unittest.mock import patch
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
-    setup_default_args,
     setup_and_configure_server,
+    setup_default_args,
 )
 from rtp_llm.server.server_args.server_args import setup_args
 
@@ -36,9 +36,24 @@ class GenerateConfigTest(TestCase):
         },
         clear=True,
     )
-    def test_glm53_rejects_kpool_incompatible_cache_block(self):
+    def test_glm53_accepts_small_indexer_cache_pages(self):
         py_env_configs: PyEnvConfigs = setup_args()
-        with self.assertRaisesRegex(ValueError, "kernel tokens 128, 256, or 512"):
+        setup_default_args(py_env_configs)
+        self.assertEqual(py_env_configs.kv_cache_config.seq_size_per_block, 64)
+        self.assertEqual(py_env_configs.kv_cache_config.kernel_seq_size_per_block, 64)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "MODEL_TYPE": "glm5_3_flash",
+            "SEQ_SIZE_PER_BLOCK": "96",
+            "USE_ALL_GATHER": "0",
+        },
+        clear=True,
+    )
+    def test_glm53_rejects_unsupported_indexer_page(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+        with self.assertRaisesRegex(ValueError, "kernel tokens 64, 128, 256, or 512"):
             setup_default_args(py_env_configs)
 
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)

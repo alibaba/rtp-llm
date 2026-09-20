@@ -520,6 +520,78 @@ TEST_F(LinearKVCacheGroupTest, BlockRolloverReclaimsOldStateBeforeAllocatingNewT
     EXPECT_EQ(block_pool->freeBlocksNum(), 7u);
 }
 
+TEST_F(LinearKVCacheGroupTest, RequestPoolHoldsFullBatchAndReservedZeroBlock) {
+    createDevice();
+    for (int concurrency : {1, 65}) {
+        for (int alignment : {1, 4}) {
+            for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+                // Production DP decode uses an unsharded Linear table.
+                if (role == RoleType::DECODE && alignment != 1) {
+                    continue;
+                }
+                for (uint32_t override_blocks : {0u, 1u}) {
+                    CacheConfig cache;
+                    cache.use_independent_block_pools           = true;
+                    cache.enable_linear_attention_request_cache = true;
+                    cache.group_types                           = {CacheGroupType::LINEAR};
+                    cache.group_block_nums                      = {0};
+                    cache.role_type                             = role;
+                    cache.linear_request_cache_alignment_blocks = alignment;
+                    cache.linear_request_cache_pool_blocks      = override_blocks;
+                    cache.linear_speculative_reserve_step       = 4;
+                    RuntimeConfig runtime;
+                    runtime.max_generate_batch_size = concurrency;
+                    cache.finalizeBlockNums(1000, runtime);
+                    auto spec                = makeLinearSpec(4);
+                    cache.cache_specs        = {spec};
+                    cache.global_layer_ids   = {{0, 1}};
+                    cache.block_num          = 1000;
+                    cache.layer_num          = spec->layer_num;
+                    cache.layer_all_num      = spec->layer_num;
+                    cache.dtype              = spec->dtype;
+                    cache.seq_size_per_block = spec->seq_size_per_block;
+                    auto pool_config         = BlockPoolConfigHelper::createConfigForGroup(cache, 0);
+                    auto pool                = std::make_shared<BlockPool>(pool_config);
+                    ASSERT_TRUE(pool->init());
+                    LinearKVCacheGroup group({}, spec, pool, 0);
+                    group.setRequestCacheMode(true);
+                    group.setRequestCacheAlignmentBlocks(alignment);
+                    ASSERT_TRUE(group.init());
+                    std::vector<BlockIds> requests(concurrency);
+                    for (auto& blocks : requests) {
+                        BlockIdxType read_state = NULL_BLOCK_IDX;
+                        if (role == RoleType::PREFILL) {
+                            auto ids = pool->malloc(1);
+                            ASSERT_EQ(ids.size(), 1u);
+                            read_state = ids[0];
+                            BlockIndicesType prefix(alignment, NULL_BLOCK_IDX);
+                            prefix.back() = read_state;
+                            blocks.assign(prefix);
+                        }
+                        const int seq_len = (3 * alignment + 4) * 4 - 1;
+                        const int reserve = role == RoleType::DECODE ? 4 : 0;
+                        ASSERT_TRUE(group.malloc(blocks, seq_len, true, reserve)) << concurrency << ":" << alignment;
+                        // Hybrid allocation visits the same request twice before forward.
+                        ASSERT_TRUE(group.malloc(blocks, seq_len, true, reserve));
+                        if (role == RoleType::DECODE) {
+                            // A rollover keeps one old aligned read state.
+                            ASSERT_TRUE(group.malloc(blocks, seq_len + 4, true, reserve));
+                        }
+                        if (role == RoleType::PREFILL) {
+                            EXPECT_EQ(blocks.blocks()[alignment - 1], read_state);
+                        }
+                    }
+                    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+                    for (auto& blocks : requests) {
+                        group.free(blocks.blocks());
+                    }
+                    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+                }
+            }
+        }
+    }
+}
+
 TEST_F(LinearKVCacheGroupTest, RequestCacheKeepsOnlyLatestAlignedCandidateAndTwoBlockTail) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
