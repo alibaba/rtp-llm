@@ -24,6 +24,13 @@ namespace rtp_llm {
 enum class ModelInputsModelRole;
 
 class ModelInputsLogger;
+class NormalGenerateStream;
+
+std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
+                                                  size_t                 reserved_blocks,
+                                                  const ModelConfig&     model_config,
+                                                  const RuntimeConfig&   runtime_config,
+                                                  const ResourceContext& resource_context);
 
 struct MtpMetricsCollector {
     RtpLLMExecutorMetricsCollector          executor_collector;

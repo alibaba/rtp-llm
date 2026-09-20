@@ -357,7 +357,7 @@ static void applyCacheStrideToModelInput(GptModelInputs& model_input, const Cach
     model_input.kv_scale_stride_bytes = cache_config.kv_scale_stride_bytes;
 }
 
-static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
+std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
                                                             size_t                 reserved_blocks,
                                                             const ModelConfig&     model_config,
                                                             const RuntimeConfig&   runtime_config,

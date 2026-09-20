@@ -4,6 +4,8 @@
 #include <list>
 #include <limits>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -245,6 +247,7 @@ protected:
         params.model_config_ = makeModelConfig();
         params.model_config_.num_layers = 2;
         params.parallelism_config.pp_size = 2;
+        params.parallelism_config.world_size = 2;
         params.parallelism_config.pp_stage_layer_counts = {1, 1};
         params.sp_config.type = SP_TYPE_MTP;
         params.sp_config.gen_num_per_cycle = num_draft_tokens;
@@ -1919,6 +1922,101 @@ TEST_F(PPBatchStreamProcessorTest, EosAndStopKeepSharedStreamTerminationSemantic
     }
 }
 
+TEST_F(PPBatchStreamProcessorTest, FakeStreamsBuildPlansWithoutLocalProposeParams) {
+    for (const auto type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+        for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
+            SCOPED_TRACE("type=" + std::to_string(type) + ", role=" + std::to_string(role));
+            auto params                             = makeMtpParams(3);
+            params.sp_config.type                    = type;
+            params.sp_config.sp_dspark_mask_token_id = 63;
+            params.pd_sep_config.role_type           = role;
+            // The first stage has no local draft model or proposer parameters.
+            auto cache_manager = std::make_shared<KVCacheManager>(
+                test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+            ASSERT_TRUE(cache_manager->init());
+            PPExecutor executor(params, cache_manager, true);
+            ResourceContext resources;
+            resources.cache_manager = cache_manager;
+            resources.role_type     = role;
+            const bool decode   = role == RoleType::DECODE;
+            const auto stream   = decode ?
+                                      PPExecutor::createMinFakeDecodeStream(params.model_config_,
+                                                                            params.runtime_config,
+                                                                            resources,
+                                                                            params.sp_config) :
+                                      PPExecutor::createMinFakePrefillStream(params.model_config_,
+                                                                             params.runtime_config,
+                                                                             resources,
+                                                                             params.sp_config,
+                                                                             role);
+            ASSERT_TRUE(stream->isFakeStream());
+            EXPECT_EQ(stream->isContextStream(), !decode);
+            const auto history = stream->completeTokenIdsVec(0);
+            std::list<GenerateStreamPtr> streams{stream};
+            executor.prepareStreams(streams);
+            auto plan_status = executor.buildPlan(StreamGroups(streams), {});
+            ASSERT_TRUE(plan_status.ok()) << plan_status.status().ToString();
+            const auto plan =
+                pp_serialization::deserializePlan(pp_serialization::serializePlan(plan_status.value(), false));
+            EXPECT_TRUE(plan.model_input.is_fake_stream);
+            EXPECT_FALSE(plan.model_input.skip_run);
+            EXPECT_EQ(plan.is_decode, decode);
+            EXPECT_EQ(plan.model_input.is_target_verify, decode && type != SP_TYPE_NONE);
+            const int64_t token_count = decode && type != SP_TYPE_NONE ? 4 : 1;
+            EXPECT_EQ(plan.model_input.combo_tokens.numel(), token_count);
+
+            // A fake target result must be usable by the draft chain without
+            // logits or per-request sampling state, including on the last stage.
+            PPExecutionResult result;
+            executor.sampleTokens(plan, GptModelOutputs{}, result);
+            EXPECT_TRUE(executor.sampling_states_.empty());
+            if (type != SP_TYPE_NONE) {
+                EXPECT_EQ(result.new_token_ids.sizes().vec(), (std::vector<int64_t>{1, token_count}));
+                EXPECT_EQ(tensorToVector<int32_t>(result.accept_len), (std::vector<int32_t>{int32_t(token_count)}));
+                ASSERT_NE(stream->getSPOutputBuffer(), nullptr);
+                EXPECT_EQ(stream->getSPOutputBuffer()->tokens.sizes().vec(), (std::vector<int64_t>{1, 4}));
+                EXPECT_FALSE(stream->getSPOutputBuffer()->all_probs.defined());
+                EXPECT_FALSE(stream->getSPOutputBuffer()->hidden_states.defined());
+            }
+            EXPECT_EQ(stream->completeTokenIdsVec(0), history);
+        }
+    }
+}
+
+TEST_F(PPBatchStreamProcessorTest, FakeExecutionResultIsReceivedBeforeDiscarding) {
+    auto params = makeMtpParams(3);
+    PPExecutor executor(params, nullptr, true);
+    ResourceContext resources;
+    auto stream = PPExecutor::createMinFakeDecodeStream(
+        params.model_config_, params.runtime_config, resources, params.sp_config);
+    const auto history = stream->completeTokenIdsVec(0);
+    PPExecutor::InflightBatch batch;
+    batch.stream_groups = StreamGroups({stream});
+
+    // The empty fake result cannot be dispatched as a real request result.
+    // A second result detects a receive skipped before the fake early return.
+    PPExecutionResult fake_result;
+    PPExecutionResult next_result;
+    next_result.request_ids = torch::tensor({101}, torch::kInt64);
+    next_result.new_token_ids = intTensor({7}).reshape({1, 1});
+    auto transport = std::make_unique<InMemoryPPTransport>();
+    auto* recorded_transport = transport.get();
+    for (const auto& result : {fake_result, next_result}) {
+        const auto object = pp_serialization::serializeExecutionResult(result);
+        transport->received_tensors.push_back(torch::tensor({object.numel()}, torch::kInt64));
+        transport->received_tensors.push_back(object);
+    }
+    executor.transport_ = std::move(transport);
+
+    ASSERT_TRUE(executor.processExecutionResult(batch).ok());
+    EXPECT_EQ(recorded_transport->receive_index, 2);
+    EXPECT_EQ(stream->completeTokenIdsVec(0), history);
+    const auto received = pp_serialization::deserializeExecutionResult(executor.receiveObject());
+    EXPECT_EQ(tensorToVector<int64_t>(received.request_ids), (std::vector<int64_t>{101}));
+    EXPECT_EQ(tensorToVector<int32_t>(received.new_token_ids), (std::vector<int32_t>{7}));
+    EXPECT_EQ(recorded_transport->receive_index, 4);
+}
+
 TEST_F(PPBatchStreamProcessorTest, MtpPreparePreservesPreparedProposalsAndExpandsFakeTokens) {
     auto params = makeMtpParams(3);
     PPExecutor executor(params, nullptr, true);
@@ -2263,7 +2361,14 @@ TEST_F(PPBatchStreamProcessorTest, NonPositiveSpeculativeWidthIsRejectedAtStartu
     for (const int64_t width : {-1, 0}) {
         SCOPED_TRACE(width);
         params.sp_config.gen_num_per_cycle = width;
-        EXPECT_THROW((PPExecutor(params, nullptr, true)), std::runtime_error);
+        try {
+            PPExecutor executor(params, nullptr, true);
+            FAIL() << "expected non-positive speculative width to be rejected";
+        } catch (const std::runtime_error& e) {
+            EXPECT_NE(std::string(e.what()).find("PP speculative decoding requires a positive gen_num_per_cycle"),
+                      std::string::npos)
+                << e.what();
+        }
     }
 }
 
@@ -2274,6 +2379,7 @@ TEST_F(PPBatchStreamProcessorTest, MtpPlanAcceptsDefaultSingleSequenceAndRejects
     params.model_config_                            = makeModelConfig();
     params.model_config_.num_layers                 = 2;
     params.parallelism_config.pp_size               = 2;
+    params.parallelism_config.world_size            = 2;
     params.parallelism_config.pp_stage_layer_counts = {1, 1};
     params.sp_config.type                           = SP_TYPE_MTP;
     params.sp_config.gen_num_per_cycle              = 1;

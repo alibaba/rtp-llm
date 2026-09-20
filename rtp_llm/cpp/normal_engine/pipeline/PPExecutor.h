@@ -55,6 +55,17 @@ public:
 
     bool updateEplbConfig(const EPLBConfig& config) override;
 
+    static GenerateStreamPtr createMinFakePrefillStream(const ModelConfig&                model_config,
+                                                        const RuntimeConfig&              runtime_config,
+                                                        const ResourceContext&            resource_context,
+                                                        const SpeculativeExecutionConfig& sp_config,
+                                                        RoleType                          role_type);
+
+    static GenerateStreamPtr createMinFakeDecodeStream(const ModelConfig&                model_config,
+                                                       const RuntimeConfig&              runtime_config,
+                                                       const ResourceContext&            resource_context,
+                                                       const SpeculativeExecutionConfig& sp_config);
+
     void setBatchProcessor(std::unique_ptr<PPBatchStreamProcessor> processor) {
         batch_stream_processor_ = std::move(processor);
     }

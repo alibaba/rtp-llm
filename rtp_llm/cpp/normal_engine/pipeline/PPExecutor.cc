@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/normal_engine/pipeline/PPSerialization.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <utility>
 
@@ -19,8 +21,10 @@
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -30,6 +34,53 @@
 namespace rtp_llm {
 
 PPExecutor::ModelFactory PPExecutor::test_model_factory = nullptr;
+
+GenerateStreamPtr PPExecutor::createMinFakePrefillStream(const ModelConfig&                model_config,
+                                                         const RuntimeConfig&              runtime_config,
+                                                         const ResourceContext&            resource_context,
+                                                         const SpeculativeExecutionConfig& sp_config,
+                                                         RoleType                          role_type) {
+    const auto propose_step = sp_config.type == SP_TYPE_NONE ? 0 : sp_config.gen_num_per_cycle;
+    /** Entries reference block 0. PDFUSION also covers the draft proposal window;
+     * a separate P stage only needs one MTP/EAGLE draft forward or a DSpARK commit. */
+    const size_t reserved_blocks = role_type == RoleType::PDFUSION ? propose_step + 1 : 1;
+    return makeFakeStream(1, reserved_blocks, model_config, runtime_config, resource_context);
+}
+
+GenerateStreamPtr PPExecutor::createMinFakeDecodeStream(const ModelConfig&                model_config,
+                                                        const RuntimeConfig&              runtime_config,
+                                                        const ResourceContext&            resource_context,
+                                                        const SpeculativeExecutionConfig& sp_config) {
+    const auto propose_step = sp_config.type == SP_TYPE_NONE ? 0 : sp_config.gen_num_per_cycle;
+    /** Cover target verification and the next draft round, including DSpARK's
+     * proposal window. All entries reference block 0 without allocating real KV blocks. */
+    const size_t reserved_blocks = 2 * (propose_step + 1);
+    auto fake_stream = makeFakeStream(1, reserved_blocks, model_config, runtime_config, resource_context);
+
+    /** Seed [prompt, t0] with a one-token request budget. The initialization may
+     * mark the request done; PP fake execution skips request sampling and dispatch. */
+    StreamUpdateInfo update_info{torch::zeros({1, 1}, torch::kInt32),
+                                 1,
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 false};
+    fake_stream->update(update_info);
+
+    if (sp_config.type != SP_TYPE_NONE) {
+        /** PP verifies immediately; proposals stay separate from the formal history. */
+        auto sp_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_buffer->propose_step = propose_step;
+        sp_buffer->tokens       = torch::zeros({1, propose_step + 1}, torch::kInt32);
+        fake_stream->setSPOutputBuffer(sp_buffer);
+    }
+    return fake_stream;
+}
 
 void PPExecutor::InflightBatch::reset() {
     skip_run         = true;
@@ -93,7 +144,12 @@ void PPExecutor::waitAll(PPTickets& tickets) {
 }
 
 absl::Status PPExecutor::processExecutionResult(InflightBatch& batch) {
+    /** Fake batches still complete the PP round trip before their result is discarded. */
     auto result = pp_serialization::deserializeExecutionResult(receiveObject());
+    if (batch.stream_groups.isFakeStream()) {
+        RTP_LLM_LOG_DEBUG("PP fake batch completed: dp_rank=%ld", parallelism_config_.dp_rank);
+        return absl::OkStatus();
+    }
     return batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result);
 }
 
@@ -120,9 +176,34 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     profile_step_finish_(std::move(profile_step_finish)),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
-        params.parallelism_config.world_rank == 0 && !warm_up_ ? metrics_reporter_ : nullptr)),
+        isFirstStage() && isStageRoot() && !warm_up_ ? metrics_reporter_ : nullptr)),
     wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
-        params.parallelism_config.world_rank == 0 && !warm_up_ ? metrics_reporter_ : nullptr)) {
+        isFirstStage() && isStageRoot() && !warm_up_ ? metrics_reporter_ : nullptr)) {
+    const char* stream_async = std::getenv("RTP_LLM_STREAM_ASYNC");
+    RTP_LLM_CHECK_WITH_INFO(stream_async == nullptr || std::strcmp(stream_async, "1") != 0,
+                            "pipeline parallelism does not support async runner (RTP_LLM_STREAM_ASYNC)");
+    RTP_LLM_CHECK_WITH_INFO(params.sp_config.type == SP_TYPE_NONE || params.sp_config.type == SP_TYPE_MTP
+                                || params.sp_config.type == SP_TYPE_EAGLE || params.sp_config.type == SP_TYPE_DSPARK,
+                            "pipeline parallelism only supports MTP, EAGLE and DSpARK speculative decoding");
+    RTP_LLM_CHECK_WITH_INFO(!params.eplb_config.enable_eplb(), "pipeline parallelism does not support EPLB");
+    RTP_LLM_CHECK_WITH_INFO(!params.ffn_disaggregate_config.enable_ffn_disaggregate,
+                            "pipeline parallelism does not support FFN disaggregation");
+    RTP_LLM_CHECK_WITH_INFO(!parallelism_config_.enable_sp && parallelism_config_.ffn_sp_size == 1,
+                            "pipeline parallelism does not support sequence parallelism");
+    RTP_LLM_CHECK_WITH_INFO(!parallelism_config_.use_ub_comm,
+                            "pipeline parallelism does not support user-buffer communication");
+    RTP_LLM_CHECK_WITH_INFO(role_type_ == RoleType::PDFUSION || role_type_ == RoleType::PREFILL
+                                || role_type_ == RoleType::DECODE,
+                            "pipeline parallelism requires the PDFUSION, PREFILL, or DECODE role");
+    RTP_LLM_CHECK_WITH_INFO(!params.runtime_config.use_batch_decode_scheduler,
+                            "pipeline parallelism does not support BatchDecodeScheduler");
+    RTP_LLM_CHECK_WITH_INFO(params.kv_cache_config.multi_task_prompt.empty()
+                                && params.kv_cache_config.multi_task_prompt_tokens.empty()
+                                && params.kv_cache_config.multi_task_prompt_str.empty(),
+                            "pipeline parallelism does not support multi-task system prompts");
+    const char* device_input = std::getenv("RTP_LLM_DEVICE_INPUT");
+    RTP_LLM_CHECK_WITH_INFO(device_input == nullptr || std::strcmp(device_input, "1") != 0,
+                            "pipeline parallelism does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
 
     RTP_LLM_CHECK_WITH_INFO(!sp_enabled_ || params.sp_config.gen_num_per_cycle > 0,
                             "PP speculative decoding requires a positive gen_num_per_cycle, got %ld",
@@ -748,6 +829,15 @@ void PPExecutor::sampleTokens(const PPExecutionPlan& plan,
     result.request_ids      = plan.sampling_plan.request_ids.to(torch::kCPU).contiguous();
     result.request_errors.assign(stream_count, ErrorInfo::OkStatus());
     result.prompt_logits.resize(stream_count);
+    if (plan.model_input.is_fake_stream) {
+        /** Supply target-result shapes for the draft chain without creating request sampling state. */
+        if (sp_enabled_) {
+            const auto token_count = static_cast<int64_t>(plan.is_decode ? propose_step_ + 1 : 1);
+            result.new_token_ids   = torch::zeros({stream_count, token_count}, torch::kInt32);
+            result.accept_len      = torch::full({stream_count}, token_count, torch::kInt32);
+        }
+        return;
+    }
     batch_stream_processor_->initSamplingStates(plan.sampling_plan, sampling_states_, result);
     if (sp_enabled_ && plan.is_decode) {
         verifyDraftTokens(plan, model_output.logits, result);
@@ -854,10 +944,12 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
 
     schedule_time_us = (schedule_time_us <= 0) ? autil::TimeUtility::currentTimeInMicroSeconds() : schedule_time_us;
 
-    auto tps_active_guard      = tps_reporter_.makeActiveGuard(metrics_reporter_ && isFirstStage() && isStageRoot()
-                                                          && !schedule_output.streams.empty());
-    auto wall_tps_active_guard = wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && isFirstStage() && isStageRoot()
-                                                                    && !schedule_output.streams.empty());
+    const bool report_active = metrics_reporter_ && isFirstStage() && isStageRoot()
+                               && std::any_of(schedule_output.streams.begin(),
+                                              schedule_output.streams.end(),
+                                              [](const auto& stream) { return !stream->isFakeStream(); });
+    auto tps_active_guard      = tps_reporter_.makeActiveGuard(report_active);
+    auto wall_tps_active_guard = wall_tps_reporter_.makeActiveGuard(report_active);
     RTP_LLM_PROFILE_FUNCTION();
 
     /** 0. Admit compatible streams and prepare SP buffers. */
@@ -958,7 +1050,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             PPExecutionResult execution_result;
             if (isStageRoot()) {
                 sampleTokens(plan, model_output, execution_result);
-                if (sp_enabled_) {
+                if (sp_enabled_ && !plan.model_input.is_fake_stream) {
                     clipMtpAcceptedLengths(plan.sampling_plan, execution_result);
                 }
             }
@@ -968,7 +1060,9 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             }
 
             if (isStageRoot()) {
-                advanceSamplingStates(plan.sampling_plan, execution_result);
+                if (!plan.model_input.is_fake_stream) {
+                    advanceSamplingStates(plan.sampling_plan, execution_result);
+                }
                 asyncSendExecutionResult(execution_result, inflight.execution_result_sends);
             }
         }
@@ -990,7 +1084,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
 
         const int64_t tps_execute_time_us =
             autil::TimeUtility::currentTimeInMicroSeconds() - next_batch.schedule_time_us;
-        if (metrics_reporter_ && tps_execute_time_us > 0) {
+        if (metrics_reporter_ && !stream_groups.isFakeStream() && tps_execute_time_us > 0) {
             RtpLLMTokenPSMetricsCollector tps_collector;
             tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
                                        stream_groups.contextExecuteTokenSizeWithCache(),

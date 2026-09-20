@@ -108,39 +108,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
                    params.parallelism_config.world_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
-    if (parallelism_config.pp_size > 1) {
-        const char* stream_async = std::getenv("RTP_LLM_STREAM_ASYNC");
-        RTP_LLM_CHECK_WITH_INFO(stream_async == nullptr || std::strcmp(stream_async, "1") != 0,
-                                "pipeline parallelism does not support async runner (RTP_LLM_STREAM_ASYNC)");
-        RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE || sp_config.type == SP_TYPE_MTP
-                                    || sp_config.type == SP_TYPE_EAGLE || sp_config.type == SP_TYPE_DSPARK,
-                                "pipeline parallelism only supports MTP, EAGLE and DSpARK speculative decoding");
-        RTP_LLM_CHECK_WITH_INFO(!eplb_config.enable_eplb(), "pipeline parallelism does not support EPLB");
-        RTP_LLM_CHECK_WITH_INFO(!ffn_disaggregate_config.enable_ffn_disaggregate,
-                                "pipeline parallelism does not support FFN disaggregation");
-
-        RTP_LLM_CHECK_WITH_INFO(!parallelism_config.enable_sp && parallelism_config.ffn_sp_size == 1,
-                                "pipeline parallelism does not support sequence parallelism");
-        RTP_LLM_CHECK_WITH_INFO(!parallelism_config.use_ub_comm,
-                                "pipeline parallelism does not support user-buffer communication");
-        RTP_LLM_CHECK_WITH_INFO(parallelism_config.world_size
-                                    == parallelism_config.pp_size * parallelism_config.dp_size
-                                           * parallelism_config.tp_size,
-                                "pipeline parallelism requires world_size == pp_size * dp_size * tp_size");
-        RTP_LLM_CHECK_WITH_INFO(pd_sep_config.role_type == RoleType::PDFUSION
-                                    || pd_sep_config.role_type == RoleType::PREFILL
-                                    || pd_sep_config.role_type == RoleType::DECODE,
-                                "pipeline parallelism requires the PDFUSION, PREFILL, or DECODE role");
-        RTP_LLM_CHECK_WITH_INFO(!runtime_config.use_batch_decode_scheduler,
-                                "pipeline parallelism does not support BatchDecodeScheduler");
-        RTP_LLM_CHECK_WITH_INFO(kv_cache_config.multi_task_prompt.empty()
-                                    && kv_cache_config.multi_task_prompt_tokens.empty()
-                                    && kv_cache_config.multi_task_prompt_str.empty(),
-                                "pipeline parallelism does not support multi-task system prompts");
-        RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(),
-                                "pipeline parallelism does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
-        // Multimodal + PP is gated python-side by BaseModel.support_pp().
-    }
     if (!model_config_.output_vocab_ids.empty()) {
         RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE,
                                 "output vocabulary pruning does not support speculative, MTP, or EAGLE engines");
@@ -820,50 +787,63 @@ bool NormalEngine::isDSpark() {
 }
 
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
-    if (propose_params_ && isMTPEagle()) {
-        int        propose_step   = sp_config.gen_num_per_cycle;
-        int        mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
-        const bool is_dspark      = sp_config.type == SP_TYPE_DSPARK;
+    if (parallelism_config.pp_size > 1) {
+        /** PP executes one scheduled phase, so only an empty batch needs a placeholder. */
+        if (!streams.empty()) {
+            return;
+        }
+        if (pd_sep_config.role_type == RoleType::DECODE) {
+            streams.emplace_back(
+                PPExecutor::createMinFakeDecodeStream(model_config_, runtime_config, resource_context_, sp_config));
+        } else {
+            streams.emplace_back(PPExecutor::createMinFakePrefillStream(
+                model_config_, runtime_config, resource_context_, sp_config, pd_sep_config.role_type));
+        }
+    } else if (!isMTPEagle()) {
+        if (streams.empty()) {
+            streams.emplace_back(createMinFakeStream(1));
+        }
+    } else {
+        bool need_prefill = false;
+        bool need_decode  = false;
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
-                if (streams.empty()) {
-                    streams.emplace_back(
-                        MtpExecutor::createMinFakePrefillStream(1, model_config_, runtime_config, resource_context_));
-                }
+                need_prefill = streams.empty();
                 break;
             case RoleType::DECODE:
-                if (streams.empty()) {
-                    streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
-                }
+                need_decode = streams.empty();
                 break;
             case RoleType::PDFUSION: {
                 bool has_prefill = false;
                 bool has_decode  = false;
-                for (auto& stream : streams) {
+                for (const auto& stream : streams) {
                     if (stream->isContextStream()) {
                         has_prefill = true;
                     } else {
                         has_decode = true;
                     }
                 }
-                if (!has_prefill && !runtime_config.use_batch_decode_scheduler) {
-                    streams.emplace_back(
-                        MtpExecutor::createMinFakePrefillStream(1, model_config_, runtime_config, resource_context_));
-                }
-                if (!has_decode) {
-                    streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
-                }
+                need_prefill = !has_prefill && !runtime_config.use_batch_decode_scheduler;
+                need_decode  = !has_decode;
                 break;
             }
             default:
                 RTP_LLM_CHECK_WITH_INFO(false, "invalid role type");
                 break;
         }
-    } else {
-        if (streams.empty()) {
-            streams.emplace_back(createMinFakeStream(1));
+
+        if (need_prefill) {
+            streams.emplace_back(
+                MtpExecutor::createMinFakePrefillStream(1, model_config_, runtime_config, resource_context_));
+        }
+        if (need_decode) {
+            const int mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
+            streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(sp_config.gen_num_per_cycle,
+                                                                        model_config_,
+                                                                        runtime_config,
+                                                                        resource_context_,
+                                                                        mtp_vocab_size,
+                                                                        isDSpark()));
         }
     }
 }
