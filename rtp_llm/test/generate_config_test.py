@@ -6,6 +6,7 @@ from unittest import TestCase, main
 from unittest.mock import Mock, patch
 
 import torch
+from jinja2 import Environment
 from transformers import AutoTokenizer
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -26,17 +27,60 @@ from rtp_llm.config.response_format_compiler import (
 )
 from rtp_llm.config.thinking_mode import normalize_think_mode
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
+from rtp_llm.frontend.tokenizer_factory.tokenizers.qwen_tokenizer import (
+    _QWEN35_DEFAULT_CHAT_TEMPLATE,
+)
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
     QWenTokenizer,
 )
-from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+    ChatMessage,
+    GenerateConfig,
+)
 from rtp_llm.openai.api_datatype import ResponseFormat as OpenAIResponseFormat
+from rtp_llm.openai.api_datatype import RoleEnum
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.openai.renderer_factory import RendererParams
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer
+from rtp_llm.openai.renderers.qwen35_renderer import Qwen35Renderer
 from rtp_llm.ops import SpecialTokens, SpeculativeType
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import GenerateInput
+
+
+class _Qwen35TemplateTokenizer:
+    """Stub tokenizer carrying the real Qwen3.5 chat template.
+
+    That template's assistant tail branches on ``enable_thinking``: only an
+    explicit ``false`` renders the closed empty think block, anything else
+    (including the flag being absent) injects an open ``<think>`` anchor.
+    """
+
+    path = ""
+    chat_template = _QWEN35_DEFAULT_CHAT_TEMPLATE
+
+    def apply_chat_template(self, messages, **kwargs):
+        env = Environment()
+        env.globals["raise_exception"] = self._raise_exception
+        template = env.from_string(self.chat_template)
+        return template.render(messages=messages, **kwargs)
+
+    def encode(self, prompt, **kwargs):
+        return list(range(len(prompt)))
+
+    def decode(self, token_ids):
+        return ""
+
+    def convert_tokens_to_ids(self, token):
+        return []
+
+    def __len__(self):
+        return 4096
+
+    def _raise_exception(self, message):
+        raise ValueError(message)
 
 
 class GenerateConfigTest(TestCase):
@@ -1091,6 +1135,243 @@ class OpenaiGenerateConfigTest(TestCase):
         renderer.apply_chat_completion_constraints = Mock()
         renderer.installs_request_grammar = Mock(return_value=installs_grammar)
         return renderer
+
+    def _make_qwen35_endpoint(self, think_mode="disabled"):
+        """Endpoint over a reasoning renderer whose template branches on
+        ``enable_thinking`` -- the Qwen3.5 shape that rendered the open anchor in
+        production while the deployment was DISABLED."""
+        tokenizer = _Qwen35TemplateTokenizer()
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = think_mode
+        generate_env_config.think_start_tag = "<think>"
+        generate_env_config.think_end_tag = "</think>"
+        renderer = Qwen35Renderer(
+            tokenizer,
+            RendererParams(
+                model_type="qwen35_dense",
+                max_seq_len=1024,
+                eos_token_id=0,
+                stop_word_ids_list=[],
+            ),
+            generate_env_config,
+            RenderConfig(),
+        )
+        endpoint = object.__new__(OpenaiEndpoint)
+        endpoint.tokenizer = tokenizer
+        endpoint.chat_renderer = renderer
+        endpoint.template_renderer = renderer
+        endpoint.generate_env_config = generate_env_config
+        endpoint.stop_words_id_list = []
+        endpoint.stop_words_str_list = []
+        return endpoint, renderer, generate_env_config
+
+    def _render_and_extract(self, endpoint, renderer, request):
+        rendered = endpoint.render_chat(request)
+        config = endpoint._extract_generation_config(
+            request, rendered.input_ids, renderer
+        )
+        return rendered.rendered_prompt, config
+
+    def test_disabled_mode_aligns_template_switch_and_installs_envelope(self):
+        """A DISABLED request that states no template kwargs must not be asked to
+        think by its own template: the injected ``enable_thinking=false`` renders
+        the closed empty block, which in turn stops the request from being exempt
+        from the no-think envelope."""
+        endpoint, renderer, _ = self._make_qwen35_endpoint("disabled")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
+        )
+
+        prompt, config = self._render_and_extract(endpoint, renderer, request)
+
+        self.assertTrue(
+            prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+        )
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.structural_tag["type"], "structural_tag")
+        answer_format = config.structural_tag["format"]
+        self.assertEqual(answer_format["type"], "any_text")
+        self.assertEqual(answer_format["excludes"], ["<think>", "</think>"])
+
+    def test_explicit_enable_thinking_request_keeps_the_open_anchor(self):
+        """The alignment must not override a caller that asked for thinking: the
+        resolved mode is ENABLED, so the template's own anchor stays and the
+        open-anchor exemption still applies."""
+        endpoint, renderer, _ = self._make_qwen35_endpoint("disabled")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            chat_template_kwargs={"enable_thinking": True},
+        )
+
+        prompt, config = self._render_and_extract(endpoint, renderer, request)
+
+        self.assertTrue(prompt.endswith("<|im_start|>assistant\n<think>\n"))
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        # An ENABLED request compiles the reasoning envelope, which closes the
+        # model's think block -- not the no-think one, whose marker is the
+        # ``excludes`` list.
+        reasoning_tag = config.structural_tag["format"]["elements"][0]
+        self.assertEqual(reasoning_tag["end"], "</think>")
+        self.assertNotIn("excludes", reasoning_tag["content"])
+
+    def test_alignment_writes_where_the_renderers_read_the_kwargs(self):
+        """``extra_configs.chat_template_kwargs`` shadows the top-level field in
+        every renderer, so the injected flag has to land in the nested mapping --
+        writing it to the top-level one alone would be a silent no-op."""
+        endpoint, renderer, _ = self._make_qwen35_endpoint("disabled")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            extra_configs=GenerateConfig(chat_template_kwargs={"add_vision_id": True}),
+        )
+
+        prompt, _ = self._render_and_extract(endpoint, renderer, request)
+
+        effective_kwargs = request.get_chat_template_kwargs()
+        self.assertIs(effective_kwargs, request.extra_configs.chat_template_kwargs)
+        self.assertIs(effective_kwargs["enable_thinking"], False)
+        self.assertIsNone(request.chat_template_kwargs)
+        self.assertTrue(prompt.endswith("<think>\n\n</think>\n\n"))
+
+    def test_adaptive_mode_keeps_the_template_think_default(self):
+        """ADAPTIVE lets the model decide, so the template default (open anchor)
+        is the shape the mode is defined on and must not be aligned away."""
+        endpoint, renderer, _ = self._make_qwen35_endpoint("adaptive")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
+        )
+
+        prompt, config = self._render_and_extract(endpoint, renderer, request)
+
+        self.assertTrue(prompt.endswith("<|im_start|>assistant\n<think>\n"))
+        self.assertEqual(config.thinking_mode, ThinkingMode.ADAPTIVE)
+
+    def test_deployment_switch_off_leaves_the_template_anchor_alone(self):
+        """The alignment shares the envelope's rollback switch: with the hardening
+        off, dropping the anchor would push untagged reasoning into the visible
+        reply instead of into reasoning_content."""
+        endpoint, renderer, generate_env_config = self._make_qwen35_endpoint("disabled")
+        generate_env_config.enforce_no_think_on_disabled = False
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
+        )
+
+        prompt, config = self._render_and_extract(endpoint, renderer, request)
+
+        self.assertTrue(prompt.endswith("<|im_start|>assistant\n<think>\n"))
+        self.assertIsNone(config.structural_tag)
+
+    def test_penalty_fields_reach_generate_config(self):
+        """presence/frequency_penalty used to be dropped by the chat path, which
+        left callers unable to ask for anti-repetition through the standard API."""
+        config = self._extract_openai_generation_config(
+            ChatCompletionRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                presence_penalty=1.0,
+                frequency_penalty=0.5,
+                repetition_penalty=1.1,
+            )
+        )
+
+        self.assertEqual(config.presence_penalty, 1.0)
+        self.assertEqual(config.frequency_penalty, 0.5)
+        self.assertEqual(config.repetition_penalty, 1.1)
+
+    def test_absent_penalty_fields_keep_extra_configs_values(self):
+        """None means "not stated by the caller": an unset standard field must not
+        zero out the equivalent value already carried by extra_configs."""
+        config = self._extract_openai_generation_config(
+            ChatCompletionRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                extra_configs=GenerateConfig(
+                    presence_penalty=1.0, frequency_penalty=1.0
+                ),
+            )
+        )
+
+        self.assertEqual(config.presence_penalty, 1.0)
+        self.assertEqual(config.frequency_penalty, 1.0)
+
+    def _count_repetition_risk_warnings(self, mock_logging):
+        return len(
+            [
+                call
+                for call in mock_logging.warning.call_args_list
+                if "anti-repetition is fully neutral" in str(call)
+            ]
+        )
+
+    def test_repetition_collapse_risk_warns_on_neutral_penalties_and_narrow_sampling(
+        self,
+    ):
+        """All three anti-repetition knobs neutral (the defaults) plus greedy-ish
+        decoding is the shape that left the reported repetitions unrecoverable."""
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.01,
+            top_p=0.1,
+        )
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            self._extract_openai_generation_config(request)
+
+        self.assertEqual(self._count_repetition_risk_warnings(mock_logging), 1)
+
+    def test_repetition_collapse_risk_silent_when_anti_repetition_is_set(self):
+        """A caller that turned on any anti-repetition knob is not on the risk
+        surface: the sampler has an escape hatch."""
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.01,
+            top_p=0.1,
+            presence_penalty=1.0,
+        )
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            self._extract_openai_generation_config(request)
+
+        self.assertEqual(self._count_repetition_risk_warnings(mock_logging), 0)
+
+    def test_repetition_collapse_risk_silent_with_no_repeat_ngram(self):
+        """``no_repeat_ngram_size`` is the knob that actually breaks a loop, so a
+        service already carrying it must not be warned about."""
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.01,
+            top_p=0.1,
+            extra_configs=GenerateConfig(no_repeat_ngram_size=4),
+        )
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            self._extract_openai_generation_config(request)
+
+        self.assertEqual(self._count_repetition_risk_warnings(mock_logging), 0)
+
+    def test_repetition_collapse_risk_silent_on_broad_sampling(self):
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.7,
+            top_p=0.9,
+        )
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            self._extract_openai_generation_config(request)
+
+        self.assertEqual(self._count_repetition_risk_warnings(mock_logging), 0)
+
+    def test_repetition_collapse_risk_warns_once_per_deployment(self):
+        """The condition is a configuration shape, so a client that always sends
+        the same risky sampling must not log one line per request."""
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            for _ in range(3):
+                request = ChatCompletionRequest(
+                    messages=[], temperature=0.01, top_p=0.1
+                )
+                endpoint._extract_generation_config(request, input_ids=[1, 2])
+
+        self.assertEqual(self._count_repetition_risk_warnings(mock_logging), 1)
 
     def test_disabled_closed_think_block_installs_no_think_constraint(self):
         """prompt 以闭合 think 块结尾（enable_thinking=false 的模板形态）时，

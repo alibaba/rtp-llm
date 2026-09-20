@@ -2,7 +2,7 @@
     "model_type": "qwen35_moe",
     "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
     "grammar_constraint_only": true,
-    "_comment": "No-think contract for a DISABLED request (production shape: server think_mode=0). thinking_mode=disabled declares this request must not reason, yet a hybrid reasoning checkpoint can still emit a think block on its own and spend the whole max_tokens inside it; the renderer can only re-route text that already exists, so the endpoint keeps the boundary tags out of the grammar (structural_tag: any_text + excludes). Two prompt shapes trigger it -- the template's closed empty block (enable_thinking=false) and templates with no think markup at all; a prompt ending on an OPEN anchor is exempt because the template itself asked the model to think. On this model only the closed-block shape is reachable (the Qwen3.5 template injects an anchor when enable_thinking is absent); the no-markup shape seen on the qwen_3 deployment is covered by generate_config_test instead. Three queries: (1) engine enforces that envelope -- content must contain no <think>/</think>; (2) thinking off still answers -- content must be exactly one digit; (3) production shape with NO caller response_format, where the endpoint compiles the envelope itself -- no-break guard only, because OpenaiComparer skips constraint validation when the query declares no response_format (the auto-compilation contract is covered by generate_config_test and by checking generate_config.structural_tag in /v1/chat/render). Queries (1) and (2) declare exactly the constraint the endpoint compiles for (3) when the caller declares nothing, so the engine-side contract is identical across all three. grammar_constraint_only=true: reasoning_content/usage/timing are model-version-dependent, so validate the constraint only, never golden bytes.",
+    "_comment": "No-think contract for a DISABLED request (production shape: server think_mode=0). thinking_mode=disabled declares this request must not reason, yet a hybrid reasoning checkpoint can still emit a think block on its own and spend the whole max_tokens inside it; the renderer can only re-route text that already exists, so the endpoint keeps the boundary tags out of the grammar (structural_tag: any_text + excludes). Two prompt shapes trigger it -- the template's closed empty block (enable_thinking=false) and templates with no think markup at all; a prompt ending on an OPEN anchor is exempt because the template itself asked the model to think, and the endpoint now aligns that anchor with the resolved mode before rendering (a DISABLED request no longer reaches the template without enable_thinking=false). On this model only the closed-block shape is reachable (the Qwen3.5 template injects an anchor when enable_thinking is absent); the no-markup shape seen on the qwen_3 deployment is covered by generate_config_test instead. Three queries: (1) engine enforces that envelope -- content must contain no <think>/</think>; (2) thinking off still answers -- content must be exactly one digit; (3) production shape with NO caller response_format, where the endpoint compiles the envelope itself -- the fixture declares the expected answer shape through compare_config.expected_response_format, so a reply that spends the budget on prose instead of the digit fails here. Queries (1) and (2) declare exactly the constraint the endpoint compiles for (3) when the caller declares nothing, so the engine-side contract is identical across all three. grammar_constraint_only=true: reasoning_content/usage/timing are model-version-dependent, so validate the constraint only, never golden bytes.",
     "query_result": [
         {
             "endpoint": "/v1/chat/completions",
@@ -131,6 +131,12 @@
                     }
                 }
             },
+            "compare_config": {
+                "expected_response_format": {
+                    "type": "regex",
+                    "pattern": "[012]"
+                }
+            },
             "result": {
                 "choices": [
                     {
@@ -149,9 +155,9 @@
                     "completion_tokens": 0
                 },
                 "aux_info": null,
-                "_comment": "No-break guard: the comparer validates nothing here, but a request that errors out (e.g. the engine rejecting the compiled structural_tag) still fails the case."
+                "_comment": "constraint_only — compare_config.expected_response_format holds the caller-side expectation: the answer must be a single digit within max_tokens. A reply that burns the budget without reaching the digit (the failure mode this case exists for) fails the fullmatch."
             },
-            "_comment": "Production shape: the caller declares no response_format, so the endpoint has to compile the no-think envelope itself (answer-mode prompt + thinking DISABLED on a reasoning renderer). Catches the worst regression of this fix -- a request that no longer gets served because the grammar backend rejects the envelope -- and documents the shape the deployed classifier uses."
+            "_comment": "Production shape: the caller declares no response_format, so the endpoint has to compile the no-think envelope itself (answer-mode prompt + thinking DISABLED on a reasoning renderer) and the only caller-visible contract is the answer shape. Catches both the worst regression of this fix -- a request that no longer gets served because the grammar backend rejects the envelope -- and the diversion failure where the answer is replaced by untagged prose."
         }
     ]
 }

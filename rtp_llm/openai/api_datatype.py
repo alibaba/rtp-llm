@@ -181,9 +181,12 @@ class ChatCompletionRequest(BaseModel):
     response_format: Optional[ResponseFormat] = None
     json_format: Optional[bool] = None
 
-    # ---- These functions are not implemented yet.
-    # presence_penalty: Optional[float] = 0.0
-    # frequency_penalty: Optional[float] = 0.0
+    # Standard OpenAI sampling penalties. None means "not stated by the caller",
+    # so an unset field leaves extra_configs alone instead of zeroing it.
+    presence_penalty: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+    # RTP-specific; OpenAI has no repetition_penalty field.
+    repetition_penalty: Optional[float] = None
     # logit_bias: Optional[Dict[str, float]] = None
 
     # ---- These params are hacked for our framework, not standard.
@@ -263,6 +266,26 @@ class ChatCompletionRequest(BaseModel):
         ):
             return self.extra_configs.chat_template_kwargs
         return self.chat_template_kwargs
+
+    def set_chat_template_kwarg(self, key: str, value: Any) -> None:
+        """Write a template kwarg where the renderers will actually read it.
+
+        ``extra_configs.chat_template_kwargs`` shadows the top-level field in
+        every renderer, so writing to ``self.chat_template_kwargs`` alone would
+        be silently ignored whenever the nested mapping is present. A fresh dict
+        is assigned instead of mutating in place, so a caller-supplied
+        ``extra_configs`` object is never modified behind its owner's back.
+        """
+        if (
+            self.extra_configs is not None
+            and self.extra_configs.chat_template_kwargs is not None
+        ):
+            self.extra_configs.chat_template_kwargs = {
+                **self.extra_configs.chat_template_kwargs,
+                key: value,
+            }
+            return
+        self.chat_template_kwargs = {**(self.chat_template_kwargs or {}), key: value}
 
     def enable_thinking_requested(self):
         if self.enable_thinking is True:

@@ -337,10 +337,21 @@ class OpenaiComparer(BaseComparer):
         Validates the constraint (regex / json_schema / structural_tag), not golden
         bytes. Raises SmokeException on any violation so the case fails loudly; the
         actual response is already dumped to smoke_actual/ before this runs.
+
+        A query that declares no response_format has no caller grammar to check,
+        but the fixture can still state the shape the answer must take through
+        ``compare_config.expected_response_format``. That is the production shape
+        where the endpoint compiles the constraint itself: the caller did not
+        declare a format, so asserting the answer shape is the only way to catch
+        the budget being spent on something else (prose, a re-opened think block).
         """
         if self.is_stream:
             return  # streaming smoke for grammar isn't used today; keep simple
         response_format = self.qr_info["query"].get("response_format")
+        if not response_format:
+            response_format = self.qr_info.get("compare_config", {}).get(
+                "expected_response_format"
+            )
         if not response_format:
             return
         try:

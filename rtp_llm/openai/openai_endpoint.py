@@ -68,6 +68,11 @@ _INT32_MAX = 2_147_483_647
 _THINK_WARN_LOCK = threading.Lock()
 _THINK_WARN_CACHE_SIZE = 128
 
+# Decoding this narrow on a distribution peaked at one token has no way out of a
+# repetition loop unless the caller asked for anti-repetition.
+_REPETITION_RISK_MAX_TEMPERATURE = 0.1
+_REPETITION_RISK_MAX_TOP_P = 0.1
+
 
 def _warn_once_per_renderer(
     renderer: CustomChatRenderer, warn_key: tuple, message: str, *args: Any
@@ -100,6 +105,13 @@ def _request_value_digest(value: Any) -> Optional[bytes]:
     if value is None:
         return None
     return hashlib.sha256(str(value).encode("utf-8", errors="replace")).digest()
+
+
+# Sampling knobs accept a scalar or one value per returned sequence.
+def _as_values(value: Any) -> List[Any]:
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
 
 
 def _enabled_without_anchor_warn_key(
@@ -494,6 +506,53 @@ class OpenaiEndpoint(object):
                     stop_word_ids.append(list(token_ids))
         return stop_word_ids
 
+    def _warn_on_repetition_collapse_risk(
+        self, config: GenerateConfig, renderer: CustomChatRenderer
+    ) -> None:
+        """Flag the sampling configuration that leaves a repetition loop unrecoverable.
+
+        A single-token loop is a property of the model's distribution on its
+        prompt, so no sampler setting prevents one from starting; the
+        anti-repetition knobs only decide whether the model can leave it. With all
+        of them neutral -- which is the default -- and greedy-ish decoding there is
+        no way out at all, and ``no_repeat_ngram`` is the one that breaks the loop
+        in practice. Warned once per deployment rather than per request: this is a
+        configuration shape, not a property of an individual prompt.
+        """
+        if any(size and size > 0 for size in _as_values(config.no_repeat_ngram_size)):
+            return
+        if any(penalty != 1 for penalty in _as_values(config.repetition_penalty)):
+            return
+        if any(penalty != 0 for penalty in _as_values(config.presence_penalty)):
+            return
+        if any(penalty != 0 for penalty in _as_values(config.frequency_penalty)):
+            return
+        greedy_ish = (
+            any(
+                temperature <= _REPETITION_RISK_MAX_TEMPERATURE
+                for temperature in _as_values(config.temperature)
+            )
+            or any(
+                top_p <= _REPETITION_RISK_MAX_TOP_P
+                for top_p in _as_values(config.top_p)
+            )
+            or any(top_k == 1 for top_k in _as_values(config.top_k))
+        )
+        if not greedy_ish:
+            return
+        _warn_once_per_renderer(
+            renderer,
+            ("repetition_collapse_risk",),
+            "anti-repetition is fully neutral (repetition_penalty=1, "
+            "presence_penalty=0, frequency_penalty=0, no_repeat_ngram_size unset) "
+            "while decoding is greedy-ish (temperature<=%s, top_p<=%s or top_k=1): "
+            "if the model's distribution peaks on a single token, nothing in this "
+            "configuration can break the repetition loop. Set no_repeat_ngram_size "
+            "or one of the penalties on this service.",
+            _REPETITION_RISK_MAX_TEMPERATURE,
+            _REPETITION_RISK_MAX_TOP_P,
+        )
+
     def _extract_generation_config(
         self,
         request: ChatCompletionRequest,
@@ -525,6 +584,13 @@ class OpenaiEndpoint(object):
             config.top_p = request.top_p
         if request.top_k != None:
             config.top_k = request.top_k
+        if request.presence_penalty is not None:
+            config.presence_penalty = request.presence_penalty
+        if request.frequency_penalty is not None:
+            config.frequency_penalty = request.frequency_penalty
+        if request.repetition_penalty is not None:
+            config.repetition_penalty = request.repetition_penalty
+        self._warn_on_repetition_collapse_risk(config, renderer)
         if request.n != None:
             config.num_return_sequences = request.n
         request_stop_words_list = request.stop if request.stop != None else []
@@ -919,10 +985,37 @@ class OpenaiEndpoint(object):
             generate_config=gen_config,
         )
 
+    def _align_template_thinking_switch(
+        self, chat_request: ChatCompletionRequest, renderer: CustomChatRenderer
+    ) -> None:
+        """Make the template's think anchor agree with the resolved mode.
+
+        DISABLED is resolved on this side only: renderers hand the request's own
+        template kwargs to ``apply_chat_template``, so a template that branches on
+        ``enable_thinking`` (the Qwen3.5 family) still injects an open ``<think>``
+        anchor unless the caller happened to pass the flag. The prompt then asks
+        for the very reasoning the deployment forbids, and the open anchor also
+        makes the request exempt from the no-think envelope -- so the model spends
+        the caller's whole budget thinking. Injecting ``false`` before rendering
+        closes that window. Templates without an ``enable_thinking`` branch ignore
+        the kwarg.
+
+        Gated on the same deployment switch as the envelope: with the hardening
+        off, removing the anchor would also remove the one signal that routes the
+        model's reasoning into ``reasoning_content``, turning invisible thinking
+        into visible prose.
+        """
+        if not self.generate_env_config.enforce_no_think_on_disabled:
+            return
+        if renderer.resolve_thinking_mode(chat_request) != ThinkingMode.DISABLED:
+            return
+        chat_request.set_chat_template_kwarg("enable_thinking", False)
+
     def render_chat(self, chat_request: ChatCompletionRequest):
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
+        self._align_template_thinking_switch(chat_request, renderer)
         prepopulate_str = ""
         if len(chat_request.messages) > 0 and chat_request.messages[-1].partial:
             prepopulate_str = str(chat_request.messages[-1].content)
