@@ -1,7 +1,7 @@
-from collections.abc import Mapping
-from dataclasses import dataclass
 import logging
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
@@ -439,7 +439,6 @@ class Qwen4ExpModel(Qwen35Model):
         super().__init__(*args, **kwargs)
         self.ple_layers = nn.ModuleDict()
         self._ple_target_transaction: Optional[_PLETargetTransaction] = None
-        self.register_buffer("_mtp_target_hidden_states", None, persistent=False)
         self._capture_mtp_target_hidden = bool(getattr(self.config, "is_mtp", False))
         if getattr(self.config, "enable_qwen4_ple", False):
             self._build_ple_layers()
