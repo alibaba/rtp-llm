@@ -8,14 +8,25 @@ This reproduces the best configuration measured on 2026-09-11. The manual target
 | Role | Physical GPU | Settings |
 | --- | --- | --- |
 | E0/E1 | 5 / 0 | Two independent single-GPU services, TP1/DP1, embedding batch 1 |
-| P | 1-4 | TP1/DP4/EP4, DeepEP Normal, eager, token budget 20000, reserve 24576 MiB |
+| P | 1-4 | TP1/DP4/EP4, MegaMoE FP8 with shared expert, eager, at most 2 context requests per worker, default token budgets, reserve 24576 MiB |
 | D | 6-7 | TP1/DP2/EP2, DeepEP Low-Latency, CUDA Graph, explicit KV 49152 MiB per worker |
 
 Client concurrency is 96 across the whole pipeline. Each D worker has concurrency_limit=96.
 D graph capture sizes: 1,2,4,8,16,32,48,64,96. D reserve remains 8192 MiB in the command,
 but explicit kv_cache_mem_mb bypasses automatic pool sizing; this is not a claim of an
 actual 8 GiB reserve. BF16 activation, BASE KV; prefix/MM/URL reuse disabled.
-max_seq_len=30720, max_tokens=4096, temperature=0, thinking disabled.
+The launcher leaves max_seq_len at the server/model default (262144 for the
+current checkpoint), and retains max_tokens=4096, temperature=0, thinking disabled.
+Prefill explicitly sets max_context_batch_size=2; this is an upper bound, not a
+minimum batch requirement. Neither max_batch_tokens_size nor
+max_batch_tokens_without_cache is passed by default. The server derives the
+former as max_context_batch_size * max_seq_len (524288 for this checkpoint),
+while the latter defaults to 0 (no extra uncached-token quota).
+The optional --p-token-budget override is retained for explicit experiments.
+result.json records max_seq_len=null and max_seq_len_source=server_default
+because the launcher no longer overrides the server's resolved value.
+These are updated launch defaults; the historical measurements below do not
+validate their performance or memory footprint.
 
 The committed video hook is enabled only by QWEN35_BENCH_NATIVE_VIDEO=1. It decodes
 and samples the original video for every request: 46 frames, grid [23,44,80],
@@ -84,3 +95,19 @@ states. New E RPC instrumentation is outside this reproduction change.
 CPU fixture/hash reconciliation and Python/command checks are performed without GPUs.
 The historical measurements above came from the archived harness; they are not new runs
 of the reorganized entry. GPU smoke has not been rerun while the machine is serving vLLM.
+
+
+### Prefill optimizations
+
+The Prefill role explicitly enables:
+
+- `MOE_STRATEGY=mega_moe_fp8_se`: fuse the gated shared expert into FP8 MegaMoE.
+- `RTP_QWEN35_FUSED_CONV_QKV_NORM=1`: enable convolution + QKV normalization fusion.
+- `RTP_QWEN35_FUSED_GATED_RMSNORM_FP8=1`: enable gated RMSNorm + FP8 quantization fusion.
+
+The shared-expert strategy requires a compatible DeepGEMM runtime; the two
+additional fusions also check their supported shapes and backends. These are
+Prefill-only defaults. Decode retains its existing strategy.
+For normalized softmax routing with 512 experts and unit route scale, local
+batches up to 4096 tokens use fused topk+pack; larger batches explicitly use
+topk512 followed by packing, independently of RTP_FUSED_TOPK_512.

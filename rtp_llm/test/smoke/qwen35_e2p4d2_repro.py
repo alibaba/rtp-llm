@@ -95,7 +95,12 @@ def main():
     parser.add_argument("--max-seconds", type=float, default=900)
     parser.add_argument("--min-samples", type=int, default=32)
     parser.add_argument("--reserve-mb", type=int, default=24576)
-    parser.add_argument("--p-token-budget", type=int, default=20000)
+    parser.add_argument(
+        "--p-token-budget",
+        type=int,
+        default=None,
+        help="Optional prefill token-budget override; omitted uses server defaults",
+    )
     parser.add_argument("--d-seq-limit", type=int, default=96)
     parser.add_argument(
         "--e-batch",
@@ -132,7 +137,6 @@ def main():
     os.environ["TEST_UNDECLARED_OUTPUTS_DIR"] = str(O)
     os.environ["OMP_NUM_THREADS"] = "8"
     assert sorted(get_gpu_ids()) == [0, 1, 2, 3, 4, 5, 6, 7], get_gpu_ids()
-    max_seq = 30720
     roles = [
         ("vit0", [5], "VIT"),
         ("vit1", [0], "VIT"),
@@ -176,7 +180,7 @@ def main():
             )
         ],
     ).model_dump_json()
-    common = f"--use_local 1 --tp_size 1 --act_type BF16 --seq_size_per_block 2048 --kernel_seq_size_per_block 64 --max_seq_len {max_seq} --warm_up 0 --concurrency_limit 96 --reserver_runtime_mem_mb {a.reserve_mb} --reuse_cache 0 --mm_cache_item_num 0 --url_cache_item_num 0 --use_deepep_moe 1 --use_all_gather 0 --use_deepep_internode 0 --fp8_kv_cache 0 --load_cache_timeout_ms 60000"
+    common = f"--use_local 1 --tp_size 1 --act_type BF16 --seq_size_per_block 2048 --kernel_seq_size_per_block 64 --warm_up 0 --concurrency_limit 96 --reserver_runtime_mem_mb {a.reserve_mb} --reuse_cache 0 --mm_cache_item_num 0 --url_cache_item_num 0 --use_deepep_moe 1 --use_all_gather 0 --use_deepep_internode 0 --fp8_kv_cache 0 --load_cache_timeout_ms 60000"
     managers = []
     configs = []
     for name, gpus, role in roles:
@@ -197,7 +201,13 @@ def main():
             "REUSE_CACHE": "0",
             "OMP_NUM_THREADS": "8",
         }
-        env["MOE_STRATEGY"] = "mega_moe_fp8" if role == "PREFILL" else "auto"
+        env["MOE_STRATEGY"] = "auto"
+        if role == "PREFILL":
+            env.update(
+                MOE_STRATEGY="mega_moe_fp8_se",
+                RTP_QWEN35_FUSED_CONV_QKV_NORM="1",
+                RTP_QWEN35_FUSED_GATED_RMSNORM_FP8="1",
+            )
         if role == "DECODE" and a.graph_diagnostic:
             env["LOG_LEVEL"] = "DEBUG"
         if role != "VIT":
@@ -222,15 +232,12 @@ def main():
             args += (
                 " --moe_strategy fp8_per_block_ep_low_latency --use_deepep_low_latency 1 --enable_cuda_graph 1 --decode_capture_config 1,2,4,8,16,32,48,64,96"
                 if role == "DECODE"
-                else " --use_deepep_low_latency 0 --enable_cuda_graph 0 --max_batch_tokens_size 40000 --max_batch_tokens_without_cache 40000"
+                else " --use_deepep_low_latency 0 --enable_cuda_graph 0 --max_context_batch_size 2"
             )
-        if role == "PREFILL":
-            args = args.replace(
-                "--max_batch_tokens_size 40000",
-                "--max_batch_tokens_size " + str(a.p_token_budget),
-            ).replace(
-                "--max_batch_tokens_without_cache 40000",
-                "--max_batch_tokens_without_cache " + str(a.p_token_budget),
+        if role == "PREFILL" and a.p_token_budget is not None:
+            args += (
+                f" --max_batch_tokens_size {a.p_token_budget}"
+                f" --max_batch_tokens_without_cache {a.p_token_budget}"
             )
         if role == "DECODE":
             if a.d_kv_mb is not None:
@@ -282,7 +289,8 @@ def main():
         "status": "STARTING",
         "configs": configs,
         "model": MODEL,
-        "max_seq_len": max_seq,
+        "max_seq_len": None,  # No launcher override; resolved by the server.
+        "max_seq_len_source": "server_default",
         "requests": [],
         "throughput_not_run": True,
         "graph_diagnostic": a.graph_diagnostic,

@@ -1,19 +1,19 @@
 import os
 
-import torch
-from torch import nn
-
 import rtp_llm.ops.compute_ops as compute_ops
+import torch
 from rtp_llm.config.model_config import ModelConfig
+from torch import nn
 
 
 class SelectTopk(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, use_fused_512: bool | None = None):
         super().__init__()
         self.config = config
+        if use_fused_512 is None:
+            use_fused_512 = os.environ.get("RTP_FUSED_TOPK_512", "0") == "1"
         self.select_topk_op = compute_ops.SelectTopkOp(
-            self.config,
-            use_fused_512=os.environ.get("RTP_FUSED_TOPK_512", "0") == "1",
+            self.config, use_fused_512=use_fused_512
         )
 
     def forward(
