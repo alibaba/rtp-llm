@@ -587,7 +587,6 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             {
                 "SMOKE_PREFILL_KV_CACHE_MEM_MB": "56000",
                 "SMOKE_DECODE_KV_CACHE_MEM_MB": "26000",
-                "SMOKE_DECODE_KDA_POOL_BLOCKS": "40",
                 "SMOKE_DECODE_ROLE_ADDRS": (
                     "10.0.0.2:28188:28189,10.0.0.2:28197:28198"
                 ),
@@ -598,7 +597,6 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             _, _, _, command = driver.role_launch_parts(args, "decode")
         self.assertIn("SMOKE_PREFILL_KV_CACHE_MEM_MB=56000", command)
         self.assertIn("SMOKE_DECODE_KV_CACHE_MEM_MB=26000", command)
-        self.assertIn("SMOKE_DECODE_KDA_POOL_BLOCKS=40", command)
         self.assertIn(
             "SMOKE_DECODE_ROLE_ADDRS=10.0.0.2:28188:28189,10.0.0.2:28197:28198",
             command,

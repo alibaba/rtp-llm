@@ -158,8 +158,6 @@ Important optional variables:
                             Prefill cache budget; defaults to 42000 MiB; larger opt-in contexts may need more.
   SMOKE_DECODE_KV_CACHE_MEM_MB
                             Decode hybrid-cache budget; defaults to 29000 MiB.
-  SMOKE_DECODE_KDA_POOL_BLOCKS
-                            Decode KDA block count; defaults to 32.
   SMOKE_DECODE_ROLE_ADDRS   optional single IP:HTTP_PORT:GRPC_PORT address;
                             defaults to the sole Decode DP1 owner derived
                             from DECODE_ENDPOINT.
@@ -380,7 +378,6 @@ smoke_shared_expert_shard=$((smoke_tp_size % 2 == 0))
 # contexts need separate cache-capacity and runtime-headroom validation.
 smoke_prefill_kv_cache_mem_mb="${SMOKE_PREFILL_KV_CACHE_MEM_MB:-42000}"
 smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-29000}"
-smoke_decode_kda_pool_blocks="${SMOKE_DECODE_KDA_POOL_BLOCKS:-32}"
 smoke_long_prefix_target_tokens="${SMOKE_LONG_PREFIX_TARGET_TOKENS:-110000}"
 smoke_long_prefix_tp_size="${SMOKE_LONG_PREFIX_TP_SIZE:-${smoke_prefill_tp_size}}"
 smoke_prefill_page_rr_multi_launch="${SMOKE_PREFILL_PAGE_RR_MULTI_LAUNCH:-0}"
@@ -400,7 +397,6 @@ for size_value in \
     "${smoke_chunk_tokens}" \
     "${smoke_prefill_kv_cache_mem_mb}" \
     "${smoke_decode_kv_cache_mem_mb}" \
-    "${smoke_decode_kda_pool_blocks}" \
     "${smoke_long_prefix_target_tokens}" \
     "${smoke_long_prefix_tp_size}" \
     "${smoke_linear_step}"; do
@@ -700,7 +696,6 @@ verify_role_environment() {
         "${smoke_chunk_tokens}" \
         "${smoke_prefill_kv_cache_mem_mb}" \
         "${smoke_decode_kv_cache_mem_mb}" \
-        "${smoke_decode_kda_pool_blocks}" \
         "${smoke_linear_step}" \
         "${smoke_chunkwise_rdma}" \
         "${sp_checkpoint_real}" \
@@ -727,7 +722,6 @@ import sys
     chunk_tokens,
     prefill_kv_cache_mem_mb,
     decode_kv_cache_mem_mb,
-    decode_kda_pool_blocks,
     linear_step,
     chunkwise_rdma,
     sp_checkpoint_path,
@@ -793,7 +787,6 @@ if role == "prefill":
         "MAX_BATCH_TOKENS_SIZE": "1258291",
         "KV_CACHE_MEM_MB": prefill_kv_cache_mem_mb,
         "REUSE_CACHE": "1",
-        "KIMI_K3_KDA_POOL_BLOCKS": "0",
         "RESERVER_RUNTIME_MEM_MB": "15000",
         "MEGA_MOE_MAX_TOKENS_PER_RANK": str((int(chunk_tokens) + int(tp_size) - 1) // int(tp_size)),
         "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": str(int(int(tp_size) % 2 == 0)),
@@ -812,7 +805,6 @@ else:
         "MAX_BATCH_TOKENS_SIZE": "1468006",
         "KV_CACHE_MEM_MB": decode_kv_cache_mem_mb,
         "REUSE_CACHE": "0",
-        "KIMI_K3_KDA_POOL_BLOCKS": decode_kda_pool_blocks,
         "RESERVER_RUNTIME_MEM_MB": "8000",
         "MEGA_MOE_MAX_TOKENS_PER_RANK": "16",
         "NCCL_MAX_CTAS": "8",
@@ -945,7 +937,6 @@ apply_validated_prefill_profile() {
     export MAX_BATCH_TOKENS_SIZE=1258291
     export KV_CACHE_MEM_MB="${smoke_prefill_kv_cache_mem_mb}"
     export REUSE_CACHE=1
-    export KIMI_K3_KDA_POOL_BLOCKS=0
     export RESERVER_RUNTIME_MEM_MB=15000
     export MEGA_MOE_MAX_TOKENS_PER_RANK="${smoke_mega_tokens}"
     export KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD="${smoke_shared_expert_shard}"
@@ -971,7 +962,6 @@ apply_validated_decode_profile() {
     # Disable graph registration to avoid a collective launch hang on SM103.
     export NCCL_GRAPH_REGISTER=0
     export REUSE_CACHE=0
-    export KIMI_K3_KDA_POOL_BLOCKS="${smoke_decode_kda_pool_blocks}"
     export RESERVER_RUNTIME_MEM_MB=8000
     export MEGA_MOE_MAX_TOKENS_PER_RANK=16
     unset KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD KIMI_K3_PREFILL_CHUNK_TOKENS

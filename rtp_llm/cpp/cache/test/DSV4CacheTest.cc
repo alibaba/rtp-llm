@@ -436,18 +436,66 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolCo
               std::vector<KVCacheRegionName>({KVCacheRegionName::DEFAULT, KVCacheRegionName::DEFAULT}));
 }
 
-TEST(HybridPoolConfigCreatorTest, KimiKdaPoolUsesExplicitBlockCount) {
+TEST(HybridPoolConfigCreatorTest, KimiMtpDecodeKdaPoolScalesWithConcurrency) {
     ParallelismConfig pc;
-    KVCacheConfig     kv_cache_config;
-    kv_cache_config.kimi_k3_kda_pool_blocks = 17;
-    auto config = CacheConfigCreator::createBasicConfig(
-        makeHybridAttentionModelConfig(true), pc, kv_cache_config, false, 0);
+    pc.role_type = RoleType::DECODE;
 
-    config.finalizeBlockNums(101, RuntimeConfig{});
-    ASSERT_EQ(config.groupNums(), 2);
+    auto target       = makeHybridAttentionModelConfig(true);
+    target.model_type = "kimi_k3";
+    auto draft        = target;
+    draft.num_layers  = 1;
+    draft.model_type  = "kimi_k3_mtp";
+    draft.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 1000;
+
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.model_type        = "kimi_k3_mtp";
+    sp_config.gen_num_per_cycle = 3;
+
+    const auto create_config = [&](int concurrency) {
+        RuntimeConfig runtime_config;
+        runtime_config.max_generate_batch_size = concurrency;
+        return CacheConfigCreator::createSpConfig(target,
+                                                  draft,
+                                                  pc,
+                                                  runtime_config,
+                                                  kv_cache_config,
+                                                  sp_config,
+                                                  std::nullopt,
+                                                  true,
+                                                  false);
+    };
+
+    const auto concurrency_16 = create_config(16);
+    ASSERT_GE(concurrency_16.group_block_nums.size(), 2u);
+    EXPECT_EQ(concurrency_16.linear_replay_group_ids, std::vector<int>({1}));
+    EXPECT_EQ(concurrency_16.group_types[1], CacheGroupType::LINEAR);
+    EXPECT_EQ(concurrency_16.group_block_nums[1], 40u);
+
+    const auto concurrency_128 = create_config(128);
+    ASSERT_GE(concurrency_128.group_block_nums.size(), 2u);
+    EXPECT_EQ(concurrency_128.group_block_nums[1], 264u);
+}
+
+TEST(HybridPoolConfigCreatorTest, KimiPrefillKdaPoolKeepsGlobalSizing) {
+    ParallelismConfig pc;
+    pc.role_type = RoleType::PREFILL;
+
+    auto model_config       = makeHybridAttentionModelConfig(true);
+    model_config.model_type = "kimi_k3";
+
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size = 16;
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 101;
+    auto config = CacheConfigCreator::createConfig(model_config, pc, runtime_config, kv_cache_config);
+
     ASSERT_EQ(config.group_block_nums.size(), 2u);
-    EXPECT_EQ(config.group_block_nums[0], 101u);
-    EXPECT_EQ(config.group_block_nums[1], 17u);
+    EXPECT_EQ(config.group_block_nums[1], 101u);
 }
 
 TEST(HybridPoolConfigCreatorTest, HybridAttentionWithoutIndependentPoolKeepsSharedHybridConfig) {

@@ -449,7 +449,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
         .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
-        .def_readwrite("kimi_k3_kda_pool_blocks", &KVCacheConfig::kimi_k3_kda_pool_blocks)
         .def_readwrite("dsv4_fixed_pool_use_memory", &KVCacheConfig::dsv4_fixed_pool_use_memory)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
@@ -532,8 +531,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_prefix_tree_memory_cache,
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
-                                      self.enable_dsv4_state_block_independent_eviction,
-                                      self.kimi_k3_kda_pool_blocks);
+                                      self.enable_dsv4_state_block_independent_eviction);
             },
             [](py::tuple t) {
                 const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
@@ -617,9 +615,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                             if (extra_count >= 6) {
                                 c.prefix_tree_memory_state_swa_pool_ratio      = t[extra_start + 4].cast<int64_t>();
                                 c.enable_dsv4_state_block_independent_eviction = t[extra_start + 5].cast<bool>();
-                            }
-                            if (extra_count >= 7) {
-                                c.kimi_k3_kda_pool_blocks = t[extra_start + 6].cast<uint32_t>();
                             }
                         }
                     }

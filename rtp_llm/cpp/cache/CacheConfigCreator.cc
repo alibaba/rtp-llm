@@ -25,6 +25,35 @@ bool shouldUseHybridPoolLayout(const ModelConfig& model_config) {
                && model_config.hybrid_attention_config.enable_independent_kv_cache_pools);
 }
 
+void configureKimiK3DecodeLinearPool(CacheConfig&             config,
+                                     const ModelConfig&       model_config,
+                                     const ParallelismConfig& parallelism_config,
+                                     const RuntimeConfig&     runtime_config) {
+    if (model_config.model_type != "kimi_k3" || parallelism_config.role_type != RoleType::DECODE
+        || !config.use_independent_block_pools || config.use_typed_cache_regions || config.linear_group_num == 0) {
+        return;
+    }
+
+    constexpr uint64_t kTailBlocksPerStream = 2;
+    constexpr uint64_t kReserveStreams      = 4;
+    RTP_LLM_CHECK_WITH_INFO(runtime_config.max_generate_batch_size > 0,
+                            "Kimi K3 Decode KDA pool requires positive concurrency, got %ld",
+                            static_cast<long>(runtime_config.max_generate_batch_size));
+    const uint64_t concurrency = static_cast<uint64_t>(runtime_config.max_generate_batch_size);
+    const uint64_t pool_blocks = kTailBlocksPerStream * (concurrency + kReserveStreams);
+    RTP_LLM_CHECK_WITH_INFO(pool_blocks <= std::numeric_limits<uint32_t>::max(),
+                            "Kimi K3 Decode KDA pool block count overflows uint32: concurrency=%lu, blocks=%lu",
+                            static_cast<unsigned long>(concurrency),
+                            static_cast<unsigned long>(pool_blocks));
+    config.auto_linear_pool_blocks = static_cast<uint32_t>(pool_blocks);
+    RTP_LLM_LOG_INFO("Kimi K3 Decode KDA pool auto sizing: concurrency=%lu, tail_blocks_per_stream=%lu, "
+                     "reserve_streams=%lu, pool_blocks=%u",
+                     static_cast<unsigned long>(concurrency),
+                     static_cast<unsigned long>(kTailBlocksPerStream),
+                     static_cast<unsigned long>(kReserveStreams),
+                     config.auto_linear_pool_blocks);
+}
+
 size_t steppedBytes(size_t bytes, int step) {
     return (bytes > 0 && step > 1) ? bytes / static_cast<size_t>(step) : bytes;
 }
@@ -189,6 +218,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     uint32_t block_num = 0;
 
     config.linear_step = kv_cache_config.linear_step;
+    configureKimiK3DecodeLinearPool(config, model_config, parallelism_config, runtime_config);
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const auto kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
         if (hasTypedHybridPoolLayout(model_config)) {
@@ -283,6 +313,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         score_model_config, parallelism_config, kv_cache_config, false, sp_config.gen_num_per_cycle);
     CacheConfig propose_config = CacheConfigCreator::createBasicConfig(
         propose_model_config, parallelism_config, kv_cache_config, is_mtp, sp_config.gen_num_per_cycle);
+
+    configureKimiK3DecodeLinearPool(score_config, score_model_config, parallelism_config, runtime_config);
 
 #if USING_CUDA
     if (is_mtp && sp_config.gen_num_per_cycle > 0) {

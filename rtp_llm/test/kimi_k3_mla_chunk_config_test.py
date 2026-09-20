@@ -1,4 +1,3 @@
-import pickle
 import unittest
 from types import SimpleNamespace
 
@@ -13,16 +12,6 @@ from rtp_llm.ops import (
     KvCacheDataType,
     ParallelismConfig,
 )
-
-
-class KimiK3CacheConfigTest(unittest.TestCase):
-
-    def test_kda_pool_cap_survives_spawn_pickle_round_trip(self):
-        config = KVCacheConfig()
-        config.kimi_k3_kda_pool_blocks = 112
-        self.assertEqual(
-            pickle.loads(pickle.dumps(config)).kimi_k3_kda_pool_blocks, 112
-        )
 
 
 class KimiK3PageRRTargetTest(unittest.TestCase):

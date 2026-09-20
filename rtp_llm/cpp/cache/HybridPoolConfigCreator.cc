@@ -349,7 +349,6 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         config.dsv4_hca_state_pool_blocks = kv_cache_config.dsv4_hca_state_pool_blocks;
     } else {
         setupKimiK3CompactLinearSpans(config, parallelism_config);
-        config.kimi_k3_kda_pool_blocks = kv_cache_config.kimi_k3_kda_pool_blocks;
     }
     return config;
 }

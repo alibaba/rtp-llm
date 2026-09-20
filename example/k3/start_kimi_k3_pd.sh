@@ -271,7 +271,6 @@ concurrency_limit="${CONCURRENCY_LIMIT:-2}"
 max_context_batch_size="${MAX_CONTEXT_BATCH_SIZE:-1}"
 reuse_cache="${REUSE_CACHE:-0}"
 linear_step="${LINEAR_STEP:-1}"
-kimi_k3_kda_pool_blocks="${KIMI_K3_KDA_POOL_BLOCKS:-0}"
 if [[ "${role}" == "PREFILL" ]]; then
     default_kv_cache_mem_mb=43000
 else
@@ -337,8 +336,6 @@ for flag_name in \
 done
 [[ "${linear_step}" =~ ^[1-9][0-9]*$ ]] \
     || die "LINEAR_STEP must resolve to a positive integer, got ${linear_step}"
-[[ "${kimi_k3_kda_pool_blocks}" =~ ^[0-9]+$ ]] \
-    || die "KIMI_K3_KDA_POOL_BLOCKS must resolve to a non-negative integer, got ${kimi_k3_kda_pool_blocks}"
 if [[ "${enable_cuda_graph_debug_mode}" == "1" && "${enable_cuda_graph}" != "1" ]]; then
     die "ENABLE_CUDA_GRAPH_DEBUG_MODE=1 requires ENABLE_CUDA_GRAPH=1"
 fi
@@ -600,7 +597,7 @@ echo "  cache blocks:    seq=${seq_size_per_block}, kernel=${kernel_seq_size_per
 echo "  FP8 GEMM:        ${FP8_GEMM:-0}"
 echo "  FP8 KV cache:    ${FP8_KV_CACHE:-0}"
 echo "  FP8 MLA:         ${FP8_MLA:-0}"
-echo "  KDA cache:       native state, linear_step=${linear_step}, kda_pool_blocks=${kimi_k3_kda_pool_blocks}"
+echo "  KDA cache:       native state, linear_step=${linear_step}, pool=auto(2*(concurrency+4))"
 echo "  CUDA Graph:      enabled=${enable_cuda_graph}, debug=${enable_cuda_graph_debug_mode}"
 if [[ -n "${decode_capture_config}" ]]; then
     echo "  Decode captures: ${decode_capture_config}"
@@ -632,7 +629,6 @@ server_args=(
     --int8_kv_cache 0
     --fp8_kv_cache "${FP8_KV_CACHE:-0}"
     --linear_step "${linear_step}"
-    --kimi_k3_kda_pool_blocks "${kimi_k3_kda_pool_blocks}"
     --ssm_state_dtype "${SSM_STATE_DTYPE:-fp32}"
     --warm_up 0
     --reuse_cache "${reuse_cache}"
