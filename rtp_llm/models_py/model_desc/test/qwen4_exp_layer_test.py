@@ -1511,13 +1511,17 @@ class Qwen4ExpPLERuntimeTest(TestCase):
     def test_page_aligned_prefix_prefill_matches_one_full_prefill(self):
         """Prefix reuse: resumed prefills equal the same tokens in one prefill.
 
-        Request 1 prefills two pages; requests 2 and 3 reuse the stored prefix
-        page by page. Each step's outputs -- and therefore the state/context
-        the previous step wrote -- must match the single 32-token prefill.
+        Request 1 prefills three pages; requests 2 and 3 reuse the stored
+        prefix page by page. Each step's outputs -- and therefore the
+        state/context the previous step wrote -- must match the single
+        32-token prefill.
         """
         chunk = self._PAGE
+        # Request 1 writes 24 tokens (terminal page 2) and -- under the
+        # checkpoint contract -- pages 0/1 as well; request 2 reuses the page-1
+        # boundary, so it reads a checkpoint rather than a terminal write.
         steps = (
-            (0, 2 * chunk, 0),
+            (0, 3 * chunk, 0),
             (2 * chunk, chunk, 2 * chunk),
             (3 * chunk, chunk, 3 * chunk),
         )
@@ -1564,7 +1568,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
                 got, hyper[lo : lo + length] + full_out[0, lo : lo + length, :]
             )
 
-    def test_multi_page_ragged_prefill_writes_only_terminal_then_decodes(self):
+    def test_multi_page_ragged_prefill_checkpoints_every_page_then_decodes(self):
         lengths = (self._PAGE + 3, 2 * self._PAGE)
         token_count = sum(lengths)
         ids = torch.arange(1, token_count + 1, dtype=torch.long)
@@ -1603,9 +1607,10 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         expected_contexts = torch.stack(expected_contexts)
         torch.testing.assert_close(got, hyper + torch.cat(expected_outputs, dim=0))
 
-        # Both prompts end on logical page 1. Their page-0 and reserved page-2
-        # rows must remain untouched even though the physical ids are sparse and
-        # differ between the two typed pools.
+        # Both prompts end on logical page 1. Their page-0 rows carry the
+        # intermediate checkpoints (a later request may reuse that boundary),
+        # while the reserved page-2 rows stay untouched even though the
+        # physical ids are sparse and differ between the two typed pools.
         terminal_state_blocks = self.state_blocks[:, 1].to(torch.long)
         terminal_ctx_blocks = self.ctx_blocks[:, 1].to(torch.long)
         torch.testing.assert_close(
@@ -1617,8 +1622,8 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         torch.testing.assert_close(
             self.ctx_base.index_select(0, terminal_ctx_blocks), expected_contexts
         )
-        untouched_state_blocks = self.state_blocks[:, [0, 2]].reshape(-1).to(torch.long)
-        untouched_ctx_blocks = self.ctx_blocks[:, [0, 2]].reshape(-1).to(torch.long)
+        untouched_state_blocks = self.state_blocks[:, [2]].reshape(-1).to(torch.long)
+        untouched_ctx_blocks = self.ctx_blocks[:, [2]].reshape(-1).to(torch.long)
         self.assertEqual(
             int(
                 torch.count_nonzero(
