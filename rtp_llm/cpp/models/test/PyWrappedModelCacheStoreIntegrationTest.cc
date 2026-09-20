@@ -28,6 +28,10 @@ namespace py = pybind11;
 namespace rtp_llm::test {
 
 struct PyWrappedModelTestPeer {
+    static auto splitInputsIntoMicroBatches(PyWrappedModel& model, const GptModelInputs& inputs) {
+        return model.splitInputsIntoMicroBatches(inputs, model.planMicroBatches(inputs));
+    }
+
     static void replaceContextParallelProcessor(PyWrappedModel&                            model,
                                                 std::unique_ptr<IContextParallelProcessor> processor) {
         model.context_parallel_processor_ = std::move(processor);
@@ -127,6 +131,10 @@ LayoutAndBases makeLayout(const CacheConfig& config) {
     GroupedCacheLayerLayout::GroupLayouts layouts;
     std::map<std::string, uintptr_t>      bases;
     for (const auto& group : config.topology().groups()) {
+        if (config.topology().layerIdsForGroup(group.tag).empty()) {
+            layouts.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(config.layer_num)));
+            continue;
+        }
         auto storage =
             torch::zeros({static_cast<int64_t>(kPhysicalBlocks), static_cast<int64_t>(group.kvBlockStrideBytes())},
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
@@ -252,15 +260,15 @@ torch::Tensor pinnedBoolTensor(size_t size, bool value) {
     return tensor;
 }
 
-GptModelInputs makeInputs(const std::vector<int32_t>& input_lengths,
-                          const std::vector<int64_t>& request_ids,
-                          const std::vector<int64_t>& cache_keys,
-                          size_t                      cache_keys_width,
-                          const std::vector<int32_t>& block_ids,
-                          size_t                      group_count,
-                          size_t                      block_table_width,
-                          size_t                      global_tokens_per_block,
-                          size_t                      global_stride_bytes) {
+GptModelInputs makeInputs(const std::vector<int32_t>&     input_lengths,
+                          const std::vector<int64_t>&     request_ids,
+                          const std::vector<int64_t>&     cache_keys,
+                          size_t                          cache_keys_width,
+                          const std::vector<int32_t>&     block_ids,
+                          const std::vector<std::string>& group_tags,
+                          size_t                          block_table_width,
+                          size_t                          global_tokens_per_block,
+                          size_t                          global_stride_bytes) {
     const size_t batch_size = input_lengths.size();
     const size_t token_count =
         static_cast<size_t>(std::accumulate(input_lengths.begin(), input_lengths.end(), int32_t{0}));
@@ -277,15 +285,17 @@ GptModelInputs makeInputs(const std::vector<int32_t>& input_lengths,
     }
 
     GptModelInputs inputs;
-    inputs.combo_tokens      = pinnedTensor(tokens, {static_cast<int64_t>(token_count)});
-    inputs.input_lengths     = pinnedTensor(input_lengths, {static_cast<int64_t>(batch_size)});
-    inputs.sequence_lengths  = pinnedTensor({}, {0});
-    inputs.lm_output_lengths = pinnedTensor(output_lengths, {static_cast<int64_t>(batch_size)});
-    inputs.lm_output_indexes = pinnedTensor(output_indexes, {static_cast<int64_t>(batch_size)});
-    inputs.prefix_lengths    = pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
-    inputs.kv_cache_block_id = pinnedTensor(
-        block_ids,
-        {static_cast<int64_t>(group_count), static_cast<int64_t>(batch_size), static_cast<int64_t>(block_table_width)});
+    inputs.kv_cache_group_tags = group_tags;
+    inputs.combo_tokens        = pinnedTensor(tokens, {static_cast<int64_t>(token_count)});
+    inputs.input_lengths       = pinnedTensor(input_lengths, {static_cast<int64_t>(batch_size)});
+    inputs.sequence_lengths    = pinnedTensor({}, {0});
+    inputs.lm_output_lengths   = pinnedTensor(output_lengths, {static_cast<int64_t>(batch_size)});
+    inputs.lm_output_indexes   = pinnedTensor(output_indexes, {static_cast<int64_t>(batch_size)});
+    inputs.prefix_lengths      = pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
+    inputs.kv_cache_block_id   = pinnedTensor(block_ids,
+                                            {static_cast<int64_t>(group_tags.size()),
+                                             static_cast<int64_t>(batch_size),
+                                             static_cast<int64_t>(block_table_width)});
     inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id.clone().pin_memory();
     inputs.request_id               = pinnedLongTensor(request_ids, {static_cast<int64_t>(batch_size)});
     inputs.request_pd_separation    = pinnedBoolTensor(batch_size, true);
@@ -359,16 +369,15 @@ struct Scenario {
 };
 
 Scenario makeMultiTagScenario() {
-    // Keep topology order different from std::map order so the test catches
-    // accidental group-index routing in place of stable tag routing.
+    // Payload rows deliberately differ from topology order.
     auto config = makeCacheConfig({{"linear", 1, 24}, {"full", 2, 16}});
     auto layout = makeLayout(config);
     auto inputs = makeInputs(/*input_lengths=*/{4},
                              /*request_ids=*/{101},
                              /*cache_keys=*/{1001, 1002, 1003, 1004},
                              /*cache_keys_width=*/4,
-                             /*block_ids=*/{3, 4, 5, 6, 1, 2, -1, -1},
-                             /*group_count=*/2,
+                             /*block_ids=*/{1, 2, -1, -1, 3, 4, 5, 6},
+                             /*group_tags=*/{"full", "linear"},
                              /*block_table_width=*/4,
                              /*global_tokens_per_block=*/2,
                              /*global_stride_bytes=*/24);
@@ -383,7 +392,7 @@ Scenario makeMicroBatchScenario() {
                              /*cache_keys=*/{2101, 0, 2201, 2202, 2301, 0},
                              /*cache_keys_width=*/2,
                              /*block_ids=*/{1, -1, 2, 3, 4, -1},
-                             /*group_count=*/1,
+                             /*group_tags=*/{"default"},
                              /*block_table_width=*/2,
                              /*global_tokens_per_block=*/2,
                              /*global_stride_bytes=*/16);
@@ -400,7 +409,7 @@ Scenario makeContextParallelScenario(size_t tp_rank) {
                              /*cache_keys=*/{3101, 3102, 3103, 3104, 3105, 3106},
                              /*cache_keys_width=*/6,
                              /*block_ids=*/{3, 4, 5, 6, 7, 8, 1, 2, 3, -1, -1, -1},
-                             /*group_count=*/2,
+                             /*group_tags=*/{"linear", "full"},
                              /*block_table_width=*/6,
                              /*global_tokens_per_block=*/1,
                              /*global_stride_bytes=*/24);
@@ -423,7 +432,7 @@ Scenario makeMtpScenario() {
                              /*cache_keys=*/{4101, 4102},
                              /*cache_keys_width=*/2,
                              /*block_ids=*/{1, 2},
-                             /*group_count=*/1,
+                             /*group_tags=*/{"draft"},
                              /*block_table_width=*/2,
                              /*global_tokens_per_block=*/2,
                              /*global_stride_bytes=*/32);
@@ -435,6 +444,93 @@ Scenario makeMtpScenario() {
 }
 
 Scenario makeScenario(const std::string& name) {
+    if (name == "mtp_placeholders" || name == "mtp_placeholders_extra_payload" || name == "mtp_missing_placeholder"
+        || name == "single_model_extra_payload") {
+        const bool single_group = name == "single_model_extra_payload";
+        auto       main_config  = makeCacheConfig({{"unused", 2, 16}, {"draft", 2, 32}, {"other", 2, 24}});
+        auto       draft_config = std::make_shared<CacheConfig>(makeCacheConfig({{"draft", 2, 32}}));
+        if (!single_group) {
+            draft_config->setTopology(main_config.topology().groups(), {LayerBase{kLayerId, {"draft"}}});
+        }
+        auto layout = makeLayout(*draft_config);
+        main_config.mtp_sub_configs.push_back(draft_config);
+        auto inputs = makeInputs(/*input_lengths=*/{4},
+                                 /*request_ids=*/{401},
+                                 /*cache_keys=*/{4101, 4102},
+                                 /*cache_keys_width=*/2,
+                                 /*block_ids=*/{5, 6, 1, 2, 3, 4},
+                                 /*group_tags=*/{"other", "draft", "unused"},
+                                 /*block_table_width=*/2,
+                                 /*global_tokens_per_block=*/2,
+                                 /*global_stride_bytes=*/16);
+        if (name == "mtp_placeholders_extra_payload") {
+            inputs.kv_cache_group_tags.push_back("target_only");
+            inputs.kv_cache_block_id =
+                torch::cat({inputs.kv_cache_block_id, pinnedTensor({7, 0}, {1, 1, 2})}, 0).pin_memory();
+        } else if (name == "mtp_missing_placeholder") {
+            inputs.kv_cache_group_tags = {"other", "draft"};
+            inputs.kv_cache_block_id   = inputs.kv_cache_block_id.narrow(0, 0, 2);
+        }
+        inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id.clone().pin_memory();
+        Scenario scenario{
+            std::move(main_config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
+        scenario.model_id               = 7;
+        scenario.mtp_cache_config_index = 0;
+        return scenario;
+    }
+    if (name == "micro_batch_multi_tag") {
+        auto config = makeCacheConfig({{"linear", 1, 24}, {"full", 2, 16}});
+        auto layout = makeLayout(config);
+        auto inputs = makeInputs(
+            /*input_lengths=*/{2, 4, 2},
+            /*request_ids=*/{201, 202, 203},
+            /*cache_keys=*/{2101, 2102, 0, 0, 2201, 2202, 2203, 2204, 2301, 2302, 0, 0},
+            /*cache_keys_width=*/4,
+            /*block_ids=*/{1, -1, -1, -1, 2, 3, -1, -1, 4, -1, -1, -1, 2, 3, -1, -1, 4, 5, 6, 7, 1, 2, -1, -1},
+            /*group_tags=*/{"full", "linear"},
+            /*block_table_width=*/4,
+            /*global_tokens_per_block=*/1,
+            /*global_stride_bytes=*/24);
+        Scenario scenario{
+            std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
+        scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
+        return scenario;
+    }
+    if (name == "fake_micro_batch") {
+        return makeMultiTagScenario();
+    }
+    if (name == "duplicate_tags" || name == "empty_tag" || name == "missing_tags" || name == "unknown_tag"
+        || name == "physical_group_mismatch" || name == "type_group_mismatch" || name == "multi_group_2d") {
+        auto scenario = makeMultiTagScenario();
+        if (name == "duplicate_tags") {
+            scenario.inputs.kv_cache_group_tags = {"full", "full"};
+        } else if (name == "empty_tag") {
+            scenario.inputs.kv_cache_group_tags = {"full", ""};
+        } else if (name == "missing_tags") {
+            scenario.inputs.kv_cache_group_tags.clear();
+        } else if (name == "unknown_tag") {
+            scenario.inputs.kv_cache_group_tags = {"full", "unknown"};
+        } else if (name == "physical_group_mismatch") {
+            scenario.inputs.kv_cache_block_id = scenario.inputs.kv_cache_block_id.narrow(0, 0, 1);
+        } else if (name == "type_group_mismatch") {
+            scenario.inputs.kv_cache_group_types = torch::zeros({1}, torch::kInt32);
+        } else {
+            scenario.inputs.kv_cache_block_id        = scenario.inputs.kv_cache_block_id[0];
+            scenario.inputs.kv_cache_kernel_block_id = scenario.inputs.kv_cache_kernel_block_id[0];
+        }
+        return scenario;
+    }
+    if (name == "single_group_2d" || name == "single_group_2d_no_tags" || name == "single_group_2d_unknown_tag") {
+        auto scenario                            = makeMtpScenario();
+        scenario.inputs.kv_cache_block_id        = scenario.inputs.kv_cache_block_id.squeeze(0);
+        scenario.inputs.kv_cache_kernel_block_id = scenario.inputs.kv_cache_kernel_block_id.squeeze(0);
+        if (name == "single_group_2d_no_tags") {
+            scenario.inputs.kv_cache_group_tags.clear();
+        } else if (name == "single_group_2d_unknown_tag") {
+            scenario.inputs.kv_cache_group_tags = {"unknown"};
+        }
+        return scenario;
+    }
     if (name == "multi_tag") {
         return makeMultiTagScenario();
     }
@@ -499,9 +595,27 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
     });
 
     const bool cacheless_warmup = scenario_name == "cacheless_warmup";
-    auto       scenario         = makeScenario(cacheless_warmup ? "multi_tag" : scenario_name);
-    auto       cache_store      = std::make_shared<RecordingCacheStore>();
-    auto       manager          = std::make_shared<KVCacheManager>(scenario.manager_config,
+    const bool inspect_split = scenario_name == "micro_batch_split_pinned" || scenario_name == "micro_batch_split_cuda"
+                               || scenario_name == "micro_batch_split_single_group"
+                               || scenario_name == "micro_batch_split_2d";
+    const bool single_group_split =
+        scenario_name == "micro_batch_split_single_group" || scenario_name == "micro_batch_split_2d";
+    const auto input_scenario = inspect_split ? (single_group_split ? "micro_batch" : "micro_batch_multi_tag") :
+                                                (cacheless_warmup ? "multi_tag" : scenario_name);
+    auto       scenario       = makeScenario(input_scenario);
+    if (inspect_split) {
+        scenario.inputs.kv_cache_kernel_block_id.add_(100);
+        scenario.inputs.kv_cache_kernel_block_id.masked_fill_(scenario.inputs.kv_cache_block_id.lt(0), -1);
+        if (scenario_name == "micro_batch_split_cuda") {
+            scenario.inputs.kv_cache_block_id        = scenario.inputs.kv_cache_block_id.cuda();
+            scenario.inputs.kv_cache_kernel_block_id = scenario.inputs.kv_cache_kernel_block_id.cuda();
+        } else if (scenario_name == "micro_batch_split_2d") {
+            scenario.inputs.kv_cache_block_id        = scenario.inputs.kv_cache_block_id.squeeze(0);
+            scenario.inputs.kv_cache_kernel_block_id = scenario.inputs.kv_cache_kernel_block_id.squeeze(0);
+        }
+    }
+    auto cache_store = std::make_shared<RecordingCacheStore>();
+    auto manager     = std::make_shared<KVCacheManager>(scenario.manager_config,
                                                     /*warmup=*/true,
                                                     /*metrics_reporter=*/nullptr,
                                                     KVCacheConfig{},
@@ -543,6 +657,33 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
 
     {
         PyWrappedModel model(params, std::move(py_model));
+        if (inspect_split) {
+            const auto split = PyWrappedModelTestPeer::splitInputsIntoMicroBatches(model, scenario.inputs);
+            py::list   batches;
+            for (const auto& inputs : split.first) {
+                py::dict batch;
+                batch["tags"]          = inputs.kv_cache_group_tags;
+                batch["physical"]      = inputs.kv_cache_block_id;
+                batch["kernel"]        = inputs.kv_cache_kernel_block_id;
+                batch["input_lengths"] = inputs.input_lengths;
+                batches.append(std::move(batch));
+            }
+            py::dict result;
+            result["source_tags"]     = scenario.inputs.kv_cache_group_tags;
+            result["source_physical"] = scenario.inputs.kv_cache_block_id;
+            result["source_kernel"]   = scenario.inputs.kv_cache_kernel_block_id;
+            result["batches"]         = std::move(batches);
+            return result;
+        }
+        if (scenario_name == "fake_micro_batch") {
+            const auto split = PyWrappedModelTestPeer::splitInputsIntoMicroBatches(model, scenario.inputs);
+            py::dict   result;
+            result["real_tags"]             = split.first.at(0).kv_cache_group_tags;
+            result["fake_tags"]             = split.first.at(1).kv_cache_group_tags;
+            result["fake_physical_defined"] = split.first.at(1).kv_cache_block_id.defined();
+            result["fake_kernel_defined"]   = split.first.at(1).kv_cache_kernel_block_id.defined();
+            return result;
+        }
         if (scenario.replace_cp_processor) {
             PyWrappedModelTestPeer::replaceContextParallelProcessor(
                 model, std::make_unique<TestContextParallelProcessor>(scenario.parallelism));
@@ -717,9 +858,10 @@ py::dict runGenerationPrefillCaptureScenario(py::object py_model, const std::str
 py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, bool python_norm) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
-    constexpr int width        = 4;
-    const bool    enable_graph = python_norm;
-    Weights       weights;
+    constexpr int     width             = 4;
+    constexpr int64_t block_table_width = 2;
+    const bool        enable_graph      = python_norm;
+    Weights           weights;
     weights.layers.resize(1);
     auto lm_head            = std::make_shared<DenseWeights>();
     lm_head->kernel         = torch::eye(width, torch::TensorOptions().device(torch::kCUDA).dtype(torch::kBFloat16));
@@ -733,8 +875,7 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
     description.attention_conf.head_num      = 1;
     description.attention_conf.kv_head_num   = 1;
     description.attention_conf.size_per_head = width;
-    auto layout =
-        enable_graph ? std::make_optional(makeLayout(makeCacheConfig({{"full", 4, 64}})).layout) : std::nullopt;
+    auto               layout = std::make_optional(makeLayout(makeCacheConfig({{"full", 4, 64}})).layout);
     GptModelInitParams params{weights, description, layout};
     if (enable_graph) {
         params.cache_manager = std::make_shared<KVCacheManager>(makeCacheConfig({{"full", 4, 64}}),
@@ -743,9 +884,9 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
                                                                 KVCacheConfig{},
                                                                 ParallelismConfig{});
         TORCH_CHECK(params.cache_manager->init(), "custom output test cache manager init failed");
-        params.max_seq_len      = 8;
-        params.hidden_size      = width;
-        params.tokens_per_block = params.kernel_tokens_per_block           = 4;
+        params.max_seq_len                                                 = 8;
+        params.hidden_size                                                 = width;
+        params.kernel_block_table_width                                    = block_table_width;
         params.hw_kernel_config.enable_cuda_graph                          = true;
         params.hw_kernel_config.generation_prefill_cuda_graph_max_requests = 2;
         params.hw_kernel_config.generation_prefill_capture_token_buckets   = {8};
@@ -758,8 +899,8 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
     }
     PyWrappedModel model(params, std::move(py_model));
 
-    auto inputs                     = makeInputs({3, 3}, {1, 2}, {1, 2, 3, 4}, 2, {1, 2, 3, 4}, 1, 2, 4, 64);
-    inputs.combo_tokens             = torch::arange(6, torch::kInt32).pin_memory();
+    auto inputs         = makeInputs({3, 3}, {1, 2}, {1, 2, 3, 4}, 2, {1, 2, 3, 4}, {"full"}, block_table_width, 4, 64);
+    inputs.combo_tokens = torch::arange(6, torch::kInt32).pin_memory();
     inputs.pd_separation            = false;
     inputs.kv_cache_block_id        = inputs.kv_cache_block_id.squeeze(0);
     inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.squeeze(0);

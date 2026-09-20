@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 
@@ -276,6 +277,9 @@ public:
     }
 
     void prepareAttentionInputs(const GptModelInputs& inputs) override {
+        if (input_observer_) {
+            input_observer_(inputs);
+        }
         if (prepare_input_holder.test_data.empty()) {
             return;
         }
@@ -295,6 +299,9 @@ public:
     }
 
     void checkInputs(const GptModelInputs& inputs) {
+        if (input_observer_) {
+            input_observer_(inputs);
+        }
         GptModelInputs expected_inputs = input_holder.get();
         if (expected_is_target_verify_.has_value()) {
             EXPECT_EQ(inputs.is_target_verify, expected_is_target_verify_.value());
@@ -314,6 +321,10 @@ public:
 
     void setInputs(const vector<GptModelInputs>& inputs) {
         input_holder.push(inputs);
+    }
+
+    void setInputObserver(std::function<void(const GptModelInputs&)> observer) {
+        input_observer_ = std::move(observer);
     }
 
     void setPrepareInputs(const vector<GptModelInputs>& inputs) {
@@ -350,17 +361,18 @@ private:
         }
     }
 
-    TestDataHolder<GptModelInputs>            input_holder;
-    TestDataHolder<GptModelInputs>            prepare_input_holder;
-    TestDataHolder<GptModelOutputs>           output_holder;
-    torch::Tensor                             mtp_target_hidden_rows_;
-    size_t                                    forward_count_ = 0;
-    std::optional<bool>                       expected_is_target_verify_;
-    std::string                               publication_error_;
-    std::exception_ptr                        publication_exception_;
-    std::function<void()>                     publication_observer_;
-    std::shared_ptr<std::vector<std::string>> event_log_;
-    std::string                               event_name_;
+    TestDataHolder<GptModelInputs>             input_holder;
+    TestDataHolder<GptModelInputs>             prepare_input_holder;
+    TestDataHolder<GptModelOutputs>            output_holder;
+    torch::Tensor                              mtp_target_hidden_rows_;
+    size_t                                     forward_count_ = 0;
+    std::optional<bool>                        expected_is_target_verify_;
+    std::string                                publication_error_;
+    std::exception_ptr                         publication_exception_;
+    std::function<void()>                      publication_observer_;
+    std::function<void(const GptModelInputs&)> input_observer_;
+    std::shared_ptr<std::vector<std::string>>  event_log_;
+    std::string                                event_name_;
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
@@ -596,7 +608,8 @@ public:
         }
     }
 
-    MtpExecutorComponents createMtpExecutorComponents(const MtpExecutorTestConfig& test_config) {
+    MtpExecutorComponents createMtpExecutorComponents(const MtpExecutorTestConfig& test_config,
+                                                      const CacheConfig*           cache_config_override = nullptr) {
         CustomConfig               config;
         ModelConfig                model_config;
         RuntimeConfig              runtime_config;
@@ -668,6 +681,10 @@ public:
                                                                                   /*warm_up_result=*/std::nullopt,
                                                                                   cache_sp_config);
         cache_config.finalizeBlockNums(local_block_num, params.runtime_config);
+
+        if (cache_config_override != nullptr) {
+            cache_config = *cache_config_override;
+        }
 
         // Create propose model engine init params
         auto mtp_model_params   = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
@@ -756,6 +773,106 @@ public:
         return output;
     }
 };
+
+class MtpCacheStrideTest: public MtpExecutorTest, public ::testing::WithParamInterface<int> {};
+
+TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
+    const bool multiple_groups  = GetParam() != 0;
+    const bool draft_has_linear = GetParam() == 2;
+    auto       make_config      = [](bool with_linear, uint32_t head_size, bool single_layer = false) {
+        auto full   = test::makeMhaSpec("full", 4, TYPE_FP16, 1, head_size);
+        auto config = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 8);
+        if (with_linear) {
+            config.layer_num = single_layer ? 1 : 2;
+            config.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
+                                               {{0}, {single_layer ? 0 : 1}},
+                                               {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                               {"linear", "full"});
+        }
+        auto groups = config.topology().groups();
+        for (auto& group : groups) {
+            if (group.tag == "full") {
+                test::setGroupLayout(group, head_size * 16, head_size * 4);  // bytes/physical block/layer
+            }
+        }
+        config.setTopology(std::move(groups), config.topology().layers());
+        return config;
+    };
+    auto target = make_config(multiple_groups, 3);
+    auto draft  = make_config(draft_has_linear, 1, true);
+    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, 0, target.layer_num));
+    target.finalizeBlockNums(8, RuntimeConfig{});
+    if (multiple_groups && !draft_has_linear) {
+        EXPECT_TRUE(target.mtp_sub_configs[0]->layerIdsForGroup("linear").empty());
+        EXPECT_EQ(target.mtp_sub_configs[0]->groupNums(), 2);  // groups, including placeholder
+    }
+
+    auto         components         = createMtpExecutorComponents(MtpExecutorTestConfig{}, &target);
+    auto*        executor           = components.executor.get();
+    const size_t target_stride      = multiple_groups ? 0 : 48;
+    const size_t target_scale       = multiple_groups ? 0 : 12;
+    const size_t draft_stride       = multiple_groups ? 0 : 16;
+    const size_t draft_scale        = multiple_groups ? 0 : 4;
+    bool         saw_target_prepare = false;
+    bool         saw_draft_prepare  = false;
+    components.fake_target_model->setInputObserver([&](const GptModelInputs& inputs) {
+        saw_target_prepare = true;
+        EXPECT_EQ(inputs.kv_block_stride_bytes, target_stride);
+        EXPECT_EQ(inputs.kv_scale_stride_bytes, target_scale);
+    });
+    components.fake_draft_prefill_model->setInputObserver([&](const GptModelInputs& inputs) {
+        saw_draft_prepare = true;
+        EXPECT_EQ(inputs.kv_block_stride_bytes, draft_stride);
+        EXPECT_EQ(inputs.kv_scale_stride_bytes, draft_scale);
+    });
+    executor->setTargetModel(std::move(components.fake_target_model));
+    executor->setDraftPrefillModel(std::move(components.fake_draft_prefill_model));
+
+    const auto     cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    GptModelInputs input;
+    input.combo_tokens          = torch::zeros({1}, cuda_i32);
+    input.input_lengths         = torch::ones({1}, cuda_i32);
+    input.prefix_lengths        = torch::ones({1}, cuda_i32);
+    input.sequence_lengths      = torch::full({1}, 2, cuda_i32);
+    input.kv_block_stride_bytes = 999;
+    input.kv_scale_stride_bytes = 777;
+    if (executor->useAsyncPrepare()) {
+        executor->launchTargetVerifyPrepareAsync(input, 1);
+        executor->launchDraftPrefillPrepareAsync(input);
+        executor->target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+        executor->draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+        EXPECT_TRUE(saw_target_prepare);
+        EXPECT_TRUE(saw_draft_prepare);
+        EXPECT_EQ(input.kv_block_stride_bytes, 999u);
+        EXPECT_EQ(input.kv_scale_stride_bytes, 777u);
+    }
+
+    executor->broadcastPostRejectionInputs(input);
+    EXPECT_EQ(input.kv_block_stride_bytes, draft_stride);
+    EXPECT_EQ(input.kv_scale_stride_bytes, draft_scale);
+
+    bool saw_proposal = false;
+    components.fake_draft_model->setInputObserver([&](const GptModelInputs& inputs) {
+        saw_proposal = true;
+        EXPECT_EQ(inputs.kv_block_stride_bytes, draft_stride);
+        EXPECT_EQ(inputs.kv_scale_stride_bytes, draft_scale);
+    });
+    components.fake_draft_model->setInputs({input});
+    components.fake_draft_model->setOutputs({GptModelOutputs{}});
+    executor->setDraftModel(std::move(components.fake_draft_model));
+    input.kv_block_stride_bytes = 999;
+    input.kv_scale_stride_bytes = 777;
+    // A non-root proposal forwards inputs without entering root-only sampling.
+    executor->tp_rank_ = 1;
+    StreamGroups                              streams(std::list<GenerateStreamPtr>{});
+    MtpBatchStreamProcessor::DSparkRoundState round;
+    SamplerOutput                             output;
+    int64_t                                   forward_us = 0;
+    executor->runDSparkProposal(input, streams, round, output, forward_us);
+    EXPECT_TRUE(saw_proposal);
+}
+
+INSTANTIATE_TEST_SUITE_P(CacheTopology, MtpCacheStrideTest, ::testing::Values(0, 1, 2));
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     MtpExecutorTestConfig test_config;

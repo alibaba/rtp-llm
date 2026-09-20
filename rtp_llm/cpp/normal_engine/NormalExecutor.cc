@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
@@ -21,6 +22,31 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+std::vector<TaggedBlockIdPair> decodeCacheUpdateMapping(const torch::Tensor&            copy_mapping,
+                                                        const std::vector<std::string>& group_tags) {
+    RTP_LLM_CHECK_WITH_INFO(copy_mapping.defined() && copy_mapping.device().is_cpu()
+                                && copy_mapping.scalar_type() == torch::kInt32 && copy_mapping.is_contiguous()
+                                && copy_mapping.dim() == 2 && copy_mapping.size(1) == 3,
+                            "cache update mapping must be a contiguous CPU int32 [N,3] tensor");
+    std::unordered_set<std::string> seen;
+    for (const auto& tag : group_tags) {
+        RTP_LLM_CHECK_WITH_INFO(!tag.empty() && seen.insert(tag).second,
+                                "cache update mapping tags must be non-empty and unique: tag=%s",
+                                tag.c_str());
+    }
+    std::vector<TaggedBlockIdPair> mappings;
+    mappings.reserve(static_cast<size_t>(copy_mapping.size(0)));
+    const auto* rows = copy_mapping.data_ptr<int32_t>();
+    for (int64_t i = 0; i < copy_mapping.size(0); ++i) {
+        const auto row = rows[3 * i];
+        RTP_LLM_CHECK_WITH_INFO(row >= 0 && static_cast<size_t>(row) < group_tags.size(),
+                                "cache update mapping payload row is out of range: row=%d",
+                                row);
+        mappings.push_back({group_tags[row], rows[3 * i + 1], rows[3 * i + 2]});
+    }
+    return mappings;
+}
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
@@ -289,9 +315,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
     {
         // update kv cache
-        if (model_input.kv_cache_update_mapping.defined()) {
+        if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.numel() > 0) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
-            cache_manager_->blockBatchCopy(model_input.kv_cache_update_mapping);
+            RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "cache update mapping requires a cache manager");
+            cache_manager_->blockBatchCopyByGroup(
+                decodeCacheUpdateMapping(model_input.kv_cache_update_mapping, model_input.kv_cache_group_tags));
         }
     }
     {

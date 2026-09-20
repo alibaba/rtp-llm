@@ -840,10 +840,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
 
     // when warmup, cache manager maybe nullptr
-    const auto& cache_config   = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-    const auto  group_types    = cache_config.groupTypesSnapshot();
-    is_linear_attention_model_ = std::any_of(
-        group_types.begin(), group_types.end(), [](CacheGroupType type) { return type == CacheGroupType::LINEAR; });
+    const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
+    is_linear_attention_model_ =
+        cache_config.groupNums() > 0
+        && std::any_of(cache_config.topology().groups().begin(),
+                       cache_config.topology().groups().end(),
+                       [](const GroupBase& group) { return group.policy.group_type == CacheGroupType::LINEAR; });
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
                                                               params.pd_sep_config,
                                                               params.profiling_debug_logging_config,
@@ -2910,8 +2912,13 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         RTP_LLM_CHECK_WITH_INFO(kv_cache_kernel_block_id.dim() == 3 && kv_cache_kernel_block_id.size(1) == batch_size,
                                 "MTP kernel cache snapshot source must be [group,batch,blocks], batch=%ld",
                                 batch_size);
-        const auto group_types = cache_manager_->cacheConfig().groupTypesSnapshot();
-        const auto block_size  = static_cast<int>(cache_manager_->cacheConfig().seq_size_per_block);
+        std::vector<CacheGroupType> group_types;
+        const auto&                 cache_config = cache_manager_->cacheConfig();
+        group_types.reserve(cache_config.topology().groups().size());
+        for (const auto& group : cache_config.topology().groups()) {
+            group_types.push_back(group.policy.group_type);
+        }
+        const auto block_size  = static_cast<int>(cache_config.seq_size_per_block);
         const auto table_width = std::min(kv_cache_block_id.size(2), kv_cache_kernel_block_id.size(2));
         if (hasLinearCacheSnapshotCapacity(all_streams, table_width, static_cast<int>(propose_step_ + 1), block_size)) {
             auto accept_i32        = accept_len_gpu_all.to(torch::kInt32);

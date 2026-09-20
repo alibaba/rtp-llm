@@ -79,6 +79,9 @@ size_t estimateBytes(const GptModelInputs& inputs) {
     for (const auto& trace_id : inputs.trace_ids) {
         addBytes(bytes, sizeof(std::string) + sizeof(uint64_t) + trace_id.size());
     }
+    for (const auto& tag : inputs.kv_cache_group_tags) {
+        addBytes(bytes, sizeof(std::string) + sizeof(uint64_t) + tag.size());
+    }
 #define ADD_TENSOR_BYTES(field) addTensorBytes(bytes, inputs.field);
     MODEL_INPUT_TENSORS(ADD_TENSOR_BYTES)
 #undef ADD_TENSOR_BYTES
@@ -147,6 +150,7 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     payload.insert("execution_stage", executionStage(inputs));
     payload.insert("model_id", model_id);
     payload.insert("trace_ids", inputs.trace_ids);
+    payload.insert("kv_cache_group_tags", inputs.kv_cache_group_tags);
     c10::impl::GenericDict float8_dtypes(c10::StringType::get(), c10::StringType::get());
 #define ADD_TENSOR(field) addTensor(payload, #field, inputs.field, devices, float8_dtypes);
     MODEL_INPUT_TENSORS(ADD_TENSOR)

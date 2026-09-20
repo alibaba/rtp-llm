@@ -327,7 +327,7 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
             continue;
         }
 
-        for (int local_layer_id : propose_config.layerIdsForGroup(source_gid)) {
+        for (int local_layer_id : source_layer_ids) {
             if (local_layer_id < 0 || local_layer_id >= static_cast<int>(mtp_layer_num)) {
                 continue;
             }

@@ -540,7 +540,6 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     layer_cache.kv_cache_base      = layout.at("stored", 0).kv_addr;
     layer_cache.seq_size_per_block = 1;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "stored";
 
     CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager, /*cache_model_id=*/0);
@@ -602,7 +601,6 @@ TEST_P(CacheStoreAsyncWriterTpTest, PublicationPinsOnlyAllocatorOwner) {
     layer_cache.kv_cache_base      = layout.at("default", 0).kv_addr;
     layer_cache.seq_size_per_block = 1;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "default";
 
     CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager);

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <string>
 
 namespace rtp_llm {
@@ -31,6 +32,67 @@ KvBlockTableShapeHint inspectKvBlockTable(const torch::Tensor& table, const char
     return {rank, rank == 3 ? table.size(0) : 1, table.size(rank - 1)};
 }
 
+std::vector<int64_t> sortedCacheGroupRows(const std::vector<std::string>& tags) {
+    std::vector<int64_t> rows(tags.size());
+    std::iota(rows.begin(), rows.end(), 0);
+    std::sort(rows.begin(), rows.end(), [&](int64_t left, int64_t right) {
+        return std::lexicographical_compare(tags[left].begin(),
+                                            tags[left].end(),
+                                            tags[right].begin(),
+                                            tags[right].end(),
+                                            [](unsigned char a, unsigned char b) { return a < b; });
+    });
+    for (size_t i = 0; i < rows.size(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(!tags[rows[i]].empty(), "cache payload group tag must not be empty");
+        RTP_LLM_CHECK_WITH_INFO(i == 0 || tags[rows[i - 1]] != tags[rows[i]],
+                                "cache payload group tags must be unique");
+    }
+    return rows;
+}
+
+torch::Tensor reorderCacheRows(const torch::Tensor& tensor, const std::vector<int64_t>& rows, bool block_table) {
+    if (!tensor.defined()) {
+        return tensor;
+    }
+    if (block_table && tensor.dim() == 2) {
+        RTP_LLM_CHECK_WITH_INFO(rows.size() == 1, "2-D cache table requires exactly one group");
+        return tensor;
+    }
+    RTP_LLM_CHECK_WITH_INFO(tensor.dim() == (block_table ? 3 : 1)
+                                && tensor.size(0) == static_cast<int64_t>(rows.size()),
+                            "cache payload row count must match its group tags (groups)");
+    if (rows.size() <= 1) {
+        return tensor;
+    }
+    auto result = tensor.index_select(0, torch::tensor(rows, torch::kInt64).to(tensor.device()));
+    return tensor.is_pinned() && !result.is_pinned() ? result.pin_memory() : result;
+}
+
+torch::Tensor reorderCacheCopyRows(const torch::Tensor& mapping, const std::vector<int64_t>& rows) {
+    if (!mapping.defined()) {
+        return mapping;
+    }
+    RTP_LLM_CHECK_WITH_INFO(mapping.scalar_type() == torch::kInt32 && mapping.is_contiguous() && mapping.dim() == 2
+                                && mapping.size(1) == 3,
+                            "cache copy mapping must be contiguous int32 [copy count, 3]");
+    for (const auto row : rows) {
+        RTP_LLM_CHECK_WITH_INFO(row >= 0 && row <= std::numeric_limits<int32_t>::max(),
+                                "cache copy payload row exceeds int32");
+    }
+    if (mapping.size(0) == 0) {
+        return mapping;
+    }
+    const auto source_rows = mapping.select(1, 0).to(torch::kInt64);
+    RTP_LLM_CHECK_WITH_INFO(torch::logical_and(source_rows.ge(0), source_rows.lt(static_cast<int64_t>(rows.size())))
+                                .all()
+                                .item<bool>(),
+                            "cache copy payload row is out of range");
+    const auto row_map = torch::tensor(rows, torch::TensorOptions().dtype(torch::kInt64).device(mapping.device()));
+    auto       result  = mapping.clone();
+    result.select(1, 0).copy_(row_map.index_select(0, source_rows).to(torch::kInt32));
+    return result;
+}
+
 }  // namespace
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
@@ -48,7 +110,9 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::cacheKeysWidth] =
         inputs.cache_keys.defined() && inputs.cache_keys.dim() >= 2 ? inputs.cache_keys.size(1) : 0;
     shape_hints[GptModelInputIndex::kvCacheGroupNum] =
-        kernel_block_table.rank ? kernel_block_table.group_num : block_table.group_num;
+        kernel_block_table.rank ? kernel_block_table.group_num :
+        block_table.rank        ? block_table.group_num :
+                                  static_cast<int64_t>(inputs.kv_cache_group_tags.size());
     // Kept as a reserved zero-valued slot for shape-hint wire compatibility.
     // Per-layer group mapping is carried by GroupedCacheLayerLayout now, not by
     // a broadcast tensor.
@@ -191,6 +255,35 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         return;
     }
 
+    // Tags are rank-local configuration metadata. Every rank validates its local
+    // set, while numeric payloads travel in the shared canonical tag order.
+    const bool           legacy_untagged_cache = inputs.kv_cache_group_tags.empty();
+    const auto           sorted_rows = legacy_untagged_cache ? std::vector<int64_t>{0} :
+                                                               sortedCacheGroupRows(inputs.kv_cache_group_tags);
+    std::vector<int64_t> local_rows(sorted_rows.size());
+    for (size_t i = 0; i < sorted_rows.size(); ++i) {
+        local_rows[sorted_rows[i]] = static_cast<int64_t>(i);
+    }
+    torch::Tensor wire_blocks, wire_kernel_blocks, wire_group_types, wire_copy_mapping;
+    if (parallelism_config.tp_rank == 0 && !inputs.skip_run) {
+        if (legacy_untagged_cache) {
+            RTP_LLM_CHECK_WITH_INFO((!inputs.kv_cache_block_id.defined() || inputs.kv_cache_block_id.dim() == 2)
+                                        && (!inputs.kv_cache_kernel_block_id.defined()
+                                            || inputs.kv_cache_kernel_block_id.dim() == 2),
+                                    "untagged cache payload only supports 2-D single-group block tables");
+            RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_update_mapping.defined()
+                                        || inputs.kv_cache_update_mapping.numel() == 0,
+                                    "cache update mapping requires cache group tags");
+        }
+        wire_blocks        = reorderCacheRows(inputs.kv_cache_block_id, sorted_rows, true);
+        wire_kernel_blocks = reorderCacheRows(inputs.kv_cache_kernel_block_id, sorted_rows, true);
+        wire_group_types   = reorderCacheRows(inputs.kv_cache_group_types, sorted_rows, false);
+        wire_copy_mapping  = legacy_untagged_cache && inputs.kv_cache_update_mapping.defined()
+                                 && inputs.kv_cache_update_mapping.numel() == 0 ?
+                                 inputs.kv_cache_update_mapping :
+                                 reorderCacheCopyRows(inputs.kv_cache_update_mapping, local_rows);
+    }
+
     // The UDS-backed CPU broadcaster (used by execBroadcastCpu below) is
     // bootstrapped from Python in collective_torch._register_process_groups_to_cpp,
     // which guarantees deterministic timing across TP siblings. Cross-node TP
@@ -211,7 +304,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // extra-input (model-specific, treated as opaque flat 1-D tensors) per-tensor element count
     torch::Tensor mm_extra_input_shape_t;
     int64_t*      mm_extra_input_shape_ptr = nullptr;
-    auto checkedHint = [&](GptModelInputIndex index, const char* name) -> int64_t {
+    auto          checkedHint              = [&](GptModelInputIndex index, const char* name) -> int64_t {
         const auto value = shape_hints_ptr[index];
         RTP_LLM_CHECK_WITH_INFO(
             value >= 0, "tpSyncModelInputs received negative %s shape hint: %lld", name, static_cast<long long>(value));
@@ -238,6 +331,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.kernel_seq_size_per_block =
         static_cast<size_t>(checkedHint(GptModelInputIndex::kernelSeqSizePerBlock, "kernelSeqSizePerBlock"));
     if (inputs.skip_run) {
+        inputs.kv_cache_group_tags.clear();
+        inputs.kv_cache_block_id        = torch::Tensor();
+        inputs.kv_cache_kernel_block_id = torch::Tensor();
+        inputs.kv_cache_group_types     = torch::Tensor();
+        inputs.kv_cache_update_mapping  = torch::Tensor();
         return;
     }
 
@@ -348,11 +446,15 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                                  checkedHint(GptModelInputIndex::inputLengths, "inputLengths"),
                                                  max_kernel_blocks),
                          pickAlloc(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
-            inputs.kv_cache_update_mapping =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum"), 3},
-                         pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheUpdateMapping));
+        } else {
+            inputs.kv_cache_kernel_block_id = torch::Tensor();
         }
+        const auto copy_count          = checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum");
+        inputs.kv_cache_update_mapping = copy_count ?
+                                             allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                      {copy_count, 3},
+                                                      pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheUpdateMapping)) :
+                                             torch::Tensor();
         if (max_blocks != 0) {
             inputs.kv_cache_block_id =
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
@@ -366,11 +468,16 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                              {context_batch_size, cache_keys_width ? cache_keys_width : max_blocks},
                                              pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheKeys));
             }
+        } else {
+            inputs.kv_cache_block_id = torch::Tensor();
+            inputs.cache_keys        = torch::Tensor();
         }
         if (group_types_len) {
             inputs.kv_cache_group_types = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                    {group_types_len},
                                                    pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheGroupTypes));
+        } else {
+            inputs.kv_cache_group_types = torch::Tensor();
         }
         inputs.request_id = allocBuf(
             rtp_llm::DataType::TYPE_INT64, {request_length}, pickAlloc(GptModelInputDeviceBit::kDeviceBitRequestId));
@@ -436,6 +543,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
     }
 
+    if (is_non_root) {
+        wire_blocks        = inputs.kv_cache_block_id;
+        wire_kernel_blocks = inputs.kv_cache_kernel_block_id;
+        wire_group_types   = inputs.kv_cache_group_types;
+        wire_copy_mapping  = inputs.kv_cache_update_mapping;
+    }
+
     // Collect all tensors that participate in broadcast.
     // The collect order must be deterministic and identical across all ranks.
     std::vector<torch::Tensor*> tensor_ptrs;
@@ -450,16 +564,16 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);
     if (max_kernel_blocks || max_blocks) {
-        collect(inputs.kv_cache_kernel_block_id);
-        collect(inputs.kv_cache_block_id);
-        if (group_types_len) {
-            collect(inputs.kv_cache_group_types);
-        }
+        collect(wire_kernel_blocks);
+        collect(wire_blocks);
         if (inputs.pd_separation) {
             collect(inputs.cache_keys);
         }
-        collect(inputs.kv_cache_update_mapping);
     }
+    if (group_types_len) {
+        collect(wire_group_types);
+    }
+    collect(wire_copy_mapping);
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
     collect(inputs.lm_output_indexes);
@@ -613,6 +727,26 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 e.tensor->copy_(src_tensor);
             }
             flush_fused_copy();
+        }
+    }
+
+    // Receiver checks happen only after all agreed collectives have finished.
+    const bool has_cache_payload =
+        max_blocks || max_kernel_blocks || group_types_len || shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum];
+    if (!has_cache_payload) {
+        inputs.kv_cache_group_tags.clear();
+        inputs.kv_cache_block_id        = torch::Tensor();
+        inputs.kv_cache_kernel_block_id = torch::Tensor();
+        inputs.kv_cache_group_types     = torch::Tensor();
+        inputs.kv_cache_update_mapping  = torch::Tensor();
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(legacy_untagged_cache || kv_cache_group_num == static_cast<int64_t>(sorted_rows.size()),
+                                "TP cache payload group count differs from configured identities (groups)");
+        if (is_non_root) {
+            inputs.kv_cache_block_id        = reorderCacheRows(wire_blocks, local_rows, true);
+            inputs.kv_cache_kernel_block_id = reorderCacheRows(wire_kernel_blocks, local_rows, true);
+            inputs.kv_cache_group_types     = reorderCacheRows(wire_group_types, local_rows, false);
+            inputs.kv_cache_update_mapping = reorderCacheCopyRows(wire_copy_mapping, sorted_rows);
         }
     }
 }
