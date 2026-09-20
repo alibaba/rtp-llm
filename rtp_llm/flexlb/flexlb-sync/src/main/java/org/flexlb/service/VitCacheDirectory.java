@@ -135,7 +135,7 @@ public class VitCacheDirectory {
     synchronized void replace(WorkerStatus worker, MultimodalCacheStatusPB response) {
         Map<String, WorkerStatus> live = workers.selectModelWorkerStatus(RoleType.VIT, null);
         if (live.get(worker.getIpPort()) != worker || !worker.isAlive()
-                || StringUtils.isBlank(response.getWorkerInstance()) || response.getFeatureHashVersion() != 1
+                || StringUtils.isBlank(response.getWorkerInstance())
                 || !validKeys(response.getKeysList())
                 || !validKeys(response.getGpuEmbeddingKeysList()) || !validKeys(response.getCpuEmbeddingKeysList())) {
             return;

@@ -67,7 +67,8 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         if (mm_process_engine.is_none()) {
             mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
                                                               maga_init_params.model_config_.max_seq_len,
-                                                              maga_init_params.vit_config));
+                                                              maga_init_params.vit_config,
+                                                              maga_init_params.parallelism_config.tp_rank));
         } else {
             mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
                                                              maga_init_params.model_config_.mm_model_config,

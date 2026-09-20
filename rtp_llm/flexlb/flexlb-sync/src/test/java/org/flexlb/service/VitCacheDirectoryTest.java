@@ -106,12 +106,12 @@ class VitCacheDirectoryTest {
 
     private void snapshot(WorkerStatus worker, String epoch, String... keys) {
         directory.replace(worker, MultimodalCacheStatusPB.newBuilder()
-                .setFeatureHashVersion(1).setWorkerInstance(epoch).addAllKeys(List.of(keys)).build());
+                .setWorkerInstance(epoch).addAllKeys(List.of(keys)).build());
     }
 
     private void tierSnapshot(WorkerStatus worker, List<String> hashes, List<String> gpu, List<String> cpu) {
         directory.replace(worker, MultimodalCacheStatusPB.newBuilder()
-                .setFeatureHashVersion(1).setWorkerInstance("instance").addAllKeys(hashes)
+                .setWorkerInstance("instance").addAllKeys(hashes)
                 .addAllGpuEmbeddingKeys(gpu).addAllCpuEmbeddingKeys(cpu).build());
     }
 
@@ -171,7 +171,7 @@ class VitCacheDirectoryTest {
     @Test
     void refreshUsesGrpcPortAndPreservesTierFields() {
         var snapshot = MultimodalCacheStatusPB.newBuilder().setWorkerInstance("a1")
-                .setFeatureHashVersion(1).addKeys("hash")
+                .addKeys("hash")
                 .addGpuEmbeddingKeys("gpu").addCpuEmbeddingKeys("cpu").build();
         var request = CacheVersionPB.newBuilder().setNeedCacheKeys(true).build();
         when(grpc.getMultimodalCacheStatus(a.getIp(), 8001, request, 2000))
@@ -205,7 +205,7 @@ class VitCacheDirectoryTest {
                 .mapToObj(i -> String.format("%064x", i)).toList();
         var response = CacheStatusPB.newBuilder().setMultimodalCache(
                 MultimodalCacheStatusPB.newBuilder().setWorkerInstance("large-worker")
-                        .setFeatureHashVersion(1).addAllKeys(keys).addAllGpuEmbeddingKeys(keys)).build();
+                        .addAllKeys(keys).addAllGpuEmbeddingKeys(keys)).build();
         assertTrue(response.getSerializedSize() > 8 * 1024 * 1024);
         var received = new AtomicReference<CacheVersionPB>();
         Server server = NettyServerBuilder.forPort(0)

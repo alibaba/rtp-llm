@@ -209,7 +209,7 @@ message MultimodalOutputPB {
     repeated MMRdmaDescPB output_rdma_chunks = 6;
     // Compact CPU row hashes stay inline on both bytes and RDMA paths.
     TensorPB multimodal_feature_hash = 7;
-    uint32 feature_hash_version = 8;
+    reserved 8;
 }
 
 message ReleaseEmbeddingPB {
@@ -224,6 +224,17 @@ message RequestInfoPB {
     string source_role = 5;
 }
 
+message MultimodalTokenSpanPB {
+    int32 offset = 1;
+    int32 length = 2;
+}
+
+message MultimodalTokenLayoutPB {
+    reserved 1;
+    // In ViT output segment order, including all segments of a video.
+    repeated MultimodalTokenSpanPB spans = 2;
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -234,6 +245,8 @@ message GenerateInputPB {
     int32 batch_group_size = 7;
     google.protobuf.Int64Value batch_group_id = 8;
     RequestInfoPB request_info = 9;
+    // When present, token_ids already contains the expanded feature hashes.
+    MultimodalTokenLayoutPB multimodal_token_layout = 10;
 }
 
 message AuxInfoPB {
@@ -450,7 +463,7 @@ message CacheStatusPB {
 
 message MultimodalCacheStatusPB {
     string worker_instance = 1;
-    uint32 feature_hash_version = 2;
+    reserved 2;
     repeated string keys = 3;
     repeated string gpu_embedding_keys = 4;
     repeated string cpu_embedding_keys = 5;
@@ -783,7 +796,7 @@ message MultimodalHashEntryPB {
 
 message MultimodalHashResponsePB {
     string worker_instance = 1;
-    uint32 feature_hash_version = 2;
+    reserved 2;
     repeated MultimodalHashEntryPB entries = 3;
 }
 

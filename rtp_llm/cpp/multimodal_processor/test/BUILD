@@ -20,6 +20,21 @@ cuda13_torch_link_deps = select({
 })
 
 cc_test(
+    name = "remote_multimodal_processor_test",
+    srcs = ["RemoteMultimodalProcessorTest.cc"],
+    copts = test_copts,
+    deps = torch_deps() + cuda13_torch_link_deps + [
+        "//rtp_llm/cpp/model_rpc:model_rpc_server",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
+        "//rtp_llm/cpp/multimodal_processor:mm_rdma_transport",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@havenask//aios/autil:base64",
+        "@havenask//aios/autil:zlib",
+    ],
+)
+
+cc_test(
     name = "multimodal_processor_test",
     srcs = glob([
         "MultimodalProcessorTest.cc",

@@ -127,7 +127,6 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.HasField("multimodal_cache"))
         cache = response.multimodal_cache
         self.assertEqual(cache.worker_instance, self.engine._hash_key_cache.instance_id)
-        self.assertEqual(cache.feature_hash_version, 1)
         self.assertEqual(set(cache.keys), {"hash-only", "ready"})
         self.assertEqual(set(cache.cpu_embedding_keys), {"ready", "embedding-only"})
         self.assertEqual(list(cache.gpu_embedding_keys), [])
@@ -223,7 +222,7 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             set(response.DESCRIPTOR.fields_by_name),
-            {"worker_instance", "feature_hash_version", "entries"},
+            {"worker_instance", "entries"},
         )
         self.assertFalse(self.engine._hash_key_cache.contains(self.keys[0]))
 
@@ -334,7 +333,7 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
 
     def test_malformed_hash_bytes_and_splits_are_rejected(self):
         for data, sizes in ((b"x", [1]), (b"1234", [2]), (b"1234", [0])):
-            response = MultimodalHashResponsePB(feature_hash_version=1)
+            response = MultimodalHashResponsePB()
             response.entries.add(
                 key="k", hash_hit=True, feature_hashes=data, split_size=sizes
             )

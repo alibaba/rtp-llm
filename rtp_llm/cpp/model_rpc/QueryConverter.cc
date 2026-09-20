@@ -182,6 +182,13 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
+    if (input->has_multimodal_token_layout()) {
+        MultimodalTokenLayout layout;
+        for (const auto& span : input->multimodal_token_layout().spans()) {
+            layout.spans.emplace_back(span.offset(), span.length());
+        }
+        generate_input->multimodal_token_layout = std::move(layout);
+    }
     generate_input->batch_group_size = input->batch_group_size() > 0 ? input->batch_group_size() : 1;
     if (input->has_batch_group_id()) {
         generate_input->batch_group_id = input->batch_group_id().value();
@@ -278,8 +285,8 @@ MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_
     mm_output.mm_features = mm_embedding.split(split_sizes, 0);
     if (output_pb->has_multimodal_feature_hash()) {
         auto hashes = transTensor(output_pb->multimodal_feature_hash());
-        RTP_LLM_CHECK_WITH_INFO(output_pb->feature_hash_version() == 1 && hashes.dim() == 1
-                                    && hashes.scalar_type() == torch::kInt32 && hashes.numel() == split_total,
+        RTP_LLM_CHECK_WITH_INFO(hashes.dim() == 1 && hashes.scalar_type() == torch::kInt32
+                                    && hashes.numel() == split_total,
                                 "invalid multimodal feature hash metadata");
         mm_output.mm_feature_hashes = hashes.split(split_sizes, 0);
     }

@@ -407,8 +407,6 @@ class MasterClient:
             for e in (metadata or {}).get("entries", [])
             if isinstance(e, dict) and isinstance(e.get("key"), str)
         }
-        if not metadata or metadata.get("feature_hash_version") != 1:
-            entries = {}
         missing = {
             key
             for key in unique_keys
@@ -472,10 +470,6 @@ class MasterClient:
         ):
             raise FtRuntimeException(
                 ExceptionType.ROUTE_ERROR, "ViT restarted during hash acquisition"
-            )
-        if filled.get("feature_hash_version") != 1:
-            raise FtRuntimeException(
-                ExceptionType.MM_PROCESS_ERROR, "Unsupported ViT feature hash version"
             )
         entries.update({e["key"]: e for e in filled.get("entries", [])})
         if any(

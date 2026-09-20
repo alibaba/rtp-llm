@@ -30,11 +30,19 @@ class RemoteMultimodalProcessor: public MultimodalProcessor {
 public:
     RemoteMultimodalProcessor(const MMModelConfig& mm_model_config,
                               int64_t              max_seq_len,
-                              const VitConfig&     vit_config = VitConfig()):
+                              const VitConfig&     vit_config = VitConfig(),
+                              int                  tp_rank    = 0):
         MultimodalProcessor(py::none(), mm_model_config, max_seq_len) {
         // LLM consumer side of the encoder<->LLM RDMA fast path. nullptr when disabled /
         // unavailable, in which case every request transparently uses the inline-bytes path.
-        rdma_transport_          = createMMRdmaTransport(vit_config, MMRdmaRole::LLM_CLIENT);
+        // Only the TP root fetches ViT data; siblings receive model inputs through
+        // tpSyncModelInputs. Avoid reserving a pinned receive arena on every rank.
+        // Use the rank within each TP group so every DP replica keeps its own client.
+        if (tp_rank == 0) {
+            rdma_transport_ = createMMRdmaTransport(vit_config, MMRdmaRole::LLM_CLIENT);
+        } else {
+            RTP_LLM_LOG_INFO("skip ViT RDMA receive pool initialization on tp_rank=%d; using TP broadcast", tp_rank);
+        }
         rdma_release_timeout_ms_ = vit_config.mm_rdma_release_timeout_ms;
     }
 
@@ -180,8 +188,7 @@ private:
         mm_output.mm_features = mm_embedding.split(split_sizes, 0);
         if (output_pb->has_multimodal_feature_hash()) {
             auto hashes = QueryConverter::transTensor(output_pb->multimodal_feature_hash());
-            if (output_pb->feature_hash_version() != 1 || hashes.dim() != 1 || hashes.scalar_type() != torch::kInt32
-                || hashes.numel() != split_total) {
+            if (hashes.dim() != 1 || hashes.scalar_type() != torch::kInt32 || hashes.numel() != split_total) {
                 return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid multimodal feature hash metadata");
             }
             mm_output.mm_feature_hashes = hashes.split(split_sizes, 0);

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include <memory>
 #include <optional>
 
@@ -13,7 +14,22 @@
 using namespace std;
 namespace rtp_llm {
 
-class QueryConverterTest: public DeviceTestBase {};
+class QueryConverterTest: public DeviceTestBase {
+public:
+    void SetUp() override {
+        DeviceTestBase::SetUp();
+        abort_on_error_ = StaticConfig::user_ft_core_dump_on_exception;
+        // Invalid-protobuf cases below expect exceptions, not process aborts.
+        StaticConfig::user_ft_core_dump_on_exception = false;
+    }
+    void TearDown() override {
+        StaticConfig::user_ft_core_dump_on_exception = abort_on_error_;
+        DeviceTestBase::TearDown();
+    }
+
+private:
+    bool abort_on_error_ = true;
+};
 
 TEST_F(QueryConverterTest, testMultimodalFeatureHashRoundTripAndLegacyFallback) {
     MultimodalOutputPB output;
@@ -22,7 +38,6 @@ TEST_F(QueryConverterTest, testMultimodalFeatureHashRoundTripAndLegacyFallback) 
     output.add_split_size(1);
     auto hashes = torch::tensor({-123, 456, -789}, torch::kInt32);
     QueryConverter::transTensorPB(output.mutable_multimodal_feature_hash(), hashes);
-    output.set_feature_hash_version(1);
 
     auto decoded = QueryConverter::transMMOutput(&output);
     ASSERT_TRUE(decoded.mm_feature_hashes.has_value());
@@ -31,9 +46,6 @@ TEST_F(QueryConverterTest, testMultimodalFeatureHashRoundTripAndLegacyFallback) 
     EXPECT_EQ(decoded.mm_features[0].size(0), 2);
     EXPECT_EQ(decoded.mm_features[1].size(0), 1);
 
-    output.set_feature_hash_version(2);
-    EXPECT_THROW(QueryConverter::transMMOutput(&output), std::exception);
-    output.set_feature_hash_version(1);
     QueryConverter::transTensorPB(output.mutable_multimodal_feature_hash(), torch::ones({2}, torch::kInt32));
     EXPECT_THROW(QueryConverter::transMMOutput(&output), std::exception);
     output.clear_multimodal_feature_hash();
@@ -105,6 +117,28 @@ TEST_F(QueryConverterTest, testTransInput) {
     vector<int> stop_words_2{3, 4, 5};
     ASSERT_EQ(generate_config->stop_words_list[0], stop_words_1);
     ASSERT_EQ(generate_config->stop_words_list[1], stop_words_2);
+}
+
+TEST_F(QueryConverterTest, testFrontendExpandedMultimodalLayout) {
+    GenerateInputPB wire;
+    for (int value : {1, -10, 11, 2, 12, 3}) {
+        wire.add_token_ids(value);
+    }
+    auto* layout = wire.mutable_multimodal_token_layout();
+    auto* first  = layout->add_spans();
+    first->set_offset(1);
+    first->set_length(2);
+    auto* second = layout->add_spans();
+    second->set_offset(4);
+    second->set_length(1);
+    GenerateInputPB received;
+    ASSERT_TRUE(received.ParseFromString(wire.SerializeAsString()));
+    auto input = QueryConverter::transQuery(&received);
+    ASSERT_TRUE(input->multimodal_token_layout.has_value());
+    EXPECT_EQ(input->multimodal_token_layout->spans, (std::vector<std::pair<int32_t, int32_t>>{{1, 2}, {4, 1}}));
+    EXPECT_TRUE(torch::equal(input->input_ids, torch::tensor({1, -10, 11, 2, 12, 3}, torch::kInt32)));
+    received.clear_multimodal_token_layout();
+    EXPECT_FALSE(QueryConverter::transQuery(&received)->multimodal_token_layout.has_value());
 }
 
 TEST_F(QueryConverterTest, testTransMMInputsPBRequestId) {

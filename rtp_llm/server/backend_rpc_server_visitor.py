@@ -28,6 +28,7 @@ from rtp_llm.server.request_headers import (
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
+    MultimodalTokenExpansion,
     RequestInfo,
 )
 from rtp_llm.utils.time_util import Timer
@@ -181,6 +182,8 @@ class BackendRPCServerVisitor:
         Returns None on success; on failure returns FlexlbResponse for routing decisions.
         request_id is frontend-generated and is not overwritten.
         """
+        input.mm_token_expansion = None
+        token_expansion = None
         token_ids = (
             input.token_ids.tolist()[0]
             if len(input.token_ids.shape) == 2
@@ -244,6 +247,7 @@ class BackendRPCServerVisitor:
                 ):
                     return vit_result
             try:
+                expanded_spans = []
                 token_ids, full_length = multimodal_routing_tokens(
                     token_ids,
                     self.mm_model_config.mm_sep_tokens,
@@ -252,12 +256,16 @@ class BackendRPCServerVisitor:
                     metadata,
                     self.max_seq_len,
                     compact=True,
+                    expanded_spans=expanded_spans,
                 )
                 if selected_vit is not None and full_length is None:
                     raise ValueError(
                         "ViT did not return complete routing hashes within the sequence limit"
                     )
                 if full_length is not None:
+                    token_expansion = MultimodalTokenExpansion(
+                        token_ids, expanded_spans
+                    )
                     route_args["seq_len"] = full_length - input.prefix_length
             except (
                 ValueError,
@@ -275,8 +283,8 @@ class BackendRPCServerVisitor:
                     "Invalid ViT routing metadata, request_id=%s", input.request_id
                 )
                 token_ids = []
-            # Only compact token ids survive hash acquisition; HTTP metadata can
-            # contain millions of boxed integers and must not live across routing.
+            # Retain only compact int32 ids and segment offsets for the model RPC.
+            # Drop the much larger metadata representation before scheduling.
             metadata = None
         # Keep hash generation at the physical KV block granularity. Page-RR
         # routing samples canonical keys from this full logical-block key list;
@@ -302,6 +310,7 @@ class BackendRPCServerVisitor:
                 # only hints for the old worker and must not survive re-routing.
                 route_args.pop("selected_vit")
                 selected_vit = None
+                token_expansion = None
                 route_result = await self.master_client.get_backend_role_addrs(
                     block_cache_keys=[],
                     cache_key_block_size=self._cache_key_block_size(),
@@ -338,6 +347,7 @@ class BackendRPCServerVisitor:
                     selected_vit, keys, input=input
                 )
                 original_tokens = input.token_ids.reshape(-1).tolist()
+                expanded_spans = []
                 token_ids, full_length = multimodal_routing_tokens(
                     original_tokens,
                     self.mm_model_config.mm_sep_tokens,
@@ -346,12 +356,14 @@ class BackendRPCServerVisitor:
                     metadata,
                     self.max_seq_len,
                     compact=True,
+                    expanded_spans=expanded_spans,
                 )
                 if full_length is None:
                     raise FtRuntimeException(
                         ExceptionType.MM_PROCESS_ERROR,
                         "Incomplete replacement ViT routing hashes",
                     )
+                token_expansion = MultimodalTokenExpansion(token_ids, expanded_spans)
                 block_cache_keys = self._route_cache_keys(
                     get_block_cache_keys(token_ids, self.seq_size_per_block)
                 )
@@ -381,6 +393,7 @@ class BackendRPCServerVisitor:
                     ExceptionType.ROUTE_ERROR, "master changed the selected ViT route"
                 )
             input.generate_config.role_addrs = route_result.role_addrs
+            input.mm_token_expansion = token_expansion
             route_logger.debug(
                 "master route success, request_id=%s, addrs=%s",
                 input.request_id,

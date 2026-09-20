@@ -39,7 +39,6 @@ def get_mm_cache_keys(engine, max_keys=MM_CACHE_SNAPSHOT_MAX_KEYS):
         raise OverflowError("cache key snapshot too large")
     return {
         "worker_instance": worker_instance,
-        "feature_hash_version": 1,
         "keys": keys,
         "gpu_embedding_keys": [key for key, tier in tiers.items() if tier == "gpu"],
         "cpu_embedding_keys": [key for key, tier in tiers.items() if tier == "cpu"],
@@ -164,7 +163,6 @@ def get_mm_cache_metadata(
 def metadata_to_proto(metadata):
     response = MultimodalHashResponsePB(
         worker_instance=metadata["worker_instance"],
-        feature_hash_version=metadata["feature_hash_version"],
     )
     for entry in metadata["entries"]:
         response.entries.add(
@@ -214,6 +212,5 @@ def metadata_from_proto(response):
         )
     return {
         "worker_instance": response.worker_instance,
-        "feature_hash_version": response.feature_hash_version,
         "entries": entries,
     }

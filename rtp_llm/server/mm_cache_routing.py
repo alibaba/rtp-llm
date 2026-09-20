@@ -11,15 +11,18 @@ def multimodal_routing_tokens(
     metadata: Optional[Dict[str, Any]],
     max_seq_len: int,
     compact: bool = False,
+    expanded_spans: Optional[List[Tuple[int, int]]] = None,
 ) -> Tuple[Sequence[int], Optional[int]]:
     """Expand routing hashes independently of local embedding residency."""
     from libth_transformer_config import get_multimodal_token_spans
 
+    if expanded_spans is not None:
+        expanded_spans.clear()
     spans = get_multimodal_token_spans(token_ids, separators, include_separators)
     if not spans:
         return [], None
     safe_prefix = token_ids[: spans[0][0]]
-    if not keys or not metadata or metadata.get("feature_hash_version") != 1:
+    if not keys or not metadata:
         return safe_prefix, None
     entries = {entry["key"]: entry for entry in metadata["entries"]}
     output, cursor, segment = array("i") if compact else [], 0, 0
@@ -45,6 +48,8 @@ def multimodal_routing_tokens(
             if len(output) + begin - cursor + size >= max_seq_len:
                 return safe_prefix, None
             output.extend(token_ids[i] for i in range(cursor, begin))
+            if expanded_spans is not None:
+                expanded_spans.append((len(output), size))
             output.extend(islice(hash_values, size))
             cursor, segment = end, segment + 1
     if segment != len(spans):

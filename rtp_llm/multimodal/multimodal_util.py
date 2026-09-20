@@ -566,4 +566,3 @@ def add_multimodal_feature_hashes(output_pb, embeddings, feature_hashes):
         output_pb.multimodal_feature_hash.CopyFrom(
             trans_from_tensor(torch.cat(feature_hashes))
         )
-        output_pb.feature_hash_version = 1

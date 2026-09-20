@@ -2044,7 +2044,6 @@ class MMProcessEngineGpuBatchTest(TestCase):
         results = engine.get_embedding_result(inputs)
         self.assertEqual(part.embedding_calls, 2)
         response = trans_output(merge_embedding_results(results))
-        self.assertEqual(response.feature_hash_version, 1)
         self.assertEqual(list(response.split_size), [1, 1])
         expected = torch.cat([r.feature_hashes[0] for r in results])
         self.assertTrue(

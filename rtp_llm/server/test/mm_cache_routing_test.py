@@ -11,6 +11,7 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     multimodal_cache_keys,
+    trans_input,
     trans_multimodal_input,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
@@ -38,7 +39,6 @@ from rtp_llm.utils.base_model_datatypes import GenerateInput
 def metadata(keys, hashes):
     return {
         "worker_instance": "epoch",
-        "feature_hash_version": 1,
         "entries": [
             {
                 "key": key,
@@ -52,7 +52,7 @@ def metadata(keys, hashes):
 
 
 def hash_response(keys, hashes):
-    result = MultimodalHashResponsePB(worker_instance="epoch", feature_hash_version=1)
+    result = MultimodalHashResponsePB(worker_instance="epoch")
     for key, values in zip(keys, hashes):
         result.entries.add(
             key=key,
@@ -116,6 +116,26 @@ class MMCacheRoutingTest(unittest.TestCase):
         self.assertEqual(result, [10, -1, 2, 20])
         self.assertIsNone(length)
 
+    def test_expanded_locations_cover_video_segments_and_repeated_media(self):
+        data = metadata(["video"], [[-1, 99, 3]])
+        data["entries"][0]["split_size"] = [2, 1]
+        spans = []
+        tokens, length = multimodal_routing_tokens(
+            [1, 90, 5, 91, 2, 90, 6, 91, 90, 7, 91, 90, 8, 91],
+            [[90, 91]],
+            False,
+            ["video", "video"],
+            data,
+            100,
+            compact=True,
+            expanded_spans=spans,
+        )
+        self.assertEqual(
+            list(tokens), [1, 90, -1, 99, 91, 2, 90, 3, 91, 90, -1, 99, 91, 90, 3, 91]
+        )
+        self.assertEqual(length, 16)
+        self.assertEqual(spans, [(2, 2), (7, 1), (10, 2), (14, 1)])
+
     def test_paired_tags_and_repeated_media(self):
         tokens = [1, 90, 5, 91, 2, 90, 6, 91]
         data = metadata(["a"], [[-1, 3]])
@@ -128,8 +148,8 @@ class MMCacheRoutingTest(unittest.TestCase):
         self.assertEqual(kept, [1, 90, -1, 3, 91, 2, 90, -1, 3, 91])
         self.assertEqual(removed, [1, -1, 3, 2, -1, 3])
 
-    def test_miss_and_unknown_version_return_only_safe_prefix(self):
-        for data in (None, {"feature_hash_version": 2}):
+    def test_missing_metadata_returns_only_safe_prefix(self):
+        for data in (None, {}, {"entries": []}):
             self.assertEqual(
                 multimodal_routing_tokens([1, 99, 2], [[99]], False, ["a"], data, 100),
                 ([1], None),
@@ -247,9 +267,15 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1].kwargs["selected_vit"], status)
         self.assertEqual(request.generate_config.role_addrs, [prefill, vit])
         self.assertEqual(request.token_ids.tolist(), [1, 99, 2])
+        wire = GenerateInputPB.FromString(trans_input(request).SerializeToString())
+        self.assertEqual(list(wire.token_ids), [1, -10, 11, 2])
+        self.assertTrue(wire.HasField("multimodal_token_layout"))
+        self.assertEqual(
+            [(s.offset, s.length) for s in wire.multimodal_token_layout.spans], [(1, 2)]
+        )
 
     async def test_missing_or_invalid_required_hashes_stop_before_prefill_routing(self):
-        for data in (None, {"feature_hash_version": 1, "entries": [{}]}):
+        for data in (None, {"entries": [{}]}):
             await self.asyncSetUp()
             self.visitor.master_client.get_vit_cache_metadata.return_value = data
             with self.assertRaises(FtRuntimeException):
@@ -308,14 +334,14 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(client._get_vit_metadata.call_args.args[1].keys), keys)
         client._get_vit_metadata = AsyncMock(
             side_effect=[
-                {"worker_instance": "epoch", "feature_hash_version": 1, "entries": []},
-                {"worker_instance": "epoch", "feature_hash_version": 1, "entries": []},
+                {"worker_instance": "epoch", "entries": []},
+                {"worker_instance": "epoch", "entries": []},
             ]
         )
         with self.assertRaisesRegex(FtRuntimeException, "incomplete feature hashes"):
             await client.get_vit_cache_metadata(self.vit, keys, input=self.request)
 
-    async def test_frontend_drops_metadata_and_expanded_tokens_before_waiting_for_prefill(
+    async def test_frontend_drops_metadata_and_retains_only_compact_expansion(
         self,
     ):
         class TrackedMetadata(dict):
@@ -344,6 +370,12 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.visitor.master_client.get_vit_cache_metadata = get_metadata
         self.visitor.master_client.get_backend_role_addrs = route
         await self.visitor.get_master_route_addrs(self.request)
+        from array import array
+
+        expansion = self.request.mm_token_expansion
+        self.assertIsInstance(expansion.token_ids, array)
+        self.assertEqual(expansion.token_ids.itemsize, 4)
+        self.assertEqual(expansion.spans, [(1, 2)])
 
     async def test_evicted_embedding_still_supplies_prefill_cache_routing_hashes(self):
         from rtp_llm.multimodal.mm_embedding_cache import (
@@ -395,6 +427,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Exception, "changed the selected ViT"):
             await self.visitor.get_master_route_addrs(self.request)
         self.assertFalse(self.request.generate_config.role_addrs)
+        self.assertIsNone(self.request.mm_token_expansion)
 
     async def test_stale_vit_reselection_acquires_new_hashes_before_prefill(self):
         new_vit = self.vit.model_copy(update={"ip": "127.0.0.3"})
@@ -427,6 +460,22 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.request.generate_config.role_addrs, [self.prefill, new_vit]
         )
         self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
+        wire = trans_input(self.request)
+        self.assertEqual(list(wire.token_ids), [1, 31, 32, 33, 34, 2])
+        self.assertEqual(
+            [(s.offset, s.length) for s in wire.multimodal_token_layout.spans], [(1, 4)]
+        )
+
+    async def test_failed_reroute_discards_previous_expansion(self):
+        await self.visitor.get_master_route_addrs(self.request)
+        self.assertIsNotNone(self.request.mm_token_expansion)
+        self.visitor.master_client.get_backend_role_addrs.side_effect = [
+            FlexlbResponse.error_response(503)
+        ]
+        response = await self.visitor.get_master_route_addrs(self.request)
+        self.assertEqual(response.error_code, 503)
+        self.assertIsNone(self.request.mm_token_expansion)
+        self.assertFalse(trans_input(self.request).HasField("multimodal_token_layout"))
 
     async def test_short_http_timeout_does_not_shorten_pending_placement_ttl(self):
         client = MasterClient(
@@ -490,9 +539,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 payloads.append(request)
                 seen_headers.append(dict(context.invocation_metadata()))
                 if not request.HasField("inputs"):
-                    result = MultimodalHashResponsePB(
-                        worker_instance="epoch", feature_hash_version=1
-                    )
+                    result = MultimodalHashResponsePB(worker_instance="epoch")
                     result.entries.add(key=keys[0], hash_hit=False)
                     return result
                 if reject:
@@ -754,7 +801,6 @@ class MMCacheApiTest(unittest.TestCase):
         )
         response = server._trans_output_rdma(result)
         self.assertEqual(response.output_rdma.handle, "handle")
-        self.assertEqual(response.feature_hash_version, 1)
         self.assertTrue(
             torch.equal(trans_tensor(response.multimodal_feature_hash), hashes)
         )

@@ -35,6 +35,11 @@ test_deps = [
     "@havenask//aios/autil:zlib",
 ] + torch_deps() + device_impl_target()
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
 # cc_test(
 #     name = "model_rpc_server_test",
 #     srcs = [
@@ -57,7 +62,10 @@ cc_test(
         "QueryConverterTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + select({
+        "@//:using_cuda13_x86": [":cuda13_torch_nvshmem"],
+        "//conditions:default": [],
+    }),
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

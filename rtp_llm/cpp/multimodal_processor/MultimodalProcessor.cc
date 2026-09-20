@@ -161,6 +161,71 @@ ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_ou
     return ErrorInfo::OkStatus();
 }
 
+ErrorResult<ExpandedOutput>
+MultimodalProcessor::useExpandedTokenLayout(const GenerateInput&                             input,
+                                            const std::vector<torch::Tensor>&                features,
+                                            const std::optional<std::vector<torch::Tensor>>& feature_hashes) {
+    const auto& layout = input.multimodal_token_layout.value();
+    const auto& ids    = input.input_ids;
+    if (layout.spans.empty() || layout.spans.size() != features.size()
+        || (feature_hashes.has_value() && feature_hashes->size() != features.size())) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid frontend multimodal token layout");
+    }
+    if (!ids.defined() || !ids.device().is_cpu() || ids.scalar_type() != torch::kInt32 || ids.dim() != 1
+        || !ids.is_contiguous()) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid expanded multimodal token ids");
+    }
+    RETURN_IF_STATUS_ERROR(checkExpandLength(ExpandedOutput(ids)));
+    int64_t                    previous_end   = 0;
+    bool                       hashes_changed = false;
+    std::vector<torch::Tensor> verified_hashes;
+    verified_hashes.reserve(features.size());
+    for (size_t i = 0; i < layout.spans.size(); ++i) {
+        const auto [offset, length] = layout.spans[i];
+        const int64_t end           = int64_t(offset) + length;
+        if (offset < previous_end || length <= 0 || end > ids.numel() || !features[i].defined() || features[i].dim() < 1
+            || features[i].size(0) != length) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "frontend multimodal spans do not match ViT output");
+        }
+        previous_end = end;
+        // Metadata can outlive an embedding. Check the fetched result before
+        // using frontend hashes as KV-cache keys; never publish mismatched data.
+        torch::Tensor hashes;
+        try {
+            hashes = feature_hashes.has_value() ? feature_hashes->at(i) : getMultimodalFeatureHash(features[i]);
+        } catch (const std::exception& error) {
+            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error.what());
+        }
+        if (!hashes.defined() || !hashes.device().is_cpu() || hashes.scalar_type() != torch::kInt32 || hashes.dim() != 1
+            || hashes.numel() != length) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid ViT feature hashes for expanded input");
+        }
+        hashes = hashes.contiguous();
+        if (memcmp(ids.data_ptr<int32_t>() + offset, hashes.data_ptr<int32_t>(), hashes.nbytes()) != 0) {
+            hashes_changed = true;
+        }
+        verified_hashes.push_back(std::move(hashes));
+    }
+    // Recomputed embeddings can differ after cache eviction. Preserve all text
+    // and offsets, but make actual KV-cache keys describe the fetched values.
+    // Validate every segment before making changes. Matching hashes reuse the
+    // input storage; changed hashes copy it without rescanning or splicing.
+    auto expanded_ids = hashes_changed ? ids.clone() : ids;
+    auto mask         = torch::ones({ids.numel()}, torch::kInt32);
+    auto locs         = torch::empty({int64_t(layout.spans.size())}, torch::kInt32);
+    for (size_t i = 0; i < layout.spans.size(); ++i) {
+        const auto [offset, length] = layout.spans[i];
+        locs.data_ptr<int32_t>()[i] = offset;
+        std::fill(mask.data_ptr<int32_t>() + offset, mask.data_ptr<int32_t>() + offset + length, 0);
+        if (hashes_changed) {
+            memcpy(expanded_ids.data_ptr<int32_t>() + offset,
+                   verified_hashes[i].data_ptr<int32_t>(),
+                   verified_hashes[i].nbytes());
+        }
+    }
+    return ExpandedOutput(std::move(expanded_ids), {}, std::move(mask), std::move(locs));
+}
+
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
                                                         grpc::ServerContext*                     server_context) {
     if (input->generate_config && input->generate_config->calculate_loss) {
@@ -183,15 +248,19 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     if (mm_embedding_res.mm_extra_input.has_value()) {
         mm_extra_input = std::move(mm_embedding_res.mm_extra_input.value());
     }
-    input->mm_position_ids = std::move(mm_embedding_res.mm_position_ids);
-    CHECK_AND_RETURN_REF(
-        expanded_ids,
-        expandTokenIds(
-            mm_features, input->input_ids, input->multimodal_inputs.value(), {}, mm_embedding_res.mm_feature_hashes));
+    CHECK_AND_RETURN_REF(expanded_ids,
+                         input->multimodal_token_layout.has_value() ?
+                             useExpandedTokenLayout(*input, mm_features, mm_embedding_res.mm_feature_hashes) :
+                             expandTokenIds(mm_features,
+                                            input->input_ids,
+                                            input->multimodal_inputs.value(),
+                                            {},
+                                            mm_embedding_res.mm_feature_hashes));
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
     RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_features, "embedding"));
     RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_extra_input, "extra input"));
     input->multimodal_features = std::move(mm_features);
+    input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
     input->mm_extra_input      = std::move(mm_extra_input);
     input->input_ids           = expanded_ids.expanded_ids;
     input->text_tokens_mask    = expanded_ids.text_tokens_mask;

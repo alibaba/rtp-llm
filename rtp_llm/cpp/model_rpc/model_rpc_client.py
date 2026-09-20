@@ -74,7 +74,14 @@ def _trans_jsonable_option(config_pb, config, field_name):
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
-    input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
+    expansion = input_py.mm_token_expansion
+    if expansion is not None:
+        input_pb.token_ids.extend(expansion.token_ids)
+        input_pb.multimodal_token_layout.SetInParent()
+        for offset, length in expansion.spans:
+            input_pb.multimodal_token_layout.spans.add(offset=offset, length=length)
+    else:
+        input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.batch_group_size = input_py.batch_group_size
     if hasattr(input_py, "batch_group_id") and input_py.batch_group_id != -1:
         input_pb.batch_group_id.value = input_py.batch_group_id
@@ -546,7 +553,6 @@ class ModelRpcClient(object):
             if request_timeout_ms is not None and request_timeout_ms > 0
             else self._max_rpc_timeout_ms
         )
-        input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
 

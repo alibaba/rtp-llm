@@ -912,7 +912,6 @@ class MMHashKeyCache:
             )
         return {
             "worker_instance": self.instance_id,
-            "feature_hash_version": 1,
             "entries": results,
         }
 
@@ -1494,7 +1493,6 @@ class MMEmbeddingCache:
             )
         return {
             "worker_instance": self.instance_id,
-            "feature_hash_version": 1,
             "entries": results,
         }
 
