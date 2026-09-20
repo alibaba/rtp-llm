@@ -161,6 +161,7 @@ py_library(
     ], exclude = [
         "utils/jit_cache_manager.py",
         "utils/jit_cache_store.py",
+        "utils/jit_cache_deep_gemm.py",
         "utils/warmup.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
@@ -186,6 +187,7 @@ py_library(
 py_library(
     name = "jit_cache_manager_lib",
     srcs = [
+        "utils/jit_cache_deep_gemm.py",
         "utils/jit_cache_manager.py",
         "utils/jit_cache_store.py",
     ],

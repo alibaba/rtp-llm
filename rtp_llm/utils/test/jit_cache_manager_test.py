@@ -35,6 +35,9 @@ def _fake_scopes(local=None):
         mock.patch.object(jit, "_cpp_runtime_scope", return_value="cxx-test")
     )
     stack.enter_context(mock.patch.object(jit, "_pkg_version", return_value="1_0"))
+    stack.enter_context(
+        mock.patch.object(jit, "deep_gemm_build_scope", return_value=None)
+    )
     if local is not None:
         stack.enter_context(mock.patch.object(jit, "LOCAL_JIT_DIR", str(local)))
     return stack
