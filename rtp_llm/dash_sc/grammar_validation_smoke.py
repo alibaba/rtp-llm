@@ -41,9 +41,7 @@ from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_j
 from rtp_llm.config.py_config_modules import GrammarAdmissionConfig
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import LLMFinishReason, SamplingParams
-from rtp_llm.dash_sc.inference.grammar_validator import (
-    GrammarValidator,
-)
+from rtp_llm.dash_sc.inference.grammar_validator import GrammarValidator
 from rtp_llm.dash_sc.inference.servicer import DashScInferenceServicer
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
@@ -232,12 +230,13 @@ class _TimedGrammarValidator(GrammarValidator):
                 )
             )
 
-    def _record_validation(self, request_id: str, validate: Any) -> bool:
+    def _record_validation(self, request_id: str, validate: Any) -> Any:
         started = time.perf_counter()
         ok = False
         try:
-            ok = validate()
-            return ok
+            result = validate()
+            ok = result[0] if isinstance(result, tuple) else result
+            return result
         finally:
             self.timings.append(
                 _ValidationTiming(
@@ -273,6 +272,26 @@ class _TimedGrammarValidator(GrammarValidator):
             lambda: super(_TimedGrammarValidator, self).validate_response_format(
                 response_format, request_id
             ),
+        )
+
+    def validate_and_norm_structural_tag(
+        self, payload: str | dict, request_id: str = ""
+    ) -> tuple[bool, str | None]:
+        return self._record_validation(
+            request_id,
+            lambda: super(
+                _TimedGrammarValidator, self
+            ).validate_and_norm_structural_tag(payload, request_id),
+        )
+
+    def validate_and_norm_response_format(
+        self, response_format: str | dict, request_id: str = ""
+    ) -> tuple[bool, str | None]:
+        return self._record_validation(
+            request_id,
+            lambda: super(
+                _TimedGrammarValidator, self
+            ).validate_and_norm_response_format(response_format, request_id),
         )
 
 
