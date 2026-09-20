@@ -83,6 +83,7 @@ GROUP_POLL_S = 0.25
 FULL_HASH_MAX_ENV = "RTP_LLM_RELEASE_FULL_HASH_MAX_MB"
 SAMPLE_BYTES_ENV = "RTP_LLM_RELEASE_SAMPLE_MB"
 WEIGHTS_MANIFEST_ENV = "RTP_LLM_RELEASE_WEIGHTS_MANIFEST"
+VERIFY_WEIGHTS_MANIFEST_ENV = "RTP_LLM_RELEASE_VERIFY_WEIGHTS_MANIFEST"
 REQUIRE_FULL_WEIGHTS_ENV = "RTP_LLM_RELEASE_REQUIRE_FULL_WEIGHTS"
 DEFAULT_FULL_HASH_MAX_BYTES = 256 * 1024 * 1024
 DEFAULT_SAMPLE_BYTES = 1024 * 1024
@@ -316,44 +317,77 @@ def _content_digest(
 def _tree_identity(root: str, full_max_bytes: int, sample_bytes: int) -> Dict[str, Any]:
     """Content identity of a model/tokenizer directory tree, file by file.
 
-    Every file contributes its size and a content digest (full for metadata, marked-sample for a weight
-    shard), and the aggregate digest is taken over that sorted list, so a changed or added file changes
-    the identity even when the total size does not.
+    The COMPLETE inventory is kept for validation: coverage comparison and full-hash verification need
+    every file, only the *reporting* copy is capped. A file that cannot be read, and a tree too large to
+    walk in full, are errors rather than silent omissions -- an unreadable shard must not leave the
+    remaining tree looking complete.
     """
     files: Dict[str, Any] = {}
-    truncated = False
+    errors: List[str] = []
+    unreadable: List[str] = []
+    complete = True
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames.sort()
         for name in sorted(filenames):
             if len(files) >= MAX_TREE_FILES:
-                truncated = True
+                complete = False
+                errors.append(
+                    f"the tree has more than {MAX_TREE_FILES} files, so it was not walked in full and no "
+                    "digest over it can be complete"
+                )
                 break
             path = os.path.join(dirpath, name)
             try:
                 files[os.path.relpath(path, root)] = _content_digest(path, full_max_bytes, sample_bytes)
-            except OSError:
-                continue
-        if truncated:
+            except OSError as e:
+                unreadable.append(f"{os.path.relpath(path, root)}: {e}")
+        if not complete:
             break
+    if unreadable:
+        complete = False
+        errors.append(f"{len(unreadable)} file(s) could not be read: {unreadable[:3]}")
     ident: Dict[str, Any] = {
         "kind": "tree",
+        "root": root,
         "file_count": len(files),
         "total_bytes": sum(int(v["size"]) for v in files.values()),
         "sha256": _digest(files),
-        "mode": "sampled" if any(v["mode"] == "sampled" for v in files.values()) else "full",
+        "complete": complete,
+        "mode": ("full" if all(v["mode"] == "full" for v in files.values()) else "sampled")
+        if complete and files
+        else "incomplete",
+        "files": files,
     }
-    if truncated:
-        ident["truncated_at"] = MAX_TREE_FILES
-    if len(files) <= MAX_LISTED_FILES:
-        ident["files"] = files
+    if errors:
+        ident["errors"] = errors
     return ident
 
 
-def _weights_manifest(path: str, tree: Optional[Dict[str, Any]]) -> Tuple[Dict[str, Any], List[str]]:
-    """Read a packaging-supplied ``<sha256>  <path>`` digest list and require it to cover the tree.
+def _tree_for_report(ident: Mapping[str, Any]) -> Dict[str, Any]:
+    """The report copy of a tree identity: the aggregate covers every file, the listing is capped."""
+    if "files" not in ident:
+        return dict(ident)
+    out = dict(ident)
+    files = out.pop("files")
+    listed = sorted(files)
+    out["files_listed"] = len(listed)
+    out["files"] = {name: files[name] for name in listed[:MAX_LISTED_FILES]}
+    return out
 
-    Returns (manifest identity, errors). The list itself is content-hashed, so a changed digest list
-    changes the manifest even though the weight bytes are not re-read at startup.
+
+def _weights_manifest(
+    path: str,
+    tree: Optional[Dict[str, Any]],
+    verify_full: bool = False,
+    full_max_bytes: int = DEFAULT_FULL_HASH_MAX_BYTES,
+    sample_bytes: int = DEFAULT_SAMPLE_BYTES,
+) -> Tuple[Dict[str, Any], List[str]]:
+    """Read a packaging-supplied ``<sha256>  <path>`` digest list and check it against the tree.
+
+    A digest list is a DECLARATION: on its own it proves nothing about the bytes on disk, so it is never
+    reported as verified unless ``verify_full`` re-hashed every covered file and they matched. Coverage
+    is always required over the tree's COMPLETE inventory (a capped listing must not make an uncovered
+    tree look covered). Returns (manifest identity, errors).
     """
     errors: List[str] = []
     try:
@@ -375,57 +409,101 @@ def _weights_manifest(path: str, tree: Optional[Dict[str, Any]]) -> Tuple[Dict[s
         "path": path,
         "declared_files": len(declared),
         "sha256": hashlib.sha256(raw).hexdigest(),
+        "verified": False,
     }
     if tree is None:
         return ident, errors
-    listed = tree.get("files") or {}
-    if tree.get("truncated_at"):
+    if not tree.get("complete", False):
         errors.append(
-            f"the weights tree was not walked in full ({tree['truncated_at']} file limit), so digest "
-            "coverage cannot be established"
+            "the weights tree could not be walked in full, so digest coverage and verification cannot "
+            "be established"
         )
         return ident, errors
-    missing = sorted(name for name in listed if name not in declared and os.path.basename(name) not in declared)
+    files = tree.get("files") or {}
+    missing = sorted(
+        name for name in files
+        if name not in declared and os.path.basename(name) not in declared
+    )
     if missing:
         errors.append(
             f"the weights digest manifest does not cover {len(missing)} file(s), e.g. {missing[:3]}"
         )
-    ident["covered"] = len(listed) - len(missing)
+    ident["covered"] = len(files) - len(missing)
+    if verify_full:
+        root = str(tree.get("root") or "")
+        mismatched: List[str] = []
+        for name in sorted(files):
+            want = declared.get(name) or declared.get(os.path.basename(name))
+            if want is None:
+                continue
+            try:
+                got = _content_digest(os.path.join(root, name), 0, 0, force_full=True)["sha256"]
+            except OSError as e:
+                mismatched.append(f"{name} (unreadable: {e})")
+                continue
+            if got != want:
+                mismatched.append(name)
+        if mismatched:
+            errors.append(
+                f"{len(mismatched)} declared digest(s) do not match the mounted tree, e.g. "
+                f"{mismatched[:3]}"
+            )
+        else:
+            ident["verified"] = True
+            ident["verified_files"] = len(files)
     return ident, errors
 
 
-def _running_library_paths() -> List[str]:
-    """The compiled shared objects this deployment loads, deduplicated by real path.
+def _select_libraries(ordered: Sequence[str]) -> Tuple[Dict[str, str], Dict[str, List[str]], List[str]]:
+    """Pick one file per library name, in the order the loader would search, and report shadowed copies.
 
-    Deliberately path-based (not an import): the engine libraries are opened by the C++ layer, and
-    importing the extension in a validation path could have side effects. The package's libs directory
-    holds the kernel/collective libraries and the engine config library; the engine and ops libraries
-    sit beside the package in the deployed runfiles layout and inside it in a pip layout.
+    The first candidate for a name wins (the search order is the loader's); every later candidate that
+    is a DIFFERENT file (not a symlink alias of the same file) is recorded as shadowed and makes the
+    identity ambiguous, because the manifest cannot prove which of them the loader opened.
+    """
+    selected: Dict[str, str] = {}
+    shadowed: Dict[str, List[str]] = {}
+    for path in ordered:
+        name = os.path.basename(path)
+        real = os.path.realpath(path)
+        if name not in selected:
+            selected[name] = path
+            shadowed[name] = []
+            continue
+        if os.path.realpath(selected[name]) == real or real in shadowed[name]:
+            continue
+        shadowed[name].append(path)
+    errors = [
+        f"{name} exists as more than one distinct file ({[selected[name]] + shadowed[name]}); the "
+        "loader picks one of them, so this manifest cannot say which binary is running"
+        for name in sorted(shadowed)
+        if shadowed[name]
+    ]
+    return selected, shadowed, errors
+
+
+def _resolve_libraries() -> Tuple[Dict[str, str], Dict[str, List[str]], List[str]]:
+    """The compiled shared objects the deployment loads -> ({name: selected path}, shadowed, errors).
+
+    A library is identified by its BASENAME, because that is how the loader resolves it. Two DIFFERENT
+    files sharing one name on two search paths therefore make the identity ambiguous: whichever the
+    loader picks, a manifest that described the other would be wrong. The search order here mirrors the
+    loader's (the package's libs directory, then beside and above the package, then the import path).
     """
     try:
         import rtp_llm
     except Exception:  # noqa: BLE001
-        return []
+        return {}, {}, ["rtp_llm could not be imported, so no compiled library could be identified"]
     pkg = os.path.dirname(os.path.abspath(rtp_llm.__file__))
-    # The package's libs directory holds the kernel/collective libraries and the engine config library;
-    # the engine and ops shared objects live beside the package in a runfiles tree, inside it in a pip
-    # layout, or on an import path -- so all three are searched, and only for the specific names, never
-    # "every .so" (which would pull in unrelated packages).
-    library_dirs = [os.path.join(pkg, LIBRARY_DIR), pkg, os.path.dirname(pkg)]
+    search_dirs = [os.path.join(pkg, LIBRARY_DIR), pkg, os.path.dirname(pkg)]
     for entry in list(sys.path)[:32]:
         if entry and os.path.isdir(entry):
-            library_dirs.append(entry)
-    patterns = [os.path.join(pkg, LIBRARY_DIR, "*.so")]
-    patterns += [os.path.join(d, p) for d in library_dirs for p in LIBRARY_GLOBS]
-    unique: List[str] = []
-    seen = set()
-    for pattern in patterns:
-        for path in sorted(glob.glob(pattern)):
-            real = os.path.realpath(path)
-            if real not in seen:
-                seen.add(real)
-                unique.append(path)
-    return unique
+            search_dirs.append(entry)
+    ordered = sorted(glob.glob(os.path.join(pkg, LIBRARY_DIR, "*.so")))
+    for directory in search_dirs:
+        for pattern in LIBRARY_GLOBS:
+            ordered.extend(sorted(glob.glob(os.path.join(directory, pattern))))
+    return _select_libraries(ordered)
 
 
 def artifact_identity_from(cfg: Any, env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
@@ -433,16 +511,20 @@ def artifact_identity_from(cfg: Any, env: Optional[Mapping[str, str]] = None) ->
     will serve.
 
     Size and mtime are not an identity -- two builds can share both -- so every compiled library and
-    every model/tokenizer file contributes a content digest. The packaging step can add an explicit
+    every model/tokenizer file contributes a content digest, and a library whose name resolves to more
+    than one distinct file is an error rather than a coin flip. The packaging step can add an explicit
     release label (image digest or tag) through ``RTP_LLM_RELEASE_ARTIFACT_ID`` and, for weights too
-    large to re-hash at startup, a digest manifest through ``RTP_LLM_RELEASE_WEIGHTS_MANIFEST``, whose
-    coverage is required rather than assumed. Anything that could not be established is reported in
-    ``errors`` so the caller can refuse the start instead of proceeding with an unknown artifact.
+    large to re-hash at startup, a digest manifest through ``RTP_LLM_RELEASE_WEIGHTS_MANIFEST``: its
+    coverage is required, and it counts as proof only when it was VERIFIED against the mounted tree
+    (``RTP_LLM_RELEASE_VERIFY_WEIGHTS_MANIFEST``, implied by ``RTP_LLM_RELEASE_REQUIRE_FULL_WEIGHTS``).
+    Anything that could not be established is reported in ``errors`` so the caller can refuse the start
+    instead of proceeding with an unknown artifact.
     """
     environment: Mapping[str, str] = os.environ if env is None else env
     full_max = _env_bytes(environment, FULL_HASH_MAX_ENV, DEFAULT_FULL_HASH_MAX_BYTES)
     sample = _env_bytes(environment, SAMPLE_BYTES_ENV, DEFAULT_SAMPLE_BYTES)
     require_full = _truthy(environment.get(REQUIRE_FULL_WEIGHTS_ENV))
+    verify_manifest = require_full or _truthy(environment.get(VERIFY_WEIGHTS_MANIFEST_ENV))
     ids: Dict[str, Any] = {}
     errors: List[str] = []
     label = (environment.get(ARTIFACT_LABEL_ENV) or "").strip()
@@ -451,13 +533,21 @@ def artifact_identity_from(cfg: Any, env: Optional[Mapping[str, str]] = None) ->
 
     # Compiled libraries: always hashed in full. The set is bounded (the engine plus the kernel and
     # collective libraries) and it is the code that actually runs, so a sampled digest would be the
-    # wrong trade here.
+    # wrong trade here. Each entry records the path that was hashed, so a different copy of the same
+    # name is visible in the manifest itself.
+    selected, shadowed, lib_errors = _resolve_libraries()
+    errors.extend(lib_errors)
     libs: Dict[str, Any] = {}
-    for path in _running_library_paths():
+    for name, path in sorted(selected.items()):
         try:
-            libs[os.path.basename(path)] = _content_digest(path, full_max, sample, force_full=True)
+            entry = _content_digest(path, full_max, sample, force_full=True)
         except OSError as e:
             errors.append(f"cannot hash library {path}: {e}")
+            continue
+        entry["path"] = path
+        if shadowed.get(name):
+            entry["shadowed_copies"] = list(shadowed[name])
+        libs[name] = entry
     if libs:
         ids["libraries"] = {
             "count": len(libs),
@@ -499,18 +589,25 @@ def artifact_identity_from(cfg: Any, env: Optional[Mapping[str, str]] = None) ->
             errors.append(f"cannot identify {key} at {path}: {e}")
             continue
         ident["name"] = os.path.basename(path.rstrip("/"))
+        errors.extend(ident.pop("errors", []))
         if manifest_path and ident.get("kind") == "tree":
-            wm, wm_errors = _weights_manifest(manifest_path, ident)
+            wm, wm_errors = _weights_manifest(
+                manifest_path, ident, verify_full=verify_manifest,
+                full_max_bytes=full_max, sample_bytes=sample)
             if wm:
                 ident["weights_manifest"] = wm
             errors.extend(wm_errors)
-        if require_full and ident.get("mode") != "full" and "weights_manifest" not in ident:
-            errors.append(
-                f"{key} identity is '{ident.get('mode')}': {REQUIRE_FULL_WEIGHTS_ENV} requires a full "
-                f"content digest, either by raising {FULL_HASH_MAX_ENV} or by supplying "
-                f"{WEIGHTS_MANIFEST_ENV}"
-            )
-        ids[key] = ident
+        # Strict mode accepts only a FULL identity that was actually established: a sampled tree with an
+        # unverified (or zero) digest list is a declaration, not proof.
+        if require_full and ident.get("mode") != "full":
+            verified = bool((ident.get("weights_manifest") or {}).get("verified"))
+            if not verified:
+                errors.append(
+                    f"{key} identity is '{ident.get('mode')}': {REQUIRE_FULL_WEIGHTS_ENV} requires a "
+                    f"verified full content digest -- raise {FULL_HASH_MAX_ENV}, or supply a weights "
+                    f"manifest ({WEIGHTS_MANIFEST_ENV}) that is verified against the mounted tree"
+                )
+        ids[key] = _tree_for_report(ident)
         seen_trees[real] = key
     if errors:
         ids["errors"] = errors

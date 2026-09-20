@@ -835,6 +835,7 @@ class ContentIdentity(unittest.TestCase):
         ident, errors = rp._weights_manifest(manifest, tree)
         self.assertTrue(any("does not cover" in e for e in errors), errors)
         self.assertEqual(1, ident["declared_files"])
+        self.assertFalse(ident["verified"])
         # A manifest that covers the shard but not the metadata file is still incomplete.
         with open(manifest, "a") as f:
             f.write("%s  config.json\n" % ("1" * 64))
@@ -850,12 +851,102 @@ class ContentIdentity(unittest.TestCase):
         self.assertTrue(any("malformed" in e for e in errors), errors)
 
     def test_discovered_libraries_are_compiled_shared_objects(self):
-        paths = rp._running_library_paths()
-        self.assertTrue(paths, "no library path was discovered in the deployed layout")
-        self.assertTrue(all(p.endswith(".so") for p in paths), paths)
-        self.assertTrue(any("libth_transformer" in os.path.basename(p) for p in paths), paths)
-        self.assertTrue(any("librtp_compute_ops" in os.path.basename(p) for p in paths), paths)
-        self.assertEqual(len(paths), len({os.path.realpath(p) for p in paths}), "duplicates not collapsed")
+        selected, shadowed, errors = rp._resolve_libraries()
+        self.assertTrue(selected, "no library path was discovered in the deployed layout")
+        self.assertTrue(all(p.endswith(".so") for p in selected.values()), selected)
+        self.assertTrue(any("libth_transformer" in n for n in selected), selected)
+        self.assertTrue(any("librtp_compute_ops" in n for n in selected), selected)
+        self.assertEqual([], errors, "the deployed layout must not be ambiguous")
+        self.assertEqual({}, {k: v for k, v in shadowed.items() if v})
+
+    def test_shadowed_library_copies_are_an_error_not_an_overwrite(self):
+        # Two different files with one basename: the loader picks one, so the manifest cannot claim to
+        # describe the running binary, and the FIRST copy must not be silently replaced by the second.
+        a = self.write("one/libth_transformer.so", b"first")
+        b = self.write("two/libth_transformer.so", b"second")
+        selected, shadowed, errors = rp._select_libraries([a, b])
+        self.assertEqual(a, selected["libth_transformer.so"])
+        self.assertEqual([b], shadowed["libth_transformer.so"])
+        self.assertTrue(any("more than one distinct file" in e for e in errors), errors)
+        # A symlink alias of the SAME file is not a second copy.
+        alias = os.path.join(self.dir, "alias", "libth_transformer.so")
+        os.makedirs(os.path.dirname(alias))
+        os.symlink(a, alias)
+        selected2, shadowed2, errors2 = rp._select_libraries([a, alias])
+        self.assertEqual(a, selected2["libth_transformer.so"])
+        self.assertEqual([], shadowed2["libth_transformer.so"])
+        self.assertEqual([], errors2)
+
+    def test_a_file_that_cannot_be_read_fails_the_tree(self):
+        self.write("config.json", b"{}")
+        shard = self.write("shard.safetensors", b"w" * 4096)
+        tree = rp._tree_identity(self.dir, 1024, 256)
+        self.assertTrue(tree["complete"])
+        self.assertNotIn("errors", tree)
+        # A dangling symlink cannot be stat()ed whatever the uid, unlike a chmod-0 file for root.
+        os.symlink(os.path.join(self.dir, "missing-target"), shard + ".dangling")
+        broken = rp._tree_identity(self.dir, 1024, 256)
+        self.assertFalse(broken["complete"])
+        self.assertEqual("incomplete", broken["mode"])
+        self.assertTrue(any("could not be read" in e for e in broken["errors"]), broken["errors"])
+
+    def test_the_full_inventory_is_kept_when_the_listing_is_capped(self):
+        for i in range(rp.MAX_LISTED_FILES + 2):
+            self.write(f"f{i:03d}.bin", b"x" * 32)
+        tree = rp._tree_identity(self.dir, 1024, 256)
+        self.assertEqual(rp.MAX_LISTED_FILES + 2, tree["file_count"])
+        self.assertEqual(rp.MAX_LISTED_FILES + 2, len(tree["files"]), "inventory must be complete")
+        report = rp._tree_for_report(tree)
+        self.assertEqual(rp.MAX_LISTED_FILES, len(report["files"]))
+        self.assertEqual(rp.MAX_LISTED_FILES + 2, report["files_listed"])
+        self.assertEqual(tree["sha256"], report["sha256"])
+
+    def test_an_empty_manifest_over_a_capped_tree_is_rejected(self):
+        # The audit's probe: 66 sampled files + an empty manifest passed strict mode with covered: 0.
+        for i in range(rp.MAX_LISTED_FILES + 2):
+            self.write(f"shard-{i:03d}.safetensors", b"w" * 32)
+        manifest = self.write("weights.sha256", "# empty\n")
+        tree = rp._tree_identity(self.dir, 1024, 256)
+        ident, errors = rp._weights_manifest(manifest, tree)
+        self.assertTrue(any("does not cover" in e for e in errors), errors)
+        self.assertEqual(0, ident["covered"])
+        self.assertFalse(ident["verified"])
+
+    def test_declared_digests_are_not_proof_until_verified(self):
+        payload = b"weights" * 1000
+        shard = self.write("shard.safetensors", payload)
+        tree = rp._tree_identity(self.dir, 1024, 256)
+        zero = self.write("zeros.sha256", "%s  shard.safetensors\n" % ("0" * 64))
+        ident, errors = rp._weights_manifest(zero, tree, verify_full=True)
+        self.assertFalse(ident["verified"])
+        self.assertTrue(any("do not match" in e for e in errors), errors)
+        # A correct declaration over the whole tree verifies.
+        import hashlib as _h
+        good = self.write("good.sha256", "%s  shard.safetensors\n" % _h.sha256(payload).hexdigest())
+        ident2, errors2 = rp._weights_manifest(good, tree, verify_full=True)
+        self.assertEqual([], errors2)
+        self.assertTrue(ident2["verified"])
+        self.assertEqual(1, ident2["verified_files"])
+        self.assertTrue(shard)
+
+    def test_strict_mode_rejects_an_unverified_declaration(self):
+        stub = SnapshotFromResolvedConfig().stub_config()
+        model = os.path.join(self.dir, "model")
+        os.makedirs(model)
+        with open(os.path.join(model, "shard.safetensors"), "wb") as f:
+            f.write(b"w" * 8192)
+        stub.model_args.ckpt_path = model
+        zeros = os.path.join(self.dir, "zero.sha256")
+        with open(zeros, "w") as f:
+            f.write("%s  shard.safetensors\n" % ("0" * 64))
+        ids = rp.artifact_identity_from(stub, {
+            rp.FULL_HASH_MAX_ENV: "0.001",
+            rp.REQUIRE_FULL_WEIGHTS_ENV: "1",
+            rp.WEIGHTS_MANIFEST_ENV: zeros,
+        })
+        self.assertFalse(ids["model"]["weights_manifest"]["verified"])
+        self.assertTrue(any("verified full content digest" in e for e in ids.get("errors", [])), ids)
+        self.assertEqual("sampled", ids["model"]["mode"])
 
     def test_require_full_weights_rejects_a_sampled_identity(self):
         stub = SnapshotFromResolvedConfig().stub_config()
@@ -869,11 +960,11 @@ class ContentIdentity(unittest.TestCase):
         env = {rp.FULL_HASH_MAX_ENV: "0.001", rp.SAMPLE_BYTES_ENV: "0.0005",
                rp.REQUIRE_FULL_WEIGHTS_ENV: "1"}
         ids = rp.artifact_identity_from(stub, env)
-        self.assertTrue(any("requires a full content digest" in e for e in ids.get("errors", [])),
+        self.assertTrue(any("requires a verified full content digest" in e for e in ids.get("errors", [])),
                         ids.get("errors"))
         ids2 = rp.artifact_identity_from(stub, {rp.FULL_HASH_MAX_ENV: "1"})
         self.assertFalse(
-            [e for e in ids2.get("errors", []) if "requires a full content digest" in e], ids2)
+            [e for e in ids2.get("errors", []) if "requires a verified full content digest" in e], ids2)
         self.assertEqual("full", ids2["model"]["mode"])
 
 
