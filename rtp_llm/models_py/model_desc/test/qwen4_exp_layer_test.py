@@ -1398,26 +1398,52 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             torch.tensor([1, 1], dtype=torch.int32)
         )
 
-    def test_multimodal_placeholder_fails_fast(self):
+    def test_multimodal_placeholders_hash_as_eos(self):
+        """Vision positions hash as EOS, mirroring upstream's PLE ids."""
         model_inputs = SimpleNamespace(
             input_ids=torch.tensor([1, 2, 99, 4], dtype=torch.long),
             embedding_inputs=SimpleNamespace(
                 text_tokens_mask=torch.tensor([True, True, False, True])
             ),
         )
+        torch.testing.assert_close(
+            self.model._ple_input_ids(model_inputs),
+            torch.tensor([1, 2, 7, 4], dtype=torch.long),
+        )
 
-        with self.assertRaisesRegex(RuntimeError, "multimodal"):
-            self.model._ple_input_ids(model_inputs)
+        text_only = SimpleNamespace(
+            input_ids=torch.tensor([1, 2], dtype=torch.long),
+            embedding_inputs=SimpleNamespace(
+                text_tokens_mask=torch.tensor([True, True])
+            ),
+        )
+        torch.testing.assert_close(
+            self.model._ple_input_ids(text_only),
+            torch.tensor([1, 2], dtype=torch.long),
+        )
 
+        # The mask alone drives the substitution; features are not required.
         features_only = SimpleNamespace(
-            input_ids=torch.tensor([1], dtype=torch.long),
-            embedding_inputs=SimpleNamespace(text_tokens_mask=None),
+            input_ids=torch.tensor([5, 6], dtype=torch.long),
+            embedding_inputs=SimpleNamespace(
+                text_tokens_mask=torch.tensor([False, True])
+            ),
             multimodal_inputs=SimpleNamespace(
                 multimodal_features=[torch.ones(1, _HIDDEN)]
             ),
         )
-        with self.assertRaisesRegex(RuntimeError, "multimodal"):
-            self.model._ple_input_ids(features_only)
+        torch.testing.assert_close(
+            self.model._ple_input_ids(features_only),
+            torch.tensor([7, 6], dtype=torch.long),
+        )
+
+        eos = self.model.config.special_tokens.eos_token_id
+        self.model.config.special_tokens.eos_token_id = None
+        try:
+            with self.assertRaisesRegex(RuntimeError, "eos token id"):
+                self.model._ple_input_ids(features_only)
+        finally:
+            self.model.config.special_tokens.eos_token_id = eos
 
     def test_ple_input_ids_rejects_mismatched_text_mask(self):
         model_inputs = SimpleNamespace(
@@ -1678,6 +1704,80 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         )
         torch.testing.assert_close(self.ctx_base[2], expected_contexts[1])
 
+    def test_prefill_skips_pages_the_allocator_did_not_materialize(self):
+        """A dropped checkpoint chain still resumes from the terminal page.
+
+        Without prefix reuse the allocator materializes only each request's
+        tail page, so intermediate checkpoints have no home and must be
+        skipped rather than failing -- the same contract as GDN's
+        store_ssm_state_to_block_map kernel.
+        """
+        lengths = (3 * self._PAGE, 3 * self._PAGE)
+        token_count = sum(lengths)
+        ids = torch.arange(1, token_count + 1, dtype=torch.long)
+        hyper = torch.randn(token_count, _HC * _HIDDEN, dtype=torch.bfloat16)
+        inputs = self._inputs_by_tag(
+            is_prefill=True,
+            input_lengths=torch.tensor(lengths, dtype=torch.int32),
+            prefix_lengths=torch.zeros(2, dtype=torch.int32),
+            sequence_lengths=torch.empty(0, dtype=torch.int32),
+        )
+        tail_only_state = torch.tensor([[0, 0, 7], [0, 0, 8]], dtype=torch.int32)
+        tail_only_ctx = torch.tensor([[0, 0, 9], [0, 0, 10]], dtype=torch.int32)
+        inputs[PLE_STATE_TAG].kv_cache_block_id_device = tail_only_state
+        inputs[PLE_STATE_TAG].kv_cache_block_id = tail_only_state
+        inputs[PLE_NGRAM_CTX_TAG].kv_cache_block_id_device = tail_only_ctx
+        inputs[PLE_NGRAM_CTX_TAG].kv_cache_block_id = tail_only_ctx
+
+        expected_outputs = []
+        expected_states = []
+        expected_contexts = []
+        offset = 0
+        for length in lengths:
+            seq_ids = ids[offset : offset + length].view(1, length)
+            history = torch.cat(
+                [
+                    seq_ids.new_full((1, self.ple.ple_embedding.context_len), 7),
+                    seq_ids,
+                ],
+                dim=1,
+            )
+            output, state = self.ple.prefill(
+                hyper[offset : offset + length].view(1, length, -1), history
+            )
+            expected_outputs.append(output.squeeze(0))
+            expected_states.append(state.squeeze(0))
+            expected_contexts.append(history[0, -self.ple.ple_embedding.context_len :])
+            offset += length
+        expected_states = torch.stack(expected_states)
+        expected_contexts = torch.stack(expected_contexts)
+
+        got = self.model._apply_ple(1, hyper, ids, inputs)
+
+        torch.testing.assert_close(got, hyper + torch.cat(expected_outputs, dim=0))
+        torch.testing.assert_close(
+            self.state_base.index_select(
+                0, tail_only_state[:, 2].to(torch.long)
+            ).view_as(expected_states),
+            expected_states,
+        )
+        torch.testing.assert_close(
+            self.ctx_base.index_select(0, tail_only_ctx[:, 2].to(torch.long)),
+            expected_contexts,
+        )
+        # Nothing leaked into the pages the allocator dropped: only the
+        # terminal physical rows may hold data.
+        untouched_state = torch.ones(self.state_base.shape[0], dtype=torch.bool)
+        untouched_state[tail_only_state[:, 2].to(torch.long)] = False
+        self.assertEqual(
+            int(torch.count_nonzero(self.state_base[untouched_state]).item()), 0
+        )
+        untouched_ctx = torch.ones(self.ctx_base.shape[0], dtype=torch.bool)
+        untouched_ctx[tail_only_ctx[:, 2].to(torch.long)] = False
+        self.assertEqual(
+            int(torch.count_nonzero(self.ctx_base[untouched_ctx]).item()), 0
+        )
+
     def test_prefill_rejects_an_unallocated_terminal_page(self):
         inputs = self._inputs_by_tag(
             is_prefill=True,
@@ -1688,7 +1788,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         inputs[PLE_STATE_TAG].kv_cache_block_id_device = self.state_blocks.clone()
         inputs[PLE_STATE_TAG].kv_cache_block_id_device[0, 1] = 0
 
-        with self.assertRaisesRegex(RuntimeError, "unallocated logical page"):
+        with self.assertRaisesRegex(RuntimeError, "terminal page is unallocated"):
             self.model._apply_ple(
                 1,
                 torch.randn(self._PAGE + 2, _HC * _HIDDEN, dtype=torch.bfloat16),

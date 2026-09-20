@@ -13,6 +13,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     ple_state_desc,
 )
 from rtp_llm.ops import (
+    CacheGroupType,
     DataType,
     HybridAttentionType,
     KVCacheSpecType,
@@ -58,8 +59,11 @@ class PleStateDescTest(unittest.TestCase):
         self.assertEqual(desc.entry_elems, _HC * _HIDDEN)
         self.assertEqual(desc.entry_count_mode, OpaqueBlockEntryCountMode.EXPLICIT)
         self.assertEqual(desc.explicit_entry_count, 9)
-        self.assertIsNotNone(desc.reuse)
-        self.assertFalse(desc.reuse.enable_prefix_reuse)
+        # Page checkpoints the model resumes from, so the chain is materialized
+        # for the whole request length rather than tail-sparse.
+        self.assertEqual(desc.group_type, CacheGroupType.FULL)
+        self.assertTrue(desc.reuse.enable_prefix_reuse)
+        self.assertEqual(desc.tail.active_tail_blocks, 0)
 
     def test_rejects_degenerate_state_length(self):
         with self.assertRaisesRegex(ValueError, "state length must be positive"):
@@ -98,8 +102,9 @@ class BuildDescsTest(unittest.TestCase):
         self.assertEqual(ctx.entry_dtype, DataType.TYPE_INT64)
         self.assertEqual(ctx.entry_elems, 1)
         self.assertEqual(ctx.explicit_entry_count, _NGRAM - 1)
-        self.assertIsNotNone(ctx.reuse)
-        self.assertFalse(ctx.reuse.enable_prefix_reuse)
+        self.assertEqual(ctx.group_type, CacheGroupType.FULL)
+        self.assertTrue(ctx.reuse.enable_prefix_reuse)
+        self.assertEqual(ctx.tail.active_tail_blocks, 0)
 
     def test_ple_layer_keeps_its_own_attention_region(self):
         descs = self._build()
@@ -144,7 +149,7 @@ class IndexerDescTest(unittest.TestCase):
             OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED,
         )
         self.assertEqual(desc.compression_ratio, self.RATIO)
-        self.assertFalse(desc.reuse.enable_prefix_reuse)
+        self.assertTrue(desc.reuse.enable_prefix_reuse)
 
     def test_kv_desc_is_fixed_to_the_bf16_production_abi(self):
         """The 128-wide key is 256 B and never carries an inline FP8 scale."""
@@ -168,7 +173,9 @@ class IndexerDescTest(unittest.TestCase):
         self.assertEqual(desc.entry_elems, self.HEAD_DIM)
         self.assertEqual(desc.entry_count_mode, OpaqueBlockEntryCountMode.STATE_RING)
         self.assertEqual(desc.state_ring_overlap, 1)
-        self.assertFalse(desc.reuse.enable_prefix_reuse)
+        self.assertEqual(desc.group_type, CacheGroupType.FULL)
+        self.assertTrue(desc.reuse.enable_prefix_reuse)
+        self.assertEqual(desc.tail.active_tail_blocks, 0)
 
 
 class IndexerLayerPlacementTest(unittest.TestCase):
