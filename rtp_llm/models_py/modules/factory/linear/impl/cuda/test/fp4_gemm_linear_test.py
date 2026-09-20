@@ -320,8 +320,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
                 print(f"backend: {backend}, fp4_output: {fp4_output.float()}")
                 print(f"backend: {backend}, bf16_output: {bf16_output.float()}")
                 diff = calc_diff(fp4_output, bf16_output)
-                diff_threshold = 0.011 if batch_size == 1 else 0.01
-                self.assertLess(diff, diff_threshold)
+                self.assertLess(diff, 0.01)
 
                 # Both outputs should have the same shape and dtype
                 self.assertEqual(fp4_output.shape, bf16_output.shape)

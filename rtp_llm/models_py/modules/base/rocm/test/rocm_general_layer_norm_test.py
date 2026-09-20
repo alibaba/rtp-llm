@@ -11,7 +11,9 @@ pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 
 def _tolerance(dtype: _dtype) -> tuple:
-    return 1e-2, 1e-2
+    # Restore upstream's FP16 bound while retaining the stricter BF16 bound.
+    tol = 8 * 2.0**-11 if dtype == torch.float16 else 1e-2
+    return tol, tol
 
 
 class _MismatchReport:

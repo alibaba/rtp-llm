@@ -5,7 +5,11 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+import pytest
 import torch
+
+# Keep the original H20 route; CUDA 13 session profiles also select this file.
+pytestmark = pytest.mark.gpu(type="H20")
 
 
 def _make_buf(tokens: int, dim: int, topk: int, *, sentinel: bool = False):

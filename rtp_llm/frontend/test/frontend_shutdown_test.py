@@ -508,6 +508,22 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertTrue(server.should_exit)
         self.assertIsNone(server._pre_stop_timer)
 
+        # Also verify that a real timer dispatches shutdown without a manual callback.
+        manager = FrontendShutdownManager()
+        server = GracefulShutdownServer(Config(lambda scope: None))
+        server.set_server(FakeFrontendServer(), manager, pre_stop_drain_seconds=0.01)
+        try:
+            server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
+            self.assertTrue(server.wait_for_signal_dispatch())
+            self.assertTrue(self.wait_until(lambda: server.should_exit))
+            self.assertTrue(manager.is_unavailable())
+            self.assertTrue(manager.is_draining())
+            self.assertTrue(server.should_exit)
+            self.assertIsNone(server._pre_stop_timer)
+        finally:
+            if server._pre_stop_timer is not None:
+                server._pre_stop_timer.cancel()
+
     def test_pre_stop_timer_uses_remaining_drain_seconds(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))

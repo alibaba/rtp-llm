@@ -332,7 +332,6 @@ cuda13_only_paths = [
     "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/local_loop_cuda_test.py",
     "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/grouped_moe_equivalence_test.py",
     "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/mega_moe_routed_only_execution_test.py",
-    "rtp_llm/models_py/triton_kernels/moe/test/test_mega_moe_gate_pack.py",
     "rtp_llm/test/dsv4",
     # The original decode/test suite still runs on SM100_ARM with CUDA 12.9.
     # Only the newer kernel families require the CUDA 13 test environments.
@@ -536,8 +535,9 @@ gpu_type = "A10"
 minimum_count = 1
 # Preserve the 2730 previously executed cases, restore 200 mainline methods,
 # and add two coverage/staging plus 14 remote termination regressions.
+# Restore the original A10 CausalConv1D (5) and L2Norm (9) methods as well.
 # Every case must execute.
-expected_count = 2946
+expected_count = 2968
 forbid_skips = true
 paths = [
     "rtp_llm/access_logger/test",
@@ -596,7 +596,7 @@ markexpr = "not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke
 description = "Open-source-only Python UT on SM8x after internal_source is stripped"
 gpu_type = "A10"
 minimum_count = 1
-expected_count = 2946
+expected_count = 2968
 forbid_skips = true
 paths = [
     "rtp_llm/access_logger/test",
@@ -657,7 +657,12 @@ gpu_type = "H20"
 minimum_count = 1
 # Run 72942162 collected 493 after mainline sync. The ROCm-only case moves to
 # AMD; the inherited FP8 copy of a BF16-only case is no longer a phantom skip.
-expected_count = 491
+# Restore the original Headwise head-count method to automatic H20 coverage.
+# EP scatter also retains its original seven H20 kernel tests.
+# Batched routing retains its seven default-device checks in the H20 environment.
+# Generic MegaMoE gate/pack retains its nine original H20 kernel checks.
+# Include ten inherited FlashInfer decode topology/lifecycle regressions.
+expected_count = 526
 forbid_skips = true
 ignore_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4"]
 isolated_paths = [
@@ -689,8 +694,9 @@ markexpr = "SM100_ARM and not smoke and not perf and not manual"
 description = "Original SM120 UT on RTX 5000 Pro (ut-sm12x)"
 gpu_type = "RTX_5000_PRO"
 minimum_count = 1
-# Mainline: 97 hardware methods + 11 CPU methods; FP8 is unsupported on SM120.
-expected_count = 108
+# Preserve all 108 methods, including the existing FP8 decode cases, and add
+# ten inherited FlashInfer decode topology/lifecycle regressions.
+expected_count = 118
 forbid_skips = true
 isolate_all_paths = true
 require_isolated_tests = true
@@ -702,6 +708,40 @@ paths = [
     "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_trtllm_fmha_v2_paged_prefill.py::TestTRTLLMFMHAv2PagedPrefillOpBF16",
     "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_trtllm_fmha_v2_prefill.py::TestTRTLLMFMHAv2PrefillOpBF16",
     "rtp_llm/models_py/utils/test/arch_test.py",
+]
+markexpr = "not manual and not smoke and not perf"
+
+[tool.rtp_llm.pytest_ci.profiles.py_ut_l20]
+description = "Original L20 FlashInfer, SiLU and quantization methods"
+gpu_type = "L20"
+minimum_count = 1
+# Preserve the original L20 route independently of H20 and SM120 coverage.
+expected_count = 86
+forbid_skips = true
+isolate_all_paths = true
+require_isolated_tests = true
+paths = [
+    "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_py_flashinfer_mha_decode.py",
+    "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_paged_mha_prefill.py",
+    "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_ragged_mha_prefill.py",
+    "rtp_llm/models_py/triton_kernels/common/test/silu_mul_masked_test.py",
+    "rtp_llm/models_py/kernels/cuda/test/per_token_group_quant_8bit_test.py",
+]
+markexpr = "not manual and not smoke and not perf"
+
+[tool.rtp_llm.pytest_ci.profiles.py_ut_oss_l20]
+description = "Original opensource L20 methods; quantization retains upstream open_skip"
+gpu_type = "L20"
+minimum_count = 1
+expected_count = 84
+forbid_skips = true
+isolate_all_paths = true
+require_isolated_tests = true
+paths = [
+    "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_py_flashinfer_mha_decode.py",
+    "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_paged_mha_prefill.py",
+    "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_ragged_mha_prefill.py",
+    "rtp_llm/models_py/triton_kernels/common/test/silu_mul_masked_test.py",
 ]
 markexpr = "not manual and not smoke and not perf"
 

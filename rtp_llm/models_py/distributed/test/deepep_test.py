@@ -2254,8 +2254,12 @@ class DeepEPTest(TestCase):
                 )
 
     def test_deepep_low_latency_m2n(self):
-        if not hasattr(DeepEPBuffer, "get_low_latency_rdma_size_hint_m2n"):
-            return
+        self.assertTrue(
+            hasattr(DeepEPBuffer, "get_low_latency_rdma_size_hint_m2n"),
+            "Selected M2N coverage requires a deep_ep provider with "
+            "get_low_latency_rdma_size_hint_m2n; returning without execution "
+            "must not count as a passed test.",
+        )
         with PortsContext(None, 1) as ports:
             os.environ["MASTER_PORT"] = str(ports[0])
             for params in itertools.product(

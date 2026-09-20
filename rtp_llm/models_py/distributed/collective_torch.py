@@ -72,13 +72,17 @@ def _get_flashinfer_allreduce():
     return _flashinfer_allreduce
 
 
-def _init_flashinfer_allreduce(parallelism_config: ParallelismConfig) -> None:
+def _init_flashinfer_allreduce(
+    parallelism_config: ParallelismConfig,
+    disable_custom_all_reduce: Optional[bool] = None,
+) -> None:
     if parallelism_config.tp_size <= 1:
         return
     _get_flashinfer_allreduce().init_flashinfer_allreduce(
         _get_group(Group.TP),
         torch.device("cuda", parallelism_config.local_rank),
         single_node=parallelism_config.tp_size <= parallelism_config.local_world_size,
+        disable_custom_all_reduce=disable_custom_all_reduce,
     )
 
 
@@ -138,6 +142,7 @@ def init_distributed_environment(
     nccl_init_port: int,
     backend: str = "nccl",
     timeout: Optional[int] = None,
+    disable_custom_all_reduce: Optional[bool] = None,
 ):
     """Initialize distributed environment and create process groups.
 
@@ -150,6 +155,8 @@ def init_distributed_environment(
         nccl_init_port: Port for torch.distributed init_process_group (tcp://ip:port).
         backend: Distributed backend (default: "nccl")
         timeout: Timeout in seconds for process group initialization
+        disable_custom_all_reduce: Explicit server-wide custom AllReduce
+            override. ``None`` preserves the implementation-specific default.
 
     Raises:
         RuntimeError: If already initialized and not destroyed
@@ -167,12 +174,17 @@ def init_distributed_environment(
             _cpu_tp_broadcaster_base_path = _make_cpu_tp_broadcaster_base_path(
                 parallelism_config, nccl_init_port
             )
-            _create_process_groups(parallelism_config, backend, timedelta(days=36500))
+            _create_process_groups(
+                parallelism_config,
+                backend,
+                timedelta(days=36500),
+                disable_custom_all_reduce,
+            )
             _register_process_groups_to_cpp()
         rocm_rccl = _get_rocm_rccl()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
-        _init_flashinfer_allreduce(parallelism_config)
+        _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
         return
 
     _normalize_parallelism_ranks(parallelism_config)
@@ -196,13 +208,18 @@ def init_distributed_environment(
     # we still need to create our process groups
     if torch.distributed.is_initialized():
         logging.info("torch.distributed already initialized, creating process groups")
-        _create_process_groups(parallelism_config, backend, timedelta(days=36500))
+        _create_process_groups(
+            parallelism_config,
+            backend,
+            timedelta(days=36500),
+            disable_custom_all_reduce,
+        )
         _parallelism_config = parallelism_config
         _initialized = True
         _register_process_groups_to_cpp()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
-        _init_flashinfer_allreduce(parallelism_config)
+        _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
         return
 
     logging.info(
@@ -231,20 +248,26 @@ def init_distributed_environment(
     )
 
     # Create DP and TP groups
-    _create_process_groups(parallelism_config, backend, timedelta(days=36500))
+    _create_process_groups(
+        parallelism_config,
+        backend,
+        timedelta(days=36500),
+        disable_custom_all_reduce,
+    )
     _parallelism_config = parallelism_config
     _initialized = True
     _register_process_groups_to_cpp()
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
-    _init_flashinfer_allreduce(parallelism_config)
+    _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
 
 
 def _create_process_groups(
     parallelism_config: ParallelismConfig,
     backend: str,
     timeout: Optional[timedelta],
+    disable_custom_all_reduce: Optional[bool] = None,
 ):
     """Create DP and TP process groups.
 
@@ -252,6 +275,7 @@ def _create_process_groups(
         parallelism_config: Configuration for parallelism setup
         backend: Distributed backend
         timeout: Timeout for process group creation
+        disable_custom_all_reduce: Explicit custom AllReduce override.
     """
     global _group_map
 
@@ -308,13 +332,19 @@ def _create_process_groups(
                         f"[rank: {world_rank}] Stored TP group with key: {group_key} {tp_group} with ranks: {tp_ranks}"
                     )
 
-                _get_symm_mem().init_symm_mem_communicator(tp_group)
+                _get_symm_mem().init_symm_mem_communicator(
+                    tp_group,
+                    disable_custom_all_reduce=disable_custom_all_reduce,
+                )
 
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
-        _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
+        _get_symm_mem().init_symm_mem_communicator(
+            torch.distributed.group.WORLD,
+            disable_custom_all_reduce=disable_custom_all_reduce,
+        )
 
 
 def _register_process_groups_to_cpp():

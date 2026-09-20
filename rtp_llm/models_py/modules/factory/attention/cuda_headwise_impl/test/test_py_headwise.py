@@ -240,16 +240,18 @@ class TestHeadwisePrefillOp(unittest.TestCase):
     # Test Cases (replaces the old main loop)
     # -------------------------
     def test_long_context_prefill(self):
-        """Tests headwise prefill with long KV contexts without CI-scale full prefill."""
+        """Tests full prefill and prefix-cached prefill with 32k and 65k contexts."""
         logging.info("\n=== Testing Long Context Prefill ===")
 
         cases = [
-            (32768, 64),
-            (65536, 64),
+            (1, 32768, 64),
+            (1, 65536, 64),
+            (2, 32768, 32768),
+            (2, 65536, 65536),
         ]
-        for kv_len, qo_len in cases:
+        for batch_size, kv_len, qo_len in cases:
             case = self.Case(
-                batch_size=1,
+                batch_size=batch_size,
                 kv_len=kv_len,
                 qo_len=qo_len,
                 window_left=8192,
@@ -267,40 +269,41 @@ class TestHeadwisePrefillOp(unittest.TestCase):
         logging.info("\n=== Testing Various Page Sizes ===")
 
         page_sizes = [128, 256, 512]
-        for ps in page_sizes:
-            case = self.Case(
-                batch_size=1,
-                kv_len=16384,
-                qo_len=64,
-                window_left=8192,
-                num_kv_heads=1,
-                num_qo_heads=8,
-                head_dim=128,
-                page_size=ps,
-            )
-            with self.subTest(page_size=ps, case=case):
-                self._run_correctness_check(case)
+        for batch_size, kv_len, qo_len in [(1, 16384, 64), (2, 32768, 32768)]:
+            for ps in page_sizes:
+                case = self.Case(
+                    batch_size=batch_size,
+                    kv_len=kv_len,
+                    qo_len=qo_len,
+                    window_left=8192,
+                    num_kv_heads=1,
+                    num_qo_heads=8,
+                    head_dim=128,
+                    page_size=ps,
+                )
+                with self.subTest(page_size=ps, case=case):
+                    self._run_correctness_check(case)
 
-    @pytest.mark.manual
     def test_various_head(self):
         """Tests different KV head counts for GQA/MHA layouts."""
         logging.info("\n=== Testing Various Head Counts ===")
 
         qo_head = [8, 8, 8]
         kv_head = [1, 4, 8]
-        for i in range(len(qo_head)):
-            case = self.Case(
-                batch_size=1,
-                kv_len=16384,
-                qo_len=64,
-                window_left=8192,
-                num_kv_heads=kv_head[i],
-                num_qo_heads=qo_head[i],
-                head_dim=128,
-                page_size=128,
-            )
-            with self.subTest(case=case):
-                self._run_correctness_check(case)
+        for batch_size, kv_len, qo_len in [(1, 16384, 64), (2, 32768, 32768)]:
+            for i in range(len(qo_head)):
+                case = self.Case(
+                    batch_size=batch_size,
+                    kv_len=kv_len,
+                    qo_len=qo_len,
+                    window_left=8192,
+                    num_kv_heads=kv_head[i],
+                    num_qo_heads=qo_head[i],
+                    head_dim=128,
+                    page_size=128,
+                )
+                with self.subTest(case=case):
+                    self._run_correctness_check(case)
 
 
 if __name__ == "__main__":

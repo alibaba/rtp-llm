@@ -32,8 +32,15 @@ def _env_is_false(name: str, default: bool) -> bool:
 
 
 def enabled_by_env() -> bool:
-    """Use the server-wide custom AllReduce switch."""
+    """Use the legacy environment form of the custom AllReduce switch."""
     return _env_is_false("FT_DISABLE_CUSTOM_AR", default=True)
+
+
+def enabled_by_config(disable_custom_all_reduce: Optional[bool] = None) -> bool:
+    """Prefer an explicit parsed override and preserve the legacy default."""
+    if disable_custom_all_reduce is not None:
+        return not disable_custom_all_reduce
+    return enabled_by_env()
 
 
 class FlashInferAllReduce:
@@ -43,6 +50,7 @@ class FlashInferAllReduce:
         device: torch.device,
         *,
         single_node: bool,
+        disable_custom_all_reduce: Optional[bool] = None,
     ) -> None:
         self.group = group
         self.device = device
@@ -55,7 +63,7 @@ class FlashInferAllReduce:
         self._max_num_tokens = 0
         self._flashinfer_comm = None
 
-        if not enabled_by_env() or not single_node:
+        if not enabled_by_config(disable_custom_all_reduce) or not single_node:
             return
         if self.world_size not in _MAX_WORKSPACE_BYTES:
             logging.info(
@@ -207,9 +215,15 @@ def init_flashinfer_allreduce(
     device: torch.device,
     *,
     single_node: bool,
+    disable_custom_all_reduce: Optional[bool] = None,
 ) -> Optional[FlashInferAllReduce]:
     global _communicator
-    communicator = FlashInferAllReduce(group, device, single_node=single_node)
+    communicator = FlashInferAllReduce(
+        group,
+        device,
+        single_node=single_node,
+        disable_custom_all_reduce=disable_custom_all_reduce,
+    )
     _communicator = None if communicator.disabled else communicator
     return _communicator
 

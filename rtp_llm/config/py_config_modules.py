@@ -698,6 +698,13 @@ class PyEnvConfigs:
         self.master_config: MasterConfig = MasterConfig()
         self.jit_config = JITConfig()
         self.py_hw_kernel_config: HWKernelConfig = HWKernelConfig()
+        # Preserve whether FT_DISABLE_CUSTOM_AR was explicitly provided.  The
+        # legacy HWKernelConfig field has a concrete default, while Python
+        # custom-AllReduce implementations intentionally have their own
+        # defaults.  Keeping this value tri-state lets an explicit CLI/env
+        # override reach those implementations without changing the default
+        # behavior of servers that do not configure the switch.
+        self.ft_disable_custom_ar_override: Optional[bool] = None
         self.sp_config = SpeculativeExecutionConfig()
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()

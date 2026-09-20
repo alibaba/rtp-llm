@@ -6,7 +6,8 @@ import unittest
 
 import pytest
 
-pytestmark = [pytest.mark.gpu(type="H20")]
+# Restore the original A10 route; H20 and the AMD profile retain their coverage.
+pytestmark = pytest.mark.multi_arch_cuda
 
 import torch
 

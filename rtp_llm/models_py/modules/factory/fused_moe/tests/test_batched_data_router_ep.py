@@ -2,6 +2,7 @@ import unittest
 from typing import Optional
 from unittest import mock
 
+import pytest
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
@@ -13,6 +14,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.common.router import (
     batched_data_router,
 )
 from rtp_llm.ops import MoeConfig, ParallelismConfig
+
+# Preserve the original H20 environment as well as current A10 coverage.
+pytestmark = pytest.mark.multi_arch_cuda
 
 EXPERT_NUM = 8
 TP_SIZE = 2

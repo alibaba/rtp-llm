@@ -85,14 +85,13 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
         fused_w = torch.cat([qkvz_w, ba_w], dim=1).contiguous()
         out_fused = x @ fused_w
 
-        # Fusing changes the GEMM tile shape, so CUDA may select a different
-        # BF16 kernel and accumulation order. Keep the bound below 2% relative
-        # error while allowing half-unit noise around values near zero.
+        # bf16 GEMM accumulation order can differ between GEMM impls; tolerance
+        # follows the project's RmsNormGated test (atol=rtol=1e-2).
         torch.testing.assert_close(
-            out_fused[..., :qkvz_dim], out_qkvz, atol=5e-1, rtol=2e-2
+            out_fused[..., :qkvz_dim], out_qkvz, atol=1e-2, rtol=1e-2
         )
         torch.testing.assert_close(
-            out_fused[..., qkvz_dim:], out_ba, atol=5e-1, rtol=2e-2
+            out_fused[..., qkvz_dim:], out_ba, atol=1e-2, rtol=1e-2
         )
 
     # ---- (2) Qwen3NextGatedDeltaNet end-to-end ----

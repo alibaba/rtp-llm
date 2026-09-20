@@ -26,6 +26,9 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     _fwd_kernel_ep_scatter_1,
 )
 
+# Retain A10 coverage and restore the original H20 kernel validation.
+pytestmark = pytest.mark.multi_arch_cuda
+
 
 def align_up(n: int, alignment: int = 128) -> int:
     return int(math.ceil(n / alignment)) * alignment

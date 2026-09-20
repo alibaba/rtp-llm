@@ -18,6 +18,8 @@ import rtp_llm.ops  # isort:skip
 
 def _ordered_fp8_codes(values: torch.Tensor) -> torch.Tensor:
     """Map finite E4M3 bit patterns to monotonically increasing integer codes."""
+    if not torch.isfinite(values.float()).all().item():
+        raise AssertionError("FP8 comparison requires finite values")
     raw = values.contiguous().view(torch.uint8)
     return torch.where(
         (raw & 0x80).bool(),
@@ -38,7 +40,16 @@ class FusedSiluMulPerTokenQuantBatchedTest(TestCase):
         torch.manual_seed(42)
         torch.set_default_device("cuda")
 
-    def ref_silu_mul_quant_no_fused(self, input_x):
+    def ref_silu_mul_quant_no_fused(self, input_x, expert_num_tokens):
+        E, T, H2 = input_x.shape
+        input_x = input_x.view(-1, H2)
+
+        output = torch.empty((E * T, H2 // 2), dtype=input_x.dtype)
+        silu_and_mul(output, input_x)
+        q_x, q_s = moe_kernel_quantize_input(output, None, torch.float8_e4m3fn, True)
+        return q_x, q_s
+
+    def ref_silu_mul_quant_float32(self, input_x):
         E, T, H2 = input_x.shape
         values, gates = input_x.float().chunk(2, dim=-1)
         output = torch.nn.functional.silu(gates) * values
@@ -67,7 +78,7 @@ class FusedSiluMulPerTokenQuantBatchedTest(TestCase):
         expert_num_tokens[0] = 0
         expert_num_tokens[1] = max_num_tokens
 
-        ref_q_out, ref_q_scale = self.ref_silu_mul_quant_no_fused(x)
+        ref_q_out, ref_q_scale = self.ref_silu_mul_quant_float32(x)
         ref_q_out = ref_q_out.view(num_experts, max_num_tokens, -1)
         ref_q_scale = ref_q_scale.view(num_experts, max_num_tokens, -1)
 
@@ -97,6 +108,26 @@ class FusedSiluMulPerTokenQuantBatchedTest(TestCase):
                 int(code_distance.max().item()),
                 1,
                 f"q_out differs by more than one E4M3 value at expert {i}",
+            )
+
+        # Also retain the original comparison against the unfused BF16 path.
+        ref_q_out, ref_q_scale = self.ref_silu_mul_quant_no_fused(x, expert_num_tokens)
+        ref_q_out = ref_q_out.view(num_experts, max_num_tokens, -1)
+        ref_q_scale = ref_q_scale.view(num_experts, max_num_tokens, -1)
+        for expert, count in enumerate(expert_num_tokens.cpu().tolist()):
+            if count == 0:
+                continue
+            torch.testing.assert_close(
+                ref_q_out[expert, :count].float(),
+                q_out[expert, :count].float(),
+                atol=0.125,
+                rtol=0.125,
+            )
+            torch.testing.assert_close(
+                ref_q_scale[expert, :count],
+                q_scale[expert, :count],
+                atol=1e-5,
+                rtol=1e-5,
             )
 
     def test_silu_mul_per_token_fp8_quant_batched(self):

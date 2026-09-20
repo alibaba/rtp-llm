@@ -945,6 +945,8 @@ class BuildPackagingContractTest(TestCase):
             "py_ut_sm8x",
             "py_ut_oss_sm8x",
             "py_ut_sm9x",
+            "py_ut_l20",
+            "py_ut_oss_l20",
             "py_ut_sm100",
             "py_ut_sm100_arm",
             "py_ut_amd",
@@ -969,11 +971,13 @@ class BuildPackagingContractTest(TestCase):
         self.assertIn("not SM100_ARM", profiles["py_ut_sm100"]["markexpr"])
 
         for name, expected_count in {
-            "py_ut_sm8x": 2946,
-            "py_ut_oss_sm8x": 2946,
-            "py_ut_sm9x": 491,
+            "py_ut_sm8x": 2968,
+            "py_ut_oss_sm8x": 2968,
+            "py_ut_sm9x": 526,
             "py_ut_sm100": 20,
-            "py_ut_sm120": 108,
+            "py_ut_sm120": 118,
+            "py_ut_l20": 86,
+            "py_ut_oss_l20": 84,
             "py_ut_sm100_arm": 104,
             "py_ut_amd": 405,
             "py_ut_frontend": 71,
@@ -983,6 +987,22 @@ class BuildPackagingContractTest(TestCase):
                 profiles[name].get("forbid_skips"),
                 f"{name} must reject partial runs with skipped tests",
             )
+        l20 = profiles["py_ut_l20"]
+        self.assertEqual(l20["gpu_type"], "L20")
+        self.assertTrue(l20["isolate_all_paths"])
+        self.assertTrue(l20["require_isolated_tests"])
+        self.assertEqual(l20["paths"], [
+            "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_py_flashinfer_mha_decode.py",
+            "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_paged_mha_prefill.py",
+            "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_ragged_mha_prefill.py",
+            "rtp_llm/models_py/triton_kernels/common/test/silu_mul_masked_test.py",
+            "rtp_llm/models_py/kernels/cuda/test/per_token_group_quant_8bit_test.py",
+        ])
+        oss_l20 = profiles["py_ut_oss_l20"]
+        self.assertEqual(oss_l20["paths"], l20["paths"][:-1])
+        self.assertEqual(oss_l20["gpu_type"], "L20")
+        self.assertTrue(oss_l20["isolate_all_paths"])
+        self.assertTrue(oss_l20["require_isolated_tests"])
         internal_root = PROJECT_ROOT.parent
         internal_overlay = internal_root / "internal_source" / "pyproject_internal.toml"
         if (internal_root / ".git").exists() and internal_overlay.exists():
