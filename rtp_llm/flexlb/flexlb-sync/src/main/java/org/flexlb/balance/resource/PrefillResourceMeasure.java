@@ -48,16 +48,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         if (endpoint == null || !endpoint.getStatus().isAlive()) {
             return false;
         }
-        long pendingRequests = endpoint.realPendingCount();
-        boolean available = endpoint.getStatus().updateResourceAvailabilityWithHysteresis(
-                pendingRequests, maxPendingRequests, hysteresisBiasPercent);
-        if (!available) {
-            Logger.debug("Prefill worker {} resource unavailable: pendingRequests={}, "
-                            + "maxPendingRequests={}, alive={}",
-                    endpoint.getIp(), pendingRequests, maxPendingRequests,
-                    endpoint.getStatus().isAlive());
-        }
-        return available;
+        return true;
     }
 
     @Override
