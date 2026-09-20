@@ -49,6 +49,9 @@ class WhaleCacheDiagnosticsTest {
         memory.write(List.of(1L, 2L));
         assertEquals(1, memory.peekMatch(List.of(1L), 0));
         memory.write(List.of(3L));
-        assertEquals(List.of(2L, 3L), memory.keys());
+        // The diagnostic peek must not refresh recency. In prefix-tree mode,
+        // however, key 1 is an internal prefix while key 2 is the oldest
+        // evictable leaf, so leaf-only eviction retains 1 and replaces 2.
+        assertEquals(List.of(1L, 3L), memory.keys());
     }
 }
