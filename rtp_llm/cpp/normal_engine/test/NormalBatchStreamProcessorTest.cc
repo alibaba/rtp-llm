@@ -382,8 +382,8 @@ TEST_F(NormalBatchStreamProcessorTest, testModelKernelPageIgnoresLargerStatePool
                 {attention, state}, {{1}, {0}}, {CacheGroupType::FULL, CacheGroupType::SWA}, {"attention", "state"});
         }
 
-        EXPECT_EQ(cache_config.kernelSeqSizePerBlockForGroup(cache_config.groupIdForTag("attention")), 128u);
-        EXPECT_EQ(cache_config.kernelSeqSizePerBlockForGroup(cache_config.groupIdForTag("state")), 512u);
+        EXPECT_EQ(cache_config.group("attention").kernelSeqSizePerBlock(), 128u);
+        EXPECT_EQ(cache_config.group("state").kernelSeqSizePerBlock(), 512u);
         NormalBatchStreamProcessor processor(
             model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, true);
         EXPECT_EQ(processor.model_input_gatherer_config_.seq_size_per_block, 256u);
@@ -505,8 +505,8 @@ TEST_F(NormalBatchStreamProcessorTest, testMixedGroupBlockWidthsGatherCompleteRo
                 BatchKVCacheResource resource;
                 resource.resetBatchSize(1);
                 resource.initGroups(resource_config.topologyPtr());
-                resource.setBatchBlocks(0, "full", {10 + batch * 2, NULL_BLOCK_IDX, 11 + batch * 2});
-                resource.setBatchBlocks(0, "swa", {20 + batch, 30 + batch, 40 + batch, 50 + batch, 60 + batch});
+                resource.mutableBlockIds(0, "full").assign({10 + batch * 2, NULL_BLOCK_IDX, 11 + batch * 2});
+                resource.mutableBlockIds(0, "swa").assign({20 + batch, 30 + batch, 40 + batch, 50 + batch, 60 + batch});
                 stream->setKVCache(resource);
                 stream->streamCacheResource().block_update_mapping_ = {{"swa", 20 + batch, 30 + batch},
                                                                        {"full", 10 + batch * 2, 40 + batch}};
@@ -824,8 +824,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
-        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.kvBlockStrideBytesForGroup(0));
-        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.kvScaleStrideBytesForGroup(0));
+        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.groups().front().kvBlockStrideBytes());
+        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.groups().front().kvScaleStrideBytes());
     }
     {
         MMModelConfig mm_model_config;

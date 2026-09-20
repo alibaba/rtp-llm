@@ -527,7 +527,7 @@ public:
         }
         const std::string test_name = test_info->name();
         device_pools_               = {makeTestDevicePool(4, test_name + "_device_0"),
-                                       makeTestDevicePool(4, test_name + "_device_1")};
+                         makeTestDevicePool(4, test_name + "_device_1")};
         host_pools_                 = {makePinnedHostPool(4), makePinnedHostPool(4)};
         disk_pools_ = {makeTestDiskPool(4, test_name + "_disk_0"), makeTestDiskPool(4, test_name + "_disk_1")};
         if (device_pools_[0] == nullptr || device_pools_[1] == nullptr || host_pools_[0] == nullptr
@@ -537,7 +537,7 @@ public:
 
         groups_                           = {std::make_shared<FullGroupSet>(
                        std::vector<DeviceBlockPoolPtr>{device_pools_[0]}, host_pools_[0], disk_pools_[0]),
-                                             std::make_shared<LinearGroupSet>(
+                   std::make_shared<LinearGroupSet>(
                        std::vector<DeviceBlockPoolPtr>{device_pools_[1]}, host_pools_[1], disk_pools_[1])};
         auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
         auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
@@ -1314,9 +1314,7 @@ TEST_F(BlockTreeEvictorTest, ComputeWatermarkEvictCountRejectsPendingReleasesAbo
     try {
         (void)evictor_->computeWatermarkEvictCount(
             *group_, Tier::DEVICE, TierWatermark{/*low_ratio=*/0.4, /*high_ratio=*/0.5});
-    } catch (const std::runtime_error& error) {
-        error_message = error.what();
-    }
+    } catch (const std::runtime_error& error) { error_message = error.what(); }
     {
         std::lock_guard<std::mutex> lock(evictor_->pending_release_mutex_);
         evictor_->pending_release_counts_.clear();
@@ -2556,7 +2554,7 @@ TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) 
     const BlockIdxType                         leaf_block   = (*allocated)[1];
     const BlockIdxType                         rival_block  = (*allocated)[2];
     std::vector<std::vector<GroupSetResource>> resources    = {{makeResource(Tier::DEVICE, parent_block)},
-                                                               {makeResource(Tier::DEVICE, leaf_block)}};
+                                                            {makeResource(Tier::DEVICE, leaf_block)}};
     auto                                       result       = insert({100, 200}, resources);
     ASSERT_EQ(result.inserted_nodes.size(), 2u);
     auto rival = insert({300}, {{makeResource(Tier::DEVICE, rival_block)}});

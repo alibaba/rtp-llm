@@ -103,12 +103,8 @@ public:
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int                     blocksNum(std::string_view tag) const;
-    // Retained through the model payload migration; dense order is bound by the caller.
-    const BlockIndicesType& blocks(int group_id) const;
     const BlockIndicesType& blocks(std::string_view tag) const;
     const BlockIndicesType& blocksForLayer(int layer_id, std::string_view tag) const;
-    // Retained through the model payload migration; dense order is bound by the caller.
-    const BlockIndicesType& kernelBlocks(int group_id) const;
     const BlockIndicesType& kernelBlocks(std::string_view tag) const;
     const BlockIndicesType& kernelBlocksForLayer(int layer_id, std::string_view tag) const;
     BlockIds&               mutableBlockIds(std::string_view tag) const;

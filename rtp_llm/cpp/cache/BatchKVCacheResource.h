@@ -52,22 +52,12 @@ public:
         return batch_resource[0].maxBlocksNum();
     }
 
-    const BlockIndicesType& blocks(int batch_id, int group_id) const {
-        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].blocks(group_id);
-    }
-
     const BlockIndicesType& blocks(int batch_id, std::string_view tag) const {
         return cacheResource(batch_id).blocks(tag);
     }
 
     const BlockIndicesType& blocksForLayer(int batch_id, int layer_id, std::string_view tag) const {
         return cacheResource(batch_id).blocksForLayer(layer_id, tag);
-    }
-
-    const BlockIndicesType& kernelBlocks(int batch_id, int group_id) const {
-        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].kernelBlocks(group_id);
     }
 
     const BlockIndicesType& kernelBlocks(int batch_id, std::string_view tag) const {

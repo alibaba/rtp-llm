@@ -14,8 +14,8 @@
 #include <optional>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <unordered_set>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -605,14 +605,15 @@ inline void expectPathIdleAtDevice(const BlockTreeCache& cache, const CacheKeysT
     }
 }
 
+
 inline void
 expectDsv4TierTopology(const std::shared_ptr<KVCacheManager>& manager, const CacheConfig& config, TierLayout layout) {
     ASSERT_NE(manager, nullptr);
     const auto cache = manager->blockTreeCache();
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(config.groupNums(), kDsv4GroupCount);
-    ASSERT_EQ(config.groupTagsSnapshot(), kDsv4Tags);
-    ASSERT_EQ(config.groupTypesSnapshot(), kDsv4Types);
+    ASSERT_EQ(publishedGroupTags(config.topology()), kDsv4Tags);
+    ASSERT_EQ(publishedGroupTypes(config.topology()), kDsv4Types);
     ASSERT_EQ(config.linear_step, 1);
 
     const auto allocator_groups = manager->allocator_->cacheGroups();
@@ -621,6 +622,8 @@ expectDsv4TierTopology(const std::shared_ptr<KVCacheManager>& manager, const Cac
     for (int group_id = 0; group_id < kDsv4GroupCount; ++group_id) {
         const auto& group = allocator_groups[static_cast<size_t>(group_id)];
         ASSERT_NE(group, nullptr);
+        // Subsequent pool snapshots retain this verified topology order.
+        ASSERT_EQ(group->tag(), config.groupTags()[static_cast<size_t>(group_id)]);
         ASSERT_NE(group->blockPool(), nullptr);
         EXPECT_TRUE(unique_device_pools.emplace(group->blockPool().get()).second)
             << "device pool must be independent, group=" << group_id;
@@ -658,9 +661,9 @@ expectDsv4TierTopology(const std::shared_ptr<KVCacheManager>& manager, const Cac
             const auto& tag = group_set->groupTags()[member_index];
             ASSERT_NE(std::find(kDsv4Tags.begin(), kDsv4Tags.end(), tag), kDsv4Tags.end());
             EXPECT_TRUE(config.group(tag).policy.enable_prefix_reuse);
-            const auto manager = std::find_if(allocator_groups.begin(), allocator_groups.end(), [&](const auto& group) {
-                return group && group->tag() == tag;
-            });
+            const auto manager = std::find_if(allocator_groups.begin(),
+                                              allocator_groups.end(),
+                                              [&](const auto& group) { return group && group->tag() == tag; });
             ASSERT_NE(manager, allocator_groups.end());
             EXPECT_EQ(group_set->devicePools()[member_index].get(), (*manager)->blockPool().get());
             ++membership_count[tag];
@@ -686,6 +689,7 @@ inline void appendDevicePools(const GroupSetPtr& group_set, std::vector<std::sha
         pools.push_back(std::static_pointer_cast<IBlockPool>(pool));
     }
 }
+
 
 inline BlockIndicesType
 groupSetSeedBlocksAt(const GroupSetPtr& group_set, const SeededPrefix& seed, size_t path_index) {
@@ -961,6 +965,7 @@ inline bool fillCpCanonicalSeedPayload(const std::shared_ptr<KVCacheManager>& ma
         if (!isReusableGroup(config, tag)) {
             continue;
         }
+
         const auto& blocks = seed.blocks_by_group.at(tag);
         for (size_t path_index = 0; path_index < seed.cache_keys.size(); ++path_index) {
             const auto position = cpCanonicalBlockPosition(mapper, config, tag, path_index);

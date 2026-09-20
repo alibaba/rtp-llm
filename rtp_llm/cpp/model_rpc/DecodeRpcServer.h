@@ -117,7 +117,7 @@ private:
     static void            appendGroupBlockIds(const LoadKVCacheContext& context,
                                                const CacheTopology&      topology,
                                                BroadcastLoadRequestPB&   request);
-    static std::string     makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
+    static std::string makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);

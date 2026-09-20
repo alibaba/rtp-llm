@@ -290,8 +290,11 @@ protected:
         }
         cache_manager_->allocator_->block_tree_cache_.reset();
         cache_manager_->block_tree_cache_.reset();
-        auto cache = createBlockTreeCache(
-            cache_manager_->cacheConfig(), kv_cache_config, cache_manager_->allocator_, ParallelismConfig{}, backend);
+        auto cache = createBlockTreeCache(cache_manager_->cacheConfig(),
+                                          kv_cache_config,
+                                          cache_manager_->allocator_,
+                                          ParallelismConfig{},
+                                          backend);
         EXPECT_NE(cache, nullptr);
         cache_manager_->block_tree_cache_ = cache;
         cache_manager_->allocator_->attachBlockTreeCache(cache);
@@ -380,7 +383,7 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
 
 TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReordering) {
     for (const bool reversed : {false, true}) {
-        auto            config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
+        auto config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
         ResourceContext context;
         context.cache_manager = std::make_shared<KVCacheManager>(config);
         StreamCacheResource resource(nullptr, context, /*need_release_resource=*/false);
@@ -716,7 +719,7 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
     stream_->generate_input_->generate_config->enable_device_cache = true;
     resource.resource_context_.enable_device_cache                 = true;
 
-    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
     cache_manager_->allocator_ = allocator;
 
     testing::InSequence seq;
@@ -1059,7 +1062,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
 
     auto load_context =
         makeAllocatorLoadContext(/*matched_blocks=*/3, {Tier::DEVICE, Tier::HOST, Tier::DISK}, /*commit=*/false);
-    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
     cache_manager_->allocator_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/2, 0, load_context}));
@@ -1085,8 +1088,8 @@ TEST_F(StreamCacheResourceTest, testInitRejectsSuccessfulNonLoadAllocatorContext
     prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
 
-    auto context               = std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
-    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+    auto context   = std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
     cache_manager_->allocator_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/0, 0, context}));
@@ -1098,8 +1101,11 @@ TEST_F(StreamCacheResourceTest, testInitRejectsSuccessfulNonLoadAllocatorContext
 }
 
 TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessUsesCpGroupPolicyReuseUnit) {
-    auto cache_config = init_config();
-    auto policies     = cache_config.groupPoliciesSnapshot();
+    auto                          cache_config = init_config();
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : cache_config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     ASSERT_EQ(policies.size(), 1u);
     policies.front().cp_mapping = CpBlockMappingMode::NONE;
     test::setTestGroupPolicies(cache_config, policies);
@@ -1135,8 +1141,8 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadPendingPublishesZeroDeviceReady
     stream_->setHostReuseLength(2);
     stream_->setDiskReuseLength(2);
 
-    auto load_context          = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST}, /*commit=*/false);
-    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+    auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST}, /*commit=*/false);
+    auto allocator    = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
     cache_manager_->allocator_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/0, 0, load_context}));
@@ -1237,7 +1243,7 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
     EXPECT_EQ(counts->commits, 0u);
     EXPECT_EQ(counts->aborts, 1u);
 
-    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
     cache_manager_->allocator_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {

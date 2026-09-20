@@ -32,13 +32,12 @@ int FullKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
     return common_blocks + batch_size * std::max(peak_blocks - common_blocks, 0);
 }
 
-NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
-    int                      common_seq_len,
-    int                      seq_len,
-    int                      reserve_step,
-    int                      reuse_blocks_len,
-    bool                     reuse_enabled,
-    const RequiredPositions& required_positions) const {
+NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(int                      common_seq_len,
+                                               int                      seq_len,
+                                               int                      reserve_step,
+                                               int                      reuse_blocks_len,
+                                               bool                     reuse_enabled,
+                                               const RequiredPositions& required_positions) const {
     NeedBlocksInfo info;
     const int      common_slots        = needBlocksNum(common_seq_len, /*current_blocks=*/0);
     const int      total_slots         = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step);
@@ -55,12 +54,12 @@ NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-bool FullKVCacheGroup::malloc(BlockIds&                  block_ids,
-                              int                        seq_len,
-                              bool                       enable_reuse_cache,
-                              int                        reserve_step,
-                              std::vector<size_t>*       backfilled_positions,
-                              const RequiredPositions&        /*required_positions*/) {
+bool FullKVCacheGroup::malloc(BlockIds&            block_ids,
+                              int                  seq_len,
+                              bool                 enable_reuse_cache,
+                              int                  reserve_step,
+                              std::vector<size_t>* backfilled_positions,
+                              const RequiredPositions& /*required_positions*/) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
@@ -119,9 +118,7 @@ bool FullKVCacheGroup::malloc(BlockIds&                  block_ids,
     return true;
 }
 
-void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/,
-                                           bool /*enable_reuse_cache*/,
-                                           int /*reserve_step*/) {
+void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/, bool /*enable_reuse_cache*/, int /*reserve_step*/) {
 }
 
 }  // namespace rtp_llm

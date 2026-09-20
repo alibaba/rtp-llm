@@ -102,17 +102,16 @@ int SWAKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
     return common_blocks + batch_size * std::max(peak_blocks - common_blocks, 0);
 }
 
-NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
-    int                      common_seq_len,
-    int                      seq_len,
-    int                      reserve_step,
-    int                      reuse_blocks_len,
-    bool                     reuse_enabled,
-    const RequiredPositions& required_positions) const {
+NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(int                      common_seq_len,
+                                              int                      seq_len,
+                                              int                      reserve_step,
+                                              int                      reuse_blocks_len,
+                                              bool                     reuse_enabled,
+                                              const RequiredPositions& required_positions) const {
     (void)common_seq_len;
-    const int  step                    = std::max(1, linear_step_);
-    const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(reuse_enabled);
-    const int  active_tail_blocks      = activeTailBlockCount();
+    const int      step                    = std::max(1, linear_step_);
+    const bool     effective_reuse_enabled = effectiveReuseCacheForAllocation(reuse_enabled);
+    const int      active_tail_blocks      = activeTailBlockCount();
     NeedBlocksInfo info;
 
     const int seq_slots   = needBlocksNum(seq_len, 0);
@@ -130,7 +129,7 @@ NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
         if (position >= static_cast<size_t>(std::max(total_slots, 0))) {
             continue;
         }
-        const int pos = static_cast<int>(position);
+        const int  pos = static_cast<int>(position);
         const bool ordinary_seq_position =
             pos >= ordinary_start && pos < seq_slots
             && shouldAllocateBlock(
@@ -145,11 +144,11 @@ NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-bool SWAKVCacheGroup::malloc(BlockIds&                 block_ids,
-                             int                       seq_len,
-                             bool                      enable_reuse_cache,
-                             int                       reserve_step,
-                             std::vector<size_t>*      backfilled_positions,
+bool SWAKVCacheGroup::malloc(BlockIds&                block_ids,
+                             int                      seq_len,
+                             bool                     enable_reuse_cache,
+                             int                      reserve_step,
+                             std::vector<size_t>*     backfilled_positions,
                              const RequiredPositions& required_positions) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
@@ -170,8 +169,7 @@ bool SWAKVCacheGroup::malloc(BlockIds&                 block_ids,
         return required_positions.find(static_cast<size_t>(pos)) != required_positions.end();
     };
     auto should_allocate = [&](int pos) {
-        return shouldAllocateBlock(
-                   pos, seq_slots, reserve_step, step, effective_reuse_enabled, active_tail_blocks)
+        return shouldAllocateBlock(pos, seq_slots, reserve_step, step, effective_reuse_enabled, active_tail_blocks)
                || is_required(pos);
     };
 

@@ -81,7 +81,7 @@ GroupedCacheLayerLayout makeLayout(std::vector<GroupBase>          groups,
     auto topology = CacheTopology::create(std::move(groups), {{0, std::move(layer_tags)}});
     GroupedCacheLayerLayout::GroupLayouts layouts;
     for (size_t group_id = 0; group_id < topology->groups().size(); ++group_id) {
-        layouts.emplace(topology->groupById(group_id).tag,
+        layouts.emplace(topology->groupTags()[group_id],
                         CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffers[group_id])}));
     }
     return GroupedCacheLayerLayout(std::move(topology), std::move(layouts));

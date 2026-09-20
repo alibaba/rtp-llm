@@ -16,7 +16,7 @@ struct SystemPromptParams {
                        const std::unordered_map<std::string, std::vector<int>>& group_block_ids):
         prompt_tokens(prompt_tokens), group_block_ids(group_block_ids) {}
 
-    std::vector<int>                                  prompt_tokens;
+    std::vector<int> prompt_tokens;
     std::unordered_map<std::string, std::vector<int>> group_block_ids;
 };
 

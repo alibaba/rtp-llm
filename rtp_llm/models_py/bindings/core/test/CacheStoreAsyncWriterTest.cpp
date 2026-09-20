@@ -335,7 +335,7 @@ TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
         /*device_id=*/-1, cache_manager, /*cache_model_id=*/7, /*mtp_cache_config_index=*/0);
 
     EXPECT_EQ(writer.cache_manager_, cache_manager);
-    EXPECT_EQ(writer.cache_config_->tagForGroup(0), "draft");
+    EXPECT_EQ(writer.cache_config_->groupTags(), std::vector<std::string>{"draft"});
     EXPECT_EQ(writer.cache_model_id_, 7);
     EXPECT_EQ(writer.cp_rank_, 0);
     EXPECT_EQ(writer.cp_size_, 1);
@@ -535,7 +535,7 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
     inputs.cache_keys            = torch::tensor({int64_t{7001}}, torch::kInt64).reshape({1, 1});
 
-    auto                    layout = cache_manager->getMainModelCacheLayerLayout();
+    auto                    layout = cache_manager->getMainModelGroupedCacheLayerLayout();
     torch_ext::LayerKVCache layer_cache;
     layer_cache.kv_cache_base      = layout.at("stored", 0).kv_addr;
     layer_cache.seq_size_per_block = 1;
@@ -596,7 +596,7 @@ TEST_P(CacheStoreAsyncWriterTpTest, PublicationPinsOnlyAllocatorOwner) {
     inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
     inputs.cache_keys            = torch::tensor({int64_t{7001}}, torch::kInt64).reshape({1, 1});
 
-    const auto              layout = cache_manager->getMainModelCacheLayerLayout();
+    const auto              layout = cache_manager->getMainModelGroupedCacheLayerLayout();
     torch_ext::LayerKVCache layer_cache;
     layer_cache.kv_cache_base      = layout.at("default", 0).kv_addr;
     layer_cache.seq_size_per_block = 1;

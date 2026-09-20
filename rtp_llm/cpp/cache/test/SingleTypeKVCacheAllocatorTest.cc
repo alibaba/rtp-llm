@@ -291,7 +291,7 @@ TEST(KVCacheAllocatorTest, ClassifiesInitFailureBeforeRollback) {
     EXPECT_EQ(result.status, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
 }
 
-static int estimateBatchPeakForSingleSequence(const KVCacheAllocator&        allocator,
+static int estimateBatchPeakForSingleSequence(const KVCacheAllocator& allocator,
                                               const BatchKVCacheResourcePtr& batch_resource,
                                               int                            seq_len,
                                               int                            remaining_tokens,
@@ -1229,8 +1229,11 @@ TEST_F(SingleTypeKVCacheAllocatorTest, DeferredBackendMatchRetriesZeroReservePoo
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {
-    auto config   = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4);
-    auto policies = config.groupPoliciesSnapshot();
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4);
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     ASSERT_EQ(policies.size(), 1u);
     policies[0].enable_prefix_reuse = false;
     setTestGroupPolicies(config, policies);
@@ -1464,16 +1467,19 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
 
     auto layout = allocator_->allLayerCacheBase();
     ASSERT_EQ(layout.groups().size(), 1u);
-    EXPECT_EQ(layout.topology().layerGroupIdsSnapshot(), (std::vector<std::vector<int>>(4, std::vector<int>{0})));
-    EXPECT_EQ(layout.topology().groupTypesSnapshot(), std::vector<CacheGroupType>{CacheGroupType::FULL});
-    EXPECT_EQ(layout.topology().groupTagsSnapshot(), std::vector<std::string>{"default"});
+    ASSERT_EQ(layout.topology().layers().size(), 4u);
+    for (const auto& layer : layout.topology().layers()) {
+        EXPECT_EQ(layer.group_tags, std::vector<std::string>{"default"});
+    }
+    EXPECT_EQ(layout.topology().group("default").policy.group_type, CacheGroupType::FULL);
+    EXPECT_EQ(publishedGroupTags(layout.topology()), std::vector<std::string>{"default"});
     const auto& default_layout = layout.group("default");
     EXPECT_EQ(default_layout.size(), config.layer_num);
     EXPECT_EQ(default_layout.activeLayerCount(), config.layer_num);
     for (size_t i = 0; i < default_layout.size(); ++i) {
         ASSERT_TRUE(default_layout.hasLayer(i));
         EXPECT_GT(default_layout.at(i).kv_addr.nbytes(), 0u);
-        EXPECT_EQ(layout.group(0).at(i).kv_addr.data_ptr(), default_layout.at(i).kv_addr.data_ptr());
+        EXPECT_EQ(layout.at(i).kv_addr.data_ptr(), default_layout.at(i).kv_addr.data_ptr());
     }
 }
 
@@ -1484,14 +1490,14 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ManagerLayoutsPreserveSingleTypeGroupTens
     ASSERT_TRUE(manager->init());
 
     const auto all_layout  = manager->allLayerCacheBase();
-    const auto main_layout = manager->getMainModelCacheLayerLayout();
+    const auto main_layout = manager->getMainModelGroupedCacheLayerLayout();
     ASSERT_EQ(all_layout.group("default").size(), 8u);
 
     auto verify_layout = [](const GroupedCacheLayerLayout& local_layout,
                             const GroupedCacheLayerLayout& all,
                             size_t                         global_begin) {
-        ASSERT_EQ(local_layout.topology().groupTypesSnapshot(), std::vector<CacheGroupType>{CacheGroupType::FULL});
-        ASSERT_EQ(local_layout.topology().groupTagsSnapshot(), std::vector<std::string>{"default"});
+        ASSERT_EQ(local_layout.topology().group("default").policy.group_type, CacheGroupType::FULL);
+        ASSERT_EQ(publishedGroupTags(local_layout.topology()), std::vector<std::string>{"default"});
         const auto& local_group = local_layout.group("default");
         const auto& all_group   = all.group("default");
         for (size_t local_layer = 0; local_layer < local_group.size(); ++local_layer) {
@@ -1512,10 +1518,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ManagerLayoutsPreserveSingleTypeGroupTens
     };
 
     verify_layout(main_layout, all_layout, /*global_begin=*/0);
-    verify_layout(manager->getMTPModuleCacheLayerLayout(0), all_layout, /*global_begin=*/2);
-    verify_layout(manager->getMTPModuleCacheLayerLayout(1), all_layout, /*global_begin=*/5);
-    EXPECT_THROW(manager->getMTPModuleCacheLayerLayout(-1), std::runtime_error);
-    EXPECT_THROW(manager->getMTPModuleCacheLayerLayout(2), std::runtime_error);
+    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(0), all_layout, /*global_begin=*/2);
+    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(1), all_layout, /*global_begin=*/5);
+    EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(-1), std::runtime_error);
+    EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(2), std::runtime_error);
 }
 
 // Test block copy
@@ -1534,7 +1540,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockCopySingle) {
     const int src_block = (*allocated)[0];
     const int dst_block = (*allocated)[1];
 
-    auto&  spec         = config.specForGroup(0);
+    auto&  spec         = config.group("default").spec;
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
     size_t block_size   = k_block_size + v_block_size;
@@ -1584,7 +1590,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyVector) {
     std::vector<BlockIdPair> copy_mapping = {
         {(*allocated)[0], (*allocated)[1]}, {(*allocated)[2], (*allocated)[3]}, {(*allocated)[4], (*allocated)[5]}};
 
-    auto&  spec         = config.specForGroup(0);
+    auto&  spec         = config.group("default").spec;
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
     size_t block_size   = k_block_size + v_block_size;
@@ -1639,7 +1645,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteQuantizedMhaS
     config.finalizeBlockNums(/*global_block_num=*/5, RuntimeConfig{});
 
     ASSERT_FALSE(config.is_sparse);
-    ASSERT_GT(config.kvScaleStrideBytesForGroup(0), 0u);
+    ASSERT_GT(config.topology().groups()[0].kvScaleStrideBytes(), 0u);
 
     allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
@@ -1652,7 +1658,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteQuantizedMhaS
     ASSERT_EQ(allocated->size(), 4u);
     pool->incRef(*allocated);
 
-    const auto stride   = config.kvScaleStrideBytesForGroup(0);
+    const auto stride   = config.topology().groups()[0].kvScaleStrideBytes();
     auto       snapshot = [&]() {
         std::vector<std::vector<uint8_t>> blocks(allocated->size());
         for (size_t index = 0; index < allocated->size(); ++index) {
@@ -1713,7 +1719,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {
 
     BlockIdPair pairs[] = {{(*allocated)[0], (*allocated)[1]}, {(*allocated)[2], (*allocated)[3]}};
 
-    auto&  spec         = config.specForGroup(0);
+    auto&  spec         = config.group("default").spec;
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
     size_t block_size   = k_block_size + v_block_size;
@@ -1762,7 +1768,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyBuffer) {
     std::vector<int32_t> data(allocated->begin(), allocated->end());
     auto                 tensor = torch::from_blob(data.data(), {3, 2}, torch::kInt32).clone();
 
-    auto&  spec         = config.specForGroup(0);
+    auto&  spec         = config.group("default").spec;
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
     size_t block_size   = k_block_size + v_block_size;

@@ -69,7 +69,7 @@ TEST(CacheTopologyTest, MaximumKernelExpansionDoesNotDependOnGroupOrder) {
     auto full     = makeGroup("full");
     auto swa      = makeGroup("swa", CacheGroupType::SWA);
     auto topology = CacheTopology::create({swa, full}, {{0, {"swa"}}, {1, {"full"}}});
-    EXPECT_EQ(topology->groupById(0).kernelBlocksPerKvBlock(), 1u);
+    EXPECT_EQ(topology->group("swa").kernelBlocksPerKvBlock(), 1u);
     EXPECT_EQ(topology->maxKernelBlocksPerKvBlock(), 4u);
     auto reversed = CacheTopology::create({full, swa}, {{0, {"swa"}}, {1, {"full"}}});
     EXPECT_EQ(reversed->maxKernelBlocksPerKvBlock(), 4u);
@@ -86,32 +86,29 @@ TEST(CacheTopologyTest, SupportsDistinctOneToOneGroupsAndOneToManyLayers) {
     EXPECT_ANY_THROW(topology->soleGroupForLayer(2));
 }
 
-TEST(CacheTopologyTest, CompatibilitySnapshotsAreIndependentValues) {
+TEST(CacheTopologyTest, GroupPropertiesAndLayerMembershipUseCanonicalIdentity) {
     auto topology = CacheTopology::create({makeGroup("full"), makeGroup("linear", CacheGroupType::LINEAR)},
                                           {{0, {"full", "linear"}}});
 
-    auto        tags_first  = topology->groupTagsSnapshot();
-    const auto& tags_second = topology->groupTagsSnapshot();
-    EXPECT_EQ(tags_first, (std::vector<std::string>{"full", "linear"}));
-    EXPECT_EQ(topology->groupTypesSnapshot(),
-              (std::vector<CacheGroupType>{CacheGroupType::FULL, CacheGroupType::LINEAR}));
-    EXPECT_EQ(topology->layerGroupIdsSnapshot(), (std::vector<std::vector<int>>{{0, 1}}));
-    tags_first.clear();
-    EXPECT_EQ(tags_second.size(), 2u);
-    EXPECT_EQ(topology->groupTagsSnapshot().size(), 2u);
+    ASSERT_EQ(topology->groups().size(), 2u);
+    EXPECT_EQ(topology->groups()[0].tag, "full");
+    EXPECT_EQ(topology->groups()[1].tag, "linear");
+    EXPECT_EQ(topology->group("full").policy.group_type, CacheGroupType::FULL);
+    EXPECT_EQ(topology->group("linear").policy.group_type, CacheGroupType::LINEAR);
+    EXPECT_EQ(topology->layer(0).group_tags, (std::vector<std::string>{"full", "linear"}));
+    EXPECT_EQ(&topology->groupForLayer(0, "full"), &topology->group("full"));
+    EXPECT_EQ(&topology->groupForLayer(0, "linear"), &topology->group("linear"));
 }
 
 TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
     auto first    = CacheTopology::create({makeGroup("full"), makeGroup("linear", CacheGroupType::LINEAR)},
-                                       {{0, {"full", "linear"}}});
+                                          {{0, {"full", "linear"}}});
     auto reversed = CacheTopology::create({makeGroup("linear", CacheGroupType::LINEAR), makeGroup("full")},
                                           {{0, {"full", "linear"}}});
 
-    EXPECT_NE(first->groupIdForTag("full"), reversed->groupIdForTag("full"));
-    EXPECT_EQ(first->groupIdForTag("full"), 0u);
-    EXPECT_EQ(reversed->groupIdForTag("full"), 1u);
-    EXPECT_EQ(&first->group("full"), &first->groupById(first->groupIdForTag("full")));
-    EXPECT_ANY_THROW(first->groupIdForTag("missing"));
+    EXPECT_EQ(first->groupTags(), (std::vector<std::string>{"full", "linear"}));
+    EXPECT_EQ(reversed->groupTags(), (std::vector<std::string>{"linear", "full"}));
+    EXPECT_ANY_THROW(first->group("missing"));
     EXPECT_EQ(first->group("full").policy.group_type, reversed->group("full").policy.group_type);
     EXPECT_EQ(first->group("linear").policy.group_type, reversed->group("linear").policy.group_type);
     EXPECT_EQ(first->groupForLayer(0, "full").tag, reversed->groupForLayer(0, "full").tag);
@@ -224,7 +221,6 @@ TEST(CacheTopologyTest, InvalidTaggedLayoutsNeverPublishPartialUpdates) {
 
 TEST(CacheTopologyTest, DerivesReverseMembershipFromLayers) {
     auto topology = CacheTopology::create({makeGroup("full")}, {{0, {"full"}}, {1, {"full"}}});
-    EXPECT_EQ(topology->layerIdsForGroup(0), (std::vector<int>{0, 1}));
     EXPECT_EQ(topology->layerIdsForGroup("full"), (std::vector<int>{0, 1}));
     EXPECT_ANY_THROW(topology->layerIdsForGroup("missing"));
     EXPECT_ANY_THROW(topology->blockSizeBytesForGroup("missing"));

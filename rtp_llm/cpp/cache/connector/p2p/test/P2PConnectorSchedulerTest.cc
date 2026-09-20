@@ -50,7 +50,7 @@ protected:
         prefill_server_.reset();
     }
 
-    // 创建有效的 KVCacheResource（使用 initGroups + groupBlocks/blocks/cacheKeys 公开 API）
+    // Create a resource with one tagged group per layer.
     KVCacheResourcePtr createValidKVCacheResource(int num_layers = 2, int blocks_per_layer = 2) {
         auto                          resource = std::make_shared<KVCacheResource>();
         std::vector<std::vector<int>> layer_to_group_ids(num_layers);

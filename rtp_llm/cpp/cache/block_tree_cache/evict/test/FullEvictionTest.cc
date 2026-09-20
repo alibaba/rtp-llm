@@ -17,9 +17,9 @@ protected:
         auto full = std::make_shared<FullGroupSet>(
             std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr> groups = {full};
-        BlockTreeCacheConfig config{};
+        BlockTreeCacheConfig     config{};
         config.task_pool_size = 2;
-        cache_ = makeBlockTreeCacheForTest(std::move(groups), config);
+        cache_                = makeBlockTreeCacheForTest(std::move(groups), config);
     }
 
     // Insert a path with given device block for group 0.

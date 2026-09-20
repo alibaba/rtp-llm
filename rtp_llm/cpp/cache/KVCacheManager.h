@@ -99,7 +99,7 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
                   convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo          convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const;
+    BlockAddrInfo convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const;
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const;
     std::vector<BlockInfo> convertIndexToBuffer(
         int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
@@ -108,10 +108,8 @@ public:
 
     // for main model; grouped layout preserves layers that own multiple cache groups
     GroupedCacheLayerLayout getMainModelGroupedCacheLayerLayout() const;
-    GroupedCacheLayerLayout getMainModelCacheLayerLayout() const;
     // for mtp module
     GroupedCacheLayerLayout getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const;
-    GroupedCacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
 
     // 资源统计和信息查询
     size_t      freeBlocksNum() const;
@@ -161,7 +159,7 @@ private:
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
 
     // 成员变量
-    CacheConfig         config_;
+    CacheConfig                config_;
     KVCacheAllocatorPtr allocator_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;

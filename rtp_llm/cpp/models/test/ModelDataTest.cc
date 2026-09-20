@@ -583,12 +583,18 @@ TEST_F(ModelDataTest, testGenerationPrefillCudaGraphMaskedMoeBackendRequiresSm90
 }
 
 TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRequiresSingleFullCacheGroup) {
-    EXPECT_TRUE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::FULL}));
+    const GroupBase full{"full", nullptr, defaultCacheGroupPolicy(CacheGroupType::FULL)};
+    const GroupBase linear{"linear", nullptr, defaultCacheGroupPolicy(CacheGroupType::LINEAR)};
+    const GroupBase swa{"swa", nullptr, defaultCacheGroupPolicy(CacheGroupType::SWA)};
+    const GroupBase other_full{"other_full", nullptr, defaultCacheGroupPolicy(CacheGroupType::FULL)};
+
+    EXPECT_TRUE(supportsGenerationPrefillCudaGraphCacheTopology({full}));
     EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({}));
-    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::LINEAR}));
-    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::SWA}));
-    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::FULL, CacheGroupType::LINEAR}));
-    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::FULL, CacheGroupType::SWA}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({linear}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({swa}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({full, linear}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({full, swa}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({full, other_full}));
 }
 
 TEST_F(ModelDataTest, testGenerationPrefillCudaGraphSupportsSingleGpuFp8MaskedMoe) {

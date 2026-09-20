@@ -32,7 +32,7 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
         CHECK_AND_RETURN_REF(stream, engine->preRun(generate_input, preRunMode::build_system_prompt));
 
         if (insert_kv_cache) {
-            auto&                                             kv_cache = stream->kvCacheMutable();
+            auto& kv_cache = stream->kvCacheMutable();
             std::unordered_map<std::string, std::vector<int>> blocks_by_group;
             for (const auto& tag : kv_cache.cacheResource().groupTags()) {
                 blocks_by_group.emplace(tag, kv_cache.blocks(0, tag));

@@ -12,100 +12,13 @@ namespace rtp_llm {
 class DeviceBlockPoolConfigHelper {
 public:
     /**
-     * Create block pool config from CacheConfig.
-     * Supports both single model and MTP (1+N models) configuration.
+     * Create the per-group block pool config from a merged CacheConfig.
      * Memory layout is [layout0_kv][layout0_scale][layout1_kv][layout1_scale]...[layoutN_kv][layoutN_scale]
      * Generally Memory layout is [main_kv][main_scale][mtp1_kv][mtp1_scale]...[mtpN_kv][mtpN_scale]
      *
-     * @param cache_config The CacheConfig containing main model and optional MTP modules
+     * @param cache_config The merged CacheConfig (topology owns every main and MTP layer)
+     * @param group The cache group this pool serves
      */
-    static DeviceBlockPoolConfig createConfig(const CacheConfig& cache_config) {
-        RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() == 1,
-                                "combined pool config requires exactly one cache group, got %d",
-                                cache_config.groupNums());
-        DeviceBlockPoolConfig config;
-        config.pool_type            = BlockPoolType::DEVICE;
-        config.pool_name            = "default";
-        config.physical_block_count = cache_config.blockNumForGroup(0);
-        RTP_LLM_CHECK_WITH_INFO(config.physical_block_count > 0, "single group requires positive pool capacity");
-        const bool  is_hybrid = false;
-        const auto  layer_num = static_cast<uint32_t>(cache_config.layerIdsForGroup(0).size());
-        const auto& main_spec = cache_config.specForGroup(0);
-        // linear block size is same with full block block size
-        MemoryLayoutConfig main_layout = createMemoryLayoutConfig(is_hybrid,
-                                                                  layer_num,
-                                                                  cache_config.kvBlockStrideBytesForGroup(0),
-                                                                  cache_config.kvScaleStrideBytesForGroup(0),
-                                                                  main_spec,
-                                                                  cache_config,
-                                                                  static_cast<uint32_t>(config.physical_block_count),
-                                                                  cache_config.localKvHeadNumForGroup(0),
-                                                                  cache_config.seqSizePerBlockForGroup(0),
-                                                                  cache_config.kernelBlocksPerKvBlockForGroup(0));
-
-        main_layout.kv_cache_offset_bytes = 0;
-        main_layout.kv_scale_offset_bytes = main_layout.kv_cache_offset_bytes + main_layout.kv_block_pool_size_bytes;
-        size_t current_offset             = main_layout.kv_scale_offset_bytes + main_layout.kv_scale_pool_size_bytes;
-        RTP_LLM_LOG_INFO("main_layout.kv_scale_offset_bytes: %zu", main_layout.kv_scale_offset_bytes);
-        RTP_LLM_LOG_INFO("main_layout.kv_scale_pool_size_bytes: %zu", main_layout.kv_scale_pool_size_bytes);
-
-        config.memory_layouts.push_back(main_layout);
-
-        // Create MTP sub-model layouts
-        for (size_t i = 0; i < cache_config.mtp_sub_configs.size(); ++i) {
-            const auto& mtp_sub_config = cache_config.mtp_sub_configs[i];
-            RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%zu] is null", i);
-            RTP_LLM_CHECK_WITH_INFO(
-                mtp_sub_config->groupNums() > 0, "MTP module %zu cache groups must not be empty", i);
-
-            const auto mtp_layer_num = mtp_sub_config->layer_num;
-
-            size_t real_mtp_gid = 0;
-            for (size_t gid = 0; gid < static_cast<size_t>(mtp_sub_config->groupNums()); ++gid) {
-                if (!mtp_sub_config->layerIdsForGroup(gid).empty()) {
-                    real_mtp_gid = gid;
-                    break;
-                }
-            }
-            const auto& mtp_spec = mtp_sub_config->specForGroup(real_mtp_gid);
-            // MTP block size may differ from the main model. Use the real
-            // MTP group that owns a layer; target-aligned placeholder groups
-            // must not affect the sub-model memory layout.
-            MemoryLayoutConfig mtp_layout =
-                createMemoryLayoutConfig(false,
-                                         mtp_layer_num,
-                                         mtp_spec->block_size_bytes(),
-                                         mtp_spec->scale_block_size_bytes(),
-                                         mtp_spec,
-                                         cache_config,
-                                         static_cast<uint32_t>(config.physical_block_count),
-                                         mtp_sub_config->localKvHeadNumForGroup(real_mtp_gid),
-                                         mtp_sub_config->seqSizePerBlockForGroup(real_mtp_gid),
-                                         mtp_sub_config->kernelBlocksPerKvBlockForGroup(real_mtp_gid));
-
-            mtp_layout.kv_cache_offset_bytes = current_offset;
-            RTP_LLM_LOG_INFO("mtp_layout.kv_block_pool_size_bytes = %ld", mtp_layout.kv_block_pool_size_bytes);
-            current_offset += mtp_layout.kv_block_pool_size_bytes;
-
-            if (mtp_layout.hasScale()) {
-                mtp_layout.kv_scale_offset_bytes = current_offset;
-                RTP_LLM_LOG_INFO("mtp_layout.kv_scale_pool_size_bytes = %ld", mtp_layout.kv_scale_pool_size_bytes);
-                current_offset += mtp_layout.kv_scale_pool_size_bytes;
-            } else {
-                mtp_layout.kv_scale_offset_bytes = current_offset;
-            }
-
-            config.memory_layouts.push_back(mtp_layout);
-        }
-
-        config.total_size_bytes = current_offset;
-
-        RTP_LLM_LOG_INFO("DeviceBlockPoolConfig(memory_layouts=%zu): total_size=%zu bytes",
-                         config.memory_layouts.size(),
-                         config.total_size_bytes);
-        return config;
-    }
-
     static DeviceBlockPoolConfig createConfigForGroup(const CacheConfig& cache_config, const GroupBase& group) {
         const auto& spec = group.spec;
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec for group tag=%s is null", group.tag.c_str());

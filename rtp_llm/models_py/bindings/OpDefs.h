@@ -88,7 +88,7 @@ public:
     }
 
     std::vector<std::string> groupTags() const {
-        return grouped_layout_.topology().groupTagsSnapshot();
+        return grouped_layout_.topology().groupTags();
     }
 
     size_t layerCount() const {

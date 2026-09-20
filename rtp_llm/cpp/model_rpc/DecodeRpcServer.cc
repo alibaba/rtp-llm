@@ -837,10 +837,10 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto*       generate_stream = decode_context.getStream().get();
-    auto&       cache_keys      = generate_stream->cacheKeys(0);
-    const auto& cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
-    auto        group_block_ids = cache_resource.groupBlockIds();
+    auto*                              generate_stream = decode_context.getStream().get();
+    auto&                              cache_keys      = generate_stream->cacheKeys(0);
+    const auto&                        cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
+    auto                               group_block_ids = cache_resource.groupBlockIds();
 
     const auto topology_error = validateRemoteLoadTopology(resource_.workers.size(), decode_context.peer_addrs.size());
     if (!topology_error.ok()) {
@@ -1498,9 +1498,9 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     }
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config    = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology        = cache_config.topology();
-    auto                      group_block_ids = decodeGroupBlockIds(*request, topology);
+    const auto&               cache_config     = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto&               topology         = cache_config.topology();
+    auto                      group_block_ids  = decodeGroupBlockIds(*request, topology);
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 

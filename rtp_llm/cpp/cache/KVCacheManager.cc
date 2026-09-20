@@ -282,10 +282,10 @@ bool KVCacheManager::init() {
     }
 
     allocator_ = std::make_shared<KVCacheAllocator>(config_,
-                                                    AllocationType::DEVICE,
-                                                    metrics_reporter_,
-                                                    kv_cache_config_.reserve_block_ratio,
-                                                    pd_sep_config_.role_type);
+                                                                     AllocationType::DEVICE,
+                                                                     metrics_reporter_,
+                                                                     kv_cache_config_.reserve_block_ratio,
+                                                                     pd_sep_config_.role_type);
 
     if (use_device_malloc_block_pool_) {
         RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use raw device malloc KV cache block-pool backing");
@@ -486,7 +486,8 @@ void KVCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resi
 int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                           int                            seq_len,
                                           int                            reserve_step) const {
-    RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr, "singleBatchNeedBlocks called before KVCacheManager initialized");
+    RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr,
+                            "singleBatchNeedBlocks called before KVCacheManager initialized");
     return allocator_->singleBatchNeedBlocks(batch_kv_cache_resource, seq_len, reserve_step);
 }
 
@@ -498,12 +499,12 @@ int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_
                                            bool                           enable_reuse_cache,
                                            int                            target_batch_size) const {
     return allocator_->estimateBatchPeakNeedBlocks(batch_kv_cache_resource,
-                                                   seq_len,
-                                                   common_seq_len,
-                                                   remaining_tokens,
-                                                   reserve_step,
-                                                   enable_reuse_cache,
-                                                   target_batch_size);
+                                                             seq_len,
+                                                             common_seq_len,
+                                                             remaining_tokens,
+                                                             reserve_step,
+                                                             enable_reuse_cache,
+                                                             target_batch_size);
 }
 
 // 块操作相关
@@ -533,8 +534,8 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cach
                                    bool                            copy_last_block,
                                    std::vector<TaggedBlockIdPair>& block_update_mapping) {
     RTP_LLM_PROFILE_FUNCTION();
-    const bool updated =
-        allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
+    const bool updated = allocator_->updateKVBlock(
+        batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
     return updated;
 }
 
@@ -579,10 +580,6 @@ GroupedCacheLayerLayout KVCacheManager::getMainModelGroupedCacheLayerLayout() co
     return projectLayout(all_layout, std::move(main_topology), global_layer_ids);
 }
 
-GroupedCacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
-    return getMainModelGroupedCacheLayerLayout();
-}
-
 GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const {
     RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtp_sub_configs.size(),
                             "Invalid mtp_module_id: %d, must be in range [0, %zu)",
@@ -606,10 +603,6 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
         global_layer_ids.push_back(global_layer_id);
     }
     return projectLayout(allocator_->allLayerCacheBase(), mtp_sub_config->topologyPtr(), global_layer_ids);
-}
-
-GroupedCacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id) const {
-    return getMTPModuleGroupedCacheLayerLayout(mtp_module_id);
 }
 
 // 资源统计和信息查询
@@ -965,8 +958,9 @@ void KVCacheManager::reportMetricsLoop() {
 
         block_tree_cache_->reportMetrics();
         const std::vector<BlockTreePoolMetricsSnapshot> tree_pool_snapshots = block_tree_cache_->poolMetricsSnapshots();
-        const std::vector<KVCachePoolMetricsSnapshot>   device_pool_snapshots = allocator_->poolMetricsSnapshots();
-        const std::vector<CachePoolMetricsSnapshot>     report_snapshots =
+        const std::vector<KVCachePoolMetricsSnapshot>   device_pool_snapshots =
+            allocator_->poolMetricsSnapshots();
+        const std::vector<CachePoolMetricsSnapshot> report_snapshots =
             mergeCachePoolMetricsSnapshots(device_pool_snapshots, tree_pool_snapshots);
         for (const CachePoolMetricsSnapshot& report_snapshot : report_snapshots) {
             reportPoolCacheMetrics(metrics_reporter_, report_snapshot, should_log);

@@ -236,11 +236,11 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string               request_key = "request";
-    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType> cache_keys  = {101, 102};
-    GroupBlockIds                   group_block_ids;
-    const auto                      load_context = makeLoadContext(request_key,
+    const std::string                                   request_key = "request";
+    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType>                     cache_keys  = {101, 102};
+    GroupBlockIds                                       group_block_ids;
+    const auto                                          load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -265,11 +265,11 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string               request_key = "request";
-    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType> cache_keys  = {101};
-    GroupBlockIds                   group_block_ids;
-    const auto                      load_context = makeLoadContext(request_key,
+    const std::string                                   request_key = "request";
+    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType>                     cache_keys  = {101};
+    GroupBlockIds                                       group_block_ids;
+    const auto                                          load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),

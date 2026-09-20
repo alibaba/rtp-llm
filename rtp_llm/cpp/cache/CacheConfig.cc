@@ -36,11 +36,12 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
 std::string targetGroupSummary(const CacheConfig& target_config) {
     std::ostringstream os;
     os << '[';
-    for (size_t target_gid = 0; target_gid < static_cast<size_t>(target_config.groupNums()); ++target_gid) {
-        if (target_gid > 0) {
+    bool first = true;
+    for (const auto& group : target_config.topology().groups()) {
+        if (!first) {
             os << ", ";
         }
-        const auto& group = target_config.topology().groupById(target_gid);
+        first = false;
         os << "{tag=" << group.tag << ", group_type=" << cacheGroupTypeName(group.policy.group_type);
         if (group.spec != nullptr) {
             os << ", spec_type=" << static_cast<int>(group.spec->type)
@@ -60,25 +61,25 @@ std::string targetGroupSummary(const CacheConfig& target_config) {
 }
 
 std::optional<size_t> resolveDefaultMTPGroupAlias(const CacheConfig& target_config, const CacheConfig& propose_config) {
-    if (propose_config.groupNums() != 1 || propose_config.tagForGroup(0) != "default") {
+    if (propose_config.groupNums() != 1 || propose_config.topology().groups().front().tag != "default") {
         return std::nullopt;
     }
 
-    for (size_t target_gid = 0; target_gid < static_cast<size_t>(target_config.groupNums()); ++target_gid) {
-        if (target_config.tagForGroup(target_gid) == "default") {
+    for (const auto& group : target_config.topology().groups()) {
+        if (group.tag == "default") {
             return std::nullopt;  // Exact tag matching remains authoritative.
         }
     }
 
-    const auto& source_group = propose_config.topology().groupById(0);
+    const auto& source_group = propose_config.topology().groups().front();
     if (source_group.policy.group_type != CacheGroupType::FULL || source_group.spec == nullptr
         || !isFullAttentionSpec(source_group.spec->type)) {
         return std::nullopt;
     }
 
     std::vector<size_t> candidates;
-    for (size_t target_gid = 0; target_gid < static_cast<size_t>(target_config.groupNums()); ++target_gid) {
-        const auto& target_group = target_config.topology().groupById(target_gid);
+    for (size_t target_gid = 0; target_gid < target_config.topology().groups().size(); ++target_gid) {
+        const auto& target_group = target_config.topology().groups()[target_gid];
         // The aliased draft layer uses its own MTP memory layout. Group-tag APIs still expose it as the target
         // group, however, so both logical block granularity and physical block shape must remain compatible.
         if (CacheConfig::samePolicy(target_group.policy, source_group.policy) && target_group.spec != nullptr
@@ -192,7 +193,7 @@ void CacheConfig::setGroupBlockLayout(const std::vector<std::string>& group_tags
                             "CacheConfig::setGroupBlockLayout scale stride size %zu != group size %zu",
                             kv_scale_stride_bytes.size(),
                             group_num);
-    auto groups = topology().groups();
+    auto                            groups = topology().groups();
     std::unordered_set<std::string> seen_tags;
     for (size_t row = 0; row < group_num; ++row) {
         const auto& tag = group_tags[row];
@@ -217,16 +218,18 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     RTP_LLM_CHECK_WITH_INFO(module_index >= 0, "CacheConfig::mergeMTPModule invalid module_index=%d", module_index);
 
     const auto default_alias_target_gid = resolveDefaultMTPGroupAlias(*this, propose_config);
-    for (size_t gid = 0; gid < static_cast<size_t>(propose_config.groupNums()); ++gid) {
-        const auto& tag              = propose_config.tagForGroup(gid);
+    bool       any_group                = false;
+    for (const auto& propose_group : propose_config.topology().groups()) {
+        const auto& tag              = propose_group.tag;
         const bool  has_exact_target = std::any_of(topology().groups().begin(),
                                                   topology().groups().end(),
                                                   [&tag](const auto& group) { return group.tag == tag; });
         // Every declared draft segment needs backing in an existing target
         // pool. Dropping an unmatched tag would also omit its memory budget.
-        RTP_LLM_CHECK_WITH_INFO(has_exact_target || (gid == 0 && default_alias_target_gid.has_value()),
+        RTP_LLM_CHECK_WITH_INFO(has_exact_target || (!any_group && default_alias_target_gid.has_value()),
                                 "CacheConfig::mergeMTPModule unmapped draft cache group tag=%s",
                                 tag.c_str());
+        any_group = true;
     }
     auto sub_cfg = std::make_shared<CacheConfig>(propose_config);
 
@@ -245,14 +248,14 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     const auto                              target_group_num = target_groups.size();
     std::unordered_map<std::string, size_t> propose_gid_by_tag;
     for (size_t gid = 0; gid < propose_config.topology().groups().size(); ++gid) {
-        propose_gid_by_tag.emplace(propose_config.tagForGroup(gid), gid);
+        propose_gid_by_tag.emplace(propose_config.topology().groups()[gid].tag, gid);
     }
     std::vector<GroupBase> sub_groups;
     std::vector<LayerBase> sub_layers(static_cast<size_t>(mtp_layer_num));
     sub_groups.reserve(target_group_num);
 
     for (size_t target_gid = 0; target_gid < target_group_num; ++target_gid) {
-        const auto& tag             = tagForGroup(target_gid);
+        const auto& tag             = target_groups[target_gid].tag;
         const auto  propose_it      = propose_gid_by_tag.find(tag);
         const bool  has_exact_group = propose_it != propose_gid_by_tag.end();
         const bool  uses_default_alias =
@@ -268,8 +271,8 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
             source_gid    = 0;
         }
         const bool  has_propose_group = has_exact_group || uses_default_alias;
-        const auto& source_group      = source_config->topology().groupById(source_gid);
-        const auto  source_layer_ids  = source_config->layerIdsForGroup(source_gid);
+        const auto& source_group      = source_config->topology().groups()[source_gid];
+        const auto  source_layer_ids  = source_config->layerIdsForGroup(source_group.tag);
 
         if (has_propose_group) {
             RTP_LLM_CHECK_WITH_INFO(samePolicy(target_groups[target_gid].policy, source_group.policy),
@@ -514,26 +517,24 @@ std::string CacheConfig::debugString(size_t indent) const {
     OUTPUT_FIELD_EXPR("total_group_block_size_bytes", totalGroupBlockSizeBytes());
     os << "\n";
 
-    const auto                    group_policies   = groupPoliciesSnapshot();
-    const auto                    group_block_nums = groupBlockNumsSnapshot();
-    const auto                    group_layer_ids  = layerGroupIdsSnapshot();
-    const auto                    group_tags       = groupTagsSnapshot();
-    const auto&                   topology_groups  = topology().groups();
+    const auto&                   topology_groups = topology().groups();
+    std::vector<uint32_t>         group_block_nums;
     std::vector<std::vector<int>> layers_by_group;
     layers_by_group.reserve(topology_groups.size());
     for (const auto& group : topology_groups) {
-        layers_by_group.push_back(layerIdsForGroup(topology().groupIdForTag(group.tag)));
+        layers_by_group.push_back(layerIdsForGroup(group.tag));
+        group_block_nums.push_back(group.block_num);
     }
 
     os << indent1 << "# Attention Configuration:\n";
     OUTPUT_FIELD(linear_step);
     OUTPUT_FIELD_EXPR("full_group_num",
-                      std::count_if(group_policies.begin(), group_policies.end(), [](const CacheGroupPolicy& p) {
-                          return p.group_type == CacheGroupType::FULL;
+                      std::count_if(topology_groups.begin(), topology_groups.end(), [](const GroupBase& group) {
+                          return group.policy.group_type == CacheGroupType::FULL;
                       }));
     OUTPUT_FIELD_EXPR("linear_group_num",
-                      std::count_if(group_policies.begin(), group_policies.end(), [](const CacheGroupPolicy& p) {
-                          return p.group_type == CacheGroupType::LINEAR;
+                      std::count_if(topology_groups.begin(), topology_groups.end(), [](const GroupBase& group) {
+                          return group.policy.group_type == CacheGroupType::LINEAR;
                       }));
     os << indent1 << "group_block_nums=" << rtp_llm::vectorToString(group_block_nums) << "\n";
     os << "\n";
@@ -556,26 +557,42 @@ std::string CacheConfig::debugString(size_t indent) const {
     os << indent1 << "# Layer Mapping:\n";
     OUTPUT_FIELD_EXPR("layers_by_group.size()", layers_by_group.size());
     os << indent1 << "layers_by_group=" << rtp_llm::vectorsToString(layers_by_group) << "\n";
-    OUTPUT_FIELD_EXPR("group_policies.size()", group_policies.size());
+    OUTPUT_FIELD_EXPR("group_policies.size()", topology_groups.size());
     os << indent1 << "group_types=[";
-    for (size_t i = 0; i < group_policies.size(); ++i) {
-        os << static_cast<int>(group_policies[i].group_type);
-        if (i + 1 < group_policies.size()) {
+    for (size_t i = 0; i < topology_groups.size(); ++i) {
+        os << static_cast<int>(topology_groups[i].policy.group_type);
+        if (i + 1 < topology_groups.size()) {
             os << ",";
         }
     }
     os << "]\n";
-    OUTPUT_FIELD_EXPR("group_tags.size()", group_tags.size());
+    OUTPUT_FIELD_EXPR("group_tags.size()", topology_groups.size());
     os << indent1 << "group_tags=[";
-    for (size_t i = 0; i < group_tags.size(); ++i) {
-        os << group_tags[i];
-        if (i + 1 < group_tags.size()) {
+    for (size_t i = 0; i < topology_groups.size(); ++i) {
+        os << topology_groups[i].tag;
+        if (i + 1 < topology_groups.size()) {
             os << ",";
         }
     }
     os << "]\n";
-    OUTPUT_FIELD_EXPR("layer_to_group_ids.size()", group_layer_ids.size());
-    os << indent1 << "layer_to_group_ids=" << rtp_llm::vectorsToString(group_layer_ids) << "\n";
+    OUTPUT_FIELD_EXPR("layer_to_group_tags.size()", topology().layers().size());
+    os << indent1 << "layer_to_group_tags=[";
+    bool first_layer = true;
+    for (const auto& layer : topology().layers()) {
+        if (!first_layer) {
+            os << ", ";
+        }
+        first_layer = false;
+        os << "[";
+        for (size_t i = 0; i < layer.group_tags.size(); ++i) {
+            if (i != 0) {
+                os << ",";
+            }
+            os << layer.group_tags[i];
+        }
+        os << "]";
+    }
+    os << "]\n";
     os << "\n";
 
     os << indent1 << "# MTP Configurations:\n";

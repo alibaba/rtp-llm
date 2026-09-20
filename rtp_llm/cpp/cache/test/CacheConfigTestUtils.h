@@ -21,6 +21,19 @@
 
 namespace rtp_llm::test {
 
+// Used only when first-seen or merged publication order is itself the assertion.
+inline std::vector<std::string> publishedGroupTags(const CacheTopology& topology) {
+    return topology.groupTags();
+}
+
+inline std::vector<CacheGroupType> publishedGroupTypes(const CacheTopology& topology) {
+    std::vector<CacheGroupType> types;
+    for (const auto& group : topology.groups()) {
+        types.push_back(group.policy.group_type);
+    }
+    return types;
+}
+
 // Single-rank acceptance tests confirm the local candidate without collectives.
 inline CacheConfig finalizeCacheConfig(CacheConfig config, uint32_t candidate_block_num) {
     config.finalizeBlockNums(candidate_block_num, RuntimeConfig{});
@@ -176,10 +189,13 @@ inline void setTestGroupPolicies(CacheConfig& config, const std::vector<CacheGro
 
 inline size_t explicitPoolReserveBytes(const CacheConfig& config) {
     size_t reserve = 0;
-    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        const auto& policy = config.topology().groupById(gid).policy;
+    if (config.groupNums() == 0) {
+        return reserve;
+    }
+    for (const auto& group : config.groups()) {
+        const auto& policy = group.policy;
         if (policy.explicit_block_num > 0 && policy.charge_to_paged_budget) {
-            reserve += static_cast<size_t>(config.blockNumForGroup(gid)) * config.blockSizeBytesForGroup(gid);
+            reserve += static_cast<size_t>(group.block_num) * config.blockSizeBytesForGroup(group.tag);
         }
     }
     return reserve;

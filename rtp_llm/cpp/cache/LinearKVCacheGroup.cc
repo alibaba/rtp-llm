@@ -151,13 +151,12 @@ int LinearKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                      step);
 }
 
-NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
-    int                      common_seq_len,
-    int                      seq_len,
-    int                      reserve_step,
-    int                      reuse_blocks_len,
-    bool                     reuse_enabled,
-    const RequiredPositions& required_positions) const {
+NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(int                      common_seq_len,
+                                                 int                      seq_len,
+                                                 int                      reserve_step,
+                                                 int                      reuse_blocks_len,
+                                                 bool                     reuse_enabled,
+                                                 const RequiredPositions& required_positions) const {
     NeedBlocksInfo info;
 
     const int common_slots = needBlocksNum(common_seq_len, 0);
@@ -200,12 +199,12 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-bool LinearKVCacheGroup::malloc(BlockIds&                  block_ids,
-                                int                        seq_len,
-                                bool                       enable_reuse_cache,
-                                int                        reserve_step,
-                                std::vector<size_t>*       backfilled_positions,
-                                const RequiredPositions&        required_positions) {
+bool LinearKVCacheGroup::malloc(BlockIds&                block_ids,
+                                int                      seq_len,
+                                bool                     enable_reuse_cache,
+                                int                      reserve_step,
+                                std::vector<size_t>*     backfilled_positions,
+                                const RequiredPositions& required_positions) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }

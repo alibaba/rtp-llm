@@ -219,11 +219,6 @@ int KVCacheResource::blocksNum(std::string_view tag) const {
     return group_block_ids.blocksNum(tag);
 }
 
-const BlockIndicesType& KVCacheResource::blocks(int group_id) const {
-    RTP_LLM_CHECK(group_id >= 0 && group_block_ids.rows_.size() > static_cast<size_t>(group_id));
-    return group_block_ids.rows_[static_cast<size_t>(group_id)]->blocks();
-}
-
 const BlockIndicesType& KVCacheResource::blocks(std::string_view tag) const {
     return group_block_ids.blocks(tag);
 }
@@ -231,11 +226,6 @@ const BlockIndicesType& KVCacheResource::blocks(std::string_view tag) const {
 const BlockIndicesType& KVCacheResource::blocksForLayer(int layer_id, std::string_view tag) const {
     checkLayerTag(layer_id, tag);
     return group_block_ids.blocks(tag);
-}
-
-const BlockIndicesType& KVCacheResource::kernelBlocks(int group_id) const {
-    RTP_LLM_CHECK(group_id >= 0 && group_block_ids.rows_.size() > static_cast<size_t>(group_id));
-    return group_block_ids.rows_[static_cast<size_t>(group_id)]->kernelBlocks();
 }
 
 const BlockIndicesType& KVCacheResource::kernelBlocks(std::string_view tag) const {

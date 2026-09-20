@@ -34,7 +34,7 @@ CacheLayerLayout makeLayerLayout(size_t layer_count, const std::vector<int>& act
     return CacheLayerLayout(std::move(layers));
 }
 
-TEST(CacheLayerLayoutTest, SingleGroupCoversAllLayersAndTagMatchesSlotApi) {
+TEST(CacheLayerLayoutTest, SingleGroupCoversAllLayersAndTagMatchesLayerApi) {
     auto topology = CacheTopology::create({makeLayoutGroup("full")}, {{0, {"full"}}, {1, {"full"}}, {2, {"full"}}});
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("full", makeLayerLayout(3, {0, 1, 2}, 7));
@@ -42,8 +42,7 @@ TEST(CacheLayerLayoutTest, SingleGroupCoversAllLayersAndTagMatchesSlotApi) {
 
     EXPECT_FALSE(layout.group("full").empty());
     EXPECT_EQ(layout.group("full").activeLayerCount(), 3u);
-    EXPECT_EQ(layout.groupId("full"), 0u);
-    EXPECT_EQ(layout.at("full", 1).kv_addr.data_ptr(), layout.at(0, 1).kv_addr.data_ptr());
+    EXPECT_EQ(layout.at("full", 1).kv_addr[0][0].item<int>(), 7);
     EXPECT_EQ(layout.at(1).kv_addr.data_ptr(), layout.at("full", 1).kv_addr.data_ptr());
 }
 
@@ -62,6 +61,27 @@ TEST(CacheLayerLayoutTest, SupportsOneGroupPerLayerAndOneToManyTopology) {
     EXPECT_EQ(layout.at(0).kv_addr.data_ptr(), layout.at("a", 0).kv_addr.data_ptr());
     EXPECT_EQ(layout.at(1).kv_addr.data_ptr(), layout.at("b", 1).kv_addr.data_ptr());
     EXPECT_ANY_THROW(layout.at(2));
+}
+
+TEST(CacheLayerLayoutTest, GroupIdentitySelectsSameBuffersAcrossTopologyOrders) {
+    GroupedCacheLayerLayout::GroupLayouts groups;
+    groups.emplace("a", makeLayerLayout(3, {0, 2}, 11));
+    groups.emplace("b", makeLayerLayout(3, {1, 2}, 22));
+    const std::vector<LayerBase> layers{{0, {"a"}}, {1, {"b"}}, {2, {"a", "b"}}};
+    auto                         first    = CacheTopology::create({makeLayoutGroup("a"), makeLayoutGroup("b")}, layers);
+    auto                         reversed = CacheTopology::create({makeLayoutGroup("b"), makeLayoutGroup("a")}, layers);
+    GroupedCacheLayerLayout      first_layout(first, groups);
+    GroupedCacheLayerLayout      reversed_layout(reversed, groups);
+
+    EXPECT_EQ(first_layout.at("a", 2).kv_addr.data_ptr(), reversed_layout.at("a", 2).kv_addr.data_ptr());
+    EXPECT_EQ(first_layout.at("b", 2).kv_addr.data_ptr(), reversed_layout.at("b", 2).kv_addr.data_ptr());
+    EXPECT_NE(reversed_layout.at("a", 2).kv_addr.data_ptr(), reversed_layout.at("b", 2).kv_addr.data_ptr());
+    EXPECT_EQ(reversed_layout.at("a", 2).kv_addr[0][0].item<int>(), 11);
+    EXPECT_EQ(reversed_layout.at("b", 2).kv_addr[0][0].item<int>(), 22);
+    EXPECT_FALSE(reversed_layout.at("a", 1).kv_addr.defined());
+    EXPECT_FALSE(reversed_layout.at("b", 0).kv_addr.defined());
+    EXPECT_ANY_THROW(reversed_layout.at("missing", 2));
+    EXPECT_ANY_THROW(reversed_layout.at(2));
 }
 
 TEST(CacheLayerLayoutTest, EmptyPlaceholderIsSkippedAndProjectionRecountsActiveLayers) {
@@ -83,14 +103,14 @@ TEST(CacheLayerLayoutTest, EmptyPlaceholderIsSkippedAndProjectionRecountsActiveL
     EXPECT_EQ(projected.activeLayerCount(), 1u);
 }
 
-TEST(CacheLayerLayoutTest, InvalidTagSlotAndLayerFailFast) {
+TEST(CacheLayerLayoutTest, InvalidTagAndLayerFailFast) {
     auto                                  topology = CacheTopology::create({makeLayoutGroup("full")}, {{0, {"full"}}});
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("full", makeLayerLayout(1, {0}, 1));
     GroupedCacheLayerLayout layout(topology, std::move(groups));
 
     EXPECT_ANY_THROW(layout.group("missing"));
-    EXPECT_ANY_THROW(layout.group(1));
+    EXPECT_ANY_THROW(layout.at("missing", 0));
     EXPECT_ANY_THROW(layout.group("full").at(1));
     EXPECT_ANY_THROW(layout.group("full").hasLayer(1));
 }

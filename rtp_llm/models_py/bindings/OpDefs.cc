@@ -50,7 +50,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("tag", &LayerKVCache::tag, "Cache group tag");
 
     pybind11::class_<KVCache>(m, "KVCache")
-        .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology group id order")
+        .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology publication order")
         .def_property_readonly("layer_count", &KVCache::layerCount, "Number of model-local cache layers")
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int) const>(&KVCache::getLayerCache),

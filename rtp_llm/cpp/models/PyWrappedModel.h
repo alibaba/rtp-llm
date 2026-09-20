@@ -399,7 +399,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {
             RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "cache-backed CUDA graph requires a cache manager");
-            graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTagsSnapshot();
+            graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTags();
         }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
@@ -518,7 +518,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                 generation_prefill_cuda_graph_init_status_ = GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE;
                 RTP_LLM_LOG_WARNING("generation prefill CUDA graph disabled reason=kv_cache_unavailable");
             } else if (!supportsGenerationPrefillCudaGraphCacheTopology(
-                           params.cache_manager->cacheConfig().groupTypesSnapshot())) {
+                           params.cache_manager->cacheConfig().topology().groups())) {
                 generation_prefill_cuda_graph_init_status_ = GenerationPrefillCudaGraphStatus::MODEL_NOT_SUPPORTED;
                 RTP_LLM_LOG_WARNING("generation prefill CUDA graph disabled reason=unsupported_cache_topology; "
                                     "the first version requires "

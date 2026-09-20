@@ -172,8 +172,9 @@ bool synchronizeDevice() {
 }
 
 DeviceBlockPoolConfig makeSmallBlockPoolConfig() {
-    auto cache_config                = makeSimpleMhaCacheConfig(1, 4, 1, DataType::TYPE_FP16, 1, 64);
-    auto config                      = DeviceBlockPoolConfigHelper::createConfig(cache_config);
+    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 1, DataType::TYPE_FP16, 1, 64);
+    auto config =
+        DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front());
     config.pool_name                 = "raw_device_malloc_test";
     config.use_device_malloc_backing = true;
     return config;

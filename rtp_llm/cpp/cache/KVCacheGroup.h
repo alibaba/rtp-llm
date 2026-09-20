@@ -34,10 +34,10 @@ public:
 
     // Transition-only constructor for HybridPool and existing focused tests.
     KVCacheGroup(const LayerIdsType& layer_ids,
-                 KVCacheSpecPtr      kvcache_spec,
-                 DeviceBlockPoolPtr  block_pool,
-                 int                 group_id,
-                 CacheGroupPolicy    policy = CacheGroupPolicy{}):
+                           KVCacheSpecPtr      kvcache_spec,
+                           DeviceBlockPoolPtr  block_pool,
+                           int                 group_id,
+                           CacheGroupPolicy    policy = CacheGroupPolicy{}):
         KVCacheGroup(makeLegacyCacheGroup(std::move(kvcache_spec), policy), std::move(block_pool), group_id) {
         initializeLayerMapping(layer_ids);
     }

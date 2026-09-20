@@ -59,13 +59,11 @@ public:
     }
 
     const GroupBase& group(std::string_view tag) const;
-    const GroupBase& groupById(size_t group_id) const;
     const LayerBase& layer(int layer_id) const;
     GroupRefs        groupsForLayer(int layer_id) const;
     const GroupBase& groupForLayer(int layer_id, std::string_view tag) const;
     const GroupBase& soleGroupForLayer(int layer_id) const;
 
-    size_t groupIdForTag(std::string_view tag) const;
     bool   hasSingleGlobalGroup() const;
     bool   hasOneGroupPerLayer() const;
 
@@ -74,10 +72,6 @@ public:
     // totalGroupBlockSizeBytes} instead.
     size_t           blockSizeBytesForGroup(std::string_view group_tag) const;
     std::vector<int> layerIdsForGroup(std::string_view group_tag) const;
-    size_t           totalGroupBlockSizeBytes() const;
-    size_t           blockSizeBytesForGroup(size_t group_id) const;
-    std::vector<int> layerIdsForGroup(size_t group_id) const;
-    std::vector<int> groupIdsForLayer(int layer_id) const;
 
     size_t maxKernelBlocksPerKvBlock() const {
         size_t result = 1;
@@ -87,12 +81,10 @@ public:
         return result;
     }
 
-    // Compatibility projections are values, never a second configuration source.
-    std::vector<std::string>      groupTagsSnapshot() const;
-    std::vector<CacheGroupType>   groupTypesSnapshot() const;
-    std::vector<std::vector<int>> layerGroupIdsSnapshot() const;
-
 private:
+    size_t           groupIdForTag(std::string_view tag) const;
+    const GroupBase& groupById(size_t group_id) const;
+
     CacheTopology(std::vector<GroupBase> groups, std::vector<LayerBase> layers);
     void validateAndBuildIndex();
 

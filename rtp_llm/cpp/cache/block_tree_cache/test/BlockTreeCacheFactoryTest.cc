@@ -355,8 +355,8 @@ public:
     }
 
 private:
-    std::vector<DeviceBlockPoolPtr> exposed_pools_;
-    std::vector<KVCacheGroupPtr>    exposed_groups_;
+    std::vector<DeviceBlockPoolPtr>        exposed_pools_;
+    std::vector<KVCacheGroupPtr> exposed_groups_;
 };
 
 std::shared_ptr<GroupViewHybridPoolAllocator> initViewAllocator(const CacheConfig& config) {
@@ -389,9 +389,9 @@ KVCacheGroupPtr cloneGroupWithPool(const KVCacheGroupPtr& source, const DeviceBl
     return result;
 }
 
-void expectFactoryRejects(const CacheConfig&                       config,
+void expectFactoryRejects(const CacheConfig&                              config,
                           const std::shared_ptr<KVCacheAllocator>& allocator,
-                          const KVCacheConfig&                     kv_cache_config = {}) {
+                          const KVCacheConfig&                            kv_cache_config = {}) {
     CoreDumpGuard guard;
     try {
         EXPECT_EQ(createBlockTreeCache(config, kv_cache_config, allocator), nullptr);
@@ -464,7 +464,8 @@ insertOneKeyThroughAllocator(const CacheConfig& config, const KVCacheAllocatorPt
     return blocks;
 }
 
-void releaseInsertedRequestBlocks(const KVCacheAllocatorPtr& allocator, const std::vector<BlockIdxType>& blocks) {
+void releaseInsertedRequestBlocks(const KVCacheAllocatorPtr& allocator,
+                                  const std::vector<BlockIdxType>&  blocks) {
     const auto groups = allocator->cacheGroups();
     ASSERT_EQ(groups.size(), blocks.size());
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
@@ -752,8 +753,8 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteBackendResolverDoesNotKeepAttachedCacheA
     allocator->attachBlockTreeCache(cache);
 
     std::weak_ptr<KVCacheAllocator> weak_allocator = allocator;
-    std::weak_ptr<BlockTreeCache>   weak_cache     = cache;
-    std::weak_ptr<StorageBackend>   weak_backend   = backend;
+    std::weak_ptr<BlockTreeCache>          weak_cache     = cache;
+    std::weak_ptr<StorageBackend>          weak_backend   = backend;
     cache.reset();
     backend.reset();
     allocator.reset();
@@ -1236,9 +1237,9 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentPhysicalLayoutsAggregate) {
-    const CacheConfig                 config    = makePhysicallyDifferentFullGroupsConfig();
+    const CacheConfig                        config    = makePhysicallyDifferentFullGroupsConfig();
     std::shared_ptr<KVCacheAllocator> allocator = initAllocator<KVCacheAllocator>(config);
-    BlockTreeCachePtr                 cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    BlockTreeCachePtr                        cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_NE(cache, nullptr);
     EXPECT_NE(config.group("group0").block_num, config.group("group1").block_num);
@@ -1251,7 +1252,7 @@ TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentPhysicalLayoutsAggr
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentLogicalBlockSizesAreRejected) {
-    const CacheConfig                 config    = makeLogicallyIncompatibleFullGroupsConfig();
+    const CacheConfig                        config    = makeLogicallyIncompatibleFullGroupsConfig();
     std::shared_ptr<KVCacheAllocator> allocator = initAllocator<KVCacheAllocator>(config);
 
     expectFactoryRejects(config, allocator);
@@ -1307,11 +1308,11 @@ TEST_F(BlockTreeCacheFactoryTest, UnsupportedProductionEvictionPolicyFailsClosed
 }
 
 TEST_F(BlockTreeCacheFactoryTest, CompatibleSwaGroupsAggregateWhenPolicyWindowsMatch) {
-    const CacheConfig                 config    = makeCompatibleSwaGroupsConfig(/*second_window=*/128,
+    const CacheConfig                        config    = makeCompatibleSwaGroupsConfig(/*second_window=*/128,
                                                              /*second_active_tail_blocks=*/2,
                                                              CpBlockMappingMode::COMPACT_LAST_RANK);
     std::shared_ptr<KVCacheAllocator> allocator = initAllocator<KVCacheAllocator>(config);
-    BlockTreeCachePtr                 cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    BlockTreeCachePtr                        cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->groupSets().size(), 1u);
@@ -1319,7 +1320,7 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleSwaGroupsAggregateWhenPolicyWindowsM
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SwaGroupsWithDifferentPolicyWindowsAreRejected) {
-    const CacheConfig                 config    = makeCompatibleSwaGroupsConfig(/*second_window=*/64,
+    const CacheConfig                        config    = makeCompatibleSwaGroupsConfig(/*second_window=*/64,
                                                              /*second_active_tail_blocks=*/2,
                                                              CpBlockMappingMode::COMPACT_LAST_RANK);
     std::shared_ptr<KVCacheAllocator> allocator = initAllocator<KVCacheAllocator>(config);
@@ -1328,7 +1329,7 @@ TEST_F(BlockTreeCacheFactoryTest, SwaGroupsWithDifferentPolicyWindowsAreRejected
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SwaGroupsWithDifferentActiveTailBlocksAreRejected) {
-    const CacheConfig                 config    = makeCompatibleSwaGroupsConfig(/*second_window=*/128,
+    const CacheConfig                        config    = makeCompatibleSwaGroupsConfig(/*second_window=*/128,
                                                              /*second_active_tail_blocks=*/1,
                                                              CpBlockMappingMode::COMPACT_LAST_RANK);
     std::shared_ptr<KVCacheAllocator> allocator = initAllocator<KVCacheAllocator>(config);
@@ -1337,7 +1338,7 @@ TEST_F(BlockTreeCacheFactoryTest, SwaGroupsWithDifferentActiveTailBlocksAreRejec
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentCpMappingsAreRejected) {
-    const CacheConfig                 config    = makeCompatibleSwaGroupsConfig(/*second_window=*/128,
+    const CacheConfig                        config    = makeCompatibleSwaGroupsConfig(/*second_window=*/128,
                                                              /*second_active_tail_blocks=*/2,
                                                              CpBlockMappingMode::NONE);
     std::shared_ptr<KVCacheAllocator> allocator = initAllocator<KVCacheAllocator>(config);
@@ -1346,9 +1347,9 @@ TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentCpMappingsAreReject
 }
 
 TEST_F(BlockTreeCacheFactoryTest, CompatibleLinearGroupsAggregateWhenActiveTailBlocksMatch) {
-    const CacheConfig                 config    = makeCompatibleLinearGroupsConfig(/*second_active_tail_blocks=*/1);
+    const CacheConfig                        config = makeCompatibleLinearGroupsConfig(/*second_active_tail_blocks=*/1);
     std::shared_ptr<KVCacheAllocator> allocator = initAllocator<KVCacheAllocator>(config);
-    BlockTreeCachePtr                 cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    BlockTreeCachePtr                        cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->groupSets().size(), 1u);
@@ -1356,7 +1357,7 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleLinearGroupsAggregateWhenActiveTailB
 }
 
 TEST_F(BlockTreeCacheFactoryTest, LinearGroupsWithDifferentActiveTailBlocksAreRejected) {
-    const CacheConfig                 config    = makeCompatibleLinearGroupsConfig(/*second_active_tail_blocks=*/2);
+    const CacheConfig                        config = makeCompatibleLinearGroupsConfig(/*second_active_tail_blocks=*/2);
     std::shared_ptr<KVCacheAllocator> allocator = initAllocator<KVCacheAllocator>(config);
 
     expectFactoryRejects(config, allocator);
@@ -1567,9 +1568,9 @@ TEST_F(BlockTreeCacheFactoryTest, DeviceWatermarkKeepsCacheBelowHighThreshold) {
 }
 
 TEST_F(BlockTreeCacheFactoryTest, PhysicallyDifferentGroupsShareGroupSetResource) {
-    const CacheConfig                 config    = makePhysicallyDifferentFullGroupsConfig();
+    const CacheConfig                        config    = makePhysicallyDifferentFullGroupsConfig();
     std::shared_ptr<KVCacheAllocator> allocator = initAllocator<KVCacheAllocator>(config);
-    BlockTreeCachePtr                 cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    BlockTreeCachePtr                        cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
 
@@ -1812,7 +1813,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentPoolGroupSetDependsOnlyOnPublishedT
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->groupSets().size(), 2u);
     for (const auto& group_set : cache->groupSets()) {
-        EXPECT_EQ(group_set->topologyPtr()->groupTags(), topology->groupTags());
+        EXPECT_EQ(test::publishedGroupTags(*group_set->topologyPtr()), test::publishedGroupTags(*topology));
         EXPECT_GT(group_set->payloadBytes(), 0u);
     }
 }

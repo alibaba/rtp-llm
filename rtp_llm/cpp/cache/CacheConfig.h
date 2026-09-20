@@ -48,18 +48,6 @@ public:
     // Block configuration
     size_t seq_size_per_block = 1;  // tokens/base cache-key block; groups may cover multiple key blocks
 
-    size_t seqSizePerBlockForGroup(size_t gid) const {
-        return topology().groupById(gid).seqSizePerBlock();
-    }
-
-    size_t kernelSeqSizePerBlockForGroup(size_t gid) const {
-        return topology().groupById(gid).kernelSeqSizePerBlock();
-    }
-
-    size_t kernelBlocksPerKvBlockForGroup(size_t gid) const {
-        return topology().groupById(gid).kernelBlocksPerKvBlock();
-    }
-
     // Attention-specific configuration
     int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
 
@@ -124,150 +112,14 @@ public:
         return topology().soleGroupForLayer(layer_id);
     }
 
-    const std::shared_ptr<const KVCacheSpec>& specForGroup(size_t gid) const {
-        return topology().groupById(gid).spec;
-    }
-
-    CacheGroupType typeForGroup(size_t gid) const {
-        return topology().groupById(gid).policy.group_type;
-    }
-
-    const std::string& tagForGroup(size_t gid) const {
-        return topology().groupById(gid).tag;
-    }
-
-    int groupIdForTag(const std::string& tag) const {
-        return static_cast<int>(topology().groupIdForTag(tag));
-    }
-
     std::vector<int> layerIdsForGroup(std::string_view group_tag) const {
         return topology().layerIdsForGroup(group_tag);
-    }
-
-    std::vector<int> layerIdsForGroup(size_t gid) const {
-        return topology().layerIdsForGroup(gid);
-    }
-
-    std::vector<CacheGroupType> groupTypesSnapshot() const {
-        return topology().groupTypesSnapshot();
-    }
-
-    std::vector<std::string> groupTagsSnapshot() const {
-        return topology().groupTagsSnapshot();
-    }
-
-    std::vector<CacheGroupPolicy> groupPoliciesSnapshot() const {
-        std::vector<CacheGroupPolicy> policies;
-        policies.reserve(topology().groups().size());
-        for (const auto& group : topology().groups()) {
-            policies.push_back(group.policy);
-        }
-        return policies;
-    }
-
-    std::vector<size_t> groupSeqBlockSizesSnapshot() const {
-        std::vector<size_t> values;
-        values.reserve(topology().groups().size());
-        for (size_t gid = 0; gid < topology().groups().size(); ++gid) {
-            values.push_back(seqSizePerBlockForGroup(gid));
-        }
-        return values;
-    }
-
-    std::vector<size_t> groupKernelSeqBlockSizesSnapshot() const {
-        std::vector<size_t> values;
-        values.reserve(topology().groups().size());
-        for (size_t gid = 0; gid < topology().groups().size(); ++gid) {
-            values.push_back(kernelSeqSizePerBlockForGroup(gid));
-        }
-        return values;
-    }
-
-    std::vector<size_t> groupKernelBlocksPerKvBlockSnapshot() const {
-        std::vector<size_t> values;
-        values.reserve(topology().groups().size());
-        for (size_t gid = 0; gid < topology().groups().size(); ++gid) {
-            values.push_back(kernelBlocksPerKvBlockForGroup(gid));
-        }
-        return values;
-    }
-
-    std::vector<uint32_t> groupBlockNumsSnapshot() const {
-        std::vector<uint32_t> block_nums;
-        block_nums.reserve(topology().groups().size());
-        for (const auto& group : topology().groups()) {
-            block_nums.push_back(group.block_num);
-        }
-        return block_nums;
-    }
-
-    std::vector<size_t> groupBlockSizeBytesSnapshot() const {
-        std::vector<size_t> result;
-        result.reserve(static_cast<size_t>(groupNums()));
-        for (size_t gid = 0; gid < static_cast<size_t>(groupNums()); ++gid) {
-            result.push_back(blockSizeBytesForGroup(gid));
-        }
-        return result;
-    }
-
-    std::vector<size_t> groupKvBlockStrideBytesSnapshot() const {
-        std::vector<size_t> strides;
-        strides.reserve(topology().groups().size());
-        for (const auto& group : topology().groups()) {
-            strides.push_back(group.kvBlockStrideBytes());
-        }
-        return strides;
-    }
-
-    std::vector<size_t> groupKvScaleStrideBytesSnapshot() const {
-        std::vector<size_t> strides;
-        strides.reserve(topology().groups().size());
-        for (const auto& group : topology().groups()) {
-            strides.push_back(group.kvScaleStrideBytes());
-        }
-        return strides;
-    }
-
-    std::vector<std::vector<int>> layerGroupIdsSnapshot() const {
-        return topology().layerGroupIdsSnapshot();
-    }
-
-    uint32_t blockNumForGroup(size_t gid) const {
-        return topology().groupById(gid).block_num;
-    }
-
-    size_t kvBlockStrideBytesForGroup(size_t gid) const {
-        return topology().groupById(gid).kvBlockStrideBytes();
-    }
-
-    size_t kvScaleStrideBytesForGroup(size_t gid) const {
-        return topology().groupById(gid).kvScaleStrideBytes();
     }
 
     size_t blockSizeBytesForGroup(std::string_view group_tag) const {
         size_t      total = 0;
         const auto& tag   = topology().group(group_tag).tag;
         for (int layer_id : layerIdsForGroup(group_tag)) {
-            const auto&  physical_group = physicalGroupForLayer(layer_id, tag);
-            const size_t kv_bytes       = physical_group.kvBlockStrideBytes();
-            const size_t scale_bytes    = physical_group.kvScaleStrideBytes();
-            RTP_LLM_CHECK_WITH_INFO(scale_bytes <= std::numeric_limits<size_t>::max() - kv_bytes,
-                                    "CacheConfig tag=%s layer=%d stride overflow",
-                                    tag.c_str(),
-                                    layer_id);
-            const size_t layer_bytes = kv_bytes + scale_bytes;
-            RTP_LLM_CHECK_WITH_INFO(layer_bytes <= std::numeric_limits<size_t>::max() - total,
-                                    "CacheConfig tag=%s block size overflow",
-                                    tag.c_str());
-            total += layer_bytes;
-        }
-        return total;
-    }
-
-    size_t blockSizeBytesForGroup(size_t gid) const {
-        size_t      total = 0;
-        const auto& tag   = tagForGroup(gid);
-        for (int layer_id : layerIdsForGroup(gid)) {
             const auto&  physical_group = physicalGroupForLayer(layer_id, tag);
             const size_t kv_bytes       = physical_group.kvBlockStrideBytes();
             const size_t scale_bytes    = physical_group.kvScaleStrideBytes();
@@ -309,10 +161,6 @@ public:
     // on demand instead of copying a second geometry table into the topology.
     const GroupBase& physicalGroupForLayer(int layer_id, const std::string& tag) const;
 
-    uint32_t localKvHeadNumForGroup(size_t gid) const {
-        return topology().groupById(gid).localKvHeadNum();
-    }
-
     const std::vector<std::string>& groupTags() const {
         return topology().groupTags();
     }
@@ -324,36 +172,6 @@ public:
 
     std::shared_ptr<CacheConfig>
     mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
-
-    uint32_t explicitIndependentBlocks(size_t gid) const {
-        return policyForGroup(gid).explicit_block_num;
-    }
-
-    bool usesExplicitIndependentBlocks(size_t gid) const {
-        return explicitIndependentBlocks(gid) > 0;
-    }
-
-    CacheGroupPolicy policyForGroup(size_t gid) const {
-        return topology().groupById(gid).policy;
-    }
-
-    int groupIdForLayerTag(int layer_id, const std::string& tag) const {
-        topology().groupForLayer(layer_id, tag);
-        return groupIdForTag(tag);
-    }
-
-    int groupIdFor(int layer_id) const {
-        const auto gids = topology().groupIdsForLayer(layer_id);
-        RTP_LLM_CHECK_WITH_INFO(gids.size() == 1,
-                                "CacheConfig::groupIdFor requires exactly one cache tag for layer_id=%d, got %zu",
-                                layer_id,
-                                gids.size());
-        return gids.front();
-    }
-
-    std::vector<int> groupIdsForLayer(int layer_id) const {
-        return topology().groupIdsForLayer(layer_id);
-    }
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 

@@ -26,9 +26,9 @@ protected:
         auto linear = std::make_shared<LinearGroupSet>(
             std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr> groups = {full, swa, linear};
-        BlockTreeCacheConfig config{};
+        BlockTreeCacheConfig     config{};
         config.task_pool_size = 2;
-        cache_ = makeBlockTreeCacheForTest(std::move(groups), config);
+        cache_                = makeBlockTreeCacheForTest(std::move(groups), config);
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_b, BlockIdxType swa_b, BlockIdxType lin_b) {
@@ -265,9 +265,9 @@ TEST_F(FullSWALinearEvictionTest, SWAReclaimCascadesToLinear) {
         128, 64, std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     auto linear = std::make_shared<LinearGroupSet>(
         std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
-    std::vector<GroupSetPtr>        groups = {swa, linear};
-    BlockTreeCacheConfig config{};
-    config.task_pool_size = 2;
+    std::vector<GroupSetPtr> groups = {swa, linear};
+    BlockTreeCacheConfig     config{};
+    config.task_pool_size                         = 2;
     std::unique_ptr<BlockTreeCache> swa_lin_cache = makeBlockTreeCacheForTest(std::move(groups), config);
 
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(2));

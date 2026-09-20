@@ -53,10 +53,10 @@ struct KVCachePoolMetricsSnapshot {
 class KVCacheAllocator: public std::enable_shared_from_this<KVCacheAllocator> {
 public:
     KVCacheAllocator(const CacheConfig&                 config,
-                     AllocationType                     allocation_type     = AllocationType::DEVICE,
-                     const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
-                     int64_t                            reserve_block_ratio = 0,
-                     RoleType                           role_type           = RoleType::PDFUSION):
+                            AllocationType                     allocation_type     = AllocationType::DEVICE,
+                            const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
+                            int64_t                            reserve_block_ratio = 0,
+                            RoleType                           role_type           = RoleType::PDFUSION):
         config_(config),
         allocation_type_(allocation_type),
         metrics_reporter_(metrics_reporter),
@@ -267,24 +267,23 @@ protected:
     void                 rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                             const std::vector<BlockIndicesType>& referenced_blocks,
                                             const std::vector<size_t>&           original_sizes);
-    virtual void copyBlockMappingForGroup(int group_id, const std::vector<BlockIdPair>& block_update_mapping) const;
-    virtual MemoryType memoryTypeForGroup(int group_id) const;
+    virtual MemoryType   memoryTypeForGroup(int group_id) const;
 
-    std::vector<KVCacheGroupPtr>    kv_cache_groups_;
-    std::vector<int>                full_group_ids_;
-    std::vector<int>                linear_group_ids_;
-    std::vector<int>                swa_group_ids_;
-    MallocStatus                    evaluateInitCapacityImpl(const MallocInfo&                     malloc_info,
-                                                             size_t                                reserve_blocks,
-                                                             InitCapacityMode                      mode,
-                                                             const std::vector<RequiredPositions>* required_positions) const;
-    int                             validateGroupIdForLayer(int layer_id, int group_id) const;
-    int                             defaultGroupIdForLayer(int layer_id) const;
-    size_t                          minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
-    size_t                          totalReservableFreeBlocks() const;
-    size_t                          reserveBlocksForPool(size_t group_id) const;
-    std::vector<DeviceBlockPoolPtr> group_block_pools_;
-    RoleType                        role_type_{RoleType::PDFUSION};
+    std::vector<KVCacheGroupPtr> kv_cache_groups_;
+    std::vector<int>                       full_group_ids_;
+    std::vector<int>                       linear_group_ids_;
+    std::vector<int>                       swa_group_ids_;
+    MallocStatus                           evaluateInitCapacityImpl(const MallocInfo&                     malloc_info,
+                                                                    size_t                                reserve_blocks,
+                                                                    InitCapacityMode                      mode,
+                                                                    const std::vector<RequiredPositions>* required_positions) const;
+    int                                    validateGroupIdForLayer(int layer_id, int group_id) const;
+    int                                    defaultGroupIdForLayer(int layer_id) const;
+    size_t                                 minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
+    size_t                                 totalReservableFreeBlocks() const;
+    size_t                                 reserveBlocksForPool(size_t group_id) const;
+    std::vector<DeviceBlockPoolPtr>        group_block_pools_;
+    RoleType                               role_type_{RoleType::PDFUSION};
 
 private:
     size_t groupIdForTag(std::string_view tag) const;

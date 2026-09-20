@@ -290,7 +290,7 @@ TEST_F(SystemPromptConstructorTest, testNormalEngineWaitsForAllocatorObserverBef
         }));
 
     manager->allocator_ = mock_allocator;
-    auto stream_status  = engine->preRun(makeSystemPromptInput(), preRunMode::build_system_prompt);
+    auto stream_status            = engine->preRun(makeSystemPromptInput(), preRunMode::build_system_prompt);
     ASSERT_TRUE(stream_status.ok()) << stream_status.status();
     EXPECT_EQ(context->waitCalls(), 1u);
     EXPECT_EQ(stream_status.value()->streamCacheResource().allocator_load_context_, nullptr);

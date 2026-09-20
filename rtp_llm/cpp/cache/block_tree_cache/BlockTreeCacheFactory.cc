@@ -120,14 +120,14 @@ GroupSetPtr createGroupSet(const GroupBase&                group,
     return result;
 }
 
-std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cache_config,
-                                                  const KVCacheAllocatorPtr& allocator) {
+std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&                cache_config,
+                                                              const KVCacheAllocatorPtr& allocator) {
     if (!allocator) {
         RTP_LLM_LOG_ERROR("allocator is null");
         return {};
     }
     const auto allocator_groups = allocator->cacheGroups();
-    const auto group_count      = static_cast<size_t>(cache_config.groupNums());
+    const auto group_count        = static_cast<size_t>(cache_config.groupNums());
     if (allocator_groups.size() != group_count) {
         RTP_LLM_LOG_ERROR("allocator/topology group count mismatch, allocator=%zu topology=%zu",
                           allocator_groups.size(),
@@ -136,7 +136,7 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cac
     }
 
     std::vector<KVCacheGroupPtr> aligned(group_count);
-    const auto&                  topology_groups = cache_config.topology().groups();
+    const auto&                            topology_groups = cache_config.topology().groups();
     for (const auto& group : allocator_groups) {
         if (!group || !group->blockPool()) {
             RTP_LLM_LOG_ERROR("allocator group/direct pool must be non-null");
@@ -364,7 +364,7 @@ std::string resolveDiskMountPath(const std::string& paths_csv, int64_t local_wor
 
 BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                         cache_config,
                                        const KVCacheConfig&                       kv_cache_config,
-                                       const KVCacheAllocatorPtr&                 allocator,
+                                       const KVCacheAllocatorPtr&          allocator,
                                        const ParallelismConfig&                   parallelism_config,
                                        std::shared_ptr<StorageBackend>            storage_backend,
                                        std::shared_ptr<BroadcastManager>          broadcast_manager,
@@ -529,9 +529,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         for (const auto& tag : members) {
             device_pools.push_back(poolForTag(cache_config.topology(), group_pools, tag));
         }
-        const auto& first     = cache_topology->group(members.front());
-        auto        group_set = createGroupSet(
-            first, std::move(device_pools), std::move(host_pools[group_set_id]), std::move(disk_pools[group_set_id]));
+        const auto&  first     = cache_topology->group(members.front());
+        auto         group_set = createGroupSet(first,
+                                        std::move(device_pools),
+                                        std::move(host_pools[group_set_id]),
+                                        std::move(disk_pools[group_set_id]));
         group_set->initialize(group_set_id, cache_topology, members, group_set_payload_bytes[group_set_id]);
         RTP_LLM_LOG_INFO(
             "group_set[%zu] membership sealed: payload_bytes=%zu", group_set_id, group_set->payloadBytes());

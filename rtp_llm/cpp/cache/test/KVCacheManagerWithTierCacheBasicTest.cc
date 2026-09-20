@@ -243,9 +243,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
         }
         EXPECT_GT(pool.used_blocks, 0u) << pool.pool->poolName();
     }
-    ASSERT_EQ(cache_config_.typeForGroup(/*group_id=*/0), CacheGroupType::SWA);
+    ASSERT_EQ(cache_config_.group("swa_kv").policy.group_type, CacheGroupType::SWA);
     ASSERT_GE(device_before_second[0].free_blocks, 1u) << "the second request must first allocate in group0 SWA";
-    ASSERT_EQ(cache_config_.typeForGroup(/*group_id=*/1), CacheGroupType::FULL);
+    ASSERT_EQ(cache_config_.group("csa_kv").policy.group_type, CacheGroupType::FULL);
     ASSERT_EQ(device_before_second[1].free_blocks, 0u) << "the second request must fail after reaching group1 FULL";
     const size_t submits_before_second = pausable_engine->submittedDescriptorCount();
 

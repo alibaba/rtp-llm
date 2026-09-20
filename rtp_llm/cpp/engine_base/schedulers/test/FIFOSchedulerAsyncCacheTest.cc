@@ -127,8 +127,8 @@ protected:
     }
 
     void installReadinessAllocator(ContextSelector selector) {
-        real_allocator_       = cache_manager_->allocator_;
-        mock_allocator_       = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+        real_allocator_ = cache_manager_->allocator_;
+        mock_allocator_ = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
         initial_malloc_calls_ = 0;
         free_calls_           = 0;
         insert_calls_         = 0;
@@ -170,8 +170,8 @@ protected:
     }
 
     void installRetryableAllocator() {
-        real_allocator_       = cache_manager_->allocator_;
-        mock_allocator_       = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+        real_allocator_ = cache_manager_->allocator_;
+        mock_allocator_ = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
         initial_malloc_calls_ = 0;
 
         ON_CALL(*mock_allocator_, totalBlocksNum()).WillByDefault(testing::Return(64));
@@ -186,15 +186,15 @@ protected:
     }
 
 protected:
-    autil::EnvGuard                                          perf_scope;
-    CacheConfig                                              cache_config_;
-    std::shared_ptr<KVCacheManager>                          cache_manager_;
-    int64_t                                                  next_request_id_{1};
+    autil::EnvGuard                                                 perf_scope;
+    CacheConfig                                                     cache_config_;
+    std::shared_ptr<KVCacheManager>                                 cache_manager_;
+    int64_t                                                         next_request_id_{1};
     KVCacheAllocatorPtr                                      real_allocator_;
     std::shared_ptr<testing::NiceMock<MockKVCacheAllocator>> mock_allocator_;
-    size_t                                                   initial_malloc_calls_{0};
-    size_t                                                   free_calls_{0};
-    size_t                                                   insert_calls_{0};
+    size_t                                                          initial_malloc_calls_{0};
+    size_t                                                          free_calls_{0};
+    size_t                                                          insert_calls_{0};
 };
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning) {

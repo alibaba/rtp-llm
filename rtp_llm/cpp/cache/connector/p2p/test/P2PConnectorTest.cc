@@ -206,8 +206,8 @@ TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups
     auto resource         = std::make_shared<KVCacheResource>();
     resource->cacheKeys() = {1000, 1001, 1002};
     resource->initGroups(test::makeTestCacheTopology(/*group_num=*/4, /*layer_num=*/2, {{1}, {3}}));
-    resource->mutableBlockIds("group1").assign({10, 11, 12});
-    resource->mutableBlockIds("group3").assign({30, 31, 32});
+    resource->mutableBlockIds("group" + std::to_string(1)).assign({10, 11, 12});
+    resource->mutableBlockIds("group" + std::to_string(3)).assign({30, 31, 32});
     ASSERT_GT(resource->groupNums(), 1);
 
     P2PConnectorAsyncMatchContext ctx(resource);
