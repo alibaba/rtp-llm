@@ -1,25 +1,5 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.preemption.PreemptionCancelPhase;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.enums.DecodeTaskPhase;
-import org.flexlb.enums.TaskPhase;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.LongPredicate;
-
 import org.flexlb.balance.endpoint.DecodeEndpoint.AdmissionCapacity;
 import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityUsage;
@@ -36,6 +16,26 @@ import org.flexlb.balance.endpoint.DecodeEndpoint.ReleaseReason;
 import org.flexlb.balance.endpoint.DecodeEndpoint.ReservationHandle;
 import org.flexlb.balance.endpoint.DecodeEndpoint.ReservationReleaseResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint.WorkerStatusFact;
+import org.flexlb.balance.preemption.PreemptionCancelPhase;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.enums.DecodeTaskPhase;
+import org.flexlb.enums.TaskPhase;
+import org.flexlb.util.PriorityNormalizer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.LongPredicate;
 
 /** Resource ledger for one Decode generation. All mutations share admissionLock.
  * Endpoint owns lifecycle pins and publishes notifications only after these calls return.
@@ -119,6 +119,7 @@ final class DecodeState {
      * reference and therefore disappears with this endpoint generation.</p>
      */
     private volatile DecodeRoutingView routingViewCache;
+    private volatile DecodeEndpoint.AdmissionSummary admissionSummaryCache;
 
     // Reservation: acquire and release exact ownership.
 
@@ -1682,6 +1683,57 @@ final class DecodeState {
     record CleanupResult(int expiredReservations, boolean capacityReleased) { }
 
     // Read-only views: capture, cache and metrics.
+
+    DecodeEndpoint.AdmissionSummary admissionSummary() {
+        DecodeEndpoint.AdmissionSummary cached = admissionSummaryCache;
+        if (isCurrentAdmissionSummary(cached)) { return cached; }
+        admissionLock.lock();
+        try {
+            cached = admissionSummaryCache;
+            if (isCurrentAdmissionSummary(cached)) { return cached; }
+            DecodeRoutingView routing = routingViewLocked();
+            long[] requests = new long[PriorityNormalizer.MAX_PRIORITY + 1];
+            long[] hardKv = new long[PriorityNormalizer.MAX_PRIORITY + 1];
+            long[] expectedKv = new long[PriorityNormalizer.MAX_PRIORITY + 1];
+            long[] engineRequests = new long[PriorityNormalizer.MAX_PRIORITY + 1];
+            long[] engineHardKv = new long[PriorityNormalizer.MAX_PRIORITY + 1];
+            long[] engineExpectedKv = new long[PriorityNormalizer.MAX_PRIORITY + 1];
+            for (DecodeRequestState task : decodeRequests.values()) {
+                if (!task.ownsRequest()) { continue; }
+                int priority = task.priorityKnown() && PriorityNormalizer.isValid(task.priority())
+                        ? task.priority() : 0;
+                requests[priority]++;
+                long hard = task.confirmed() ? task.kvTokens() : task.releasableKvTokens();
+                long expected = task.confirmed() ? task.kvTokens() : task.expectedKvTokens();
+                hardKv[priority] = saturatedAddNonNegative(hardKv[priority], hard);
+                expectedKv[priority] = saturatedAddNonNegative(expectedKv[priority], expected);
+                if (task.confirmed() || !task.queued() || task.dispatchPermit() != null) {
+                    engineRequests[priority]++;
+                    engineHardKv[priority] = saturatedAddNonNegative(engineHardKv[priority], hard);
+                    engineExpectedKv[priority] = saturatedAddNonNegative(engineExpectedKv[priority], expected);
+                }
+            }
+            CapacityRelease[] placementOccupancy = new CapacityRelease[PriorityNormalizer.MAX_PRIORITY + 1];
+            CapacityRelease[] engineOccupancy = new CapacityRelease[PriorityNormalizer.MAX_PRIORITY + 1];
+            for (int priority = 0; priority < placementOccupancy.length; priority++) {
+                placementOccupancy[priority] = requests[priority] == 0 ? CapacityRelease.NONE
+                        : new CapacityRelease(requests[priority], hardKv[priority], expectedKv[priority]);
+                engineOccupancy[priority] = engineRequests[priority] == 0 ? CapacityRelease.NONE
+                        : new CapacityRelease(engineRequests[priority], engineHardKv[priority], engineExpectedKv[priority]);
+            }
+            admissionSummaryCache = new DecodeEndpoint.AdmissionSummary(routing, placementOccupancy, engineOccupancy);
+            return admissionSummaryCache;
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
+    private boolean isCurrentAdmissionSummary(DecodeEndpoint.AdmissionSummary summary) {
+        return summary != null
+                && summary.routing().admissionVersion() == admissionVersion.get()
+                && summary.routing().workerStatus() == status.committedWorkerStatus()
+                && summary.routing().topology() == status.topologySnapshot();
+    }
 
     LayeredAdmissionView resourceSnapshot() {
         admissionLock.lock();

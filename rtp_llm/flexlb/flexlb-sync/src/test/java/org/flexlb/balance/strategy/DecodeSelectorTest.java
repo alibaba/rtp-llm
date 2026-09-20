@@ -92,6 +92,39 @@ class DecodeSelectorTest {
     }
 
     @Test
+    void admissionSummaryIsReusedAndTracksEngineOwnershipSeparatelyFromQueuedKv() {
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            DecodeEndpoint endpoint = decodeEndpoint(registry, "127.0.0.1:8080");
+            DecodeEndpoint.AdmissionSummary empty = endpoint.admissionSummary();
+            Assertions.assertSame(empty, endpoint.admissionSummary());
+            try (var pin = endpoint.tryPinGeneration()) {
+                var reservation = endpoint.reserve(pin, 42L, 128L, 256L, 70);
+                var queued = endpoint.admissionSummary();
+                Assertions.assertNotSame(empty, queued);
+                Assertions.assertSame(queued, endpoint.admissionSummary());
+                Assertions.assertEquals(new DecodeEndpoint.CapacityRelease(1L, 128L, 256L),
+                        queued.placementOccupancy(70));
+                Assertions.assertEquals(DecodeEndpoint.CapacityRelease.NONE, queued.engineOccupancy(70));
+
+                var acquired = endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.AdmissionCapacity(10L, 100L));
+                Assertions.assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+                var dispatching = endpoint.admissionSummary();
+                Assertions.assertNotSame(queued, dispatching);
+                Assertions.assertEquals(queued.placementOccupancy(70), dispatching.engineOccupancy(70));
+                Assertions.assertEquals(DecodeEndpoint.CapacityRelease.NONE, queued.engineOccupancy(70),
+                        "a published summary must remain immutable after ownership changes");
+                Assertions.assertTrue(acquired.permit().release());
+                endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                Assertions.assertEquals(DecodeEndpoint.CapacityRelease.NONE, endpoint.admissionSummary().placementOccupancy(70));
+            }
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
         EndpointRegistry emptyRegistry = StrategyTestSupport.endpointRegistry(configService);
         WorkerDirectory engineWorkerStatus = new WorkerDirectory(emptyRegistry);
@@ -438,8 +471,8 @@ class DecodeSelectorTest {
                 DecodeBinding.capture(context), null);
 
         Assertions.assertEquals(PlacementResult.Status.REJECTED, result.status());
-        Assertions.assertTrue(result.rejection().getErrorMessage().contains("demand=258"));
-        Assertions.assertTrue(result.rejection().getErrorMessage().contains("maximum=230"));
+        Assertions.assertTrue(result.failure().getErrorMessage().contains("demand=258"));
+        Assertions.assertTrue(result.failure().getErrorMessage().contains("maximum=230"));
     }
 
     @Test

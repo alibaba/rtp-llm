@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
+import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
@@ -56,15 +57,15 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 configService, batchReporter, requestReporter);
         this.endpointEvents = new EndpointEventProjector(lifecycle);
         AtomicLong batchIds = new AtomicLong();
+        DeliveryMetrics deliveryMetrics = new DeliveryMetrics(batchReporter);
+        DeliveryStrategy delivery = configService.loadBalanceConfig().getDispatcher().requiresGenerateInput()
+                ? new BatchDeliveryStrategy(prepareBatchSubmission, batchIds::incrementAndGet, lifecycle, deliveryMetrics)
+                : new RouteDeliveryStrategy(lifecycle, deliveryMetrics);
         this.registry = new EndpointRegistry(
                 configService,
                 endpointEvents,
                 batchReporter,
-                new BatchDeliveryStrategy(
-                        prepareBatchSubmission,
-                        batchIds::incrementAndGet,
-                        lifecycle,
-                        new DeliveryMetrics(batchReporter)),
+                delivery,
                 placementAvailability);
         this.evictionManager = new EvictionManager(
                 requestReporter,

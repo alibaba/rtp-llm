@@ -360,8 +360,11 @@ on an `UNAVAILABLE` result; error message text alone does not permit replay.
 Other `UNAVAILABLE` or `DEADLINE_EXCEEDED` failures can happen after admission.
 These failures are returned directly without cancellation or local replay.
 Business errors and cancelled or expired callers also do not trigger local
-execution. Unresolved forwards keep the existing terminal error response and
-frontend behavior.
+execution. Unresolved forwards that may already be owned by the Master retain
+`BATCH_SLO_EXPIRED` (8511) as a terminal response to prevent frontend replay;
+this code does not prove that the failure was a timeout. Local scheduling
+exceptions use 8511 for typed timeouts and `DISPATCH_FAILED` (8510) otherwise;
+caller cancellation uses `REQUEST_CANCELLED` (8504).
 
 Local recovery keeps the request id and caller Context. State queries and cancel
 requests first check local ownership, so a recovering follower can manage its

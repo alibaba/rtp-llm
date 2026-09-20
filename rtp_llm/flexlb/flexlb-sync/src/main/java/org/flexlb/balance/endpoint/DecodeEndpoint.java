@@ -158,8 +158,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try (pin) {
             DecodeState.DispatchResult result = state.dispatch(permit.lease, outcome);
             if (result.capacityReleased()) {
-                if (outcome == DispatchOutcome.ABANDONED) { publishCapacityRelease(); }
-                else { notifyEngineDispatchCapacityListeners(); }
+                if (outcome == DispatchOutcome.ABANDONED) { publishCapacityRelease(); } else { notifyEngineDispatchCapacityListeners(); }
             }
             return result.status();
         }
@@ -440,6 +439,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     // Read-only resource and capacity views.
 
+    public AdmissionSummary admissionSummary() {
+        return state.admissionSummary();
+    }
+
     public DecodeRoutingView routingView() { return state.routingView(); }
 
     DecodeRoutingView routingViewSnapshot(String address) { return state.routingViewSnapshot(address); }
@@ -535,6 +538,24 @@ public class DecodeEndpoint extends WorkerEndpoint {
         public CapacityRelease placementRelease() {
             return new CapacityRelease(1L, kvTokens, expectedKvTokens);
         }
+    }
+
+    /** Failure-only priority summary, shared until the admission revision changes. */
+    public static final class AdmissionSummary {
+        private final DecodeRoutingView routing;
+        private final CapacityRelease[] placementOccupancy;
+        private final CapacityRelease[] engineOccupancy;
+
+        AdmissionSummary(DecodeRoutingView routing, CapacityRelease[] placementOccupancy,
+                         CapacityRelease[] engineOccupancy) {
+            this.routing = routing;
+            this.placementOccupancy = placementOccupancy;
+            this.engineOccupancy = engineOccupancy;
+        }
+
+        public DecodeRoutingView routing() { return routing; }
+        public CapacityRelease placementOccupancy(int priority) { return placementOccupancy[priority]; }
+        public CapacityRelease engineOccupancy(int priority) { return engineOccupancy[priority]; }
     }
 
     public record AdmissionCapacity(

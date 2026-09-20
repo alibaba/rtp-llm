@@ -32,6 +32,32 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RouteProjectionTest {
 
     @Test
+    void disabledExecutionBudgetDoesNotConstructAnUnusedPrefixPredictor() {
+        PrefillTimePredictor.Evaluator evaluator = new PrefillTimePredictor.Evaluator() {
+            @Override
+            public long estimateMs(long seqLen, long hitCache) {
+                return TOKEN_EVALUATOR.estimateMs(seqLen, hitCache);
+            }
+
+            @Override
+            public double predictBatchMs(PrefillBatchFeatures features) {
+                return TOKEN_EVALUATOR.predictBatchMs(features);
+            }
+
+            @Override
+            public PrefillTimePredictor.BatchPrediction newBatchPrediction() {
+                throw new AssertionError("disabled execution budget must not construct a prefix predictor");
+            }
+        };
+        QueueSnapshot snapshot = queue(false, constraints(2, 0L), List.of(
+                item(1L, 50, 1L, 10L), item(2L, 50, 2L, 10L), item(3L, 50, 3L, 10L)));
+        for (RouteProjection.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+            assertModeled(project(snapshot, noCommittedWork(), evaluator,
+                    probe(99L, 50, 20L, 0L), delivery), 50L);
+        }
+    }
+
+    @Test
     void probeCompletionMatchesEveryPriorityPositionAcrossConsumedGroups() {
         // A tiny budget rejects the last appended item; zero disables prediction.
         for (long budget : new long[]{0L, 25L}) {

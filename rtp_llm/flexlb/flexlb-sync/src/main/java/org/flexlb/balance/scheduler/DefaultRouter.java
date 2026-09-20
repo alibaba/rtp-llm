@@ -21,6 +21,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 @Component
@@ -61,8 +62,12 @@ public class DefaultRouter {
         if (validationFailure != null) { return PlacementResult.rejected(validationFailure); }
         DecodeBinding decodeAdmission = DecodeBinding.capture(context);
         try (PinnedRouting routing = selectAll(context, requiredRoles, policyGroup, decodeAdmission)) {
-            if (routing.rejection() != null) { return PlacementResult.rejected(routing.rejection()); }
-            if (!routing.success()) { return PlacementResult.blocked(routing.failure()); }
+            if (routing.blocker() != null) {
+                return PlacementResult.blocked(routing.blocker(), routing.failure(), routing.diagnostics);
+            }
+            if (routing.failure() != null) {
+                return PlacementResult.rejected(routing.failure(), routing.diagnostics);
+            }
             return PlacementResult.success(RouteAdmission.prepare(context, routing.selections(),
                     buildSuccessResponse(routing.serverStatuses()), decodeAdmission));
         }
@@ -98,13 +103,13 @@ public class DefaultRouter {
                             role.getCode(), context.getRequestId());
                     if (result.status() == PlacementResult.Status.REJECTED) {
                         return new PinnedRouting(
-                                selected, null, result.rejection());
+                                selected, null, result.failure(), result.diagnostics());
                     }
                     if (result.status() == PlacementResult.Status.BLOCKED) {
                         return new PinnedRouting(
                                 selected,
                                 new PlacementKey(result.blocker(), group),
-                                null);
+                                result.failure(), result.diagnostics());
                     }
                     throw new IllegalStateException("unexpected selector result: "
                             + result.status());
@@ -120,7 +125,7 @@ public class DefaultRouter {
                     group = selection.serverStatus().getGroup();
                 }
             }
-            return new PinnedRouting(selected, null, null);
+            return new PinnedRouting(selected, null, null, null);
         } catch (RuntimeException | Error failure) {
             closeSelections(selected, failure);
             throw failure;
@@ -224,28 +229,26 @@ public class DefaultRouter {
 
     private static final class PinnedRouting implements AutoCloseable {
         private final List<SelectedRole> selections;
-        private final PlacementKey failure;
-        private final Response rejection;
+        private final PlacementKey blocker;
+        private final Response failure;
+        private final Map<String, Object> diagnostics;
 
         private PinnedRouting(
                 List<SelectedRole> selections,
-                PlacementKey failure,
-                Response rejection) {
+                PlacementKey blocker,
+                Response failure, Map<String, Object> diagnostics) {
             this.selections = selections;
+            this.blocker = blocker;
             this.failure = failure;
-            this.rejection = rejection;
+            this.diagnostics = diagnostics;
         }
 
-        private boolean success() {
-            return failure == null && rejection == null;
+        private PlacementKey blocker() {
+            return blocker;
         }
 
-        private PlacementKey failure() {
+        private Response failure() {
             return failure;
-        }
-
-        private Response rejection() {
-            return rejection;
         }
 
         private List<SelectedRole> selections() {

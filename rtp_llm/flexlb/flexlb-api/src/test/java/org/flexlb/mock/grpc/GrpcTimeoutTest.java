@@ -57,7 +57,7 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
 
         Response expired = future.get(5, TimeUnit.SECONDS);
         assertFalse(expired.isSuccess());
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), expired.getCode());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), expired.getCode());
         assertTrue(expired.getErrorMessage().contains("REQUEST_INACTIVE"));
         assertEquals(0, scheduler.getInflightSize());
         assertEquals(0, getPrefillEndpoint().getInflightBatchCount());

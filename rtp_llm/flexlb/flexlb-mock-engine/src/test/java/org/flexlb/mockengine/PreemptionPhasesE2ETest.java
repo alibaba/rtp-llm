@@ -5,11 +5,14 @@ import org.flexlb.config.VictimStage;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -25,7 +28,7 @@ import static org.mockito.Mockito.verify;
  *
  * <ul>
  *   <li>A1 Prefill 优先级插队 — 保留低优请求，不再为 token 配额驱逐；</li>
- *   <li>A2 decode reserved 驱逐 — victim 8400，影子账目正确移交；</li>
+ *   <li>A2 Decode queued reservation 撤回 — 低优请求重新排队，容量先交给高优请求；</li>
  *   <li>A3 accepted 让位 — 真实 MockEngineCancelChannel，victim 8429，
  *       cancel→确认→派发顺序 + cancel 超时不泄漏（铁律4）；</li>
  *   <li>A5 同优不抢占 — 同优请求满载时绝不驱逐同优 victim。</li>
@@ -72,7 +75,7 @@ class PreemptionPhasesE2ETest {
 
     @Test
     @Timeout(30)
-    void a2_decode_reserved_eviction_victim_8400_and_shadow_accounting_transfers() throws Exception {
+    void a2_queued_decode_withdrawal_preserves_request_and_transfers_capacity() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "50", 1.0, false)) {
             h.allowPreemption(VictimStage.DECODE_RESERVED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
@@ -97,10 +100,13 @@ class PreemptionPhasesE2ETest {
 
             CompletableFuture<Response> high = h.scheduler.submit(h.context(202, 70));
 
-            Response victim = low.get(2, TimeUnit.SECONDS);
-            assertFalse(victim.isSuccess());
-            assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), victim.getCode(),
-                    "reserved victim terminal must be 8400 (never 8429): " + victim.getErrorMessage());
+            AutoTpmE2EHarness.await(
+                    () -> decodeEp.resourceSnapshot().reserved().containsKey(202L),
+                    2_000, "the higher-priority request must acquire the withdrawn capacity");
+            // Schema v3 withdraws the queued route, not the request: no terminal error or Engine Cancel.
+            assertFalse(low.isDone(), "the original low-priority future must remain pending");
+            assertTrue(h.engineArrivalOrder.isEmpty());
+            assertEquals(0, h.decodeEngines.get(0).getCancelledCount());
 
             // 账目正确：victim 影子预留释放，高优恰好占据一份
             assertFalse(high.isDone(), "high-priority request should sit in the queue after eviction");
@@ -109,6 +115,15 @@ class PreemptionPhasesE2ETest {
             assertEquals(1, decodeEp.getInflightCount());
             assertEquals(hardKvBefore, decodeEp.routingView().inflightHardKv(),
                     "hard KV must transfer 1:1 from victim to incoming");
+
+            h.fixedWindowDecision().setMaxRequests(1);
+            h.startAutoPump(10);
+            // Both original requests eventually succeed (200), with high priority dispatched first.
+            assertTrue(high.get(5, TimeUnit.SECONDS).isSuccess());
+            assertTrue(low.get(5, TimeUnit.SECONDS).isSuccess());
+            assertEquals(List.of(202L, 201L), h.engineArrivalOrder);
+            AutoTpmE2EHarness.await(() -> decodeEp.getInflightCount() == 0,
+                    5_000, "both requests must release their Decode ownership");
         }
     }
 
@@ -158,6 +173,19 @@ class PreemptionPhasesE2ETest {
                         "cancel must reach the mock engine");
                 assertFalse(low.isDone(),
                         "victim must NOT get its terminal before the engine confirms the release (iron rule 4)");
+
+                AtomicReference<EngineRpcService.TaskInfoPB> engineTerminal = new AtomicReference<>();
+                AutoTpmE2EHarness.await(() -> {
+                    AutoTpmE2EHarness.workerStatus(prefillEngine, 0L).getFinishedTaskListList().stream()
+                            // Prefill may also retain the earlier successful P-to-D handoff.
+                            .filter(task -> task.getRequestId() == 301L && task.hasErrorInfo())
+                            .findFirst().ifPresent(engineTerminal::set);
+                    return engineTerminal.get() != null;
+                }, 2_000L, "Mock Engine must publish the authoritative victim terminal");
+                // Engine terminal: CANCELED(2) + 8429; a Cancel RPC ACK alone is not terminal.
+                assertEquals(2, engineTerminal.get().getPriorityPreemptionProgressValue());
+                assertEquals(8429, engineTerminal.get().getErrorInfo().getErrorCode());
+                assertEquals("preempted by higher-priority request", engineTerminal.get().getErrorInfo().getErrorMessage());
 
                 // Decode's cancelled counter advances before Prefill publishes
                 // its authoritative terminal. Poll as production does until

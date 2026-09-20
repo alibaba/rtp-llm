@@ -1,9 +1,9 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
@@ -15,6 +15,7 @@ import org.flexlb.util.PriorityNormalizer;
 import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -71,6 +72,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final Set<GlobalQueueEntry> inFlight =
             Collections.newSetFromMap(new IdentityHashMap<>());
     private final ArrayDeque<Plan> completedPlans = new ArrayDeque<>();
+    /** Published by the decision thread; timeout readers never acquire the queue lock. */
+    private volatile Map<String, Object> waitDiagnostics = Map.of("cause", "waiting for placement");
     private final ExecutorService planners;
     private final Thread decisionThread;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -119,6 +122,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         availability.addListener(availabilityListener);
         lifecycle.attachGlobalQueue(this);
         decisionThread.start();
+    }
+
+    Map<String, Object> waitDiagnostics() {
+        return waitDiagnostics;
     }
 
     /** Enqueue without selecting an endpoint on the ingress thread. */
@@ -352,6 +359,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             // to return to the endpoint which published the capacity event.
             PlacementResult<RouteAdmission, PlacementKey> result =
                     router.select(entry.context, entry.routingGroup);
+            handle.recordDiagnostics(result.diagnostics());
             if (result.status() == PlacementResult.Status.SUCCESS) {
                 return Plan.success(
                         entry, handle, result, availabilitySequence);
@@ -381,7 +389,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         PlacementResult<RouteAdmission, PlacementKey> result = plan.result;
         if (result.status() == PlacementResult.Status.REJECTED) {
             removeRequest(entry);
-            completeDecisionResponse(entry, result.rejection());
+            completeDecisionResponse(entry, result.failure());
             return Outcome.DONE;
         }
         if (result.status() == PlacementResult.Status.BLOCKED) {
@@ -439,13 +447,35 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     }
 
     private boolean park(Plan plan) {
+        int depth;
+        int[] counts;
+        boolean parked;
         lock.lock();
         try {
-            return !isQueued(plan.entry)
-                    || waitingRequests.park(plan.entry, plan.waitKey(), plan.availabilitySequence);
+            if (!isQueued(plan.entry)) { return true; }
+            parked = waitingRequests.park(plan.entry, plan.waitKey(), plan.availabilitySequence);
+            depth = orderedQueue.size();
+            counts = orderedQueue.priorityCounts();
         } finally {
             lock.unlock();
         }
+        Map<Integer, Integer> priorityCounts = new LinkedHashMap<>();
+        for (int priority = 0; priority < counts.length; priority++) {
+            if (counts[priority] > 0) { priorityCounts.put(priority, counts[priority]); }
+        }
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("cause", plan.waitKey().role().name() + " placement unavailable");
+        details.put("role", plan.waitKey().role().name());
+        if (plan.waitKey().group() != null) { details.put("group", plan.waitKey().group()); }
+        if (plan.waitKey().endpoint() != null) { details.put("endpoint", plan.waitKey().endpoint()); }
+        details.put("capturedAtMs", System.currentTimeMillis());
+        details.put("queueDepth", depth);
+        details.put("priorityCounts", Collections.unmodifiableMap(priorityCounts));
+        if (plan.result != null && plan.result.diagnostics() != null) {
+            details.put("decision", plan.result.diagnostics());
+        }
+        waitDiagnostics = Collections.unmodifiableMap(details);
+        return parked;
     }
 
     private void removeRequest(GlobalQueueEntry entry) {

@@ -81,23 +81,46 @@ public class Response {
     }
 
     public static Response buildErrorResponse(StrategyErrorType errorType, String message) {
-        Response response = error(errorType);
-        response.errorMessage = errorType.buildErrorMessage(message);
-        return response;
+        return error(errorType, errorType == StrategyErrorType.RESOURCE_EXHAUSTED
+                ? AdmissionRejectReason.RESOURCE_EXHAUSTED : AdmissionRejectReason.UNSPECIFIED, message);
     }
 
     public static Response error(StrategyErrorType strategyErrorType) {
-        return error(strategyErrorType, AdmissionRejectReason.UNSPECIFIED);
+        return error(strategyErrorType, strategyErrorType == StrategyErrorType.RESOURCE_EXHAUSTED
+                ? AdmissionRejectReason.RESOURCE_EXHAUSTED : AdmissionRejectReason.UNSPECIFIED);
     }
 
     public static Response error(StrategyErrorType strategyErrorType,
                                  AdmissionRejectReason admissionRejectReason) {
+        return error(strategyErrorType, admissionRejectReason, null);
+    }
+
+    public static Response error(StrategyErrorType strategyErrorType,
+                                 AdmissionRejectReason admissionRejectReason,
+                                 String detail) {
+        if (admissionRejectReason == null) {
+            admissionRejectReason = AdmissionRejectReason.UNSPECIFIED;
+        }
+        if (!strategyErrorType.acceptsAdmissionRejectReason(admissionRejectReason)) {
+            throw new IllegalArgumentException("invalid schedule error code/reason: "
+                    + strategyErrorType + "/" + admissionRejectReason);
+        }
         Response result = new Response();
         result.setSuccess(false);
         result.setCode(strategyErrorType.getErrorCode());
-        result.setErrorMessage(strategyErrorType.buildErrorMessage(null));
-        result.setAdmissionRejectReason(admissionRejectReason == null
-                ? AdmissionRejectReason.UNSPECIFIED : admissionRejectReason);
+        detail = switch (strategyErrorType) {
+            case PRIORITY_ADMISSION_REJECTED -> admissionRejectReason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
+                    ? "higher-priority requests are ahead" : "same-priority requests are ahead";
+            case ADMISSION_UNAVAILABLE -> "admission unavailable; blocker priority attribution is unavailable";
+            case RESOURCE_EXHAUSTED -> {
+                String standard = "admission capacity is temporarily exhausted";
+                yield detail == null || detail.isBlank() ? standard
+                        : detail.startsWith(standard) ? detail : standard + "; trigger=" + detail;
+            }
+            default -> detail;
+        };
+        result.setErrorMessage(strategyErrorType.buildErrorMessage(detail));
+        result.setAdmissionRejectReason(admissionRejectReason);
         return result;
     }
 

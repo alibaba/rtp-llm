@@ -207,13 +207,14 @@ final class RouteTimelineProjector {
             final GroupPlanner.Plan<GroupPlanner.Item> plan;
             final RouteProjection.GroupPlanning planning;
             try {
-                planning = deliveryProjection.planning(predictions);
+                planning = queue.constraints().predictedExecutionBudgetMs() > 0L
+                        ? deliveryProjection.planning(predictions) : null;
                 plan = GroupPlanner.plan(
                         ordered,
                         GroupPlanner.itemAccess(),
                         queue.constraints(),
                         decisionNowMs,
-                        items -> planning.durationMs(
+                        planning == null ? null : items -> planning.durationMs(
                                 items, Math.min(probePosition, items.size() - 1)));
             } catch (PredictionFailure predictionFailure) {
                 return unavailable(
@@ -312,17 +313,19 @@ final class RouteTimelineProjector {
     private record ExpirationPrune(
             boolean probeExpired,
             boolean initialHeadExpired) {
+        private static final ExpirationPrune NONE = new ExpirationPrune(false, false);
     }
 
     /**
      * Ordered snapshot plus probe. Prefix consumption advances an index; expiry
-     * clears individual slots. The heap visits each deadline once, including
-     * deadlines belonging to already consumed items.
+     * clears individual slots. Deadlines are indexed only when collection reaches
+     * the first expiry; ordinary projections need only the queue order.
      */
     private static final class ProjectedQueue implements Iterable<GroupPlanner.Item> {
 
         private final GroupPlanner.Item[] itemsInQueueOrder;
-        private final PriorityQueue<Integer> expiryIndexes;
+        private final long earliestExpiryMs;
+        private PriorityQueue<Integer> expiryIndexes;
         private final int probeIndex;
         private final int initialHeadIndex;
         private int headIndex;
@@ -332,14 +335,10 @@ final class RouteTimelineProjector {
         private ProjectedQueue(
                 GroupPlanner.Item[] itemsInQueueOrder,
                 int probeIndex,
-                int initialHeadIndex) {
+                int initialHeadIndex,
+                long earliestExpiryMs) {
             this.itemsInQueueOrder = itemsInQueueOrder;
-            this.expiryIndexes = new PriorityQueue<>(itemsInQueueOrder.length,
-                    Comparator.comparingLong((Integer index) -> itemsInQueueOrder[index].expiresAtMs())
-                            .thenComparingInt(Integer::intValue));
-            for (int index = 0; index < itemsInQueueOrder.length; index++) {
-                expiryIndexes.add(index);
-            }
+            this.earliestExpiryMs = earliestExpiryMs;
             this.probeIndex = probeIndex;
             this.itemsBeforeProbe = probeIndex;
             this.initialHeadIndex = initialHeadIndex;
@@ -353,8 +352,10 @@ final class RouteTimelineProjector {
             GroupPlanner.Item[] itemsInQueueOrder = new GroupPlanner.Item[eligibleActive.size() + 1];
             int probeIndex = -1;
             int initialHeadIndex = -1;
+            long earliestExpiryMs = probe.expiresAtMs();
             int index = 0;
             for (GroupPlanner.Item item : eligibleActive) {
+                earliestExpiryMs = Math.min(earliestExpiryMs, item.expiresAtMs());
                 if (probeIndex < 0 && order.compare(probe, item) < 0) {
                     probeIndex = index;
                     itemsInQueueOrder[index++] = probe;
@@ -368,7 +369,7 @@ final class RouteTimelineProjector {
                 probeIndex = index;
                 itemsInQueueOrder[index] = probe;
             }
-            return new ProjectedQueue(itemsInQueueOrder, probeIndex, initialHeadIndex);
+            return new ProjectedQueue(itemsInQueueOrder, probeIndex, initialHeadIndex, earliestExpiryMs);
         }
 
         private int probePosition() {
@@ -441,6 +442,17 @@ final class RouteTimelineProjector {
         }
 
         private ExpirationPrune pruneExpired(long nowMs) {
+            if (expiryIndexes == null) {
+                if (nowMs < earliestExpiryMs) {
+                    return ExpirationPrune.NONE;
+                }
+                expiryIndexes = new PriorityQueue<>(itemsInQueueOrder.length - headIndex,
+                        Comparator.comparingLong((Integer index) -> itemsInQueueOrder[index].expiresAtMs())
+                                .thenComparingInt(Integer::intValue));
+                for (int index = headIndex; index < itemsInQueueOrder.length; index++) {
+                    expiryIndexes.add(index);
+                }
+            }
             boolean probeExpired = false;
             boolean initialHeadExpired = false;
             while (!expiryIndexes.isEmpty()) {

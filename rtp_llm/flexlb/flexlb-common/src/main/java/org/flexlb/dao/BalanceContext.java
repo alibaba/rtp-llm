@@ -7,6 +7,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
@@ -78,6 +79,9 @@ public class BalanceContext {
     private boolean success = true;
 
     private String errorMessage;
+
+    /** Failure-time scheduling evidence exported in the completed PV log. */
+    private volatile Map<String, Object> schedulingDiagnostics;
 
     //===================== Scheduling =================//
 

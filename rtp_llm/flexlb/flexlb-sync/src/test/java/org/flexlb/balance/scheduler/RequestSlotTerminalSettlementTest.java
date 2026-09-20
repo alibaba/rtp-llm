@@ -14,13 +14,46 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class RequestSlotTerminalSettlementTest {
     private static final DecodeEndpoint.ReservationHandle RESERVATION =
             new DecodeEndpoint.ReservationHandle(1L, 2L, 3L);
+
+    @Test
+    void latePlacementDiagnosticsCannotOverwriteQueueTimeoutEvidence() {
+        var context = RequestLifecycleTestSupport.context(SchedulingTestConfig.newConfig(), 42L);
+        var queue = mock(GlobalQueueCoordinator.class);
+        var timeoutEvidence = java.util.Map.<String, Object>of("cause", "DECODE placement unavailable");
+        when(queue.waitDiagnostics()).thenReturn(timeoutEvidence);
+        var slot = new RequestSlot(mock(RequestCompletionPublisher.class), context,
+                mock(ExpirationTimer.class), mock(RequestTerminalCleanup.class), () -> { }, true, queue);
+        var admission = slot.tryBeginAdmissionHandle();
+        assertNotNull(admission);
+        admission.recordDiagnostics(java.util.Map.of("cause", "earlier placement"));
+        assertEquals("earlier placement", context.getSchedulingDiagnostics().get("cause"));
+
+        slot.cancelRequest(0L, CancelReason.DEADLINE_EXCEEDED);
+        admission.recordDiagnostics(java.util.Map.of("cause", "late placement"));
+
+        assertEquals(timeoutEvidence, context.getSchedulingDiagnostics());
+        assertFalse(slot.future().isDone(), "cancellation must still wait for the active admission");
+    }
 
     @Test
     void decodeTerminalIsAProofOfAlreadyCommittedEndpointSettlement() {
@@ -152,7 +185,7 @@ class RequestSlotTerminalSettlementTest {
         BalanceContext context = RequestLifecycleTestSupport.context(config, RESERVATION.requestId());
         var publisher = mock(RequestCompletionPublisher.class);
         var timer = mock(ExpirationTimer.class);
-        RequestSlot slot = new RequestSlot(publisher, RESERVATION.requestId(), timer,
+        RequestSlot slot = new RequestSlot(publisher, context, timer,
                 new RequestTerminalCleanup(timer), () -> { });
         when(publisher.tryReservePublication(any(), any())).thenAnswer(call ->
                 new RequestCompletionPublisher.PublicationPermit(publisher, slot, call.getArgument(1)));

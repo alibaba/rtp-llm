@@ -33,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -66,6 +67,15 @@ class WorkerBatcherSchedulingTest {
         await(delivery.firstAttempt);
         await(delivery.firstCapacity.subscribed);
 
+        var firstWait = runtime.waitDiagnostics();
+        assertEquals(1, firstWait.get("queueDepth"));
+        assertEquals(Map.of(50, 1), firstWait.get("priorityCounts"));
+        assertThrows(UnsupportedOperationException.class,
+                () -> firstWait.put("cause", "modified"));
+        Map<?, ?> firstCounts = (Map<?, ?>) firstWait.get("priorityCounts");
+        assertThrows(UnsupportedOperationException.class, firstCounts::clear);
+        assertTrue(runtime.offer(item(config, endpoint, 2L, 30, System.currentTimeMillis())));
+
         TimeUnit.MILLISECONDS.sleep(100L);
         assertEquals(1, delivery.attempts.get(),
                 "a capacity miss must not be polled");
@@ -74,6 +84,9 @@ class WorkerBatcherSchedulingTest {
         delivery.firstCapacity.release();
         await(delivery.secondAttempt);
         await(delivery.parkedCapacity.subscribed);
+        assertEquals(2, runtime.waitDiagnostics().get("queueDepth"));
+        assertEquals(Map.of(50, 1, 30, 1), runtime.waitDiagnostics().get("priorityCounts"));
+        assertEquals(1, firstWait.get("queueDepth"), "later decisions must not mutate an earlier snapshot");
         assertTrue(delivery.firstCapacity.listeners.isEmpty());
         assertEquals(1, delivery.parkedCapacity.listeners.size());
 

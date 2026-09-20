@@ -103,7 +103,7 @@ class DefaultRouterTest {
 
         assertEquals(PlacementResult.Status.REJECTED, result.status());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                result.rejection().getCode());
+                result.failure().getCode());
         verify(configService, never()).loadBalanceConfig();
         verifyNoInteractions(prefillSelector, decodeSelector, vitSelector);
     }
@@ -423,7 +423,7 @@ class DefaultRouterTest {
         assertEquals(PlacementResult.Status.REJECTED, rejected.status());
 
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
-                rejected.rejection().getCode());
+                rejected.failure().getCode());
         verify(prefill.selection).close();
     }
 

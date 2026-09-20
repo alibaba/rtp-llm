@@ -7,6 +7,7 @@ import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -119,7 +120,9 @@ class RequestCompletionPublicationRaceTest {
             Response expired = future.get(2L, TimeUnit.SECONDS);
             callback.get(2L, TimeUnit.SECONDS);
             assertFalse(expired.isSuccess());
-            assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), expired.getCode());
+            assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), expired.getCode());
+            assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                    expired.getAdmissionRejectReason());
             assertEquals(RequestState.Phase.TIMED_OUT, slot.snapshot().state());
             verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
             verify(prefill).expireCommittedItem(item);
@@ -200,7 +203,8 @@ class RequestCompletionPublicationRaceTest {
     @ParameterizedTest
     @EnumSource(TerminalForm.class)
     void externalFutureOperationUnderSlotLockLeavesRequestUnchanged(TerminalForm form) {
-        RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), 702L,
+        RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class),
+                RequestLifecycleTestSupport.context(SchedulingTestConfig.batchConfig(), 702L),
                 mock(ExpirationTimer.class), mock(RequestTerminalCleanup.class), () -> { });
         synchronized (slot) {
             assertThrows(IllegalStateException.class, () -> {
@@ -218,11 +222,11 @@ class RequestCompletionPublicationRaceTest {
 
     private static Fixture fixture() {
         RequestCompletionPublisher publisher = mock(RequestCompletionPublisher.class);
-        RequestSlot slot = new RequestSlot(publisher, 701L, mock(ExpirationTimer.class), mock(RequestTerminalCleanup.class), () -> { });
+        var config = SchedulingTestConfig.batchConfig();
+        BalanceContext context = RequestLifecycleTestSupport.context(config, 701L);
+        RequestSlot slot = new RequestSlot(publisher, context, mock(ExpirationTimer.class), mock(RequestTerminalCleanup.class), () -> { });
         when(publisher.tryReservePublication(eq(slot), any())).thenAnswer(invocation ->
                 new RequestCompletionPublisher.PublicationPermit(publisher, slot, invocation.getArgument(1)));
-        var config = SchedulingTestConfig.batchConfig();
-        BalanceContext context = RequestLifecycleTestSupport.context(config, slot.requestId());
         ScheduledRequest item = new ScheduledRequest(context, slot.future(), new Response(), null, null,
                 null, null, null, slot.createdAtMs());
         RequestSlot.DeliveryPublication delivery;

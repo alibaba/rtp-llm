@@ -91,6 +91,15 @@ public enum StrategyErrorType {
                 + "\",\"detail\":\"" + escaped + "\"}";
     }
 
+    public boolean acceptsAdmissionRejectReason(AdmissionRejectReason reason) {
+        return switch (this) {
+            case PRIORITY_ADMISSION_REJECTED -> reason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
+                    || reason == AdmissionRejectReason.SAME_PRIORITY_AHEAD;
+            case RESOURCE_EXHAUSTED -> reason == AdmissionRejectReason.RESOURCE_EXHAUSTED;
+            default -> reason == AdmissionRejectReason.UNSPECIFIED;
+        };
+    }
+
     @Override
     public String toString() {
         return name() + "(" + errorCode + ")";
