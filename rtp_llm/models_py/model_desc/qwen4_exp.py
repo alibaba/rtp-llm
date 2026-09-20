@@ -588,14 +588,11 @@ class Qwen4ExpModel(Qwen35Model):
         return raw.view(dtype).view(int(raw.shape[0]), entries, width)
 
     @staticmethod
-    def _physical_blocks(
+    def _resolve_block_table(
         attention_inputs: PyAttentionInputs,
         tag: str,
-        logical_pages: torch.Tensor,
-        pool_rows: int,
-        device: torch.device,
     ) -> torch.Tensor:
-        """Resolve request-local logical pages through a HybridPool block table."""
+        """The request-local HybridPool physical block table for one cache tag."""
         table = getattr(attention_inputs, "kv_cache_block_id_device", None)
         if table is None or table.numel() == 0:
             table = getattr(attention_inputs, "kv_cache_block_id", None)
@@ -606,6 +603,31 @@ class Qwen4ExpModel(Qwen35Model):
                 f"PLE cache {tag!r} physical block table must be int32, "
                 f"got {table.dtype}"
             )
+        return table
+
+    @staticmethod
+    def _check_physical_blocks(
+        tag: str,
+        blocks: torch.Tensor,
+        pool_rows: int,
+    ) -> torch.Tensor:
+        if bool((blocks <= 0).any().item()):
+            raise RuntimeError(f"PLE cache {tag!r} has an unallocated logical page")
+        if bool((blocks >= pool_rows).any().item()):
+            raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
+        return blocks.to(torch.long)
+
+    @classmethod
+    def _physical_blocks(
+        cls,
+        attention_inputs: PyAttentionInputs,
+        tag: str,
+        logical_pages: torch.Tensor,
+        pool_rows: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Resolve one request-local logical page per batch row."""
+        table = cls._resolve_block_table(attention_inputs, tag)
         if logical_pages.dim() != 1 or int(table.shape[0]) != int(
             logical_pages.numel()
         ):
@@ -617,12 +639,43 @@ class Qwen4ExpModel(Qwen35Model):
             raise RuntimeError(
                 f"PLE cache {tag!r} logical page exceeds its block table"
             )
-        blocks = table.gather(1, pages.unsqueeze(1)).squeeze(1).to(torch.long)
-        if bool((blocks <= 0).any().item()):
-            raise RuntimeError(f"PLE cache {tag!r} has an unallocated logical page")
-        if bool((blocks >= pool_rows).any().item()):
-            raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
-        return blocks.to(device=device)
+        return cls._check_physical_blocks(
+            tag, table.gather(1, pages.unsqueeze(1)).squeeze(1), pool_rows
+        ).to(device=device)
+
+    @classmethod
+    def _physical_blocks_for_pairs(
+        cls,
+        attention_inputs: PyAttentionInputs,
+        tag: str,
+        rows: torch.Tensor,
+        pages: torch.Tensor,
+        pool_rows: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Resolve (batch row, logical page) pairs, used for per-page writes."""
+        table = cls._resolve_block_table(attention_inputs, tag)
+        if (
+            rows.dim() != 1
+            or pages.dim() != 1
+            or int(rows.numel()) != int(pages.numel())
+        ):
+            raise RuntimeError(f"PLE cache {tag!r} block-table pairs are inconsistent")
+        rows_l = rows.to(device=table.device, dtype=torch.long)
+        pages_l = pages.to(device=table.device, dtype=torch.long)
+        if bool((rows_l < 0).any().item()) or bool(
+            (rows_l >= int(table.shape[0])).any().item()
+        ):
+            raise RuntimeError(f"PLE cache {tag!r} block-table row is out of range")
+        if bool((pages_l < 0).any().item()):
+            raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
+        if bool((pages_l >= int(table.shape[1])).any().item()):
+            raise RuntimeError(
+                f"PLE cache {tag!r} logical page exceeds its block table"
+            )
+        return cls._check_physical_blocks(tag, table[rows_l, pages_l], pool_rows).to(
+            device=device
+        )
 
     def _validate_ple_mode(
         self,
@@ -1105,34 +1158,13 @@ class Qwen4ExpModel(Qwen35Model):
                 raise RuntimeError(
                     "qwen4_exp PLE prefill prefix lengths are inconsistent"
                 )
-            # Current requests arrive with per-request new-token lengths;
-            # prefix reuse resumes the side state from the page that holds the
-            # last prefix token, so prefixes must land on page boundaries.
+            # Requests carry per-request new-token lengths; prefix reuse resumes
+            # the side state from the page holding the last prefix token, so
+            # prefixes must land on page boundaries.
             if any(prefix % page_size for prefix in prefixes):
                 raise RuntimeError(
                     "qwen4_exp PLE prefix reuse requires page-aligned prefixes"
                 )
-            terminal_pages = torch.tensor(
-                [
-                    (prefix + length - 1) // page_size
-                    for prefix, length in zip(prefixes, lengths)
-                ],
-                dtype=torch.long,
-            )
-            state_blocks = self._physical_blocks(
-                state_inputs,
-                PLE_STATE_TAG,
-                terminal_pages,
-                int(state_pool.shape[0]),
-                state_pool.device,
-            )
-            ctx_blocks = self._physical_blocks(
-                ctx_inputs,
-                PLE_NGRAM_CTX_TAG,
-                terminal_pages,
-                int(ctx_pool.shape[0]),
-                ctx_pool.device,
-            )
             read_buffers = None
             read_contexts = None
             if any(prefixes):
@@ -1160,34 +1192,70 @@ class Qwen4ExpModel(Qwen35Model):
                         ctx_pool.device,
                     ),
                 )
-            outputs, states, contexts = [], [], []
+            # Checkpoint every page, not just the request's terminal page: a
+            # later request can reuse a prefix that ends at any page boundary,
+            # exactly like the GDN state snapshots written by
+            # store_ssm_state_to_block_map.
+            outputs = []
+            write_rows = []
+            write_pages = []
+            write_states = []
+            write_contexts = []
             offset = 0
             for idx, (prefix, length) in enumerate(zip(prefixes, lengths)):
-                seq_ids = ids[offset : offset + length].view(1, length)
                 if prefix > 0:
-                    history = torch.cat([read_contexts[idx : idx + 1], seq_ids], dim=1)
-                    output, state = ple.prefill_with_state(
-                        hyper_states[offset : offset + length].view(1, length, -1),
-                        history,
-                        read_buffers[idx : idx + 1],
-                    )
+                    state = read_buffers[idx : idx + 1]
+                    context = read_contexts[idx : idx + 1]
                 else:
-                    history = torch.cat(
-                        [seq_ids.new_full((1, context_len), eos), seq_ids], dim=1
+                    state = None
+                    context = ids.new_full((1, context_len), eos)
+                chunk_outputs = []
+                start = 0
+                while start < length:
+                    end = min(start + page_size, length)
+                    chunk_ids = ids[offset + start : offset + end].view(1, end - start)
+                    history = torch.cat([context, chunk_ids], dim=1)
+                    chunk_hyper = hyper_states[offset + start : offset + end].view(
+                        1, end - start, -1
                     )
-                    output, state = ple.prefill(
-                        hyper_states[offset : offset + length].view(1, length, -1),
-                        history,
-                    )
-                outputs.append(output.squeeze(0))
-                states.append(state.squeeze(0))
-                contexts.append(history[0, -context_len:])
+                    if state is None:
+                        output, state = ple.prefill(chunk_hyper, history)
+                    else:
+                        output, state = ple.prefill_with_state(
+                            chunk_hyper, history, state
+                        )
+                    chunk_outputs.append(output.squeeze(0))
+                    write_rows.append(idx)
+                    write_pages.append((prefix + end - 1) // page_size)
+                    write_states.append(state.squeeze(0))
+                    write_contexts.append(history[0, -context_len:])
+                    context = history[:, -context_len:]
+                    start = end
+                outputs.append(torch.cat(chunk_outputs, dim=0))
                 offset += length
+            write_rows_t = torch.tensor(write_rows, dtype=torch.long)
+            write_pages_t = torch.tensor(write_pages, dtype=torch.long)
+            write_state_blocks = self._physical_blocks_for_pairs(
+                state_inputs,
+                PLE_STATE_TAG,
+                write_rows_t,
+                write_pages_t,
+                int(state_pool.shape[0]),
+                state_pool.device,
+            )
+            write_ctx_blocks = self._physical_blocks_for_pairs(
+                ctx_inputs,
+                PLE_NGRAM_CTX_TAG,
+                write_rows_t,
+                write_pages_t,
+                int(ctx_pool.shape[0]),
+                ctx_pool.device,
+            )
             state_pool.index_copy_(
-                0, state_blocks, torch.stack(states).to(state_pool.dtype)
+                0, write_state_blocks, torch.stack(write_states).to(state_pool.dtype)
             )
             ctx_pool.index_copy_(
-                0, ctx_blocks, torch.stack(contexts).to(ctx_pool.dtype)
+                0, write_ctx_blocks, torch.stack(write_contexts).to(ctx_pool.dtype)
             )
             return hyper_states + torch.cat(outputs, dim=0)
 
