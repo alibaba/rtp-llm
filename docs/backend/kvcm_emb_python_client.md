@@ -18,6 +18,7 @@ Before starting RTP, make sure that:
 - `kvcm_py_client` with KVMeta object support is installed.
 - KVCM already has the derived instance group. For example,
   `RECO_INSTANCE_GROUP=pace_group_m3` requires `kve_pace_group_m3`.
+- The derived group uses a KVMeta exact-object backend (details below).
 
 Then use the client directly:
 
@@ -80,6 +81,10 @@ For production use:
   KVCM Registry; otherwise a KVCM restart loses allocation ownership and GC
   cannot reconstruct it. Reserve `local` for tests or an explicitly ephemeral
   deployment backed by an independently verified namespace TTL/sweeper.
+- Every storage candidate in the derived group must implement KVCM's KVMeta
+  exact-object lifecycle. Current new-write admission supports NFS and
+  TairMempool DRAM/SSD. A fixed-block group using HF3FS, VCNS-HF3FS,
+  Mooncake, Dummy, or EventReport cannot simply be reused as an EMB group.
 
 ### Existing online configuration
 
@@ -176,7 +181,10 @@ does not change the fixed-block client. The server quarantine does not change
 the derived client lease (for the listed online 100-second Put / 1.5-second
 metadata settings, it remains 205 seconds). KVCM invokes its TairMempool
 cleanup extension once. The extension chunks large batches at 256 identities
-and uses generation-aware exact free/query endpoints on the same KVCM port.
+and uses generation-aware exact free/query routes on the storage candidate's
+configured PACE MetaService HTTP endpoint. That provider control endpoint is
+separate from the shared KVCM gRPC port; the latter is where legacy KVCM meta
+and KVMeta object RPCs coexist.
 Provider records the logical release on the allocation descriptor, so a lost
 response retried against the same Provider process cannot decrement the same
 reference twice; only manager-owned physical finalization may resume. A
@@ -211,7 +219,11 @@ that key for controlled reconciliation after the write session has converged.
 The context manager above only demonstrates the complete lifecycle. A
 production RTP worker should construct one client during component startup,
 reuse that thread-safe client across requests, and call `close()` during worker
-shutdown. Do not register a new client for every embedding.
+shutdown. Independent native operations on one client may run concurrently;
+bound cache concurrency at worker level so optional I/O cannot starve
+inference. Once shutdown starts, new operations are rejected and `close()`
+waits for admitted synchronous calls before releasing registered memory. Do
+not register a new client for every embedding.
 
 For an RTP request containing several objects, use the corresponding batch
 operations. They validate the complete logical call before the first KVCM I/O
@@ -431,11 +443,13 @@ client = RtpKvMetaObjectClient.from_env(environ=test_reco_environment)
   Handoff mode should retain fresh UUID keys for controlled cleanup; reusable
   cache mode should retain stable keys for bounded reconciliation and must not
   blindly overwrite or remove a key that another request can share.
-- `close()` is idempotent. Prefer the context-manager form.
+- `close()` is idempotent, rejects new work once closing begins, and waits for
+  already-admitted operations. Prefer a worker-lifetime client; the
+  context-manager form is best for bounded examples/tests.
 
 ### Tests
 
-The 56 fast tests do not require the KVCM wheel. They cover configuration and
+The 57 fast tests do not require the KVCM wheel. They cover configuration and
 provider failures, lazy dependency loading, exception identity and structured
 progress preservation, no implicit mutation retry/cleanup, and lifecycle
 errors in addition to the successful paths:
