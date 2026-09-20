@@ -660,9 +660,7 @@ public class EvictionManager {
                         AdmissionRejectReason.RESOURCE_EXHAUSTED,
                         "Decode reservation disappeared before placement");
             }
-            if (!returnInstructions) {
-                reportCommittedEnginePreemption(ctx, proposal);
-            }
+            reportCommittedEnginePreemption(ctx, proposal, !returnInstructions);
             recordDecodePlanObservability(ctx, proposal);
             return placeReservedDecode(
                     ctx, future, decodeEp, reservation, admission, returnInstructions
@@ -679,8 +677,9 @@ public class EvictionManager {
     }
 
     /** Metrics never participate in the committed reservation handoff. */
-    private void reportCommittedEnginePreemption(
-            BalanceContext ctx, DecodeEvictionProposal proposal) {
+    private void reportCommittedEnginePreemption(BalanceContext ctx,
+                                                 DecodeEvictionProposal proposal,
+                                                 boolean cancelConfirmed) {
         try {
             for (DecodeRequestView victim : proposal.victims()) {
                 String stage = victim.phase() == DecodeTaskPhase.RUNNING
@@ -690,8 +689,11 @@ public class EvictionManager {
                 reporter.reportPriorityPreempt(stage);
                 reporter.reportVictimKvTokens(
                         victim.priority(), stage, victim.kvTokens());
-                reporter.reportCancelConfirm(
-                        proposal.endpointId(), victim.priority());
+
+                if (cancelConfirmed) {
+                    reporter.reportCancelConfirm(
+                            proposal.endpointId(), victim.priority());
+                }
             }
             reporter.reportEvictionCommit(ctx.getPriority(),
                     proposal.evictionCase(), "success");

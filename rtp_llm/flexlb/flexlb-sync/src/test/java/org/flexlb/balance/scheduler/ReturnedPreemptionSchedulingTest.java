@@ -24,6 +24,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -37,12 +38,26 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_CONFIRM_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_QPS;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_REQUEST_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_TIMEOUT_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_EVICTION_COMMIT_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_PRIORITY_PREEMPT_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_KV_TOKENS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -55,6 +70,7 @@ class ReturnedPreemptionSchedulingTest {
     private PrefillEndpoint prefill;
     private DecodeEndpoint decode;
     private EngineCancelChannel cancel;
+    private FlexMonitor metrics;
 
     @BeforeEach
     void setUp() {
@@ -63,10 +79,10 @@ class ReturnedPreemptionSchedulingTest {
         SchedulingTestConfig.engineCancellation(config).setMode(EngineCancellationConfig.Mode.RETURN);
         SchedulingTestConfig.useNonBatchDispatcher(config);
         SchedulingTestConfig.useSingleDecision(config);
-        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
+        setMaxEngineRequests(1L);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        FlexMonitor metrics = mock(FlexMonitor.class);
+        metrics = mock(FlexMonitor.class);
         BatchSchedulerReporter reporter = new BatchSchedulerReporter(metrics);
         RequestSchedulerReporter requestReporter = new RequestSchedulerReporter(metrics);
         cancel = mock(EngineCancelChannel.class);
@@ -103,12 +119,8 @@ class ReturnedPreemptionSchedulingTest {
 
     @Test
     void schedulerReturnsStringVictimsOnSelectedLogicalDecodeWithoutRpc() throws Exception {
-        assertTrue(submit("victim-0001", 30).get(2, TimeUnit.SECONDS).isSuccess());
-        updateDecode(Map.of("victim-0001", task("victim-0001")), Map.of(), 9_872);
+        Response result = preemptConfirmedVictim(TaskPhase.RUNNING);
 
-        Response result = submit("new-request", 70).get(2, TimeUnit.SECONDS);
-
-        assertTrue(result.isSuccess(), result.getErrorMessage());
         assertFalse(result.isEnqueuedByMaster());
         ServerStatus target = result.getServerStatus().get(1);
         assertEquals(List.of("victim-0001"), target.getPreemptRequestIds());
@@ -125,18 +137,64 @@ class ReturnedPreemptionSchedulingTest {
 
     @Test
     void everyVictimIsReturnedWithItsOriginalStringId() throws Exception {
-        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(2L);
-        assertTrue(submit("00042", 30).get(2, TimeUnit.SECONDS).isSuccess());
-        assertTrue(submit("req-uuid", 30).get(2, TimeUnit.SECONDS).isSuccess());
-        updateDecode(Map.of("00042", task("00042"), "req-uuid", task("req-uuid")), Map.of(), 9_744);
-        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
+        Response result = preemptTwoConfirmedVictims();
 
-        Response result = submit("next", 80).get(2, TimeUnit.SECONDS);
-
-        assertTrue(result.isSuccess(), result.getErrorMessage());
         assertEquals(List.of("00042", "req-uuid"),
                 result.getServerStatus().get(1).getPreemptRequestIds().stream().sorted().toList());
         assertEquals(3, decode.routingView().totalLoad());
+        verifyNoInteractions(cancel);
+    }
+
+    @Test
+    void returnedPreemptionReportsVictimAccountingWithoutCancelConfirmation() throws Exception {
+        preemptConfirmedVictim(TaskPhase.RUNNING);
+
+        assertReported(AUTO_TPM_VICTIM_COUNT, FlexMetricTags.of(
+                "victim_priority", "30", "incoming_priority", "70",
+                "stage", "decode_running", "case", "decode_slot_full"), 1.0);
+        assertReported(AUTO_TPM_PRIORITY_PREEMPT_COUNT,
+                FlexMetricTags.of("stage", "decode_running"), 1.0);
+        assertReported(AUTO_TPM_VICTIM_KV_TOKENS,
+                FlexMetricTags.of("victim_priority", "30", "stage", "decode_running"), 128.0);
+        assertReported(AUTO_TPM_EVICTION_COMMIT_COUNT, FlexMetricTags.of(
+                "priority", "70", "case", "decode_slot_full", "result", "success"), 1.0);
+        assertNeverReported(AUTO_TPM_CANCEL_CONFIRM_COUNT);
+        assertNeverReported(AUTO_TPM_CANCEL_REQUEST_COUNT);
+        assertNeverReported(AUTO_TPM_CANCEL_QPS);
+        assertNeverReported(AUTO_TPM_CANCEL_TIMEOUT_COUNT);
+        verifyNoInteractions(cancel);
+    }
+
+    @Test
+    void returnedPreemptionReportsDecodeCancelStageForAcceptedVictim() throws Exception {
+        preemptConfirmedVictim(TaskPhase.KV_ALLOCATED);
+
+        assertReported(AUTO_TPM_VICTIM_COUNT, FlexMetricTags.of(
+                "victim_priority", "30", "incoming_priority", "70",
+                "stage", "decode_cancel", "case", "decode_slot_full"), 1.0);
+        assertReported(AUTO_TPM_PRIORITY_PREEMPT_COUNT,
+                FlexMetricTags.of("stage", "decode_cancel"), 1.0);
+        assertReported(AUTO_TPM_VICTIM_KV_TOKENS,
+                FlexMetricTags.of("victim_priority", "30", "stage", "decode_cancel"), 128.0);
+        verify(metrics, never()).report(eq(AUTO_TPM_VICTIM_COUNT),
+                argThat(tags -> "decode_running".equals(tags.getTags().get("stage"))),
+                anyDouble());
+        verifyNoInteractions(cancel);
+    }
+
+    @Test
+    void returnedPreemptionReportsOneMetricPerVictimButOneCommitPerPlan() throws Exception {
+        preemptTwoConfirmedVictims();
+
+        assertReported(AUTO_TPM_VICTIM_COUNT, FlexMetricTags.of(
+                "victim_priority", "30", "incoming_priority", "80",
+                "stage", "decode_running", "case", "decode_slot_full"), 1.0, 2);
+        assertReported(AUTO_TPM_PRIORITY_PREEMPT_COUNT,
+                FlexMetricTags.of("stage", "decode_running"), 1.0, 2);
+        assertReported(AUTO_TPM_VICTIM_KV_TOKENS,
+                FlexMetricTags.of("victim_priority", "30", "stage", "decode_running"), 128.0, 2);
+        assertReported(AUTO_TPM_EVICTION_COMMIT_COUNT, FlexMetricTags.of(
+                "priority", "80", "case", "decode_slot_full", "result", "success"), 1.0);
         verifyNoInteractions(cancel);
     }
 
@@ -150,6 +208,46 @@ class ReturnedPreemptionSchedulingTest {
         assertEquals(List.of("00042"), copy.getPreemptRequestIds());
         assertEquals(1, copy.getEngineIndex());
         assertEquals("10.0.0.2:8080@1", copy.getLogicalIpPort());
+    }
+
+    /** One P30 victim confirmed on Decode at {@code victimPhase}, preempted by a P70 incoming. */
+    private Response preemptConfirmedVictim(TaskPhase victimPhase) throws Exception {
+        assertTrue(submit("victim-0001", 30).get(2, TimeUnit.SECONDS).isSuccess());
+        updateDecode(Map.of("victim-0001", task("victim-0001", victimPhase)), Map.of(), 9_872);
+        return assertScheduled(submit("new-request", 70));
+    }
+
+    /** Two P30 victims confirmed on Decode against a single slot, preempted by a P80 incoming. */
+    private Response preemptTwoConfirmedVictims() throws Exception {
+        setMaxEngineRequests(2L);
+        assertTrue(submit("00042", 30).get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(submit("req-uuid", 30).get(2, TimeUnit.SECONDS).isSuccess());
+        updateDecode(Map.of("00042", task("00042"), "req-uuid", task("req-uuid")),
+                Map.of(), 9_744);
+        setMaxEngineRequests(1L);
+        return assertScheduled(submit("next", 80));
+    }
+
+    private Response assertScheduled(CompletableFuture<Response> scheduled) throws Exception {
+        Response response = scheduled.get(2, TimeUnit.SECONDS);
+        assertTrue(response.isSuccess(), response.getErrorMessage());
+        return response;
+    }
+
+    private void assertReported(String metric, FlexMetricTags tags, double value) {
+        verify(metrics).report(metric, tags, value);
+    }
+
+    private void assertReported(String metric, FlexMetricTags tags, double value, int count) {
+        verify(metrics, times(count)).report(metric, tags, value);
+    }
+
+    private void assertNeverReported(String metric) {
+        verify(metrics, never()).report(eq(metric), any(FlexMetricTags.class), anyDouble());
+    }
+
+    private void setMaxEngineRequests(long limit) {
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(limit);
     }
 
     private CompletableFuture<Response> submit(String id, int priority) {
@@ -227,9 +325,13 @@ class ReturnedPreemptionSchedulingTest {
     }
 
     private static TaskInfo task(String requestId) {
+        return task(requestId, TaskPhase.RUNNING);
+    }
+
+    private static TaskInfo task(String requestId, TaskPhase phase) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
-        task.setPhase(TaskPhase.RUNNING);
+        task.setPhase(phase);
         task.setInputLength(128);
         return task;
     }
