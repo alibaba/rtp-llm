@@ -49,6 +49,18 @@ def sm120_suites():
                 smoke_args = "--act_type FP16 --warm_up 0",
                 gpu_type = ["RTX_5000_PRO"],
             ),
+            # Answer-mode no-think contract on the SM120 pool: think_mode=0 plus a
+            # caller that declares neither response_format nor template kwargs, so
+            # the endpoint aligns the template's thinking switch, compiles the
+            # no-think envelope itself, and the only caller-visible contract is the
+            # answer shape. Kept in this suite -- a member of maga_model_smoke_light
+            # -- so the sm12x pool actually runs it.
+            smoke_test(
+                name = "qwen35_answer_mode_no_think_sm120",
+                task_info = "data/model/qwen35/q_r_no_think_answer_mode_sm120.json",
+                smoke_args = "--act_type BF16 --warm_up 0 --max_seq_len 4096 --tp_size 1 --world_size 1 --think_mode 0",
+                gpu_type = ["RTX_5000_PRO"],
+            ),
         ],
     )
 
