@@ -24,6 +24,7 @@ from .fp8_per_tensor import (
     CudaFp8PerTensorEpNormalStrategy,
     CudaFp8PerTensorNoDPStrategy,
 )
+from .mega_moe_fp8 import CudaMegaMoeFp8SEStrategy, CudaMegaMoeFp8Strategy
 from .no_quant import (
     CudaNoQuantCppStrategy,
     CudaNoQuantDpNormalStrategy,
@@ -60,8 +61,8 @@ __all__ = [
     "CudaFp4NoDPStrategy",
     "CudaMegaMoeSEStrategy",
     "CudaMegaMoeStrategy",
+    "CudaMegaMoeFp8SEStrategy",
+    "CudaMegaMoeFp8Strategy",
     "CudaGroupedFp4Strategy",
     "CudaLocalLoopStrategy",
 ]
-
-from .mega_moe_fp8 import CudaMegaMoeFp8Strategy

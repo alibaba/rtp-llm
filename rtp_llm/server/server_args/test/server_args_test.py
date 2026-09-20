@@ -52,6 +52,15 @@ class ServerArgsPyEnvConfigsTest(TestCase):
         self.assertEqual(grouped.moe_config.moe_strategy, "grouped_fp4")
         self.assertEqual(local.moe_config.moe_strategy, "local_loop")
 
+    def test_mega_moe_fp8_public_choices(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            routed = server_args.setup_args(["--moe_strategy", "mega_moe_fp8"])
+            fused_se = server_args.setup_args(["--moe_strategy", "mega_moe_fp8_se"])
+        self.assertEqual(routed.moe_config.moe_strategy, "mega_moe_fp8")
+        self.assertEqual(fused_se.moe_config.moe_strategy, "mega_moe_fp8_se")
+
     def test_dsv4_single_card_strategy_from_environment(self):
         from rtp_llm.server.server_args import server_args
 

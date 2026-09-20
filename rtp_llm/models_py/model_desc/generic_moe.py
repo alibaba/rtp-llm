@@ -1,5 +1,4 @@
 import logging
-import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -28,6 +27,7 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import ExpertGatePayload
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -119,12 +119,6 @@ class GenericMoeLayer(nn.Module):
             self.sigmoid_gate_scale_add = None
 
         executor = self.fused_moe.fused_experts
-        if os.getenv("RTP_QWEN35_FUSED_MEGAMOE_GATED_SE", "0") == "1" and not getattr(
-            executor, "gated_shared_expert_requested", False
-        ):
-            raise RuntimeError(
-                "Requested gated shared-expert fusion requires the FP8 MegaMoE executor"
-            )
         if getattr(executor, "gated_shared_expert_requested", False):
             if (
                 self.shared_expert is None
@@ -186,47 +180,44 @@ class GenericMoeLayer(nn.Module):
             return torch.sigmoid(gate_output) * shared_expert_output
         return shared_expert_output
 
+    def _gate_pack_score_func(self) -> str:
+        # ModelConfig.scoring_func is int: 0 softmax, 1 sigmoid, 2 sqrt_softplus.
+        scoring_func = self.config.scoring_func
+        if scoring_func == 0:
+            return "softmax"
+        if scoring_func == 2:
+            return "sqrtsoftplus"
+        raise RuntimeError(
+            "MegaMoE gate-pack requires scoring_func 0 (softmax) or 2 (sqrt_softplus), "
+            f"got {scoring_func!r}"
+        )
+
+    def _build_mega_moe_gate_payload(
+        self, router_logits: torch.Tensor
+    ) -> ExpertGatePayload:
+        score_func = self._gate_pack_score_func()
+        if score_func == "softmax" and self.correction_bias is not None:
+            raise RuntimeError(
+                "MegaMoE softmax gate-pack does not accept e_score_correction_b"
+            )
+        scores = router_logits
+        if scores.dtype != torch.bfloat16:
+            scores = scores.to(torch.bfloat16)
+        return ExpertGatePayload(
+            scores=scores.contiguous(),
+            topk=int(self.top_k),
+            score_func=score_func,
+            route_scale=float(self.config.routed_scaling_factor or 1.0),
+            bias=(
+                None
+                if score_func == "softmax" or self.correction_bias is None
+                else self.correction_bias.contiguous()
+            ),
+        )
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
-
-        topk_weights = torch.empty(
-            (num_tokens, self.top_k),
-            dtype=torch.float32,
-            device=hidden_states.device,
-        )
-        # different executor may need different topk_ids dtype
-        topk_ids_dtype = self.fused_moe.topk_ids_dtype
-        topk_ids = torch.empty(
-            (num_tokens, self.top_k),
-            dtype=topk_ids_dtype,
-            device=hidden_states.device,
-        )
-
-        if self.correction_bias is not None:
-            self.group_topk = GroupTopK()
-            self.renormalize = self.config.has_moe_norm
-            self.num_expert_group = self.config.moe_n_group
-
-            self.topk_group = self.config.moe_topk_group
-            self.n_routed_experts = self.config.expert_num  # config.n_routed_experts
-            self.routed_scaling_factor = self.config.routed_scaling_factor
-            self.group_topk(
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                scores=router_logits,
-                correction_bias=self.correction_bias,
-                n_group=self.num_expert_group,
-                topk_group=self.topk_group,
-                topk=self.top_k,
-                renormalize=self.renormalize,
-                routed_scaling_factor=self.routed_scaling_factor,
-            )
-        else:
-            self.select_topk(router_logits, topk_ids, topk_weights)
-
-        if self.fake_balance_expert is not None:
-            self.fake_balance_expert(topk_ids, topk_weights)
 
         # In pure-TP mode both the routed experts and the shared expert produce
         # TP-partial outputs.  Reduce their sum once instead of reducing each
@@ -241,14 +232,61 @@ class GenericMoeLayer(nn.Module):
 
             gate_logits = self.shared_expert_gate(hidden_states)
             expert_args = {"shared_expert_gates": shared_expert_sigmoid(gate_logits)}
-        experts_output = self.fused_moe(
-            hidden_states=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation="SiGLU",
-            extra_expert_args=expert_args,
-            skip_tp_allreduce=self.use_unified_tp_allreduce,
-        )
+
+        if self.fused_moe.supports_gate_pack:
+            experts_output = self.fused_moe.forward_gate_pack(
+                hidden_states=hidden_states,
+                gate_payload=self._build_mega_moe_gate_payload(router_logits),
+                activation="SiGLU",
+                extra_expert_args=expert_args,
+                skip_tp_allreduce=self.use_unified_tp_allreduce,
+            )
+        else:
+            topk_weights = torch.empty(
+                (num_tokens, self.top_k),
+                dtype=torch.float32,
+                device=hidden_states.device,
+            )
+            # different executor may need different topk_ids dtype
+            topk_ids = torch.empty(
+                (num_tokens, self.top_k),
+                dtype=self.fused_moe.topk_ids_dtype,
+                device=hidden_states.device,
+            )
+
+            if self.correction_bias is not None:
+                self.group_topk = GroupTopK()
+                self.renormalize = self.config.has_moe_norm
+                self.num_expert_group = self.config.moe_n_group
+
+                self.topk_group = self.config.moe_topk_group
+                self.n_routed_experts = self.config.expert_num
+                self.routed_scaling_factor = self.config.routed_scaling_factor
+                self.group_topk(
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    scores=router_logits,
+                    correction_bias=self.correction_bias,
+                    n_group=self.num_expert_group,
+                    topk_group=self.topk_group,
+                    topk=self.top_k,
+                    renormalize=self.renormalize,
+                    routed_scaling_factor=self.routed_scaling_factor,
+                )
+            else:
+                self.select_topk(router_logits, topk_ids, topk_weights)
+
+            if self.fake_balance_expert is not None:
+                self.fake_balance_expert(topk_ids, topk_weights)
+
+            experts_output = self.fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation="SiGLU",
+                extra_expert_args=expert_args,
+                skip_tp_allreduce=self.use_unified_tp_allreduce,
+            )
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
                 hidden_states,

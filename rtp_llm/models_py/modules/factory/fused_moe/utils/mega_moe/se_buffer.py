@@ -17,6 +17,7 @@ from .buffer import _mega_moe_unavailable_reason
 
 _MEGA_SE_BUF_CACHE: dict = {}
 _MEGA_SE_OUTPUT_CACHE: dict = {}
+_MEGA_FP8_SE_BUF_CACHE: dict = {}
 
 _MMA_TYPE = "fp8xfp4"
 
@@ -160,6 +161,68 @@ def _get_or_create_mega_se_buf(
         )
 
     _MEGA_SE_BUF_CACHE[key] = buf
+    return buf
+
+
+def _get_or_create_mega_fp8_se_buf(
+    group,
+    num_experts: int,
+    num_max_tokens_per_rank: int,
+    num_topk: int,
+    hidden: int,
+    intermediate_hidden: int,
+    num_shared_experts: int,
+    use_fp8_dispatch: bool = True,
+    activation: str = "swiglu",
+):
+    from deep_gemm import mega_fp8
+
+    key = (
+        id(group),
+        num_experts,
+        num_max_tokens_per_rank,
+        num_topk,
+        hidden,
+        intermediate_hidden,
+        num_shared_experts,
+        bool(use_fp8_dispatch),
+        activation,
+    )
+    buf = _MEGA_FP8_SE_BUF_CACHE.get(key)
+    if buf is not None:
+        return buf
+    buf = mega_fp8.get_symm_buffer_for_mega_moe_fp8(
+        group,
+        num_experts,
+        num_max_tokens_per_rank,
+        num_topk,
+        hidden,
+        intermediate_hidden,
+        num_shared_experts=num_shared_experts,
+        use_fp8_dispatch=use_fp8_dispatch,
+        activation=activation,
+    )
+    if getattr(buf, "shared_l1_acts_sf", None) is None:
+        raise RuntimeError(
+            "DeepGEMM returned a MegaMoE FP8-SE buffer without shared_l1_acts_sf"
+        )
+    try:
+        actual_bytes = int(buf.buffer.numel() * buf.buffer.element_size())
+        logging.info(
+            "[MegaMoE FP8-SE] allocated symm buffer: num_experts=%d "
+            "max_tokens_per_rank=%d topk=%d hidden=%d intermediate=%d "
+            "shared=%d actual=%.3f GiB",
+            num_experts,
+            num_max_tokens_per_rank,
+            num_topk,
+            hidden,
+            intermediate_hidden,
+            num_shared_experts,
+            actual_bytes / (1024**3),
+        )
+    except Exception:
+        pass
+    _MEGA_FP8_SE_BUF_CACHE[key] = buf
     return buf
 
 

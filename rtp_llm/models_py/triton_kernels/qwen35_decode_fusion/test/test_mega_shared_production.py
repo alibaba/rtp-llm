@@ -23,6 +23,9 @@ def worker(rank, rendezvous, output_dir):
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8 import (
         MegaMoeFp8Executor,
     )
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8_se import (
+        MegaMoeFp8SEExecutor,
+    )
     from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_inputs import (
         shared_expert_sigmoid,
     )
@@ -43,10 +46,18 @@ def worker(rank, rendezvous, output_dir):
             max_tokens_per_rank=65536,
             model_config=SimpleNamespace(max_seq_len=65536),
             hidden_size=hidden,
+            dim=hidden,
             moe_inter_dim=inter,
             expert_num=experts,
             n_local_experts=128,
+            n_routed_experts=experts,
             moe_k=topk,
+            n_activated_experts=topk,
+            local_expert_start=rank * 128,
+            route_scale=1.0,
+            swiglu_limit=0.0,
+            layer_id=0,
+            warmup_include_capacity=False,
             moe_w1_layout="gate_up",
         )
         torch.manual_seed(3000 + rank)
@@ -67,14 +78,12 @@ def worker(rank, rendezvous, output_dir):
 
         w1, s1 = weights((128, 2 * inter, hidden))
         w2, s2 = weights((128, hidden, inter))
-        os.environ["RTP_QWEN35_FUSED_MEGAMOE_GATED_SE"] = "0"
         plain = MegaMoeFp8Executor(
             cfg,
             None,
             {W.moe_w1: w1.clone(), W.moe_s1: s1, W.moe_w2: w2.clone(), W.moe_s2: s2},
         )
-        os.environ["RTP_QWEN35_FUSED_MEGAMOE_GATED_SE"] = "1"
-        fused = MegaMoeFp8Executor(
+        fused = MegaMoeFp8SEExecutor(
             cfg, None, {W.moe_w1: w1, W.moe_s1: s1, W.moe_w2: w2, W.moe_s2: s2}
         )
         torch.manual_seed(3210)
@@ -84,22 +93,43 @@ def worker(rank, rendezvous, output_dir):
         fused.configure_gated_shared_expert(shared)
         activation = FusedSiluAndMul()
         assert (
-            plain._buffer() is not fused._buffer()
+            plain._mega_buf is not fused._mega_buf
         ), "Shared workspace reused for routed-only executor"
-        shared_buffer = fused._buffer()
+        shared_buffer = fused._mega_buf
+
+        def k32_linear(x_fp8, x_sf, linear):
+            from deep_gemm.utils.math import unpack_ue8m0_from_int
+
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_weights import (
+                expand_fp8_scale,
+            )
+
+            weight = linear.weight
+            act_sf = unpack_ue8m0_from_int(x_sf.contiguous()).view(
+                x_sf.size(0), x_sf.size(1) * 4
+            )
+            weight_sf = unpack_ue8m0_from_int(
+                expand_fp8_scale(linear.weight_scales, weight.size(0), weight.size(1))
+            ).view(weight.size(0), weight.size(1) // 32)
+            out = torch.empty(
+                (x_fp8.size(0), weight.size(0)),
+                dtype=torch.bfloat16,
+                device=x_fp8.device,
+            )
+            deep_gemm.fp8_gemm_nt(
+                (x_fp8, act_sf.contiguous()),
+                (weight, weight_sf.contiguous()),
+                out,
+                recipe=(1, 1, 32),
+            )
+            return out
 
         def run(executor, x, ids, routing, gate=None):
-            payload = SimpleNamespace(
-                expert_x=x, expert_topk_ids=ids, expert_topk_weights=routing
+            if gate is None:
+                return executor.forward(x, routing, ids)
+            return executor.forward(
+                x, routing, ids, extra_expert_args={"shared_expert_gates": gate}
             )
-            return executor.execute(
-                payload,
-                "SiGLU",
-                None,
-                None,
-                False,
-                None if gate is None else {"shared_expert_gates": gate},
-            ).fused_expert_output
 
         def checkpoint(stage, tokens):
             torch.cuda.synchronize()
@@ -123,7 +153,9 @@ def worker(rank, rendezvous, output_dir):
             checkpoint("inputs_ready", tokens)
             baseline = run(plain, x, ids, routing)
             checkpoint("routed_done", tokens)
-            activated = activation(up(x))
+            activated = activation(
+                k32_linear(plain._mega_buf.x[:tokens], plain._mega_buf.x_sf[:tokens], up)
+            )
             checkpoint("shared_activation_done", tokens)
             mlp = down(activated)
             checkpoint("shared_mlp_done", tokens)
@@ -156,7 +188,7 @@ def worker(rank, rendezvous, output_dir):
                     json.dumps(rows, indent=2)
                 )
                 torch.testing.assert_close(actual, expected, atol=0.01, rtol=0.01)
-                assert fused._buffer() is shared_buffer
+                assert fused._mega_buf is shared_buffer
             del x, ids, routing, baseline, mlp, expected, actual, delta
     finally:
         dist.destroy_process_group()

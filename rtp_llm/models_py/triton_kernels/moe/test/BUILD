@@ -53,6 +53,7 @@ py_test(
     srcs = ["test_mega_moe_gate_pack.py"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:moe",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ] + [":triton", ":torch"],
     visibility = ["//visibility:public"],
     tags = ["H20"],
@@ -98,5 +99,11 @@ cuda13_sm100_py_test(
 cuda13_sm100_py_test(
     name = "test_mega_moe_input_packer_perf",
     srcs = ["test_mega_moe_input_packer_perf.py"],
+    deps = ["//rtp_llm/models_py/triton_kernels:moe"],
+)
+
+cuda13_sm100_py_test(
+    name = "test_mega_moe_softmax_gate_pack_perf",
+    srcs = ["test_mega_moe_softmax_gate_pack_perf.py"],
     deps = ["//rtp_llm/models_py/triton_kernels:moe"],
 )

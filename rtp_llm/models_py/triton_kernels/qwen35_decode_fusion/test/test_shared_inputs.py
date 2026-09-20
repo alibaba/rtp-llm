@@ -1,10 +1,12 @@
-"""Compare the production shared-input adapter against native RTP semantics."""
+"""Compare the production shared-expert gate against native RTP semantics."""
 
 import unittest
 
 import torch
 
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_inputs import (
+    _SHARED_GATE_CACHE,
+    ensure_shared_gate_capacity,
     shared_expert_sigmoid,
     stage_shared_scales,
 )
@@ -58,6 +60,35 @@ class SharedInputsTest(unittest.TestCase):
                         )
                         reference[indices] = source[:count]
                         self.assertTrue(torch.equal(target, reference))
+
+    def test_cuda_graph_requires_preallocated_buffer(self):
+        _SHARED_GATE_CACHE.clear()
+        logits = torch.randn(8, 1, device="cuda", dtype=torch.bfloat16)
+        graph = torch.cuda.CUDAGraph()
+        with self.assertRaisesRegex(RuntimeError, "static gate buffer"):
+            with torch.cuda.graph(graph):
+                shared_expert_sigmoid(logits)
+
+    def test_cuda_graph_reuses_preallocated_buffer(self):
+        ensure_shared_gate_capacity("cuda", 256)
+        static_logits = torch.randn(32, 1, device="cuda", dtype=torch.bfloat16)
+        shared_expert_sigmoid(static_logits)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = shared_expert_sigmoid(static_logits)
+        static_logits.copy_(
+            torch.linspace(-8, 8, 32, device="cuda", dtype=torch.bfloat16).view(-1, 1)
+        )
+        graph.replay()
+        reference = torch.zeros((32, 1), device="cuda", dtype=torch.float32)
+        sigmoid_gate_scale_add_triton(
+            static_logits, torch.ones_like(reference), reference
+        )
+        self.assertTrue(torch.equal(actual, reference[:, 0]))
+        self.assertIs(
+            actual.untyped_storage(),
+            _SHARED_GATE_CACHE[str(static_logits.device)].untyped_storage(),
+        )
 
 
 if __name__ == "__main__":

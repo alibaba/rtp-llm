@@ -319,5 +319,91 @@ class MegaMoeGatePackEquivTest(unittest.TestCase):
         self._check_nonfinite_fallback(hash_routing=True)
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class MegaMoeSoftmaxGatePackTest(unittest.TestCase):
+    def _check(self, tokens: int) -> None:
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.ops.compute_ops import SelectTopkOp
+        from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
+            fused_pack_mega_moe_gate_inputs,
+            fused_pack_mega_moe_inputs_optimized,
+        )
+
+        hidden, experts, topk = 4096, 512, 10
+        route_scale = 1.0
+        torch.manual_seed(1701 + tokens)
+        x = torch.randn(tokens, hidden, device="cuda:0", dtype=torch.bfloat16)
+        scores = torch.randn(tokens, experts, device="cuda:0", dtype=torch.bfloat16)
+
+        config = ModelConfig()
+        config.attn_config.head_num = 1
+        config.attn_config.size_per_head = 128
+        config.num_layers = 1
+        config.max_seq_len = 1
+        config.vocab_size = 5120
+        config.expert_num = experts
+        config.moe_k = topk
+        config.has_moe_norm = True
+        indices = torch.empty((tokens, topk), dtype=torch.int64, device="cuda:0")
+        weights = torch.empty((tokens, topk), dtype=torch.float32, device="cuda:0")
+        SelectTopkOp(config).forward(scores.float(), indices, weights)
+
+        ref = _make_buf(tokens, hidden, topk)
+        fused_pack_mega_moe_inputs_optimized(
+            x,
+            weights,
+            indices,
+            ref.x,
+            ref.x_sf,
+            ref.topk_idx,
+            ref.topk_weights,
+        )
+        got = _make_buf(tokens, hidden, topk)
+        fused_pack_mega_moe_gate_inputs(
+            x,
+            scores,
+            got.x,
+            got.x_sf,
+            got.topk_idx,
+            got.topk_weights,
+            topk=topk,
+            score_func="softmax",
+            route_scale=route_scale,
+        )
+        torch.cuda.synchronize()
+
+        self.assertTrue(torch.equal(ref.x.view(torch.uint8), got.x.view(torch.uint8)))
+        self.assertTrue(torch.equal(ref.x_sf, got.x_sf))
+        self.assertTrue(torch.equal(indices, got.topk_idx))
+        torch.testing.assert_close(got.topk_weights, weights, rtol=1e-5, atol=1e-6)
+
+    def test_qwen35_shapes(self):
+        for tokens in (0, 1, 2, 8, 17, 37, 257, 1024):
+            with self.subTest(tokens=tokens):
+                self._check(tokens)
+
+    def test_rejects_other_routing_metadata(self):
+        from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
+            fused_pack_mega_moe_gate_inputs,
+        )
+
+        x = torch.empty((1, 128), dtype=torch.bfloat16, device="cuda:0")
+        scores = torch.empty((1, 16), dtype=torch.bfloat16, device="cuda:0")
+        got = _make_buf(1, 128, 2)
+        with self.assertRaisesRegex(ValueError, "does not accept"):
+            fused_pack_mega_moe_gate_inputs(
+                x,
+                scores,
+                got.x,
+                got.x_sf,
+                got.topk_idx,
+                got.topk_weights,
+                topk=2,
+                score_func="softmax",
+                route_scale=1.0,
+                bias=torch.zeros(16, dtype=torch.float32, device="cuda:0"),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
