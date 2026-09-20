@@ -189,13 +189,16 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 rope_config=self.qsa_rope_config,
             )
         prefixes = qsa_runtime.main_inputs.prefix_lengths
-        if (
-            self.is_mtp_draft
-            and not bool(qsa_runtime.main_inputs.is_target_verify)
-            and prefixes.numel()
-            and bool(torch.any(prefixes != 0).item())
-        ):
-            return qsa_runtime.select_draft_incremental_prefill_tokens(
+        has_prefix = bool(prefixes.numel()) and bool(torch.any(prefixes != 0).item())
+        if not bool(qsa_runtime.main_inputs.is_target_verify) and has_prefix:
+            if self.is_mtp_draft:
+                return qsa_runtime.select_draft_incremental_prefill_tokens(
+                    q,
+                    raw_keys,
+                    indexer=self.qsa_indexer,
+                    rope_config=self.qsa_rope_config,
+                )
+            return qsa_runtime.select_prefix_reuse_prefill_tokens(
                 q,
                 raw_keys,
                 indexer=self.qsa_indexer,

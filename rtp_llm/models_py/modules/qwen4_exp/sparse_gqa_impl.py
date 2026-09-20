@@ -137,6 +137,19 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             and self._has_nonzero_prefill_prefix()
         )
 
+    def _is_prefix_reuse_prefill(self) -> bool:
+        """Ranaged prefill that starts at a reused prefix block boundary.
+
+        Covers both the MTP draft's post-rejection incremental commit and the
+        target's page-aligned prefix-reuse prefill: both carry an explicit
+        prefix and consume the ragged paged bridge.
+        """
+        return (
+            self.is_prefill
+            and not self.is_target_verify
+            and self._has_nonzero_prefill_prefix()
+        )
+
     def _has_nonzero_prefill_prefix(self) -> bool:
         prefixes = self.attn_inputs.prefix_lengths
         return bool(prefixes.numel()) and bool(torch.any(prefixes != 0).item())
@@ -270,17 +283,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             token_count=int(hidden_states.shape[0]),
             device=hidden_states.device,
         )
-        is_incremental_prefill = self._is_mtp_incremental_prefill()
-        if (
-            self.is_prefill
-            and not self.is_target_verify
-            and self._has_nonzero_prefill_prefix()
-            and not is_incremental_prefill
-        ):
-            raise RuntimeError(
-                "qwen4_exp sparse GQA non-zero-prefix prefill requires explicit "
-                "MTP draft mode"
-            )
+        is_incremental_prefill = self._is_prefix_reuse_prefill()
         if self.is_prefill and not self.is_target_verify and not is_incremental_prefill:
             return
         if qsa_runtime.main_cache is None:
@@ -288,6 +291,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "qwen4_exp QSA paged attention requires the main KV cache"
             )
         if qsa_runtime.main_inputs is not self.attn_inputs:
+
             def _inputs_brief(inputs) -> str:
                 try:
                     prefixes = inputs.prefix_lengths
@@ -529,9 +533,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         selected_indices: torch.Tensor,
     ) -> dict:
         """Build ragged per-request paged plans before the production writer."""
-        if not self._is_mtp_incremental_prefill():
+        if not self._is_prefix_reuse_prefill():
             raise RuntimeError(
-                "qwen4_exp incremental prefill requires explicit MTP draft mode"
+                "qwen4_exp incremental prefill requires an explicit prefix"
             )
         if qkv.dim() != 2:
             raise ValueError(
@@ -696,17 +700,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "the attention module must run the indexer and pass it in"
             )
 
-        is_incremental_prefill = self._is_mtp_incremental_prefill()
-        if (
-            self.is_prefill
-            and not self.is_target_verify
-            and self._has_nonzero_prefill_prefix()
-            and not is_incremental_prefill
-        ):
-            raise RuntimeError(
-                "qwen4_exp sparse GQA non-zero-prefix prefill requires explicit "
-                "MTP draft mode"
-            )
+        is_incremental_prefill = self._is_prefix_reuse_prefill()
 
         paged_plan = None
         if is_incremental_prefill:
@@ -755,9 +749,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         if not self.is_prefill:
             if qkv.dim() != 2 or int(qkv.shape[1]) != self.q_width:
                 prefixes = getattr(self.attn_inputs, "prefix_lengths", None)
-                prefix_head = (
-                    prefixes[:4].tolist() if prefixes is not None else None
-                )
+                prefix_head = prefixes[:4].tolist() if prefixes is not None else None
                 raise RuntimeError(
                     "qwen4_exp decode RoPE writer returned invalid query geometry"
                     f" [qkv={tuple(qkv.shape)} in={pre_writer_shape}"

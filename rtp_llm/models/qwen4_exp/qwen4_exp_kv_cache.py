@@ -143,8 +143,13 @@ def indexer_kv_desc(indexer_head_dim: int, compress_ratio: int) -> KVCacheSpecDe
     desc.entry_count_mode = OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED
     desc.compression_ratio = compress_ratio
     reuse = CacheReusePolicyDesc()
-    reuse.enable_prefix_reuse = False
+    # Complete compressed-block chain: a page-aligned prefix leaves whole
+    # pooled blocks in the pool, which the paged scorer reads back on reuse.
+    reuse.enable_prefix_reuse = True
     desc.reuse = reuse
+    tail = CacheTailPolicyDesc()
+    tail.active_tail_blocks = 0
+    desc.tail = tail
     return desc
 
 
@@ -156,10 +161,9 @@ def indexer_state_desc(indexer_head_dim: int, compress_ratio: int) -> KVCacheSpe
     ``mean`` over the whole block in fp32, and an incremental sum would not
     reproduce that summation order.
 
-    Prefix reuse is explicitly disabled until QSA can restore both the pooled
-    key pool and raw-key ring from one checkpoint boundary. Target verification
-    uses the active request's nonzero prefix and does not depend on block-cache
-    prefix reuse.
+    Page-aligned prefix reuse is supported: the pooled key chain restores the
+    prefix's completed blocks, and this ring is tail-sparse, so a boundary that
+    lands on a compressed-block boundary needs no ring content restored.
     """
     desc = KVCacheSpecDesc()
     desc.tag = INDEXER_STATE_TAG
@@ -175,8 +179,14 @@ def indexer_state_desc(indexer_head_dim: int, compress_ratio: int) -> KVCacheSpe
     desc.compression_ratio = compress_ratio
     desc.state_ring_overlap = 1
     reuse = CacheReusePolicyDesc()
-    reuse.enable_prefix_reuse = False
+    # Page-level record like its sibling opaque-state regions: every page holds
+    # the ring content as of that page's end. Block-tree reuse requires one
+    # active-tail policy across the shared SWA coordinate family.
+    reuse.enable_prefix_reuse = True
     desc.reuse = reuse
+    tail = CacheTailPolicyDesc()
+    tail.active_tail_blocks = 0
+    desc.tail = tail
     return desc
 
 
