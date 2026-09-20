@@ -18,8 +18,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongPredicate;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
 
 /**
  * Cleanup must finish while a business operation holds the Slot monitor and needs
@@ -96,7 +103,7 @@ class EndpointCleanupDeadlockTest {
             when(service.loadBalanceConfig()).thenReturn(config);
             RequestRegistry registry = mock(RequestRegistry.class);
             ExpirationTimer timer = new ExpirationTimer(registry, service);
-            RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), 992L,
+            RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), RequestLifecycleTestSupport.context(config, 992L),
                     timer, new RequestTerminalCleanup(timer), () -> { });
             CountDownLatch slotHeld = new CountDownLatch(1);
             CountDownLatch closeReachesSlots = new CountDownLatch(1);

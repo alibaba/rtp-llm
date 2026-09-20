@@ -13,22 +13,25 @@ import org.flexlb.balance.scheduler.ExpirationTimer.DecisionDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.RequestDeadline;
 import org.flexlb.balance.scheduler.RequestCompletionPublisher.PublicationPermit;
-import org.flexlb.balance.scheduler.RequestCompletionPublisher.SelectedPublication;
 import org.flexlb.balance.scheduler.RequestCompletionPublisher.ResponseCompletion;
+import org.flexlb.balance.scheduler.RequestCompletionPublisher.SelectedPublication;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 
+import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 
-import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 import static org.flexlb.balance.scheduler.RequestTerminalCleanup.appendFailure;
-import static org.flexlb.balance.scheduler.RequestTerminalCleanup.runStep;
 import static org.flexlb.balance.scheduler.RequestTerminalCleanup.rethrowCleanup;
+import static org.flexlb.balance.scheduler.RequestTerminalCleanup.runStep;
+import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 import static org.flexlb.dao.loadbalance.Response.buildSuccessResponse;
 
 /**
@@ -57,6 +60,17 @@ public final class RequestSlot {
 
         AdmissionHandle(RequestSlot owner) {
             this.owner = Objects.requireNonNull(owner, "owner");
+        }
+
+        /** A late placement attempt must not overwrite the frozen cancellation evidence. */
+        void recordDiagnostics(Map<String, Object> diagnostics) {
+            if (diagnostics == null) { return; }
+            synchronized (owner) {
+                if (!resolved.get() && owner.admissionHandle == this
+                        && owner.cancellationResponse == null) {
+                    owner.context.setSchedulingDiagnostics(diagnostics);
+                }
+            }
         }
 
         /** Transfer this exact admission attempt to canonical terminal ownership. */
@@ -103,6 +117,10 @@ public final class RequestSlot {
     private final Runnable admissionFinished;
 
     private final RequestCompletionPublisher completionPublisher;
+    private final boolean queueScheduling;
+    private final GlobalQueueCoordinator globalQueue;
+    /** Used while active to capture PV evidence; released with the terminal record. */
+    private BalanceContext context;
     private final long requestId;
     private final long createdAtMs;
     private final RequestFuture future;
@@ -121,6 +139,8 @@ public final class RequestSlot {
     /** Storage/cleanup ownership; distinct from the public request lifecycle. */
     private SlotPhase slotPhase = SlotPhase.ACTIVE;
     private EngineOwnership engineOwnership = EngineOwnership.DECODE_PENDING;
+    /** Frozen with the first cancellation; later cleanup cannot reclassify it. */
+    private Response cancellationResponse;
     private CancelReason cancellationReason;
     /** One frontend result may win before its unlocked future completion runs. */
     private PublicationKind publicationWinner;
@@ -174,14 +194,23 @@ public final class RequestSlot {
 
     RequestSlot(
             RequestCompletionPublisher completionPublisher,
-            long requestId, ExpirationTimer expirationTimer,
+            BalanceContext context, ExpirationTimer expirationTimer,
             RequestTerminalCleanup terminalCleanup, Runnable admissionFinished) {
+        this(completionPublisher, context, expirationTimer, terminalCleanup, admissionFinished, false, null);
+    }
+
+    RequestSlot(RequestCompletionPublisher completionPublisher, BalanceContext context, ExpirationTimer expirationTimer,
+                RequestTerminalCleanup terminalCleanup, Runnable admissionFinished,
+                boolean queueScheduling, GlobalQueueCoordinator globalQueue) {
+        this.queueScheduling = queueScheduling;
+        this.globalQueue = globalQueue;
         this.expirationTimer = expirationTimer;
         this.terminalCleanup = terminalCleanup;
         this.admissionFinished = admissionFinished;
         this.completionPublisher = Objects.requireNonNull(
                 completionPublisher, "completionPublisher");
-        this.requestId = requestId;
+        this.context = Objects.requireNonNull(context, "context");
+        this.requestId = context.getRequestId();
         this.createdAtMs = System.currentTimeMillis();
         this.updatedAtMs = createdAtMs;
         this.lastWorkerStatusAtMs = createdAtMs;
@@ -519,7 +548,7 @@ public final class RequestSlot {
             TerminalOutcome outcome = pendingCancellation == null ? TerminalOutcome.fail(message)
                     : TerminalOutcome.cancellation(pendingCancellation, message);
             Response response = pendingCancellation == null ? failure
-                    : buildErrorResponse(cancellationErrorTypeLocked(pendingCancellation), message);
+                    : Response.copyOf(cancellationResponse);
             effect = RequestEffect.terminal(claimTerminalActionLocked(null, outcome, response, true), null);
         }
         if (effect.terminal() != null || pendingCancellation == null || !ownsActiveGenerationLocked()) { return effect; }
@@ -593,8 +622,7 @@ public final class RequestSlot {
             cleanup = cleanupProgress != null && cleanupProgress.expired;
         }
         // Endpoint cleanup and response callbacks must never run under Slot's lock.
-        if (cleanup) { resumeCleanup(); }
-        else { terminalCleanup.submitTerminal(expired); }
+        if (cleanup) { resumeCleanup(); } else { terminalCleanup.submitTerminal(expired); }
         return null;
     }
 
@@ -751,8 +779,8 @@ public final class RequestSlot {
         String message = cancellation == null ? detail : cancellation.getMessage() + "; " + detail;
         TerminalOutcome outcome = cancellation == null ? TerminalOutcome.fail(message)
                 : TerminalOutcome.cancellation(cancellation, message);
-        Response response = buildErrorResponse(cancellation == null ? StrategyErrorType.DISPATCH_FAILED
-                : cancellationErrorTypeLocked(cancellation), message);
+        Response response = cancellation == null ? buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, message)
+                : Response.copyOf(cancellationResponse);
         PublicationPermit permit = publicationWinner == null && !future.isDone()
                 ? requirePublicationPermitLocked(PublicationKind.TERMINAL) : null;
         cleanupProgress = new CleanupProgress(exact, source);
@@ -1086,6 +1114,25 @@ public final class RequestSlot {
                 || cancellationReason != null || pendingAdmissionCancelReason != null) {
             return false;
         }
+        if (reason == CancelReason.DEADLINE_EXCEEDED && queueScheduling) {
+            ScheduledRequest item = activeItem();
+            Map<String, Object> diagnostics;
+            if (deliveryClaimKind != DeliveryClaimKind.NONE) {
+                diagnostics = Map.of("cause", message);
+            } else if (item != null && item.prefillEp() != null) {
+                diagnostics = item.prefillEp().queueWaitDiagnostics();
+            } else if (globalQueue != null) {
+                diagnostics = globalQueue.waitDiagnostics();
+            } else {
+                diagnostics = Map.of("cause", "waiting for placement");
+            }
+            cancellationResponse = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
+                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                    String.valueOf(diagnostics.get("cause")));
+            context.setSchedulingDiagnostics(diagnostics);
+        } else {
+            cancellationResponse = buildErrorResponse(cancellationErrorTypeLocked(reason), message);
+        }
         if (admissionHandle != null) {
             pendingAdmissionCancelReason = reason;
         } else {
@@ -1105,7 +1152,7 @@ public final class RequestSlot {
         if (active != null && !canClaimLocalTerminalLocked()) { return null; }
         String message = cancellationReason.getMessage();
         return claimTerminalActionLocked(null, TerminalOutcome.cancellation(cancellationReason, message),
-                buildErrorResponse(cancellationErrorTypeLocked(cancellationReason), message), true);
+                Response.copyOf(cancellationResponse), true);
     }
 
     private boolean hasCancellationFirstCauseLocked() {
@@ -1784,7 +1831,9 @@ public final class RequestSlot {
             }
             default -> throw new IllegalStateException("unsupported request end: " + event.kind());
         }
-        return claimTerminalActionLocked(event, outcome, buildErrorResponse(error, message), true);
+        Response response = hasCancellationFirstCauseLocked() && cancellationResponse != null
+                ? Response.copyOf(cancellationResponse) : buildErrorResponse(error, message);
+        return claimTerminalActionLocked(event, outcome, response, true);
     }
 
     /** The only close gate: no event may discard an outstanding cleanup obligation. */
@@ -1878,6 +1927,7 @@ public final class RequestSlot {
         }
 
         item = null;
+        context = null;
         cleanupProgress = null;
         preemption = null;
         cancellationReason = null;
@@ -2087,8 +2137,6 @@ public final class RequestSlot {
             boolean needsConfirmation) {
     }
 }
-
-
 
 /** Endpoint that emitted the terminal fact; Decode facts follow its ledger update. */
 enum WorkerTerminalSource {

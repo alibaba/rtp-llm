@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
@@ -18,11 +19,14 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.Logger;
+import org.flexlb.util.PriorityNormalizer;
 import org.flexlb.util.PriorityOrdering;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -65,6 +69,59 @@ public final class WorkerBatcher {
         }
     }
 
+    /** Frozen decision evidence; the log representation is materialized only on failure. */
+    private static final class QueueWaitSnapshot {
+        private final String endpoint;
+        private final String cause;
+        private final long capturedAtMs;
+        private final long queueVersion;
+        private final int[] requestCountsByPriority;
+        private final long prefillRequests;
+        private final int prefillBatchSlots;
+        private final DecodeRoutingView decode;
+        private volatile Map<String, Object> diagnostics;
+
+        private QueueWaitSnapshot(String endpoint, String cause, long capturedAtMs, long queueVersion,
+                                  int[] requestCountsByPriority, long prefillRequests, int prefillBatchSlots, DecodeRoutingView decode) {
+            this.endpoint = endpoint;
+            this.cause = cause;
+            this.capturedAtMs = capturedAtMs;
+            this.queueVersion = queueVersion;
+            this.requestCountsByPriority = requestCountsByPriority;
+            this.prefillRequests = prefillRequests;
+            this.prefillBatchSlots = prefillBatchSlots;
+            this.decode = decode;
+        }
+
+        private Map<String, Object> diagnostics() {
+            Map<String, Object> cached = diagnostics;
+            if (cached != null) { return cached; }
+            Map<Integer, Integer> priorityCounts = new HashMap<>();
+            int depth = 0;
+            for (int priority = 0; priority < requestCountsByPriority.length; priority++) {
+                if (requestCountsByPriority[priority] > 0) { priorityCounts.put(priority, requestCountsByPriority[priority]); }
+                depth += requestCountsByPriority[priority];
+            }
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("cause", cause);
+            details.put("capturedAtMs", capturedAtMs);
+            details.put("endpoint", endpoint);
+            details.put("queueDepth", depth);
+            details.put("queueVersion", queueVersion);
+            details.put("priorityCounts", Collections.unmodifiableMap(priorityCounts));
+            details.put("prefillRequests", prefillRequests);
+            details.put("prefillBatchSlots", prefillBatchSlots);
+            if (decode != null) {
+                details.put("decode", Map.of("endpoint", decode.address(), "version", decode.admissionVersion(),
+                        "engineLoad", decode.engineLoad(), "totalLoad", decode.totalLoad(),
+                        "kvTotal", decode.totalKv(), "kvAvailable", decode.placementUsage().hardKvAvailable()));
+            }
+            cached = Collections.unmodifiableMap(details);
+            diagnostics = cached;
+            return cached;
+        }
+    }
+
     private enum RuntimeState {
         NEW,
         STARTING,
@@ -87,7 +144,8 @@ public final class WorkerBatcher {
             CapacityBoundary unavailable,
             long queueVersion,
             long schedulingInputVersion,
-            long wakeAtMs) {
+            long wakeAtMs,
+            String waitReason) {
 
         private static final BatcherCycleResult NO_ACTION = simple(false);
         private static final BatcherCycleResult CAPACITY_CHANGED = simple(true);
@@ -107,22 +165,24 @@ public final class WorkerBatcher {
             return new BatcherCycleResult(false,
                     Objects.requireNonNull(item, "item"),
                     Objects.requireNonNull(unavailable, "unavailable"),
-                    0L, 0L, 0L);
+                    0L, 0L, 0L, unavailable.projectionSemantics() == null
+                            ? "Prefill batch capacity exhausted" : unavailable.projectionSemantics().blockedDetail());
         }
 
         private static BatcherCycleResult awaitingSchedulingChange(
                 ScheduledRequest head,
                 long queueVersion,
                 long schedulingInputVersion,
-                long wakeAtMs) {
+                long wakeAtMs,
+                String waitReason) {
             return new BatcherCycleResult(false,
                     Objects.requireNonNull(head, "head"), null,
-                    queueVersion, schedulingInputVersion, wakeAtMs);
+                    queueVersion, schedulingInputVersion, wakeAtMs, waitReason);
         }
 
         private static BatcherCycleResult simple(boolean capacityChanged) {
             return new BatcherCycleResult(
-                    capacityChanged, null, null, 0L, 0L, 0L);
+                    capacityChanged, null, null, 0L, 0L, 0L, null);
         }
 
         private boolean capacityBlocked() {
@@ -173,6 +233,8 @@ public final class WorkerBatcher {
     private static final String SINGLE_DECISION_REASON = "single_request";
     /** Initial queue index allocation; unrelated to admission limits. */
     private static final int INITIAL_QUEUE_ALLOCATION = 16;
+    private static final Map<String, Object> INITIAL_WAIT_DIAGNOSTICS =
+            Map.of("cause", "waiting for Prefill decision");
 
     private final String key;
     private final PrefillEndpoint prefillEndpoint;
@@ -236,6 +298,9 @@ public final class WorkerBatcher {
             this::signalCapacityAvailable;
     /** Exact active head for which this worker is waiting on a capacity event. */
     private BatcherCycleResult capacityBlockedHead;
+
+    /** Last waiting decision; timeout readers never acquire queueLock. */
+    private volatile QueueWaitSnapshot waitSnapshot;
 
     public WorkerBatcher(
             String key,
@@ -469,8 +534,9 @@ public final class WorkerBatcher {
         Map<Integer, Integer> sizeByPriority = new HashMap<>();
         queueLock.lock();
         try {
-            for (ScheduledRequest item : activeIndex) {
-                sizeByPriority.merge(item.priority(), 1, Integer::sum);
+            for (int priority = 0; priority <= PriorityNormalizer.MAX_PRIORITY; priority++) {
+                int count = activeIndex.size(priority);
+                if (count > 0) { sizeByPriority.put(priority, count); }
             }
         } finally {
             queueLock.unlock();
@@ -782,6 +848,33 @@ public final class WorkerBatcher {
             throw new IllegalArgumentException(
                     operation + " belongs to another Prefill generation");
         }
+    }
+
+    public Map<String, Object> waitDiagnostics() {
+        QueueWaitSnapshot snapshot = waitSnapshot;
+        return snapshot == null ? INITIAL_WAIT_DIAGNOSTICS : snapshot.diagnostics();
+    }
+
+    /** Capture fixed-size counters without formatting the PV record on the scheduling loop. */
+    private void recordQueueWait(ScheduledRequest head, String reason) {
+        int[] requestCountsByPriority = new int[PriorityNormalizer.MAX_PRIORITY + 1];
+        long version;
+        long prefillRequests;
+        int prefillBatchSlots;
+        queueLock.lock();
+        try {
+            version = queueVersion.get();
+            prefillRequests = prefillState.observedRequestCount();
+            prefillBatchSlots = prefillState.batchLeasesInUseUnderLock();
+            for (int priority = 0; priority < requestCountsByPriority.length; priority++) {
+                requestCountsByPriority[priority] = activeIndex.size(priority);
+            }
+        } finally {
+            queueLock.unlock();
+        }
+        DecodeRoutingView decode = head.decodeEp() == null ? null : head.decodeEp().routingView();
+        waitSnapshot = new QueueWaitSnapshot(key, reason, now(), version, requestCountsByPriority,
+                prefillRequests, prefillBatchSlots, decode);
     }
 
     public QueueSnapshot captureQueueSnapshot() {
@@ -1576,7 +1669,7 @@ public final class WorkerBatcher {
                 windowOpenedAtMs, collectionWindowMs);
         return BatcherCycleResult.awaitingSchedulingChange(
                 head, queueVersion, schedulingInputVersion,
-                Math.min(collectionDeadline, head.expiresAtMs()));
+                Math.min(collectionDeadline, head.expiresAtMs()), "Prefill collection window");
     }
 
     private static BatcherCycleResult awaitPrefillKvCapacity(
@@ -1585,7 +1678,7 @@ public final class WorkerBatcher {
             long schedulingInputVersion) {
         return BatcherCycleResult.awaitingSchedulingChange(
                 head, queueVersion, schedulingInputVersion,
-                head.expiresAtMs());
+                head.expiresAtMs(), "Prefill KV capacity exhausted");
     }
 
     private static ScheduledRequest firstExpiredMember(
@@ -1662,6 +1755,9 @@ public final class WorkerBatcher {
         }
 
         BatcherCycleResult result = processQueue();
+        if (result.waitReason() != null) {
+            recordQueueWait(result.request(), result.waitReason());
+        }
         if (result.placementCapacityChanged()) {
             // Only a committed removal creates a new queue seat. Advisory
             // waits and delivery-capacity misses must not feed placement back

@@ -17,6 +17,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -81,6 +82,23 @@ class RequestRegistryTest {
                 duplicate.join().getCode());
         assertSame(canonical, lifecycle.requestSlot(101L).future());
         assertEquals(1, lifecycle.liveRequestCount());
+    }
+
+    @Test
+    void terminalRecordPreservesIdentityWithoutRetainingRequestContext() throws Exception {
+        WeakReference<BalanceContext> contextReference = cancelAndReferenceContext(103L);
+        RequestSlot terminal = lifecycle.requestSlot(103L);
+        assertEquals(RequestState.Phase.CANCELLED, terminal.snapshot().state());
+
+        for (int attempt = 0; attempt < 20 && !contextReference.refersTo(null); attempt++) {
+            System.gc();
+            Thread.sleep(50L);
+        }
+
+        assertTrue(contextReference.refersTo(null), "terminal identity must not retain the request payload");
+        assertSame(terminal, lifecycle.requestSlot(103L));
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
+                lifecycle.register(context(103L)).join().getCode());
     }
 
     @Test
@@ -279,7 +297,8 @@ class RequestRegistryTest {
         var low = lifecycle.register(context(1));
         var expired = context(2);
         expired.setSchedulingMetadata(SchedulingMetadata.explicit(90, System.currentTimeMillis() - 1L));
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+        // QUEUE expiry before placement is admission capacity exhaustion (8431).
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                 lifecycle.register(expired).get(5, TimeUnit.SECONDS).getCode());
         assertFalse(low.isDone());
         assertEquals(1, lifecycle.liveRequestCount());
@@ -355,6 +374,14 @@ class RequestRegistryTest {
         assertEquals(RequestState.Phase.ACKNOWLEDGED, lifecycle.getRequestState(705L, 23L).state());
         org.mockito.Mockito.verify(registered.item().decodeEp(), org.mockito.Mockito.never())
                 .release(registered.item().decodeReservation(), DecodeEndpoint.ReleaseReason.NOT_SENT);
+    }
+
+    private WeakReference<BalanceContext> cancelAndReferenceContext(long requestId) {
+        BalanceContext context = context(requestId);
+        CompletableFuture<Response> future = lifecycle.register(context);
+        lifecycle.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), future.join().getCode());
+        return new WeakReference<>(context);
     }
 
     private BalanceContext context(long requestId) {

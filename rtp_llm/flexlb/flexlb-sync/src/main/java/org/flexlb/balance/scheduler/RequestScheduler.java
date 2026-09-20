@@ -96,6 +96,7 @@ public final class RequestScheduler {
         Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
         try {
             PlacementResult<RouteAdmission, PlacementKey> selection = router.select(context);
+            context.setSchedulingDiagnostics(selection.diagnostics());
             switch (selection.status()) {
                 case SUCCESS -> {
                     try (RouteAdmission admission = selection.value()) {
@@ -106,14 +107,15 @@ public final class RequestScheduler {
                                 requestRegistry.publishRoute(delivery.claim(), delivery.precedingWork(), delivery.unstartedWorkMs());
                                 yield null;
                             }
-                            case REJECTED -> committed.rejection();
+                            case REJECTED -> committed.failure();
                             case CLOSED -> Response.error(StrategyErrorType.REQUEST_CANCELLED);
                             case BLOCKED -> Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
                         };
                     }
                 }
-                case BLOCKED -> failure = Response.error(selection.blocker().role().getErrorType());
-                case REJECTED -> failure = selection.rejection();
+                case BLOCKED -> failure = selection.failure() != null
+                        ? selection.failure() : Response.error(selection.blocker().role().getErrorType());
+                case REJECTED -> failure = selection.failure();
                 case CLOSED -> failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
             }
         } catch (RuntimeException selectionFailure) {

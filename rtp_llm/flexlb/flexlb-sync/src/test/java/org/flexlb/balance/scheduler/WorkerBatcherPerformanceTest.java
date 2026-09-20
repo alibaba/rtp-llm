@@ -16,6 +16,8 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -35,6 +37,85 @@ class WorkerBatcherPerformanceTest {
 
     private static final int[] QUEUE_DEPTHS = {0, 1, 32, 128, 512};
     private static final int MEASUREMENT_ROUNDS = 5;
+
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    void waitDiagnosticsCaptureDoesNotScaleWithRequestCount() throws Throwable {
+        var capture = MethodHandles.privateLookupIn(WorkerBatcher.class, MethodHandles.lookup())
+                .findVirtual(WorkerBatcher.class, "recordQueueWait",
+                        MethodType.methodType(void.class, ScheduledRequest.class, String.class));
+        var allocationBean = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean
+                && bean.isThreadAllocatedMemorySupported() ? bean : null;
+        if (allocationBean != null) { allocationBean.setThreadAllocatedMemoryEnabled(true); }
+        long threadId = Thread.currentThread().threadId();
+        long shallowAllocation = 0;
+        int operations = 2_000;
+        // Both depths populate every priority bucket. Additional requests must not add capture work.
+        for (int depth : new int[]{128, 512, 4096}) {
+            WorkerBatcher runtime = runtimeWithDepth(depth);
+            try {
+                ScheduledRequest head = runtime.captureQueueSnapshot().items().getFirst();
+                for (int i = 0; i < operations; i++) {
+                    capture.invokeExact(runtime, head, "Prefill capacity exhausted");
+                }
+                long before = allocationBean == null ? 0 : allocationBean.getThreadAllocatedBytes(threadId);
+                long started = System.nanoTime();
+                for (int i = 0; i < operations; i++) {
+                    capture.invokeExact(runtime, head, "Prefill capacity exhausted");
+                }
+                long nsPerCapture = (System.nanoTime() - started) / operations;
+                long bytesPerCapture = allocationBean == null ? 0
+                        : (allocationBean.getThreadAllocatedBytes(threadId) - before) / operations;
+                assertEquals(depth, runtime.waitDiagnostics().get("queueDepth"));
+                System.out.printf("FlexLB wait capture: depth=%d ns_per_capture=%d bytes_per_capture=%d%n",
+                        depth, nsPerCapture, bytesPerCapture);
+                if (depth == 128) { shallowAllocation = bytesPerCapture; }
+                if (allocationBean != null) {
+                    assertTrue(bytesPerCapture < 1_024,
+                            "the scheduling loop must retain raw counters without materializing PV maps");
+                    assertTrue(bytesPerCapture <= shallowAllocation + 1_024,
+                            "capture allocation must be bounded by priority levels, not request count");
+                }
+            } finally {
+                runtime.stopAndAwait();
+            }
+        }
+    }
+
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    void timeoutDiagnosticsReadDoesNotGrowWithQueueDepth() throws Exception {
+        var allocationBean = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean
+                && bean.isThreadAllocatedMemorySupported() ? bean : null;
+        if (allocationBean != null) { allocationBean.setThreadAllocatedMemoryEnabled(true); }
+        long threadId = Thread.currentThread().threadId();
+        int operations = 100_000;
+        for (int depth : QUEUE_DEPTHS) {
+            WorkerBatcher runtime = runtimeWithDepth(depth);
+            try {
+                long checksum = 0;
+                for (int warmup = 0; warmup < operations; warmup++) {
+                    checksum += runtime.waitDiagnostics().size();
+                }
+                long allocatedBefore = allocationBean == null ? 0 : allocationBean.getThreadAllocatedBytes(threadId);
+                long started = System.nanoTime();
+                for (int operation = 0; operation < operations; operation++) {
+                    checksum += runtime.waitDiagnostics().size();
+                }
+                long nsPerRead = (System.nanoTime() - started) / operations;
+                long bytesPerRead = allocationBean == null ? 0
+                        : (allocationBean.getThreadAllocatedBytes(threadId) - allocatedBefore) / operations;
+                System.out.printf("FlexLB timeout diagnostics: depth=%d ns_per_read=%d bytes_per_read=%d checksum=%d%n",
+                        depth, nsPerRead, bytesPerRead, checksum);
+                assertTrue(nsPerRead < 10_000L, "timeout diagnostics must not traverse the request queue");
+                if (allocationBean != null) {
+                    assertEquals(0L, bytesPerRead, "timeout reads must reuse the queue's published snapshot");
+                }
+            } finally {
+                runtime.stopAndAwait();
+            }
+        }
+    }
 
     @Test
     @Timeout(value = 30, unit = TimeUnit.SECONDS)

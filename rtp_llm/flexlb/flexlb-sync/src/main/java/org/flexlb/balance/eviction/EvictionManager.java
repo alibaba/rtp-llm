@@ -3,8 +3,8 @@ package org.flexlb.balance.eviction;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RouteAdmission;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
@@ -551,9 +551,7 @@ public class EvictionManager {
     private static Response admissionError(StrategyErrorType errorType,
                                            AdmissionRejectReason reason,
                                            String message) {
-        Response errorResp = Response.error(errorType, reason);
-        errorResp.setErrorMessage(errorType.buildErrorMessage(message));
-        return errorResp;
+        return Response.error(errorType, reason, message);
     }
 
 }

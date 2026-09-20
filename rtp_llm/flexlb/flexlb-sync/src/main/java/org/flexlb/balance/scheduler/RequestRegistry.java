@@ -172,8 +172,7 @@ public class RequestRegistry {
             }
         } finally {
             if (!retained) {
-                if (claim == null) { exitAdmissionHandleGate(); }
-                else { claim.close(); }
+                if (claim == null) { exitAdmissionHandleGate(); } else { claim.close(); }
             }
         }
     }
@@ -271,16 +270,20 @@ public class RequestRegistry {
                             "duplicate request_id: " + context.getRequestId()));
                 }
                 if (context.requestExpired(System.currentTimeMillis())) {
-                    return CompletableFuture.completedFuture(buildErrorResponse(
-                            StrategyErrorType.BATCH_SLO_EXPIRED,
-                            "request scheduling deadline has expired"));
+                    Response failure = buildErrorResponse(
+                            context.getConfig().isQueue() ? StrategyErrorType.RESOURCE_EXHAUSTED : StrategyErrorType.BATCH_SLO_EXPIRED,
+                            "request scheduling deadline has expired before placement");
+                    if (globalQueue != null) {
+                        context.setSchedulingDiagnostics(globalQueue.waitDiagnostics());
+                    }
+                    return CompletableFuture.completedFuture(failure);
                 }
                 if (shuttingDown.get()) {
                     return CompletableFuture.completedFuture(buildErrorResponse(
                             StrategyErrorType.DISPATCH_FAILED,
                             "request scheduler is shutting down"));
                 }
-                slot = new RequestSlot(completionPublisher, context.getRequestId(), expirationTimer, terminalCleanup, this::exitAdmissionHandleGate);
+                slot = new RequestSlot(completionPublisher, context, expirationTimer, terminalCleanup, this::exitAdmissionHandleGate, context.getConfig().isQueue(), globalQueue);
                 context.setEnqueueTime(System.currentTimeMillis());
                 synchronized (slot) {
                     slot.configureInactivityTimeout(
@@ -298,10 +301,7 @@ public class RequestRegistry {
                 return future;
             }
             if (context.requestExpired(System.currentTimeMillis())) {
-                completeError(
-                        future,
-                        StrategyErrorType.BATCH_SLO_EXPIRED,
-                        "request scheduling deadline has expired");
+                slot.cancelRequest(0L, CancelReason.DEADLINE_EXCEEDED);
                 return future;
             }
             attachRequestExpiration(context, future);
@@ -437,12 +437,12 @@ public class RequestRegistry {
     public void finishYielded(ScheduledRequest victim, String detail) {
         finishVictim(
                 victim,
-                StrategyErrorType.NO_AVAILABLE_WORKER,
+                StrategyErrorType.PRIORITY_PREEMPTED,
                 detail);
     }
 
     void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
-        finishYielded(victim, "yielded to higher-priority request " + incoming.requestId());
+        finishYielded(victim, "preempted by higher-priority request " + incoming.requestId());
         requestReporter.reportVictim(victim.priority(), incoming.priority(),
                 "prefill_queued", "prefill_inflight_requests");
         requestReporter.reportPriorityPreempt("prefill_queued");

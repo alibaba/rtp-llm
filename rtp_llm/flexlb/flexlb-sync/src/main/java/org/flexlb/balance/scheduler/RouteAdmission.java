@@ -273,7 +273,7 @@ public final class RouteAdmission implements AutoCloseable {
                 return switch (attempt.boundary().status()) {
                     case UNAVAILABLE -> PlacementResult.blocked(decodePlacementKey());
                     case OWNERSHIP_LOST -> PlacementResult.rejected(
-                            Response.error(StrategyErrorType.SCHEDULER_PLAN_CONFLICT));
+                            Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
                     case FAILED -> throw new IllegalStateException("route admission failed", attempt.boundary().cause());
                 };
             }
@@ -343,7 +343,7 @@ public final class RouteAdmission implements AutoCloseable {
                 case CAPACITY_FULL -> StrategyErrorType.RESOURCE_EXHAUSTED;
                 case ENDPOINT_RETIRED -> StrategyErrorType.DISPATCH_FAILED;
                 case REQUEST_ALREADY_RESERVED, REQUEST_NOT_ACTIVE, BATCH_ID_ALREADY_RESERVED ->
-                        StrategyErrorType.SCHEDULER_PLAN_CONFLICT;
+                        StrategyErrorType.RESOURCE_EXHAUSTED;
                 case ACQUIRED -> throw new IllegalStateException("successful admission cannot be rejected");
             };
         }
