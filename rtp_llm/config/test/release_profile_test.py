@@ -17,6 +17,7 @@ import shutil
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 from rtp_llm.config import release_profile as rp
 
@@ -889,6 +890,28 @@ class ContentIdentity(unittest.TestCase):
         self.assertFalse(broken["complete"])
         self.assertEqual("incomplete", broken["mode"])
         self.assertTrue(any("could not be read" in e for e in broken["errors"]), broken["errors"])
+
+    def test_a_directory_that_cannot_be_listed_fails_the_tree(self):
+        # os.walk swallows an inaccessible directory unless given an onerror handler, which is how a tree
+        # could report complete: true / mode: full with only the readable files in it.
+        self.write("config.json", b"{}")
+        self.write("sub/shard.safetensors", b"w" * 4096)
+        real_walk = rp.os.walk
+
+        def walk_with_denied_subdir(top, onerror=None, **kwargs):
+            for dirpath, dirnames, filenames in real_walk(top, **kwargs):
+                if os.path.basename(dirpath) == "sub" and onerror is not None:
+                    onerror(PermissionError(13, "Permission denied", os.path.join(dirpath, "denied")))
+                    continue  # an unlistable directory yields nothing
+                yield dirpath, dirnames, filenames
+
+        with mock.patch.object(rp.os, "walk", walk_with_denied_subdir):
+            tree = rp._tree_identity(self.dir, 1024, 256)
+        self.assertFalse(tree["complete"])
+        self.assertEqual("incomplete", tree["mode"])
+        self.assertTrue(any("could not be listed" in e for e in tree["errors"]), tree["errors"])
+        # The readable file is still inventoried, but the tree can no longer claim to be complete.
+        self.assertIn("config.json", tree["files"])
 
     def test_the_full_inventory_is_kept_when_the_listing_is_capped(self):
         for i in range(rp.MAX_LISTED_FILES + 2):

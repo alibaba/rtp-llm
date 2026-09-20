@@ -325,8 +325,21 @@ def _tree_identity(root: str, full_max_bytes: int, sample_bytes: int) -> Dict[st
     files: Dict[str, Any] = {}
     errors: List[str] = []
     unreadable: List[str] = []
+    unlistable: List[str] = []
     complete = True
-    for dirpath, dirnames, filenames in os.walk(root):
+
+    def on_walk_error(error: OSError) -> None:
+        """A directory that cannot be listed is a FAILURE, not a subtree to skip.
+
+        ``os.walk`` swallows an inaccessible directory unless it is given an ``onerror`` handler, which
+        means a weights tree could report itself complete and "full" while holding only the files that
+        happened to be readable.
+        """
+        nonlocal complete
+        complete = False
+        unlistable.append(f"{getattr(error, 'filename', '?')}: {error}")
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=on_walk_error):
         dirnames.sort()
         for name in sorted(filenames):
             if len(files) >= MAX_TREE_FILES:
@@ -346,6 +359,9 @@ def _tree_identity(root: str, full_max_bytes: int, sample_bytes: int) -> Dict[st
     if unreadable:
         complete = False
         errors.append(f"{len(unreadable)} file(s) could not be read: {unreadable[:3]}")
+    if unlistable:
+        complete = False
+        errors.append(f"{len(unlistable)} directory(ies) could not be listed: {unlistable[:3]}")
     ident: Dict[str, Any] = {
         "kind": "tree",
         "root": root,
