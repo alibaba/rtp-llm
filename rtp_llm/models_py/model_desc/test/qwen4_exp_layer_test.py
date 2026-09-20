@@ -234,6 +234,81 @@ class Qwen4ExpDecoderLayerTest(TestCase):
         with self.assertRaisesRegex(ValueError, "gated residual features"):
             self._run(torch.randn(3, _HIDDEN))
 
+    def test_linear_layer_forwards_the_configured_norm_activation(self):
+        # Qwen4-Exp checkpoints gate the GDN output norm with output_gate_type
+        # ("sigmoid"); the layer must forward it instead of the silu default.
+        self.config.linear_attn_norm_activation = "sigmoid"
+        attention = _Attention()
+        with (
+            patch.object(
+                qwen3_next, "Qwen3NextGatedDeltaNet", return_value=attention
+            ) as gdn_cls,
+            patch.object(
+                generic_moe.LinearFactory,
+                "create_linear_from_weights",
+                return_value=nn.Linear(_HIDDEN, _EXPERTS, bias=False),
+            ),
+            patch.object(generic_moe, "SelectTopk", return_value=_select_topk),
+            patch.object(
+                generic_moe.FusedMoeFactory,
+                "create_fused_moe",
+                return_value=_RoutedBackend(),
+            ),
+        ):
+            qwen4_exp.Qwen4ExpDecoderLayer(
+                self.config, ParallelismConfig(), self.weights, 0, MoeConfig()
+            )
+        self.assertEqual(gdn_cls.call_args.kwargs.get("norm_activation"), "sigmoid")
+
+
+class Qwen4ExpModelConstructionTest(TestCase):
+    """The real construction path: GptModelBase.__init__ then Qwen4ExpModel.
+
+    Every other test in this file fakes the base init, which hid a startup
+    regression: GptModelBase already owns `_mtp_target_hidden_states` as a plain
+    attribute, so re-registering it as a buffer raised
+    "attribute ... already exists" on every server start.
+    """
+
+    class _FakeModelWeights:
+        def __init__(self, embedding, mixer_norm, mix_down, mix_up):
+            self._globals = {
+                W.embedding: embedding,
+                W.qwen4_hc_mixer_norm: mixer_norm,
+                W.qwen4_hc_mixer_mix_down: mix_down,
+                W.qwen4_hc_mixer_mix_up: mix_up,
+            }
+            self.weights: list = []
+
+        def get_global_weight(self, name):
+            return self._globals[name]
+
+    def test_model_init_reuses_the_base_mtp_capture_attributes(self):
+        hidden, vocab = _HIDDEN, 16
+        hc_hidden = _HC * hidden
+        config = ModelConfig()
+        config.num_layers = 0
+        config.hidden_size = hidden
+        config.vocab_size = vocab
+        config.hc_mult = _HC
+        config.layernorm_eps = _EPS
+        config.capture_aux_hidden_layer_ids = None
+        mixer_norm, mix_down, mix_up, _ = _hc_weights(0)
+        weights = self._FakeModelWeights(
+            torch.zeros(vocab, hidden),
+            mixer_norm,
+            mix_down,
+            mix_up,
+        )
+
+        model = qwen4_exp.Qwen4ExpModel(
+            config, ParallelismConfig(), weights, MoeConfig(), 0
+        )
+
+        self.assertIsNone(model._mtp_target_hidden_states)
+        self.assertFalse(model._capture_mtp_target_hidden)
+        self.assertEqual(model.hyper_connection_mixer.hc_hidden_size, hc_hidden)
+
 
 class Qwen4ExpQSAConstructionTest(TestCase):
     @staticmethod
