@@ -29,6 +29,9 @@
 namespace rtp_llm {
 
 template<typename T>
+void invokeAddBias(T* output, const T* bias, size_t numel, size_t hidden_size, cudaStream_t stream);
+
+template<typename T>
 void invokeAddBiasGelu(T* output, const T* bias, size_t numel, size_t hidden_size, cudaStream_t stream);
 
 #if USING_CUDA
