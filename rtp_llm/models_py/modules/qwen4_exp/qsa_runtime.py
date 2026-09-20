@@ -296,6 +296,7 @@ class Qwen4ExpQSARuntimeContext:
         expect_prefill: bool,
         allow_target_verify: bool = False,
         allow_draft_incremental: bool = False,
+        allow_prefix_reuse: bool = False,
     ) -> list[int]:
         if str(self.indexer_kv_cache.tag) != INDEXER_KV_TAG:
             raise RuntimeError("qwen4_exp QSA received the wrong indexer KV cache")
@@ -333,6 +334,7 @@ class Qwen4ExpQSARuntimeContext:
             if (
                 not is_target_verify
                 and not allow_draft_incremental
+                and not allow_prefix_reuse
                 and prefixes.numel()
                 and bool(torch.any(prefixes != 0).item())
             ):
@@ -375,16 +377,31 @@ class Qwen4ExpQSARuntimeContext:
         token_count: int,
         device: torch.device,
         rope_config: Any,
+        draft: bool = True,
     ) -> dict[str, Any]:
-        """Validate one post-rejection MTP draft commit without side effects."""
+        """Validate one incremental prefill build without side effects.
+
+        ``draft=True`` is the post-rejection MTP draft commit (shifted positions,
+        at most ``ratio`` new tokens).  ``draft=False`` is a page-aligned
+        prefix-reuse target prefill: the request starts at its absolute prefix
+        position, every reused prefix block is a complete compressed block held
+        by the side pool, and the writer seals complete blocks exactly as the
+        draft path does.
+        """
+        label = "draft incremental prefill" if draft else "prefix-reuse prefill"
         lengths = self._validate_mode_and_metadata(
-            expect_prefill=True, allow_draft_incremental=True
+            expect_prefill=True,
+            allow_draft_incremental=draft,
+            allow_prefix_reuse=not draft,
         )
         if self._target_verify_enabled():
             raise RuntimeError(
                 "qwen4_exp QSA draft incremental prefill cannot be target verification"
             )
-        if not is_qsa_rope_style(rope_config, "Base"):
+        if draft and not is_qsa_rope_style(rope_config, "Base"):
+            # The MTP draft runs Base RoPE; the target keeps its own style
+            # (MRoPE for the released checkpoint), which build_qsa_rope
+            # dispatches on for both the writer and the scoring rotation.
             raise RuntimeError(
                 "qwen4_exp QSA MTP draft incremental prefill requires Base RoPE"
             )
@@ -403,7 +420,7 @@ class Qwen4ExpQSARuntimeContext:
                 "qwen4_exp QSA draft incremental prefill token budget must be "
                 "positive and divisible by the compression ratio"
             )
-        if max(lengths) > ratio:
+        if draft and max(lengths) > ratio:
             raise RuntimeError(
                 "qwen4_exp QSA draft incremental prefill requires "
                 f"max(input_lengths)={max(lengths)} <= compress_ratio={ratio}"
@@ -521,6 +538,11 @@ class Qwen4ExpQSARuntimeContext:
             )
         if state_tokens_per_block <= 0:
             raise RuntimeError("qwen4_exp QSA indexer state page size must be positive")
+        if not draft and bool((prefixes % kv_tokens_per_block != 0).any().item()):
+            raise RuntimeError(
+                "qwen4_exp QSA prefix reuse requires prefixes aligned to the "
+                f"indexer KV page size ({kv_tokens_per_block})"
+            )
         kv_entries_per_block = kv_tokens_per_block // ratio
         kv_pool = _typed_2d_pool(
             self.indexer_kv_cache,
@@ -899,7 +921,13 @@ class Qwen4ExpQSARuntimeContext:
         indexer: Any,
         rope_config: Any,
     ) -> tuple[list[int], torch.Tensor, torch.Tensor, dict]:
-        """Write one ragged, prefix-free prefill projection to both side pools."""
+        """Write one ragged prefill projection to both side pools.
+
+        Page-aligned non-zero prefixes are supported: the request starts at its
+        absolute prefix position and the block tables already map the reused
+        prefix pages, so the writer seals the prefix's last partial block with
+        raw keys retained from the earlier request.
+        """
         lengths = self._validate_mode_and_metadata(expect_prefill=True)
         token_count = int(raw_keys.shape[0]) if raw_keys.dim() == 2 else -1
         if token_count < 0 or sum(lengths) != token_count:
@@ -919,6 +947,26 @@ class Qwen4ExpQSARuntimeContext:
             raise RuntimeError(
                 "qwen4_exp QSA indexer KV page size must be positive and divisible "
                 f"by ratio={ratio}, got {kv_tokens_per_block}"
+            )
+        prefix_tensor = self.main_inputs.prefix_lengths
+        if (
+            prefix_tensor is None
+            or prefix_tensor.dim() != 1
+            or int(prefix_tensor.numel()) != len(lengths)
+            or prefix_tensor.dtype != torch.int32
+        ):
+            raise RuntimeError(
+                "qwen4_exp QSA prefill requires int32 prefix_lengths [B]"
+            )
+        start_positions = prefix_tensor.to(
+            device=raw_keys.device, dtype=torch.int64, non_blocking=True
+        ).contiguous()
+        if bool((start_positions < 0).any().item()):
+            raise RuntimeError("qwen4_exp QSA prefill prefixes must be non-negative")
+        if bool((start_positions % kv_tokens_per_block != 0).any().item()):
+            raise RuntimeError(
+                "qwen4_exp QSA prefix reuse requires prefixes aligned to the "
+                f"indexer KV page size ({kv_tokens_per_block})"
             )
         kv_pool = _typed_2d_pool(
             self.indexer_kv_cache,
@@ -1001,7 +1049,8 @@ class Qwen4ExpQSARuntimeContext:
             # RoPE positions intentionally differ from the logical cache rows.
             logical_positions = None
             if is_qsa_rope_style(rope_config, "Base") and not self.is_mtp_draft:
-                logical_positions = torch.arange(
+                prefix_len = int(start_positions[request_idx].item())
+                logical_positions = prefix_len + torch.arange(
                     seq_len, dtype=torch.int64, device=raw_keys.device
                 )
             try:
@@ -1015,9 +1064,7 @@ class Qwen4ExpQSARuntimeContext:
                 )
             except ValueError as error:
                 prefixes = self.main_inputs.prefix_lengths
-                prefix_head = (
-                    prefixes[:6].tolist() if prefixes is not None else None
-                )
+                prefix_head = prefixes[:6].tolist() if prefixes is not None else None
                 raise RuntimeError(
                     f"qwen4_exp QSA prefill {error} "
                     f"[request={request_idx} seq_len={seq_len} "
@@ -1031,7 +1078,7 @@ class Qwen4ExpQSARuntimeContext:
         result = self._write_indexer_cache_transactional(
             raw_keys,
             cu_seqlens,
-            torch.zeros(batch_size, dtype=torch.int64, device=raw_keys.device),
+            start_positions,
             rope_cos,
             rope_sin,
             indexer.k_norm_gamma,
@@ -1054,47 +1101,74 @@ class Qwen4ExpQSARuntimeContext:
         indexer: Any,
         rope_config: Any,
     ) -> torch.Tensor:
-        """Commit and score a ragged post-rejection MTP draft suffix.
+        return self._incremental_prefill_selection(
+            q, raw_keys, indexer=indexer, rope_config=rope_config, draft=True
+        )
 
-        Each request starts at its explicit prefix ``P``. Packed row ``j`` is
-        written at ``P + j`` and may select only tokens below the corresponding
-        visible length ``P + j + 1``. The correctness-first implementation calls
-        the existing paged scorer once per request because accepted widths are
-        ragged across the batch.
+    def select_prefix_reuse_prefill_tokens(
+        self,
+        q: torch.Tensor,
+        raw_keys: torch.Tensor,
+        *,
+        indexer: Any,
+        rope_config: Any,
+    ) -> torch.Tensor:
+        """Selection for a page-aligned prefix-reuse target prefill."""
+        return self._incremental_prefill_selection(
+            q, raw_keys, indexer=indexer, rope_config=rope_config, draft=False
+        )
+
+    def _incremental_prefill_selection(
+        self,
+        q: torch.Tensor,
+        raw_keys: torch.Tensor,
+        *,
+        indexer: Any,
+        rope_config: Any,
+        draft: bool,
+    ) -> torch.Tensor:
+        """Shared paged selection for incremental prefill builds.
+
+        ``draft=True`` serves the post-rejection MTP draft commit (shifted
+        positions, at most ``ratio`` new tokens per row).  ``draft=False``
+        serves a page-aligned prefix-reuse target prefill: the writer seals the
+        request's completed blocks into both side pools first, so one paged
+        score covers the reused prefix blocks and the new blocks uniformly and
+        the emitted token ids are absolute KV positions.
         """
+        label = "draft incremental prefill" if draft else "prefix-reuse prefill"
+
         token_count = int(raw_keys.shape[0]) if raw_keys.dim() == 2 else -1
         plan = self._draft_incremental_prefill_geometry(
             indexer=indexer,
             token_count=token_count,
             device=raw_keys.device,
             rope_config=rope_config,
+            draft=draft,
         )
         head_num = int(plan["head_num"])
         head_dim = int(plan["head_dim"])
         if q.dim() != 3 or tuple(q.shape) != (token_count, head_num, head_dim):
             raise RuntimeError(
-                "qwen4_exp QSA draft incremental prefill q must be packed "
+                f"qwen4_exp QSA {label} q must be packed "
                 f"[{token_count}, {head_num}, {head_dim}], got {tuple(q.shape)}"
             )
         if raw_keys.dim() != 2 or tuple(raw_keys.shape) != (token_count, head_dim):
             raise RuntimeError(
-                "qwen4_exp QSA draft incremental prefill raw keys must be packed "
+                f"qwen4_exp QSA {label} raw keys must be packed "
                 f"[{token_count}, {head_dim}], got {tuple(raw_keys.shape)}"
             )
         if q.dtype != torch.bfloat16 or raw_keys.dtype != torch.bfloat16:
             raise RuntimeError(
-                "qwen4_exp QSA draft incremental prefill currently requires "
-                "BF16 q/raw keys"
+                f"qwen4_exp QSA {label} currently requires " "BF16 q/raw keys"
             )
         if q.device != raw_keys.device:
             raise RuntimeError(
-                "qwen4_exp QSA draft incremental prefill q/raw keys must share "
-                "a device"
+                f"qwen4_exp QSA {label} q/raw keys must share " "a device"
             )
         if not q.is_cuda:
             raise RuntimeError(
-                "qwen4_exp QSA draft incremental prefill paged scoring requires "
-                "CUDA tensors"
+                f"qwen4_exp QSA {label} paged scoring requires " "CUDA tensors"
             )
 
         # All metadata, tables, physical destinations and position contracts
