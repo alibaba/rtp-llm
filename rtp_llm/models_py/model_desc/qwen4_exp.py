@@ -644,14 +644,9 @@ class Qwen4ExpModel(Qwen35Model):
             raise RuntimeError("qwen4_exp PLE does not support prefill CP yet")
         if getattr(attention_inputs, "cache_store_inputs", None) is not None:
             raise RuntimeError("qwen4_exp PLE does not support PD cache-store yet")
-        prefixes = getattr(attention_inputs, "prefix_lengths", None)
-        if (
-            not is_target_verify
-            and prefixes is not None
-            and prefixes.numel()
-            and bool((prefixes != 0).any().item())
-        ):
-            raise RuntimeError("qwen4_exp PLE does not support prefix reuse yet")
+        # Prefix reuse is supported for page-aligned prefixes: the prefill path
+        # resumes state/context from the page holding the last prefix token (and
+        # fails fast there when a prefix is not page-aligned).
 
     @staticmethod
     def _same_metadata(
@@ -1100,8 +1095,28 @@ class Qwen4ExpModel(Qwen35Model):
                 raise RuntimeError(
                     "qwen4_exp PLE packed prefill lengths are inconsistent"
                 )
+            raw_prefixes = getattr(state_inputs, "prefix_lengths", None)
+            prefixes = (
+                [int(x) for x in raw_prefixes.tolist()]
+                if raw_prefixes is not None and int(raw_prefixes.numel()) > 0
+                else [0] * len(lengths)
+            )
+            if len(prefixes) != len(lengths) or any(p < 0 for p in prefixes):
+                raise RuntimeError(
+                    "qwen4_exp PLE prefill prefix lengths are inconsistent"
+                )
+            # Current requests arrive with per-request new-token lengths;
+            # prefix reuse resumes the side state from the page that holds the
+            # last prefix token, so prefixes must land on page boundaries.
+            if any(prefix % page_size for prefix in prefixes):
+                raise RuntimeError(
+                    "qwen4_exp PLE prefix reuse requires page-aligned prefixes"
+                )
             terminal_pages = torch.tensor(
-                [(length - 1) // page_size for length in lengths],
+                [
+                    (prefix + length - 1) // page_size
+                    for prefix, length in zip(prefixes, lengths)
+                ],
                 dtype=torch.long,
             )
             state_blocks = self._physical_blocks(
@@ -1118,17 +1133,52 @@ class Qwen4ExpModel(Qwen35Model):
                 int(ctx_pool.shape[0]),
                 ctx_pool.device,
             )
+            read_buffers = None
+            read_contexts = None
+            if any(prefixes):
+                read_pages = torch.tensor(
+                    [(prefix - 1) // page_size if prefix else 0 for prefix in prefixes],
+                    dtype=torch.long,
+                )
+                read_buffers = state_pool.index_select(
+                    0,
+                    self._physical_blocks(
+                        state_inputs,
+                        PLE_STATE_TAG,
+                        read_pages,
+                        int(state_pool.shape[0]),
+                        state_pool.device,
+                    ),
+                )
+                read_contexts = ctx_pool.index_select(
+                    0,
+                    self._physical_blocks(
+                        ctx_inputs,
+                        PLE_NGRAM_CTX_TAG,
+                        read_pages,
+                        int(ctx_pool.shape[0]),
+                        ctx_pool.device,
+                    ),
+                )
             outputs, states, contexts = [], [], []
             offset = 0
-            for length in lengths:
+            for idx, (prefix, length) in enumerate(zip(prefixes, lengths)):
                 seq_ids = ids[offset : offset + length].view(1, length)
-                history = torch.cat(
-                    [seq_ids.new_full((1, context_len), eos), seq_ids], dim=1
-                )
-                output, state = ple.prefill(
-                    hyper_states[offset : offset + length].view(1, length, -1),
-                    history,
-                )
+                if prefix > 0:
+                    history = torch.cat([read_contexts[idx : idx + 1], seq_ids], dim=1)
+                    output, state = ple.prefill_with_state(
+                        hyper_states[offset : offset + length].view(1, length, -1),
+                        history,
+                        read_buffers[idx : idx + 1],
+                    )
+                else:
+                    history = torch.cat(
+                        [seq_ids.new_full((1, context_len), eos), seq_ids], dim=1
+                    )
+                    output, state = ple.prefill(
+                        hyper_states[offset : offset + length].view(1, length, -1),
+                        history,
+                    )
                 outputs.append(output.squeeze(0))
                 states.append(state.squeeze(0))
                 contexts.append(history[0, -context_len:])

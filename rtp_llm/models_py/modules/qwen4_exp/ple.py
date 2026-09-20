@@ -315,6 +315,26 @@ class Qwen4ExpPLELayer(nn.Module):
         output = gated_value + self._short_conv(gated_value_normed)
         return output, self.prefill_conv_state(gated_value_normed)
 
+    def prefill_with_state(
+        self,
+        hyper_states: torch.Tensor,
+        token_history: torch.Tensor,
+        conv_buffer: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Prefix-reuse prefill: continue the conv from a cached state buffer.
+
+        ``token_history`` carries the cached n-gram context followed by the new
+        tokens, so this is the chunked form of :meth:`decode_step` and returns
+        the state the next chunk/decode must resume from.
+        """
+        output, candidate_inputs = self.decode_chunk(
+            hyper_states, token_history, conv_buffer
+        )
+        state = torch.cat([conv_buffer, candidate_inputs], dim=1)[
+            :, -self.short_conv_state_len :
+        ]
+        return output, state
+
     def prefill_conv_state(self, gated_value_normed: torch.Tensor) -> torch.Tensor:
         """The conv-input history decode must resume from: last state_len rows.
 
