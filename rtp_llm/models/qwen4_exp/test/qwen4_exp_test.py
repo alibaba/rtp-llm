@@ -461,6 +461,26 @@ class Qwen4ExpTest(unittest.TestCase):
             self.assertEqual(layer_descs[0].cache_type, expected)
             self.assertEqual(len(layer_descs), 1)
 
+    def test_all_variants_use_the_independent_cache_pools(self):
+        # PLE/QSA-on already route through the pool path; the dense fallback
+        # (this default config) must too, or the shared hybrid pool rejects
+        # qwen4's linear-vs-attention block stride geometry.
+        self.assertTrue(
+            self.config.hybrid_attention_config.enable_independent_kv_cache_pools
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_ENABLE_QWEN4_EXP_PLE": "true",
+                "RTP_LLM_ENABLE_QWEN4_EXP_QSA": "false",
+            },
+        ):
+            ple_config = Qwen4Exp.create_config(self._temp_dir.name)
+        self.assertTrue(ple_config.enable_qwen4_ple)
+        self.assertTrue(
+            ple_config.hybrid_attention_config.enable_independent_kv_cache_pools
+        )
+
     def test_unfinished_subsystems_are_disabled_by_default(self):
         self.assertFalse(self.config.enable_qwen4_ple)
         self.assertFalse(self.config.enable_qwen4_qsa)
