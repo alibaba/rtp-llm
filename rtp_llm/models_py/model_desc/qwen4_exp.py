@@ -615,7 +615,10 @@ class Qwen4ExpModel(Qwen35Model):
         pool_rows: int,
     ) -> torch.Tensor:
         if bool((blocks <= 0).any().item()):
-            raise RuntimeError(f"PLE cache {tag!r} has an unallocated logical page")
+            raise RuntimeError(
+                f"PLE cache {tag!r} has an unallocated logical page; "
+                f"blocks={blocks.tolist()[:32]} pool_rows={pool_rows}"
+            )
         if bool((blocks >= pool_rows).any().item()):
             raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
         return blocks.to(torch.long)
@@ -655,8 +658,15 @@ class Qwen4ExpModel(Qwen35Model):
         pages: torch.Tensor,
         pool_rows: int,
         device: torch.device,
-    ) -> torch.Tensor:
-        """Resolve (batch row, logical page) pairs, used for per-page writes."""
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Resolve (batch row, logical page) pairs, used for per-page writes.
+
+        Returns the physical blocks plus a mask of the pairs that own a block.
+        The allocator keeps the pages it plans to reuse (the request's tail page
+        is always among them) and leaves the rest unallocated, so a checkpoint
+        may legitimately have no home -- GDN's store_ssm_state_to_block_map
+        kernel skips those positions the same way.
+        """
         table = cls._resolve_block_table(attention_inputs, tag)
         if (
             rows.dim() != 1
@@ -676,9 +686,10 @@ class Qwen4ExpModel(Qwen35Model):
             raise RuntimeError(
                 f"PLE cache {tag!r} logical page exceeds its block table"
             )
-        return cls._check_physical_blocks(tag, table[rows_l, pages_l], pool_rows).to(
-            device=device
-        )
+        blocks = table[rows_l, pages_l]
+        if bool((blocks >= pool_rows).any().item()):
+            raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
+        return blocks.to(device=device, dtype=torch.long), (blocks > 0).to(device=device)
 
     def _validate_ple_mode(
         self,
@@ -1238,7 +1249,7 @@ class Qwen4ExpModel(Qwen35Model):
                 offset += length
             write_rows_t = torch.tensor(write_rows, dtype=torch.long)
             write_pages_t = torch.tensor(write_pages, dtype=torch.long)
-            write_state_blocks = self._physical_blocks_for_pairs(
+            write_state_blocks, state_writable = self._physical_blocks_for_pairs(
                 state_inputs,
                 PLE_STATE_TAG,
                 write_rows_t,
@@ -1246,7 +1257,7 @@ class Qwen4ExpModel(Qwen35Model):
                 int(state_pool.shape[0]),
                 state_pool.device,
             )
-            write_ctx_blocks = self._physical_blocks_for_pairs(
+            write_ctx_blocks, ctx_writable = self._physical_blocks_for_pairs(
                 ctx_inputs,
                 PLE_NGRAM_CTX_TAG,
                 write_rows_t,
@@ -1254,11 +1265,34 @@ class Qwen4ExpModel(Qwen35Model):
                 int(ctx_pool.shape[0]),
                 ctx_pool.device,
             )
+            # Decode resumes from the page holding each request's last token, so
+            # that page must exist even when the allocator dropped the rest of
+            # the checkpoint chain.
+            terminal_indices = []
+            placed = 0
+            for length in lengths:
+                placed += (length + page_size - 1) // page_size
+                terminal_indices.append(placed - 1)
+            terminal_t = torch.tensor(
+                terminal_indices, dtype=torch.long, device=state_writable.device
+            )
+            if not bool(
+                (state_writable[terminal_t] & ctx_writable[terminal_t]).all().item()
+            ):
+                raise RuntimeError(
+                    "qwen4_exp PLE terminal page is unallocated: decode resumes "
+                    "from its checkpoint"
+                )
+            writable = state_writable & ctx_writable
             state_pool.index_copy_(
-                0, write_state_blocks, torch.stack(write_states).to(state_pool.dtype)
+                0,
+                write_state_blocks[writable],
+                torch.stack(write_states)[writable].to(state_pool.dtype),
             )
             ctx_pool.index_copy_(
-                0, write_ctx_blocks, torch.stack(write_contexts).to(ctx_pool.dtype)
+                0,
+                write_ctx_blocks[writable],
+                torch.stack(write_contexts)[writable].to(ctx_pool.dtype),
             )
             return hyper_states + torch.cat(outputs, dim=0)
 
@@ -1415,25 +1449,31 @@ class Qwen4ExpModel(Qwen35Model):
         )
 
     def _ple_input_ids(self, inputs: PyModelInputs) -> torch.Tensor:
-        """Return text ids while rejecting unverified multimodal PLE semantics."""
+        """Text ids for the n-gram hash; non-text positions hash as EOS.
+
+        Mirrors upstream: ``ple_input_ids = where(text_mask, ids, eos_token_id)``,
+        so image-placeholder positions contribute the EOS id to the n-gram
+        history instead of an arbitrary vision token id.
+        """
         input_ids = inputs.input_ids
         embedding_inputs = getattr(inputs, "embedding_inputs", None)
         text_mask = getattr(embedding_inputs, "text_tokens_mask", None)
-        if text_mask is not None and text_mask.numel():
-            if text_mask.numel() != input_ids.numel():
-                raise RuntimeError(
-                    "qwen4_exp PLE text token mask size does not match input ids: "
-                    f"{text_mask.numel()} != {input_ids.numel()}"
-                )
+        if text_mask is None or not text_mask.numel():
+            return input_ids
+        if text_mask.numel() != input_ids.numel():
             raise RuntimeError(
-                "qwen4_exp PLE does not support multimodal inputs yet; "
-                "text_tokens_mask must be absent"
+                "qwen4_exp PLE text token mask size does not match input ids: "
+                f"{text_mask.numel()} != {input_ids.numel()}"
             )
-        multimodal_inputs = getattr(inputs, "multimodal_inputs", None)
-        features = getattr(multimodal_inputs, "multimodal_features", None)
-        if features is not None and len(features):
-            raise RuntimeError("qwen4_exp PLE does not support multimodal inputs yet")
-        return input_ids
+        text_flags = text_mask.bool()
+        if bool(text_flags.all().item()):
+            return input_ids
+        eos = self.config.special_tokens.eos_token_id
+        if eos is None:
+            raise RuntimeError(
+                "qwen4_exp PLE needs an eos token id to hash multimodal positions"
+            )
+        return torch.where(text_flags, input_ids, torch.full_like(input_ids, eos))
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         if (

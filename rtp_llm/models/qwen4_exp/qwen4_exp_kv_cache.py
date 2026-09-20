@@ -25,6 +25,7 @@ from typing import List
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.ops import (
+    CacheGroupType,
     CacheReusePolicyDesc,
     CacheTailPolicyDesc,
     DataType,
@@ -38,6 +39,26 @@ PLE_STATE_TAG = "ple_conv_state"
 PLE_NGRAM_CTX_TAG = "ple_ngram_ctx"
 INDEXER_KV_TAG = "indexer_kv"
 INDEXER_STATE_TAG = "indexer_state"
+
+
+def _full_group_state_desc(desc: KVCacheSpecDesc) -> KVCacheSpecDesc:
+    """Materialize a paged state chain for the whole request length.
+
+    These regions hold page checkpoints, not a rolling per-block payload: the
+    model resumes from the page holding the last processed token. An
+    ``OPAQUE_STATE`` desc defaults to the SWA group, whose allocation keeps only
+    the tail page(s) once the request disables prefix reuse, which would drop
+    the checkpoint a page-crossing decode needs. FULL groups materialize every
+    block the request spans and never release them mid-request.
+    """
+    desc.group_type = CacheGroupType.FULL
+    reuse = CacheReusePolicyDesc()
+    reuse.enable_prefix_reuse = True
+    desc.reuse = reuse
+    tail = CacheTailPolicyDesc()
+    tail.active_tail_blocks = 0
+    desc.tail = tail
+    return desc
 
 
 def ple_short_conv_state_len(ple_conv_kernel_size: int, ngram_size: int) -> int:
@@ -71,17 +92,7 @@ def ple_state_desc(
     desc.entry_elems = hc_hidden_size
     desc.entry_count_mode = OpaqueBlockEntryCountMode.EXPLICIT
     desc.explicit_entry_count = state_len
-    reuse = CacheReusePolicyDesc()
-    # Page-level state chain: the model resumes from the page holding the last
-    # prefix token ((prefix-1)//page_size) for page-aligned prefixes. Opaque
-    # state descs default to the SWA group policy, which keeps only tail
-    # blocks; this region materializes every page, so clear that tail policy.
-    reuse.enable_prefix_reuse = True
-    desc.reuse = reuse
-    tail = CacheTailPolicyDesc()
-    tail.active_tail_blocks = 0
-    desc.tail = tail
-    return desc
+    return _full_group_state_desc(desc)
 
 
 def ple_ngram_ctx_desc(ngram_size: int) -> KVCacheSpecDesc:
@@ -103,15 +114,8 @@ def ple_ngram_ctx_desc(ngram_size: int) -> KVCacheSpecDesc:
     desc.entry_elems = 1
     desc.entry_count_mode = OpaqueBlockEntryCountMode.EXPLICIT
     desc.explicit_entry_count = context_len
-    reuse = CacheReusePolicyDesc()
-    # Page-level context chain, restored together with the conv state above;
-    # same SWA tail-policy override as the state region.
-    reuse.enable_prefix_reuse = True
-    desc.reuse = reuse
-    tail = CacheTailPolicyDesc()
-    tail.active_tail_blocks = 0
-    desc.tail = tail
-    return desc
+    # Page-level context chain, restored together with the conv state above.
+    return _full_group_state_desc(desc)
 
 
 def indexer_kv_desc(indexer_head_dim: int, compress_ratio: int) -> KVCacheSpecDesc:
@@ -178,16 +182,9 @@ def indexer_state_desc(indexer_head_dim: int, compress_ratio: int) -> KVCacheSpe
     desc.entry_count_mode = OpaqueBlockEntryCountMode.STATE_RING
     desc.compression_ratio = compress_ratio
     desc.state_ring_overlap = 1
-    reuse = CacheReusePolicyDesc()
     # Page-level record like its sibling opaque-state regions: every page holds
-    # the ring content as of that page's end. Block-tree reuse requires one
-    # active-tail policy across the shared SWA coordinate family.
-    reuse.enable_prefix_reuse = True
-    desc.reuse = reuse
-    tail = CacheTailPolicyDesc()
-    tail.active_tail_blocks = 0
-    desc.tail = tail
-    return desc
+    # the ring content as of that page's end.
+    return _full_group_state_desc(desc)
 
 
 def build_qwen4_exp_kv_cache_spec_descs(
