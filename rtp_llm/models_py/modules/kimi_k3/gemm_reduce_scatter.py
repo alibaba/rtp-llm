@@ -1,4 +1,7 @@
-"""Fused GEMM/RS for Prefill M >= 512; NCCL for smaller M, Decode and TP16."""
+"""Prefill M >= 512 uses fused GEMM/RS; small Prefill/Decode use Push RS.
+
+Standalone RS falls back to NCCL when the push workspace is unavailable.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +12,7 @@ from typing import Any, Optional
 import torch
 import torch.distributed as dist
 
+from rtp_llm.models_py.distributed.push_reduce_scatter import create_push_reduce_scatter
 from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
     QuantizedActivation,
 )
@@ -29,6 +33,7 @@ class _GemmReduceScatterState:
     workspace: Optional[Any] = None
     fp8: bool = False
     use_fused: bool = True
+    push: Optional[Any] = None
 
 
 _STATES: dict[tuple[dist.ProcessGroup, int], _GemmReduceScatterState] = {}
@@ -73,12 +78,17 @@ def configure_gemm_reduce_scatter(
             "GEMM/RS capacity must be positive with max_m divisible by TP size"
         )
     if not use_fused:
-        # No fused workspace: both GEMM dtypes share this NCCL state.
+        # Decode: both GEMM dtypes share one push workspace (NCCL fallback).
+        push = create_push_reduce_scatter(group, device, max_m=max_m, n=n)
         _STATES[key] = _GemmReduceScatterState(
-            group, device, world_size, max_m, n, fp8=True, use_fused=False
+            group, device, world_size, max_m, n, fp8=True, use_fused=False, push=push
         )
         logging.info(
-            "[K3_GEMM_REDUCE_SCATTER] nccl TP%d max_m=%d n=%d", world_size, max_m, n
+            "[K3_GEMM_REDUCE_SCATTER] %s TP%d max_m=%d n=%d",
+            "push" if push is not None else "nccl",
+            world_size,
+            max_m,
+            n,
         )
         return True
     deep_gemm = None
@@ -110,8 +120,11 @@ def configure_gemm_reduce_scatter(
             failure_reason or "at least one TP rank cannot use DeepGEMM GEMM/RS"
         )
     workspace = deep_gemm.GemmRSBuffer(group, max_m=max_m, n=n, device=device)
+    push = create_push_reduce_scatter(
+        group, device, max_m=min(max_m, _MIN_FUSED_M), n=n
+    )
     _STATES[key] = _GemmReduceScatterState(
-        group, device, world_size, max_m, n, deep_gemm, workspace, fp8=fp8
+        group, device, world_size, max_m, n, deep_gemm, workspace, fp8=fp8, push=push
     )
     logging.info(
         "[K3_GEMM_REDUCE_SCATTER] fused TP%d max_m=%d n=%d workspace=%.3f GiB",
@@ -174,13 +187,13 @@ def gemm_reduce_scatter(
     if not isinstance(weight, torch.Tensor):
         # The public API has no bias epilogue or disable_ue8m0_cast option.
         # K3's Blackwell weights use packed UE8M0; preserve other projections'
-        # existing semantics via their own forward method and NCCL.
+        # existing semantics via their own forward method and standalone RS.
         if (
             not use_fused
             or not weight.scale_ue8m0
             or getattr(weight, "bias", None) is not None
         ):
-            return _fp8_nccl_gemm_reduce_scatter(x, weight, state, physical_m)
+            return _fp8_separate_gemm_reduce_scatter(x, weight, state, physical_m)
         return _fp8_fused_gemm_reduce_scatter(x, weight, state, physical_m)
     if (
         weight.ndim != 2
@@ -217,12 +230,10 @@ def gemm_reduce_scatter(
         return output
     if not use_fused:
         with torch.profiler.record_function(
-            "RTP::kimi_k3.gemm_reduce_scatter.bf16_nccl"
+            "RTP::kimi_k3.gemm_reduce_scatter.bf16_separate"
         ):
             partial = torch.mm(x, weight)
-            dist.reduce_scatter_tensor(
-                output, partial, op=dist.ReduceOp.SUM, group=state.group
-            )
+            _reduce_scatter_partial(partial, output, state, m)
         return output
     assert state.deep_gemm is not None and state.workspace is not None
     with torch.profiler.record_function("RTP::kimi_k3.gemm_reduce_scatter.fused"):
@@ -236,7 +247,41 @@ def gemm_reduce_scatter(
     return output
 
 
-__all__ = ["configure_gemm_reduce_scatter", "gemm_reduce_scatter"]
+def _reduce_scatter_partial(partial, output, state, m):
+    partial = partial.contiguous()
+    use_push = state.push is not None and (not state.use_fused or m < _MIN_FUSED_M)
+    if use_push and partial.dtype == torch.bfloat16:
+        # Storage offsets can differ across ranks. Repair alignment locally;
+        # never let a rank-local address select a different collective backend.
+        if partial.data_ptr() % 16:
+            partial = partial.clone()
+        with torch.profiler.record_function("RTP::kimi_k3.reduce_scatter.push"):
+            state.push.reduce_scatter(partial, output)
+    else:
+        dist.reduce_scatter_tensor(
+            output, partial, op=dist.ReduceOp.SUM, group=state.group
+        )
+
+
+def reduce_scatter(partial: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
+    """K3 dense MLP RS, sharing the projection's initialized workspace/policy."""
+    world = int(group.size())
+    if world == 1:
+        return partial
+    if partial.ndim != 2 or partial.shape[0] % world:
+        raise ValueError("K3 RS requires [M,N] with M divisible by TP size")
+    state = _STATES.get(collective_gemm_state_key(group, partial.device))
+    if state is None:
+        raise RuntimeError("GEMM/RS must be initialized before execution")
+    if partial.shape[0] > state.max_m or partial.shape[1] != state.n:
+        raise ValueError("K3 RS input exceeds or does not match configured capacity")
+    output = partial.new_empty((partial.shape[0] // world, state.n))
+    if partial.shape[0]:
+        _reduce_scatter_partial(partial, output, state, partial.shape[0])
+    return output
+
+
+__all__ = ["configure_gemm_reduce_scatter", "gemm_reduce_scatter", "reduce_scatter"]
 
 
 def _fp8_fused_gemm_reduce_scatter(x, projection, state, physical_m):
@@ -271,8 +316,9 @@ def _fp8_fused_gemm_reduce_scatter(x, projection, state, physical_m):
     return output
 
 
-def _fp8_nccl_gemm_reduce_scatter(x, projection, state, physical_m):
-    """Compute one FP8 GEMM, then sum/scatter its BF16 output with NCCL."""
+def _fp8_separate_gemm_reduce_scatter(x, projection, state, physical_m):
+    """Compute one FP8 GEMM, then sum/scatter its BF16 output with push/NCCL."""
+    m = x.shape[0]
     if not state.fp8 or projection.K != x.shape[1] or projection.N != state.n:
         raise ValueError("FP8 RS projection does not match the configured workspace")
     if physical_m > state.max_m:
@@ -290,12 +336,12 @@ def _fp8_nccl_gemm_reduce_scatter(x, projection, state, physical_m):
         x = padded
     else:
         x = x.contiguous()
-    with torch.profiler.record_function("RTP::kimi_k3.gemm_reduce_scatter.fp8_nccl"):
+    with torch.profiler.record_function(
+        "RTP::kimi_k3.gemm_reduce_scatter.fp8_separate"
+    ):
         if isinstance(x, QuantizedActivation):
             partial = projection.forward_quantized(x.values, x.scales)
         else:
             partial = projection(x)
-        dist.reduce_scatter_tensor(
-            output, partial, op=dist.ReduceOp.SUM, group=state.group
-        )
+        _reduce_scatter_partial(partial, output, state, m)
     return output

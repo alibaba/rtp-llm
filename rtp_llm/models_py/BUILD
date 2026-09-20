@@ -59,6 +59,7 @@ py_library(
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/distributed:sequence_parallel",
         "//rtp_llm/models_py/distributed:user_buffers",
+        "//rtp_llm/models_py/distributed:push_reduce_scatter",
     ] + select({
         # cuda13 lock omits flashinfer-python and deep_ep → only deep_gemm.
         "@//:using_cuda13_x86": ["deep_gemm"],

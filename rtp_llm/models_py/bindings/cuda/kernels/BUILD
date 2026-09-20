@@ -28,6 +28,18 @@ cuda_deps = [
 ]
 
 cc_library(
+    name = "push_reduce_scatter",
+    srcs = ["push_reduce_scatter.cu"],
+    hdrs = ["push_reduce_scatter.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts() + sm103_cuda_copts,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_utils_common",
     hdrs = [
         "vec_dtypes.cuh",

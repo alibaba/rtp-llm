@@ -28,7 +28,6 @@ from rtp_llm.models_py.distributed.collective_torch import (
     all_gather_trim,
     barrier,
     get_process_group,
-    reduce_scatter,
 )
 from rtp_llm.models_py.distributed.sequence_parallel import (
     SequenceParallelLayout,
@@ -63,6 +62,7 @@ from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import KimiK3ChunkSession
 from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import (
     configure_gemm_reduce_scatter,
     gemm_reduce_scatter,
+    reduce_scatter,
 )
 from rtp_llm.models_py.modules.kimi_k3.kda import KimiK3KDA
 from rtp_llm.models_py.triton_kernels.common.activation import SituAndMul
@@ -303,7 +303,7 @@ class KimiK3DecoderLayer(nn.Module):
             sequence_parallel=False,
             reduce_output=False,
         )
-        return reduce_scatter(local_partial, group=Group.TP)
+        return reduce_scatter(local_partial, get_process_group(Group.TP))
 
     def forward(
         self,
@@ -651,8 +651,8 @@ class KimiK3Model(GptModelBase):
             getattr(self.config, "k3_attention_quant_config", None) is not None
         )
         fp8_kwargs = {"fp8": True} if fp8_attention else {}
-        # Decode uses separate NCCL collectives and GEMMs for both warmup and
-        # CUDA Graph execution. Prefill retains its fused overlap backend.
+        # Decode uses separate GEMMs with NCCL AG and push/NCCL RS for
+        # warmup and CUDA Graph execution. Prefill retains eligible fusion.
         if init_resource.is_decode_role:
             fp8_kwargs["use_fused"] = False
         if not getattr(self, "_all_gather_gemm_configured", False):

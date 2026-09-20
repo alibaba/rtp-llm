@@ -11,6 +11,16 @@ import torch
 
 from rtp_llm.ops import KVCache, PyCacheStoreInputs
 
+def push_reduce_scatter(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    peers: list[torch.Tensor],
+    counters: torch.Tensor,
+    rank: int,
+    blocks: int,
+    threads: int,
+) -> None: ...
+
 __all__ = [
     "FlashInferAttnParams",
     "FlashInferOp",

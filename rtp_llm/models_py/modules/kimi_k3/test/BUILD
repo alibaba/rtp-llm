@@ -20,3 +20,22 @@ py_test(
     ],
     timeout = "short",
 )
+
+py_test(
+    name = "push_reduce_scatter_test",
+    srcs = ["test_push_reduce_scatter.py"],
+    main = "test_push_reduce_scatter.py",
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["manual", "B300"],
+    exec_properties = {"gpu": "B300"},
+)
+
+py_test(
+    name = "push_reduce_scatter_gpu_test",
+    srcs = ["test_push_reduce_scatter_gpu.py"],
+    main = "test_push_reduce_scatter_gpu.py",
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    timeout = "long",
+    tags = ["manual", "B300"],
+    exec_properties = {"gpu": "B300", "gpu_count": "8"},
+)

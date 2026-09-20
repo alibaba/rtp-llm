@@ -44,3 +44,12 @@ py_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+py_library(
+    name = "push_reduce_scatter",
+    srcs = ["push_reduce_scatter.py"],
+    deps = [
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)

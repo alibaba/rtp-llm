@@ -232,7 +232,7 @@ class KimiK3Fp8NcclTest(unittest.TestCase):
                 with patch.dict(rs._STATES, {(group, 0): state}), patch.object(
                     rs, "_fp8_fused_gemm_reduce_scatter", return_value=expected
                 ) as fused, patch.object(
-                    rs, "_fp8_nccl_gemm_reduce_scatter", return_value=expected
+                    rs, "_fp8_separate_gemm_reduce_scatter", return_value=expected
                 ) as nccl:
                     self.assertIs(
                         rs.gemm_reduce_scatter(
@@ -393,7 +393,7 @@ class KimiK3Fp8NcclTest(unittest.TestCase):
                 ), patch.dict(
                     rs._STATES, {(group, 0): state}
                 ), patch.object(
-                    rs, "_fp8_nccl_gemm_reduce_scatter", return_value=expected
+                    rs, "_fp8_separate_gemm_reduce_scatter", return_value=expected
                 ) as nccl, patch.object(
                     rs, "_fp8_fused_gemm_reduce_scatter"
                 ) as fused:
@@ -451,7 +451,13 @@ class KimiK3Fp8NcclTest(unittest.TestCase):
                     projection = Mock(wraps=reference, K=k, N=n)
                     group = object()
                     state = SimpleNamespace(
-                        fp8=True, world_size=size, max_m=physical_m, n=n, group=group
+                        fp8=True,
+                        world_size=size,
+                        max_m=physical_m,
+                        n=n,
+                        group=group,
+                        push=None,
+                        use_fused=False,
                     )
 
                     def scatter(output, partial, *, op, group):
@@ -469,7 +475,7 @@ class KimiK3Fp8NcclTest(unittest.TestCase):
                     with patch.object(
                         rs.dist, "reduce_scatter_tensor", side_effect=scatter
                     ) as nccl:
-                        result = rs._fp8_nccl_gemm_reduce_scatter(
+                        result = rs._fp8_separate_gemm_reduce_scatter(
                             x, projection, state, physical_m
                         )
                     nccl.assert_called_once()
@@ -584,7 +590,7 @@ class KimiK3Fp8NcclTest(unittest.TestCase):
         p = ReferenceProjection(torch.ones(128, 8))
         state = SimpleNamespace(fp8=True, world_size=16, max_m=16, n=8, group=object())
         with patch.object(rs.dist, "reduce_scatter_tensor") as scatter:
-            result = rs._fp8_nccl_gemm_reduce_scatter(x, p, state, 0)
+            result = rs._fp8_separate_gemm_reduce_scatter(x, p, state, 0)
             self.assertEqual(tuple(result.shape), (0, 8))
             scatter.assert_not_called()
 

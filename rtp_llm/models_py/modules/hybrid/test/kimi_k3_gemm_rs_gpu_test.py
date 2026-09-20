@@ -133,6 +133,7 @@ def worker(rank, size, port):
                     return rs.gemm_reduce_scatter(payload, weight, pg, pad_rows=True)
 
                 fused = prefill and m >= 512
+                push = size == 8 and m > 0 and not fused
                 backend = rs._STATES[key].deep_gemm
                 # Spy on real kernels/collectives to prove selection, not just
                 # numerical equivalence between the two possible paths.
@@ -150,11 +151,11 @@ def worker(rank, size, port):
                             assert fp8.call_count == int(fused and precision != "bf16")
                     else:
                         actual = run()
-                    assert nccl.call_count == int(m > 0 and not fused)
+                    assert nccl.call_count == int(m > 0 and not fused and not push)
                 payload = (
                     quantized_input(x, projection) if precision == "prequantized" else x
                 )
-                expected = reference(payload, weight, pg, fused=fused)
+                expected = reference(payload, weight, pg, fused=fused or push)
                 assert_numerics(actual, expected)
                 if m in (511, 512, 513):
                     # Move the shared workspace onto the capture stream during
@@ -178,14 +179,15 @@ def worker(rank, size, port):
                             else x
                         )
                         assert_numerics(
-                            graph_output, reference(payload, weight, pg, fused=fused)
+                            graph_output,
+                            reference(payload, weight, pg, fused=fused or push),
                         )
                     torch.cuda.synchronize()
                     graph.reset()
                     del graph, graph_output
                 if rank == 0:
                     print(
-                        f"PASS TP{size} prefill={prefill} M={m} K={k} N={n} {precision} fused={fused}",
+                        f"PASS TP{size} prefill={prefill} M={m} K={k} N={n} {precision} fused={fused} push={push}",
                         flush=True,
                     )
         if prefill:
