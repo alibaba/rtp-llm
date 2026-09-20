@@ -4,14 +4,16 @@ from types import SimpleNamespace
 from unittest import mock
 
 import torch
+
 import rtp_llm.models_py.modules.kimi_k3.ktp_step as ktp_step
 import rtp_llm.models_py.modules.kimi_k3.projection_ktp as projection_ktp
-
-from rtp_llm.ops.compute_ops import LinearReplayInputs, PyAttentionInputs
 from rtp_llm.model_loader.linear_attn_weight import (
     LinearAttnConfig,
     split_kda_dim1_parallel,
     split_kda_qkvg_fa_beta_parallel,
+)
+from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
+    QuantizedActivation,
 )
 from rtp_llm.models_py.modules.kimi_k3.ktp_step import (
     build_ktp_step_plan,
@@ -25,9 +27,7 @@ from rtp_llm.models_py.modules.kimi_k3.projection_ktp import (
     resolve_projection_local_heads,
     validate_projection_ktp_sp_type,
 )
-from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
-    QuantizedActivation,
-)
+from rtp_llm.ops.compute_ops import LinearReplayInputs, PyAttentionInputs
 
 
 class KtpProjectionWorkspaceTest(unittest.TestCase):
@@ -71,10 +71,13 @@ class KtpProjectionWorkspaceTest(unittest.TestCase):
             return output
 
         with mock.patch.object(
-            projection_ktp, "_all_gather_projection_input",
+            projection_ktp,
+            "_all_gather_projection_input",
             side_effect=lambda x, **kw: x.repeat(8, 1),
         ), mock.patch.object(projection_ktp, "all_to_all_single", side_effect=exchange):
-            expected = projection_ktp.project_kda_inputs_ktp(hidden, fused, forget, **kwargs)
+            expected = projection_ktp.project_kda_inputs_ktp(
+                hidden, fused, forget, **kwargs
+            )
             for _ in range(2):
                 actual = projection_ktp.project_kda_inputs_ktp(
                     hidden, fused, forget, workspace=workspace, **kwargs
@@ -92,8 +95,11 @@ class KtpProjectionWorkspaceTest(unittest.TestCase):
             received = workspace.get(batch)[1]
             received.copy_(torch.arange(received.numel()).reshape(received.shape))
             result = reassemble_ktp_projection_payload(
-                received, ktp_size=8, physical_batch=batch,
-                local_projection_size=8, local_heads=2,
+                received,
+                ktp_size=8,
+                physical_batch=batch,
+                local_projection_size=8,
+                local_heads=2,
             )
             before = {name: value.clone() for name, value in vars(result).items()}
             received.zero_()
@@ -122,14 +128,22 @@ class KtpStepPlanTest(unittest.TestCase):
         for tp, dp in ((4, 2), (4, 4), (8, 1), (16, 1)):
             with self.subTest(tp=tp, dp=dp):
                 validate_mega_moe_topology(
-                    attention_tp_size=tp, dp_size=dp, ktp_size=1,
-                    ep_size=tp * dp, world_size=tp * dp, label="test",
+                    attention_tp_size=tp,
+                    dp_size=dp,
+                    ktp_size=1,
+                    ep_size=tp * dp,
+                    world_size=tp * dp,
+                    label="test",
                 )
         for tp, dp, ep, world in ((8, 2, 8, 8), (4, 2, 4, 8), (0, 2, 8, 8)):
             with self.assertRaises(RuntimeError):
                 validate_mega_moe_topology(
-                    attention_tp_size=tp, dp_size=dp, ktp_size=1,
-                    ep_size=ep, world_size=world, label="test",
+                    attention_tp_size=tp,
+                    dp_size=dp,
+                    ktp_size=1,
+                    ep_size=ep,
+                    world_size=world,
+                    label="test",
                 )
 
     def test_mega_moe_rejects_ambiguous_tp1_ep_layout(self):
@@ -236,9 +250,7 @@ class KtpStepPlanTest(unittest.TestCase):
         def fake_all_gather(tensor, *, group):
             captured["device"] = tensor.device.type
             captured["group"] = group
-            return torch.tensor(
-                [[1, 1, 0, 1], [3, 1, 0, 1]], dtype=torch.int32
-            )
+            return torch.tensor([[1, 1, 0, 1], [3, 1, 0, 1]], dtype=torch.int32)
 
         with mock.patch.object(ktp_step, "all_gather", side_effect=fake_all_gather):
             plan = ktp_step.coordinate_ktp_step(
@@ -416,8 +428,10 @@ class KtpStepPlanTest(unittest.TestCase):
 
 class KtpProjectionLayoutTest(unittest.TestCase):
     def test_fp8_projection_input_gathers_values_and_repacks_scales(self):
-        local_values = torch.arange(256, dtype=torch.uint8).reshape(2, 128).view(
-            torch.float8_e4m3fn
+        local_values = (
+            torch.arange(256, dtype=torch.uint8)
+            .reshape(2, 128)
+            .view(torch.float8_e4m3fn)
         )
         local_scales = torch.tensor([[101, 102, 0, 0]], dtype=torch.int32)
         local = QuantizedActivation(local_values, local_scales)
@@ -441,8 +455,10 @@ class KtpProjectionLayoutTest(unittest.TestCase):
         self.assertEqual(gather.call_count, 2)
 
     def test_fp8_projection_input_removes_each_ranks_local_scale_padding(self):
-        local_values = torch.arange(128, dtype=torch.uint8).reshape(1, 128).view(
-            torch.float8_e4m3fn
+        local_values = (
+            torch.arange(128, dtype=torch.uint8)
+            .reshape(1, 128)
+            .view(torch.float8_e4m3fn)
         )
         local = QuantizedActivation(
             local_values, torch.tensor([[11, 0, 0, 0]], dtype=torch.int32)
@@ -519,9 +535,7 @@ class KtpProjectionLayoutTest(unittest.TestCase):
             (1, 16, 6),
         )
         for attention_tp_size, ktp_size, expected_heads in cases:
-            with self.subTest(
-                attention_tp_size=attention_tp_size, ktp_size=ktp_size
-            ):
+            with self.subTest(attention_tp_size=attention_tp_size, ktp_size=ktp_size):
                 self.assertEqual(
                     resolve_projection_local_heads(
                         total_heads=96,
@@ -549,12 +563,13 @@ class KtpProjectionLayoutTest(unittest.TestCase):
         sends = []
         local_projection = total_heads // ktp_size * head_dim
         for rank in range(ktp_size):
-            q, k, v, g = torch.split(
-                full_qkvg, [total_heads * head_dim] * 4, dim=1
-            )
+            q, k, v, g = torch.split(full_qkvg, [total_heads * head_dim] * 4, dim=1)
             begin = rank * local_projection
             local_fused = torch.cat(
-                tuple(section.narrow(1, begin, local_projection) for section in (q, k, v, g))
+                tuple(
+                    section.narrow(1, begin, local_projection)
+                    for section in (q, k, v, g)
+                )
                 + (f_a, beta),
                 dim=1,
             )
@@ -627,7 +642,9 @@ class KtpProjectionLayoutTest(unittest.TestCase):
             local_f_b = split_kda_dim1_parallel(
                 f_b, parallel_size=ktp_size, parallel_rank=ktp_size - 1
             )
-            self.assertEqual(tuple(local_f_b.shape), (forget_rank, expected_heads * 128))
+            self.assertEqual(
+                tuple(local_f_b.shape), (forget_rank, expected_heads * 128)
+            )
 
     def test_source_head_shards_reassemble_for_each_owner(self):
         ktp_size = 2
@@ -671,7 +688,8 @@ class KtpProjectionLayoutTest(unittest.TestCase):
 class MixedTpDpInputPreparationTest(unittest.TestCase):
     def test_target_verify_keeps_tp_rows_and_live_mask_in_each_dp(self):
         from rtp_llm.models_py.modules.kimi_k3.input_preparation import (
-            KimiK3ExecutionSpec, prepare_round,
+            KimiK3ExecutionSpec,
+            prepare_round,
         )
         from rtp_llm.models_py.modules.kimi_k3.parallel_mode import KimiK3ParallelMode
 
@@ -680,26 +698,41 @@ class MixedTpDpInputPreparationTest(unittest.TestCase):
                 for logical in (0, 1, 3, 4):
                     with self.subTest(dp=dp, rank=rank, logical=logical):
                         model = SimpleNamespace(
-                            kv_cache=object(), layers=[], _layer_group_ids=(),
+                            kv_cache=object(),
+                            layers=[],
+                            _layer_group_ids=(),
                             parallel_mode=KimiK3ParallelMode.TP_SP,
                             parallelism_config=SimpleNamespace(
-                                tp_size=4, tp_rank=rank, dp_size=2, dp_rank=dp,
-                                ktp_size=1, ep_size=8, world_size=8,
+                                tp_size=4,
+                                tp_rank=rank,
+                                dp_size=2,
+                                dp_rank=dp,
+                                ktp_size=1,
+                                ep_size=8,
+                                world_size=8,
                             ),
-                            execution_spec=KimiK3ExecutionSpec(4, rank, 0, "mtp", (), frozenset(), ()),
-                            num_attn_res_blocks=1, config=SimpleNamespace(hidden_size=4),
+                            execution_spec=KimiK3ExecutionSpec(
+                                4, rank, 0, "mtp", (), frozenset(), ()
+                            ),
+                            num_attn_res_blocks=1,
+                            config=SimpleNamespace(hidden_size=4),
                             embedding_weight=torch.empty(1, 4),
                         )
                         mask = torch.zeros(16, dtype=torch.int32)
-                        mask[:logical * 4] = 1
+                        mask[: logical * 4] = 1
                         inputs = SimpleNamespace(
                             input_ids=torch.arange(16) + dp * 1000,
-                            multimodal_inputs=None, ktp_valid_row_mask=mask,
+                            multimodal_inputs=None,
+                            ktp_valid_row_mask=mask,
                             attention_inputs=SimpleNamespace(
-                                is_prefill=False, is_target_verify=True, is_cuda_graph=True,
+                                is_prefill=False,
+                                is_target_verify=True,
+                                is_cuda_graph=True,
                                 input_lengths=torch.ones(4, dtype=torch.int32),
-                                logical_request_count=logical, physical_request_count=4,
-                                logical_token_count=logical * 4, physical_token_count=16,
+                                logical_request_count=logical,
+                                physical_request_count=4,
+                                logical_token_count=logical * 4,
+                                physical_token_count=16,
                                 decode_cu_seqlens_d=torch.arange(17, dtype=torch.int32),
                             ),
                         )
@@ -711,13 +744,21 @@ class MixedTpDpInputPreparationTest(unittest.TestCase):
                         layout = prepared.attn_meta.sp_layout
                         self.assertEqual(layout.tokens.local_tokens, 4)
                         self.assertEqual(layout.tokens.local_start, rank * 4)
-                        self.assertEqual(layout.tokens.local_valid_tokens, 4 if rank < logical else 0)
-                        torch.testing.assert_close(prepared.embedding_ids, inputs.input_ids)
+                        self.assertEqual(
+                            layout.tokens.local_valid_tokens, 4 if rank < logical else 0
+                        )
+                        torch.testing.assert_close(
+                            prepared.embedding_ids, inputs.input_ids
+                        )
                         local_mask = prepared.attn_meta.valid_token_mask
-                        self.assertEqual(local_mask.data_ptr(), mask[rank * 4:].data_ptr())
+                        self.assertEqual(
+                            local_mask.data_ptr(), mask[rank * 4 :].data_ptr()
+                        )
                         # CUDA Graph metadata must retain the live mask view.
                         mask.fill_(1)
-                        torch.testing.assert_close(local_mask, torch.ones(4, dtype=torch.int32))
+                        torch.testing.assert_close(
+                            local_mask, torch.ones(4, dtype=torch.int32)
+                        )
 
 
 class PrefillAttentionWorkspaceLifetimeTest(unittest.TestCase):
@@ -749,45 +790,64 @@ class PrefillAttentionWorkspaceLifetimeTest(unittest.TestCase):
                         return None
 
                 def project(value, weight):
-                    self.assertIsNotNone(scratch_ref(), "attention output storage freed early")
+                    self.assertIsNotNone(
+                        scratch_ref(), "attention output storage freed early"
+                    )
                     if prefill and not kda:
-                        self.assertIsNone(staging_ref(), "KV scratch still overlaps output projection")
+                        self.assertIsNone(
+                            staging_ref(), "KV scratch still overlaps output projection"
+                        )
                     order.append("projection")
                     return value * 2
 
                 def mlp(value, **kwargs):
                     order.append("mlp")
                     if prefill and not kda:
-                        self.assertIsNone(scratch_ref(), "MLA workspace still overlaps MLP")
+                        self.assertIsNone(
+                            scratch_ref(), "MLA workspace still overlaps MLP"
+                        )
                     else:
                         self.assertIsNotNone(scratch_ref())
                     return torch.zeros_like(value)
 
                 layer = SimpleNamespace(
-                    _previous_blocks=0, _writes_block=False,
+                    _previous_blocks=0,
+                    _writes_block=False,
                     parallel_mode=KimiK3ParallelMode.PROJECTION_KTP,
-                    is_kda=kda, attention_norm=lambda x: x,
-                    self_attn=Attention(), _project_parallel_output=project,
+                    is_kda=kda,
+                    attention_norm=lambda x: x,
+                    self_attn=Attention(),
+                    _project_parallel_output=project,
                     mlp_residual=lambda x, *args, **kwargs: x,
                     mlp_norm=SimpleNamespace(weight=None, variance_epsilon=1e-5),
                     mlp=mlp,
                 )
                 meta = SimpleNamespace(
-                    cu_seqlens=None, mode=None,
-                    sp_layout=SimpleNamespace(tokens=SimpleNamespace(local_valid_tokens=2, local_tokens=2)),
-                    kda_prefill_metadata=None, kda_current_state_registry=None,
+                    cu_seqlens=None,
+                    mode=None,
+                    sp_layout=SimpleNamespace(
+                        tokens=SimpleNamespace(local_valid_tokens=2, local_tokens=2)
+                    ),
+                    kda_prefill_metadata=None,
+                    kda_current_state_registry=None,
                     valid_token_mask=None,
                 )
                 result = KimiK3DecoderLayer.forward(
-                    layer, torch.ones(2, 4), torch.empty(2, 0, 4),
-                    attn_meta=meta, attention_inputs=SimpleNamespace(is_prefill=prefill), fmha_impl=fmha,
+                    layer,
+                    torch.ones(2, 4),
+                    torch.empty(2, 0, 4),
+                    attn_meta=meta,
+                    attention_inputs=SimpleNamespace(is_prefill=prefill),
+                    fmha_impl=fmha,
                 )
                 expected_order = ["attention"]
                 if prefill and not kda:
                     expected_order.append("release")
                 expected_order.append("projection")
                 self.assertEqual(order, expected_order + ["mlp"])
-                torch.testing.assert_close(result.hidden_states, 1 + 2 * torch.arange(8.0).reshape(2, 4))
+                torch.testing.assert_close(
+                    result.hidden_states, 1 + 2 * torch.arange(8.0).reshape(2, 4)
+                )
 
 
 if __name__ == "__main__":

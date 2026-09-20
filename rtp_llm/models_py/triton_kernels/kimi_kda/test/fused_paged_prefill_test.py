@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import sys
 import unittest
+from functools import partial
 from pathlib import Path
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     kimi_kda_load_recurrent_state,
@@ -202,6 +204,79 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
             prefixes=[0, 512, 1024, 0],
             page_size=512,
         )
+
+    def _beta_prefill_call(self, raw_beta, lengths=(3,)):
+        channels, page_size = 96, 64
+        cu_host = torch.tensor([0, *torch.tensor(lengths).cumsum(0)], dtype=torch.int32)
+        pages = (max(lengths) + page_size - 1) // page_size
+        block_map = torch.arange(
+            1, len(lengths) * pages + 1, device="cuda", dtype=torch.int32
+        )
+        return partial(
+            kimi_kda_short_conv_paged_prefill,
+            torch.randn(sum(lengths), channels, dtype=torch.bfloat16, device="cuda"),
+            torch.randn(channels, 4, dtype=torch.bfloat16, device="cuda"),
+            torch.zeros(
+                1 + block_map.numel(), 3, channels, dtype=torch.bfloat16, device="cuda"
+            ),
+            block_map.reshape(len(lengths), pages),
+            torch.zeros(len(lengths), dtype=torch.int32, device="cuda"),
+            cu_host.cuda(),
+            page_size,
+            prepare_kimi_kda_short_conv_metadata(cu_host, raw_beta.device),
+            raw_beta=raw_beta,
+        )
+
+    def test_fused_conv_packs_strided_beta_without_torch_copy(self) -> None:
+        class ObserveOperations(TorchDispatchMode):
+            def __init__(self):
+                self.operations = []
+
+            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                self.operations.append(str(func))
+                return func(*args, **(kwargs or {}))
+
+        for dtype in (torch.bfloat16, torch.float32):
+            raw_beta = torch.randn(70, 7, dtype=dtype, device="cuda")[:, 1:5]
+            expected_beta = raw_beta.to(dtype=torch.bfloat16).contiguous()
+            run = self._beta_prefill_call(raw_beta, lengths=(3, 67))
+            with self.subTest(dtype=dtype):
+                with ObserveOperations() as observed:
+                    result = run()
+                self.assertEqual(len(result), 5)
+                q, k, v, final_state, packed_beta = result
+                self.assertIsNone(final_state)
+                self.assertTrue(all(tensor.is_contiguous() for tensor in (q, k, v)))
+                self.assertTrue(packed_beta.is_contiguous())
+                torch.testing.assert_close(packed_beta, expected_beta, rtol=0, atol=0)
+                self.assertNotIn("aten.clone.default", observed.operations)
+                self.assertNotIn("aten._to_copy.default", observed.operations)
+
+    def test_fused_conv_reuses_compact_beta_without_packing(self) -> None:
+        compact_beta = torch.randn(3, 4, dtype=torch.bfloat16, device="cuda")
+        result = self._beta_prefill_call(compact_beta)()
+        self.assertEqual(len(result), 5)
+        self.assertIs(result[-1], compact_beta)
+
+    def test_fused_conv_packs_beta_with_token_offsets_beyond_int32(self) -> None:
+        token_count = 3
+        heads = 4
+        token_stride = 2**30 + 128
+        storage = torch.empty(2**32 + 1024, dtype=torch.bfloat16, device="cuda")
+        storage[:1024].zero_()
+        raw_beta = storage.as_strided((token_count, heads), (token_stride, 1), 2**31)
+        expected_beta = torch.tensor(
+            [
+                [1.0, 2.0, 3.0, 4.0],
+                [5.0, 6.0, 7.0, 8.0],
+                [9.0, 10.0, 11.0, 12.0],
+            ],
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        raw_beta.copy_(expected_beta)
+        result = self._beta_prefill_call(raw_beta)()
+        torch.testing.assert_close(result[-1], expected_beta, rtol=0, atol=0)
 
     def test_fused_conv_continues_from_temporary_state(self) -> None:
         page_size = 64

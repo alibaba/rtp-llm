@@ -46,7 +46,6 @@ class KimiK3MLAProjectionFusionUnitTest(unittest.TestCase):
         module.attn_tp_rank = 0
         module.parallel_mode = KimiK3ParallelMode.TP_SP
         module.use_output_gate = True
-        module._mla_backend = "kernel"
         module._sp_layout_for_forward = SimpleNamespace(
             tokens=SimpleNamespace(physical_tokens=7)
         )

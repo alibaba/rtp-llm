@@ -71,6 +71,7 @@ class KimiK3MtpContractTest(unittest.TestCase):
                 return torch.zeros_like(value)
 
             layer = SimpleNamespace(
+                _decode_small_kernels=False,
                 enorm=lambda x: x,
                 hnorm=lambda x: x,
                 eh_proj=lambda x: x[:, :4],
@@ -118,7 +119,9 @@ class KimiK3MtpContractTest(unittest.TestCase):
                 model.release_consumed_prefill_hidden()  # idempotent cleanup
             else:
                 self.assertIsNotNone(owner())
-                torch.testing.assert_close(model.get_mtp_target_hidden_states(-1), expected)
+                torch.testing.assert_close(
+                    model.get_mtp_target_hidden_states(-1), expected
+                )
 
     def test_prefill_cleanup_preserves_decode_graph_recurrent_buffer(self):
         model = KimiK3MtpModel.__new__(KimiK3MtpModel)
@@ -271,7 +274,7 @@ class KimiK3MtpContractTest(unittest.TestCase):
             flashmla_dense_prefill as dense,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
-            mla_fp8_kernels,
+            mla_qkv_fp8_quant,
         )
 
         q, k, v = (torch.randn(2, 1, 4, dtype=torch.bfloat16) for _ in range(3))
@@ -287,7 +290,9 @@ class KimiK3MtpContractTest(unittest.TestCase):
             with patch.object(
                 dense, "_workspace", return_value=torch.empty(0)
             ), patch.object(
-                mla_fp8_kernels, "quantize_fp8", side_effect=lambda x, *a, **kw: x
+                mla_qkv_fp8_quant,
+                "quantize_qkv_fp8",
+                side_effect=lambda q, k, v, *a: (q, k, v),
             ) as quantize:
                 op._run_dense_attention(
                     q,
@@ -295,11 +300,12 @@ class KimiK3MtpContractTest(unittest.TestCase):
                     v,
                     qo_indptr=ptr,
                     kv_indptr=ptr,
+                    seq_lens=torch.tensor([2], dtype=torch.int32),
                     max_q_len=2,
                     max_kv_len=2,
                     causal=True,
                 )
-                self.assertEqual(quantize.call_count, 3 if enabled else 0)
+                self.assertEqual(quantize.call_count, int(enabled))
                 self.assertEqual(op.tokenspeed_prefill.call_count, int(enabled))
                 self.assertEqual(
                     op.flash_mla_cuda.dense_prefill_fwd.call_count, int(not enabled)
@@ -434,6 +440,7 @@ class KimiK3MtpContractTest(unittest.TestCase):
         torch.manual_seed(31)
         layer = KimiK3MtpLayer.__new__(KimiK3MtpLayer)
         nn.Module.__init__(layer)
+        layer._decode_small_kernels = False
         for name in ("enorm", "hnorm", "input_norm", "post_norm"):
             setattr(layer, name, nn.RMSNorm(4, eps=1e-5))
         layer.attn_tp_size = 1
@@ -614,7 +621,8 @@ class KimiK3MtpContractTest(unittest.TestCase):
                     return_value=hidden,
                     side_effect=(
                         AssertionError("TP1 must not gather hidden across DP owners")
-                        if tp_size == 1 else None
+                        if tp_size == 1
+                        else None
                     ),
                 ) as gather:
                     output = model.forward(inputs, SimpleNamespace(fmha_params=None))
@@ -624,7 +632,9 @@ class KimiK3MtpContractTest(unittest.TestCase):
                     gather.assert_called_once()
                     torch.testing.assert_close(gather.call_args.args[0], local)
                 torch.testing.assert_close(output, F.rms_norm(hidden, (4,), eps=1e-5))
-                torch.testing.assert_close(model.get_mtp_target_hidden_states(-1), hidden)
+                torch.testing.assert_close(
+                    model.get_mtp_target_hidden_states(-1), hidden
+                )
 
     def test_model_returns_norm_for_logits_but_preserves_recurrent_state(self):
         model = KimiK3MtpModel.__new__(KimiK3MtpModel)
@@ -687,6 +697,7 @@ class KimiK3MtpContractTest(unittest.TestCase):
         torch.manual_seed(31)
         layer = KimiK3MtpLayer.__new__(KimiK3MtpLayer)
         nn.Module.__init__(layer)
+        layer._decode_small_kernels = False
         for name in ("enorm", "hnorm", "input_norm", "post_norm"):
             setattr(layer, name, nn.RMSNorm(4, eps=1e-5))
         layer.attn_tp_size = 8
@@ -700,22 +711,30 @@ class KimiK3MtpContractTest(unittest.TestCase):
             positions = torch.arange(tokens) + 23
             positions[::5] = 0
             masked = torch.where(positions[:, None] == 0, 0, e)
-            x = layer.eh_proj(torch.cat((layer.enorm(masked), layer.hnorm(previous)), -1))
+            x = layer.eh_proj(
+                torch.cat((layer.enorm(masked), layer.hnorm(previous)), -1)
+            )
             a = x + layer.input_norm(x) * 0.3
             expected = a + layer.moe.linear(layer.post_norm(a))
             for rank in range(8):
                 with self.subTest(tokens=tokens, rank=rank):
                     layout = sequence_parallel_layout(
-                        mode="prefill", logical_requests=1, physical_requests=1,
-                        tokens_per_request=0, logical_tokens=tokens,
-                        physical_tokens=physical, world_size=8, rank=rank,
+                        mode="prefill",
+                        logical_requests=1,
+                        physical_requests=1,
+                        tokens_per_request=0,
+                        logical_tokens=tokens,
+                        physical_tokens=physical,
+                        world_size=8,
+                        rank=rank,
                     )
                     model = KimiK3MtpModel.__new__(KimiK3MtpModel)
                     nn.Module.__init__(model)
                     model.hidden_size = 4
                     model._decode_role = False
                     model.parallelism_config = SimpleNamespace(
-                        get_attn_tp_size=lambda: 8, get_attn_tp_rank=lambda: rank,
+                        get_attn_tp_size=lambda: 8,
+                        get_attn_tp_rank=lambda: rank,
                     )
                     model.layer = layer
                     model.kv_cache = None
@@ -725,19 +744,25 @@ class KimiK3MtpContractTest(unittest.TestCase):
                         input_hiddens=F.pad(previous, (0, 0, 0, physical - tokens)),
                         combo_position_ids=F.pad(positions, (0, physical - tokens)),
                         attention_inputs=SimpleNamespace(
-                            is_prefill=True, input_lengths=torch.tensor([tokens]),
-                            logical_request_count=1, physical_request_count=1,
-                            logical_token_count=tokens, physical_token_count=physical,
+                            is_prefill=True,
+                            input_lengths=torch.tensor([tokens]),
+                            logical_request_count=1,
+                            physical_request_count=1,
+                            logical_token_count=tokens,
+                            physical_token_count=physical,
                         ),
                     )
-                    fmha = SimpleNamespace(fmha_params=None, release_forward_workspace=MagicMock())
+                    fmha = SimpleNamespace(
+                        fmha_params=None, release_forward_workspace=MagicMock()
+                    )
                     full_embedding = F.pad(e, (0, 0, 0, physical - tokens))
                     full_expected = F.pad(expected, (0, 0, 0, physical - tokens))
 
                     def gather(local, *_args, **kwargs):
                         start = layout.tokens.local_start
                         torch.testing.assert_close(
-                            local, full_expected[start:start + layout.tokens.local_tokens]
+                            local,
+                            full_expected[start : start + layout.tokens.local_tokens],
                         )
                         return full_expected.clone()
 
@@ -745,15 +770,20 @@ class KimiK3MtpContractTest(unittest.TestCase):
                         local_embedding = args[0]
                         self.assertEqual(
                             local_embedding.untyped_storage().nbytes(),
-                            layout.tokens.local_tokens * 4 * local_embedding.element_size(),
+                            layout.tokens.local_tokens
+                            * 4
+                            * local_embedding.element_size(),
                         )
 
                     hook = layer.register_forward_pre_hook(check_embedding)
                     try:
-                        with patch.object(model, "_embed_shifted_tokens", return_value=full_embedding), patch(
+                        with patch.object(
+                            model, "_embed_shifted_tokens", return_value=full_embedding
+                        ), patch(
                             "rtp_llm.models_py.model_desc.kimi_k3_mtp.select_block_map_for_layer"
                         ), patch(
-                            "rtp_llm.models_py.distributed.collective_torch.all_gather", side_effect=gather
+                            "rtp_llm.models_py.distributed.collective_torch.all_gather",
+                            side_effect=gather,
                         ) as ag, patch(
                             "rtp_llm.models_py.model_desc.kimi_k3_mtp.all_gather_gemm",
                             side_effect=lambda x, _weights, **kwargs: [x],
@@ -764,19 +794,31 @@ class KimiK3MtpContractTest(unittest.TestCase):
                             "rtp_llm.models_py.model_desc.kimi_k3_mtp.get_process_group",
                             return_value=object(),
                         ), patch(
-                            "rtp_llm.models_py.model_desc.kimi_k3_mtp.PyModelOutputs", side_effect=lambda z, _: z
-                        ), patch.object(layer.attention, "forward", wraps=layer.attention.forward) as attn:
+                            "rtp_llm.models_py.model_desc.kimi_k3_mtp.PyModelOutputs",
+                            side_effect=lambda z, _: z,
+                        ), patch.object(
+                            layer.attention, "forward", wraps=layer.attention.forward
+                        ) as attn:
                             result = model.forward(inputs, fmha)
                     finally:
                         hook.remove()
                     torch.testing.assert_close(result, model.final_norm(expected))
-                    torch.testing.assert_close(model.get_mtp_target_hidden_states(-1), expected)
-                    self.assertEqual(attn.call_args.args[0].shape, (layout.tokens.local_tokens, 4))
+                    torch.testing.assert_close(
+                        model.get_mtp_target_hidden_states(-1), expected
+                    )
+                    self.assertEqual(
+                        attn.call_args.args[0].shape, (layout.tokens.local_tokens, 4)
+                    )
                     self.assertEqual(attn.call_args.kwargs["sp_layout"], layout)
                     valid = layout.tokens.local_valid_tokens
-                    self.assertEqual(layer.moe.calls[-1][1], dict(
-                        valid_token_count=valid if valid < layout.tokens.local_tokens else None,
-                    ))
+                    self.assertEqual(
+                        layer.moe.calls[-1][1],
+                        dict(
+                            valid_token_count=(
+                                valid if valid < layout.tokens.local_tokens else None
+                            ),
+                        ),
+                    )
                     fmha.release_forward_workspace.assert_called_once()
                     ag.assert_called_once()
 

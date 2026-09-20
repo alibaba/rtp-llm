@@ -9,6 +9,7 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:testlib",
     ] + tokenspeed_mla_test_deps(),
+    env = {"GPU_COUNT": "8"},
     tags = ["manual", "L20D"],
     exec_properties = {"gpu": "L20D", "gpu_count": "8"},
     timeout = "long",
@@ -155,6 +156,18 @@ py_binary(
 py_test(
     name = "mla_fp8_test",
     srcs = ["mla_fp8_test.py", "flashmla_forward_test_utils.py", "flashmla_dense_prefill_packed_kv_test.py"],
+    deps = [
+        "//rtp_llm:apache-tvm-ffi",
+        "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ] + tokenspeed_mla_test_deps(),
+    tags = ["manual", "SM100"],
+    exec_properties = {'gpu': 'SM100'},
+)
+
+py_test(
+    name = "mla_qkv_fp8_quant_test",
+    srcs = ["mla_qkv_fp8_quant_test.py"],
     deps = [
         "//rtp_llm:apache-tvm-ffi",
         "//rtp_llm:nvidia-cutlass-dsl",

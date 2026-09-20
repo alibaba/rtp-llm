@@ -1,6 +1,7 @@
 import unittest
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from rtp_llm.models_py.triton_kernels.kimi_kda.fused_recurrent import (
     fused_recurrent_kda,
@@ -23,6 +24,70 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required")
         torch.manual_seed(20260730)
+
+    def _check_recurrent_beta(self, beta, dense_beta):
+        class ObserveOperations(TorchDispatchMode):
+            def __init__(self):
+                self.operations = []
+
+            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                self.operations.append(str(func))
+                return func(*args, **(kwargs or {}))
+
+        q = torch.randn(1, 3, 2, 8, dtype=torch.bfloat16, device="cuda")
+        k = torch.randn_like(q)
+        v = torch.randn_like(q)
+        gate = torch.randn_like(q)
+        initial = torch.randn(1, 2, 8, 8, dtype=torch.float32, device="cuda")
+        expected = fused_recurrent_kda(
+            q,
+            k,
+            v,
+            gate,
+            dense_beta,
+            initial_state=initial.clone(),
+            inplace_final_state=False,
+        )
+        actual_initial = initial.clone()
+        with ObserveOperations() as observed:
+            actual = fused_recurrent_kda(
+                q,
+                k,
+                v,
+                gate,
+                beta,
+                initial_state=actual_initial,
+                inplace_final_state=False,
+            )
+        for actual_tensor, expected_tensor in zip(actual, expected):
+            torch.testing.assert_close(actual_tensor, expected_tensor, rtol=0, atol=0)
+        self.assertNotIn("aten.clone.default", observed.operations)
+
+    def test_recurrent_reads_strided_scalar_and_headwise_beta_without_clone(self):
+        for shape, width in (((1, 3, 5), 2), ((1, 3, 2, 11), 8)):
+            beta = torch.randn(shape, dtype=torch.bfloat16, device="cuda")[
+                ..., 1 : 1 + width
+            ]
+            with self.subTest(shape=beta.shape, stride=beta.stride()):
+                self._check_recurrent_beta(beta, beta.contiguous())
+
+    def test_recurrent_beta_token_offsets_beyond_int32_are_exact(self) -> None:
+        batch, steps, heads, state_dim = 1, 3, 2, 8
+        token_stride = 2**30 + 128
+        storage = torch.empty(2**32 + 1024, dtype=torch.bfloat16, device="cuda")
+        storage[:1024].zero_()
+        beta = storage.as_strided(
+            (batch, steps, heads),
+            (steps * token_stride, token_stride, 1),
+            2**31,
+        )
+        dense_beta = torch.tensor(
+            [[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]],
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        beta.copy_(dense_beta)
+        self._check_recurrent_beta(beta, dense_beta)
 
     @staticmethod
     def _block_map(batch: int, pages: int) -> torch.Tensor:

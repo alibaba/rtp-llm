@@ -18,6 +18,15 @@ py_test(
 )
 
 py_test(
+    name = "moe_decode_small_test",
+    srcs = ["test_moe_decode_small.py"],
+    main = "test_moe_decode_small.py",
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    env = {"DSV4_MOE_STRICT_FUSED": "0"},
+    timeout = "short",
+)
+
+py_test(
     name = "chunkwise_rdma_publisher_test",
     srcs = ["test_chunkwise_rdma_publisher.py"],
     main = "test_chunkwise_rdma_publisher.py",

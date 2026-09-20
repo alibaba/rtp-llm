@@ -11,9 +11,7 @@ from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
 
 
 @triton.jit
-def store_group128(
-    values, out, scales, token, M, K: tl.constexpr, BLOCK: tl.constexpr
-):
+def store_group128(values, out, scales, token, M, K: tl.constexpr, BLOCK: tl.constexpr):
     """Preserve BF16 rounding; keep the request-dependent scale pitch dynamic."""
     cols = tl.arange(0, BLOCK)
     values = values.to(tl.bfloat16).to(tl.float32)
@@ -183,22 +181,26 @@ def _kda_output_prefill_fp8(
     XB,
     XT: tl.constexpr,
     XH: tl.constexpr,
+    XD: tl.constexpr,
     GB,
     GT: tl.constexpr,
     GH: tl.constexpr,
+    GD: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     token = tl.program_id(0)
+    token_i64 = token.to(tl.int64)
     cols = tl.arange(0, BLOCK)
-    heads, dims = cols // 128, cols % 128
+    heads = (cols // 128).to(tl.int64)
+    dims = (cols % 128).to(tl.int64)
     xb = tl.load(
-        X + token // SEQ * XB + token % SEQ * XT + heads * XH + dims,
+        X + token_i64 // SEQ * XB + token_i64 % SEQ * XT + heads * XH + dims * XD,
         cols < K,
         other=0.0,
     ).to(tl.float32)
     gate = tl.load(
-        G + token // SEQ * GB + token % SEQ * GT + heads * GH + dims,
+        G + token_i64 // SEQ * GB + token_i64 % SEQ * GT + heads * GH + dims * GD,
         cols < K,
         other=0.0,
     ).to(tl.float32)
@@ -208,7 +210,7 @@ def _kda_output_prefill_fp8(
     inverse = 1.0 / tl.sqrt(variance + EPS)
     norm = tl.reshape(grouped * inverse[:, None], (BLOCK,))
     v = norm * gamma * tl.sigmoid(gate)
-    store_group128(v, Y, S, token, M, K, BLOCK)
+    store_group128(v, Y, S, token_i64, M, K, BLOCK)
 
 
 @triton.jit(do_not_specialize=["M", "SEQ", "XB", "GB"])
@@ -224,22 +226,26 @@ def _kda_output_decode_fp8(
     XB,
     XT: tl.constexpr,
     XH: tl.constexpr,
+    XD: tl.constexpr,
     GB,
     GT: tl.constexpr,
     GH: tl.constexpr,
+    GD: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     token = tl.program_id(0)
+    token_i64 = token.to(tl.int64)
     cols = tl.arange(0, BLOCK)
-    heads, dims = cols // 128, cols % 128
+    heads = (cols // 128).to(tl.int64)
+    dims = (cols % 128).to(tl.int64)
     xb = tl.load(
-        X + token // SEQ * XB + token % SEQ * XT + heads * XH + dims,
+        X + token_i64 // SEQ * XB + token_i64 % SEQ * XT + heads * XH + dims * XD,
         cols < K,
         other=0.0,
     ).to(tl.float32)
     gate = tl.load(
-        G + token // SEQ * GB + token % SEQ * GT + heads * GH + dims,
+        G + token_i64 // SEQ * GB + token_i64 % SEQ * GT + heads * GH + dims * GD,
         cols < K,
         other=0.0,
     ).to(tl.float32)
@@ -267,7 +273,7 @@ def _kda_output_decode_fp8(
     norm = tl.reshape(grouped * inverse[:, None], (BLOCK,))
     sigmoid = tl.div_rn(1.0, 1.0 + libdevice.exp(-gate))
     v = norm * gamma * sigmoid
-    store_group128(v, Y, S, token, M, K, BLOCK)
+    store_group128(v, Y, S, token_i64, M, K, BLOCK)
 
 
 def kda_output_fp8(x, gate, weight, eps, *, mode):
@@ -293,8 +299,8 @@ def kda_output_fp8(x, gate, weight, eps, *, mode):
             m,
             k,
             x.shape[-3],
-            *xs[:3],
-            *gs[:3],
+            *xs,
+            *gs,
             eps,
             max(512, triton.next_power_of_2(k)),
             enable_fp_fusion=False

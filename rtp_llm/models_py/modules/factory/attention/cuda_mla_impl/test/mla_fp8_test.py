@@ -90,6 +90,7 @@ class MlaFp8Test(unittest.TestCase):
 
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_dense_prefill import (
             MlaFlashMLAPrefillOp,
+            _FlashMLAForwardWorkspace,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.test.flashmla_dense_prefill_packed_kv_test import (
             FlashMLADensePrefillPackedKVTest,
@@ -100,6 +101,15 @@ class MlaFp8Test(unittest.TestCase):
             output_and_lse,
         )
         from rtp_llm.ops import KvCacheDataType
+
+        allocate_workspace = _FlashMLAForwardWorkspace.allocate
+
+        def allocate_without_lse_scratch(**kwargs):
+            workspace = allocate_workspace(**kwargs)
+            self.assertIsNone(workspace.attention_lse_storage)
+            self.assertIsNone(workspace.canonical_lse)
+            self.assertIsNone(workspace.attention_buffers(1)[1])
+            return workspace
 
         # Nonzero page offsets, partial pages, ragged Q and multiple launches.
         for q_lens, prefix_lens in (((2, 3), (0, 300)), ((1, 1), (127, 640))):
@@ -133,13 +143,18 @@ class MlaFp8Test(unittest.TestCase):
                     op,
                     "_create_kv_b_proj",
                     return_value=DeterministicPackedProjection(),
-                ):
+                ), mock.patch.object(
+                    _FlashMLAForwardWorkspace,
+                    "allocate",
+                    side_effect=allocate_without_lse_scratch,
+                ) as allocator:
                     output, lse = output_and_lse(op, inputs)
                     repeated, repeated_lse = output_and_lse(op, inputs)
                 torch.testing.assert_close(output, repeated, atol=0, rtol=0)
                 torch.testing.assert_close(lse, repeated_lse, atol=0, rtol=0)
                 results.append((output, lse))
                 if capacity:
+                    allocator.assert_called_once()
                     self.assertLessEqual(op._fp8_prefix_rope.shape[0], capacity)
             torch.testing.assert_close(
                 results[0][0].float(), results[1][0].float(), atol=2e-3, rtol=3e-2
@@ -500,6 +515,7 @@ class MlaFp8Test(unittest.TestCase):
                 v,
                 qo_indptr=qi,
                 kv_indptr=ki,
+                seq_lens=ki[1:] - ki[:-1],
                 max_q_len=7,
                 max_kv_len=17,
                 causal=causal,

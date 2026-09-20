@@ -10,13 +10,14 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 import torch.nn.functional as F
+from torch import nn
+
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models.kimi_k3.kimi_k3_weight import shared_expert_weight_shard_enabled
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.base import GroupTopK, RMSNorm
 from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
 from rtp_llm.ops import ParallelismConfig
-from torch import nn
 
 if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
@@ -104,6 +105,11 @@ class KimiK3LatentMoE(nn.Module):
         layer_idx: int = -1,
     ) -> None:
         super().__init__()
+        from rtp_llm.models_py.modules.kimi_k3.small_kernel_config import (
+            decode_small_kernels_enabled,
+        )
+
+        self._decode_small_kernels = decode_small_kernels_enabled()
         self.parallelism_config = parallelism_config
         self.weights = weights
         self.expert_num = int(config.expert_num)
@@ -291,6 +297,7 @@ class KimiK3LatentMoE(nn.Module):
 
         import deep_gemm
         import torch.distributed as dist
+
         from rtp_llm.models_py.modules.dsv4.moe.input_packer import (
             get_mega_moe_input_packer,
         )
@@ -462,6 +469,9 @@ class KimiK3LatentMoE(nn.Module):
         routed_input: torch.Tensor,
         expert_ids: torch.Tensor,
         routing_weights: torch.Tensor,
+        *,
+        valid_token_count=None,
+        valid_token_mask=None,
     ) -> torch.Tensor:
         import deep_gemm
 
@@ -481,6 +491,8 @@ class KimiK3LatentMoE(nn.Module):
             expert_ids,
             self._mega_buf,
             token_count,
+            valid_token_count=valid_token_count,
+            valid_token_mask=valid_token_mask,
         )
         # Packing is rank-local but the peer kernel consumes every rank's
         # symmetric buffer.  Rendezvous again after pack so no rank launches
@@ -658,6 +670,7 @@ class KimiK3LatentMoE(nn.Module):
         routed_input: torch.Tensor,
         expert_ids: torch.Tensor,
         routing_weights: torch.Tensor,
+        **pack_options,
     ) -> torch.Tensor:
         """Execute tokens already owned by this TP-SP or DP/KTP rank."""
 
@@ -665,7 +678,40 @@ class KimiK3LatentMoE(nn.Module):
             routed_input,
             expert_ids,
             routing_weights,
+            **pack_options,
         )
+
+    def _prepare_mega_moe_routing(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        valid_token_count: Optional[int],
+        valid_token_mask: Optional[torch.Tensor],
+        prepared_context,
+        optimize_decode: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, bool, dict]:
+        if prepared_context is not None:
+            if hidden_states.shape[0] != prepared_context.token_count:
+                raise ValueError("prepared MoE token count does not match input")
+            valid_token_count = prepared_context.valid_tokens
+
+        expert_ids, routing_weights = self._route(hidden_states)
+        optimize = self._can_optimize_decode(hidden_states, optimize_decode)
+        pack_options = {}
+        if optimize and self._mega_input_packer.supports_decode_options:
+            pack_options = dict(
+                valid_token_count=valid_token_count,
+                valid_token_mask=valid_token_mask,
+            )
+        else:
+            expert_ids, routing_weights = self._mask_padding_routes(
+                expert_ids,
+                routing_weights,
+                token_count=hidden_states.shape[0],
+                valid_token_count=valid_token_count,
+                valid_token_mask=valid_token_mask,
+            )
+        return expert_ids, routing_weights, optimize, pack_options
 
     def forward(
         self,
@@ -674,31 +720,41 @@ class KimiK3LatentMoE(nn.Module):
         valid_token_count: Optional[int] = None,
         valid_token_mask: Optional[torch.Tensor] = None,
         prepared_context=None,
+        residual: Optional[torch.Tensor] = None,
+        optimize_decode: bool = False,
     ) -> torch.Tensor:
-        if prepared_context is not None:
-            if hidden_states.shape[0] != prepared_context.token_count:
-                raise ValueError("prepared MoE token count does not match input")
-            valid_token_count = prepared_context.valid_tokens
-        expert_ids, routing_weights = self._route(hidden_states)
-        expert_ids, routing_weights = self._mask_padding_routes(
-            expert_ids,
-            routing_weights,
-            token_count=hidden_states.shape[0],
-            valid_token_count=valid_token_count,
-            valid_token_mask=valid_token_mask,
+        expert_ids, routing_weights, optimize, pack_options = (
+            self._prepare_mega_moe_routing(
+                hidden_states,
+                valid_token_count=valid_token_count,
+                valid_token_mask=valid_token_mask,
+                prepared_context=prepared_context,
+                optimize_decode=optimize_decode,
+            )
         )
         routed_input = torch.matmul(hidden_states, self.weights[K3W.MOE_ROUTED_DOWN])
         routed_output = self._mega_expert_sum(
             routed_input,
             expert_ids,
             routing_weights,
+            **pack_options,
         )
         if self.routed_norm is not None:
             routed_output = self.routed_norm(routed_output.contiguous())
         routed_output = torch.matmul(routed_output, self.weights[K3W.MOE_ROUTED_UP])
         shared_output = self._shared_expert_forward(hidden_states)
-        output = routed_output + shared_output
-        return output
+        from rtp_llm.models_py.triton_kernels.kimi_kda.moe_decode import add_moe_output
+
+        return add_moe_output(routed_output, shared_output, residual, optimize=optimize)
+
+    def _can_optimize_decode(self, hidden_states, optimize_decode):
+        return (
+            optimize_decode
+            and self._decode_small_kernels
+            and hidden_states.is_cuda
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.is_contiguous()
+        )
 
 
 __all__ = [

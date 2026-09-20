@@ -29,6 +29,9 @@ from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
     QuantizedActivation,
 )
 from rtp_llm.models_py.modules.kimi_k3._collective_gemm import collective_gemm_state_key
+from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_scale_layout import (
+    repack_ag_scale_wire,
+)
 
 # Per-rank physical input rows, including sequence-parallel padding.
 _OVERLAP_MIN_LOCAL_M = 4096
@@ -275,12 +278,15 @@ def _all_gather_quantized(local_input, projections, *, logical_m, group):
             )
             # Each rank pads its scale rows independently. Remove that padding
             # before joining rank-local rows, then restore the GEMM's global alignment.
-            scales = wire.new_zeros((groups, (size * m + 3) // 4 * 4))
-            scales[:, : size * m].copy_(
-                wire.view(size, groups, aligned_m)[:, :, :m]
-                .permute(1, 0, 2)
-                .reshape(groups, size * m)
-            )
+            if wire.is_cuda:
+                scales = repack_ag_scale_wire(wire, m, size)
+            else:
+                scales = wire.new_zeros((groups, (size * m + 3) // 4 * 4))
+                scales[:, : size * m].copy_(
+                    wire.view(size, groups, aligned_m)[:, :, :m]
+                    .permute(1, 0, 2)
+                    .reshape(groups, size * m)
+                )
             return [
                 p.forward_quantized(values, scales.T[: size * m])[:logical_m]
                 for p in projections

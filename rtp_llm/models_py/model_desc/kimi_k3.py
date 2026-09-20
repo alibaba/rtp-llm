@@ -20,6 +20,8 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
 
 import torch
+from torch import nn
+
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.distributed.collective_torch import (
@@ -53,16 +55,16 @@ from rtp_llm.models_py.modules.kimi_k3.cache_geometry import (
     bind_kimi_k3_cache_geometry,
     validate_kimi_k3_page_rr_target,
 )
-from rtp_llm.models_py.modules.kimi_k3.input_preparation import (
-    KimiK3DecoderMetadata,
-    KimiK3ExecutionSpec,
-    prepare_round,
-)
 from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import KimiK3ChunkSession
 from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import (
     configure_gemm_reduce_scatter,
     gemm_reduce_scatter,
     reduce_scatter,
+)
+from rtp_llm.models_py.modules.kimi_k3.input_preparation import (
+    KimiK3DecoderMetadata,
+    KimiK3ExecutionSpec,
+    prepare_round,
 )
 from rtp_llm.models_py.modules.kimi_k3.kda import KimiK3KDA
 from rtp_llm.models_py.triton_kernels.common.activation import SituAndMul
@@ -75,25 +77,25 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 
+from rtp_llm.models_py.modules.kimi_k3.ktp_step import KtpForwardMode, KtpStepPlan
+from rtp_llm.models_py.modules.kimi_k3.ktp_step import (
+    coordinate_ktp_step as coordinate_ktp_step_collective,
+)
+from rtp_llm.models_py.modules.kimi_k3.ktp_step import (
+    default_decode_capture_buckets,
+    normalize_capture_buckets,
+    pad_ktp_decode_inputs,
+)
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
 from rtp_llm.models_py.modules.kimi_k3.parallel_mode import (
     KimiK3ParallelMode,
     resolve_kimi_k3_parallel_mode,
-)
-from rtp_llm.models_py.modules.kimi_k3.ktp_step import (
-    KtpForwardMode,
-    KtpStepPlan,
-    coordinate_ktp_step as coordinate_ktp_step_collective,
-    default_decode_capture_buckets,
-    normalize_capture_buckets,
-    pad_ktp_decode_inputs,
 )
 from rtp_llm.models_py.modules.kimi_k3.projection_ktp import (
     KtpProjectionWorkspace,
@@ -170,6 +172,11 @@ class KimiK3DecoderLayer(nn.Module):
         moe_strategy: str = "mega_moe",
     ) -> None:
         super().__init__()
+        from rtp_llm.models_py.modules.kimi_k3.small_kernel_config import (
+            decode_small_kernels_enabled,
+        )
+
+        self._decode_small_kernels = decode_small_kernels_enabled()
         self.weights = weights
         self.layer_idx = int(layer_idx)
         self.parallel_mode = resolve_kimi_k3_parallel_mode(parallelism_config)
@@ -253,7 +260,11 @@ class KimiK3DecoderLayer(nn.Module):
 
     @staticmethod
     def _local_projection(x: torch.Tensor, weight) -> torch.Tensor:
-        return weight(x) if not isinstance(weight, torch.Tensor) else torch.matmul(x, weight)
+        return (
+            weight(x)
+            if not isinstance(weight, torch.Tensor)
+            else torch.matmul(x, weight)
+        )
 
     def _project_tp_sp_inputs(
         self,
@@ -388,7 +399,11 @@ class KimiK3DecoderLayer(nn.Module):
                 projected_qkv_a=projected_attention_input,
                 prepared_context=attention_context,
             )
-        if not self.is_kda and attention_inputs is not None and attention_inputs.is_prefill:
+        if (
+            not self.is_kda
+            and attention_inputs is not None
+            and attention_inputs.is_prefill
+        ):
             # This tensor keeps the aliased result storage alive. Historical
             # KV and merge scratch have no remaining consumer and need not
             # overlap the output projection's full-token intermediate.
@@ -413,12 +428,25 @@ class KimiK3DecoderLayer(nn.Module):
             delta=attention_delta,
             num_blocks=active_blocks,
         )
+        residual_included = False
         if isinstance(self.mlp, (KimiK3LatentMoE, KimiK3LatentMoESE)):
+            # mlp_residual has already applied attention_delta to prefix_sum
+            # in place. A supplied residual is included on every MoE path.
+            residual_included = (
+                self._decode_small_kernels
+                and normalized_mlp_input.is_cuda
+                and normalized_mlp_input.dtype == torch.bfloat16
+            )
             mlp_output = self.mlp(
                 normalized_mlp_input,
                 valid_token_count=local_valid_tokens,
                 valid_token_mask=attn_meta.valid_token_mask,
                 prepared_context=moe_context,
+                **(
+                    dict(residual=prefix_sum, optimize_decode=True)
+                    if residual_included
+                    else {}
+                ),
             )
         else:
             mlp_output = (
@@ -430,7 +458,7 @@ class KimiK3DecoderLayer(nn.Module):
                     valid_token_count=local_valid_tokens,
                 )
             )
-        output = prefix_sum + mlp_output
+        output = mlp_output if residual_included else prefix_sum + mlp_output
         return KimiK3DecoderOutput(output, block_residual)
 
 
@@ -1174,7 +1202,8 @@ class KimiK3Model(GptModelBase):
         tp_size = self.execution_spec.tp_size
         token_layout = attn_meta.sp_layout
         output_token_count = sequence_parallel_output_tokens(
-            token_layout, is_fake_stream=bool(getattr(attention_inputs, "is_fake_stream", False))
+            token_layout,
+            is_fake_stream=bool(getattr(attention_inputs, "is_fake_stream", False)),
         )
         eagle3_enabled = prepared.eagle3_enabled
         aux_layers = prepared.aux_layers

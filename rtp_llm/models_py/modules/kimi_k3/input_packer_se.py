@@ -12,6 +12,10 @@ from abc import ABC, abstractmethod
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.moe.input_packer import (
+    mask_pack_routes,
+    validate_pack_options,
+)
 from rtp_llm.models_py.modules.dsv4.moe.quant_layouts import (
     _per_token_cast_to_fp8_packed_ue8m0,
 )
@@ -30,6 +34,11 @@ class KimiK3MegaMoeSeInputPacker(ABC):
         indices: torch.Tensor,
         buf,
         tokens: int,
+        *,
+        valid_token_count=None,
+        valid_token_mask=None,
+        shared_input=None,
+        shared_out=None,
     ) -> None:
         raise NotImplementedError
 
@@ -38,21 +47,56 @@ class TorchKimiK3MegaMoeSeInputPacker(KimiK3MegaMoeSeInputPacker):
     """Reference packer that materializes FP8 activation and scale tensors."""
 
     name = "torch"
+    # Keep MoE's reference pre-mask/copy path; direct calls honor all options.
+    supports_decode_options = False
 
-    def pack(self, x, weights, indices, buf, tokens: int) -> None:
+    def pack(
+        self,
+        x,
+        weights,
+        indices,
+        buf,
+        tokens: int,
+        *,
+        valid_token_count=None,
+        valid_token_mask=None,
+        shared_input=None,
+        shared_out=None,
+    ) -> None:
+        validate_pack_options(
+            tokens, valid_token_count, valid_token_mask, shared_input, shared_out
+        )
+        indices, weights = mask_pack_routes(
+            indices, weights, valid_token_count, valid_token_mask
+        )
         x_fp8, x_sf = _per_token_cast_to_fp8_packed_ue8m0(x.contiguous(), gran_k=32)
         buf.x[:tokens].copy_(x_fp8)
         buf.x_sf[:tokens].copy_(x_sf)
         buf.topk_idx[:tokens].copy_(indices.to(torch.int64).contiguous())
         buf.topk_weights[:tokens].copy_(weights.to(torch.float32).contiguous())
+        if shared_input is not None:
+            shared_out[:tokens].copy_(shared_input)
 
 
 class FusedKimiK3MegaMoeSeInputPacker(KimiK3MegaMoeSeInputPacker):
     """Triton packer that writes the final symmetric-buffer views directly."""
 
     name = "fused"
+    supports_decode_options = True
 
-    def pack(self, x, weights, indices, buf, tokens: int) -> None:
+    def pack(
+        self,
+        x,
+        weights,
+        indices,
+        buf,
+        tokens: int,
+        *,
+        valid_token_count=None,
+        valid_token_mask=None,
+        shared_input=None,
+        shared_out=None,
+    ) -> None:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.shape[1] % 128 == 0):
             raise RuntimeError(
                 "Kimi K3 fused-SE MegaMoE input packer requires CUDA BF16 "
@@ -71,6 +115,10 @@ class FusedKimiK3MegaMoeSeInputPacker(KimiK3MegaMoeSeInputPacker):
             buf.x_sf[:tokens],
             buf.topk_idx[:tokens],
             buf.topk_weights[:tokens],
+            valid_token_count=valid_token_count,
+            valid_token_mask=valid_token_mask,
+            shared_input=shared_input,
+            shared_out=shared_out,
         )
 
 

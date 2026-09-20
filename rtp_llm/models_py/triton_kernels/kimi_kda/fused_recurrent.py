@@ -54,6 +54,10 @@ def fused_recurrent_kda_fwd_kernel(
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    stride_beta_n: tl.constexpr,
+    stride_beta_t: tl.constexpr,
+    stride_beta_h: tl.constexpr,
+    stride_beta_v: tl.constexpr,
     stride_init_state_token: tl.constexpr,
     stride_final_state_token: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
@@ -99,14 +103,20 @@ def fused_recurrent_kda_fwd_kernel(
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
+    i_n_i64 = i_n.to(tl.int64)
+    i_hv_i64 = i_hv.to(tl.int64)
+    o_v_i64 = o_v.to(tl.int64)
 
     p_q = q + (bos * H + i_h) * K + o_k
     p_k = k + (bos * H + i_h) * K + o_k
     p_v = v + (bos * HV + i_hv) * V + o_v
-    if IS_BETA_HEADWISE:
-        p_beta = beta + (bos * HV + i_hv) * V + o_v
+    if IS_VARLEN:
+        p_beta = beta + bos * stride_beta_t
     else:
-        p_beta = beta + bos * HV + i_hv
+        p_beta = beta + i_n_i64 * stride_beta_n
+    p_beta += i_hv_i64 * stride_beta_h
+    if IS_BETA_HEADWISE:
+        p_beta += o_v_i64 * stride_beta_v
     # KDA: g is per-dim [B, T, HV, K]
     p_g = g + (bos * HV + i_hv) * K + o_k
     p_o = o + (bos * HV + i_hv) * V + o_v
@@ -221,7 +231,7 @@ def fused_recurrent_kda_fwd_kernel(
         p_o += HV * V
         p_v += HV * V
         p_g += HV * K
-        p_beta += HV * (V if IS_BETA_HEADWISE else 1)
+        p_beta += stride_beta_t
 
     if not IS_CONTINUOUS_BATCHING:
         p_ht = ht + (i_n * HV + i_hv) * K * V
@@ -273,6 +283,11 @@ def fused_recurrent_kda_fwd(
         initial_state.stride(0) if initial_state is not None else 1
     )
     stride_final_state_token = final_state.stride(0) if final_state is not None else 1
+    is_beta_headwise = beta.ndim == v.ndim
+    stride_beta_n = beta.stride(0)
+    stride_beta_t = beta.stride(1)
+    stride_beta_h = beta.stride(2)
+    stride_beta_v = beta.stride(3) if is_beta_headwise else 0
 
     max_block_size = 0
     if block_map is not None:
@@ -305,9 +320,13 @@ def fused_recurrent_kda_fwd(
         V=V,
         BK=BK,
         BV=BV,
+        stride_beta_n=stride_beta_n,
+        stride_beta_t=stride_beta_t,
+        stride_beta_h=stride_beta_h,
+        stride_beta_v=stride_beta_v,
         stride_init_state_token=stride_init_state_token,
         stride_final_state_token=stride_final_state_token,
-        IS_BETA_HEADWISE=beta.ndim == v.ndim,
+        IS_BETA_HEADWISE=is_beta_headwise,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
         SEQ_SIZE_PER_BLOCK=seq_size_per_block,
@@ -352,7 +371,7 @@ def fused_recurrent_kda(
         k=k,
         v=v,
         g=g.contiguous(),
-        beta=beta.contiguous(),
+        beta=beta,
         scale=scale,
         initial_state=initial_state,
         A_log=A_log,

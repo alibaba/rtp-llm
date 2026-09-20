@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import torch
 
-from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3KDA
+from rtp_llm.models_py.modules.kimi_k3.kda.decode import KimiK3KDADecode
 from rtp_llm.models_py.triton_kernels.kimi_kda.fused_recurrent import (
     fused_recurrent_kda,
 )
@@ -35,24 +35,16 @@ class KimiK3PagedRecurrentLayoutTest(unittest.TestCase):
         page_size = 8
         pages = 3
         block_map = self._block_map(batch, pages)
-        lengths_plus_one = torch.tensor(
-            [2, 8, 9, 10], dtype=torch.int32, device="cuda"
-        )
-        cu_seqlens = torch.arange(
-            batch + 1, dtype=torch.int32, device="cuda"
-        )
+        lengths_plus_one = torch.tensor([2, 8, 9, 10], dtype=torch.int32, device="cuda")
+        cu_seqlens = torch.arange(batch + 1, dtype=torch.int32, device="cuda")
         flat_shape = (batch, heads * head_dim)
         q = torch.randn(*flat_shape, dtype=torch.bfloat16, device="cuda")
         k = torch.randn_like(q)
         v = torch.randn_like(q)
         raw_gate = torch.randn_like(q)
-        raw_beta = torch.randn(
-            batch, heads, dtype=torch.float32, device="cuda"
-        )
+        raw_beta = torch.randn(batch, heads, dtype=torch.float32, device="cuda")
         a_log = torch.randn(heads, dtype=torch.float32, device="cuda")
-        dt_bias = torch.randn(
-            heads * head_dim, dtype=torch.float32, device="cuda"
-        )
+        dt_bias = torch.randn(heads * head_dim, dtype=torch.float32, device="cuda")
         initial_cache = torch.randn(
             batch * pages + 1,
             heads,
@@ -86,9 +78,7 @@ class KimiK3PagedRecurrentLayoutTest(unittest.TestCase):
         # The canonical RTP cache is physically [H,K,V].  The non-paged model
         # path transposes it to the kernel's V-first layout and transposes the
         # final state back before publishing it to the cache.
-        gathered_v_first = (
-            initial_cache[read_blocks].transpose(-1, -2).contiguous()
-        )
+        gathered_v_first = initial_cache[read_blocks].transpose(-1, -2).contiguous()
         expected_output, expected_final_v_first = fused_recurrent_kda(
             q.reshape(head_shape),
             k.reshape(head_shape),
@@ -137,7 +127,7 @@ class KimiK3PagedRecurrentLayoutTest(unittest.TestCase):
         )
 
         def run_paged(cache: torch.Tensor) -> torch.Tensor:
-            return KimiK3KDA._paged_decode_core(
+            return KimiK3KDADecode._recurrent(
                 layer,
                 q,
                 k,
@@ -154,9 +144,7 @@ class KimiK3PagedRecurrentLayoutTest(unittest.TestCase):
         eager_cache = initial_cache.clone()
         eager_output = run_paged(eager_cache)
         torch.testing.assert_close(eager_output, expected_output, rtol=0, atol=0)
-        torch.testing.assert_close(
-            eager_cache, expected_cache, rtol=1e-5, atol=2e-7
-        )
+        torch.testing.assert_close(eager_cache, expected_cache, rtol=1e-5, atol=2e-7)
 
         # Compile before capture, then verify the same cache ABI survives a
         # captured launch and replay.
@@ -176,9 +164,7 @@ class KimiK3PagedRecurrentLayoutTest(unittest.TestCase):
         torch.cuda.synchronize()
 
         torch.testing.assert_close(graph_output, expected_output, rtol=0, atol=0)
-        torch.testing.assert_close(
-            graph_cache, expected_cache, rtol=1e-5, atol=2e-7
-        )
+        torch.testing.assert_close(graph_cache, expected_cache, rtol=1e-5, atol=2e-7)
 
 
 if __name__ == "__main__":

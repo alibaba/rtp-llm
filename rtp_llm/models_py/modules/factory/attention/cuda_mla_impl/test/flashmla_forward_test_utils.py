@@ -314,6 +314,9 @@ def output_and_lse(
     captured: list[torch.Tensor] = []
 
     def capture(*args: Any, **kwargs: Any) -> Any:
+        # Production FULL forwards intentionally skip LSE. This numerical
+        # helper opts back in so FULL and HYBRID states can still be compared.
+        kwargs["return_lse"] = True
         result = original(*args, **kwargs)
         captured.append(result[1])
         return result

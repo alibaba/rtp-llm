@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Sequence
 
 import torch
+from torch import nn
+
 from rtp_llm.models_py.modules.kimi_k3.kda.cache import KimiK3KDACache
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     KimiKDARecurrentCheckpointMetadata,
@@ -16,7 +18,6 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
 )
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 
 @dataclass(frozen=True)
@@ -412,20 +413,23 @@ class KimiK3KDAPrefill(nn.Module):
                     "KDA continuation requested before current state was written: "
                     f"requests={missing}"
                 )
-        q_conv, k_conv, v_conv, final_conv = kimi_kda_short_conv_paged_prefill(
-            mixed_qkv,
-            self.fused_conv,
-            conv_cache,
-            linear_block_map,
-            attention_inputs.prefix_lengths,
-            cu_seqlens,
-            metadata.checkpoint_tokens,
-            metadata.conv,
-            current_conv_state=current_conv,
-            continuation_mask=(
-                metadata.continuation_mask if current_state is not None else None
-            ),
-            return_final_state=current_state is not None,
+        q_conv, k_conv, v_conv, final_conv, packed_beta = (
+            kimi_kda_short_conv_paged_prefill(
+                mixed_qkv,
+                self.fused_conv,
+                conv_cache,
+                linear_block_map,
+                attention_inputs.prefix_lengths,
+                cu_seqlens,
+                metadata.checkpoint_tokens,
+                metadata.conv,
+                raw_beta=raw_beta,
+                current_conv_state=current_conv,
+                continuation_mask=(
+                    metadata.continuation_mask if current_state is not None else None
+                ),
+                return_final_state=current_state is not None,
+            )
         )
         physical_initial_state = self.cache.load_recurrent_state(
             kv_cache,
@@ -450,7 +454,7 @@ class KimiK3KDAPrefill(nn.Module):
             k_conv.reshape(head_shape),
             v_conv.reshape(head_shape),
             raw_gate.reshape(head_shape),
-            raw_beta.reshape(1, token_count, self.local_heads),
+            packed_beta.reshape(1, token_count, self.local_heads),
             recurrent_state,
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=metadata.cu_seqlens_cpu,

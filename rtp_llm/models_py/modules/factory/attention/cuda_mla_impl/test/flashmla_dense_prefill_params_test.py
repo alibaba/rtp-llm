@@ -1,11 +1,13 @@
 import os
+import sys
 import weakref
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Sequence
 from unittest import TestCase, main, skipUnless
 from unittest.mock import Mock, patch
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from rtp_llm.models_py.modules.factory.attention import attn_factory
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
@@ -39,6 +41,96 @@ if _TEST_TMPDIR:
 
 CUDA_AVAILABLE = torch.cuda.is_available()
 GIB = 1024**3
+
+
+class FlashMlaTokenSpeedWarmupTest(TestCase):
+    def setUp(self) -> None:
+        self.prefill = Mock(return_value=torch.empty(0))
+        tokenspeed_package = ModuleType("tokenspeed_mla")
+        tokenspeed_package.__path__ = []
+        prefill_module = ModuleType("tokenspeed_mla.mla_prefill")
+        prefill_module.tokenspeed_mla_prefill = self.prefill
+        prefill_module.warmup_compile_prefill = Mock()
+        self.current_device = Mock(return_value=0)
+        placeholder = torch.empty(0)
+        for patcher in [
+            patch.object(
+                flashmla_dense_prefill,
+                "_TOKENSPEED_NO_LSE_WARMUP_KEYS",
+                set(),
+            ),
+            patch.dict(
+                sys.modules,
+                {
+                    "tokenspeed_mla": tokenspeed_package,
+                    "tokenspeed_mla.mla_prefill": prefill_module,
+                },
+            ),
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl."
+                "tokenspeed_mla_impl._is_tokenspeed_blackwell",
+                return_value=True,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl."
+                "tokenspeed_mla_impl._ensure_tokenspeed_cutlass_compat"
+            ),
+            patch("torch.cuda.current_device", self.current_device),
+            *(
+                patch.object(torch, name, return_value=placeholder)
+                for name in ("zeros", "zeros_like", "ones", "tensor")
+            ),
+        ]:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _make_op(
+        self,
+        *,
+        num_heads: int = 8,
+        qk_nope_head_dim: int = 128,
+        v_head_dim: int = 128,
+    ) -> MlaFlashMLAPrefillOp:
+        return MlaFlashMLAPrefillOp(
+            num_heads=num_heads,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            qk_nope_head_dim=qk_nope_head_dim,
+            v_head_dim=v_head_dim,
+            kernel_page_tokens=128,
+            prefix_chunk_alignment_tokens=128,
+            softmax_extra_scale=1.0,
+            use_mla=True,
+            weights=[{}],
+            kv_cache_dtype=KvCacheDataType.FP8,
+            fp8_compute=True,
+        )
+
+    def test_repeated_constructor_reuses_successful_no_lse_warmup(self) -> None:
+        self._make_op()
+        self._make_op()
+        self.assertEqual(self.prefill.call_count, 1)
+
+    def test_no_lse_warmup_cache_distinguishes_config_and_device(self) -> None:
+        self.current_device.side_effect = (0, 0, 0, 0, 1)
+
+        self._make_op()
+        self._make_op(num_heads=16)
+        self._make_op(qk_nope_head_dim=256)
+        self._make_op(v_head_dim=64)
+        self._make_op()
+
+        self.assertEqual(self.prefill.call_count, 5)
+
+    def test_failed_no_lse_warmup_is_retried_and_then_cached(self) -> None:
+        self.prefill.side_effect = (RuntimeError("warmup failed"), torch.empty(0))
+
+        with self.assertRaisesRegex(RuntimeError, "warmup failed"):
+            self._make_op()
+        self._make_op()
+        self._make_op()
+
+        self.assertEqual(self.prefill.call_count, 2)
 
 
 class FlashMlaPrefixSmokeEvidenceTest(TestCase):
@@ -734,6 +826,47 @@ class FlashMlaDensePrefillParamsTest(TestCase):
             self.page_size,
         )
 
+    def test_only_fp8_plan_computes_sequence_lengths(self) -> None:
+        for fp8_compute in (False, True):
+            op = self._make_unplanned_op(expanded_kv_budget_gib=0)
+            op.fp8_compute = fp8_compute
+            # Replanning must replace the previous request's lengths.
+            for q_lens, prefix_lens in (([4, 4], [130, 5]), ([2, 3], [0, 257])):
+                with self.subTest(fp8_compute=fp8_compute, q_lens=q_lens):
+                    inputs = _attention_inputs(
+                        q_lens,
+                        prefix_lens,
+                        [torch.zeros((2, 4), dtype=torch.int32, device="cuda")],
+                        current_group=0,
+                    )
+                    length_adds = []
+
+                    class ObserveLengths(TorchDispatchMode):
+                        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                            result = func(*args, **(kwargs or {}))
+                            if (
+                                func is torch.ops.aten.add.Tensor
+                                and args[0] is inputs.input_lengths
+                                and args[1] is inputs.prefix_lengths
+                            ):
+                                length_adds.append(result)
+                            return result
+
+                    with ObserveLengths():
+                        params = build_flashmla_device_params(inputs, self.page_size)
+                        op.plan(params)
+                    self.assertEqual(len(length_adds), int(fp8_compute))
+                    if fp8_compute:
+                        self.assertIs(op.q_seq_lens, inputs.input_lengths)
+                        self.assertIs(op.kv_seq_lens, length_adds[0])
+                        self.assertEqual(
+                            op.kv_seq_lens.tolist(),
+                            [q + p for q, p in zip(q_lens, prefix_lens)],
+                        )
+                    else:
+                        self.assertIsNone(op.q_seq_lens)
+                        self.assertIsNone(op.kv_seq_lens)
+
     def test_plan_builds_full_route_once_without_prefix_metadata(self) -> None:
         op = self._make_unplanned_op(expanded_kv_budget_gib=0)
         params = self._make_plan_params(q_lens=(128,), reuse_lens=(1024,))
@@ -766,6 +899,7 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         launch = op._prefix_runtime_launches[0]
         self.assertEqual(launch.qo_indptr.cpu().tolist(), [0, 2, 5])
         self.assertEqual(launch.kv_indptr.cpu().tolist(), [0, 128, 256])
+        self.assertEqual(launch.seq_lens.cpu().tolist(), [128, 128])
         self.assertEqual(launch.gather_qo_indptr.cpu().tolist(), [0, 0, 0])
         self.assertEqual(
             launch.batch_reuse_info.cpu().tolist(),
@@ -773,6 +907,53 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         )
         self.assertEqual(launch.destination_starts.cpu().tolist(), [0, 2])
         self.assertEqual(launch.q_range, (0, 5))
+
+    def test_fp8_attention_reuses_planned_lengths_and_native_lse(self) -> None:
+        op = self._make_unplanned_op()
+        op.num_heads, op.v_head_dim, op.scale, op.q_scale = 2, 4, 0.5, 0.25
+        op.fp8_compute = True
+        op.max_q_len, op.max_kv_len = 3, 5
+        q, k, value = (
+            torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+            for shape in ((3, 2, 6), (5, 2, 6), (5, 2, 4))
+        )
+        output = value.new_empty(3, 2, 4)
+        scratch_lse = torch.full((2, 3), torch.nan, device="cuda").T
+        native_lse = torch.randn((3, 2), device="cuda")
+        for full in (False, True):
+            op.qo_indptr, op.kv_indptr, op.kv_seq_lens = (
+                torch.tensor(values, dtype=torch.int32, device="cuda")
+                for values in (
+                    ([0, 3], [0, 5], [5]) if full else ([0, 1, 3], [0, 2, 5], [2, 3])
+                )
+            )
+
+            def prefill(**kwargs):
+                self.assertIs(kwargs["seq_lens"], op.kv_seq_lens)
+                self.assertEqual(kwargs["return_lse"], not full)
+                return kwargs["out"] if full else (kwargs["out"], native_lse)
+
+            op.tokenspeed_prefill = Mock(side_effect=prefill)
+            if full:
+                actual = op._dense_attention(q, k, value)
+                self.assertIs(actual, op.tokenspeed_prefill.call_args.kwargs["out"])
+            else:
+                actual, lse = op._run_dense_attention(
+                    q,
+                    k,
+                    value,
+                    qo_indptr=op.qo_indptr,
+                    kv_indptr=op.kv_indptr,
+                    seq_lens=op.kv_seq_lens,
+                    max_q_len=2,
+                    max_kv_len=3,
+                    causal=False,
+                    out=output,
+                    lse=scratch_lse,
+                )
+                self.assertIs(actual, output)
+                self.assertIs(lse, native_lse)
+                self.assertTrue(torch.isnan(scratch_lse).all())
 
     def test_physical_chunk_alignment_keeps_kernel_page_table_offsets(self) -> None:
         expanded_bytes_per_token = 12 * (128 + 64 + 128) * 2

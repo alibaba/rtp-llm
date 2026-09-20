@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 
 import torch
 
+from ._mega_input_pack_triton import mask_pack_routes, validate_pack_options
 from .quant_layouts import _per_token_cast_to_fp8_packed_ue8m0
 from .shared_expert import strict_fused_moe_enabled
 
@@ -35,12 +36,17 @@ class MegaMoeInputPacker(ABC):
         indices: torch.Tensor,
         buf,
         tokens: int,
+        *,
+        valid_token_count=None,
+        valid_token_mask=None,
     ) -> None:
         raise NotImplementedError
 
 
 class TorchMegaMoeInputPacker(MegaMoeInputPacker):
     name = "torch"
+    # Keep MoE's reference pre-mask path; direct calls still honor all options.
+    supports_decode_options = False
 
     def pack(
         self,
@@ -49,11 +55,18 @@ class TorchMegaMoeInputPacker(MegaMoeInputPacker):
         indices: torch.Tensor,
         buf,
         tokens: int,
+        *,
+        valid_token_count=None,
+        valid_token_mask=None,
     ) -> None:
         if strict_fused_moe_enabled():
             raise RuntimeError(
                 "DSV4_MOE_STRICT_FUSED=1 forbids TorchMegaMoeInputPacker"
             )
+        validate_pack_options(tokens, valid_token_count, valid_token_mask)
+        indices, weights = mask_pack_routes(
+            indices, weights, valid_token_count, valid_token_mask
+        )
         x_fp8, x_sf = _per_token_cast_to_fp8_packed_ue8m0(x.contiguous(), gran_k=32)
         buf.x[:tokens].copy_(x_fp8)
         buf.x_sf[:tokens].copy_(x_sf)
@@ -63,6 +76,7 @@ class TorchMegaMoeInputPacker(MegaMoeInputPacker):
 
 class FusedMegaMoeInputPacker(MegaMoeInputPacker):
     name = "fused"
+    supports_decode_options = True
 
     def pack(
         self,
@@ -71,6 +85,9 @@ class FusedMegaMoeInputPacker(MegaMoeInputPacker):
         indices: torch.Tensor,
         buf,
         tokens: int,
+        *,
+        valid_token_count=None,
+        valid_token_mask=None,
     ) -> None:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.shape[1] % 128 == 0):
             raise RuntimeError(
@@ -88,6 +105,8 @@ class FusedMegaMoeInputPacker(MegaMoeInputPacker):
             buf.x_sf[:tokens],
             buf.topk_idx[:tokens],
             buf.topk_weights[:tokens],
+            valid_token_count=valid_token_count,
+            valid_token_mask=valid_token_mask,
         )
 
 

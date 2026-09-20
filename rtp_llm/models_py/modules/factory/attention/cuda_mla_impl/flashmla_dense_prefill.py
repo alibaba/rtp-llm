@@ -35,6 +35,7 @@ from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 _FLASHMLA_WORKSPACES: Dict[int, torch.Tensor] = {}
+_TOKENSPEED_NO_LSE_WARMUP_KEYS: set[tuple[int, int, int, int]] = set()
 _K3_PACKED_KV_HEAD_SPLITS = (128, 64, 128)
 logger = logging.getLogger(__name__)
 _LOGGED_SMOKE_PREFIX_PLANS: set[tuple[object, ...]] = set()
@@ -107,6 +108,7 @@ class _FlashMLAPrefixRuntimeLaunch:
     spec: FlashMLAPrefixLaunch
     qo_indptr: torch.Tensor
     kv_indptr: torch.Tensor
+    seq_lens: torch.Tensor
     gather_qo_indptr: torch.Tensor
     batch_reuse_info: torch.Tensor
     destination_starts: torch.Tensor
@@ -128,10 +130,10 @@ class _FlashMLAForwardWorkspace:
     packed_kv: torch.Tensor
     packed_q: Optional[torch.Tensor]
     attention_output: torch.Tensor
-    attention_lse_storage: torch.Tensor
+    attention_lse_storage: Optional[torch.Tensor]
     output_bf16: torch.Tensor
     fp32_output: Optional[torch.Tensor]
-    canonical_lse: torch.Tensor
+    canonical_lse: Optional[torch.Tensor]
     num_heads: int
 
     @classmethod
@@ -146,6 +148,7 @@ class _FlashMLAForwardWorkspace:
         qk_head_dim: int,
         v_head_dim: int,
         packed_q_tokens: int,
+        fp8_compute: bool,
     ) -> "_FlashMLAForwardWorkspace":
         compressed_kv = retained_bf16(compressed_kv)
         q_tokens = q.shape[0]
@@ -168,10 +171,14 @@ class _FlashMLAForwardWorkspace:
                     v_head_dim,
                 )
             ),
-            attention_lse_storage=torch.empty(
-                plan.max_partial_state_tokens * num_heads,
-                dtype=torch.float32,
-                device=q.device,
+            attention_lse_storage=(
+                None
+                if fp8_compute
+                else torch.empty(
+                    plan.max_partial_state_tokens * num_heads,
+                    dtype=torch.float32,
+                    device=q.device,
+                )
             ),
             output_bf16=q.new_empty((q_tokens, num_heads, v_head_dim)),
             fp32_output=(
@@ -183,11 +190,15 @@ class _FlashMLAForwardWorkspace:
                 if plan.requires_fp32_accumulator
                 else None
             ),
-            canonical_lse=torch.empty(
-                (num_heads, q_tokens),
-                dtype=torch.float32,
-                device=q.device,
-            ).transpose(0, 1),
+            canonical_lse=(
+                None
+                if fp8_compute
+                else torch.empty(
+                    (num_heads, q_tokens),
+                    dtype=torch.float32,
+                    device=q.device,
+                ).transpose(0, 1)
+            ),
             num_heads=num_heads,
         )
 
@@ -200,14 +211,18 @@ class _FlashMLAForwardWorkspace:
     def q_buffer(self, tokens: int) -> torch.Tensor:
         return cast(torch.Tensor, self.packed_q).narrow(0, 0, tokens)
 
-    def attention_buffers(self, tokens: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def attention_buffers(
+        self, tokens: int
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         output = self.attention_output.narrow(0, 0, tokens)
-        # FlashMLA requires head-major LSE with the current launch's token stride.
-        lse = torch.as_strided(
-            self.attention_lse_storage,
-            size=(tokens, self.num_heads),
-            stride=(1, tokens),
-        )
+        lse = None
+        if self.attention_lse_storage is not None:
+            # BF16 FlashMLA needs head-major LSE; FP8 returns its own allocation.
+            lse = torch.as_strided(
+                self.attention_lse_storage,
+                size=(tokens, self.num_heads),
+                stride=(1, tokens),
+            )
         return output, lse
 
 
@@ -430,6 +445,12 @@ class MlaFlashMLAPrefillOp:
                 d_v=v_head_dim,
                 enable_pdl=False,
             )
+            self._warmup_tokenspeed_prefill_without_lse(
+                tokenspeed_mla_prefill,
+                num_heads,
+                qk_nope_head_dim + qk_rope_head_dim,
+                v_head_dim,
+            )
             self.tokenspeed_prefill = tokenspeed_mla_prefill
             self.flash_mla_cuda = None
         else:
@@ -476,6 +497,8 @@ class MlaFlashMLAPrefillOp:
         self.use_mla = use_mla
         self.qo_indptr: Optional[torch.Tensor] = None
         self.kv_indptr: Optional[torch.Tensor] = None
+        self.q_seq_lens: Optional[torch.Tensor] = None
+        self.kv_seq_lens: Optional[torch.Tensor] = None
         self.max_q_len = 0
         self.max_kv_len = 0
         self.has_reuse_cache = False
@@ -490,6 +513,50 @@ class MlaFlashMLAPrefillOp:
         self._prefix_runtime_launches: tuple[_FlashMLAPrefixRuntimeLaunch, ...] = ()
         self._page_rr_full_descriptor: Optional[MlaPageRRChunkDescriptor] = None
         self._forward_workspace: Optional[_FlashMLAForwardWorkspace] = None
+
+    @staticmethod
+    def _warmup_tokenspeed_prefill_without_lse(
+        tokenspeed_prefill,
+        num_heads: int,
+        qk_head_dim: int,
+        v_head_dim: int,
+    ) -> None:
+        """Warm the causal no-LSE variant through TokenSpeed's public API."""
+
+        device_index = torch.cuda.current_device()
+        warmup_key = (device_index, num_heads, qk_head_dim, v_head_dim)
+        if warmup_key in _TOKENSPEED_NO_LSE_WARMUP_KEYS:
+            return
+        device = torch.device("cuda", device_index)
+        query = torch.zeros(
+            (1, num_heads, qk_head_dim),
+            dtype=torch.float8_e4m3fn,
+            device=device,
+        )
+        key = torch.zeros_like(query)
+        value = torch.zeros(
+            (1, num_heads, v_head_dim),
+            dtype=torch.float8_e4m3fn,
+            device=device,
+        )
+        seq_lens = torch.ones((1,), dtype=torch.int32, device=device)
+        indptr = torch.tensor((0, 1), dtype=torch.int32, device=device)
+        tokenspeed_prefill(
+            query=query,
+            key=key,
+            value=value,
+            seq_lens=seq_lens,
+            cum_seq_lens=indptr,
+            max_seq_len=1,
+            batch_size=1,
+            softmax_scale=1.0,
+            is_causal=True,
+            return_lse=False,
+            cum_seq_lens_q=indptr,
+            max_seq_len_q=1,
+            enable_pdl=False,
+        )
+        _TOKENSPEED_NO_LSE_WARMUP_KEYS.add(warmup_key)
 
     def release_forward_workspace(self) -> None:
         """Drop per-plan scratch once all target layers have consumed it.
@@ -506,6 +573,10 @@ class MlaFlashMLAPrefillOp:
         prefix_lens = list(mla_params.prefix_lens_host)
         self.qo_indptr = mla_params.qo_indptr_d
         self.kv_indptr = mla_params.prefill_ragged_kv_len_indptr_d
+        self.q_seq_lens = self.kv_seq_lens = None
+        if self.fp8_compute:
+            self.q_seq_lens = mla_params.attn_inputs.input_lengths
+            self.kv_seq_lens = self.q_seq_lens + mla_params.attn_inputs.prefix_lengths
         self.has_reuse_cache = mla_params.has_reuse_cache
         batch_reuse_info_host = mla_params.batch_reuse_info_host
         self._direct_attn_inputs = mla_params.attn_inputs
@@ -607,6 +678,7 @@ class MlaFlashMLAPrefillOp:
             flat_values = (
                 qo_indptr
                 + kv_indptr
+                + [item.prefix_len for item in launch.slices]
                 + gather_qo_indptr
                 + batch_reuse_info
                 + destination_starts
@@ -616,11 +688,19 @@ class MlaFlashMLAPrefillOp:
             (
                 launch_qo_indptr,
                 launch_kv_indptr,
+                launch_seq_lens,
                 launch_gather_qo_indptr,
                 launch_batch_reuse_info,
                 launch_destination_starts,
             ) = metadata.split(
-                (num_rows + 1, num_rows + 1, num_rows + 1, num_rows * 4, num_rows)
+                (
+                    num_rows + 1,
+                    num_rows + 1,
+                    num_rows,
+                    num_rows + 1,
+                    num_rows * 4,
+                    num_rows,
+                )
             )
             q_range = None
             if owners == list(range(owners[0], owners[-1] + 1)):
@@ -634,6 +714,7 @@ class MlaFlashMLAPrefillOp:
                     spec=launch,
                     qo_indptr=launch_qo_indptr,
                     kv_indptr=launch_kv_indptr,
+                    seq_lens=launch_seq_lens,
                     gather_qo_indptr=launch_gather_qo_indptr,
                     batch_reuse_info=launch_batch_reuse_info.view(num_rows, 4),
                     destination_starts=launch_destination_starts,
@@ -922,12 +1003,14 @@ class MlaFlashMLAPrefillOp:
         *,
         qo_indptr: torch.Tensor,
         kv_indptr: torch.Tensor,
+        seq_lens: Optional[torch.Tensor],
         max_q_len: int,
         max_kv_len: int,
         causal: bool,
+        return_lse: bool = True,
         out: Optional[torch.Tensor] = None,
         lse: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         if out is None:
             out = torch.empty(
                 q.shape[0],
@@ -936,37 +1019,42 @@ class MlaFlashMLAPrefillOp:
                 dtype=q.dtype,
                 device=q.device,
             )
-            lse = torch.empty(
-                self.num_heads,
-                q.shape[0],
-                dtype=torch.float32,
-                device=q.device,
-            ).transpose(0, 1)
-        else:
-            lse = cast(torch.Tensor, lse)
+            if not self.fp8_compute:
+                lse = torch.empty(
+                    self.num_heads,
+                    q.shape[0],
+                    dtype=torch.float32,
+                    device=q.device,
+                ).transpose(0, 1)
         if self.fp8_compute:
-            from .mla_fp8_kernels import quantize_fp8
+            from .mla_qkv_fp8_quant import quantize_qkv_fp8
 
             # Expanded K/V have their own ordinary unit-scale quantization.
             # Historical compressed KV was restored with kv_scale at gather.
-            result, result_lse = self.tokenspeed_prefill(
-                query=quantize_fp8(q, self.q_scale, name="prefill_q"),
-                key=quantize_fp8(k, name="prefill_k"),
-                value=quantize_fp8(value_states, name="prefill_v"),
-                seq_lens=kv_indptr[1:] - kv_indptr[:-1],
+            query_fp8, key_fp8, value_fp8 = quantize_qkv_fp8(
+                q, k, value_states, self.q_scale
+            )
+            result = self.tokenspeed_prefill(
+                query=query_fp8,
+                key=key_fp8,
+                value=value_fp8,
+                seq_lens=seq_lens,
                 cum_seq_lens=kv_indptr,
                 max_seq_len=max_kv_len,
                 batch_size=qo_indptr.numel() - 1,
                 softmax_scale=self.scale * self.q_scale,
                 is_causal=causal,
-                return_lse=True,
+                return_lse=return_lse,
                 cum_seq_lens_q=qo_indptr,
                 max_seq_len_q=max_q_len,
                 enable_pdl=False,
                 out=out,
             )
-            lse.copy_(result_lse)
-            return result, lse
+            if return_lse:
+                result, result_lse = cast(tuple[torch.Tensor, torch.Tensor], result)
+                return result, result_lse
+            return cast(torch.Tensor, result), None
+        lse = cast(torch.Tensor, lse)
         self.flash_mla_cuda.dense_prefill_fwd(
             _workspace(q.device),
             q,
@@ -996,9 +1084,11 @@ class MlaFlashMLAPrefillOp:
             value_states,
             qo_indptr=cast(torch.Tensor, self.qo_indptr),
             kv_indptr=cast(torch.Tensor, self.kv_indptr),
+            seq_lens=self.kv_seq_lens,
             max_q_len=self.max_q_len,
             max_kv_len=self.max_kv_len,
             causal=True,
+            return_lse=not self.fp8_compute,
         )
         return out
 
@@ -1136,6 +1226,7 @@ class MlaFlashMLAPrefillOp:
                 launch_v,
                 qo_indptr=launch.qo_indptr,
                 kv_indptr=launch.kv_indptr,
+                seq_lens=launch.seq_lens,
                 max_q_len=launch.max_q_len,
                 max_kv_len=launch.max_kv_len,
                 causal=False,
@@ -1185,6 +1276,7 @@ class MlaFlashMLAPrefillOp:
                 qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
                 v_head_dim=self.v_head_dim,
                 packed_q_tokens=packed_q_tokens,
+                fp8_compute=self.fp8_compute,
             )
             self._forward_workspace = workspace
             if self.fp8_compute or self._prefix_producer is not None:
@@ -1205,18 +1297,23 @@ class MlaFlashMLAPrefillOp:
             packed_projection=packed_projection,
             packed_output=current_packed_kv,
         )
-        current_output, _ = self._run_dense_attention(
+        current_output, current_lse = self._run_dense_attention(
             q,
             current_k,
             current_v,
             qo_indptr=cast(torch.Tensor, self.qo_indptr),
             kv_indptr=cast(torch.Tensor, self.qo_indptr),
+            seq_lens=self.q_seq_lens,
             max_q_len=self.max_q_len,
             max_kv_len=self.max_q_len,
             causal=True,
             out=workspace.output_bf16,
             lse=workspace.canonical_lse,
         )
+        # TokenSpeed owns its contiguous LSE allocation. Keep that native
+        # result as the canonical hybrid state instead of copying it into the
+        # FlashMLA-layout scratch used by the BF16 backend.
+        workspace.canonical_lse = cast(torch.Tensor, current_lse)
         canonical_output = (
             workspace.fp32_output
             if workspace.fp32_output is not None

@@ -6,9 +6,21 @@ import logging
 from typing import TYPE_CHECKING, Dict, Literal, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.model_loader.linear_attn_weight import split_kda_qkvg_fa_beta_sections
 from rtp_llm.models_py.distributed.sequence_parallel import SequenceParallelLayout
 from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
+    QuantizedActivation,
+)
+from rtp_llm.models_py.modules.kimi_k3.kda.cache import KimiK3KDACache
+from rtp_llm.models_py.modules.kimi_k3.kda.decode import KimiK3KDADecode
+from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
+    KimiK3KDAPrefill,
+    KimiKDACurrentStateRegistry,
+    KimiKDAPrefillMetadata,
+)
 from rtp_llm.models_py.modules.kimi_k3.parallel_mode import (
     KimiK3ParallelMode,
     resolve_kimi_k3_parallel_mode,
@@ -17,12 +29,8 @@ from rtp_llm.models_py.modules.kimi_k3.projection_ktp import (
     project_kda_inputs_ktp,
     resolve_projection_local_heads,
 )
-from rtp_llm.models_py.modules.kimi_k3.kda.cache import KimiK3KDACache
-from rtp_llm.models_py.modules.kimi_k3.kda.decode import KimiK3KDADecode
-from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
-    KimiK3KDAPrefill,
-    KimiKDACurrentStateRegistry,
-    KimiKDAPrefillMetadata,
+from rtp_llm.models_py.modules.kimi_k3.small_kernel_config import (
+    decode_small_kernels_enabled,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_quant import (
     quantize_forget_latent_fp8,
@@ -32,7 +40,6 @@ from rtp_llm.ops import ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
-from torch import nn
 
 if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
@@ -53,6 +60,7 @@ class KimiK3KDA(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
+        self._decode_small_kernels_enabled = decode_small_kernels_enabled()
         self.projection_ktp_workspace = None
         self.parallelism_config = parallelism_config
         self.weights = weights
@@ -236,14 +244,32 @@ class KimiK3KDA(nn.Module):
         else:
             self.decode_executor = None
 
+    def _use_small_kernels(self, hidden_states) -> bool:
+        """Select layout optimizations by activation capability, not phase.
+
+        FP8 projections also produce BF16 Q/K/V and gate tensors. Their wire
+        input is handled by the existing quantized gather; packing/reassembly
+        independently validate the actual projection outputs.
+        """
+
+        return bool(
+            self._decode_small_kernels_enabled
+            and hidden_states.is_cuda
+            and (
+                hidden_states.dtype == torch.bfloat16
+                or isinstance(hidden_states, QuantizedActivation)
+            )
+        )
+
     def _project_fused_kda_inputs(
         self,
         hidden_states: torch.Tensor,
         *,
         sp_layout: SequenceParallelLayout,
         projected_fused: Optional[torch.Tensor] = None,
+        need_mixed_qkv: bool = True,
     ) -> tuple[
-        torch.Tensor,
+        Optional[torch.Tensor],
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
@@ -252,6 +278,8 @@ class KimiK3KDA(nn.Module):
         torch.Tensor,
     ]:
         """Run and unpack the loader-provided Q/K/V/G/F_A/beta projection."""
+
+        optimize = self._use_small_kernels(hidden_states)
 
         if self.parallel_mode is KimiK3ParallelMode.PROJECTION_KTP:
             if projected_fused is not None:
@@ -269,8 +297,13 @@ class KimiK3KDA(nn.Module):
                 ktp_size=self.ktp_size,
                 ktp_rank=self.ktp_rank,
                 workspace=self.projection_ktp_workspace,
+                optimize=optimize,
             )
-            mixed_qkv_projected = torch.cat((result.q, result.k, result.v), dim=-1)
+            mixed_qkv_projected = (
+                torch.cat((result.q, result.k, result.v), dim=-1)
+                if need_mixed_qkv
+                else None
+            )
             return (
                 mixed_qkv_projected,
                 result.q,
@@ -321,7 +354,11 @@ class KimiK3KDA(nn.Module):
             raw_gate = torch.matmul(forget_latent, self.weights[W.linear_attn_f_b_w])
         beta_begin = self.attn_tp_rank * self.local_heads
         raw_beta = full_raw_beta.narrow(1, beta_begin, self.local_heads)
-        mixed_qkv_projected = projected_fused.narrow(1, 0, 3 * self.projection_size)
+        mixed_qkv_projected = (
+            projected_fused.narrow(1, 0, 3 * self.projection_size)
+            if need_mixed_qkv
+            else None
+        )
         return (
             mixed_qkv_projected,
             q_projected,
@@ -330,35 +367,6 @@ class KimiK3KDA(nn.Module):
             raw_gate,
             raw_beta,
             output_gate,
-        )
-
-    def _paged_decode_core(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        raw_gate: torch.Tensor,
-        raw_beta: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        ssm_cache: torch.Tensor,
-        block_map: torch.Tensor,
-        sequence_lengths_plus_one: torch.Tensor,
-        page_size: int,
-    ) -> torch.Tensor:
-        """Compatibility shim for the paged-cache ABI unit test."""
-
-        return KimiK3KDADecode._recurrent(
-            self,
-            q,
-            k,
-            v,
-            raw_gate,
-            raw_beta,
-            cu_seqlens,
-            ssm_cache,
-            block_map,
-            sequence_lengths_plus_one,
-            page_size,
         )
 
     def tp_input_projection_weights(self) -> list:
@@ -445,6 +453,7 @@ class KimiK3KDA(nn.Module):
             attention_inputs=attention_inputs,
             sp_layout=sp_layout,
         )
+        use_small_kernels = self._use_small_kernels(hidden_states)
         (
             mixed_qkv_projected,
             q_projected,
@@ -457,6 +466,9 @@ class KimiK3KDA(nn.Module):
             hidden_states,
             sp_layout=sp_layout,
             projected_fused=projected_fused,
+            # Prefill's convolution consumes packed QKV. Decode/target verify
+            # consume the separate views and need no staging concatenation.
+            need_mixed_qkv=mode == "prefill" or not use_small_kernels,
         )
         token_count = q_projected.shape[0]
         output_gate = output_gate_projected.reshape(

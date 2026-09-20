@@ -15,6 +15,9 @@ from rtp_llm.models_py.modules.kimi_k3.parallel_mode import (
     KimiK3ParallelMode,
     resolve_kimi_k3_parallel_mode,
 )
+from rtp_llm.models_py.modules.kimi_k3.small_kernel_config import (
+    decode_small_kernels_enabled,
+)
 from rtp_llm.ops import ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
@@ -97,9 +100,7 @@ class KimiK3MLA(MlaAttention):
             getattr(config, "k3_attention_quant_config", None) or config.quant_config,
             replicate_query_heads=q_replicated,
         )
-        # The framework RMSNorm consumes dense rows. The previous K3 wrapper
-        # also materialized these split views before invoking the same kernel.
-        self._perf_accepts_strided_latent = False
+        self._decode_small_kernels_enabled = decode_small_kernels_enabled()
         tp_size = int(parallelism_config.get_attn_tp_size())
         self.attn_tp_size = tp_size
         self.parallel_mode = resolve_kimi_k3_parallel_mode(parallelism_config)
@@ -125,11 +126,6 @@ class KimiK3MLA(MlaAttention):
                 "Kimi K3 requires the physical MLA suffix to remain no-RoPE"
             )
         self.use_output_gate = runtime.mla_use_output_gate
-        # Prefill 走 FlashMLA(dense prefill),Decode 走 FlashInfer("kernel")。
-        # 与 KDA 一样按 PD 角色固定后端。
-        self._mla_backend = (
-            "flashmla" if parallelism_config.role_type == RoleType.PREFILL else "kernel"
-        )
 
         self._q_a_norm = weights[W.mla_q_a_ln_gamma]
         self._kv_a_norm = weights[W.mla_kv_a_ln_gamma]
@@ -146,7 +142,10 @@ class KimiK3MLA(MlaAttention):
             else None
         )
         self.kv_b_proj = LinearFactory.create_linear_from_weights(
-            weights, W.mla_kv_b_w, W.mla_kv_b_s, None,
+            weights,
+            W.mla_kv_b_w,
+            W.mla_kv_b_s,
+            None,
             quant_config=quant_config or config.quant_config,
         )
         self._o_w = self.o_proj if self._fp8_enabled else weights[W.attn_o_w]
@@ -156,6 +155,7 @@ class KimiK3MLA(MlaAttention):
         self.q_a_layernorm = RMSNorm(self._q_a_norm, latent_norm_eps)
         self.kv_a_layernorm = RMSNorm(self._kv_a_norm, latent_norm_eps)
         from rtp_llm.models_py.modules.kimi_k3.fp8_producers import (
+            Bf16RMSNorm,
             Fp8RMSNorm,
             Fp8SigmoidGate,
             SigmoidGate,
@@ -167,6 +167,19 @@ class KimiK3MLA(MlaAttention):
                 self.kv_a_layernorm = Fp8RMSNorm(
                     self._kv_a_norm, latent_norm_eps, retain_bf16=True
                 )
+            elif self._decode_small_kernels_enabled:
+                # Decode caches the BF16 compressed latent even when its
+                # projections are FP8. Consume the projection slice directly.
+                self.kv_a_layernorm = Bf16RMSNorm(
+                    self._kv_a_norm, latent_norm_eps, self.kv_a_layernorm
+                )
+        elif self._decode_small_kernels_enabled:
+            self.q_a_layernorm = Bf16RMSNorm(
+                self._q_a_norm, latent_norm_eps, self.q_a_layernorm
+            )
+            self.kv_a_layernorm = Bf16RMSNorm(
+                self._kv_a_norm, latent_norm_eps, self.kv_a_layernorm
+            )
         self.output_gate_op = Fp8SigmoidGate() if self._fp8_enabled else SigmoidGate()
 
     def tp_input_projection_weights(self) -> list:
@@ -239,6 +252,42 @@ class KimiK3MLA(MlaAttention):
             dim=-1,
         )
 
+    def _normalize_latent(self, norm, latent):
+        from rtp_llm.models_py.modules.kimi_k3.fp8_producers import (
+            Bf16RMSNorm,
+            Fp8RMSNorm,
+        )
+        from rtp_llm.models_py.triton_kernels.kimi_kda.decode_bf16_producers import (
+            supports_latent_rmsnorm,
+        )
+
+        if isinstance(norm, Bf16RMSNorm):
+            return norm(latent)
+        if self._perf_accepts_strided_latent:
+            # FP8 Prefill already opted into this contract at construction.
+            # Keep its existing direct path without repeating capability checks.
+            return norm(latent)
+        if (
+            self._decode_small_kernels_enabled
+            and isinstance(norm, Fp8RMSNorm)
+            and supports_latent_rmsnorm(latent, norm.weight)
+        ):
+            # The existing FP8 producer already loads row-strided latents;
+            # keep its quantization and retained BF16 arithmetic unchanged.
+            return norm(latent)
+        return super()._normalize_latent(norm, latent)
+
+    def _prepare_output_layout(self, attn_output, input_shape, output_gate):
+        from rtp_llm.models_py.modules.kimi_k3.fp8_producers import SigmoidGate
+
+        if (
+            self.use_output_gate
+            and isinstance(self.output_gate_op, SigmoidGate)
+            and self.output_gate_op.accepts_strided(attn_output, output_gate)
+        ):
+            return attn_output
+        return super()._prepare_output_layout(attn_output, input_shape, output_gate)
+
     def _apply_output_gate(
         self,
         attn_output: torch.Tensor,
@@ -246,10 +295,9 @@ class KimiK3MLA(MlaAttention):
     ) -> torch.Tensor:
         """K3 sigmoid output gate, applied on the framework (kernel) path.
 
-        ``attn_output`` is the framework context flattened to
-        ``[tokens, local_heads * v_head_dim]`` (head-major), matching the flat
-        layout of the rank-local gate projection, so the gate multiplies element
-        wise per (head, value) exactly as K3 requires before o_proj.
+        The reference consumes flattened head-major context. The enabled BF16
+        producer also accepts the strided 3-D context, and writes dense
+        ``[tokens, local_heads * v_head_dim]`` rows for the output projection.
         This runs before the strict TP-SP or local-KTP output projection, so
         each rank gates only its local heads.
         """
@@ -258,7 +306,9 @@ class KimiK3MLA(MlaAttention):
         assert output_gate is not None
         return self.output_gate_op(attn_output, output_gate)
 
-    def _project_output(self, attn_output: torch.Tensor, context: KimiK3MLAContext) -> torch.Tensor:
+    def _project_output(
+        self, attn_output: torch.Tensor, context: KimiK3MLAContext
+    ) -> torch.Tensor:
         # The decoder layer owns the output projection and collective.  The
         # base MLA forward still calls this hook at the correct semantic point.
         return attn_output

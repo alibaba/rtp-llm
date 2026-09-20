@@ -20,6 +20,54 @@ except Exception:  # pragma: no cover - CPU-only import
     tl = None
 
 
+def validate_pack_options(
+    tokens,
+    valid_token_count=None,
+    valid_token_mask=None,
+    shared_input=None,
+    shared_out=None,
+):
+    """Validate metadata before writes; keep standalone kernel loading supported."""
+    if valid_token_count is not None and (
+        not isinstance(valid_token_count, int)
+        or isinstance(valid_token_count, bool)
+        or not 0 <= valid_token_count <= tokens
+    ):
+        raise ValueError("valid_token_count is outside the local token shard")
+    if valid_token_mask is not None and (
+        valid_token_mask.ndim != 1 or valid_token_mask.numel() != tokens
+    ):
+        raise ValueError("valid_token_mask must contain one entry per local token")
+    if (shared_input is None) != (shared_out is None):
+        raise ValueError("shared_input and shared_out must be supplied together")
+    if shared_input is not None and (
+        shared_input.ndim != 2
+        or shared_out.ndim != 2
+        or shared_input.shape[0] != tokens
+        or shared_out.shape[0] < tokens
+        or shared_input.shape[1] != shared_out.shape[1]
+        or shared_input.device != shared_out.device
+        or shared_input.dtype != shared_out.dtype
+    ):
+        raise ValueError("shared input/output shape, dtype or device mismatch")
+
+
+def mask_pack_routes(indices, weights, valid_token_count=None, valid_token_mask=None):
+    # Packers validate metadata once, before masking or writing any output.
+    valid = None
+    if valid_token_mask is not None:
+        valid = valid_token_mask.to(device=indices.device, dtype=torch.bool)
+    if valid_token_count is not None:
+        prefix = (
+            torch.arange(indices.shape[0], device=indices.device) < valid_token_count
+        )
+        valid = prefix if valid is None else valid & prefix
+    if valid is not None:
+        indices = torch.where(valid[:, None], indices, 0)
+        weights = torch.where(valid[:, None], weights, 0)
+    return indices, weights
+
+
 if triton is not None:
 
     @triton.jit(do_not_specialize=["M"])
@@ -108,6 +156,15 @@ if triton is not None:
         fp8_max: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        valid_mask_ptr,
+        valid_count,
+        HAS_COUNT: tl.constexpr,
+        HAS_MASK: tl.constexpr,
+        shared_ptr,
+        shared_out_ptr,
+        SHARED_D: tl.constexpr,
+        shared_stride: tl.constexpr,
+        shared_out_stride: tl.constexpr,
     ):
         pid_m_blk = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
@@ -161,6 +218,14 @@ if triton is not None:
                 mask=router_mask,
                 other=0,
             ).to(tl.int64)
+            if HAS_COUNT or HAS_MASK:
+                valid = offs_m < valid_count
+                if HAS_MASK:
+                    valid = valid & (
+                        tl.load(valid_mask_ptr + offs_m, row_mask, other=0) != 0
+                    )
+                w = tl.where(valid[:, None], w, 0.0)
+                idx = tl.where(valid[:, None], idx, 0)
             tl.store(
                 out_weights_ptr
                 + offs_m[:, None] * out_weights_stride_m
@@ -175,6 +240,23 @@ if triton is not None:
                 idx,
                 mask=router_mask,
             )
+
+        if SHARED_D > 0:
+            for chunk in tl.static_range((SHARED_D + N - 1) // N):
+                shared_cols = chunk * N + pid_blk * 128 + tl.arange(0, 128)
+                shared_mask = row_mask[:, None] & (shared_cols[None, :] < SHARED_D)
+                shared = tl.load(
+                    shared_ptr + offs_m[:, None] * shared_stride + shared_cols[None, :],
+                    shared_mask,
+                    other=0,
+                )
+                tl.store(
+                    shared_out_ptr
+                    + offs_m[:, None] * shared_out_stride
+                    + shared_cols[None, :],
+                    shared,
+                    shared_mask,
+                )
 
 
 def _validate_inputs(
@@ -213,8 +295,19 @@ def fused_pack_mega_moe_inputs_legacy(
     out_sf: torch.Tensor,
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
+    *,
+    valid_token_count=None,
+    valid_token_mask=None,
+    shared_input=None,
+    shared_out=None,
 ) -> None:
     T, D, topk = _validate_inputs(x, weights, indices, out_sf)
+    validate_pack_options(
+        T, valid_token_count, valid_token_mask, shared_input, shared_out
+    )
+    indices, weights = mask_pack_routes(
+        indices, weights, valid_token_count, valid_token_mask
+    )
     if T == 0:
         return
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
@@ -247,6 +340,8 @@ def fused_pack_mega_moe_inputs_legacy(
         BLOCK_K=block_k,
         num_warps=1,
     )
+    if shared_input is not None:
+        shared_out[:T].copy_(shared_input)
 
 
 def fused_pack_mega_moe_inputs_optimized(
@@ -257,8 +352,29 @@ def fused_pack_mega_moe_inputs_optimized(
     out_sf: torch.Tensor,
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
+    *,
+    valid_token_count=None,
+    valid_token_mask=None,
+    shared_input=None,
+    shared_out=None,
 ) -> None:
     T, D, topk = _validate_inputs(x, weights, indices, out_sf)
+    validate_pack_options(
+        T, valid_token_count, valid_token_mask, shared_input, shared_out
+    )
+    if shared_input is not None and (
+        shared_input.device != x.device
+        or shared_input.dtype != torch.bfloat16
+        or shared_input.stride(1) != 1
+        or shared_out.stride(1) != 1
+    ):
+        raise ValueError(
+            "fused shared staging requires same-device BF16 tensors with contiguous columns"
+        )
+    if valid_token_mask is not None:
+        valid_token_mask = valid_token_mask.to(
+            device=x.device, dtype=torch.bool
+        ).contiguous()
     if T == 0:
         return
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
@@ -292,6 +408,15 @@ def fused_pack_mega_moe_inputs_optimized(
         fp8_max,
         BLOCK_M=block_m,
         BLOCK_K=block_k,
+        valid_mask_ptr=valid_token_mask,
+        valid_count=T if valid_token_count is None else valid_token_count,
+        HAS_COUNT=valid_token_count is not None,
+        HAS_MASK=valid_token_mask is not None,
+        shared_ptr=shared_input,
+        shared_out_ptr=shared_out,
+        SHARED_D=0 if shared_input is None else shared_input.shape[1],
+        shared_stride=0 if shared_input is None else shared_input.stride(0),
+        shared_out_stride=0 if shared_out is None else shared_out.stride(0),
         num_warps=4,
     )
 
@@ -304,16 +429,31 @@ def fused_pack_mega_moe_inputs(
     out_sf: torch.Tensor,
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
+    *,
+    valid_token_count=None,
+    valid_token_mask=None,
+    shared_input=None,
+    shared_out=None,
 ) -> None:
     impl = os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER_IMPL", "optimized").lower()
     if impl == "legacy":
-        return fused_pack_mega_moe_inputs_legacy(
-            x, weights, indices, out_fp8, out_sf, out_indices, out_weights
+        pack = fused_pack_mega_moe_inputs_legacy
+    elif impl == "optimized":
+        pack = fused_pack_mega_moe_inputs_optimized
+    else:
+        raise ValueError(
+            f"invalid DSV4_MEGA_MOE_INPUT_PACKER_IMPL={impl!r}; expected legacy|optimized"
         )
-    if impl == "optimized":
-        return fused_pack_mega_moe_inputs_optimized(
-            x, weights, indices, out_fp8, out_sf, out_indices, out_weights
-        )
-    raise ValueError(
-        f"invalid DSV4_MEGA_MOE_INPUT_PACKER_IMPL={impl!r}; expected legacy|optimized"
+    return pack(
+        x,
+        weights,
+        indices,
+        out_fp8,
+        out_sf,
+        out_indices,
+        out_weights,
+        valid_token_count=valid_token_count,
+        valid_token_mask=valid_token_mask,
+        shared_input=shared_input,
+        shared_out=shared_out,
     )

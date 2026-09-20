@@ -8,6 +8,7 @@ import multiprocessing as mp
 import os
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -17,8 +18,13 @@ from rtp_llm.models_py.distributed.collective_torch import (
 )
 from rtp_llm.models_py.modules.factory.attention.attn_factory import get_mla_impl
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import mla_dcp_comm
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_dcp_comm import MlaDcpCommunicator
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_decode import PageRRMlaDecodeImpl
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_dcp_comm import (
+    MlaDcpCommunicator,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_decode import (
+    PageRRMlaDecodeImpl,
+    PageRRMlaDecodeOp,
+)
 from rtp_llm.ops import KvCacheDataType, NcclCommConfig, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.test.utils.port_util import PortManager
@@ -76,7 +82,11 @@ def _fixture(
     heads, latent, rope, nope, value = 96, 512, 64, 128, 128
     # The short request crosses into a 128:1 split during replay; the other
     # spans a whole CP period. This distinguishes LSE weighting from averaging.
-    prefixes = list(prefix_lengths) if prefix_lengths is not None else [page - 2 + generation, page * size + 3 + generation]
+    prefixes = (
+        list(prefix_lengths)
+        if prefix_lengths is not None
+        else [page - 2 + generation, page * size + 3 + generation]
+    )
     batch, local_heads = len(prefixes), heads // size
     unique_prefixes = list(dict.fromkeys(prefixes))
     prefix_to_group = {prefix: group for group, prefix in enumerate(unique_prefixes)}
@@ -88,13 +98,23 @@ def _fixture(
     max_len = max(lengths) + 16
     dtype = torch.float8_e4m3fn if fp8 else torch.bfloat16
     q_scale, kv_scale = (0.01, 0.02) if fp8 else (1.0, 1.0)
-    q_groups = (torch.randn(group_count, queries, heads, nope + rope, device=device) * 0.2).bfloat16()
-    ckv_groups = (torch.randn(group_count, queries, latent, device=device) * 0.2).bfloat16()
-    k_pe_groups = (torch.randn(group_count, queries, rope, device=device) * 0.2).bfloat16()
+    q_groups = (
+        torch.randn(group_count, queries, heads, nope + rope, device=device) * 0.2
+    ).bfloat16()
+    ckv_groups = (
+        torch.randn(group_count, queries, latent, device=device) * 0.2
+    ).bfloat16()
+    k_pe_groups = (
+        torch.randn(group_count, queries, rope, device=device) * 0.2
+    ).bfloat16()
     torch.manual_seed(3301)
     kc = (torch.randn(heads, nope, latent, device=device) * 0.02).bfloat16()
     vc = (torch.randn(heads, latent, value, device=device) * 0.02).bfloat16()
-    angles = torch.arange(max_len, device=device)[:, None] * (torch.arange(rope // 2, device=device)[None, :] + 1) / 97
+    angles = (
+        torch.arange(max_len, device=device)[:, None]
+        * (torch.arange(rope // 2, device=device)[None, :] + 1)
+        / 97
+    )
     cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
     group_positions = torch.tensor(
         [[prefix + query for query in range(queries)] for prefix in unique_prefixes],
@@ -112,12 +132,16 @@ def _fixture(
         group_positions.reshape(-1).long(),
         cos_sin,
     ).view(group_count, queries, rope)
-    canonical = (torch.randn(group_count, max_len, latent + rope, device=device) * 0.2).bfloat16()
+    canonical = (
+        torch.randn(group_count, max_len, latent + rope, device=device) * 0.2
+    ).bfloat16()
     for group, prefix in enumerate(unique_prefixes):
-        canonical[group, prefix:prefix + queries] = torch.cat(
+        canonical[group, prefix : prefix + queries] = torch.cat(
             (ckv_groups[group], k_rotated_groups[group]), dim=-1
         )
-    encoded = (canonical.float() / kv_scale).clamp(-448, 448).to(dtype) if fp8 else canonical
+    encoded = (
+        (canonical.float() / kv_scale).clamp(-448, 448).to(dtype) if fp8 else canonical
+    )
     q_all = q_groups[group_ids].reshape(tokens, heads, nope + rope)
     q_rotated = q_rotated_groups[group_ids].reshape(tokens, heads, nope + rope)
     ckv = ckv_groups[group_ids].reshape(tokens, latent)
@@ -127,30 +151,26 @@ def _fixture(
     # Real kernel tables are padded views and may select a native draft FULL
     # group distinct from the singular view last selected by a KDA layer.
     width = (max(lengths) + page * size - 1) // (page * size) * (page // kernel_page)
-    table_storage = torch.full((3, batch, width + 3), -1, dtype=torch.int32, device=device)
+    table_storage = torch.full(
+        (3, batch, width + 3), -1, dtype=torch.int32, device=device
+    )
     group_id = 2 if draft else 0
     table = table_storage[group_id, :, :width]
     page_count = batch * width
     logical_pages = torch.arange(page_count, device=device).view(batch, width)
-    physical_pages = 1 + (
-        page_count - 1 - logical_pages + generation
-    ) % page_count
+    physical_pages = 1 + (page_count - 1 - logical_pages + generation) % page_count
     table.copy_(physical_pages.to(torch.int32))
     local_pages = torch.arange(width, device=device)
     pages_per_owner = page // kernel_page
-    global_starts = (
-        (local_pages // pages_per_owner) * size + rank
-    ) * page + (local_pages % pages_per_owner) * kernel_page
-    global_positions = global_starts[:, None] + torch.arange(
-        kernel_page, device=device
-    )
+    global_starts = ((local_pages // pages_per_owner) * size + rank) * page + (
+        local_pages % pages_per_owner
+    ) * kernel_page
+    global_positions = global_starts[:, None] + torch.arange(kernel_page, device=device)
     safe_positions = global_positions.clamp_max(max_len - 1)
-    packed_pages = encoded[
-        group_ids[:, None, None], safe_positions[None]
-    ]
-    valid = global_positions[None] < torch.tensor(
-        prefixes, device=device
-    )[:, None, None]
+    packed_pages = encoded[group_ids[:, None, None], safe_positions[None]]
+    valid = (
+        global_positions[None] < torch.tensor(prefixes, device=device)[:, None, None]
+    )
     packed_pages = torch.where(
         valid[..., None], packed_pages, torch.zeros((), dtype=dtype, device=device)
     )
@@ -163,36 +183,56 @@ def _fixture(
         page_count, kernel_page, latent + rope
     )
     fields = dict(
-        is_prefill=queries > 1, is_target_verify=queries > 1 and not draft,
+        is_prefill=queries > 1,
+        is_target_verify=queries > 1 and not draft,
         is_mtp_draft_update=queries > 1 and draft,
-        is_cuda_graph=False, total_tokens=tokens,
+        is_cuda_graph=False,
+        total_tokens=tokens,
         input_lengths=torch.full((batch,), queries, dtype=torch.int32, device=device),
         input_lengths_host=torch.full((batch,), queries, dtype=torch.int32),
         prefix_lengths=torch.tensor(prefixes, dtype=torch.int32, device=device),
         prefix_lengths_host=torch.tensor(prefixes, dtype=torch.int32),
         sequence_lengths=torch.tensor(prefixes, dtype=torch.int32, device=device),
-        sequence_lengths_plus_1_d=torch.tensor([p + 1 for p in prefixes], dtype=torch.int32, device=device),
-        kv_cache_kernel_block_id_device_by_group=[table_storage[g, :, :width] for g in range(3)],
+        sequence_lengths_plus_1_d=torch.tensor(
+            [p + 1 for p in prefixes], dtype=torch.int32, device=device
+        ),
+        kv_cache_kernel_block_id_device_by_group=[
+            table_storage[g, :, :width] for g in range(3)
+        ],
         kv_cache_kernel_block_id_device=table_storage[1, :, :width],
         # Native Graph keeps the CPU map in this field, without a _host mirror.
-        kv_cache_layer_to_group=torch.tensor([2] if draft else [1, 0], dtype=torch.int32).pin_memory(),
+        kv_cache_layer_to_group=torch.tensor(
+            [2] if draft else [1, 0], dtype=torch.int32
+        ).pin_memory(),
         cache_store_inputs=None,
     )
     inputs = PyAttentionInputs()
     for name, field in fields.items():
         setattr(inputs, name, field)
     config = SimpleNamespace(
-        head_num=local_heads, kv_lora_rank=latent, rope_head_dim=rope, nope_head_dim=nope,
-        kernel_tokens_per_block=kernel_page, tokens_per_block=page, softmax_extra_scale=1.0,
-        use_mla=True, indexer_topk=2048, is_sparse=False, mla_fp8_compute=fp8, mla_fp8_q_scale=q_scale, mla_fp8_kv_scale=kv_scale,
+        head_num=local_heads,
+        kv_lora_rank=latent,
+        rope_head_dim=rope,
+        nope_head_dim=nope,
+        kernel_tokens_per_block=kernel_page,
+        tokens_per_block=page,
+        softmax_extra_scale=1.0,
+        use_mla=True,
+        indexer_topk=2048,
+        is_sparse=False,
+        mla_fp8_compute=fp8,
+        mla_fp8_q_scale=q_scale,
+        mla_fp8_kv_scale=kv_scale,
         kv_cache_dtype=KvCacheDataType.FP8 if fp8 else KvCacheDataType.BASE,
         rope_config=SimpleNamespace(is_neox_style=True),
     )
     head_slice = slice(rank * local_heads, (rank + 1) * local_heads)
-    weights = [{
-        W.mla_kc: kc if q_replicated else kc[head_slice],
-        W.mla_vc: vc[head_slice],
-    }]
+    weights = [
+        {
+            W.mla_kc: kc if q_replicated else kc[head_slice],
+            W.mla_vc: vc[head_slice],
+        }
+    ]
     if not draft:
         weights.insert(0, {})  # The target starts with LINEAR, not FULL MLA.
     absorbed = torch.bmm(q_rotated[..., :nope].transpose(0, 1), kc).transpose(0, 1)
@@ -213,7 +253,10 @@ def _fixture(
     ).view(group_count, queries, local_heads, max_len)
     scores.mul_((nope + rope) ** -0.5 * q_scale * kv_scale)
     causal_lengths = torch.tensor(
-        [[prefix + query + 1 for query in range(queries)] for prefix in unique_prefixes],
+        [
+            [prefix + query + 1 for query in range(queries)]
+            for prefix in unique_prefixes
+        ],
         dtype=torch.int64,
         device=device,
     )
@@ -234,14 +277,22 @@ def _fixture(
         group_ids
     ].reshape(tokens, local_heads, value)
     return SimpleNamespace(
-        config=config, inputs=inputs, weights=weights, cos_sin=cos_sin,
+        config=config,
+        inputs=inputs,
+        weights=weights,
+        cos_sin=cos_sin,
         q=(q_all if q_replicated else q_all[:, head_slice]).contiguous(),
         ckv=ckv,
         k_pe=k_pe,
-        cache=SimpleNamespace(kv_cache_base=raw_cache), expected=expected,
-        positions=positions, canonical=encoded, prefix_groups=prefix_groups,
-        prefixes=prefixes, dtype=dtype,
-        layer_id=0 if draft else 1, group_id=group_id,
+        cache=SimpleNamespace(kv_cache_base=raw_cache),
+        expected=expected,
+        positions=positions,
+        canonical=encoded,
+        prefix_groups=prefix_groups,
+        prefixes=prefixes,
+        dtype=dtype,
+        layer_id=0 if draft else 1,
+        group_id=group_id,
     )
 
 
@@ -258,7 +309,10 @@ def _assert_result(fixture, impl, output, rank, size):
     torch.testing.assert_close(output, fixture.expected, atol=atol, rtol=0.015)
     metadata = impl.fmha_params
     torch.testing.assert_close(metadata.positions_d, fixture.positions, rtol=0, atol=0)
-    expected_lengths = [_reference_local_prefix_tokens(p, rank, size) for p in fixture.positions.tolist()]
+    expected_lengths = [
+        _reference_local_prefix_tokens(p, rank, size)
+        for p in fixture.positions.tolist()
+    ]
     assert metadata.local_causal_lens.flatten().tolist() == expected_lengths
     slots = metadata.slot_mapping.tolist()
     for row, position in enumerate(fixture.positions.tolist()):
@@ -286,7 +340,9 @@ def _worker(rank, size, port):
     parallelism.dp_size = 1
     parallelism.role_type = RoleType.DECODE
     parallelism.decode_cp_kv_cache_sharded = True
-    init_distributed_environment(parallelism, NcclCommConfig(nccl_ip="127.0.0.1"), port, timeout=180)
+    init_distributed_environment(
+        parallelism, NcclCommConfig(nccl_ip="127.0.0.1"), port, timeout=180
+    )
     graph = None
     try:
         total_cases = len(_CASES)
@@ -320,8 +376,12 @@ def _worker(rank, size, port):
                         fixture.inputs.sequence_lengths_plus_1_d.zero_()
                     impl = get_mla_impl(
                         fixture.config,
-                        SimpleNamespace(weights=fixture.weights, get_global_weight=lambda key: fixture.cos_sin),
-                        fixture.inputs, parallelism_config=parallelism,
+                        SimpleNamespace(
+                            weights=fixture.weights,
+                            get_global_weight=lambda key: fixture.cos_sin,
+                        ),
+                        fixture.inputs,
+                        parallelism_config=parallelism,
                         is_cuda_graph=True,
                     )
                     assert isinstance(impl, PageRRMlaDecodeImpl)
@@ -332,24 +392,44 @@ def _worker(rank, size, port):
                             f"case={case_index}/{total_cases} backend=page_rr",
                             flush=True,
                         )
-                    comm = mla_dcp_comm.get_mla_dcp(fixture.config, fixture.q.device, fixture.dtype)
-                    assert comm.backend == "a2a"
-                    assert impl.fmha_params.cache_group_id == fixture.group_id, (
-                        f"Page-RR selected group {impl.fmha_params.cache_group_id}, expected {fixture.group_id}"
+                    comm = mla_dcp_comm.get_mla_dcp(
+                        fixture.config, fixture.q.device, fixture.dtype
                     )
-                    output = impl.forward(fixture.q.clone(), fixture.ckv, fixture.k_pe.clone(), fixture.cache, fixture.layer_id)
+                    assert comm.backend == "a2a"
+                    assert (
+                        impl.fmha_params.cache_group_id == fixture.group_id
+                    ), f"Page-RR selected group {impl.fmha_params.cache_group_id}, expected {fixture.group_id}"
+                    output = impl.forward(
+                        fixture.q.clone(),
+                        fixture.ckv,
+                        fixture.k_pe.clone(),
+                        fixture.cache,
+                        fixture.layer_id,
+                    )
                     _assert_result(fixture, impl, output, rank, size)
                     q, k_pe = fixture.q.clone(), fixture.k_pe.clone()
                     stream = torch.cuda.Stream()
                     stream.wait_stream(torch.cuda.current_stream())
                     with torch.cuda.stream(stream):
                         for _ in range(2):
-                            impl.forward(q, fixture.ckv, k_pe, fixture.cache, fixture.layer_id)
+                            impl.forward(
+                                q, fixture.ckv, k_pe, fixture.cache, fixture.layer_id
+                            )
                     torch.cuda.current_stream().wait_stream(stream)
                     graph = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(graph):
-                        output = impl.forward(q, fixture.ckv, k_pe, fixture.cache, fixture.layer_id)
-                    addresses = tuple(x.data_ptr() for x in (impl.fmha_params.positions_d, impl.fmha_params.slot_mapping, impl.fmha_params.local_causal_lens, impl.fmha_params.query_block_tables))
+                        output = impl.forward(
+                            q, fixture.ckv, k_pe, fixture.cache, fixture.layer_id
+                        )
+                    addresses = tuple(
+                        x.data_ptr()
+                        for x in (
+                            impl.fmha_params.positions_d,
+                            impl.fmha_params.slot_mapping,
+                            impl.fmha_params.local_causal_lens,
+                            impl.fmha_params.query_block_tables,
+                        )
+                    )
                     for generation in (1, 2):
                         live = _fixture(
                             rank,
@@ -367,9 +447,21 @@ def _worker(rank, size, port):
                         k_pe.copy_(live.k_pe)
                         fixture.ckv.copy_(live.ckv)
                         fixture.cache.kv_cache_base.copy_(live.cache.kv_cache_base)
-                        for field in ("prefix_lengths", "sequence_lengths", "sequence_lengths_plus_1_d"):
-                            getattr(fixture.inputs, field).copy_(getattr(live.inputs, field))
-                        fixture.inputs.kv_cache_kernel_block_id_device_by_group[fixture.group_id].copy_(live.inputs.kv_cache_kernel_block_id_device_by_group[live.group_id])
+                        for field in (
+                            "prefix_lengths",
+                            "sequence_lengths",
+                            "sequence_lengths_plus_1_d",
+                        ):
+                            getattr(fixture.inputs, field).copy_(
+                                getattr(live.inputs, field)
+                            )
+                        fixture.inputs.kv_cache_kernel_block_id_device_by_group[
+                            fixture.group_id
+                        ].copy_(
+                            live.inputs.kv_cache_kernel_block_id_device_by_group[
+                                live.group_id
+                            ]
+                        )
                         impl.prepare_cuda_graph(fixture.inputs)
                         allocated = torch.cuda.memory_allocated()
                         graph.replay()
@@ -377,7 +469,15 @@ def _worker(rank, size, port):
                         assert torch.cuda.memory_allocated() == allocated
                         live.cache = fixture.cache
                         _assert_result(live, impl, output, rank, size)
-                        assert addresses == tuple(x.data_ptr() for x in (impl.fmha_params.positions_d, impl.fmha_params.slot_mapping, impl.fmha_params.local_causal_lens, impl.fmha_params.query_block_tables))
+                        assert addresses == tuple(
+                            x.data_ptr()
+                            for x in (
+                                impl.fmha_params.positions_d,
+                                impl.fmha_params.slot_mapping,
+                                impl.fmha_params.local_causal_lens,
+                                impl.fmha_params.query_block_tables,
+                            )
+                        )
                     graph.reset()
                     graph = None
                     torch.cuda.synchronize()
@@ -396,9 +496,13 @@ def _worker(rank, size, port):
         except ValueError as error:
             assert "BF16/E4M3" in str(error)
         else:
-            raise AssertionError("unsupported communication dtype must fail during initialization")
+            raise AssertionError(
+                "unsupported communication dtype must fail during initialization"
+            )
         if rank == 0:
-            print("DCP PASS fixed A2A backend and lazy communicator contract", flush=True)
+            print(
+                "DCP PASS fixed A2A backend and lazy communicator contract", flush=True
+            )
     finally:
         # NCCL finalization waits for captured graph callbacks to be released.
         # Destroy the graph while its communicator is still alive.
@@ -416,15 +520,27 @@ class PageRRMlaDecodeTest(unittest.TestCase):
             for position in range(128 * size * 3 + 19):
                 counts[(position // 128) % size] += 1
                 for rank in range(size):
-                    self.assertEqual(_reference_local_prefix_tokens(position, rank, size), counts[rank])
+                    self.assertEqual(
+                        _reference_local_prefix_tokens(position, rank, size),
+                        counts[rank],
+                    )
 
     def test_production_page_rr_decode(self):
         size = int(os.environ.get("DCP_TEST_WORLD_SIZE", "8"))
         self.assertIn(size, (4, 8, 16))
-        self.assertGreaterEqual(torch.cuda.device_count(), size, "DCP test must not pass by skipping missing GPUs")
+        self.assertGreaterEqual(
+            torch.cuda.device_count(),
+            size,
+            "DCP test must not pass by skipping missing GPUs",
+        )
         mp.set_start_method("spawn", force=True)
         ports, locks = PortManager().get_consecutive_ports(1)
-        processes = [mp.Process(target=_worker, args=(rank, size, ports[0]), name=f"dcp-rank-{rank}") for rank in range(size)]
+        processes = [
+            mp.Process(
+                target=_worker, args=(rank, size, ports[0]), name=f"dcp-rank-{rank}"
+            )
+            for rank in range(size)
+        ]
         try:
             for process in processes:
                 process.start()
@@ -445,6 +561,121 @@ class PageRRMlaDecodeTest(unittest.TestCase):
             for lock in locks:
                 lock.__exit__(None, None, None)
 
+
+class PageRREmptyPartialTest(unittest.TestCase):
+    def setUp(self):
+        # Load the compatibility bridge lazily: spawn must not import TokenSpeed
+        # while unpickling the distributed worker.
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.tokenspeed_mla_impl import (
+            _load_tokenspeed_mla,
+        )
+
+        self.assertTrue(_load_tokenspeed_mla())
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            tokenspeed_mla_page_rr,
+        )
+
+        self.tokenspeed = tokenspeed_mla_page_rr
+        self.query = torch.ones((1, 2, 2, 6), dtype=torch.bfloat16, device="cuda")
+        self.cache = self.query.new_ones(1, 4, 6)
+        self.workspace = torch.empty(4096, dtype=torch.int8, device="cuda")
+        self.tables = torch.zeros((2, 1), dtype=torch.int32, device="cuda")
+        self.lengths = self.tables.new_tensor([[0, 1]])
+        backend = patch.object(
+            self.tokenspeed.backend,
+            "tokenspeed_mla_decode",
+            side_effect=self._dirty_backend,
+        )
+        backend.start()
+        self.addCleanup(backend.stop)
+
+    def _dirty_backend(self, **kwargs):
+        output = kwargs["out"].fill_(7)
+        lse = torch.full(output.shape[:3], 11, dtype=torch.float32, device="cuda")
+        self.dirty = output, lse
+        return output, lse
+
+    def test_standalone_api_normalizes_dirty_empty_rows(self):
+        output, lse = self.tokenspeed.tokenspeed_mla_page_rr_decode(
+            self.query,
+            self.cache,
+            self.workspace,
+            4,
+            2,
+            self.tables,
+            self.lengths,
+            4,
+            0.5,
+        )
+        self.assertTrue((output[0, 0] == 0).all())
+        self.assertTrue(torch.isneginf(lse[0, 0]).all())
+        self.assertTrue((output[0, 1] == 7).all())
+        self.assertTrue((lse[0, 1] == 11).all())
+
+    def test_page_rr_op_masks_dirty_empty_rows_without_cleanup_on_graph_replay(self):
+        packed = self.query.new_empty(1, 2, 2, 6)
+
+        def combine(partial, lse, lengths):
+            mla_dcp_comm._pack_a2a[(2, 2)](
+                partial,
+                lse,
+                lengths,
+                packed,
+                packed.view(torch.float32),
+                2,
+                heads=2,
+                local_heads=2,
+                dim=4,
+                block=8,
+            )
+            return packed[0, :, :, :4].permute(1, 0, 2).contiguous()
+
+        op = object.__new__(PageRRMlaDecodeOp)
+        op.num_heads = op.all_heads = op.query_heads = 2
+        op.q_replicated = True
+        op.kv_lora_rank, op.qk_rope_head_dim = 4, 2
+        op.fp8_compute, op.bmm1_scale = False, 0.5
+        op.communicator = SimpleNamespace(combine=combine)
+        op._workspace = self.workspace
+        op.metadata = SimpleNamespace(
+            local_causal_lens=self.lengths,
+            query_block_tables=self.tables,
+            kernel_page_size=4,
+        )
+        op.weights = [
+            {
+                W.mla_kc: self.query.new_zeros(2, 2, 4),
+                W.mla_vc: self.query.new_ones(2, 4, 3),
+            }
+        ]
+        query = self.query.new_ones(2, 2, 2)
+        cache = SimpleNamespace(kv_cache_base=self.cache)
+        # A real PageRR forward must delegate empty masking to the packing
+        # kernel. Both output and LSE from the backend are deliberately dirty.
+        with patch.object(
+            self.tokenspeed,
+            "_set_empty_partial_identity",
+            side_effect=AssertionError("redundant empty cleanup launched"),
+        ):
+            op.forward(query, query, cache, 0)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = op.forward(query, query, cache, 0)
+
+        for _ in range(2):
+            packed.fill_(23)
+            graph.replay()
+            torch.cuda.synchronize()
+            self.assertTrue((self.dirty[0][0] == 7).all())
+            self.assertTrue((self.dirty[1][0] == 11).all())
+            self.assertTrue((packed[0, 0, :, :4] == 0).all())
+            self.assertTrue(
+                torch.isneginf(packed.view(torch.float32)[0, 0, :, 2]).all()
+            )
+            self.assertTrue((packed[0, 1, :, :4] == 7).all())
+            self.assertTrue((packed.view(torch.float32)[0, 1, :, 2] == 11).all())
+            self.assertTrue((output[0] == 0).all())
+            self.assertTrue((output[1] == 28).all())
 
 
 if __name__ == "__main__":

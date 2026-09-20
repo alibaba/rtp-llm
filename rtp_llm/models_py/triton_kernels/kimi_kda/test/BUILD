@@ -3,6 +3,95 @@ load("//bazel:arch_select.bzl", "requirement")
 requirement(["torch", "triton"])
 
 py_test(
+    name = "cached_launch_compat_test",
+    srcs = ["cached_launch_compat_test.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        ":torch",
+        ":triton",
+    ],
+)
+
+py_test(
+    name = "cached_launch_test",
+    srcs = ["cached_launch_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        ":torch",
+        ":triton",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+    tags = ["manual", "H20"],
+)
+
+[
+    py_test(
+        name = "projection_ktp_nccl_%d_test" % ranks,
+        srcs = ["projection_ktp_nccl_test.py"],
+        main = "projection_ktp_nccl_test.py",
+        deps = [
+            "//rtp_llm/models_py:modules",
+            "//rtp_llm/models_py/triton_kernels:kimi_kda",
+            ":torch",
+            ":triton",
+        ],
+        env = {"GPU_COUNT": str(ranks)},
+        exec_properties = {"gpu": "H20", "gpu_count": str(ranks)},
+        tags = ["manual", "H20"],
+        timeout = "long",
+    )
+    for ranks in [1, 2, 4, 8]
+]
+
+py_test(
+    name = "moe_decode_small_kernel_test",
+    srcs = ["moe_decode_small_kernel_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        ":torch",
+        ":triton",
+    ],
+    env = {"GPU_COUNT": "1", "DSV4_MOE_STRICT_FUSED": "0"},
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+    tags = ["manual", "H20"],
+)
+
+py_test(
+    name = "decode_bf16_producers_test",
+    srcs = ["decode_bf16_producers_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        ":torch",
+        ":triton",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+    tags = ["manual", "H20"],
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "projection_ktp_small_kernel_test",
+    srcs = ["projection_ktp_small_kernel_test.py"],
+    deps = [
+        "//rtp_llm/model_loader:loader",
+        "//rtp_llm/models_py:kernels",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        ":torch",
+        ":triton",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+    tags = ["manual", "H20"],
+    visibility = ["//visibility:public"],
+)
+
+py_test(
     name = "attn_res_test",
     srcs = ["attn_res_test.py"],
     deps = [
@@ -88,8 +177,9 @@ py_test(
     name = "producer_fp8_test",
     srcs = ["producer_fp8_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
     tags = ["manual", "B300"],
-    exec_properties = {"gpu": "B300"},
+    exec_properties = {"gpu": "B300", "gpu_count": "1"},
 )
 
 py_test(

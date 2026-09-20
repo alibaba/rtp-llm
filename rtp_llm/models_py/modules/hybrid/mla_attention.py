@@ -2,6 +2,8 @@ from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
@@ -10,7 +12,6 @@ from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 
 class MlaAttention(nn.Module):
@@ -37,9 +38,7 @@ class MlaAttention(nn.Module):
             attn_config.head_num // self.parallelism_config.get_attn_tp_size()
         )
         self.num_heads = (
-            attn_config.head_num
-            if replicate_query_heads
-            else self.output_num_heads
+            attn_config.head_num if replicate_query_heads else self.output_num_heads
         )
         self.qk_nope_head_dim = attn_config.nope_head_dim
         self.qk_rope_head_dim = attn_config.rope_head_dim
@@ -149,6 +148,18 @@ class MlaAttention(nn.Module):
         """
         return attn_output
 
+    def _normalize_latent(self, norm, latent):
+        """Keep the default dense staging contract and existing FP8 opt-out."""
+        return norm(
+            latent
+            if getattr(self, "_perf_accepts_strided_latent", False)
+            else latent.contiguous()
+        )
+
+    def _prepare_output_layout(self, attn_output, input_shape, output_gate):
+        """Prepare the dense head-major context consumed by the output gate."""
+        return attn_output.reshape(*input_shape, -1).contiguous()
+
     def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
         """Apply the row-parallel output projection and TP reduction.
 
@@ -198,11 +209,7 @@ class MlaAttention(nn.Module):
                 dim=-1,
             )
             with self._profile_stage("q_latent_rmsnorm", q):
-                q_c = self.q_a_layernorm(
-                    q
-                    if getattr(self, "_perf_accepts_strided_latent", False)
-                    else q.contiguous()
-                )
+                q_c = self._normalize_latent(self.q_a_layernorm, q)
             with self._profile_stage("q_up_projection_local_heads", q_c):
                 q = self.q_b_proj(q_c)
         else:
@@ -225,11 +232,7 @@ class MlaAttention(nn.Module):
         )
 
         with self._profile_stage("kv_latent_rmsnorm", compressed_kv):
-            compressed_kv = self.kv_a_layernorm(
-                compressed_kv
-                if getattr(self, "_perf_accepts_strided_latent", False)
-                else compressed_kv.contiguous()
-            )
+            compressed_kv = self._normalize_latent(self.kv_a_layernorm, compressed_kv)
 
         with self._profile_stage("sparse_indexer_or_dense_noop", q_view):
             topk_indices = self._run_sparse_indexer(
@@ -241,8 +244,8 @@ class MlaAttention(nn.Module):
             )
 
         if attn_output is not None:
-            attn_output = (
-                attn_output.reshape(*input_shape, -1).contiguous()
+            attn_output = self._prepare_output_layout(
+                attn_output, input_shape, output_gate
             )
         else:
             attn_output = torch.zeros(

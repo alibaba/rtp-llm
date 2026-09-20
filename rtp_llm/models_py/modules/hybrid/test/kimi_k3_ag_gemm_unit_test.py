@@ -189,6 +189,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
 
         module = KimiK3KDA.__new__(KimiK3KDA)
         nn.Module.__init__(module)
+        module._decode_small_kernels_enabled = False
         module.attn_tp_size = tp_size
         module.attn_tp_rank = tp_size - 1
         module.ktp_size = 1
@@ -347,7 +348,6 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         module.suffix_dim = 1
         module.local_heads = 2
         module.value_dim = 4
-        module._mla_backend = "kernel"
         module.use_output_gate = True
         module.attn_tp_rank = 0
         packed_weight = torch.randn(5, 14)
@@ -794,6 +794,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         layer = KimiK3DecoderLayer.__new__(KimiK3DecoderLayer)
         nn.Module.__init__(layer)
         layer.parallel_mode = KimiK3ParallelMode.TP_SP
+        layer._decode_small_kernels = False
         layer.layer_idx = 1
         layer._previous_blocks = 1
         layer._writes_block = False
@@ -875,6 +876,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         layer._previous_blocks = 1
         layer._writes_block = False
         layer.eps = 1e-6
+        layer._decode_small_kernels = False
         layer.attn_res_block_size = 2
         layer.layer_type = kimi_k3.HybridAttentionType.LINEAR
         layer.attention_norm = nn.Identity()

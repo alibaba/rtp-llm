@@ -44,10 +44,14 @@ class PageRRMlaDecodeOp:
         self.fp8_compute = attn_configs.mla_fp8_compute
         self.q_scale = attn_configs.mla_fp8_q_scale
         self.kv_scale = attn_configs.mla_fp8_kv_scale
-        self.bmm1_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** -0.5 * attn_configs.softmax_extra_scale
+        self.bmm1_scale = (
+            self.qk_nope_head_dim + self.qk_rope_head_dim
+        ) ** -0.5 * attn_configs.softmax_extra_scale
         if self.fp8_compute:
             self.bmm1_scale *= self.q_scale * self.kv_scale
-        projection = next((w[W.mla_kc] for w in weights if W.mla_kc in w and W.mla_vc in w), None)
+        projection = next(
+            (w[W.mla_kc] for w in weights if W.mla_kc in w and W.mla_vc in w), None
+        )
         if projection is None:
             raise ValueError("Decode Page-RR requires absorbed K/V projection weights")
         if projection.shape[0] != self.query_heads:
@@ -56,23 +60,39 @@ class PageRRMlaDecodeOp:
                 f"query layout: got {projection.shape[0]}, expected "
                 f"{self.query_heads}"
             )
-        expected_cache_dtype = KvCacheDataType.FP8 if self.fp8_compute else KvCacheDataType.BASE
+        expected_cache_dtype = (
+            KvCacheDataType.FP8 if self.fp8_compute else KvCacheDataType.BASE
+        )
         if attn_configs.kv_cache_dtype != expected_cache_dtype:
             raise ValueError(f"Decode Page-RR requires {expected_cache_dtype} cache")
         kernel_dtype = torch.float8_e4m3fn if self.fp8_compute else projection.dtype
         if not tokenspeed_mla_kernel_supported(
-            self.all_heads, self.kv_lora_rank, self.qk_rope_head_dim,
-            attn_configs.kernel_tokens_per_block, 1, kernel_dtype, projection.device,
+            self.all_heads,
+            self.kv_lora_rank,
+            self.qk_rope_head_dim,
+            attn_configs.kernel_tokens_per_block,
+            1,
+            kernel_dtype,
+            projection.device,
         ):
-            raise ValueError("Decode Page-RR requires supported TokenSpeed MLA geometry/dtype")
+            raise ValueError(
+                "Decode Page-RR requires supported TokenSpeed MLA geometry/dtype"
+            )
         self.metadata = PageRRMlaDecodeMetadata(
-            attn_configs.tokens_per_block, attn_configs.kernel_tokens_per_block,
-            parallelism.tp_size, parallelism.tp_rank, cache_group_id,
+            attn_configs.tokens_per_block,
+            attn_configs.kernel_tokens_per_block,
+            parallelism.tp_size,
+            parallelism.tp_rank,
+            cache_group_id,
         )
         # Each B*Q row has its own local causal bound and runs as q1.
-        required = _tokenspeed_workspace_bytes(projection.device, self.all_heads, self.kv_lora_rank, 1)
+        required = _tokenspeed_workspace_bytes(
+            projection.device, self.all_heads, self.kv_lora_rank, 1
+        )
         if workspace is None:
-            workspace = _get_tokenspeed_workspace(projection.device, self.all_heads, self.kv_lora_rank, 1)
+            workspace = _get_tokenspeed_workspace(
+                projection.device, self.all_heads, self.kv_lora_rank, 1
+            )
         if workspace.device != projection.device or workspace.numel() < required:
             raise ValueError("Decode Page-RR workspace has wrong device or capacity")
         self._workspace = workspace
@@ -97,12 +117,15 @@ class PageRRMlaDecodeOp:
             device=q_nope.device,
         )
         torch.bmm(
-            q_nope.transpose(0, 1), self.weights[layer_id][W.mla_kc],
-            out=local_query[..., :self.kv_lora_rank],
+            q_nope.transpose(0, 1),
+            self.weights[layer_id][W.mla_kc],
+            out=local_query[..., : self.kv_lora_rank],
         )
-        local_query[..., self.kv_lora_rank:].copy_(q_pe.transpose(0, 1))
+        local_query[..., self.kv_lora_rank :].copy_(q_pe.transpose(0, 1))
         if self.fp8_compute:
-            local_query = quantize_fp8(local_query, self.q_scale, name="page_rr_absorbed_q")
+            local_query = quantize_fp8(
+                local_query, self.q_scale, name="page_rr_absorbed_q"
+            )
         gathered = (
             local_query
             if self.q_replicated
@@ -112,14 +135,20 @@ class PageRRMlaDecodeOp:
         partial, lse = tokenspeed_mla_page_rr_decode(
             gathered.transpose(0, 1).view(batch, queries, self.all_heads, dim),
             kv_cache.kv_cache_base.view(-1, page_size, dim),
-            self._workspace, self.kv_lora_rank, self.qk_rope_head_dim,
-            self.metadata.query_block_tables, self.metadata.local_causal_lens,
-            self.metadata.query_block_tables.shape[1] * page_size, self.bmm1_scale,
+            self._workspace,
+            self.kv_lora_rank,
+            self.qk_rope_head_dim,
+            self.metadata.query_block_tables,
+            self.metadata.local_causal_lens,
+            self.metadata.query_block_tables.shape[1] * page_size,
+            self.bmm1_scale,
             output_scale=self.kv_scale if self.fp8_compute else 1.0,
+            normalize_empty=False,  # combine masks empty rows while packing.
         )
         merged = self.communicator.combine(
             partial.view(tokens, self.all_heads, self.kv_lora_rank),
-            lse.view(tokens, self.all_heads), self.metadata.local_causal_lens,
+            lse.view(tokens, self.all_heads),
+            self.metadata.local_causal_lens,
         )
         value_weight = self.weights[layer_id][W.mla_vc]
         output = q_nope.new_empty(tokens, self.num_heads, value_weight.shape[-1])
@@ -129,20 +158,36 @@ class PageRRMlaDecodeOp:
 
 class PageRRMlaDecodeImpl(MlaFlashInferImplBase):
     def __init__(
-        self, attn_configs, attn_inputs, weights, cos_sin_cache, fmha_config=None,
-        quant_config=None, max_seq_len=0, is_cuda_graph=False, parallelism_config=None,
-        *, communicator=None,
+        self,
+        attn_configs,
+        attn_inputs,
+        weights,
+        cos_sin_cache,
+        fmha_config=None,
+        quant_config=None,
+        max_seq_len=0,
+        is_cuda_graph=False,
+        parallelism_config=None,
+        *,
+        communicator=None,
     ):
         # The target's first layer may be KDA; bind the first *MLA* layer's
         # physical group. Native draft weights/map select their own FULL pool.
-        mla_layer = next(i for i, w in enumerate(weights) if W.mla_kc in w and W.mla_vc in w)
+        mla_layer = next(
+            i for i, w in enumerate(weights) if W.mla_kc in w and W.mla_vc in w
+        )
         if communicator is None:
             from .mla_dcp_comm import get_mla_dcp
 
             projection = weights[mla_layer][W.mla_kc]
             communicator = get_mla_dcp(
-                attn_configs, projection.device,
-                torch.float8_e4m3fn if attn_configs.mla_fp8_compute else projection.dtype,
+                attn_configs,
+                projection.device,
+                (
+                    torch.float8_e4m3fn
+                    if attn_configs.mla_fp8_compute
+                    else projection.dtype
+                ),
             )
         layer_map = attn_inputs.kv_cache_layer_to_group_host
         if layer_map is None or not layer_map.numel():
@@ -151,23 +196,40 @@ class PageRRMlaDecodeImpl(MlaFlashInferImplBase):
             layer_map = attn_inputs.kv_cache_layer_to_group
         if layer_map is not None and layer_map.is_cuda:
             raise ValueError("Decode Page-RR requires a host layer-to-group map")
-        group_id = int(layer_map[mla_layer]) if layer_map is not None and layer_map.numel() else 0
+        group_id = (
+            int(layer_map[mla_layer])
+            if layer_map is not None and layer_map.numel()
+            else 0
+        )
         super().__init__(
             PageRRMlaDecodeOp(
-                attn_configs, parallelism_config, weights, communicator, group_id,
+                attn_configs,
+                parallelism_config,
+                weights,
+                communicator,
+                group_id,
                 getattr(attn_inputs, "cuda_graph_fmha_workspace", None),
                 q_replicated=bool(parallelism_config.decode_cp_q_replicated),
             ),
-            NewMlaRotaryEmbeddingOp(cos_sin_cache, attn_configs.rope_config.is_neox_style),
+            NewMlaRotaryEmbeddingOp(
+                cos_sin_cache, attn_configs.rope_config.is_neox_style
+            ),
             MlaKVCacheWriteOp(
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
                 clear_page_on_boundary=is_cuda_graph,
                 fp8_compute=attn_configs.mla_fp8_compute,
                 kv_scale=attn_configs.mla_fp8_kv_scale,
             ),
-            attn_inputs, attn_configs.kernel_tokens_per_block, attn_configs, weights,
-            cos_sin_cache, fmha_config, quant_config=quant_config, max_seq_len=max_seq_len,
-            is_cuda_graph=is_cuda_graph, parallelism_config=parallelism_config,
+            attn_inputs,
+            attn_configs.kernel_tokens_per_block,
+            attn_configs,
+            weights,
+            cos_sin_cache,
+            fmha_config,
+            quant_config=quant_config,
+            max_seq_len=max_seq_len,
+            is_cuda_graph=is_cuda_graph,
+            parallelism_config=parallelism_config,
             warmup_flashinfer=False,
         )
 
@@ -183,7 +245,12 @@ class PageRRMlaDecodeImpl(MlaFlashInferImplBase):
         self.prepare(attn_inputs, forbid_realloc=True)
 
     def cuda_graph_workspace_key(self):
-        return ("page_rr", self.fmha_impl._workspace.device.index, self.fmha_impl.all_heads, self.fmha_impl.kv_lora_rank)
+        return (
+            "page_rr",
+            self.fmha_impl._workspace.device.index,
+            self.fmha_impl.all_heads,
+            self.fmha_impl.kv_lora_rank,
+        )
 
     @classmethod
     def support(cls, attn_configs, attn_inputs):

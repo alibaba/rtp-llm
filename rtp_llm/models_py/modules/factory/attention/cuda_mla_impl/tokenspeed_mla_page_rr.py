@@ -36,12 +36,15 @@ def tokenspeed_mla_page_rr_decode(
     max_local_seq_len: int,
     softmax_scale: float,
     output_scale: float = 1.0,
+    *,
+    normalize_empty: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return partial O[B,Q,H,L] and base-2 LSE[B,Q,H].
 
     query_block_tables is compact int32 [B*Q,M], prepared once before the
-    layer loop. local_causal_lens is compact int32 [B,Q]. Empty shards return
-    zero output and negative-infinity LSE.
+    layer loop. local_causal_lens is compact int32 [B,Q]. ``normalize_empty``
+    supplies zero output and negative-infinity LSE for empty shards when the
+    immediate consumer does not already mask them.
     """
     batch, query_count, heads, dim = query.shape
     rows = batch * query_count
@@ -49,9 +52,7 @@ def tokenspeed_mla_page_rr_decode(
         query.dtype not in (torch.bfloat16, torch.float8_e4m3fn)
         or kv_cache.dtype != query.dtype
     ):
-        raise ValueError(
-            "Page-RR MLA requires matching BF16 or E4M3 query/cache"
-        )
+        raise ValueError("Page-RR MLA requires matching BF16 or E4M3 query/cache")
     if dim != kv_lora_rank + qk_rope_head_dim or max_local_seq_len <= 0:
         raise ValueError("invalid Page-RR MLA dimensions or maximum local length")
     if (
@@ -65,7 +66,10 @@ def tokenspeed_mla_page_rr_decode(
         or not local_causal_lens.is_contiguous()
     ):
         raise ValueError("Page-RR local causal lengths must be contiguous [B,Q]")
-    if query_block_tables.dtype != torch.int32 or local_causal_lens.dtype != torch.int32:
+    if (
+        query_block_tables.dtype != torch.int32
+        or local_causal_lens.dtype != torch.int32
+    ):
         raise ValueError("Page-RR page tables and local lengths must be int32")
     if not (
         query.device
@@ -98,14 +102,15 @@ def tokenspeed_mla_page_rr_decode(
         return_lse=True,
     )
     lse = lse.view(batch, query_count, heads)
-    # Empty outputs may be unwritten on replay. Supply the exact merge identity.
-    _set_empty_partial_identity[(rows,)](
-        out,
-        lse,
-        local_causal_lens,
-        elements=heads * kv_lora_rank,
-        heads=heads,
-        block_size=256,
-        lse_block_size=triton.next_power_of_2(heads),
-    )
+    if normalize_empty:
+        # Standalone callers observe the exact merge identity for empty shards.
+        _set_empty_partial_identity[(rows,)](
+            out,
+            lse,
+            local_causal_lens,
+            elements=heads * kv_lora_rank,
+            heads=heads,
+            block_size=256,
+            lse_block_size=triton.next_power_of_2(heads),
+        )
     return out, lse

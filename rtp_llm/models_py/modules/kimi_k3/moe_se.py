@@ -14,6 +14,7 @@ import os
 from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
+
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.modules.kimi_k3.input_packer_se import (
     get_kimi_k3_mega_moe_se_input_packer,
@@ -104,6 +105,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
 
         import deep_gemm
         import torch.distributed as dist
+
         from rtp_llm.models_py.modules.dsv4.quant_layouts import (
             FP4_BLOCK,
             prepare_fp4_weight_scale_for_deepgemm,
@@ -288,6 +290,10 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         shared_input: torch.Tensor,
         expert_ids: torch.Tensor,
         routing_weights: torch.Tensor,
+        *,
+        valid_token_count=None,
+        valid_token_mask=None,
+        stage_shared=False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         import deep_gemm
 
@@ -310,8 +316,13 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             expert_ids,
             self._mega_buf,
             token_count,
+            valid_token_count=valid_token_count,
+            valid_token_mask=valid_token_mask,
+            shared_input=shared_input if stage_shared else None,
+            shared_out=self._mega_shared_x if stage_shared else None,
         )
-        self._mega_shared_x[:token_count].copy_(shared_input)
+        if not stage_shared:
+            self._mega_shared_x[:token_count].copy_(shared_input)
         routed_output = self._mega_y[:token_count]
         deep_gemm.fp8_fp4_mega_moe(
             routed_output,
@@ -339,6 +350,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         shared_input: torch.Tensor,
         expert_ids: torch.Tensor,
         routing_weights: torch.Tensor,
+        **pack_options,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Execute tokens already owned by this TP-SP or DP/KTP rank."""
 
@@ -347,6 +359,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             shared_input,
             expert_ids,
             routing_weights,
+            **pack_options,
         )
 
     def forward(
@@ -356,19 +369,20 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         valid_token_count: Optional[int] = None,
         valid_token_mask: Optional[torch.Tensor] = None,
         prepared_context=None,
+        residual: Optional[torch.Tensor] = None,
+        optimize_decode: bool = False,
     ) -> torch.Tensor:
-        if prepared_context is not None:
-            if hidden_states.shape[0] != prepared_context.token_count:
-                raise ValueError("prepared MoE token count does not match input")
-            valid_token_count = prepared_context.valid_tokens
-        expert_ids, routing_weights = self._route(hidden_states)
-        expert_ids, routing_weights = self._mask_padding_routes(
-            expert_ids,
-            routing_weights,
-            token_count=hidden_states.shape[0],
-            valid_token_count=valid_token_count,
-            valid_token_mask=valid_token_mask,
+        expert_ids, routing_weights, optimize, pack_options = (
+            self._prepare_mega_moe_routing(
+                hidden_states,
+                valid_token_count=valid_token_count,
+                valid_token_mask=valid_token_mask,
+                prepared_context=prepared_context,
+                optimize_decode=optimize_decode,
+            )
         )
+        if pack_options:
+            pack_options["stage_shared"] = True
 
         routed_input = torch.matmul(
             hidden_states,
@@ -379,6 +393,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             hidden_states,
             expert_ids,
             routing_weights,
+            **pack_options,
         )
         if self.routed_norm is not None:
             routed_output = self.routed_norm(routed_output.contiguous())
@@ -386,8 +401,9 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             routed_output,
             self.weights[K3W.MOE_ROUTED_UP],
         )
-        output = routed_output + shared_output
-        return output
+        from rtp_llm.models_py.triton_kernels.kimi_kda.moe_decode import add_moe_output
+
+        return add_moe_output(routed_output, shared_output, residual, optimize=optimize)
 
 
 __all__ = ["KimiK3LatentMoESE"]

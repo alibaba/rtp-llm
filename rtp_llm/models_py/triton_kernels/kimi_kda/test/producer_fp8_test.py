@@ -46,6 +46,43 @@ class ProducerTest(unittest.TestCase):
         if actual.bf16 is not None:
             torch.testing.assert_close(actual.bf16, original, atol=0, rtol=0)
 
+    @staticmethod
+    def _feature_strided(dense):
+        view = torch.empty(
+            (*dense.shape[:-1], 2 * dense.shape[-1] + 1),
+            device=dense.device,
+            dtype=dense.dtype,
+        )[..., 1::2]
+        return view.copy_(dense)
+
+    def _check_kda_layout(self, actual, dense_x, dense_gate, weight, mode):
+        expected = kda_output_fp8(dense_x, dense_gate, weight, 1e-5, mode=mode)
+        torch.testing.assert_close(
+            actual.values.view(torch.uint8),
+            expected.values.view(torch.uint8),
+            atol=0,
+            rtol=0,
+        )
+        torch.testing.assert_close(
+            actual.scale_wire, expected.scale_wire, atol=0, rtol=0
+        )
+        # The existing BF16 producer and CUDA quantizer are independent oracles.
+        reference = KdaOutputNorm(weight, 1e-5)(dense_x, dense_gate, mode)
+        self.check(actual, reference.reshape(-1, dense_x.shape[-2] * 128))
+
+    def _check_independent_strides(
+        self, dense_x, dense_gate, x_view, gate_view, weight
+    ):
+        for strided_x, strided_gate in ((True, False), (False, True), (True, True)):
+            x = x_view if strided_x else dense_x
+            gate = gate_view if strided_gate else dense_gate
+            for mode in ("prefill", "decode"):
+                with self.subTest(
+                    strided_x=strided_x, strided_gate=strided_gate, mode=mode
+                ):
+                    actual = kda_output_fp8(x, gate, weight, 1e-5, mode=mode)
+                    self._check_kda_layout(actual, dense_x, dense_gate, weight, mode)
+
     def test_rms(self):
         for m in (1, 3, 4, 17, 257):
             for k in (512, 1536, 7168):
@@ -114,6 +151,73 @@ class ProducerTest(unittest.TestCase):
                                     artifact,
                                 )
                             raise
+
+    def test_kda_respects_independent_feature_strides(self):
+        for shape in ((3, 4, 128), (2, 3, 4, 128)):
+            dense_x = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+            dense_gate = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+            weight = torch.randn(128, device="cuda", dtype=torch.bfloat16)
+            with self.subTest(shape=shape):
+                self._check_independent_strides(
+                    dense_x,
+                    dense_gate,
+                    self._feature_strided(dense_x),
+                    self._feature_strided(dense_gate),
+                    weight,
+                )
+
+    def test_kda_wide_stride_addresses_use_int64(self):
+        stride = 2**30 + 128
+        # The ~10 GiB backing is reused. Only addressed rows and the wrapped
+        # int32 sentinel rows are touched, so failures stay inside allocation.
+        storage = torch.empty(5 * 2**30 + 2048, device="cuda", dtype=torch.bfloat16)
+        storage[:2048].zero_()
+        storage[2**30 : 2**30 + 2048].zero_()
+        cases = (
+            ((3, 4, 128), (stride, 128, 1), "token"),
+            ((1, 4, 128), (512, stride, 1), "head"),
+            ((3, 1, 4, 128), (stride, 512, 128, 1), "batch"),
+        )
+        weight = torch.randn(128, device="cuda", dtype=torch.bfloat16)
+        for shape, strides, offset_kind in cases:
+            dense_x = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+            dense_gate = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+            x_view = storage.as_strided(shape, strides, 2**31)
+            gate_view = storage.as_strided(shape, strides, 2**31 + 512)
+            x_view.copy_(dense_x)
+            gate_view.copy_(dense_gate)
+            with self.subTest(offset_kind=offset_kind, shape=shape):
+                self._check_independent_strides(
+                    dense_x, dense_gate, x_view, gate_view, weight
+                )
+
+    def test_kda_strided_inputs_update_during_graph_replay(self):
+        weight = torch.randn(128, device="cuda", dtype=torch.bfloat16)
+        for shape in ((3, 4, 128), (1, 3, 4, 128)):
+            dense_x = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+            dense_gate = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+            x = self._feature_strided(dense_x)
+            gate = self._feature_strided(dense_gate)
+            for mode in ("prefill", "decode"):
+                for _ in range(2):
+                    kda_output_fp8(x, gate, weight, 1.0e-5, mode=mode)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = kda_output_fp8(x, gate, weight, 1.0e-5, mode=mode)
+                pointers = (actual.values.data_ptr(), actual.scale_wire.data_ptr())
+                for replay in range(3):
+                    dense_x.add_(0.125 * (replay + 1))
+                    dense_gate.sub_(0.25)
+                    x.copy_(dense_x)
+                    gate.copy_(dense_gate)
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    self.assertEqual(
+                        (actual.values.data_ptr(), actual.scale_wire.data_ptr()),
+                        pointers,
+                    )
+                    self._check_kda_layout(actual, dense_x, dense_gate, weight, mode)
+                graph.reset()
 
     def test_attnres(self):
         for m in (1, 4, 257):

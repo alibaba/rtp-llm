@@ -68,6 +68,8 @@ def _kimi_kda_short_conv_paged_prefill_kernel(
     batch_ptr,
     token_chunk_offset_ptr,
     output,
+    raw_beta,
+    packed_beta,
     current_conv_state,
     continuation_mask,
     final_conv_state,
@@ -83,6 +85,10 @@ def _kimi_kda_short_conv_paged_prefill_kernel(
     stride_o_p,
     stride_o_t,
     stride_o_d,
+    stride_beta_t,
+    stride_beta_h,
+    stride_packed_beta_t,
+    stride_packed_beta_h,
     stride_cs_b,
     stride_cs_w,
     stride_cs_d,
@@ -100,6 +106,9 @@ def _kimi_kda_short_conv_paged_prefill_kernel(
     PAGE_SIZE: tl.constexpr,
     HAS_CURRENT_STATE: tl.constexpr,
     RETURN_FINAL_STATE: tl.constexpr,
+    HAS_RAW_BETA: tl.constexpr,
+    BETA_HEADS: tl.constexpr,
+    BETA_BLOCK: tl.constexpr,
 ):
     """FLA-compatible fused Q/K/V Prefill with direct paged state writes."""
 
@@ -217,6 +226,30 @@ def _kimi_kda_short_conv_paged_prefill_kernel(
         tl.cast(b_y, dtype=output.dtype.element_ty, fp_downcast_rounding="rtne"),
         mask=(output_t[:, None] < sequence_length) & m_d[None, :],
     )
+
+    if HAS_RAW_BETA and i_d == 0:
+        o_h = tl.arange(0, BETA_BLOCK)
+        o_h_i64 = o_h.to(tl.int64)
+        beta_t = (sequence_start + output_t).to(tl.int64)
+        beta_mask = (output_t[:, None] < sequence_length) & (o_h[None, :] < BETA_HEADS)
+        beta_values = tl.load(
+            raw_beta
+            + beta_t[:, None] * stride_beta_t
+            + o_h_i64[None, :] * stride_beta_h,
+            mask=beta_mask,
+            other=0,
+        )
+        tl.store(
+            packed_beta
+            + beta_t[:, None] * stride_packed_beta_t
+            + o_h_i64[None, :] * stride_packed_beta_h,
+            tl.cast(
+                beta_values,
+                dtype=packed_beta.dtype.element_ty,
+                fp_downcast_rounding="rtne",
+            ),
+            mask=beta_mask,
+        )
 
     # Page boundaries are aligned to BT on the fast path. The last partial
     # chunk also publishes a request-owned tail state for immediate Decode.
@@ -713,16 +746,21 @@ def kimi_kda_short_conv_paged_prefill(
     page_size: int,
     metadata: KimiKDAShortConvMetadata,
     *,
+    raw_beta: torch.Tensor | None = None,
     current_conv_state: torch.Tensor | None = None,
     continuation_mask: torch.Tensor | None = None,
     return_final_state: bool = False,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor | None,
-]:
-    """Run fused packed Q/K/V convolution and return contiguous Q/K/V planes."""
+) -> (
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]
+    | tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor,
+    ]
+):
+    """Run fused packed Q/K/V convolution and optionally pack raw beta."""
 
     if mixed_qkv.ndim != 2 or fused_weight.ndim != 2:
         raise ValueError("paged KDA conv expects mixed_qkv=[T,3D], weight=[3D,W]")
@@ -786,6 +824,21 @@ def kimi_kda_short_conv_paged_prefill(
         raise ValueError("paged KDA conv cu_seqlens must be int32/int64")
     if metadata.total_chunks <= 0 and tokens > 0:
         raise ValueError("paged KDA conv metadata contains no token chunks")
+    has_raw_beta = raw_beta is not None
+    if has_raw_beta:
+        assert raw_beta is not None
+        if raw_beta.ndim != 2 or raw_beta.shape[0] != tokens:
+            raise ValueError(
+                "paged KDA raw beta must be [tokens,heads], got "
+                f"{tuple(raw_beta.shape)}"
+            )
+        if raw_beta.device != mixed_qkv.device:
+            raise ValueError(
+                "paged KDA raw beta device must match projected QKV: "
+                f"beta={raw_beta.device} qkv={mixed_qkv.device}"
+            )
+        if raw_beta.shape[1] <= 0:
+            raise ValueError("paged KDA raw beta must contain at least one head")
     has_current_state = current_conv_state is not None
     if has_current_state != (continuation_mask is not None):
         raise ValueError(
@@ -814,6 +867,18 @@ def kimi_kda_short_conv_paged_prefill(
         dtype=mixed_qkv.dtype,
         device=mixed_qkv.device,
     )
+    pack_raw_beta = raw_beta is not None and (
+        raw_beta.dtype != mixed_qkv.dtype or not raw_beta.is_contiguous()
+    )
+    packed_beta = (
+        torch.empty(
+            (tokens, raw_beta.shape[1]),
+            dtype=mixed_qkv.dtype,
+            device=mixed_qkv.device,
+        )
+        if pack_raw_beta
+        else None
+    )
     final_state = (
         torch.empty(
             (sequence_count, history_size, channels),
@@ -826,6 +891,8 @@ def kimi_kda_short_conv_paged_prefill(
     current_arg = current_conv_state if current_conv_state is not None else conv_state
     mask_arg = continuation_mask if continuation_mask is not None else prefix_lengths
     final_arg = final_state if final_state is not None else conv_state
+    raw_beta_arg = raw_beta if pack_raw_beta else mixed_qkv
+    packed_beta_arg = packed_beta if packed_beta is not None else output
     block_d = 64
     grid = (metadata.total_chunks, triton.cdiv(channels, block_d))
     _kimi_kda_short_conv_paged_prefill_kernel[grid](
@@ -838,6 +905,8 @@ def kimi_kda_short_conv_paged_prefill(
         metadata.batch_ptr,
         metadata.token_chunk_offset_ptr,
         output,
+        raw_beta_arg,
+        packed_beta_arg,
         current_arg,
         mask_arg,
         final_arg,
@@ -853,6 +922,10 @@ def kimi_kda_short_conv_paged_prefill(
         output.stride(0),
         output.stride(1),
         output.stride(2),
+        raw_beta_arg.stride(0),
+        raw_beta_arg.stride(1),
+        packed_beta_arg.stride(0),
+        packed_beta_arg.stride(1),
         current_arg.stride(0),
         current_arg.stride(1),
         current_arg.stride(2),
@@ -870,9 +943,15 @@ def kimi_kda_short_conv_paged_prefill(
         PAGE_SIZE=page_size,
         HAS_CURRENT_STATE=has_current_state,
         RETURN_FINAL_STATE=return_final_state,
+        HAS_RAW_BETA=pack_raw_beta,
+        BETA_HEADS=(raw_beta.shape[1] if pack_raw_beta else 1),
+        BETA_BLOCK=(triton.next_power_of_2(raw_beta.shape[1]) if pack_raw_beta else 1),
         num_warps=4,
     )
-    return output[0], output[1], output[2], final_state
+    result = (output[0], output[1], output[2], final_state)
+    if raw_beta is None:
+        return result
+    return (*result, packed_beta if packed_beta is not None else raw_beta)
 
 
 @torch.compiler.disable

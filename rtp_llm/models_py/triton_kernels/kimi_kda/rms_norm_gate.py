@@ -10,6 +10,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.triton_kernels.kimi_kda.cached_launch import CachedLaunch
+
 
 @triton.jit
 def _kimi_kda_rms_norm_sigmoid_gate_kernel(
@@ -97,6 +99,14 @@ def _kimi_kda_rms_norm_sigmoid_gate_kernel(
     )
 
 
+_cached_prefill_launches = {
+    num_warps: CachedLaunch(
+        _kimi_kda_rms_norm_sigmoid_gate_kernel, num_warps=num_warps, num_stages=3
+    )
+    for num_warps in (4, 16)
+}
+
+
 def _bthd_strides(tensor: torch.Tensor) -> tuple[int, int, int, int]:
     """Return logical B/T/H/D strides without materializing a reshape."""
 
@@ -115,6 +125,8 @@ def kimi_kda_rms_norm_sigmoid_gate(
     gate: torch.Tensor,
     weight: torch.Tensor,
     eps: float,
+    *,
+    use_cached_launch: bool = False,
 ) -> torch.Tensor:
     """Apply K3's per-head RMSNorm and sigmoid output gate.
 
@@ -174,6 +186,25 @@ def kimi_kda_rms_norm_sigmoid_gate(
     stride_x = _bthd_strides(x)
     stride_gate = _bthd_strides(gate)
     stride_output = _bthd_strides(output)
+    if use_cached_launch:
+        # Reuse precisely the original kernel, arithmetic and launch geometry.
+        _cached_prefill_launches[num_warps](
+            (triton.cdiv(token_rows, block_rows), 1, 1),
+            (x, gate, output, weight),
+            (
+                eps,
+                token_rows,
+                sequence_size,
+                head_count,
+                *stride_x,
+                *stride_gate,
+                *stride_output,
+                feature_size,
+                block_rows,
+                block_features,
+            ),
+        )
+        return output
     _kimi_kda_rms_norm_sigmoid_gate_kernel[(triton.cdiv(token_rows, block_rows),)](
         x,
         gate,
