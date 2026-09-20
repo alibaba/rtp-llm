@@ -10,11 +10,31 @@
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/fp8_kv_cache.h"
+#ifndef USE_PPU
+#include "rtp_llm/models_py/bindings/cuda/kernels/fast_bf16_int8.h"
+#endif
 #include "rtp_llm/models_py/bindings/common/kernels/moe/ep_utils.h"
 
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+#ifndef USE_PPU
+    rtp_ops_m.def("fast_bf16_int8_quantize",
+                  &fastBf16Int8Quantize,
+                  "Quantize BF16 groups to INT8 with BF16 scales",
+                  py::arg("input"),
+                  py::arg("output_q"),
+                  py::arg("output_s"),
+                  py::arg("group_size"));
+    rtp_ops_m.def("fast_bf16_int8_dequantize_reduce",
+                  &fastBf16Int8DequantizeReduce,
+                  "Dequantize INT8 sources and sum in order with BF16 rounding",
+                  py::arg("input_q"),
+                  py::arg("input_s"),
+                  py::arg("output"),
+                  py::arg("group_size"));
+#endif
+
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,
                   "cuBLAS BF16 x BF16 GEMM with FP32 accumulation and FP32 output",

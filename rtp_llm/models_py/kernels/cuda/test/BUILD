@@ -3,6 +3,14 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+py_test(
+    name = "fast_bf16_int8_test",
+    srcs = ["fast_bf16_int8_test.py"],
+    deps = py_test_deps,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO"},
+)
+
 py_test (
     name = "per_token_group_quant_8bit_test",
     srcs = ["per_token_group_quant_8bit_test.py"],
