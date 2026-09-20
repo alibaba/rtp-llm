@@ -85,6 +85,7 @@ arch_with_version_dep = select({
 requirement([
     "quack-kernels",
     "flash-attn-4",
+    "typing-extensions",
     "sentencepiece",
     "transformers",
     "pynvml",
