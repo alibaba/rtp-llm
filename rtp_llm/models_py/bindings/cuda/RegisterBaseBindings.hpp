@@ -4,6 +4,7 @@
 #include "rtp_llm/models_py/bindings/common/RtpEmbeddingLookup.h"
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
+#include "rtp_llm/models_py/bindings/common/FusedCopyOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/GroupTopKOp.h"
@@ -26,6 +27,12 @@ using namespace rtp_llm;
 namespace torch_ext {
 
 void registerBasicCudaOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("fused_multimodal_copy_",
+                  &fusedMultimodalCopy,
+                  "Fuse multimodal embedding D2D copies",
+                  py::arg("dst"),
+                  py::arg("srcs"),
+                  py::arg("row_offsets"));
     rtp_ops_m.def("debug_kernel",
                   &debugKernel,
                   "Debug kernel to print 2D data blocks from GPU tensor",
@@ -93,6 +100,24 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("weight"),
                   py::arg("beta"),
                   py::arg("eps"));
+
+    rtp_ops_m.def("fused_add_layernorm_quant_fp8",
+                  &fused_add_layernorm_quant_fp8,
+                  "Fused Add LayerNorm and per-block FP8 UE8M0 quantization",
+                  py::arg("input"),
+                  py::arg("residual"),
+                  py::arg("bias"),
+                  py::arg("weight"),
+                  py::arg("beta"),
+                  py::arg("output"),
+                  py::arg("scales"),
+                  py::arg("eps"));
+
+    rtp_ops_m.def("fused_bias_add",
+                  &fused_bias_add,
+                  "In-place fused per-column bias add kernel",
+                  py::arg("input"),
+                  py::arg("bias"));
 
     rtp_ops_m.def("fused_bias_gelu",
                   &fused_bias_gelu,
