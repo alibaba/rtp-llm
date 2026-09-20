@@ -36,9 +36,8 @@ def configure_kernel_tuning(
 ) -> tuple[KernelTuningStatus, ...]:
     """Configure registered kernel-tuning providers for the current device."""
 
-    if not is_rocm_fp8_moe_deterministic_reduce_enabled():
-        return ()
-
+    # These dispatch overrides correct known-bad kernels; they are required
+    # independently of the optional deterministic route reduction.
     resolved_arch = arch if arch is not None else _current_rocm_arch()
     statuses = tuple(
         provider() for provider in _PROVIDERS_BY_ARCH.get(resolved_arch, ())

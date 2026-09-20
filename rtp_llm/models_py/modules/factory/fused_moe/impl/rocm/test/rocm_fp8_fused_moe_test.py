@@ -8,15 +8,18 @@ weights) and asserts shape, finiteness and approximate numerical agreement.
 
 import os
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest import SkipTest
 from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.kernel_tuning.aiter import configure_aiter_fmoe_overlays
+from rtp_llm.models_py.kernel_tuning import configure_kernel_tuning
 
-_AITER_TUNING_STATUS = configure_aiter_fmoe_overlays()
+# Run this file in a fresh Python process. AITER caches FMoE dispatch
+# configuration at first use, so the production registry must run first.
+_AITER_TUNING_STATUSES = configure_kernel_tuning()
 
 try:
     import aiter
@@ -136,18 +139,21 @@ class DeterministicFp8MoeConfigTest(unittest.TestCase):
         _IMPORT_ERROR is not None, f"ROCm imports unavailable: {_IMPORT_ERROR}"
     )
     def test_cuda_graph_does_not_block_opt_in_path(self):
-        with patch.dict(
-            os.environ,
-            {
-                ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1",
-                "ENABLE_CUDA_GRAPH": "1",
-                "ENABLE_NATIVE_CUDA_GRAPH": "1",
-            },
-            clear=True,
-        ), patch.object(
-            deterministic_fp8_moe,
-            "_unsupported_reason",
-            return_value="test fallback",
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1",
+                    "ENABLE_CUDA_GRAPH": "1",
+                    "ENABLE_NATIVE_CUDA_GRAPH": "1",
+                },
+                clear=True,
+            ),
+            patch.object(
+                deterministic_fp8_moe,
+                "_unsupported_reason",
+                return_value="test fallback",
+            ),
         ):
             self.assertIsNone(
                 deterministic_fp8_moe.try_deterministic_fp8_moe(
@@ -264,6 +270,17 @@ class _Fp8MoeBaseTest(unittest.TestCase):
         self._feature_env.start()
         self.addCleanup(self._feature_env.stop)
 
+    def _assert_target_numerics(self, output, reference):
+        self.assertTrue(torch.isfinite(output).all().item())
+        per_token_cosine = torch.nn.functional.cosine_similarity(
+            output.float(), reference.float(), dim=-1
+        )
+        relative_l2 = torch.linalg.vector_norm(
+            (output.float() - reference.float()).reshape(-1)
+        ) / torch.linalg.vector_norm(reference.float().reshape(-1)).clamp_min(1e-8)
+        self.assertGreater(per_token_cosine.min().item(), 0.99)
+        self.assertLess(relative_l2.item(), 0.1)
+
     def _build_payload(self, M, K, E, top_k):
         hidden_states = (
             torch.randn(M, K, dtype=torch.bfloat16, device=self.device) * 0.05
@@ -289,7 +306,7 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
 
     M, K, N, E, TOP_K = 16, 256, 256, 4, 2
 
-    def test_activation_type_normalization(self):
+    def test_activation_type_normalization_is_independent_of_deterministic_reduce(self):
         swiglu_config = ModelConfig()
         swiglu_config.activation_type = "SiGLU"
         silu_config = ModelConfig()
@@ -303,31 +320,63 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
             silu_config.activation_type,
             swiglu_config.activation_type,
         )
-        with patch.dict(
-            os.environ,
-            {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1"},
-        ):
-            for activation in silu_aliases:
-                with self.subTest(activation=activation):
+        for deterministic_reduce in ("0", "1"):
+            with (
+                self.subTest(deterministic_reduce=deterministic_reduce),
+                patch.dict(
+                    os.environ,
+                    {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: deterministic_reduce},
+                ),
+            ):
+                for activation in silu_aliases:
+                    with self.subTest(activation=activation):
+                        self.assertEqual(
+                            _moe_activation_type(activation), aiter.ActivationType.Silu
+                        )
+
+                self.assertEqual(
+                    _moe_activation_type("gelu"), aiter.ActivationType.Gelu
+                )
+                if deterministic_reduce == "1":
+                    with self.assertRaisesRegex(
+                        ValueError, "Unsupported AITER FMoE activation"
+                    ):
+                        _moe_activation_type("unknown")
+                else:
                     self.assertEqual(
-                        _moe_activation_type(activation), aiter.ActivationType.Silu
+                        _moe_activation_type("unknown"), aiter.ActivationType.Gelu
                     )
 
-            self.assertEqual(_moe_activation_type("gelu"), aiter.ActivationType.Gelu)
-            with self.assertRaisesRegex(
-                ValueError, "Unsupported AITER FMoE activation"
-            ):
-                _moe_activation_type("unknown")
-
-    def test_feature_disabled_keeps_legacy_activation_mapping(self):
-        self.assertEqual(_moe_activation_type("swiglu"), aiter.ActivationType.Gelu)
+    def test_default_path_fails_closed_when_required_tuning_is_unavailable(self):
+        config = _make_config_adapter(4, 2, 256)
+        weights = {
+            W.moe_w1: torch.empty((4, 256, 256), device=self.device),
+            W.moe_w2: torch.empty((4, 256, 128), device=self.device),
+            W.moe_s1: torch.empty((4, 256), device=self.device),
+            W.moe_s2: torch.empty((4, 256), device=self.device),
+        }
+        with (
+            patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.rocm_moe._aiter_fmoe_workload_signature",
+                return_value=object(),
+            ),
+            patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.rocm_moe.require_aiter_fmoe_tuning",
+                side_effect=RuntimeError("overlay unavailable"),
+            ) as require_tuning,
+            self.assertRaisesRegex(RuntimeError, "overlay unavailable"),
+        ):
+            RocmExpertsFp8PerChannel(config, FusedMoEQuantConfig(), weights)
+        require_tuning.assert_called_once()
 
     def _run(self, apply_router_weight_on_input: bool):
         payload = self._build_payload(self.M, self.K, self.E, self.TOP_K)
         # apply_router_weight_on_input requires top_k == 1.
         if apply_router_weight_on_input:
-            payload.expert_topk_ids = payload.expert_topk_ids[:, :1]
-            payload.expert_topk_weights = payload.expert_topk_weights[:, :1]
+            payload.expert_topk_ids = payload.expert_topk_ids[:, :1].contiguous()
+            payload.expert_topk_weights = payload.expert_topk_weights[
+                :, :1
+            ].contiguous()
 
         # Random BF16 reference weights, then quantize per-channel.
         w1_ref = (
@@ -350,8 +399,18 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
         # paths see the same numerical content (modulo fp8 rounding).
         w1_deq = _dequant_per_channel(w1q, s1)
         w2_deq = _dequant_per_channel(w2q, s2)
+        # torch_moe_ref expects input weighting to have happened upstream.
+        reference_payload = (
+            replace(
+                payload,
+                expert_x=payload.expert_x
+                * payload.expert_topk_weights.to(payload.expert_x.dtype),
+            )
+            if apply_router_weight_on_input
+            else payload
+        )
         ref_out = torch_moe_ref(
-            payload=payload,
+            payload=reference_payload,
             activation="silu",
             global_num_experts=self.E,
             expert_map=None,
@@ -389,8 +448,7 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
 
         self.assertEqual(out.shape, (self.M, self.K))
         self.assertTrue(torch.isfinite(out).all().item(), "kernel produced non-finite")
-        # FP8 + bf16 accumulation: loose tolerance, mainly a sanity bound.
-        torch.testing.assert_close(out, ref_out, atol=5e-2, rtol=5e-2)
+        self._assert_target_numerics(out, ref_out)
 
     def test_basic_forward(self):
         self._run(apply_router_weight_on_input=False)
@@ -399,12 +457,13 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
         # PR #882 review #7 specifically called out this newly-enabled path.
         self._run(apply_router_weight_on_input=True)
 
-    @patch.dict(
-        os.environ,
-        {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1"},
-    )
-    def test_small_token_tuned_shape_with_loader_postprocess(self):
-        self.assertTrue(_AITER_TUNING_STATUS.applied, _AITER_TUNING_STATUS)
+    def _run_small_token_tuned_shape_with_loader_postprocess(
+        self, token_counts, verify_graph
+    ):
+        self.assertTrue(
+            any(status.applied for status in _AITER_TUNING_STATUSES),
+            _AITER_TUNING_STATUSES,
+        )
         hidden, local_inter, experts, top_k = 2048, 128, 256, 8
         runtime_device = RocmImpl.__new__(RocmImpl)
 
@@ -484,7 +543,9 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
                 FusedMoEQuantConfig(),
                 weights,
             )
-            for token_count in (1, 2, 4, 8, 16):
+            self.assertTrue(executor.w1.is_shuffled)
+            self.assertTrue(executor.w2.is_shuffled)
+            for token_count in token_counts:
                 with self.subTest(tp_size=tp_size, token_count=token_count):
                     payload = self._build_payload(token_count, hidden, experts, top_k)
                     reference = torch_moe_ref(
@@ -506,13 +567,90 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
                         apply_router_weight_on_input=False,
                         extra_expert_args=None,
                     ).fused_expert_output
-                    cosine = torch.nn.functional.cosine_similarity(
-                        output.float(), reference.float(), dim=-1
-                    ).mean()
-
                     self.assertEqual(output.shape, (token_count, hidden))
-                    self.assertTrue(torch.isfinite(output).all().item())
-                    self.assertGreater(cosine.item(), 0.99)
+                    self._assert_target_numerics(output, reference)
+
+                    if verify_graph and tp_size == 4 and token_count == 1:
+                        self._capture_and_replay_target_shape(
+                            executor,
+                            payload,
+                            hidden,
+                            experts,
+                            top_k,
+                            w1_dequant,
+                            w2_dequant,
+                        )
+
+    def test_small_token_tuned_shape_with_loader_postprocess(self):
+        self.assertEqual(
+            os.environ.get(ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV, "0"), "0"
+        )
+        self._run_small_token_tuned_shape_with_loader_postprocess(
+            (1, 2, 4, 8, 16, 18, 32), verify_graph=True
+        )
+
+    @patch.dict(
+        os.environ,
+        {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1"},
+    )
+    def test_small_token_tuned_shape_deterministic_opt_in(self):
+        self._run_small_token_tuned_shape_with_loader_postprocess(
+            (1,), verify_graph=False
+        )
+
+    def _capture_and_replay_target_shape(
+        self,
+        executor,
+        warm_payload,
+        hidden,
+        experts,
+        top_k,
+        w1_dequant,
+        w2_dequant,
+    ):
+        """Exercise the B=1 decode shape through graph capture and two replays."""
+        executor.execute(
+            payload=warm_payload,
+            activation="SiGLU",
+            expert_map=None,
+            a2_scale=None,
+            apply_router_weight_on_input=False,
+            extra_expert_args=None,
+        )
+        torch.cuda.synchronize()
+
+        static_payload = self._build_payload(1, hidden, experts, top_k)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            static_output = executor.execute(
+                payload=static_payload,
+                activation="SiGLU",
+                expert_map=None,
+                a2_scale=None,
+                apply_router_weight_on_input=False,
+                extra_expert_args=None,
+            ).fused_expert_output
+
+        for replay_index in range(2):
+            payload = self._build_payload(1, hidden, experts, top_k)
+            static_payload.expert_x.copy_(payload.expert_x)
+            static_payload.expert_topk_ids.copy_(payload.expert_topk_ids)
+            static_payload.expert_topk_weights.copy_(payload.expert_topk_weights)
+            graph.replay()
+            torch.cuda.synchronize()
+            reference = torch_moe_ref(
+                payload=payload,
+                activation="silu",
+                global_num_experts=experts,
+                expert_map=None,
+                a2_scale=None,
+                apply_router_weight_on_input=False,
+                extra_expert_args=None,
+                w1=w1_dequant,
+                w2=w2_dequant,
+            )
+            with self.subTest(graph_replay=replay_index):
+                self._assert_target_numerics(static_output, reference)
 
 
 class RocmExpertsFp8PerBlockTest(_Fp8MoeBaseTest):
@@ -521,11 +659,13 @@ class RocmExpertsFp8PerBlockTest(_Fp8MoeBaseTest):
     # Sizes must be divisible by 128 for per-128x128 quant.
     M, K, N, E, TOP_K = 16, 256, 256, 4, 2
 
-    def _run(self, apply_router_weight_on_input: bool):
+    def _run(self, apply_router_weight_on_input: bool, activation: str = "silu"):
         payload = self._build_payload(self.M, self.K, self.E, self.TOP_K)
         if apply_router_weight_on_input:
-            payload.expert_topk_ids = payload.expert_topk_ids[:, :1]
-            payload.expert_topk_weights = payload.expert_topk_weights[:, :1]
+            payload.expert_topk_ids = payload.expert_topk_ids[:, :1].contiguous()
+            payload.expert_topk_weights = payload.expert_topk_weights[
+                :, :1
+            ].contiguous()
 
         w1_ref = (
             torch.randn(
@@ -545,8 +685,18 @@ class RocmExpertsFp8PerBlockTest(_Fp8MoeBaseTest):
 
         w1_deq = _dequant_per_block(w1q, s1)
         w2_deq = _dequant_per_block(w2q, s2)
+        # torch_moe_ref expects input weighting to have happened upstream.
+        reference_payload = (
+            replace(
+                payload,
+                expert_x=payload.expert_x
+                * payload.expert_topk_weights.to(payload.expert_x.dtype),
+            )
+            if apply_router_weight_on_input
+            else payload
+        )
         ref_out = torch_moe_ref(
-            payload=payload,
+            payload=reference_payload,
             activation="silu",
             global_num_experts=self.E,
             expert_map=None,
@@ -559,8 +709,10 @@ class RocmExpertsFp8PerBlockTest(_Fp8MoeBaseTest):
 
         config_adapter = _make_config_adapter(self.E, self.TOP_K, 2 * self.N)
         weights = {
-            W.moe_w1: w1q,
-            W.moe_w2: w2q,
+            # Reference weights are already [gate, up]; apply only the
+            # physical layout that follows the loader's gate/up conversion.
+            W.moe_w1: shuffle_weight(w1q, layout=(16, 16)),
+            W.moe_w2: shuffle_weight(w2q, layout=(16, 16)),
             W.moe_s1: s1,
             W.moe_s2: s2,
         }
@@ -570,7 +722,7 @@ class RocmExpertsFp8PerBlockTest(_Fp8MoeBaseTest):
 
         out = executor.execute(
             payload=payload,
-            activation="silu",
+            activation=activation,
             expert_map=None,
             a2_scale=None,
             apply_router_weight_on_input=apply_router_weight_on_input,
@@ -579,7 +731,10 @@ class RocmExpertsFp8PerBlockTest(_Fp8MoeBaseTest):
 
         self.assertEqual(out.shape, (self.M, self.K))
         self.assertTrue(torch.isfinite(out).all().item(), "kernel produced non-finite")
-        torch.testing.assert_close(out, ref_out, atol=5e-2, rtol=5e-2)
+        self._assert_target_numerics(out, ref_out)
+
+    def test_default_swiglu_alias_matches_silu(self):
+        self._run(apply_router_weight_on_input=False, activation="swiglu")
 
     def test_basic_forward(self):
         self._run(apply_router_weight_on_input=False)

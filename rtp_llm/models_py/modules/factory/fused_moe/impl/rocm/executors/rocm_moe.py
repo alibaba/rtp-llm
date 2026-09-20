@@ -57,11 +57,14 @@ def _normalized_moe_activation_type(activation: Any) -> aiter.ActivationType:
 
 
 def _moe_activation_type(activation: Any) -> aiter.ActivationType:
-    if not is_rocm_fp8_moe_deterministic_reduce_enabled():
-        if activation in ("silu", "SiGLU"):
-            return aiter.ActivationType.Silu
+    try:
+        return _normalized_moe_activation_type(activation)
+    except ValueError:
+        if is_rocm_fp8_moe_deterministic_reduce_enabled():
+            raise
+        # Preserve the legacy fallback for other activation names. Known SiLU
+        # aliases and ModelConfig enums must agree with the dispatch signature.
         return aiter.ActivationType.Gelu
-    return _normalized_moe_activation_type(activation)
 
 
 def _aiter_fmoe_workload_signature(
@@ -255,26 +258,21 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         self.w1_scale = weights[W.moe_s1]
         self.w2_scale = weights[W.moe_s2]
         self._stability_enabled = is_rocm_fp8_moe_deterministic_reduce_enabled()
-        if self._stability_enabled:
-            self._configured_activation_type = _normalized_moe_activation_type(
-                config.activation_type
+        self._configured_activation_type = _moe_activation_type(config.activation_type)
+        require_aiter_fmoe_tuning(
+            _aiter_fmoe_workload_signature(
+                self.w1,
+                self.w2,
+                config.moe_k,
+                self._configured_activation_type,
+                config.model_config.compute_dtype,
             )
-            require_aiter_fmoe_tuning(
-                _aiter_fmoe_workload_signature(
-                    self.w1,
-                    self.w2,
-                    config.moe_k,
-                    self._configured_activation_type,
-                    config.model_config.compute_dtype,
-                )
-            )
+        )
 
-            # ROCmDevice.shuffle_moe_weight always converts MoE weights to the
-            # layout consumed by AITER's preshuffle_on kernels. Tensor attributes
-            # can be dropped while the loaded tensors are registered on the model,
-            # so restore the layout marker only for the opt-in deterministic path.
-            self.w1.is_shuffled = True
-            self.w2.is_shuffled = True
+        # The loader always uses AITER's preshuffled layout. Model registration
+        # may drop tensor attributes, so restore the marker for either route.
+        self.w1.is_shuffled = True
+        self.w2.is_shuffled = True
 
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1
@@ -304,10 +302,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         assert payload.expert_tokens_meta is not None
 
         activation_type = _moe_activation_type(activation)
-        if (
-            self._stability_enabled
-            and activation_type != self._configured_activation_type
-        ):
+        if activation_type != self._configured_activation_type:
             raise ValueError(
                 "MoE activation mismatch: ModelConfig resolved to "
                 f"{self._configured_activation_type}, but execute() received "

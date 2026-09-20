@@ -20,13 +20,27 @@ class KernelTuningRegistryTest(unittest.TestCase):
             self.assertEqual(registry.configure_kernel_tuning("gfx950"), ())
         provider.assert_called_once_with()
 
-    def test_providers_are_not_called_when_feature_is_disabled(self):
-        provider = mock.Mock()
-        with mock.patch.dict(
-            registry._PROVIDERS_BY_ARCH, {"gfx942": (provider,)}, clear=True
-        ), mock.patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(registry.configure_kernel_tuning("gfx942"), ())
-        provider.assert_not_called()
+    def test_correctness_overlays_do_not_require_deterministic_reduction(self):
+        status = KernelTuningStatus("test", True, "configured")
+        for value in (None, "0", "1"):
+            with self.subTest(deterministic=value):
+                provider = mock.Mock(return_value=status)
+                env = (
+                    {}
+                    if value is None
+                    else {registry.ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: value}
+                )
+                with mock.patch.dict(
+                    registry._PROVIDERS_BY_ARCH, {"gfx942": (provider,)}, clear=True
+                ), mock.patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(
+                        registry.configure_kernel_tuning("gfx942"), (status,)
+                    )
+                    self.assertEqual(
+                        registry.is_rocm_fp8_moe_deterministic_reduce_enabled(),
+                        value == "1",
+                    )
+                provider.assert_called_once_with()
 
     def test_current_arch_uses_rocm_device_properties(self):
         properties = mock.Mock(gcnArchName="gfx942:sramecc+:xnack-")
