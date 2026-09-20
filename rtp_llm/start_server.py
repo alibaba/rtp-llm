@@ -563,6 +563,11 @@ def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:
 
 
 def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
+    raw = os.environ.get("DSV4_STARTUP_REAL_WARMUP")
+    if raw is not None and not str_to_bool(raw):
+        logging.info("skip DSV4 startup real warmup, DSV4_STARTUP_REAL_WARMUP=%s", raw)
+        return False
+
     runtime_config = py_env_configs.runtime_config
     if not runtime_config.warm_up or not runtime_config.model_warm_up:
         return False
