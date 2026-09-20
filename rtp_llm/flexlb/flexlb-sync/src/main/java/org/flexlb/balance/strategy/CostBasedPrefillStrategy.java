@@ -11,9 +11,12 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -61,7 +64,8 @@ public class CostBasedPrefillStrategy {
         if (discovery.candidates().isEmpty()) {
             Logger.debug("Prefill select failed: no admission capacity, request_id={}",
                     requestId);
-            return PlacementResult.blocked(roleType);
+            return classifyAdmissionFailure(
+                    discovery.directory(), balanceContext.getPriority(), roleType, group);
         }
         Map<String, Integer> cacheMatchResults =
                 getCacheMatchResults(balanceContext, roleType, discovery);
@@ -84,9 +88,13 @@ public class CostBasedPrefillStrategy {
                     poolWideBlockers,
                     discovery.registeredCount());
             if (poolWideBlocker != null) {
-                return PlacementResult.blocked(poolWideBlocker);
+                return blockedWithDiagnostics(
+                        Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
+                        poolWideBlocker, discovery.registeredCount(), rejections);
             }
-            return PlacementResult.blocked(roleType);
+            return blockedWithDiagnostics(
+                    Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
+                    roleType, discovery.registeredCount(), rejections);
         }
 
         int selectedIndex = selectBestCandidate(
@@ -140,6 +148,44 @@ public class CostBasedPrefillStrategy {
                 survivors.maximumRoutingCacheMatchTokens,
                 seqLen);
         return PlacementResult.success(selectedRole);
+    }
+
+    private static PlacementResult<SelectedRole, RoleType> classifyAdmissionFailure(
+            List<EndpointRegistry.PrefillRoutingEntry> directory,
+            int priority, RoleType role, String group) {
+        AdmissionRejectReason reason = null;
+        int workerCount = 0;
+        long observedRequestCount = 0;
+        for (var entry : directory) {
+            PrefillEndpoint endpoint = entry.endpoint();
+            if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) {
+                continue;
+            }
+            workerCount++;
+            observedRequestCount += endpoint.observedRequestCount();
+            AdmissionRejectReason workerReason = endpoint.admissionRejectReason(priority);
+            if (reason == null) {
+                reason = workerReason;
+            } else if (reason == AdmissionRejectReason.UNSPECIFIED
+                    || workerReason == AdmissionRejectReason.UNSPECIFIED) {
+                reason = AdmissionRejectReason.UNSPECIFIED;
+            } else if (reason != workerReason) {
+                reason = AdmissionRejectReason.RESOURCE_EXHAUSTED;
+            }
+        }
+        Response failure = reason == null ? Response.error(role.getErrorType()) : switch (reason) {
+            case HIGHER_PRIORITY_AHEAD, SAME_PRIORITY_AHEAD ->
+                    Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED, reason);
+            case RESOURCE_EXHAUSTED -> Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+            case UNSPECIFIED -> Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
+        };
+        return blockedWithDiagnostics(failure, role, workerCount, Map.of("observedRequests", observedRequestCount));
+    }
+
+    private static PlacementResult<SelectedRole, RoleType> blockedWithDiagnostics(
+            Response failure, RoleType role, int workerCount, Map<String, ?> details) {
+        return PlacementResult.blocked(role, failure, Map.of("role", role.name(), "workers", workerCount,
+                "observedAtMs", System.currentTimeMillis(), "details", Map.copyOf(details)));
     }
 
     /** Select from candidates that already passed the common hard filters. */
@@ -290,6 +336,7 @@ public class CostBasedPrefillStrategy {
     }
 
     private record EndpointDiscovery(
+            List<EndpointRegistry.PrefillRoutingEntry> directory,
             List<EndpointRegistry.PrefillRoutingEntry> candidates,
             int registeredCount) {
 
@@ -420,7 +467,7 @@ public class CostBasedPrefillStrategy {
                 matching.add(entry);
             }
         }
-        return new EndpointDiscovery(matching, registered);
+        return new EndpointDiscovery(directory, matching, registered);
     }
 
     private Map<String, Integer> getCacheMatchResults(

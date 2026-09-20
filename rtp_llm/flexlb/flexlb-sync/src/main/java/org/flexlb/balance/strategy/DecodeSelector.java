@@ -2,6 +2,7 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
@@ -14,9 +15,12 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.CommonUtils;
+import org.flexlb.util.PriorityNormalizer;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 @Component
 public class DecodeSelector {
@@ -55,11 +59,11 @@ public class DecodeSelector {
                 }
             }
             if (allWorkersTooSmall) {
-                return PlacementResult.rejected(staticCapacityFailure(
+                return PlacementResult.rejected(oversizedRequestFailure(
                         request.expectedKvTokens(), largestKvBudget));
             }
             if (preferredAvailability == Availability.IMPOSSIBLE) {
-                return PlacementResult.blocked(RoleType.DECODE);
+                return classifyCapacityFailure(request, snapshots);
             }
             Availability selectedAvailability = preferredAvailability;
             double[] costByWorker = new double[snapshots.size()];
@@ -94,6 +98,83 @@ public class DecodeSelector {
         return PlacementResult.blocked(RoleType.DECODE);
     }
 
+    private PlacementResult<SelectedRole, RoleType> classifyCapacityFailure(
+            DecodeBinding request, List<DecodeRoutingView> views) {
+        Response failure = null;
+        boolean uniformFailure = true;
+        List<Map<String, Object>> evidence = new ArrayList<>();
+        for (DecodeRoutingView view : views) {
+            Response workerFailure;
+            try (WorkerEndpoint.GenerationPin pin = workerDirectory.captureDecodeGeneration(view)) {
+                if (pin == null) {
+                    workerFailure = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+                } else {
+                    var snapshot = ((DecodeEndpoint) pin.endpoint()).admissionSummary();
+                    evidence.add(Map.of("endpoint", view.address(), "version", snapshot.routing().admissionVersion(),
+                            "engineLoad", snapshot.routing().engineLoad(), "totalLoad", snapshot.routing().totalLoad(),
+                            "kvTotal", snapshot.routing().totalKv(), "kvAvailable", snapshot.routing().placementUsage().hardKvAvailable()));
+                    workerFailure = classifyCapacityFailure(request, snapshot);
+                }
+            }
+            if (failure == null) {
+                failure = workerFailure;
+            } else if (failure.getCode() != workerFailure.getCode()
+                    || failure.getAdmissionRejectReason() != workerFailure.getAdmissionRejectReason()) {
+                uniformFailure = false;
+            }
+            if (workerFailure.getCode() == StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode()) {
+                failure = workerFailure;
+            }
+        }
+        if (failure == null || !uniformFailure && failure.getCode() != StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode()) {
+            failure = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+        }
+        return PlacementResult.blocked(RoleType.DECODE, failure, Map.of("cause", "Decode capacity exhausted",
+                "capturedAtMs", System.currentTimeMillis(), "decode", List.copyOf(evidence)));
+    }
+
+    /** Classify only the dimensions that prevent this request from fitting. */
+    static Response classifyCapacityFailure(DecodeBinding request, DecodeEndpoint.AdmissionSummary snapshot) {
+        boolean dispatch = request.mode() == DecodeMode.IMMEDIATE;
+        var routing = snapshot.routing();
+        var usage = dispatch ? routing.dispatchUsage() : routing.placementUsage();
+        if (usage.totalKvTokens() > 0
+                && request.expectedKvTokens() > request.capacity().kvBudget(usage.totalKvTokens())) {
+            return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+        }
+        CapacityRelease lower = CapacityRelease.NONE;
+        CapacityRelease higher = CapacityRelease.NONE;
+        CapacityRelease same = CapacityRelease.NONE;
+        for (int priority = 1; priority <= PriorityNormalizer.MAX_PRIORITY; priority++) {
+            CapacityRelease occupied = dispatch ? snapshot.engineOccupancy(priority) : snapshot.placementOccupancy(priority);
+            if (occupied == CapacityRelease.NONE) { continue; }
+            if (priority < request.priority()) {
+                lower = lower.plus(occupied);
+            } else if (priority == request.priority()) {
+                same = occupied;
+            } else {
+                higher = higher.plus(occupied);
+            }
+        }
+        // Removing lower-priority occupancy is a counterfactual for attribution,
+        // not an authorization to preempt its owners.
+        var residual = request.capacity().evaluate(usage, request.hardKvTokens(), request.expectedKvTokens(), lower);
+        if (residual.fits()) {
+            return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+        }
+        CapacityRelease attributed = higher.plus(same);
+        if (residual.requests() > attributed.requests()
+                || residual.hardKvTokens() > attributed.hardKvTokens()
+                || residual.expectedKvTokens() > attributed.expectedKvTokens()) {
+            return Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
+        }
+        boolean higherBlocks = residual.requests() > 0 && higher.requests() > 0
+                || residual.hardKvTokens() > 0 && higher.hardKvTokens() > 0
+                || residual.expectedKvTokens() > 0 && higher.expectedKvTokens() > 0;
+        return Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED, higherBlocks
+                ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD : AdmissionRejectReason.SAME_PRIORITY_AHEAD);
+    }
+
     private static Availability availability(DecodeBinding request, DecodeRoutingView view) {
         if (view.totalKv() > 0L && request.expectedKvTokens() > request.capacity().kvBudget(view.totalKv())) {
             return Availability.IMPOSSIBLE;
@@ -106,13 +187,11 @@ public class DecodeSelector {
                 ? Availability.READY : Availability.BUSY;
     }
 
-    private static Response staticCapacityFailure(long required, long maximum) {
-        Response response = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
-                AdmissionRejectReason.RESOURCE_EXHAUSTED);
-        response.setErrorMessage(StrategyErrorType.RESOURCE_EXHAUSTED.buildErrorMessage(
+    private static Response oversizedRequestFailure(long required, long maximum) {
+        return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED,
                 "Decode prompt plus output demand=" + required
-                        + " exceeds every worker KV admission budget; maximum=" + maximum));
-        return response;
+                        + " exceeds every worker KV admission budget; maximum=" + maximum);
     }
 
     private SelectedRole buildSelectedRole(

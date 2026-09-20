@@ -18,7 +18,6 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.StatusEnum;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.interceptor.GrpcTraceInterceptor;
@@ -41,6 +40,7 @@ import java.net.UnknownHostException;
 import java.nio.channels.UnresolvedAddressException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -373,11 +373,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private static String failureName(Throwable error) {
-        Throwable cause = error;
-        while (cause instanceof CompletionException && cause.getCause() != null) {
-            cause = cause.getCause();
-        }
-        return cause.getClass().getSimpleName();
+        Throwable cause = unwrapCompletion(error);
+        Status status = Status.fromThrowable(cause);
+        return status.getCode() == Status.Code.UNKNOWN
+                ? cause.getClass().getSimpleName() : status.getCode().name();
     }
 
     @Override
@@ -780,18 +779,23 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
     }
 
+    private static Throwable unwrapCompletion(Throwable error) {
+        while ((error instanceof CompletionException || error instanceof ExecutionException)
+                && error.getCause() != null) {
+            error = error.getCause();
+        }
+        return error;
+    }
+
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB buildErrorResponse(Throwable error) {
-        Throwable cause = error;
-        while (cause instanceof CompletionException && cause.getCause() != null) {
-            cause = cause.getCause();
+        Throwable cause = unwrapCompletion(error);
+        if (cause instanceof TimeoutException
+                || Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED) {
+            return buildErrorResponse(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+                    "request scheduling deadline exceeded");
         }
-        if (cause instanceof TimeoutException) {
-            return buildErrorResponse(
-                    StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
-                    "NO_AVAILABLE_WORKER: schedule timeout");
-        }
-        return buildErrorResponse(StatusEnum.INTERNAL_ERROR.getCode(),
-                error.getMessage() != null ? error.getMessage() : "internal error");
+        return buildErrorResponse(StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
+                cause.getMessage() != null ? cause.getMessage() : "internal scheduling error");
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB buildErrorResponse(int code, String message) {
@@ -886,8 +890,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder();
         if (response == null) {
             return builder.setSuccess(false)
-                    .setCode(StatusEnum.INTERNAL_ERROR.getCode())
-                    .setErrorMessage("null response")
+                    .setCode(StrategyErrorType.DISPATCH_FAILED.getErrorCode())
+                    .setErrorMessage("null schedule response")
                     .build();
         }
         builder.setSuccess(response.isSuccess());

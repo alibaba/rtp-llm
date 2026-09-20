@@ -5,8 +5,8 @@ import org.flexlb.util.PriorityNormalizer;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Comparator;
-import java.util.NavigableSet;
 import java.util.List;
+import java.util.NavigableSet;
 import java.util.TreeSet;
 import java.util.function.Predicate;
 
@@ -33,6 +33,7 @@ final class OrderedRequestQueue {
     private final Bucket fifo = new Bucket();
     private final Bucket[] priorityBuckets = new Bucket[PRIORITY_LEVELS];
     private final BitSet pendingPriorities = new BitSet(PRIORITY_LEVELS);
+    private final int[] priorityCounts = new int[PRIORITY_LEVELS];
     private int size;
     private long nextSequence;
 
@@ -54,7 +55,12 @@ final class OrderedRequestQueue {
             fifo.add(entry);
         }
         size++;
+        priorityCounts[entry.priority]++;
         rewindScanTo(entry);
+    }
+
+    int[] priorityCounts() {
+        return priorityCounts.clone();
     }
 
     int size() {
@@ -70,6 +76,7 @@ final class OrderedRequestQueue {
         bucket.restore(entry);
         entry.removed = false;
         size++;
+        priorityCounts[entry.priority]++;
         rewindScanTo(entry);
     }
 
@@ -166,6 +173,7 @@ final class OrderedRequestQueue {
         entry.removed = true;
         unlink(entry);
         size--;
+        priorityCounts[entry.priority]--;
         return true;
     }
 
@@ -280,8 +288,7 @@ final class OrderedRequestQueue {
             }
             entry.next = before;
             entry.previous = before.previous;
-            if (before.previous == null) { head = entry; }
-            else { before.previous.next = entry; }
+            if (before.previous == null) { head = entry; } else { before.previous.next = entry; }
             before.previous = entry;
             entry.linked = true;
         }

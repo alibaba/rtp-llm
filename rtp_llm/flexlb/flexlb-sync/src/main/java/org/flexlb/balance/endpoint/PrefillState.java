@@ -5,6 +5,7 @@ import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot.Phase;
 import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
@@ -599,6 +600,8 @@ public final class PrefillState {
     private volatile long mutationVersion;
     /** Published at ownership mutation boundaries; admission still checks under the lock. */
     private volatile long outstandingRequestCount;
+    private long requestCountsVersion = -1;
+    private long[] requestCountsByPriority;
     /** Derived immutable work; ACTIVE queue mutations leave committed work unchanged. */
     private WorkCapture committedWorkCapture;
     private long unknownEngineRequestCount;
@@ -694,6 +697,45 @@ public final class PrefillState {
         removeRequestUnderLock(item.requestId(), entry);
         recordMutationUnderLock();
         return true;
+    }
+
+    /** Only failed admission needs priority provenance; reuse one summary per revision. */
+    public AdmissionRejectReason admissionRejectReason(int priority, long requestLimit) {
+        long[] counts;
+        long occupiedRequests;
+        lock.lock();
+        try {
+            if (requestCountsByPriority == null || requestCountsVersion != mutationVersion) {
+                long[] updatedCounts = new long[PriorityNormalizer.MAX_PRIORITY + 1];
+                updatedCounts[0] = unknownEngineRequestCount;
+                for (RequestEntry entry : requests.values()) {
+                    ScheduledRequest item = entry.activeItem != null ? entry.activeItem : entry.committedItem;
+                    int occupant = item == null ? 0 : item.priority();
+                    updatedCounts[occupant > 0 && occupant <= PriorityNormalizer.MAX_PRIORITY ? occupant : 0]++;
+                }
+                requestCountsByPriority = updatedCounts;
+                requestCountsVersion = mutationVersion;
+            }
+            counts = requestCountsByPriority;
+            occupiedRequests = outstandingRequestCount;
+        } finally {
+            lock.unlock();
+        }
+        long residual = requestLimit > 0 ? Math.max(0L, occupiedRequests + 1L - requestLimit) : 0L;
+        long higher = 0L;
+        long same = 0L;
+        for (int occupant = 1; occupant <= PriorityNormalizer.MAX_PRIORITY; occupant++) {
+            if (occupant < priority) { residual = Math.max(0L, residual - counts[occupant]); }
+            else if (occupant == priority) { same += counts[occupant]; } else { higher += counts[occupant]; }
+        }
+        if (residual > higher + same && counts[0] > 0) {
+            return AdmissionRejectReason.UNSPECIFIED;
+        }
+        if (residual > 0 && higher + same >= residual) {
+            return higher > 0 ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
+                    : AdmissionRejectReason.SAME_PRIORITY_AHEAD;
+        }
+        return AdmissionRejectReason.RESOURCE_EXHAUSTED;
     }
 
     public boolean canPreemptQueuedRequest(int priority, long requestLimit) {
@@ -925,6 +967,11 @@ public final class PrefillState {
         } finally {
             lock.unlock();
         }
+    }
+
+    public int batchLeasesInUseUnderLock() {
+        requireLock();
+        return batchLeasesInUse;
     }
 
     private boolean batchCapacityAvailable(int maximum) {

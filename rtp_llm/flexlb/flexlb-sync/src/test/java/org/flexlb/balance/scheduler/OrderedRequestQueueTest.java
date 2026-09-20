@@ -29,13 +29,19 @@ class OrderedRequestQueueTest {
             queue.add(first);
             queue.add(second);
             queue.add(third);
+            int[] capturedCounts = queue.priorityCounts();
+            assertEquals(3, capturedCounts[50]);
             long sequence = second.sequence;
             queue.scanForPlanningCandidates(3, 3, candidate -> true);
             queue.remove(second);
+            assertEquals(2, queue.priorityCounts()[50]);
+            assertEquals(3, capturedCounts[50]);
             queue.restore(second);
+            assertEquals(3, queue.priorityCounts()[50]);
             assertEquals(sequence, second.sequence);
             assertEquals(List.of(second, third), queue.scanForPlanningCandidates(3, 3, candidate -> true));
             assertEquals(List.of(first, second, third), queue.drain());
+            assertEquals(0, queue.priorityCounts()[50]);
         }
     }
 

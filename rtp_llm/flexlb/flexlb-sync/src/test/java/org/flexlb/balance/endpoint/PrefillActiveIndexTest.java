@@ -12,8 +12,15 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class PrefillActiveIndexTest {
     private static final Comparator<ScheduledRequest> ORDER =
@@ -42,11 +49,19 @@ class PrefillActiveIndexTest {
             }
             assertEquals(oldItems, old.items());
             assertEquals(expected, index.capture().items());
+            for (int priority = 0; priority <= 100; priority++) {
+                int exactPriority = priority;
+                assertEquals(expected.stream().filter(item -> item.priority() == exactPriority).count(),
+                        index.size(priority));
+            }
             assertSame(index.capture(), index.capture());
             assertEquals(expected.isEmpty() ? null : expected.getFirst(), index.peek());
         }
         var beforeClear = index.capture();
         index.clear();
+        for (int priority = 0; priority <= 100; priority++) {
+            assertEquals(0, index.size(priority));
+        }
         assertTrue(index.capture().items().isEmpty());
         assertEquals(expected, beforeClear.items());
     }

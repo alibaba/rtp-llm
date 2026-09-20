@@ -15,6 +15,7 @@ import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -146,7 +147,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return runtime.removeQueued(exactItem, reason);
     }
 
-    /** Capture immutable queue facts for timeout and eviction planning. */
+    /** Read the last scheduling decision without traversing or locking the queue. */
+    public Map<String, Object> queueWaitDiagnostics() {
+        return runtime.waitDiagnostics();
+    }
+
+    /** Capture exact queued identities for eviction planning. */
     public WorkerBatcher.QueueSnapshot captureQueueSnapshot() {
         return runtime.captureQueueSnapshot();
     }
@@ -286,6 +292,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public CapacityBoundary.Availability batchAdmissionAvailability(
             int maximumInflightBatches) {
         return prefillState.batchAvailability(maximumInflightBatches);
+    }
+
+    /** Explain a failed admission using the current owner-priority summary. */
+    public AdmissionRejectReason admissionRejectReason(int priority) {
+        return prefillState.admissionRejectReason(priority, inflightRequestLimit);
     }
 
     /** Advisory capacity; publication repeats the count check under the ownership lock. */

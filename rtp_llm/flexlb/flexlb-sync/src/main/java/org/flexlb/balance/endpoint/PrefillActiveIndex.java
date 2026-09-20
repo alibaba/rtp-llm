@@ -1,16 +1,18 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.util.PriorityNormalizer;
 
-import java.util.Collections;
-import java.util.Collection;
-import java.util.Comparator;
-import java.util.Iterator;
-import java.util.Objects;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.IdentityHashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Objects;
 import java.util.TreeSet;
 
 /**
@@ -45,6 +47,8 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
 
     int size();
 
+    int size(int priority);
+
     void clear();
 
     /** Caller holds the owning PrefillState lock. Reused until membership changes. */
@@ -54,20 +58,26 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
     final class Capture {
         private static final Capture EMPTY = new Capture(List.of());
         private final List<Entry> entries;
-        private final List<ScheduledRequest> items;
+        private volatile List<ScheduledRequest> items;
         private volatile List<GroupPlanner.Item> projectedItems;
 
         private Capture(Collection<Entry> entries) {
             this.entries = List.copyOf(entries);
-            List<ScheduledRequest> requests = new ArrayList<>(entries.size());
-            for (Entry entry : entries) {
-                requests.add(entry.request);
-            }
-            this.items = List.copyOf(requests);
         }
 
         public List<ScheduledRequest> items() {
-            return items;
+            List<ScheduledRequest> result = items;
+            if (result != null) { return result; }
+            synchronized (this) {
+                if (items == null) {
+                    List<ScheduledRequest> requests = new ArrayList<>(entries.size());
+                    for (Entry entry : entries) {
+                        requests.add(entry.request);
+                    }
+                    items = List.copyOf(requests);
+                }
+                return items;
+            }
         }
 
         public List<GroupPlanner.Item> projectedItems() {
@@ -154,6 +164,9 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         }
 
         @Override
+        public int size(int priority) { return 0; }
+
+        @Override
         public void clear() {
         }
 
@@ -172,6 +185,7 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         private final TreeSet<Entry> queue;
         // Identity lookup is part of this index, not a second ownership ledger.
         private final IdentityHashMap<ScheduledRequest, Entry> identities;
+        private final int[] priorityCounts = new int[PriorityNormalizer.MAX_PRIORITY + 1];
         private long nextSequence;
         private Capture capture;
 
@@ -194,6 +208,7 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
             Entry entry = new Entry(item, nextSequence++);
             queue.add(entry);
             identities.put(item, entry);
+            priorityCounts[item.priority()]++;
             capture = null;
             return true;
         }
@@ -206,6 +221,7 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
             }
             queue.remove(entry);
             identities.remove(item);
+            priorityCounts[item.priority()]--;
             capture = null;
             return true;
         }
@@ -231,7 +247,11 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         }
 
         @Override
+        public int size(int priority) { return priorityCounts[priority]; }
+
+        @Override
         public void clear() {
+            Arrays.fill(priorityCounts, 0);
             queue.clear();
             identities.clear();
             capture = null;

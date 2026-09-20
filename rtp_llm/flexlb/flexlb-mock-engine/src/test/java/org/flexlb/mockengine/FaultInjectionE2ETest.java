@@ -334,9 +334,11 @@ class FaultInjectionE2ETest {
             Response expired = crashed.get(5, TimeUnit.SECONDS);
             assertFalse(expired.isSuccess());
             StrategyErrorType expectedError = clientCancellation
-                    ? StrategyErrorType.REQUEST_CANCELLED : StrategyErrorType.BATCH_SLO_EXPIRED;
+                    ? StrategyErrorType.REQUEST_CANCELLED : StrategyErrorType.RESOURCE_EXHAUSTED;
             assertEquals(expectedError.getErrorCode(), expired.getCode());
-            assertTrue(expired.getErrorMessage().contains("REQUEST_INACTIVE"));
+            // Cleanup may wait for inactivity, but it cannot replace an earlier client cancellation.
+            assertTrue(expired.getErrorMessage().contains(clientCancellation
+                    ? CancelReason.CLIENT_CANCELLED.getMessage() : "REQUEST_INACTIVE"));
             assertEquals(0, prefillEndpoint.getInflightBatchCount());
             assertEquals(0, prefillEndpoint.getLocallyOwnedRequestCount());
             AutoTpmE2EHarness.await(() -> h.scheduler.getInflightSize() == 0

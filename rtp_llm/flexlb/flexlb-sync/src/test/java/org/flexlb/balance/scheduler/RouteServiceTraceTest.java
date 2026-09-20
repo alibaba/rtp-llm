@@ -91,7 +91,7 @@ class RouteServiceTraceTest {
         ctx.setTraceContext(Context.root().with(span));
         Response response = service.route(ctx).join();
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.BATCH_BUILD_FAILED.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
         verify(span).setAttribute(FlexlbTrace.SCHEDULE_MODE, "BATCH");
         verifyNoInteractions(scheduler);
     }

@@ -19,13 +19,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.mockito.ArgumentMatchers.eq;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -157,13 +157,14 @@ class RequestAdmissionResourceLeakTest {
     }
 
     @Test
-    void queuedPrefillPreemptionReturnsRetryableFailureAndReleasesDecodeOnce() throws Exception {
+    void queuedPrefillPreemptionReturnsPreemptedAndReleasesDecodeOnce() throws Exception {
         Registered victim = registerItem(61L);
         Registered incoming = registerItem(62L);
         RequestLifecycleTestSupport.bindRoute(lifecycle, victim);
         lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
-                victim.future().get(5, TimeUnit.SECONDS).getCode());
+        Response response = victim.future().get(5, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), response.getCode());
+        assertEquals("preempted by higher-priority request 62", response.getErrorMessage());
         lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
         lifecycle.cancelRequest(61L, 0L, CancelReason.CLIENT_CANCELLED);
         verify(victim.item().decodeEp(), times(1)).release(

@@ -1,12 +1,11 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.DeliveryMetrics;
-import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.FormulaPredictor;
+import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -33,9 +32,23 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.await;
-import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.awaitCondition;
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 /** Real executor, Slot and endpoint ledgers; only the Engine transport is simulated. */
 class QueuedBatchDeliveryTest {
@@ -292,9 +305,9 @@ class QueuedBatchDeliveryTest {
         }
     }
 
-    private void awaitDispatchTasks() throws InterruptedException {
+    private void awaitDispatchTasks() throws Exception {
         ThreadPoolExecutor executor = (ThreadPoolExecutor) ReflectionTestUtils.getField(dispatcher, "dispatchExecutor");
-        awaitCondition(() -> executor.getActiveCount() == 0 && executor.getQueue().isEmpty());
+        executor.submit(() -> { }).get(5, TimeUnit.SECONDS);
     }
 
     private void assertOccupancy(int batches, int requests) {
