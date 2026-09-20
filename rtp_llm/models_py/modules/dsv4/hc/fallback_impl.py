@@ -103,8 +103,14 @@ class FallbackHCUnit(HCUnitBase):
         for s in range(0, T, chunk):
             e = min(s + chunk, T)
             y[s:e] = torch.sum(pre_dt[s:e].unsqueeze(-1) * x_view[s:e], dim=-2)
-        y = y.view(*shape[:-2], hidden_dim) if x.dim() >= 3 else y
-        return y.to(dtype), post.unsqueeze(-1), comb
+        # Flatten-for-chunk, then restore the public [T, ...] / [B, S, ...]
+        # contract.  Leaving post/comb as [T_flat, hc, ...] fails
+        # test_factory_fallback_cpu_shapes on 4-D decode layout.
+        leading = shape[:-2]
+        y = y.view(*leading, hidden_dim)
+        post = post.view(*leading, self.hc_mult, 1)
+        comb = comb.view(*leading, self.hc_mult, self.hc_mult)
+        return y.to(dtype), post, comb
 
     def _post_impl(
         self,
