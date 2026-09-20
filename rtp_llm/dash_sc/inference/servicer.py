@@ -19,7 +19,7 @@ import inspect
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator, Callable, Iterator, Optional
 
 import torch
@@ -1803,26 +1803,30 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
 
     async def _validate_request_grammar(
         self, sampling: SamplingParams, request_id: str
-    ) -> Optional[tuple[DashErrorSpec, str]]:
-        """Trial-compile the current branch's grammar fields before enqueue."""
+    ) -> tuple[Optional[tuple[DashErrorSpec, str]], SamplingParams]:
+        """Normalize and trial-compile grammar fields before enqueue."""
         validator = self._grammar_validator
         if validator is None:
-            return None
+            return None, sampling
 
         try:
             if sampling.structural_tag is not None:
-                ok = await asyncio.to_thread(
-                    validator.validate_structural_tag,
+                ok, normalized = await asyncio.to_thread(
+                    validator.validate_and_norm_structural_tag,
                     sampling.structural_tag,
                     request_id,
                 )
+                if normalized is not None:
+                    sampling = replace(sampling, structural_tag=normalized)
                 field_name = "tool_call_structural_tag"
             elif sampling.response_format is not None:
-                ok = await asyncio.to_thread(
-                    validator.validate_response_format,
+                ok, normalized = await asyncio.to_thread(
+                    validator.validate_and_norm_response_format,
                     sampling.response_format,
                     request_id,
                 )
+                if normalized is not None:
+                    sampling = replace(sampling, response_format=normalized)
                 field_name = "response_format"
             elif sampling.json_format:
                 ok = await asyncio.to_thread(
@@ -1832,20 +1836,26 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 )
                 field_name = "json_format"
             else:
-                return None
+                return None, sampling
         except GrammarCompilationError as e:
-            return DASH_ERROR_BAD_REQUEST, str(e)
+            return (DASH_ERROR_BAD_REQUEST, str(e)), sampling
         except GrammarCheckUnavailable as e:
             return (
-                DASH_ERROR_BAD_REQUEST,
-                f"grammar validation or compilation failed: {e}",
+                (
+                    DASH_ERROR_BAD_REQUEST,
+                    f"grammar validation or compilation failed: {e}",
+                ),
+                sampling,
             )
 
         if ok:
-            return None
+            return None, sampling
         return (
-            DASH_ERROR_BAD_REQUEST,
-            f"invalid {field_name}: grammar validation or compilation failed",
+            (
+                DASH_ERROR_BAD_REQUEST,
+                f"invalid {field_name}: grammar validation or compilation failed",
+            ),
+            sampling,
         )
 
     def _record_and_report_chunk(
@@ -2081,7 +2091,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     yield resp
                     return
 
-                invalid_grammar = await self._validate_request_grammar(
+                invalid_grammar, sampling = await self._validate_request_grammar(
                     sampling, str(request.id)
                 )
                 if invalid_grammar is not None:
