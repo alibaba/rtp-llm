@@ -22,7 +22,11 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     SWA_KV,
 )
 from rtp_llm.models_py.modules.dsv4.cp import _cp_restore_gathered_full_2d
+from rtp_llm.models_py.modules.dsv4.fp8 import (
+    _v41_prefill_candidates as prefill_candidates,
+)
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_indexer as prefill_indexer
+from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_topk as prefill_topk
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_swa_triton as swa_codec
 from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
     cp_kv_slot_mapping,
@@ -256,6 +260,45 @@ def mask_candidate_logits(logits, candidates, block_size):
     return logits.masked_fill_(~allowed[:, columns], -torch.inf)
 
 
+def _apply_prefill_candidates(shared, logits, visible, rows, block_size, topk, publish):
+    """Publish candidates once and reuse their bounded bitmap across HCA sources.
+
+    Single-request chunks use row slices, so output/bitmap views need no
+    gather or scatter. Ragged requests retain their original row mapping.
+    If the complete bitmap would exceed its budget, consumers rebuild only
+    the current scoring chunk's bitmap from the same stored candidate IDs.
+    """
+    candidates = shared["candidates"]
+    cache = shared.get("prefill_candidate_mask")
+    flags = (
+        cache[1][rows]
+        if cache is not None and cache[0] is candidates and cache[2] == block_size
+        else None
+    )
+    if publish:
+        result = prefill_candidates.select_candidates(
+            logits, visible, block_size, topk, out=candidates[rows], flags=flags
+        )
+        if result is None:
+            block_ids = select_candidate_blocks(logits, visible, block_size, topk)
+            candidates[rows, : block_ids.shape[1]] = block_ids
+            # A partially initialized bitmap must never reach a consumer.
+            shared.pop("prefill_candidate_mask", None)
+        elif not isinstance(rows, slice):
+            candidates[rows] = result[0]
+            if flags is not None:
+                cache[1][rows] = result[1]
+    else:
+        if flags is None:
+            flags = prefill_candidates.build_flags(
+                candidates[rows], logits.shape[1], block_size
+            )
+        if flags is None or not prefill_candidates.mask_candidates(
+            logits, flags, block_size
+        ):
+            mask_candidate_logits(logits, candidates[rows], block_size)
+
+
 class AttentionV41FP8(AttentionFP8):
     def __init__(self, *args, v41_config, shared_attention, **kwargs):
         ratio = int(kwargs["compress_ratio"])
@@ -427,6 +470,7 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention["topk"] = {}
             self._shared_attention["candidates"] = None
             self._shared_attention.pop("candidate_mask", None)
+            self._shared_attention.pop("prefill_candidate_mask", None)
             # ``_prefill_chunk_meta`` caches per-source-group chunk offsets for
             # the duration of one forward; drop them with the rest of the
             # per-forward shared state.
@@ -777,6 +821,7 @@ class AttentionV41FP8(AttentionFP8):
             and candidate_size > 0
         )
         if publish_candidates:
+            shared.pop("prefill_candidate_mask", None)
             max_blocks = max(
                 (
                     (len(k) + candidate_size - 1) // candidate_size
@@ -794,6 +839,28 @@ class AttentionV41FP8(AttentionFP8):
                 if max_blocks > candidate_blocks
                 else None
             )
+            if (
+                shared["candidates"] is not None
+                and x.is_cuda
+                and os.environ.get("DSV41_FUSED_PREFILL_CANDIDATES", "1") != "0"
+                and prefill_candidates.bitmap_is_bounded(
+                    x.shape[0], max_blocks * candidate_size, candidate_size
+                )
+            ):
+                shared["prefill_candidate_mask"] = (
+                    shared["candidates"],
+                    torch.empty(
+                        (
+                            x.shape[0],
+                            prefill_candidates.bitmap_words(
+                                max_blocks * candidate_size, candidate_size
+                            ),
+                        ),
+                        dtype=torch.int32,
+                        device=x.device,
+                    ),
+                    candidate_size,
+                )
         # Short prompts select all causal candidates, as in the vLLM backend.
         if max((len(k) for _, k in globals_by_req), default=0) <= self.index_topk:
             ids = torch.arange(self.index_topk, device=x.device)
@@ -836,7 +903,12 @@ class AttentionV41FP8(AttentionFP8):
                     if fused_indexer
                     else 64
                 )
-                for chunk in rows.split(chunk_rows):
+                for chunk_index, chunk in enumerate(rows.split(chunk_rows)):
+                    output_rows = (
+                        slice(chunk_index * chunk_rows, (chunk_index + 1) * chunk_rows)
+                        if single_request
+                        else chunk
+                    )
                     visible = (positions[chunk] + 1) // self.compress_ratio
                     if fused_indexer:
                         from rtp_llm.models_py.modules.dsv4._profiler import (
@@ -863,21 +935,24 @@ class AttentionV41FP8(AttentionFP8):
                         logits.masked_fill_(ids[None] >= visible[:, None], -torch.inf)
                     candidates = shared.get("candidates")
                     if candidates is not None:
-                        if publish_candidates:
-                            block_ids = select_candidate_blocks(
+                        if publish_candidates or (
+                            candidate_source >= 0 and self.layer_id > candidate_source
+                        ):
+                            _apply_prefill_candidates(
+                                shared,
                                 logits,
                                 visible,
+                                output_rows,
                                 candidate_size,
                                 candidate_blocks,
-                            )
-                            candidates[chunk, : block_ids.shape[1]] = block_ids
-                        elif candidate_source >= 0 and self.layer_id > candidate_source:
-                            mask_candidate_logits(
-                                logits, candidates[chunk], candidate_size
+                                publish_candidates,
                             )
                     k = min(self.index_topk, key_count)
-                    scores, selected = logits.topk(k, dim=-1)
-                    out[chunk, :k] = torch.where(scores.isfinite(), selected, -1).int()
+                    selected = prefill_topk.try_select_tokens(logits, visible, k)
+                    if selected is None:
+                        scores, selected = logits.topk(k, dim=-1)
+                        selected = torch.where(scores.isfinite(), selected, -1).int()
+                    out[output_rows, :k] = selected
         shared["topk"] = {self.layer_id: out}
         return out
 
@@ -944,19 +1019,17 @@ class AttentionV41FP8(AttentionFP8):
         buf.view(-1, D).index_copy_(0, meta.slot_in_flat, qkv.kv_full)
         return buf
 
-    def _prefill_chunk_meta(self, globals_by_req, swa, swa_starts, req_ids, device):
+    def _prefill_chunk_meta(
+        self, globals_by_req, swa, swa_starts, req_ids, device, *, common
+    ):
         """Per-request chunk offsets for the sparse-prefill index build.
 
         ``offsets``/``ns``/``swstart`` are pure functions of the KV-source
         globals' shapes and of the SWA window shape, and both are fixed for a
-        whole ``kv_source_layer_id`` group: ``globals_by_req`` is that group's
-        shared KV-source tensor, while the SWA window is ``window_size`` wide on
-        every layer (``args.window_size`` is a single model-wide value). The
-        previous per-layer rebuild therefore recomputed byte-identical host
-        lists and re-uploaded them with a pageable — hence synchronous — H2D
-        copy on every compress-ratio layer. Compute and upload once per group
-        instead; ``_produce_global`` drops the entry whenever it republishes
-        ``shared["global"]``, so the cache never outlives its inputs.
+        whole ``kv_source_layer_id`` group. Build batched metadata from the
+        existing device lengths/prefixes, avoiding pageable host uploads even
+        on the first layer of a group. ``_produce_global`` invalidates this
+        cache whenever it republishes ``shared["global"]``.
         """
         shared = self._shared_attention
         cached = shared.get("prefill_chunk_meta")
@@ -974,10 +1047,36 @@ class AttentionV41FP8(AttentionFP8):
             # directly and skip the device tensors (and their H2D copy) entirely.
             meta = (offsets[0], global_sizes[0], swa_starts[0])
         else:
+            if self._source_pool(self._global_region()) is None:
+                # Pool-free warmup materializes only this chunk's closed
+                # groups, so its shapes need not include prefix history.
+                def device_values(values):
+                    return torch.cat(
+                        [
+                            torch.full((1,), v, dtype=torch.long, device=device)
+                            for v in values
+                        ]
+                    )
+
+                offsets_d = device_values(offsets)
+                sizes = device_values(global_sizes)
+                starts_d = device_values(swa_starts)
+            else:
+                lengths = (
+                    common.cp_ctx.input_lengths_global
+                    if common.cp_on
+                    else common.input_lengths
+                ).long()
+                prefixes = common.prefix_lengths.long()
+                tails = prefixes.clamp(max=self.window_size - 1)
+                sizes = (prefixes + lengths) // self.compress_ratio
+                chunk_sizes = sizes + lengths + tails
+                offsets_d = chunk_sizes.cumsum(0) - chunk_sizes
+                starts_d = prefixes - tails
             meta = (
-                torch.tensor(offsets, device=device)[req_ids, None],
-                torch.tensor(global_sizes, device=device)[req_ids, None],
-                torch.tensor(swa_starts, device=device)[req_ids, None],
+                offsets_d[req_ids, None],
+                sizes[req_ids, None],
+                starts_d[req_ids, None],
             )
         shared["prefill_chunk_meta"] = meta
         return meta
@@ -1097,7 +1196,7 @@ class AttentionV41FP8(AttentionFP8):
         selected = self._select_indices(x, qkv.qr, positions, req_ids)
         globals_by_req = self._shared_attention["global"][self.kv_source_layer_id]
         offsets, ns, swstart = self._prefill_chunk_meta(
-            globals_by_req, swa, swa_starts, req_ids, x.device
+            globals_by_req, swa, swa_starts, req_ids, x.device, common=common
         )
         chunks = []
         for (g, _), sw in zip(globals_by_req, swa):

@@ -14,8 +14,11 @@ _DSV4_FP8_TEST_DEPS = [
 
 _DSV4_FP8_TESTS = [
     "test_attention_v41_cuda_graph",
+    "test_attention_v41_prefill_selection",
     "test_v41_decode_attention_fusion",
     "test_v41_decode_preprocessing",
+    "test_v41_prefill_candidates",
+    "test_v41_prefill_topk",
     "test_bf16_gemm_fp32",
     "test_compressor_disable_raw_path",
     "test_cp_pool_reader_owned_lens",

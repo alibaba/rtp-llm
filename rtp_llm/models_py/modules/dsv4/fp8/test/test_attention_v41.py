@@ -1,5 +1,6 @@
 """CPU contracts for V4.1 compression, query scaling, and shared selections."""
 
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -8,6 +9,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.fp8 import attention_v41 as attention_v41_module
 from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import cp_kv_slot_mapping
+from rtp_llm.models_py.modules.dsv4.fp8.attention import _configure_flash_mla_l2_persist
 from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (
     AttentionV41FP8,
     compress_pairs,
@@ -19,6 +21,182 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (
 
 
 class AttentionV41Test(unittest.TestCase):
+    @staticmethod
+    def _chunk_meta_fixture(ratio, window_size, *, pool_bound=True):
+        attn = AttentionV41FP8.__new__(AttentionV41FP8)
+        torch.nn.Module.__init__(attn)
+        attn.layer_id = 2
+        attn.compress_ratio = ratio
+        attn.window_size = window_size
+        attn._shared_attention = {"layers": {2: attn}}
+        attn._source_pool = lambda region: object() if pool_bound else None
+        return attn
+
+    @staticmethod
+    def _chunk_meta_reference(globals_by_req, swa, swa_starts, req_ids):
+        per_request = []
+        offset = 0
+        for (g, _), sw, start in zip(globals_by_req, swa, swa_starts):
+            per_request.append((offset, g.shape[0], start))
+            offset += g.shape[0] + sw.shape[0]
+        return tuple(
+            torch.tensor(
+                [[per_request[request][column]] for request in req_ids.tolist()],
+                dtype=torch.long,
+            )
+            for column in range(3)
+        )
+
+    def test_prefill_chunk_meta_ragged_requests_use_global_cp_lengths(self):
+        for cp_on in (False, True):
+            for ratio in (1, 2):
+                for window_size in (1, 8):
+                    with self.subTest(
+                        cp_on=cp_on, ratio=ratio, window_size=window_size
+                    ):
+                        lengths = [1, 5, 3, 8, 2, 7]
+                        prefixes = [
+                            0,
+                            1,
+                            window_size - 1,
+                            window_size,
+                            window_size + 1,
+                            2 * window_size + 3,
+                        ]
+                        tails = [min(p, window_size - 1) for p in prefixes]
+                        globals_by_req = [
+                            (torch.empty((p + n) // ratio, 4), None)
+                            for p, n in zip(prefixes, lengths)
+                        ]
+                        swa = [
+                            torch.empty(n + tail, 4) for n, tail in zip(lengths, tails)
+                        ]
+                        starts = [p - tail for p, tail in zip(prefixes, tails)]
+                        req_ids = torch.repeat_interleave(
+                            torch.arange(len(lengths)), torch.tensor(lengths)
+                        ).flip(0)
+                        expected = self._chunk_meta_reference(
+                            globals_by_req, swa, starts, req_ids
+                        )
+                        common = SimpleNamespace(
+                            cp_on=cp_on,
+                            # Deliberately different from global lengths:
+                            # CP's local shard lengths must not size the cache.
+                            input_lengths=torch.tensor(
+                                [1] * len(lengths) if cp_on else lengths,
+                                dtype=torch.int32,
+                            ),
+                            prefix_lengths=torch.tensor(prefixes, dtype=torch.int32),
+                            cp_ctx=SimpleNamespace(
+                                input_lengths_global=torch.tensor(
+                                    lengths, dtype=torch.int32
+                                )
+                            ),
+                        )
+                        attn = self._chunk_meta_fixture(ratio, window_size)
+                        with patch.object(
+                            torch,
+                            "tensor",
+                            side_effect=AssertionError("unexpected host tensor upload"),
+                        ):
+                            actual = attn._prefill_chunk_meta(
+                                globals_by_req,
+                                swa,
+                                starts,
+                                req_ids,
+                                torch.device("cpu"),
+                                common=common,
+                            )
+                        for result, reference in zip(actual, expected):
+                            self.assertEqual(result.dtype, torch.long)
+                            torch.testing.assert_close(result, reference)
+
+    def test_prefill_chunk_meta_pool_free_keeps_new_boundary_shapes(self):
+        lengths = [1, 3, 2]
+        prefixes = [7, 8, 13]
+        req_ids = torch.tensor([2, 0, 1, 1, 2, 1])
+        swa = [torch.empty(n, 4) for n in lengths]
+        for ratio in (1, 2):
+            with self.subTest(ratio=ratio):
+                globals_by_req = [
+                    (torch.empty((p + n) // ratio - p // ratio, 4), None)
+                    for p, n in zip(prefixes, lengths)
+                ]
+                expected = self._chunk_meta_reference(
+                    globals_by_req, swa, prefixes, req_ids
+                )
+                attn = self._chunk_meta_fixture(ratio, 8, pool_bound=False)
+                with patch.object(
+                    torch,
+                    "tensor",
+                    side_effect=AssertionError("unexpected host tensor upload"),
+                ):
+                    actual = attn._prefill_chunk_meta(
+                        globals_by_req,
+                        swa,
+                        prefixes,
+                        req_ids,
+                        torch.device("cpu"),
+                        # Pool-free warmup must use actual shapes, and need
+                        # not have the production pool's length metadata.
+                        common=SimpleNamespace(),
+                    )
+                for result, reference in zip(actual, expected):
+                    torch.testing.assert_close(result, reference)
+
+    def test_prefill_chunk_meta_single_request_keeps_scalar_fast_path(self):
+        attn = self._chunk_meta_fixture(2, 8)
+        req_ids = torch.zeros(3, dtype=torch.long)
+        with patch.object(
+            torch, "tensor", side_effect=AssertionError("unexpected host tensor upload")
+        ):
+            actual = attn._prefill_chunk_meta(
+                [(torch.empty(9, 4), None)],
+                [torch.empty(10, 4)],
+                [8],
+                req_ids,
+                torch.device("cpu"),
+                common=SimpleNamespace(),
+            )
+        self.assertEqual(actual, (0, 9, 8))
+        self.assertTrue(all(isinstance(value, int) for value in actual))
+
+    def test_prefill_chunk_meta_cache_survives_consumers_until_next_forward(self):
+        attn = self._chunk_meta_fixture(2, 8)
+        globals_by_req = [(torch.empty(2, 4), None), (torch.empty(3, 4), None)]
+        swa = [torch.empty(4, 4), torch.empty(6, 4)]
+        req_ids = torch.tensor([0, 1, 1])
+        common = SimpleNamespace(
+            cp_on=False,
+            input_lengths=torch.tensor([4, 6]),
+            prefix_lengths=torch.zeros(2, dtype=torch.long),
+        )
+        actual = attn._prefill_chunk_meta(
+            globals_by_req, swa, [0, 0], req_ids, "cpu", common=common
+        )
+        consumer = self._chunk_meta_fixture(2, 8)
+        consumer.layer_id = 3
+        consumer._shared_attention = attn._shared_attention
+        attn._shared_attention["layers"][3] = consumer
+        consumer._begin_forward()
+        # A consumer must return the same tuple without re-reading metadata.
+        self.assertIs(
+            consumer._prefill_chunk_meta(None, None, None, None, None, common=None),
+            actual,
+        )
+        attn._begin_forward()
+        self.assertNotIn("prefill_chunk_meta", attn._shared_attention)
+        next_meta = attn._prefill_chunk_meta(
+            [(torch.empty(1, 4), None)],
+            [torch.empty(2, 4)],
+            [0],
+            torch.zeros(2, dtype=torch.long),
+            "cpu",
+            common=SimpleNamespace(),
+        )
+        self.assertEqual(next_meta, (0, 1, 0))
+        self.assertIsNot(next_meta, actual)
+
     def test_small_cp_x_gather_ceiling_covers_mid_size_batches(self):
         # The single-shot raw-x all-gather must cover the shared-prefix batch
         # band (8x8192 = 65536 global rows and every smaller multi-request
@@ -48,6 +226,7 @@ class AttentionV41Test(unittest.TestCase):
                     SimpleNamespace(padded_seq_len=32768)
                 )
             )
+
     def test_cp_hidden_tiles_restore_padded_multiple_requests(self):
         for cp_size in (2, 4):
             lengths = (5, 19, 1, 32)
@@ -450,6 +629,288 @@ class AttentionV41Test(unittest.TestCase):
         self.assertNotIn("prefill_index_plan", attn._shared_attention)
         self.assertNotIn("prefill_chunk_meta", attn._shared_attention)
         self.assertEqual(attn._shared_attention["global"], {})
+
+
+class PrefillCandidatesIntegrationTest(unittest.TestCase):
+    def test_source_slice_writes_in_place_and_four_consumers_reuse_bitmap(self):
+        candidates = torch.full((6, 2), -7, dtype=torch.int32)
+        flags = torch.full((6, 3), -9, dtype=torch.int32)
+        shared = {"candidates": candidates}
+        shared["prefill_candidate_mask"] = (candidates, flags, 2)
+        rows = slice(1, 4)
+        logits = torch.zeros(3, 17)
+        visible = torch.tensor([3, 9, 17])
+        expected_ids = torch.tensor([[0, 1], [2, 4], [6, 8]], dtype=torch.int32)
+        expected_flags = torch.tensor([[3, 0, 0], [20, 0, 0], [320, 0, 0]])
+
+        def select(logits, visible, block_size, topk, *, out, flags):
+            self.assertEqual(
+                out.untyped_storage().data_ptr(),
+                candidates.untyped_storage().data_ptr(),
+            )
+            self.assertEqual(
+                flags.untyped_storage().data_ptr(),
+                shared["prefill_candidate_mask"][1].untyped_storage().data_ptr(),
+            )
+            out.copy_(expected_ids)
+            flags.copy_(expected_flags)
+            return out, flags
+
+        def mask(logits, chunk_flags, block_size):
+            torch.testing.assert_close(chunk_flags, expected_flags.to(torch.int32))
+            self.assertEqual(
+                chunk_flags.untyped_storage().data_ptr(),
+                flags.untyped_storage().data_ptr(),
+            )
+            logits[:, 0] = -torch.inf
+            return True
+
+        helpers = attention_v41_module.prefill_candidates
+        with patch.object(
+            helpers, "select_candidates", side_effect=select
+        ), patch.object(
+            helpers, "build_flags", side_effect=AssertionError("Bitmap must be reused")
+        ), patch.object(
+            helpers, "mask_candidates", side_effect=mask
+        ) as mask_call:
+            attention_v41_module._apply_prefill_candidates(
+                shared, logits, visible, rows, 2, 2, True
+            )
+            for _ in range(4):
+                consumer_logits = torch.ones_like(logits)
+                attention_v41_module._apply_prefill_candidates(
+                    shared, consumer_logits, visible, rows, 2, 2, False
+                )
+                self.assertTrue(torch.isneginf(consumer_logits[:, 0]).all())
+            self.assertEqual(mask_call.call_count, 4)
+        torch.testing.assert_close(candidates[rows], expected_ids)
+        self.assertTrue((candidates[[0, 4, 5]] == -7).all())
+        self.assertTrue((flags[[0, 4, 5]] == -9).all())
+        source = SimpleNamespace(layer_id=2, _shared_attention=shared)
+        shared["layers"] = {2: source}
+        AttentionV41FP8._begin_forward(source)
+        self.assertNotIn("prefill_candidate_mask", shared)
+        self.assertIsNone(shared["candidates"])
+
+    def test_ragged_source_scatter_restores_candidates_and_bitmap_row_order(self):
+        candidates = torch.full((5, 2), -1, dtype=torch.int32)
+        bitmap = torch.full((5, 3), -9, dtype=torch.int32)
+        shared = {
+            "candidates": candidates,
+            "prefill_candidate_mask": (candidates, bitmap, 2),
+        }
+        rows = torch.tensor([4, 0, 2])
+        expected_ids = torch.tensor([[0, 2], [1, 3], [4, 5]], dtype=torch.int32)
+        expected_flags = torch.tensor([[5, 0, 0], [10, 0, 0], [48, 0, 0]])
+
+        def select(logits, visible, block_size, topk, *, out, flags):
+            self.assertNotEqual(
+                out.untyped_storage().data_ptr(),
+                candidates.untyped_storage().data_ptr(),
+            )
+            out.copy_(expected_ids)
+            flags.copy_(expected_flags)
+            return out, flags
+
+        with patch.object(
+            attention_v41_module.prefill_candidates,
+            "select_candidates",
+            side_effect=select,
+        ):
+            attention_v41_module._apply_prefill_candidates(
+                shared, torch.zeros(3, 12), torch.tensor([5, 8, 12]), rows, 2, 2, True
+            )
+        torch.testing.assert_close(candidates[rows], expected_ids)
+        torch.testing.assert_close(bitmap[rows], expected_flags.to(torch.int32))
+        self.assertTrue((candidates[[1, 3]] == -1).all())
+        self.assertTrue((bitmap[[1, 3]] == -9).all())
+
+    def test_source_fallback_discards_partial_bitmap_and_consumer_rebuilds(self):
+        candidates = torch.full((4, 3), -1, dtype=torch.int32)
+        candidates[:2] = torch.tensor([[0, 2, -1], [1, 2, -1]])
+        shared = {
+            "candidates": candidates,
+            # Simulate an earlier source chunk that has initialized only
+            # half the complete cross-layer bitmap.
+            "prefill_candidate_mask": (
+                candidates,
+                torch.full((4, 1), 123, dtype=torch.int32),
+                2,
+            ),
+        }
+        logits = torch.tensor([[5.0, 2.0, 1.0, -torch.inf], [3.0, 4.0, 5.0, 6.0]])
+        visible = torch.tensor([3, 4])
+        rows = torch.tensor([3, 2])
+        expected = select_candidate_blocks(logits, visible, 2, 3)
+        helpers = attention_v41_module.prefill_candidates
+        with patch.object(helpers, "select_candidates", return_value=None):
+            attention_v41_module._apply_prefill_candidates(
+                shared, logits, visible, rows, 2, 3, True
+            )
+        self.assertNotIn("prefill_candidate_mask", shared)
+        torch.testing.assert_close(candidates[rows, :2], expected)
+        self.assertTrue((candidates[rows, 2] == -1).all())
+        built = torch.tensor([[5], [6]], dtype=torch.int32)
+        consumer = torch.arange(8, dtype=torch.float32).view(2, 4)
+        reference = mask_candidate_logits(consumer.clone(), candidates[rows], 2)
+        with patch.object(
+            helpers, "build_flags", return_value=built
+        ) as build, patch.object(
+            helpers, "mask_candidates", return_value=False
+        ) as fused_mask:
+            attention_v41_module._apply_prefill_candidates(
+                shared, consumer, visible, rows, 2, 3, False
+            )
+        torch.testing.assert_close(build.call_args.args[0], candidates[rows])
+        self.assertEqual(build.call_args.args[1:], (4, 2))
+        self.assertIs(fused_mask.call_args.args[1], built)
+        torch.testing.assert_close(consumer, reference)
+
+    def test_single_and_ragged_topk_chunk_rows_map_to_original_output(self):
+        for single_request in (True, False):
+            for use_fused_topk in (False, True):
+                with self.subTest(single=single_request, fused=use_fused_topk):
+                    req_ids = torch.tensor(
+                        [0, 0, 0, 0, 0] if single_request else [1, 0, 1, 0, 1]
+                    )
+                    positions = torch.tensor([4, 2, 5, 0, 3])
+                    x = torch.ones(5, 2)
+                    qr = torch.stack((torch.arange(1, 6), torch.ones(5)), dim=1)
+                    keys = [7] if single_request else [5, 7]
+                    globals_by_req = [
+                        (
+                            None,
+                            attention_v41_module.prefill_indexer.PrefillIndexerKeys(
+                                torch.empty(n, 64, dtype=torch.int8),
+                                torch.empty(n, dtype=torch.int32),
+                            ),
+                        )
+                        for n in keys
+                    ]
+                    attn = SimpleNamespace(
+                        is_index_source=True,
+                        index_source_layer_id=20,
+                        kv_source_layer_id=20,
+                        layer_id=20,
+                        index_topk=2,
+                        index_n_heads=1,
+                        index_head_dim=2,
+                        rope_head_dim=0,
+                        compress_ratio=1,
+                        index_wq=None,
+                        index_weights=torch.ones(1, 2),
+                        freqs_cis=torch.ones(8, 1, dtype=torch.complex64),
+                        _lin=lambda weight, value: value,
+                        v41_config=dict(
+                            candidate_source_layer_id=20,
+                            candidate_topk_blocks=1,
+                            candidate_block_size=2,
+                        ),
+                        _shared_attention={"global": {20: globals_by_req}},
+                    )
+                    selections = []
+
+                    def score(q, q_sf, k, k_sf, weights, visible):
+                        sign = torch.where(q[:, 0, 0].long() % 2 == 0, 1.0, -1.0)
+                        columns = torch.arange(k.shape[0])
+                        logits = (columns[None] + 1) * sign[:, None]
+                        return logits.masked_fill(
+                            columns[None] >= visible[:, None], -torch.inf
+                        )
+
+                    def select(logits, visible, topk):
+                        if not use_fused_topk:
+                            return None
+                        values, ids = logits.topk(topk, dim=-1)
+                        return torch.where(values.isfinite(), ids, -1).int()
+
+                    def candidates(
+                        shared, logits, visible, rows, block_size, topk, publish
+                    ):
+                        self.assertTrue(publish)
+                        selections.append(rows)
+
+                    with patch.object(
+                        attention_v41_module,
+                        "rope_only",
+                        side_effect=lambda q, *args: q,
+                    ), patch.object(
+                        attention_v41_module.prefill_indexer,
+                        "quantize_indexer_q",
+                        side_effect=lambda q: (q, torch.zeros(5, 1)),
+                    ), patch.object(
+                        attention_v41_module.prefill_indexer,
+                        "logits_chunk_rows",
+                        return_value=2,
+                    ), patch.object(
+                        attention_v41_module.prefill_indexer,
+                        "score_indexer_chunk",
+                        side_effect=score,
+                    ), patch.object(
+                        attention_v41_module.prefill_topk,
+                        "try_select_tokens",
+                        side_effect=select,
+                    ), patch.object(
+                        attention_v41_module,
+                        "_apply_prefill_candidates",
+                        side_effect=candidates,
+                    ):
+                        actual = AttentionV41FP8._select_indices(
+                            attn, x, qr, positions, req_ids
+                        )
+                    expected = []
+                    for row, position in enumerate(positions.tolist()):
+                        ids = list(range(position + 1))
+                        if (row + 1) % 2 == 0:
+                            ids.reverse()
+                        expected.append((ids[:2] + [-1, -1])[:2])
+                    torch.testing.assert_close(
+                        actual, torch.tensor(expected, dtype=torch.int32)
+                    )
+                    if single_request:
+                        self.assertEqual(
+                            selections, [slice(0, 2), slice(2, 4), slice(4, 6)]
+                        )
+                    else:
+                        for actual_rows, expected_rows in zip(
+                            selections, ([1, 3], [0, 2], [4])
+                        ):
+                            torch.testing.assert_close(
+                                actual_rows, torch.tensor(expected_rows)
+                            )
+
+
+class FlashMlaL2PersistEnvironmentTest(unittest.TestCase):
+    def setUp(self):
+        _configure_flash_mla_l2_persist.cache_clear()
+        self.addCleanup(_configure_flash_mla_l2_persist.cache_clear)
+
+    def test_default_disables_native_l2_persist(self):
+        with patch.dict(os.environ, {"RTP_V41_TEST_UNRELATED": "preserve"}):
+            os.environ.pop("FLASH_MLA_NO_L2_PERSIST", None)
+            _configure_flash_mla_l2_persist()
+            _configure_flash_mla_l2_persist()
+            self.assertEqual(os.environ["FLASH_MLA_NO_L2_PERSIST"], "1")
+            self.assertEqual(os.environ["RTP_V41_TEST_UNRELATED"], "preserve")
+
+    def test_explicit_disable_is_preserved(self):
+        with patch.dict(os.environ, {"FLASH_MLA_NO_L2_PERSIST": "1"}):
+            _configure_flash_mla_l2_persist()
+            _configure_flash_mla_l2_persist()
+            self.assertEqual(os.environ["FLASH_MLA_NO_L2_PERSIST"], "1")
+
+    def test_explicit_enable_removes_presence_flag_only_once(self):
+        with patch.dict(
+            os.environ,
+            {"FLASH_MLA_NO_L2_PERSIST": "0", "RTP_V41_TEST_UNRELATED": "preserve"},
+        ):
+            _configure_flash_mla_l2_persist()
+            self.assertNotIn("FLASH_MLA_NO_L2_PERSIST", os.environ)
+            # Later Attention instances must not treat the now-absent flag as
+            # an unset default and disable the user's explicit L2 policy.
+            _configure_flash_mla_l2_persist()
+            self.assertNotIn("FLASH_MLA_NO_L2_PERSIST", os.environ)
+            self.assertEqual(os.environ["RTP_V41_TEST_UNRELATED"], "preserve")
 
 
 if __name__ == "__main__":

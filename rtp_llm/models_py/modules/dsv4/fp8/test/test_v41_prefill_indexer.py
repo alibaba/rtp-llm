@@ -30,6 +30,72 @@ def _reference_logits(q, weights, k, visible):
 
 
 class V41PrefillIndexerCPU(unittest.TestCase):
+    def test_clean_logits_only_defaults_to_verified_sm100(self):
+        with patch.dict(os.environ):
+            os.environ.pop("DSV41_PREFILL_CLEAN_LOGITS_ONLY", None)
+            for major in (8, 9, 10, 11, 12):
+                with self.subTest(major=major), patch.object(
+                    torch.cuda, "get_device_capability", return_value=(major, 0)
+                ):
+                    self.assertEqual(
+                        indexer._use_clean_logits_only(torch.device("cuda")),
+                        major == 10,
+                    )
+
+    def test_clean_logits_only_disabled_and_cpu_do_not_query_cuda(self):
+        with patch.object(
+            torch.cuda,
+            "get_device_capability",
+            side_effect=AssertionError("Fallback must not query CUDA"),
+        ):
+            with patch.dict(os.environ, {"DSV41_PREFILL_CLEAN_LOGITS_ONLY": "1"}):
+                self.assertFalse(indexer._use_clean_logits_only(torch.device("cpu")))
+            with patch.dict(os.environ, {"DSV41_PREFILL_CLEAN_LOGITS_ONLY": "0"}):
+                self.assertFalse(indexer._use_clean_logits_only(torch.device("cuda")))
+
+    def test_clean_logits_only_preserves_backend_tensor_without_dense_mask(self):
+        clean = torch.tensor(
+            [[-torch.inf, -torch.inf, -torch.inf], [2.0, 1.0, -torch.inf]]
+        )
+        with patch.object(
+            score_backend, "fp8_fp4_mqa_indexer_score", return_value=clean
+        ) as fused, patch.object(
+            indexer, "_use_clean_logits_only", return_value=True
+        ), patch.object(
+            torch.Tensor,
+            "masked_fill_",
+            side_effect=AssertionError("Clean logits must not be masked again"),
+        ):
+            actual = indexer.score_indexer_chunk(
+                torch.zeros(2, 32, 64, dtype=torch.int8),
+                torch.ones(2, 32, dtype=torch.int32),
+                torch.zeros(3, 64, dtype=torch.int8),
+                torch.ones(3, dtype=torch.int32),
+                torch.ones(2, 32),
+                torch.tensor([0, 2], dtype=torch.int32),
+            )
+        self.assertIs(actual, clean)
+        self.assertTrue(fused.call_args.kwargs["clean_logits"])
+        self.assertEqual(fused.call_args.kwargs["max_seqlen_k"], 0)
+
+    def test_empty_score_shape_does_not_launch_backend(self):
+        for rows, keys in ((0, 5), (3, 0), (0, 0)):
+            with self.subTest(rows=rows, keys=keys), patch.object(
+                score_backend,
+                "fp8_fp4_mqa_indexer_score",
+                side_effect=AssertionError("Empty logits must not launch DeepGEMM"),
+            ):
+                actual = indexer.score_indexer_chunk(
+                    torch.empty(rows, 32, 64, dtype=torch.int8),
+                    torch.empty(rows, 32, dtype=torch.int32),
+                    torch.empty(keys, 64, dtype=torch.int8),
+                    torch.empty(keys, dtype=torch.int32),
+                    torch.empty(rows, 32),
+                    torch.zeros(rows, dtype=torch.int32),
+                )
+                self.assertEqual(actual.shape, (rows, keys))
+                self.assertEqual(actual.dtype, torch.float32)
+
     def test_default_enable_and_supported_device_contract(self):
         with patch.dict(os.environ), patch.object(
             score_backend, "has_fp8_fp4_mqa_logits", return_value=True
@@ -89,9 +155,7 @@ class V41PrefillIndexerCPU(unittest.TestCase):
         self.assertTrue((payload[0] == 0).all())
         exponent = sf.view(torch.uint8).view(9, 4)
         self.assertTrue(((exponent > 0) & (exponent < 255)).all())
-        torch.testing.assert_close(
-            values[1], torch.full((128,), 1.5), rtol=0, atol=0
-        )
+        torch.testing.assert_close(values[1], torch.full((128,), 1.5), rtol=0, atol=0)
         # Round-trip error stays bounded by the coarsest e2m1 grid step
         # (one full scale in the [4, 6] magnitude band, half elsewhere).
         error = (values - k.float()).abs().reshape(9, 4, 32)
@@ -359,6 +423,121 @@ class V41PrefillIndexerCUDA(unittest.TestCase):
                 float(expected[row, selected].min()), float(cutoff - 2 * error - 1e-6)
             )
 
+    def test_clean_logits_only_mixed_tile_boundaries_and_padded_stride(self):
+        if torch.cuda.get_device_capability(self.device)[0] != 10:
+            self.skipTest("Clean-logits-only is enabled only on SM100")
+        for heads in (32, 64):
+            for ratio in (1, 2):
+                for keys in (1, 255, 256, 257, 509, 1021, 16555):
+                    with self.subTest(heads=heads, ratio=ratio, keys=keys):
+                        # Non-aligned M and N, mixed bounds within each Q
+                        # tile, and ratio-2 odd/even original token positions.
+                        if ratio == 2:
+                            positions = [
+                                0,
+                                1,
+                                2,
+                                509,
+                                510,
+                                511,
+                                512,
+                                513,
+                                2 * keys - 3,
+                                2 * keys - 2,
+                                2 * keys - 1,
+                                2 * keys,
+                                2 * keys + 1,
+                            ]
+                            ends = [(p + 1) // ratio for p in positions]
+                        else:
+                            ends = [
+                                -1,
+                                0,
+                                1,
+                                255,
+                                256,
+                                257,
+                                keys - 1,
+                                keys,
+                                keys + 1,
+                                0,
+                                keys,
+                                1,
+                                128,
+                            ]
+                        visible = torch.tensor(
+                            ends, dtype=torch.int32, device=self.device
+                        )
+                        bounded = visible.clamp(0, keys)
+                        q, weights, k = self._inputs(len(ends), heads, keys, 61)
+                        with patch.dict(
+                            os.environ, {"DSV41_PREFILL_CLEAN_LOGITS_ONLY": "1"}
+                        ):
+                            actual = self._score(q, weights, k, visible)
+                        with patch.dict(
+                            os.environ, {"DSV41_PREFILL_CLEAN_LOGITS_ONLY": "0"}
+                        ):
+                            masked = self._score(q, weights, k, visible)
+                        # The optimization changes no arithmetic, valid value,
+                        # or invalid (-inf) position in the full logical output.
+                        torch.testing.assert_close(actual, masked, rtol=0, atol=0)
+                        self._assert_scores_and_topk(
+                            actual, _reference_logits(q, weights, k, bounded)
+                        )
+                        self.assertGreater(actual.stride(0), keys)
+                        padded = actual.as_strided(
+                            (len(ends), actual.stride(0)), actual.stride()
+                        )
+                        self.assertTrue(torch.isneginf(padded[:, keys:]).all())
+
+    def test_clean_logits_graph_replay_overwrites_poisoned_reused_storage(self):
+        if torch.cuda.get_device_capability(self.device)[0] != 10:
+            self.skipTest("Clean-logits-only is enabled only on SM100")
+        for rows, keys in ((1, 257), (3, 509), (13, 1021), (13, 16555)):
+            with self.subTest(rows=rows, keys=keys):
+                q, weights, k = self._inputs(rows, 32, keys, 62)
+                q_payload, q_sf = indexer.quantize_indexer_q(q)
+                k_payload, k_sf = indexer.quantize_indexer_k_reference(k)
+                visible = torch.full(
+                    (rows,), keys, dtype=torch.int32, device=self.device
+                )
+
+                def score():
+                    return indexer.score_indexer_chunk(
+                        q_payload, q_sf, k_payload, k_sf, weights, visible
+                    )
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with patch.dict(os.environ, {"DSV41_PREFILL_CLEAN_LOGITS_ONLY": "1"}):
+                    with torch.cuda.stream(stream):
+                        for _ in range(3):
+                            score()
+                    stream.synchronize()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=stream):
+                        actual = score()
+                torch.cuda.synchronize()
+                storage = actual.as_strided((rows, actual.stride(0)), actual.stride())
+                mixed = [0, 1, 255, 256, 257, keys - 1, keys]
+                # Zero-only Q tiles visit no K tile; the independent cleaner
+                # still has to overwrite the entire reused output allocation.
+                for bounds, poison in (
+                    ([0] * rows, float("nan")),
+                    ([mixed[i % len(mixed)] for i in range(rows)], 1.0e30),
+                    ([keys] * rows, float("nan")),
+                ):
+                    storage.fill_(poison)
+                    visible.copy_(
+                        torch.tensor(bounds, dtype=torch.int32, device=self.device)
+                    )
+                    graph.replay()
+                    self._assert_scores_and_topk(
+                        actual,
+                        _reference_logits(q, weights, k, visible.clamp(0, keys)),
+                    )
+                    self.assertTrue(torch.isneginf(storage[:, keys:]).all())
+
     def test_ratio_one_two_noncontiguous_global_positions_and_prefix(self):
         for heads in (32, 64):
             for ratio in (1, 2):
@@ -452,11 +631,11 @@ class V41PrefillIndexerCUDA(unittest.TestCase):
         keys = 16555
         rows = 4096
         generator = torch.Generator(device=self.device).manual_seed(45)
-        q = torch.randn(rows, 32, 128, generator=generator, device=self.device).bfloat16()
+        q = torch.randn(
+            rows, 32, 128, generator=generator, device=self.device
+        ).bfloat16()
         k = torch.randn(keys, 128, generator=generator, device=self.device).bfloat16()
-        weights = (
-            torch.randn(rows, 32, generator=generator, device=self.device) / 32.0
-        )
+        weights = torch.randn(rows, 32, generator=generator, device=self.device) / 32.0
         visible = torch.full((rows,), keys, dtype=torch.int32, device=self.device)
         visible[0] = 0
         q_payload, q_sf = indexer.quantize_indexer_q(q)

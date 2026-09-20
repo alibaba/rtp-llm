@@ -89,7 +89,9 @@ def _fp4_rows_torch(x: torch.Tensor):
     dequantized (fake-quantized) row values.
     """
     rows = int(x.numel()) // FP4_INDEXER_HEAD_DIM
-    grouped = x.float().reshape(rows, FP4_INDEXER_HEAD_DIM // FP4_INDEXER_GROUP, FP4_INDEXER_GROUP)
+    grouped = x.float().reshape(
+        rows, FP4_INDEXER_HEAD_DIM // FP4_INDEXER_GROUP, FP4_INDEXER_GROUP
+    )
     amax = grouped.abs().amax(-1).clamp_min(6.0 * (2.0**-126))
     scaled = amax * (1.0 / 6.0)
     bits = scaled.contiguous().view(torch.int32)
@@ -146,9 +148,7 @@ def gather_indexer_keys(
     latter is expressed in compressed entries; the callback maps original
     token positions through the typed pool tables for both ratios 1 and 2.
     """
-    from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
-        gather_indexer_k_fp4,
-    )
+    from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import gather_indexer_k_fp4
 
     device = pool.device
     if count == 0:
@@ -169,7 +169,10 @@ def gather_indexer_keys(
     owner_entries = owner_tokens_per_block // ratio
     plan = build_indexer_cp_chunk_plan(
         cp_ctx,
-        torch.tensor([count], dtype=torch.long, device=device),
+        # A scalar fill stays on the device. torch.tensor([count], device=...)
+        # first allocates pageable host storage and synchronizes its H2D copy
+        # inside every KV producer layer.
+        torch.full((1,), count, dtype=torch.long, device=device),
         block_size=pool.shape[1],
         owner_block_size=owner_entries,
         device=device,
@@ -199,6 +202,22 @@ def gather_indexer_keys(
     return PrefillIndexerKeys(payload, sf)
 
 
+def _use_clean_logits_only(device: torch.device) -> bool:
+    """Trust the verified SM100 dense-logit cleaner; keep other paths masked.
+
+    The pinned DeepGEMM 2.8.0 (6db6ed3) SM100 implementation writes -inf both
+    outside scheduled KV tiles and past each row's end inside visited tiles,
+    including zero-length rows and the padded output stride. This applies to
+    clean_logits=True with max_seqlen_k=0, as used below. Do not extend this
+    gate to a new architecture without checking that complete-write contract.
+    """
+    return (
+        os.environ.get("DSV41_PREFILL_CLEAN_LOGITS_ONLY", "1") != "0"
+        and torch.device(device).type == "cuda"
+        and torch.cuda.get_device_capability(device)[0] == 10
+    )
+
+
 def score_indexer_chunk(q_payload, q_sf, k_payload, k_sf, weights, visible):
     """Fused dot/ReLU/head reduction; keep causal padding at negative infinity."""
     from ._indexer_score import fp8_fp4_mqa_indexer_score
@@ -210,9 +229,8 @@ def score_indexer_chunk(q_payload, q_sf, k_payload, k_sf, weights, visible):
         )
     ends = visible.to(torch.int32).clamp(0, count).contiguous()
     starts = torch.zeros_like(ends)
-    # The scheduler uses per-query bounds to skip future K tiles. Explicitly
-    # mask below as well: topk and candidate selection must never observe the
-    # scheduler's padding, including a row with no completed ratio-2 pair.
+    # The scheduler skips future K tiles. Its SM100 cleaner writes every
+    # logical output element, including rows with no completed ratio-2 pair.
     logits = fp8_fp4_mqa_indexer_score(
         q_payload,
         q_sf,
@@ -226,8 +244,9 @@ def score_indexer_chunk(q_payload, q_sf, k_payload, k_sf, weights, visible):
         # is incompatible with clean_logits. This caller uses ordinary [M,K].
         max_seqlen_k=0,
     )
-    logits.masked_fill_(
-        torch.arange(count, device=logits.device)[None] >= ends[:, None],
-        -torch.inf,
-    )
+    if not _use_clean_logits_only(q_payload.device):
+        logits.masked_fill_(
+            torch.arange(count, device=logits.device)[None] >= ends[:, None],
+            -torch.inf,
+        )
     return logits

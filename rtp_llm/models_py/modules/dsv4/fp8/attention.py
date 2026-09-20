@@ -18,6 +18,7 @@ import os
 import threading
 import weakref
 from contextlib import contextmanager, suppress
+from functools import lru_cache
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
 # P3 (audit §3.5 / §7.4 P0): wo_a batched output projection.
@@ -88,6 +89,22 @@ from rtp_llm.models_py.modules.dsv4.utils import (
 )
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import KVCacheRegionName, rtp_llm_ops
+
+
+@lru_cache(maxsize=1)
+def _configure_flash_mla_l2_persist() -> None:
+    """Configure the process-wide FlashMLA policy once, before inference.
+
+    Per-call persisting-L2 setup invokes cudaDeviceSetLimit and can block the
+    host behind previously queued layer work. Disable it by default. An
+    explicit FLASH_MLA_NO_L2_PERSIST=0 restores the wheel's original policy;
+    the wheel tests presence rather than value, so remove the native flag in
+    that case. Cache this initialization so later layers do not reset it.
+    """
+    if os.environ.get("FLASH_MLA_NO_L2_PERSIST", "1") == "0":
+        os.environ.pop("FLASH_MLA_NO_L2_PERSIST", None)
+    else:
+        os.environ.setdefault("FLASH_MLA_NO_L2_PERSIST", "1")
 
 
 # int attn_type id → pybind11 ``KVCacheRegionName`` enum.  The
@@ -909,6 +926,7 @@ class AttentionFP8(nn.Module):
         for the outer compressor, ``W.v4_indexer_*`` (forwarded) for the
         indexer."""
         super().__init__()
+        _configure_flash_mla_l2_persist()
         self.layer_id = layer_id
         self.dim = dim
         self.q_lora_rank = q_lora_rank
@@ -4017,8 +4035,8 @@ class AttentionFP8(nn.Module):
                     req_id_per_token=req_id_per_token,
                     topk_length_kv_full=topk_length_kv_full,
                 )
-            row_seqlens_full = torch.tensor(
-                [seqlen_full], device=device, dtype=torch.long
+            row_seqlens_full = torch.full(
+                (1,), seqlen_full, device=device, dtype=torch.long
             )
         else:
             if can_reuse_freqs:
