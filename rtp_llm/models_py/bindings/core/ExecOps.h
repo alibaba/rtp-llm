@@ -32,7 +32,7 @@ class CacheStore;
 
 using CacheStoreCompletionCallback = std::function<void(std::exception_ptr)>;
 using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback(
-    const std::vector<int64_t>&, const std::vector<int32_t>&, size_t)>;
+    const std::vector<int64_t>&, const std::vector<int32_t>&, const std::string&)>;
 
 // ===================================================================
 // Runtime lifecycle

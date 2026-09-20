@@ -114,7 +114,7 @@ static CacheConfig makeTinyFullSwaMultiPoolHybridConfig(uint32_t full_block_num 
 
 struct MemoryStorageState {
     std::mutex                                                   mutex;
-    std::unordered_map<CacheKeyType, std::unordered_set<size_t>> groups_by_key;
+    std::unordered_map<CacheKeyType, std::unordered_set<std::string>> groups_by_key;
 };
 
 class InlineStorageBackendExecutor: public StorageBackendExecutor {
@@ -181,13 +181,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return matched_keys_;
     }
-    std::vector<std::vector<size_t>> writeGroupIds() const {
+    std::vector<std::vector<std::string>> writeGroupTags() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return write_group_ids_;
+        return write_group_tags_;
     }
-    std::vector<std::vector<size_t>> readGroupIds() const {
+    std::vector<std::vector<std::string>> readGroupTags() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return read_group_ids_;
+        return read_group_tags_;
     }
 
 protected:
@@ -204,8 +204,9 @@ protected:
                 for (size_t key_index = request.local_matched_blocks_num; found && key_index < candidate; ++key_index) {
                     const auto stored = state_->groups_by_key.find((*request.keys)[key_index]);
                     for (const auto& handle : request.handles[key_index]) {
-                        if (isHandleRequired(key_index, candidate, handle.group_id)
-                            && (stored == state_->groups_by_key.end() || !stored->second.count(handle.group_id))) {
+                        const auto& tag = handle.tag;
+                        if (isHandleRequired(key_index, candidate, handle.tag)
+                            && (stored == state_->groups_by_key.end() || !stored->second.count(tag))) {
                             found = false;
                             break;
                         }
@@ -224,34 +225,35 @@ protected:
     }
 
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>&) override {
-        std::vector<std::vector<size_t>> group_ids;
+        std::vector<std::vector<std::string>> group_tags;
         for (const auto& handles : request.handles) {
-            group_ids.emplace_back();
+            group_tags.emplace_back();
             for (const auto& handle : handles) {
-                group_ids.back().push_back(handle.group_id);
+                group_tags.back().push_back(handle.tag);
             }
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            read_group_ids_ = std::move(group_ids);
+            read_group_tags_ = std::move(group_tags);
         }
     }
 
     void writeImpl(const StorageRequest& request) override {
-        std::vector<std::vector<size_t>> group_ids(request.handles.size());
+        std::vector<std::vector<std::string>> group_tags(request.handles.size());
         {
             std::lock_guard<std::mutex> storage_lock(state_->mutex);
             for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
                 auto& stored = state_->groups_by_key[(*request.keys)[key_index]];
                 for (const auto& handle : request.handles[key_index]) {
-                    stored.insert(handle.group_id);
-                    group_ids[key_index].push_back(handle.group_id);
+                    const auto& tag = handle.tag;
+                    stored.insert(tag);
+                    group_tags[key_index].push_back(tag);
                 }
             }
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            write_group_ids_ = std::move(group_ids);
+            write_group_tags_ = std::move(group_tags);
         }
     }
 
@@ -259,8 +261,8 @@ private:
     std::shared_ptr<MemoryStorageState> state_;
     mutable std::mutex                  mutex_;
     size_t                              matched_keys_{0};
-    std::vector<std::vector<size_t>>    write_group_ids_;
-    std::vector<std::vector<size_t>>    read_group_ids_;
+    std::vector<std::vector<std::string>> write_group_tags_;
+    std::vector<std::vector<std::string>> read_group_tags_;
 };
 
 static ModelConfig makeTinyDSV4ModelConfig() {
@@ -608,14 +610,14 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ResidentInsertProtectsAllReusableGroups) 
     block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
 }
 
-static void runStorageRoundTrip(const CacheConfig&                      config,
-                                const CacheKeysType&                    writer_keys,
-                                int                                     writer_seq_len,
-                                const CacheKeysType&                    reader_keys,
-                                int                                     reader_seq_len,
-                                const std::shared_ptr<CPSlotMapper>&    cp_mapper,
-                                const std::vector<std::vector<size_t>>& expected_write_groups,
-                                const std::vector<std::vector<size_t>>& expected_read_groups) {
+static void runStorageRoundTrip(const CacheConfig&                           config,
+                                const CacheKeysType&                         writer_keys,
+                                int                                          writer_seq_len,
+                                const CacheKeysType&                         reader_keys,
+                                int                                          reader_seq_len,
+                                const std::shared_ptr<CPSlotMapper>&         cp_mapper,
+                                const std::vector<std::vector<std::string>>& expected_write_groups,
+                                const std::vector<std::vector<std::string>>& expected_read_groups) {
     auto          state          = std::make_shared<MemoryStorageState>();
     auto          writer_backend = std::make_shared<PolicyMemoryStorageBackend>(state);
     auto          writer         = makeAllocator(config);
@@ -639,7 +641,7 @@ static void runStorageRoundTrip(const CacheConfig&                      config,
         writer->insertIntoCache(InsertInfo{writer_resource, writer_tokens, /*is_resident=*/false},
                                 resident_prefix_length);
     }
-    EXPECT_EQ(writer_backend->writeGroupIds(), expected_write_groups);
+    EXPECT_EQ(writer_backend->writeGroupTags(), expected_write_groups);
 
     auto reader_backend = std::make_shared<PolicyMemoryStorageBackend>(state);
     auto reader         = makeAllocator(config);
@@ -661,7 +663,7 @@ static void runStorageRoundTrip(const CacheConfig&                      config,
     result.async_context->waitDone();
     EXPECT_TRUE(result.async_context->success());
     EXPECT_EQ(reader_backend->matchedKeys(), 4u);
-    EXPECT_EQ(reader_backend->readGroupIds(), expected_read_groups);
+    EXPECT_EQ(reader_backend->readGroupTags(), expected_read_groups);
 
     reader->free(FreeInfo{reader_resource, reader_tokens});
     writer->free(FreeInfo{writer_resource, writer_tokens});
@@ -677,8 +679,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, StorageRoundTripUsesSparseFullLinearShape
                         request_keys,
                         /*reader_seq_len=*/21,
                         nullptr,
-                        {{1}, {0, 1}, {1}, {0, 1}},
-                        {{1}, {1}, {1}, {0, 1}});
+                        {{"full"}, {"linear", "full"}, {"full"}, {"linear", "full"}},
+                        {{"full"}, {"full"}, {"full"}, {"linear", "full"}});
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, StorageRoundTripUsesFullSwaWindowShape) {
@@ -691,8 +693,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, StorageRoundTripUsesFullSwaWindowShape) {
                         request_keys,
                         /*reader_seq_len=*/21,
                         nullptr,
-                        {{0}, {0, 1}, {0, 1}, {0, 1}},
-                        {{0}, {0}, {0, 1}, {0, 1}});
+                        {{"full"}, {"full", "swa"}, {"full", "swa"}, {"full", "swa"}},
+                        {{"full"}, {"full"}, {"full", "swa"}, {"full", "swa"}});
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, StorageRoundTripMapsCpCanonicalFullLinearTargets) {
@@ -706,8 +708,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, StorageRoundTripMapsCpCanonicalFullLinear
                         request_keys,
                         /*reader_seq_len=*/41,
                         cp_mapper,
-                        {{0, 1}, {0, 1}, {0, 1}, {0, 1}},
-                        {{1}, {1}, {1}, {0, 1}});
+                        {{"linear", "full"}, {"linear", "full"}, {"linear", "full"}, {"linear", "full"}},
+                        {{"full"}, {"full"}, {"full"}, {"linear", "full"}});
 }
 
 // ---------------------------------------------------------------------------
@@ -1161,7 +1163,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllPrefixReuseDisabledPoolMetricsFollowAl
         ASSERT_NE(init_snapshot, nullptr) << source.pool_name;
 
         const size_t expected_request_blocks =
-            distinctValidBlockCount(batch_res->blocks(0, static_cast<int>(source.pool_index)));
+            distinctValidBlockCount(batch_res->blocks(0, config.groupTags()[source.pool_index]));
         ASSERT_EQ(expected_request_blocks, 1u) << source.pool_name;
 
         EXPECT_EQ(snapshot->block_size_bytes, init_snapshot->block_size_bytes) << source.pool_name;
@@ -1427,7 +1429,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksUseCPShardedFullGroupNeed) {
 
     auto result = allocator->malloc(malloc_info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(validBlockCount(batch_res->blocks(0, /*group_id=*/1)), 4u);
+    EXPECT_EQ(validBlockCount(batch_res->blocks(0, "full")), 4u);
 
     FreeInfo free_info{batch_res, token_ids};
     allocator->free(free_info);
@@ -1447,8 +1449,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PreparedSWALoadReserveRejectsPoolLocalSho
     ASSERT_EQ(pools[1]->freeBlocksNum(), 0u);
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config);
-    batch_res->mutableBlockIds(0, /*group_id=*/0).assign({NULL_BLOCK_IDX});
-    batch_res->mutableBlockIds(0, /*group_id=*/1).assign({NULL_BLOCK_IDX});
+    batch_res->mutableBlockIds(0, "linear").assign({NULL_BLOCK_IDX});
+    batch_res->mutableBlockIds(0, "swa").assign({NULL_BLOCK_IDX});
     auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{batch_res, token_ids};
     malloc_info.reuse_cache = true;
@@ -1477,8 +1479,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PreparedSWALoadCountsHeldDeviceBlocksForP
     pools[1]->incRef(*device_matches);
 
     auto resource = makeBatchResource(/*batch_size=*/1, config);
-    resource->mutableBlockIds(0, /*group_id=*/1).assign(*device_matches);
-    resource->mutableBlockIds(0, /*group_id=*/1).add({NULL_BLOCK_IDX});
+    resource->mutableBlockIds(0, "swa").assign(*device_matches);
+    resource->mutableBlockIds(0, "swa").add({NULL_BLOCK_IDX});
     const size_t remote_position = swa_total;
     auto         token_ids       = makeCompleteTokenIds(
         /*batch_size=*/1, /*seq_length=*/static_cast<int>((swa_total + 1) * 4), /*seq_size_per_block=*/4);
@@ -1510,7 +1512,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PreparedSWALoadIgnoresNonPhysicalDummyInH
     pools[1]->incRef(*device_match);
 
     auto resource = makeBatchResource(/*batch_size=*/1, config);
-    resource->mutableBlockIds(0, /*group_id=*/1).assign({*device_match, 0, NULL_BLOCK_IDX});
+    resource->mutableBlockIds(0, "swa").assign({*device_match, 0, NULL_BLOCK_IDX});
     auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.reuse_cache = true;
@@ -1521,7 +1523,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PreparedSWALoadIgnoresNonPhysicalDummyInH
     EXPECT_EQ(allocator->preparedReserveStatusForTest(malloc_info, /*reserve_blocks=*/0, {{}, RequiredPositions{2}}),
               MallocStatus::NONE);
 
-    resource->mutableBlockIds(0, /*group_id=*/1).assign({*device_match});
+    resource->mutableBlockIds(0, "swa").assign({*device_match});
     allocator->free(FreeInfo{resource, token_ids});
 }
 
@@ -1542,7 +1544,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PreparedNoReuseDoesNotDoubleCountPartialG
     pools[1]->incRef(*swa_pins);
 
     auto resource = makeBatchResource(/*batch_size=*/1, config);
-    resource->mutableBlockIds(0, /*group_id=*/0).assign({*partial_full});
+    resource->mutableBlockIds(0, "full").assign({*partial_full});
     auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.reuse_cache = false;
@@ -1573,7 +1575,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PreparedNoReuseCountsRequiredSparseSWAHol
     ASSERT_EQ(pools[1]->freeBlocksNum(), 2u);
 
     auto resource = makeBatchResource(/*batch_size=*/1, config);
-    resource->mutableBlockIds(0, /*group_id=*/1).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    resource->mutableBlockIds(0, "swa").assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
     auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.reuse_cache = false;
@@ -1603,7 +1605,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DeferredBackendMatchReportsSWAPoolShortfa
     allocator->setReserveBlocksNum(0);
 
     constexpr CacheKeyType key = 7001;
-    state->groups_by_key[key]  = {0, 1};
+    state->groups_by_key[key]  = {"full", "swa"};
 
     const auto pools = allocator->groupBlockPools();
     ASSERT_EQ(pools.size(), 2u);
@@ -1693,8 +1695,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackFreesPartiallyAllocated
     EXPECT_EQ(result.status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
 
     EXPECT_EQ(batch_res->curBlocksNum(), 0u);
-    EXPECT_EQ(batch_res->blocksNum(0, /*group_id=*/0), 0u);
-    EXPECT_EQ(batch_res->blocksNum(0, /*group_id=*/1), 0u);
+    EXPECT_EQ(batch_res->blocksNum(0, "linear"), 0u);
+    EXPECT_EQ(batch_res->blocksNum(0, "full"), 0u);
     expectPoolCountersEq(allocator, counters_before);
 }
 
@@ -1744,8 +1746,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfi
     EXPECT_EQ(result.status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
     EXPECT_EQ(result.async_context, nullptr);
     EXPECT_EQ(batch_res->curBlocksNum(), 0u);
-    EXPECT_EQ(batch_res->blocksNum(0, /*group_id=*/0), 0u);
-    EXPECT_EQ(batch_res->blocksNum(0, /*group_id=*/1), 0u);
+    EXPECT_EQ(batch_res->blocksNum(0, "linear"), 0u);
+    EXPECT_EQ(batch_res->blocksNum(0, "full"), 0u);
     expectPoolCountersEq(allocator, counters_before);
     for (const auto& [group_set, source_block] : host_sources) {
         EXPECT_EQ(group_set->hostPool()->treeRefCount(source_block), 1u);
@@ -1782,8 +1784,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesRequestRefsAndP
     EXPECT_FALSE(result.success);
 
     EXPECT_EQ(batch_res->curBlocksNum(), 0u);
-    EXPECT_EQ(batch_res->blocksNum(0, /*group_id=*/0), 0u);
-    EXPECT_EQ(batch_res->blocksNum(0, /*group_id=*/1), 0u);
+    EXPECT_EQ(batch_res->blocksNum(0, "linear"), 0u);
+    EXPECT_EQ(batch_res->blocksNum(0, "full"), 0u);
     expectPoolCountersEq(allocator, counters_before);
     EXPECT_TRUE(pools[0]->isAllocated(linear_cached));
     EXPECT_TRUE(pools[1]->isAllocated(full_cached));
@@ -1806,10 +1808,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     init_info.reuse_cache         = false;
     ASSERT_TRUE(allocator->malloc(init_info).success);
 
-    ASSERT_EQ(batch_res->blocksNum(0, /*group_id=*/0), 1u);
-    ASSERT_EQ(batch_res->blocksNum(0, /*group_id=*/1), 1u);
-    const auto linear_block_before = batch_res->blocks(0, /*group_id=*/0)[0];
-    const auto full_block_before   = batch_res->blocks(0, /*group_id=*/1)[0];
+    ASSERT_EQ(batch_res->blocksNum(0, "linear"), 1u);
+    ASSERT_EQ(batch_res->blocksNum(0, "full"), 1u);
+    const auto linear_block_before = batch_res->blocks(0, "linear")[0];
+    const auto full_block_before   = batch_res->blocks(0, "full")[0];
     const auto counters_before     = snapshotPoolCounters(allocator);
 
     // group_id=0 can append one real LINEAR tail block. group_id=1 has no remaining
@@ -1821,10 +1823,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     auto incr_result              = allocator->malloc(incr_info);
     EXPECT_FALSE(incr_result.success);
 
-    ASSERT_EQ(batch_res->blocksNum(0, /*group_id=*/0), 1u);
-    ASSERT_EQ(batch_res->blocksNum(0, /*group_id=*/1), 1u);
-    EXPECT_EQ(batch_res->blocks(0, /*group_id=*/0)[0], linear_block_before);
-    EXPECT_EQ(batch_res->blocks(0, /*group_id=*/1)[0], full_block_before);
+    ASSERT_EQ(batch_res->blocksNum(0, "linear"), 1u);
+    ASSERT_EQ(batch_res->blocksNum(0, "full"), 1u);
+    EXPECT_EQ(batch_res->blocks(0, "linear")[0], linear_block_before);
+    EXPECT_EQ(batch_res->blocks(0, "full")[0], full_block_before);
     expectPoolCountersEq(allocator, counters_before);
 }
 
@@ -1843,10 +1845,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackRestoresLinearBackfille
     init_info.enable_cache_lookup = false;
     init_info.reuse_cache         = false;
     ASSERT_TRUE(allocator->malloc(init_info).success);
-    ASSERT_EQ(batch_res->blocksNum(0, /*group_id=*/0), 2u);
-    ASSERT_EQ(batch_res->blocksNum(0, /*group_id=*/1), 2u);
+    ASSERT_EQ(batch_res->blocksNum(0, "linear"), 2u);
+    ASSERT_EQ(batch_res->blocksNum(0, "full"), 2u);
 
-    auto& linear_ids       = batch_res->mutableBlockIds(0, /*group_id=*/0);
+    auto& linear_ids       = batch_res->mutableBlockIds(0, "linear");
     auto  removed_block_id = linear_ids.blocks()[1];
     ASSERT_FALSE(isNullBlockIdx(removed_block_id));
     allocator->groupBlockPools()[0]->decRef(removed_block_id);
@@ -1862,9 +1864,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackRestoresLinearBackfille
     incr_info.reuse_cache         = false;
     EXPECT_FALSE(allocator->malloc(incr_info).success);
 
-    ASSERT_EQ(batch_res->blocksNum(0, /*group_id=*/0), 2u);
-    ASSERT_EQ(batch_res->blocksNum(0, /*group_id=*/1), 2u);
-    EXPECT_TRUE(isNullBlockIdx(batch_res->blocks(0, /*group_id=*/0)[1]));
+    ASSERT_EQ(batch_res->blocksNum(0, "linear"), 2u);
+    ASSERT_EQ(batch_res->blocksNum(0, "full"), 2u);
+    EXPECT_TRUE(isNullBlockIdx(batch_res->blocks(0, "linear")[1]));
     expectPoolCountersEq(allocator, counters_before);
 }
 
@@ -1975,7 +1977,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly
     auto result                     = allocator->malloc(malloc_info);
     ASSERT_TRUE(result.success);
 
-    const auto& hca_blocks = batch_res->blocks(0, hca_state_group_id);
+    const auto& hca_blocks = batch_res->blocks(0, "hca_state");
     ASSERT_EQ(hca_blocks.size(), 10u);
     EXPECT_EQ(validBlockCount(hca_blocks), 1u);
     EXPECT_TRUE(isNullBlockIdx(hca_blocks[8]));

@@ -254,7 +254,7 @@ StorageRequest BlockTreeLoader::makeStorageRequest(const CacheKeysType& cache_ke
     for (auto& key_handles : request.handles) {
         for (const auto& group_set : tree_->groupSets()) {
             for (const auto& tag : group_set->groupTags()) {
-                key_handles.push_back({group_set->topologyPtr()->groupIdForTag(tag), NULL_BLOCK_IDX});
+                key_handles.push_back({tag, NULL_BLOCK_IDX});
             }
         }
     }
@@ -276,10 +276,10 @@ void BlockTreeLoader::shutdown() {
 
 bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& context) {
     std::lock_guard<std::mutex>            lock(mutex_);
-    const std::vector<TransferDescriptor>& load_descs               = context->loadDescs();
-    const std::vector<bool>&               joined_loads             = context->joinedLoads();
-    const uint64_t                         context_id               = context->contextId();
-    size_t                                 prepared_desc_count      = 0;
+    const std::vector<TransferDescriptor>& load_descs          = context->loadDescs();
+    const std::vector<bool>&               joined_loads        = context->joinedLoads();
+    const uint64_t                         context_id          = context->contextId();
+    size_t                                 prepared_desc_count = 0;
     block_tree_cache_detail::ScopeRollback rollback_guard(
         [this, &load_descs, &joined_loads, &prepared_desc_count, context_id]() {
             abortLoadLocked(load_descs,

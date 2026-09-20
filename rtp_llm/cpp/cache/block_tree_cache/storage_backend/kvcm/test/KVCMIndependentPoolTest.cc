@@ -131,7 +131,7 @@ protected:
         DeviceTestBase::TearDown();
     }
 
-    bool initialize(bool fail_second = false, int rank = 0) {
+    bool initialize(bool fail_second = false, int rank = 0, bool reorder_binding = false) {
         auto factory = std::make_unique<kvcm::MockClientFactory>();
         auto meta    = std::make_unique<kv_cache_manager::MockMetaClient>();
         meta_        = meta.get();
@@ -147,14 +147,14 @@ protected:
                 std::map<std::string, size_t> sizes;
                 autil::legacy::FromJson(sizes, object.at("location_spec_infos"));
                 for (size_t group = 0; group < pools_.size(); ++group) {
-                    const auto& topology_group = config_.topology().groupById(group);
+                    const auto& topology_group = config_.group(config_.groupTags().at(group));
                     const auto  prefix         = group < 2 ? "F" : "L";
                     for (int tp = 0; tp < (rank == 0 ? 1 : 2); ++tp) {
                         EXPECT_EQ(sizes.at("tp" + std::to_string(tp) + "_" + prefix + topology_group.tag),
-                                  config_.blockSizeBytesForGroup(group));
+                                  config_.blockSizeBytesForGroup(topology_group.tag));
                     }
                 }
-                EXPECT_NE(config_.blockSizeBytesForGroup(0), config_.blockSizeBytesForGroup(2));
+                EXPECT_NE(config_.blockSizeBytesForGroup("full0"), config_.blockSizeBytesForGroup("linear0"));
                 return std::move(meta);
             }));
         static const std::string storage_config = R"({"sdk_backend_configs":[]})";
@@ -196,8 +196,24 @@ protected:
         backend_ = std::make_shared<KVCMStorageBackend>(
             config_, options, RuntimeConfig{}, parallel, SpeculativeExecutionConfig{}, nullptr, wrapper_);
         if (fail_second || rank != 0) {
-            return backend_->init(config_.topologyPtr(), pools_, [&](int layer, int group, int block) {
-                return allocator_->convertIndexToBuffer(layer, config_.groupTags()[group], block);
+            auto topology = config_.topologyPtr();
+            auto tags     = config_.groupTags();
+            auto pools    = pools_;
+            if (reorder_binding) {
+                // Constructor config, bound topology, and input pool rows have
+                // three different orders. Registration must still join by tag.
+                auto groups = topology->groups();
+                std::reverse(groups.begin(), groups.end());
+                topology = CacheTopology::create(std::move(groups), topology->layers());
+                std::rotate(tags.begin(), tags.begin() + 1, tags.end());
+                std::rotate(pools.begin(), pools.begin() + 1, pools.end());
+            }
+            StorageBackend::PoolsByTag pools_by_tag;
+            for (size_t i = 0; i < tags.size(); ++i) {
+                EXPECT_TRUE(pools_by_tag.emplace(tags[i], pools[i]).second);
+            }
+            return backend_->init(topology, std::move(pools_by_tag), [&](int layer, const std::string& tag, int block) {
+                return allocator_->convertIndexToBuffer(layer, tag, block);
             });
         }
         cache_ = createBlockTreeCache(config_, options, allocator_, parallel, backend_);
@@ -207,15 +223,17 @@ protected:
     StorageRequest request() const {
         StorageRequest result;
         result.keys    = std::make_shared<CacheKeysType>(CacheKeysType{101});
-        result.handles = {{{2, blocks_[2]}, {1, blocks_[1]}, {0, blocks_[0]}}};
+        result.handles = {{{config_.groupTags().at(2), blocks_[2]},
+                           {config_.groupTags().at(1), blocks_[1]},
+                           {config_.groupTags().at(0), blocks_[0]}}};
         return result;
     }
 
     void fill(uint8_t value) {
         for (size_t group = 0; group < pools_.size(); ++group) {
-            for (int layer : config_.layerIdsForGroup(group)) {
-                for (const auto& buffer : allocator_->convertIndexToBuffer(
-                         layer, config_.groupTags()[static_cast<int>(group)], blocks_[group])) {
+            for (int layer : config_.layerIdsForGroup(config_.groupTags().at(group))) {
+                for (const auto& buffer :
+                     allocator_->convertIndexToBuffer(layer, config_.groupTags().at(group), blocks_[group])) {
                     ASSERT_EQ(cudaMemset(buffer.addr, value == 0 ? 0 : value + group, buffer.size_bytes), cudaSuccess);
                 }
             }
@@ -270,9 +288,9 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
     ASSERT_TRUE(read(*backend_, request(), matched.match_meta));
     EXPECT_EQ(state_->reads, (std::vector<size_t>{1, 1, 1}));
     for (size_t group = 0; group < pools_.size(); ++group) {
-        for (int layer : config_.layerIdsForGroup(group)) {
-            for (const auto& buffer : allocator_->convertIndexToBuffer(
-                     layer, config_.groupTags()[static_cast<int>(group)], blocks_[group])) {
+        for (int layer : config_.layerIdsForGroup(config_.groupTags().at(group))) {
+            for (const auto& buffer :
+                 allocator_->convertIndexToBuffer(layer, config_.groupTags().at(group), blocks_[group])) {
                 std::vector<uint8_t> bytes(buffer.size_bytes);
                 ASSERT_EQ(cudaMemcpy(bytes.data(), buffer.addr, bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
                 EXPECT_EQ(bytes, std::vector<uint8_t>(bytes.size(), 17 + group));
@@ -317,14 +335,14 @@ TEST_F(KVCMIndependentPoolTest, FailedSecondRegistrationReleasesAcceptedClients)
     EXPECT_EQ(state_->destroyed, 1u);
 }
 
-TEST_F(KVCMIndependentPoolTest, WorkerRegistersAllPoolsAndPropagatesTransferFailure) {
-    ASSERT_TRUE(initialize(false, 1));
+TEST_F(KVCMIndependentPoolTest, WorkerRoutesRepeatedTagsAcrossIndependentOrdersAndPropagatesFailure) {
+    ASSERT_TRUE(initialize(false, 1, /*reorder_binding=*/true));
     EXPECT_EQ(state_->spec_names, (std::vector<std::string>{"tp1_Ffull0", "tp1_Ffull1", "tp1_Llinear0"}));
     fill(31);
     RemoteOperationRequestPB operation;
     operation.set_op(REMOTE_OPERATION_WRITE);
     for (size_t group : {2u, 0u, 1u, 0u}) {
-        operation.add_group_tags(config_.topology().groupById(group).tag);
+        operation.add_group_tags(config_.groupTags().at(group));
         operation.add_block_ids(blocks_[group]);
         operation.add_uris("group_" + std::to_string(group) + "_" + std::to_string(operation.uris_size()));
     }

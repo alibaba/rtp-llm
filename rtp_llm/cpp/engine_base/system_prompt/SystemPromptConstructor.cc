@@ -32,9 +32,12 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
         CHECK_AND_RETURN_REF(stream, engine->preRun(generate_input, preRunMode::build_system_prompt));
 
         if (insert_kv_cache) {
-            auto& kv_cache = stream->kvCacheMutable();
-            auto& blocks   = kv_cache.blocks(0, 0);
-            RTP_LLM_CHECK(blocks.size() > 0);
+            auto&                                             kv_cache = stream->kvCacheMutable();
+            std::unordered_map<std::string, std::vector<int>> blocks_by_group;
+            for (const auto& tag : kv_cache.cacheResource().groupTags()) {
+                blocks_by_group.emplace(tag, kv_cache.blocks(0, tag));
+            }
+            RTP_LLM_CHECK(kv_cache.curBlocksNum() > 0);
             rtp_llm::InsertInfo insert_info{stream->kvCachePtr(),
                                             stream->completeTokenIdsPtr(),
                                             /*is_resident=*/true,
@@ -52,7 +55,7 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
                     + " resident_prefix_length=" + std::to_string(resident_prefix_length)
                     + " expected_prefix_length=" + std::to_string(expected_prefix_length));
             }
-            multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, blocks);
+            multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, blocks_by_group);
         }
         prepared_streams.push_back(std::move(stream));
     }

@@ -241,7 +241,7 @@ createBatchKVCacheResource(int batch_size, const CacheConfig& config, int block_
     resource->resetBatchSize(batch_size);
     resource->initGroups(config.topologyPtr());
     for (int i = 0; i < batch_size; ++i) {
-        resource->setBatchBlocks(i, 0, std::vector<int>(block_num_per_batch));
+        resource->setBatchBlocks(i, "default", std::vector<int>(block_num_per_batch));
         resource->setBatchCacheKeys(i, CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100)));
     }
     return resource;
@@ -413,7 +413,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocSingleBatch) {
     auto       result = allocator_->malloc(malloc_info);
 
     EXPECT_TRUE(result.success);
-    EXPECT_EQ(batch_resource->blocksNum(0, 0), 2);
+    EXPECT_EQ(batch_resource->blocksNum(0, "default"), 2);
     EXPECT_LT(allocator_->freeBlocksNum(), config.group("default").block_num);
 
     const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator_->poolMetricsSnapshots();
@@ -616,7 +616,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
 
     EXPECT_TRUE(result.success);
     for (int i = 0; i < batch_size; ++i) {
-        EXPECT_EQ(batch_resource->blocksNum(i, 0), 3);
+        EXPECT_EQ(batch_resource->blocksNum(i, "default"), 3);
     }
     EXPECT_EQ(allocator_->freeBlocksNum(),
               config.group("default").block_num - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
@@ -729,7 +729,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ResidentPrefixRemainsMatchableUnderAlloca
     MallocInfo                              seed_malloc{seed, seed_tokens};
     seed_malloc.enable_cache_lookup = false;
     ASSERT_TRUE(allocator_->malloc(seed_malloc).success);
-    const BlockIdxType seed_block = seed->blocks(0, 0).front();
+    const BlockIdxType seed_block = seed->blocks(0, "default").front();
     {
         size_t resident_prefix_length = 0;
         allocator_->insertIntoCache(InsertInfo{seed, seed_tokens, /*is_resident=*/false}, resident_prefix_length);
@@ -783,8 +783,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, OrdinaryAllocationEvictsTreeEntryWhileReq
     MallocInfo seed_malloc{seed, seed_tokens};
     seed_malloc.enable_cache_lookup = false;
     ASSERT_TRUE(allocator_->malloc(seed_malloc).success);
-    ASSERT_EQ(seed->blocksNum(0, 0), 1);
-    const BlockIdxType seed_block = seed->blocks(0, 0).front();
+    ASSERT_EQ(seed->blocksNum(0, "default"), 1);
+    const BlockIdxType seed_block = seed->blocks(0, "default").front();
     {
         size_t resident_prefix_length = 0;
         allocator_->insertIntoCache(InsertInfo{seed, seed_tokens, /*is_resident=*/false}, resident_prefix_length);
@@ -808,8 +808,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, OrdinaryAllocationEvictsTreeEntryWhileReq
     allocator_->free(FreeInfo{seed, seed_tokens});
     EXPECT_FALSE(device_pool->isAllocated(seed_block));
     EXPECT_TRUE(allocator_->malloc(pressure_malloc).success);
-    EXPECT_NE(std::find(pressure->blocks(0, 0).begin(), pressure->blocks(0, 0).end(), seed_block),
-              pressure->blocks(0, 0).end())
+    EXPECT_NE(std::find(pressure->blocks(0, "default").begin(), pressure->blocks(0, "default").end(), seed_block),
+              pressure->blocks(0, "default").end())
         << "the released numeric id may be immediately reused by the pressure request";
 
     allocator_->free(FreeInfo{pressure, pressure_tokens});
@@ -828,8 +828,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCachePublishesOnlyBatchZero) {
     block_pool->incRef(blocks);
 
     auto resource = createBatchKVCacheResource(/*batch_size=*/2, config);
-    resource->setBatchBlocks(0, 0, BlockIndicesType{blocks[0]});
-    resource->setBatchBlocks(1, 0, BlockIndicesType{blocks[1]});
+    resource->setBatchBlocks(0, "default", BlockIndicesType{blocks[0]});
+    resource->setBatchBlocks(1, "default", BlockIndicesType{blocks[1]});
     resource->setBatchCacheKeys(0, CacheKeysType{100});
     resource->setBatchCacheKeys(1, CacheKeysType{200});
     {
@@ -869,7 +869,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheStopsAtFirstNullBlock) {
     block_pool->incRef(blocks);
 
     auto resource = createBatchKVCacheResource(/*batch_size=*/1, config);
-    resource->setBatchBlocks(0, 0, BlockIndicesType{blocks[0], NULL_BLOCK_IDX, blocks[1]});
+    resource->setBatchBlocks(0, "default", BlockIndicesType{blocks[0], NULL_BLOCK_IDX, blocks[1]});
     resource->setBatchCacheKeys(0, CacheKeysType{100, 200, 300});
     {
         size_t resident_prefix_length = 0;
@@ -898,7 +898,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
     block_pool->incRef(seed_blocks);
 
     auto seed = createBatchKVCacheResource(/*batch_size=*/1, config);
-    seed->setBatchBlocks(0, 0, seed_blocks);
+    seed->setBatchBlocks(0, "default", seed_blocks);
     seed->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
     {
         size_t resident_prefix_length = 0;
@@ -925,9 +925,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
     auto       hit_result = allocator_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, 16);
-    ASSERT_GE(hit->blocksNum(0, 0), 2);
-    EXPECT_EQ(hit->blocks(0, 0)[0], seed_blocks[0]);
-    EXPECT_EQ(hit->blocks(0, 0)[1], seed_blocks[1]);
+    ASSERT_GE(hit->blocksNum(0, "default"), 2);
+    EXPECT_EQ(hit->blocks(0, "default")[0], seed_blocks[0]);
+    EXPECT_EQ(hit->blocks(0, "default")[1], seed_blocks[1]);
 
     allocator_->free(FreeInfo{hit, hit_tokens});
 
@@ -940,7 +940,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
     auto       unaligned_result = allocator_->malloc(unaligned_info);
     ASSERT_TRUE(unaligned_result.success);
     EXPECT_EQ(unaligned_result.reuse_len, 8);
-    EXPECT_EQ(unaligned->blocks(0, 0)[0], seed_blocks[0]);
+    EXPECT_EQ(unaligned->blocks(0, "default")[0], seed_blocks[0]);
 
     allocator_->free(FreeInfo{unaligned, unaligned_tokens});
     block_pool->decRef(seed_blocks);
@@ -1154,10 +1154,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
     const BlockIdxType published_target = group_set_resource.device_blocks.front();
     const auto&        device_pool      = cache->groupSets().front()->devicePools().front();
     ASSERT_NE(device_pool, nullptr);
-    ASSERT_FALSE(resource->blocks(0, 0).empty());
-    ASSERT_FALSE(resource->blocks(1, 0).empty());
-    EXPECT_EQ(resource->blocks(0, 0).front(), published_target);
-    EXPECT_EQ(resource->blocks(1, 0).front(), published_target);
+    ASSERT_FALSE(resource->blocks(0, "default").empty());
+    ASSERT_FALSE(resource->blocks(1, "default").empty());
+    EXPECT_EQ(resource->blocks(0, "default").front(), published_target);
+    EXPECT_EQ(resource->blocks(1, "default").front(), published_target);
     // Two request holders (one per batch) plus the published tree holder.
     EXPECT_EQ(device_pool->refCount(published_target), 3u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
@@ -1826,7 +1826,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     resource.initGroups(config.topologyPtr());
 
     resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
-    resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX, blocks[2]});
+    resource.mutableBlockIds("default").assign(BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX, blocks[2]});
     resource.setDeviceReuseBlockNum(3);
 
     // Reference keys: 101(pos1)->blocks[1], 102(pos2)->NULL(ignored), 103(pos3)->blocks[2]
@@ -1862,13 +1862,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     resource.cacheKeys() = CacheKeysType{101, 103, 999};
     resource.rebuildLinearBlockDependencies();
     resource.setLastBlockAligned(false);
-    resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1]});
+    resource.mutableBlockIds("default").assign(BlockIndicesType{blocks[0], blocks[1]});
 
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{101, 103, 999}, /*is_connector=*/true);
     ASSERT_NE(ref_resource, nullptr);
     EXPECT_FALSE(ref_resource->lastBlockAligned());
     EXPECT_EQ(ref_resource->cacheKeys(), (CacheKeysType{101, 103, 999}));
-    EXPECT_EQ(ref_resource->blocks(0), (BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX}));
+    EXPECT_EQ(ref_resource->blocks("default"), (BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX}));
 
     block_pool->decRef(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
@@ -1895,7 +1895,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
     resource.cacheKeys() = CacheKeysType{100, 101};
-    resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1]});
+    resource.mutableBlockIds("default").assign(BlockIndicesType{blocks[0], blocks[1]});
 
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{});
     ASSERT_EQ(ref_resource, nullptr);
@@ -1993,8 +1993,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
 
     // KVCacheAllocator::initMalloc should call free() to rollback any referenced/allocated blocks.
     EXPECT_EQ(batch_resource->curBlocksNum(), 0);
-    EXPECT_EQ(batch_resource->blocksNum(0, 0), 0);
-    EXPECT_EQ(batch_resource->blocksNum(1, 0), 0);
+    EXPECT_EQ(batch_resource->blocksNum(0, "default"), 0);
+    EXPECT_EQ(batch_resource->blocksNum(1, "default"), 0);
 
     EXPECT_EQ(allocator_->freeBlocksNum(), free_before_fail);
 
@@ -2027,7 +2027,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrMallocRollback) {
 
     // Verify each batch has 1 block
     for (int i = 0; i < batch_size; ++i) {
-        EXPECT_EQ(batch_resource->blocksNum(i, 0), 1);
+        EXPECT_EQ(batch_resource->blocksNum(i, "default"), 1);
     }
 
     // update complete_token_ids to 16 tokens
@@ -2041,7 +2041,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrMallocRollback) {
     EXPECT_EQ(after_rollback_free_blocks, 6);
 
     for (int i = 0; i < batch_size; ++i) {
-        EXPECT_EQ(batch_resource->blocksNum(i, 0), 1);
+        EXPECT_EQ(batch_resource->blocksNum(i, "default"), 1);
     }
 
     // Verify that no extra blocks were allocated and left unfreed
@@ -2067,7 +2067,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenIncrMallocFails) {
     // KVCacheAllocator::initMalloc should call free() to clear shared blocks after incrMalloc fails.
     EXPECT_EQ(batch_resource->curBlocksNum(), 0);
     for (int i = 0; i < batch_resource->batchSize(); ++i) {
-        EXPECT_EQ(batch_resource->blocksNum(i, 0), 0);
+        EXPECT_EQ(batch_resource->blocksNum(i, "default"), 0);
     }
 
     EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
@@ -2130,7 +2130,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
     MallocInfo mi{new_res, token_ids};
     auto       result = allocator_->malloc(mi);
     ASSERT_TRUE(result.success);
-    ASSERT_EQ(new_res->blocksNum(0, 0), 2);
+    ASSERT_EQ(new_res->blocksNum(0, "default"), 2);
 
     // After malloc: ceil((8+0)/4) - 2 = 0
     EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator_, new_res, 8, 0, 0, /*enable_reuse_cache=*/false), 0);
@@ -2148,8 +2148,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNon
     ASSERT_TRUE(allocator_->init());
 
     auto resource = createBatchKVCacheResource(/*batch_size=*/2, config);
-    resource->setBatchBlocks(/*batch_id=*/0, /*group_id=*/0, {1, 2, 3});
-    resource->setBatchBlocks(/*batch_id=*/1, /*group_id=*/0, {1, 2, 4});
+    resource->setBatchBlocks(/*batch_id=*/0, "default", {1, 2, 3});
+    resource->setBatchBlocks(/*batch_id=*/1, "default", {1, 2, 4});
 
     // Two common blocks are shared. Each current batch owns one private tail block.
     EXPECT_EQ(allocator_->estimateBatchPeakNeedBlocks(resource,
@@ -2257,7 +2257,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, UpdateKVBlockReleasesSharedBlocksFromEach
 
     auto resource = createBatchKVCacheResource(/*batch_size=*/3, config);
     for (int batch_id = 0; batch_id < 3; ++batch_id) {
-        resource->setBatchBlocks(batch_id, /*group_id=*/0, *shared_blocks);
+        resource->setBatchBlocks(batch_id, "default", *shared_blocks);
     }
 
     std::vector<TaggedBlockIdPair> block_update_mapping;
@@ -2265,7 +2265,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, UpdateKVBlockReleasesSharedBlocksFromEach
         allocator_->updateKVBlock(resource, /*block_src_batch=*/{0}, /*copy_last_block=*/false, block_update_mapping));
 
     ASSERT_EQ(resource->batchSize(), 1);
-    EXPECT_EQ(resource->blocks(0, 0), *shared_blocks);
+    EXPECT_EQ(resource->blocks(0, "default"), *shared_blocks);
     EXPECT_TRUE(block_update_mapping.empty());
     for (const BlockIdxType block : *shared_blocks) {
         EXPECT_EQ(block_pool->refCount(block), 1u);

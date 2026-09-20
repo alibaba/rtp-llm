@@ -87,8 +87,7 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
             }
             const auto& group = *tree_->groupSets()[group_set];
             for (size_t member = 0; member < group.groupTags().size(); ++member) {
-                key_handles.push_back(
-                    {group.topologyPtr()->groupIdForTag(group.groupTags()[member]), resource.device_blocks[member]});
+                key_handles.push_back({group.groupTags()[member], resource.device_blocks[member]});
             }
         }
     }
@@ -107,9 +106,7 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         cache_keys,
         std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_));
 
-    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() {
-        settleLocked(*task, /*publish=*/false);
-    });
+    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() { settleLocked(*task, /*publish=*/false); });
 
     if (!store_task_runner_.prepareTask(*task, resources)) {
         return;

@@ -208,12 +208,11 @@ protected:
         for (const auto& key_handles : request.handles) {
             key_handle_counts_.push_back(key_handles.size());
             for (const auto& handle : key_handles) {
-                const auto& group = topology().groupById(handle.group_id);
-                group_tags_.push_back(group.tag);
+                group_tags_.push_back(handle.tag);
                 blocks_.push_back(handle.block);
-                const auto& layer_ids = topology().layerIdsForGroup(handle.group_id);
+                const auto& layer_ids = topology().layerIdsForGroup(handle.tag);
                 RTP_LLM_CHECK(!layer_ids.empty());
-                const auto buffers = convertIndexToBuffer(layer_ids.front(), handle.group_id, handle.block);
+                const auto buffers = convertIndexToBuffer(layer_ids.front(), handle.tag, handle.block);
                 addresses_.push_back(buffers.front().addr);
             }
         }

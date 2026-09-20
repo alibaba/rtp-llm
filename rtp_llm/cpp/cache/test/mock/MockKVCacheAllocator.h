@@ -17,6 +17,8 @@ public:
     MOCK_METHOD(void, insertIntoCache, (const InsertInfo&, size_t&), (override));
     MOCK_METHOD(BlockAddrInfo, convertIndexToAddr, (int layer_id, int block_id), (const, override));
     MOCK_METHOD(std::vector<BlockInfo>, convertIndexToBuffer, (int layer_id, int block_id), (const, override));
+    using KVCacheAllocator::convertIndexToAddr;
+    using KVCacheAllocator::convertIndexToBuffer;
     MOCK_METHOD(std::vector<BlockInfo>,
                 convertIndexToBuffer,
                 (int layer_id, int block_id, int partition_count, int partition_id),

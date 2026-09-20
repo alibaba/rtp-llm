@@ -2702,7 +2702,7 @@ TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
     for (int gid = 0; gid < 7; ++gid) {
-        EXPECT_EQ(batch_res->blocksNum(0, gid), 1u) << "gid=" << gid;
+        EXPECT_EQ(batch_res->blocksNum(0, config.groupTags()[static_cast<size_t>(gid)]), 1u) << "gid=" << gid;
     }
 
     FreeInfo free_info{batch_res};
@@ -2969,7 +2969,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
         ASSERT_TRUE(blocks.has_value());
         ASSERT_EQ(blocks->size(), 3u);
         block_pool->incRef(*blocks);
-        batch_res->mutableBlockIds(0, gid).assign(*blocks);
+        batch_res->mutableBlockIds(0, config.groupTags()[static_cast<size_t>(gid)]).assign(*blocks);
     }
 
     // Create CompleteTokenIds: 3 full blocks * seq_size_per_block tokens + partial
@@ -3007,7 +3007,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
 
     // Free all blocks
     for (int gid = 0; gid < 7; gid++) {
-        const auto& blocks = batch_res->blocks(0, gid);
+        const auto& blocks = batch_res->blocks(0, config.groupTags()[static_cast<size_t>(gid)]);
         allocator->groupBlockPools()[gid]->decRef(blocks);
     }
 }
@@ -3034,7 +3034,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
         ASSERT_TRUE(blocks.has_value());
         ASSERT_EQ(blocks->size(), 3u);
         block_pool->incRef(*blocks);
-        batch_res->mutableBlockIds(0, gid).assign(*blocks);
+        batch_res->mutableBlockIds(0, config.groupTags()[static_cast<size_t>(gid)]).assign(*blocks);
     }
 
     int  seq_size_per_block         = allocator->seqSizePerBlock();
@@ -3069,7 +3069,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
 
     for (int gid = 0; gid < 7; gid++) {
-        allocator->groupBlockPools()[gid]->decRef(batch_res->blocks(0, gid));
+        allocator->groupBlockPools()[gid]->decRef(batch_res->blocks(0, config.groupTags()[static_cast<size_t>(gid)]));
     }
 }
 
@@ -3111,7 +3111,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
     EXPECT_GT(result.reuse_len, 0) << "Prefix cache reuse should work with paged DSV4 groups";
 
     for (int gid = 0; gid < group_num; gid++) {
-        const auto& out_blocks = batch_res->blocks(0, gid);
+        const auto& out_blocks = batch_res->blocks(0, config.groupTags()[static_cast<size_t>(gid)]);
         ASSERT_GE(out_blocks.size(), 3u) << config.tagForGroup(gid);
         if (config.typeForGroup(gid) == CacheGroupType::FULL) {
             const auto& cached_blocks = seeded.blocks_by_tag.at(config.tagForGroup(gid));
@@ -3205,10 +3205,8 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
     ASSERT_TRUE(result.success);
 
     EXPECT_GT(result.reuse_len, 0) << "HCA_STATE miss should not veto DSV4 prefix reuse";
-    const auto hca_state_gid = gidForTag(config, "hca_state");
-    const auto swa_gid       = gidForTag(config, "swa_kv");
-    EXPECT_TRUE(isNullBlockIdx(batch_res->blocks(0, hca_state_gid).at(2))) << "HCA_STATE should remain non-reused";
-    EXPECT_EQ(batch_res->blocks(0, swa_gid).at(2), seeded.blocks_by_tag.at("swa_kv")[2])
+    EXPECT_TRUE(isNullBlockIdx(batch_res->blocks(0, "hca_state").at(2))) << "HCA_STATE should remain non-reused";
+    EXPECT_EQ(batch_res->blocks(0, "swa_kv").at(2), seeded.blocks_by_tag.at("swa_kv")[2])
         << "SWA_KV tail should still gate reuse";
 
     FreeInfo free_info{batch_res};
@@ -3292,7 +3290,7 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
     EXPECT_GT(result.reuse_len, 0) << "Flash prefix cache reuse should work for paged groups";
 
     for (int gid = 0; gid < group_num; gid++) {
-        const auto& out_blocks = batch_res->blocks(0, gid);
+        const auto& out_blocks = batch_res->blocks(0, config.groupTags()[static_cast<size_t>(gid)]);
         ASSERT_GE(out_blocks.size(), 3u) << config.tagForGroup(gid);
         if (config.typeForGroup(gid) == CacheGroupType::FULL) {
             EXPECT_EQ(out_blocks[0], seeded.blocks_by_tag.at(config.tagForGroup(gid))[0]) << config.tagForGroup(gid);
@@ -3459,7 +3457,7 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
     ASSERT_TRUE(result.success);
     EXPECT_GT(result.reuse_len, 0);
 
-    const auto& swa_out = batch_res->blocks(0, gidForTag(config, "swa_kv"));
+    const auto& swa_out = batch_res->blocks(0, "swa_kv");
     ASSERT_GE(swa_out.size(), 2u);
     EXPECT_TRUE(isNullBlockIdx(swa_out[0])) << "SWA previous matched tail is evicted after new tail allocation";
     EXPECT_EQ(swa_out[1], seeded.blocks_by_tag.at("swa_kv")[1]) << "SWA last matched tail block should remain";
@@ -3498,7 +3496,8 @@ TEST_F(DSV4AllocatorTest, IncrMallocDecodeGrowsBlocks) {
 
     // All 7 groups should have 1 block each
     for (int gid = 0; gid < 7; gid++) {
-        EXPECT_EQ(batch_res->blocksNum(0, gid), 1u) << "group " << gid << " should have 1 block after init";
+        EXPECT_EQ(batch_res->blocksNum(0, config.groupTags()[static_cast<size_t>(gid)]), 1u)
+            << "group " << gid << " should have 1 block after init";
     }
 
     size_t free_after_init = allocator->freeBlocksNum();
@@ -3512,7 +3511,8 @@ TEST_F(DSV4AllocatorTest, IncrMallocDecodeGrowsBlocks) {
 
     // All 7 groups should now have 2 blocks each
     for (int gid = 0; gid < 7; gid++) {
-        EXPECT_EQ(batch_res->blocksNum(0, gid), 2u) << "group " << gid << " should have 2 blocks after incr";
+        EXPECT_EQ(batch_res->blocksNum(0, config.groupTags()[static_cast<size_t>(gid)]), 2u)
+            << "group " << gid << " should have 2 blocks after incr";
     }
 
     // HCA_STATE is not reusable: decode may materialize a new tail, but the
@@ -3606,7 +3606,7 @@ TEST_F(DSV4AllocatorTest, FlashIncrMallocDecode) {
     ASSERT_TRUE(allocator->malloc(init_info).success);
 
     for (int gid = 0; gid < 7; gid++) {
-        EXPECT_EQ(batch_res->blocksNum(0, gid), 1u) << "Flash group " << gid;
+        EXPECT_EQ(batch_res->blocksNum(0, config.groupTags()[static_cast<size_t>(gid)]), 1u) << "Flash group " << gid;
     }
 
     // Grow to 3 blocks
@@ -3616,7 +3616,8 @@ TEST_F(DSV4AllocatorTest, FlashIncrMallocDecode) {
     ASSERT_TRUE(allocator->malloc(incr_info).success);
 
     for (int gid = 0; gid < 7; gid++) {
-        EXPECT_EQ(batch_res->blocksNum(0, gid), 3u) << "Flash group " << gid << " after incr";
+        EXPECT_EQ(batch_res->blocksNum(0, config.groupTags()[static_cast<size_t>(gid)]), 3u)
+            << "Flash group " << gid << " after incr";
     }
 
     FreeInfo free_info{batch_res};

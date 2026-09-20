@@ -200,8 +200,8 @@ dsv4TransferPositions(const CacheConfig& config, int gid, size_t block_num, size
                                           /*hybrid_full_from_begin=*/true);
 }
 
-torch::Tensor blockIdsTensor(const BatchKVCacheResourcePtr& resource, int gid) {
-    const auto& blocks = resource->blocks(0, gid);
+torch::Tensor blockIdsTensor(const BatchKVCacheResourcePtr& resource, const std::string& tag) {
+    const auto& blocks = resource->blocks(0, tag);
     return torch::from_blob(const_cast<int*>(blocks.data()), {1, static_cast<int64_t>(blocks.size())}, torch::kInt32)
         .clone();
 }
@@ -385,6 +385,61 @@ protected:
     std::shared_ptr<KVCacheManager>       cache_manager_;
     size_t                                initial_free_blocks_ = 0;
 };
+
+TEST_F(PdSepKVCacheReleaseTest, MissingGroupIdentityRejectsAsyncLoadBeforeConnecting) {
+    auto             manager = std::make_shared<KVCacheManager>(makeConfig(), /*warmup=*/false, nullptr);
+    EngineInitParams params;
+    DecodeRpcServer  server;
+    server.engine_                = std::make_shared<MinimalEngine>(params, manager);
+    server.resource_.workers      = {"decode-0"};
+    server.resource_.grpc_workers = {"127.0.0.1:1"};
+    grpc::ServerContext          server_context;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    DecodeGenerateContext        decode_context(rpc_context, 1000, &server_context, reporter, nullptr);
+    decode_context.peer_addrs = {"prefill-0"};
+    // An uninitialized resource has no rows/tags. The request-only builders may
+    // accept this, but the asynchronous dispatch entry must reject it locally.
+    KVCacheResource                     resource;
+    DecodeRpcServer::LoadKVCacheContext load_context(
+        42, "missing-identity", {"prefill-0"}, {}, resource.groupBlockIds(), 0, 1000, 1, 0, &server_context);
+    ASSERT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
+    EXPECT_ANY_THROW(server.loadCacheAsyncForTp(decode_context, load_context));
+    EXPECT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
+}
+
+TEST_F(PdSepKVCacheReleaseTest, MalformedGroupIndexRejectsAsyncLoadBeforeConnecting) {
+    auto             manager = std::make_shared<KVCacheManager>(makeConfig(), /*warmup=*/false, nullptr);
+    EngineInitParams params;
+    DecodeRpcServer  server;
+    server.engine_                = std::make_shared<MinimalEngine>(params, manager);
+    server.resource_.workers      = {"decode-0"};
+    server.resource_.grpc_workers = {"127.0.0.1:1"};
+    grpc::ServerContext          server_context;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    DecodeGenerateContext        decode_context(rpc_context, 1000, &server_context, reporter, nullptr);
+    decode_context.peer_addrs = {"prefill-0"};
+    KVCacheResource resource;
+    resource.initGroups(manager->cacheConfig().topologyPtr());
+    auto                             holder = std::make_shared<BlockIds>();
+    const auto                       tag    = manager->cacheConfig().groupTags().front();
+    const std::vector<GroupBlockIds> malformed{{{}, {holder}},
+                                               {{{tag, 0}, {"extra", 0}}, {holder, holder}},
+                                               {{{tag, 1}}, {holder}},
+                                               {{{tag, 0}, {"extra", 2}}, {holder, holder}},
+                                               {{{tag, 0}}, {nullptr}}};
+    for (const auto& blocks : malformed) {
+        DecodeRpcServer::LoadKVCacheContext context(
+            42, "malformed-identity", {"prefill-0"}, {}, resource.groupBlockIds(), 0, 1000, 1, 0, &server_context);
+        // Fault injection proves dispatch revalidates even after constructor validation.
+        // Production only receives the const complete object.
+        const_cast<GroupBlockIds&>(context.groupBlockIds()) = blocks;
+        ASSERT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
+        EXPECT_ANY_THROW(server.loadCacheAsyncForTp(decode_context, context));
+        EXPECT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
+    }
+}
 
 // =============================================================================
 // Test 1: Normal release without PD sep hold
@@ -640,8 +695,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     ASSERT_GT(resource.curBlocksNum(), 0);
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
         const auto& tag = config.tagForGroup(static_cast<size_t>(gid));
-        ASSERT_EQ(resource.kvCache().blocksNum(0, gid), 4) << "group " << tag;
-        const auto&  blocks = resource.kvCache().blocks(0, gid);
+        ASSERT_EQ(resource.kvCache().blocksNum(0, tag), 4) << "group " << tag;
+        const auto&  blocks = resource.kvCache().blocks(0, tag);
         const size_t tail   = static_cast<size_t>(config.policyForGroup(static_cast<size_t>(gid)).active_tail_blocks);
         if (tail == 0) {
             // Paged group: every logical block is materialized from position 0.
@@ -737,8 +792,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecodeFirstMallocBypassesLocalDeviceReus
     EXPECT_EQ(decode_stream->reuseLength(), 0)
         << "Hybrid DSV4 decode first malloc must not consume local device-cache reuse; PD load owns reuse.";
     EXPECT_EQ(decode_resource.kvCache().groupNums(), kDsv4PoolNum);
-    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(decode_resource.kvCache().blocksNum(0, gid), 4) << "group " << gid;
+    for (const auto& tag : cache_manager_->cacheConfig().groupTags()) {
+        EXPECT_EQ(decode_resource.kvCache().blocksNum(0, tag), 4) << "group " << tag;
     }
 
     decode_stream->releaseResource();
@@ -782,7 +837,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
             manager
                 ->malloc({resource, makeCompleteTokens(logical_blocks / cp_size * spb), request_id, true, false, false})
                 .success);
-        ASSERT_EQ(resource->blocksNum(0, 0), logical_blocks / cp_size);
+        ASSERT_EQ(resource->blocksNum(0, "default"), logical_blocks / cp_size);
         prefill_managers.push_back(std::move(manager));
         prefill_resources.push_back(std::move(resource));
     }
@@ -794,7 +849,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
         decode_manager
             ->malloc({decode_resource, makeCompleteTokens(logical_blocks * spb), request_id, true, false, false})
             .success);
-    ASSERT_EQ(decode_resource->blocksNum(0, 0), logical_blocks);
+    ASSERT_EQ(decode_resource->blocksNum(0, "default"), logical_blocks);
 
     std::vector<CacheKeyType> cache_keys;
     for (int logical_pos = 0; logical_pos < logical_blocks; ++logical_pos) {
@@ -805,7 +860,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
     for (int cp_rank = 0; cp_rank < cp_size; ++cp_rank) {
         const auto& manager  = prefill_managers[cp_rank];
         const auto& resource = prefill_resources[cp_rank];
-        const auto& blocks   = resource->blocks(0, 0);
+        const auto& blocks   = resource->blocks(0, "default");
         auto        layout   = manager->getMainModelCacheLayerLayout();
         auto        kv_base  = layout.at("default", 0).kv_addr;
 
@@ -818,7 +873,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
         auto                    inputs = makeDsv4WriteInputs(request_id,
                                           logical_blocks * spb,
                                           /*prefix_length=*/0,
-                                          blockIdsTensor(resource, /*gid=*/0),
+                                          blockIdsTensor(resource, "default"),
                                           cache_keys);
         torch_ext::LayerKVCache layer_cache;
         layer_cache.kv_cache_base      = kv_base;
@@ -859,7 +914,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
     ASSERT_EQ(cache_store->stored_blocks_.size(), static_cast<size_t>(logical_blocks));
 
     for (int logical_pos = 0; logical_pos < logical_blocks; ++logical_pos) {
-        const auto decode_block = decode_resource->blocks(0, 0)[static_cast<size_t>(logical_pos)];
+        const auto decode_block = decode_resource->blocks(0, "default")[static_cast<size_t>(logical_pos)];
         fillDsv4RegionBytes(decode_manager, decode_block, /*layer_id=*/0, "default", 0xEE);
     }
 
@@ -880,7 +935,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                                                      "cp-sharded-cache-store-pd",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     decode_resource->cacheResource(0).groupBlockIds(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -899,7 +954,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                 "kv_" + makeCacheKey(model_id, std::to_string(cache_keys[logical_pos]), /*layer_id=*/0, "default");
             const auto block = loaded_request->getBlock(key);
             ASSERT_NE(block, nullptr) << "cp_rank=" << cp_rank << " logical_pos=" << logical_pos;
-            const auto decode_block = decode_resource->blocks(0, 0)[static_cast<size_t>(logical_pos)];
+            const auto decode_block = decode_resource->blocks(0, "default")[static_cast<size_t>(logical_pos)];
             const auto expected     = decode_manager->convertIndexToBuffer(0, "default", decode_block);
             ASSERT_EQ(expected.size(), 1u);
             EXPECT_EQ(block->addr.get(), expected[0].addr);
@@ -971,8 +1026,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
             const auto& tag       = cache_config.tagForGroup(static_cast<size_t>(gid));
             auto        positions = dsv4TransferPositions(cache_config, gid, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
-                auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
-                auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
+                auto prefill_block_id = prefill_resource->blocks(0, tag)[block_pos];
+                auto decode_block_id  = decode_resource->blocks(0, tag)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill tag=" << tag << " pos=" << block_pos;
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode tag=" << tag << " pos=" << block_pos;
                 fillDsv4RegionBytes(
@@ -994,7 +1049,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
             auto inputs = makeDsv4WriteInputs(request_id,
                                               /*input_length=*/block_num * spb,
                                               /*prefix_length=*/0,
-                                              blockIdsTensor(prefill_resource, gid),
+                                              blockIdsTensor(prefill_resource, tag),
                                               cache_keys);
 
             torch_ext::LayerKVCache layer_cache;
@@ -1034,7 +1089,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                                                      "dsv4-cache-store-pd",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     decode_resource->cacheResource(0).groupBlockIds(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1050,7 +1105,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
             const auto& tag       = cache_config.tagForGroup(static_cast<size_t>(gid));
             auto        positions = dsv4TransferPositions(cache_config, gid, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
-                auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
+                auto decode_block_id = decode_resource->blocks(0, tag)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
                 expectDsv4RegionBytes(
                     decode_manager, decode_block_id, layer_id, tag, dsv4PdPattern(layer_id, gid, block_pos));
@@ -1109,8 +1164,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             const auto& tag       = cache_config.tagForGroup(static_cast<size_t>(gid));
             auto        positions = dsv4TransferPositions(cache_config, gid, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
-                auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
-                auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
+                auto prefill_block_id = prefill_resource->blocks(0, tag)[block_pos];
+                auto decode_block_id  = decode_resource->blocks(0, tag)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill tag=" << tag << " pos=" << block_pos;
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode tag=" << tag << " pos=" << block_pos;
                 fillDsv4RegionBytes(
@@ -1132,7 +1187,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             auto inputs = makeDsv4WriteInputs(request_id,
                                               /*input_length=*/block_num * spb,
                                               /*prefix_length=*/0,
-                                              blockIdsTensor(prefill_resource, gid),
+                                              blockIdsTensor(prefill_resource, tag),
                                               cache_keys);
 
             // Paged groups expose the layer view at kernel-block granularity;
@@ -1178,7 +1233,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
                                                      "dsv4-decoupled-cache-store-pd",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     decode_resource->cacheResource(0).groupBlockIds(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1192,7 +1247,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             const auto& tag       = cache_config.tagForGroup(static_cast<size_t>(gid));
             auto        positions = dsv4TransferPositions(cache_config, gid, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
-                auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
+                auto decode_block_id = decode_resource->blocks(0, tag)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
                 expectDsv4RegionBytes(
                     decode_manager, decode_block_id, layer_id, tag, dsv4PdPattern(layer_id, gid, block_pos));
@@ -1263,8 +1318,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
             const auto& tag       = cache_config.tagForGroup(static_cast<size_t>(gid));
             auto        positions = dsv4TransferPositions(cache_config, gid, block_num, reuse_num);
             for (auto block_pos : positions) {
-                auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
-                auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
+                auto prefill_block_id = prefill_resource->blocks(0, tag)[block_pos];
+                auto decode_block_id  = decode_resource->blocks(0, tag)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill tag=" << tag << " pos=" << block_pos;
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode tag=" << tag << " pos=" << block_pos;
                 fillDsv4RegionBytes(
@@ -1286,7 +1341,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
             auto inputs = makeDsv4WriteInputs(request_id,
                                               /*input_length=*/(block_num - reuse_num) * spb,
                                               /*prefix_length=*/reuse_num * spb,
-                                              blockIdsTensor(prefill_resource, gid),
+                                              blockIdsTensor(prefill_resource, tag),
                                               cache_keys);
 
             torch_ext::LayerKVCache layer_cache;
@@ -1326,7 +1381,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                                                      "dsv4-cache-store-pd-prefix-reuse",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     decode_resource->cacheResource(0).groupBlockIds(),
                                                      reuse_num,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1342,7 +1397,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
             const auto& tag       = cache_config.tagForGroup(static_cast<size_t>(gid));
             auto        positions = dsv4TransferPositions(cache_config, gid, block_num, reuse_num);
             for (auto block_pos : positions) {
-                auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
+                auto decode_block_id = decode_resource->blocks(0, tag)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
                 expectDsv4RegionBytes(
                     decode_manager, decode_block_id, layer_id, tag, dsv4PdPattern(layer_id, gid, block_pos));
@@ -1391,7 +1446,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
         auto buf = layout.at(static_cast<size_t>(layer_id)).kv_addr;
         ASSERT_TRUE(buf.defined());
         for (int b = 0; b < block_num; ++b) {
-            auto bid       = resource->blocks(0, 0)[b];
+            auto bid       = resource->blocks(0, "default")[b];
             auto kv_stride = config.kvBlockStrideBytesForGroup(0);
             ASSERT_FALSE(isNullBlockIdx(bid));
             auto device_slice = torch::from_blob((uint8_t*)buf.data_ptr() + bid * kv_stride,
@@ -1425,8 +1480,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
 
     // --- Call runtimeWriteCacheStore (event->synchronize() inside) ---
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
-    auto block_ids   = torch::from_blob(const_cast<int*>(resource->blocks(0, 0).data()),
-                                      {1, (int64_t)resource->blocks(0, 0).size()},
+    auto block_ids   = torch::from_blob(const_cast<int*>(resource->blocks(0, "default").data()),
+                                      {1, (int64_t)resource->blocks(0, "default").size()},
                                       torch::kInt32)
                          .clone();
 

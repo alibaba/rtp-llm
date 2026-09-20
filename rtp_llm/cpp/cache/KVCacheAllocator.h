@@ -180,10 +180,10 @@ protected:
         size_t additional_blocks{0};
     };
     // Count unique valid physical blocks held by this request in one independent pool.
-    static size_t heldRequestBlocks(const MallocInfo& malloc_info, int group_id);
+    static size_t heldRequestBlocks(const MallocInfo& malloc_info, std::string_view tag);
     // Reuse-aware interpretation of planner output: reuse planners report
     // additional demand; no-reuse planners report the full footprint.
-    static InitBlockDemand initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, int group_id);
+    static InitBlockDemand initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, std::string_view tag);
     // Estimate peak additional blocks for one sequence resource.
     virtual int   estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
                                          int                    seq_len,

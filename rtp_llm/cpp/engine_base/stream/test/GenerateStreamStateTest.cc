@@ -457,7 +457,7 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
     ASSERT_EQ(real_allocator->groupBlockPools().size(), 1u);
     const auto device_pool = real_allocator->groupBlockPools().front();
     ASSERT_NE(device_pool, nullptr);
-    const auto& request_blocks = stream->streamCacheResource().kvCache().blocks(/*batch_id=*/0, /*group_id=*/0);
+    const auto& request_blocks = stream->streamCacheResource().kvCache().blocks(/*batch_id=*/0, "default");
     ASSERT_EQ(request_blocks.size(), 1u);
     const BlockIdxType request_block = request_blocks.front();
     ASSERT_EQ(device_pool->refCount(request_block), 1u);

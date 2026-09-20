@@ -190,13 +190,12 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
                 load_targets[group_set_id] = groupSetRequestBlocksAt(group_set, load_resource, 0, path_index);
                 ASSERT_EQ(group_set->devicePools().size(), load_targets[group_set_id].size());
                 for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
-                    const int group_id =
-                        static_cast<int>(group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_index]));
+                    const auto&        tag      = group_set->groupTags()[member_index];
                     const BlockIdxType block    = load_targets[group_set_id][member_index];
                     ASSERT_FALSE(isNullBlockIdx(block));
                     EXPECT_EQ(group_set->devicePools()[member_index]->refCount(block), 2u);
                     ASSERT_TRUE(
-                        fillGroupBlockPayload(manager_, cache_config_, group_id, block, path_index, /*poison=*/true));
+                        fillGroupBlockPayload(manager_, cache_config_, tag, block, path_index, /*poison=*/true));
                 }
             } else {
                 EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
@@ -470,13 +469,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         load_targets[group_set_id] = groupSetRequestBlocksAt(group_set, load_resource, 0, /*path_index=*/0);
         ASSERT_EQ(group_set->devicePools().size(), load_targets[group_set_id].size());
         for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
-            const int group_id =
-                static_cast<int>(group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_index]));
+            const auto&        tag      = group_set->groupTags()[member_index];
             const BlockIdxType block    = load_targets[group_set_id][member_index];
             ASSERT_FALSE(isNullBlockIdx(block));
             EXPECT_EQ(group_set->devicePools()[member_index]->refCount(block), 2u);
-            ASSERT_TRUE(
-                fillGroupBlockPayload(manager_, cache_config_, group_id, block, /*path_index=*/0, /*poison=*/true));
+            ASSERT_TRUE(fillGroupBlockPayload(manager_, cache_config_, tag, block, /*path_index=*/0, /*poison=*/true));
         }
     }
 

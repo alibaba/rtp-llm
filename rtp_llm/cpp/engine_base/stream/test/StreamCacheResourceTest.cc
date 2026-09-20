@@ -29,6 +29,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -323,7 +324,7 @@ protected:
     void checkBlockFunc(BatchKVCacheResource& batch_resource, int outter_size, int inner_size) {
         ASSERT_EQ(batch_resource.batchSize(), outter_size);
         for (int i = 0; i < outter_size; ++i) {
-            ASSERT_EQ(batch_resource.blocks(i, 0).size(), inner_size);
+            ASSERT_EQ(batch_resource.blocks(i, "default").size(), inner_size);
         }
     };
 
@@ -375,6 +376,33 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
 
     stream_->fakeInitKVBlock(2);
     EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
+}
+
+TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReordering) {
+    for (const bool reversed : {false, true}) {
+        auto            config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
+        ResourceContext context;
+        context.cache_manager = std::make_shared<KVCacheManager>(config);
+        StreamCacheResource resource(nullptr, context, /*need_release_resource=*/false);
+        resource.init(1);
+        if (reversed) {
+            auto groups = config.topology().groups();
+            std::reverse(groups.begin(), groups.end());
+            config.setTopology(std::move(groups), config.topology().layers());
+        }
+        auto& batch = resource.kvCacheMutable();
+        // Only the resource order changes; the manager keeps its original topology.
+        batch.initGroups(config.topologyPtr());
+        for (const auto& group : config.topology().groups()) {
+            batch.mutableBlockIds(0, group.tag).assign({2, 5});
+        }
+        resource.swapLinearBlocks(0, 0, 1);
+        for (const auto& group : config.topology().groups()) {
+            EXPECT_EQ(batch.blocks(0, group.tag),
+                      group.policy.group_type == CacheGroupType::LINEAR ? (BlockIndicesType{5, 2}) :
+                                                                          (BlockIndicesType{2, 5}));
+        }
+    }
 }
 
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
@@ -706,7 +734,7 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
             EXPECT_FALSE(info.enable_cache_lookup);
             // Simulate a successful allocation so subsequent calls go through incrMalloc path.
             for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
-                auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, /*group_id=*/0);
+                auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, "linear");
                 block_ids.assign(BlockIndicesType{/*block=*/1});
             }
             return {true, 0};
@@ -1175,7 +1203,7 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
             return true;
         },
         [counts](LoadAsyncContext&) { ++counts->aborts; });
-    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setMatchCallback([](LoadAsyncContext&, size_t) {
@@ -1218,7 +1246,7 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
         }));
     EXPECT_CALL(*allocator, incrMalloc(testing::_))
         .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
-            info.batch_kv_cache_resource->mutableBlockIds(0, /*group_id=*/0).assign({1});
+            info.batch_kv_cache_resource->mutableBlockIds(0, "default").assign({1});
             return {true, 0};
         }));
 
@@ -1236,7 +1264,7 @@ TEST_F(StreamCacheResourceTest, testPrefillPermanentMaterializationFailureTermin
 
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
-    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{5678}), {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{5678}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setMatchCallback([](LoadAsyncContext&, size_t) {
@@ -1264,7 +1292,7 @@ TEST_F(StreamCacheResourceTest, testPrefillCoordinatorCommitFailureTerminates) {
 
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return false; }, [](LoadAsyncContext&) {});
-    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{9012}), {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{9012}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setMatchCallback([](LoadAsyncContext& current, size_t) { return current.commit(); });
@@ -1358,7 +1386,7 @@ TEST_F(StreamCacheResourceTest, PollAllocatorLoadPreservesRetryableMaterializati
     auto& resource    = stream_->streamCacheResource();
     auto  coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
-    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{0, NULL_BLOCK_IDX}}}};
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, 0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setMatchCallback([](LoadAsyncContext&, size_t) {

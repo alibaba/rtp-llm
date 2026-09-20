@@ -124,12 +124,12 @@ CacheConfig makeHybridConfig(bool disable_linear_reuse = false) {
 CacheConfig makeIndependentWatermarkConfig() {
     CacheConfig config = makeHybridConfig();
 
-    const std::shared_ptr<const KVCacheSpec>& linear_spec     = config.specForGroup(0);
-    const std::shared_ptr<const KVCacheSpec>& full_spec       = config.specForGroup(1);
-    const CacheGroupPolicy                    linear_policy   = config.policyForGroup(0);
-    const CacheGroupPolicy                    full_policy     = config.policyForGroup(1);
-    const size_t                              linear_stride   = config.kvBlockStrideBytesForGroup(0);
-    const size_t                              full_stride     = config.kvBlockStrideBytesForGroup(1);
+    const std::shared_ptr<const KVCacheSpec>& linear_spec     = config.group("group0").spec;
+    const std::shared_ptr<const KVCacheSpec>& full_spec       = config.group("group1").spec;
+    const CacheGroupPolicy                    linear_policy   = config.group("group0").policy;
+    const CacheGroupPolicy                    full_policy     = config.group("group1").policy;
+    const size_t                              linear_stride   = config.group("group0").kvBlockStrideBytes();
+    const size_t                              full_stride     = config.group("group1").kvBlockStrideBytes();
     std::vector<KVCacheSpecPtr>               reordered_specs = {
         full_spec->clone(),
         linear_spec->clone(),
@@ -321,7 +321,7 @@ CacheConfig makeReusableGroupsAroundDisabledConfig() {
     test::configureIndexedTestGroups(
         config, specs, {{0}, {1}, {2}}, {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::FULL}, policies);
 
-    const size_t stride = config.specForGroup(0)->block_size_bytes();
+    const size_t stride = config.group("group0").spec->block_size_bytes();
     config.setGroupBlockLayout({"group0", "group1", "group2"}, {8, 8, 8}, {stride, stride, stride}, {0, 0, 0});
     return config;
 }
@@ -455,7 +455,7 @@ insertOneKeyThroughAllocator(const CacheConfig& config, const KVCacheAllocatorPt
         }
         pool->incRef(*allocated);
         blocks[group_id] = allocated->front();
-        resource->setBatchBlocks(0, static_cast<int>(group_id), BlockIndicesType{allocated->front()});
+        resource->setBatchBlocks(0, groups[group_id]->tag(), BlockIndicesType{allocated->front()});
     }
     {
         size_t resident_prefix_length = 0;
@@ -517,7 +517,7 @@ public:
         resolved_count_(std::move(resolved_count)) {}
 
     ~ShutdownCountingStorageBackend() override {
-        const auto buffers = convertIndexToBuffer(/*layer_id=*/0, /*group_id=*/0, /*block_id=*/0);
+        const auto buffers = convertIndexToBuffer(/*layer_id=*/0, /*tag=*/"default", /*block_id=*/0);
         if (!buffers.empty() && buffers.front().addr != nullptr) {
             ++*resolved_count_;
         }
@@ -546,8 +546,8 @@ public:
     ~CountingStorageBackend() override {
         shutdown();
     }
-    std::vector<BlockInfo> resolve(int layer, int group, int block) const {
-        return convertIndexToBuffer(layer, group, block);
+    std::vector<BlockInfo> resolve(int layer, const std::string& tag, int block) const {
+        return convertIndexToBuffer(layer, tag, block);
     }
     size_t matchCalls() const {
         return match_calls_;
@@ -645,15 +645,15 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteResolverMatchesAllocatorForNonContiguous
         kv_cache_config.enable_remote_cache = true;
         auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend);
         ASSERT_NE(cache, nullptr);
-        for (size_t group_id = 0; group_id < config.topology().groups().size(); ++group_id) {
-            const auto& group  = config.topology().groupById(group_id);
-            const auto& pool   = allocator->cacheGroups()[group_id]->blockPool();
+        for (const auto& manager : allocator->cacheGroups()) {
+            const auto& group  = config.group(manager->tag());
+            const auto& pool   = manager->blockPool();
             const auto  blocks = pool->malloc(1);
             ASSERT_TRUE(blocks.has_value());
             pool->incRef(*blocks);
-            for (int layer_id : config.layerIdsForGroup(group_id)) {
+            for (int layer_id : config.layerIdsForGroup(group.tag)) {
                 const auto expected = allocator->convertIndexToBuffer(layer_id, group.tag, blocks->front());
-                const auto actual   = backend->resolve(layer_id, group_id, blocks->front());
+                const auto actual   = backend->resolve(layer_id, group.tag, blocks->front());
                 ASSERT_FALSE(expected.empty());
                 ASSERT_FALSE(actual.empty());
                 EXPECT_EQ(actual.front().addr, expected.front().addr) << layer_id;
@@ -666,11 +666,11 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteResolverMatchesAllocatorForNonContiguous
 
 TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCopyHostAndRemoteResolver) {
     const auto config = makeHeterogeneousMtpConfig();
-    ASSERT_EQ(config.layerIdsForGroup(0), (std::vector<int>{0, 1, 2}));
+    ASSERT_EQ(config.layerIdsForGroup("default"), (std::vector<int>{0, 1, 2}));
     EXPECT_EQ(config.physicalGroupForLayer(0, "default").kvBlockStrideBytes(), 32u);
     EXPECT_EQ(config.physicalGroupForLayer(1, "default").kvBlockStrideBytes(), 64u);
     EXPECT_EQ(config.physicalGroupForLayer(2, "default").kvBlockStrideBytes(), 64u);
-    EXPECT_EQ(config.blockSizeBytesForGroup(0), 160u);
+    EXPECT_EQ(config.blockSizeBytesForGroup(config.topology().groups().front().tag), 160u);
     EXPECT_EQ(config.totalGroupBlockSizeBytes(), 160u);
 
     auto        allocator = initAllocator<KVCacheAllocator>(config);
@@ -712,7 +712,7 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
     EXPECT_EQ(group_set->hostPool()->payloadBytes(), 160u);
 
     for (int layer = 0; layer < 3; ++layer) {
-        const auto resolved = backend->resolve(layer, /*group=*/0, src);
+        const auto resolved = backend->resolve(layer, "default", src);
         ASSERT_EQ(resolved.size(), 1u);
         EXPECT_EQ(resolved.front().addr, allocator->convertIndexToAddr(layer, "default", src).kv_addr);
         EXPECT_EQ(resolved.front().size_bytes, bytes[static_cast<size_t>(layer)]);
@@ -766,8 +766,11 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteBackendResolverDoesNotKeepAttachedCacheA
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteMatchSkipsBackendWhenNoGroupSupportsPrefixReuse) {
-    auto config   = makeSingleConfig();
-    auto policies = config.groupPoliciesSnapshot();
+    auto                          config = makeSingleConfig();
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     ASSERT_EQ(policies.size(), 1u);
     policies[0].enable_prefix_reuse = false;
     test::setTestGroupPolicies(config, policies);
@@ -786,8 +789,11 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteMatchSkipsBackendWhenNoGroupSupportsPref
 }
 
 TEST_F(BlockTreeCacheFactoryTest, DiskCacheAllowsNoPrefixReusableGroups) {
-    auto config   = makeSingleConfig();
-    auto policies = config.groupPoliciesSnapshot();
+    auto                          config = makeSingleConfig();
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     ASSERT_EQ(policies.size(), 1u);
     policies[0].enable_prefix_reuse = false;
     test::setTestGroupPolicies(config, policies);
@@ -875,8 +881,11 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteBackendIsDroppedWhenRemoteCacheDisabled)
 }
 
 TEST_F(BlockTreeCacheFactoryTest, CpSwaWindowUsesCanonicalKeysWithoutChangingPhysicalLayout) {
-    auto config                     = makeSwaConfig(16);
-    auto policies                   = config.groupPoliciesSnapshot();
+    auto                          config = makeSwaConfig(16);
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     policies[0].sliding_window_size = 128;
     test::setTestGroupPolicies(config, policies);
     auto allocator = initAllocator<KVCacheAllocator>(config);
@@ -885,8 +894,8 @@ TEST_F(BlockTreeCacheFactoryTest, CpSwaWindowUsesCanonicalKeysWithoutChangingPhy
     ASSERT_NE(cache, nullptr);
     auto swa = std::dynamic_pointer_cast<SWAGroupSet>(cache->groupSets().front());
     ASSERT_NE(swa, nullptr);
-    EXPECT_EQ(config.topology().groupById(0).seqSizePerBlock(), 16u);
-    EXPECT_EQ(config.topology().groupById(0).cacheKeyTokenStride(), 16u);
+    EXPECT_EQ(config.group("group0").seqSizePerBlock(), 16u);
+    EXPECT_EQ(config.group("group0").cacheKeyTokenStride(), 16u);
     EXPECT_EQ(swa->seqSizePerBlock(), 32u);
     EXPECT_EQ(swa->computeReuseBlockCount(8), 4u);
     auto             validator = swa->createMatchValidator();
@@ -902,7 +911,7 @@ TEST_F(BlockTreeCacheFactoryTest, CpSwaWindowUsesCanonicalKeysWithoutChangingPhy
 
 TEST_F(BlockTreeCacheFactoryTest, SwaGroupSetUsesDeclaredPolicyWindow) {
     const auto config = makeSwaConfig();
-    ASSERT_EQ(config.policyForGroup(0).sliding_window_size, 128);
+    ASSERT_EQ(config.group("group0").policy.sliding_window_size, 128);
     auto allocator = initAllocator<KVCacheAllocator>(config);
     auto cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
@@ -938,7 +947,7 @@ TEST_F(BlockTreeCacheFactoryTest, HybridPoolBindsIndependentPoolsAndNonContiguou
         ASSERT_TRUE(block.has_value());
         ASSERT_EQ(block->size(), 1u);
         pool->incRef(*block);
-        const auto layer_ids    = config.layerIdsForGroup(config.topology().groupIdForTag(group->tag()));
+        const auto layer_ids    = config.layerIdsForGroup(group->tag());
         const int  global_layer = layer_ids.back();
         const int  local_layer  = static_cast<int>(layer_ids.size() - 1);
         const auto via_group    = group->convertIndexToAddr(global_layer, block->front());
@@ -963,7 +972,7 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     ASSERT_EQ(target_groups.size(), 2u);
     const auto& full_group = target_groups[1];
     ASSERT_NE(full_group, nullptr);
-    ASSERT_EQ(config.layerIdsForGroup(config.groupIdForTag(full_group->tag())), (std::vector<int>{0, 2}));
+    ASSERT_EQ(config.layerIdsForGroup(full_group->tag()), (std::vector<int>{0, 2}));
 
     const auto group_set_it =
         std::find_if(cache->groupSets().begin(), cache->groupSets().end(), [&config](const GroupSetPtr& group_set) {
@@ -1039,7 +1048,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReorderedAllocatorGroupsAndPoolsBindByTag) {
             manager->blockPool()->incRef(*blocks);
             for (const int layer : config.layerIdsForGroup(manager->tag())) {
                 const auto expected = manager->convertIndexToBuffer(layer, blocks->front());
-                const auto actual   = backend->resolve(layer, config.groupIdForTag(manager->tag()), blocks->front());
+                const auto actual   = backend->resolve(layer, manager->tag(), blocks->front());
                 ASSERT_EQ(actual.size(), expected.size());
                 for (size_t i = 0; i < actual.size(); ++i) {
                     EXPECT_EQ(actual[i].addr, expected[i].addr);
@@ -1169,8 +1178,8 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
     ASSERT_NE(context, nullptr);
     ASSERT_EQ(context->backendHandles().size(), 1u);
     ASSERT_EQ(context->backendHandles()[0].size(), 2u);
-    EXPECT_EQ(context->backendHandles()[0][0].group_id, 0u);
-    EXPECT_EQ(context->backendHandles()[0][1].group_id, 1u);
+    EXPECT_EQ(context->backendHandles()[0][0].tag, "default");
+    EXPECT_EQ(context->backendHandles()[0][1].tag, "indexer_kv");
 
     const GroupSetPtr& group_set = cache->groupSets()[0];
     ASSERT_NE(group_set->hostPool(), nullptr);
@@ -1186,7 +1195,7 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
         const auto&  cache_group = cache_groups[member];
         const size_t layer_bytes =
             cache_group->config().kvBlockStrideBytes() + cache_group->config().kvScaleStrideBytes();
-        const auto layer_ids = config.layerIdsForGroup(config.groupIdForTag(cache_group->tag()));
+        const auto layer_ids = config.layerIdsForGroup(cache_group->tag());
         for (size_t local_layer = 0; local_layer < layer_ids.size(); ++local_layer) {
             const int     global_layer = layer_ids[local_layer];
             const uint8_t pattern      = static_cast<uint8_t>(0x21 + member * 0x20 + local_layer);
@@ -1200,7 +1209,7 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
         const auto&  cache_group = cache_groups[member];
         const size_t layer_bytes =
             cache_group->config().kvBlockStrideBytes() + cache_group->config().kvScaleStrideBytes();
-        for (int global_layer : config.layerIdsForGroup(config.groupIdForTag(cache_group->tag()))) {
+        for (int global_layer : config.layerIdsForGroup(cache_group->tag())) {
             writeDevicePattern(
                 cache_group->convertIndexToAddr(global_layer, device_blocks[0][member]).kv_addr, layer_bytes, 0);
         }
@@ -1211,7 +1220,7 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
         const auto&  cache_group = cache_groups[member];
         const size_t layer_bytes =
             cache_group->config().kvBlockStrideBytes() + cache_group->config().kvScaleStrideBytes();
-        const auto layer_ids = config.layerIdsForGroup(config.groupIdForTag(cache_group->tag()));
+        const auto layer_ids = config.layerIdsForGroup(cache_group->tag());
         for (size_t local_layer = 0; local_layer < layer_ids.size(); ++local_layer) {
             const int     global_layer = layer_ids[local_layer];
             const uint8_t pattern      = static_cast<uint8_t>(0x21 + member * 0x20 + local_layer);
@@ -1232,9 +1241,9 @@ TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentPhysicalLayoutsAggr
     BlockTreeCachePtr                 cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_NE(cache, nullptr);
-    EXPECT_NE(config.topology().groupById(0).block_num, config.topology().groupById(1).block_num);
-    EXPECT_NE(config.topology().groupById(0).kvBlockStrideBytes(), config.topology().groupById(1).kvBlockStrideBytes());
-    EXPECT_NE(config.topology().groupById(0).policy.cp_slice, config.topology().groupById(1).policy.cp_slice);
+    EXPECT_NE(config.group("group0").block_num, config.group("group1").block_num);
+    EXPECT_NE(config.group("group0").kvBlockStrideBytes(), config.group("group1").kvBlockStrideBytes());
+    EXPECT_NE(config.group("group0").policy.cp_slice, config.group("group1").policy.cp_slice);
     ASSERT_EQ(cache->groupSets().size(), 1u);
     EXPECT_EQ(cache->groupSets()[0]->groupTags(), tagsFor(config, {0, 1}));
     ASSERT_EQ(cache->groupSets()[0]->devicePools().size(), 2u);
@@ -1617,8 +1626,8 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
         group_set_a->unreferenceBlocks(device_resource, BlockTreeRefType::CACHE);
     };
 
-    const int    b_layer = config.layerIdsForGroup(1).front();
-    const size_t b_bytes = config.kvBlockStrideBytesForGroup(1) + config.kvScaleStrideBytesForGroup(1);
+    const int    b_layer = config.layerIdsForGroup("group1").front();
+    const size_t b_bytes = config.group("group1").kvBlockStrideBytes() + config.group("group1").kvScaleStrideBytes();
     ASSERT_GT(b_bytes, 0u);
     writeDevicePattern(
         allocator->cacheGroups()[1]->convertIndexToAddr(b_layer, original_blocks[1]).kv_addr, b_bytes, 0x5a);
@@ -1803,7 +1812,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentPoolGroupSetDependsOnlyOnPublishedT
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->groupSets().size(), 2u);
     for (const auto& group_set : cache->groupSets()) {
-        EXPECT_EQ(group_set->topologyPtr()->groupTagsSnapshot(), topology->groupTagsSnapshot());
+        EXPECT_EQ(group_set->topologyPtr()->groupTags(), topology->groupTags());
         EXPECT_GT(group_set->payloadBytes(), 0u);
     }
 }
@@ -2017,7 +2026,7 @@ TEST_F(BlockTreeCacheFactoryTest, UnifiedCreatorPreservesRuntimeTierConfiguratio
     EXPECT_DOUBLE_EQ(cache->config().watermark_host.high_ratio, 0.72);
     EXPECT_DOUBLE_EQ(cache->config().watermark_disk.low_ratio, 0.63);
     EXPECT_DOUBLE_EQ(cache->config().watermark_disk.high_ratio, 0.73);
-    EXPECT_EQ(config.blockNumForGroup(0), 8u);
+    EXPECT_EQ(config.group("default").block_num, 8u);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, TierWatermarksPropagateAndInvalidCombinationsAreRejected) {
@@ -2226,7 +2235,10 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     }
     test::configureIndexedTestGroups(
         cache_config, specs, {{0}, {1}, {2}}, {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::SWA});
-    auto policies                   = cache_config.groupPoliciesSnapshot();
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : cache_config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     policies[2].enable_prefix_reuse = true;
     policies[2].sliding_window_size = 2;
     test::setTestGroupPolicies(cache_config, policies);

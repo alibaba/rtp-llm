@@ -549,11 +549,9 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    auto type_list = resource_context_.cache_manager->cacheConfig().groupTypesSnapshot();
-
-    for (size_t i = 0; i < type_list.size(); i++) {
-        if (type_list[i] == CacheGroupType::LINEAR) {
-            batch_kv_cache_resource_->swapBlocks(batch_id, i, rhs, lhs);
+    for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, rhs, lhs);
         }
     }
 }

@@ -340,8 +340,8 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     BatchKVCacheResource resource;
     resource.resetBatchSize(2);
     resource.initGroups(cache_config.topologyPtr());
-    resource.setBatchBlocks(0, 0, {1, 2});
-    resource.setBatchBlocks(1, 0, {3, 4});
+    resource.setBatchBlocks(0, "default", {1, 2});
+    resource.setBatchBlocks(1, "default", {3, 4});
     resource.setBatchCacheKeys(0, CacheKeysType{101, 102, 103});
     resource.setBatchCacheKeys(1, CacheKeysType{201, 202, 203, 204, 205});
     stream->setKVCache(resource);
@@ -467,8 +467,8 @@ TEST_F(NormalBatchStreamProcessorTest, testMixedGroupBlockWidthsGatherCompleteRo
                 BatchKVCacheResource resource;
                 resource.resetBatchSize(1);
                 resource.initGroups(cache_config.topologyPtr());
-                resource.setBatchBlocks(0, full_gid, {10 + batch * 2, 11 + batch * 2});
-                resource.setBatchBlocks(0, swa_gid, {20 + batch});
+                resource.setBatchBlocks(0, "full", {10 + batch * 2, 11 + batch * 2});
+                resource.setBatchBlocks(0, "swa", {20 + batch});
                 stream->setKVCache(resource);
                 stream->generate_status_->status = StreamState::RUNNING;
                 streams.push_back(stream);
@@ -565,7 +565,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
     addr1.initGroups(cache_config.topologyPtr());
-    addr1.setBatchBlocks(0, 0, {1, 2, 3, 4});
+    addr1.setBatchBlocks(0, "default", {1, 2, 3, 4});
     stream1->setKVCache(addr1);
     stream1->setIsContextStream(false);
 
@@ -578,7 +578,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     BatchKVCacheResource addr2;
     addr2.resetBatchSize(1);
     addr2.initGroups(cache_config.topologyPtr());
-    addr2.setBatchBlocks(0, 0, {5, 6, 7, 8});
+    addr2.setBatchBlocks(0, "default", {5, 6, 7, 8});
     stream2->setKVCache(addr2);
     stream2->setIsContextStream(false);
 
@@ -590,7 +590,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
     addr3.initGroups(cache_config.topologyPtr());
-    addr3.setBatchBlocks(0, 0, {9, 10});
+    addr3.setBatchBlocks(0, "default", {9, 10});
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4 = make_shared<GenerateInput>();
@@ -601,7 +601,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
     addr4.initGroups(cache_config.topologyPtr());
-    addr4.setBatchBlocks(0, 0, {11, 12, 13, 14});
+    addr4.setBatchBlocks(0, "default", {11, 12, 13, 14});
     stream4->setKVCache(addr4);
     stream4->setReuseLength(1);
 
@@ -753,7 +753,7 @@ TEST_P(OutputDispatchTest, testSoftmaxProbs) {
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
     addr1.initGroups(cache_config.topologyPtr());
-    addr1.setBatchBlocks(0, 0, {1});
+    addr1.setBatchBlocks(0, "default", {1});
     stream1->setKVCache(addr1);
 
     std::list<GenerateStreamPtr> streams;
@@ -1491,7 +1491,7 @@ TEST_P(OutputDispatchTest, testLoss) {
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
     addr1.initGroups(cache_config.topologyPtr());
-    addr1.setBatchBlocks(0, 0, {1});
+    addr1.setBatchBlocks(0, "default", {1});
     stream1->setKVCache(addr1);
 
     std::shared_ptr<GenerateInput> query3   = make_shared<GenerateInput>();
@@ -1503,7 +1503,7 @@ TEST_P(OutputDispatchTest, testLoss) {
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
     addr3.initGroups(cache_config.topologyPtr());
-    addr3.setBatchBlocks(0, 0, {9});
+    addr3.setBatchBlocks(0, "default", {9});
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4   = make_shared<GenerateInput>();
@@ -1515,7 +1515,7 @@ TEST_P(OutputDispatchTest, testLoss) {
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
     addr4.initGroups(cache_config.topologyPtr());
-    addr4.setBatchBlocks(0, 0, {11, 12});
+    addr4.setBatchBlocks(0, "default", {11, 12});
     stream4->setKVCache(addr4);
 
     std::list<GenerateStreamPtr> streams;

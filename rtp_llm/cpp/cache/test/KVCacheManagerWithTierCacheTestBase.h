@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -422,12 +423,12 @@ inline CompleteTokenIdsPtr makeBatchedTokenIdsWithCommonPrefix(
     return token_ids;
 }
 
-inline bool isReusableGroup(const CacheConfig& config, int group_id) {
-    return config.policyForGroup(static_cast<size_t>(group_id)).enable_prefix_reuse;
+inline bool isReusableGroup(const CacheConfig& config, const std::string& tag) {
+    return config.group(tag).policy.enable_prefix_reuse;
 }
 
-inline bool isFullGroup(const CacheConfig& config, int group_id) {
-    return config.typeForGroup(static_cast<size_t>(group_id)) == CacheGroupType::FULL;
+inline bool isFullGroup(const CacheConfig& config, const std::string& tag) {
+    return config.group(tag).policy.group_type == CacheGroupType::FULL;
 }
 
 struct PoolSnapshot {
@@ -624,12 +625,13 @@ expectDsv4TierTopology(const std::shared_ptr<KVCacheManager>& manager, const Cac
         EXPECT_TRUE(unique_device_pools.emplace(group->blockPool().get()).second)
             << "device pool must be independent, group=" << group_id;
         EXPECT_GT(group->blockPool()->freeBlocksNum(), 0u) << "group=" << group_id;
-        EXPECT_EQ(isReusableGroup(config, group_id), config.tagForGroup(static_cast<size_t>(group_id)) != "hca_state");
+        EXPECT_EQ(isReusableGroup(config, config.groupTags()[static_cast<size_t>(group_id)]),
+                  config.groupTags()[static_cast<size_t>(group_id)] != "hca_state");
     }
     EXPECT_EQ(unique_device_pools.size(), static_cast<size_t>(kDsv4GroupCount));
 
     ASSERT_EQ(cache->groupSets().size(), 2u);
-    std::vector<size_t>                membership_count(static_cast<size_t>(kDsv4GroupCount), 0);
+    std::unordered_map<std::string, size_t> membership_count;
     std::unordered_set<CacheGroupType> group_set_types;
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
         const auto& group_set = cache->groupSets()[group_set_id];
@@ -653,16 +655,20 @@ expectDsv4TierTopology(const std::shared_ptr<KVCacheManager>& manager, const Cac
             EXPECT_EQ(group_set->diskPool(), nullptr);
         }
         for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
-            const size_t group_id = group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_index]);
-            ASSERT_LT(group_id, static_cast<size_t>(kDsv4GroupCount));
-            EXPECT_TRUE(config.policyForGroup(group_id).enable_prefix_reuse);
-            EXPECT_EQ(group_set->devicePools()[member_index].get(), allocator_groups[group_id]->blockPool().get());
-            ++membership_count[group_id];
+            const auto& tag = group_set->groupTags()[member_index];
+            ASSERT_NE(std::find(kDsv4Tags.begin(), kDsv4Tags.end(), tag), kDsv4Tags.end());
+            EXPECT_TRUE(config.group(tag).policy.enable_prefix_reuse);
+            const auto manager = std::find_if(allocator_groups.begin(), allocator_groups.end(), [&](const auto& group) {
+                return group && group->tag() == tag;
+            });
+            ASSERT_NE(manager, allocator_groups.end());
+            EXPECT_EQ(group_set->devicePools()[member_index].get(), (*manager)->blockPool().get());
+            ++membership_count[tag];
         }
     }
-    for (int group_id = 0; group_id < kDsv4GroupCount; ++group_id) {
-        const bool hca_state = config.tagForGroup(static_cast<size_t>(group_id)) == "hca_state";
-        EXPECT_EQ(membership_count[static_cast<size_t>(group_id)], hca_state ? 0u : 1u) << "group=" << group_id;
+    for (const auto& tag : config.groupTags()) {
+        const bool hca_state = tag == "hca_state";
+        EXPECT_EQ(membership_count[tag], hca_state ? 0u : 1u) << "group=" << tag;
     }
     EXPECT_EQ(group_set_types.size(), 2u);
 }
@@ -672,7 +678,7 @@ struct SeededPrefix {
     CompleteTokenIdsPtr           token_ids;
     CacheKeysType                 full_cache_keys;
     CacheKeysType                 cache_keys;
-    std::vector<BlockIndicesType> blocks_by_group;
+    std::unordered_map<std::string, BlockIndicesType> blocks_by_group;
 };
 
 inline void appendDevicePools(const GroupSetPtr& group_set, std::vector<std::shared_ptr<IBlockPool>>& pools) {
@@ -686,8 +692,7 @@ groupSetSeedBlocksAt(const GroupSetPtr& group_set, const SeededPrefix& seed, siz
     BlockIndicesType blocks;
     blocks.reserve(group_set->groupTags().size());
     for (const auto& tag : group_set->groupTags()) {
-        const size_t group_id = group_set->topologyPtr()->groupIdForTag(tag);
-        blocks.push_back(seed.blocks_by_group[group_id][path_index]);
+        blocks.push_back(seed.blocks_by_group.at(tag)[path_index]);
     }
     return blocks;
 }
@@ -699,8 +704,7 @@ inline BlockIndicesType groupSetRequestBlocksAt(const GroupSetPtr&             g
     BlockIndicesType blocks;
     blocks.reserve(group_set->groupTags().size());
     for (const auto& tag : group_set->groupTags()) {
-        const size_t group_id = group_set->topologyPtr()->groupIdForTag(tag);
-        blocks.push_back(resource->blocks(batch_id, static_cast<int>(group_id))[path_index]);
+        blocks.push_back(resource->blocks(batch_id, tag)[path_index]);
     }
     return blocks;
 }
@@ -846,18 +850,24 @@ deviceBlockLayerHasPattern(const DeviceBlockPoolPtr& pool, BlockIdxType block, s
 
 inline bool fillGroupBlockPayload(const std::shared_ptr<KVCacheManager>& manager,
                                   const CacheConfig&                     config,
-                                  int                                    group_id,
+                                  const std::string&                     tag,
                                   BlockIdxType                           block,
                                   size_t                                 path_index,
                                   bool                                   poison) {
-    if (manager == nullptr || group_id < 0 || group_id >= config.groupNums()) {
+    if (manager == nullptr) {
         return false;
     }
     const auto groups = manager->allocator_->cacheGroups();
-    if (static_cast<size_t>(group_id) >= groups.size() || groups[static_cast<size_t>(group_id)] == nullptr) {
+    const auto group  = std::find_if(
+        groups.begin(), groups.end(), [&](const auto& candidate) { return candidate && candidate->tag() == tag; });
+    const auto& tags        = config.groupTags();
+    const auto  pattern_row = std::find(tags.begin(), tags.end(), tag);
+    if (group == groups.end() || pattern_row == tags.end()) {
         return false;
     }
-    const auto& layer_ids = config.layerIdsForGroup(static_cast<size_t>(group_id));
+    // Preserve the fixture's original payload bytes; this row does not select a pool.
+    const int   group_id  = static_cast<int>(std::distance(tags.begin(), pattern_row));
+    const auto& layer_ids = config.layerIdsForGroup(tag);
     if (layer_ids.empty()) {
         return false;
     }
@@ -866,7 +876,7 @@ inline bool fillGroupBlockPayload(const std::shared_ptr<KVCacheManager>& manager
         if (poison) {
             pattern ^= 0xFF;
         }
-        if (!fillDeviceBlockLayer(groups[static_cast<size_t>(group_id)]->blockPool(), block, local_layer, pattern)) {
+        if (!fillDeviceBlockLayer((*group)->blockPool(), block, local_layer, pattern)) {
             return false;
         }
     }
@@ -875,25 +885,29 @@ inline bool fillGroupBlockPayload(const std::shared_ptr<KVCacheManager>& manager
 
 inline bool groupBlockPayloadMatches(const std::shared_ptr<KVCacheManager>& manager,
                                      const CacheConfig&                     config,
-                                     int                                    group_id,
+                                     const std::string&                     tag,
                                      BlockIdxType                           block,
                                      size_t                                 path_index) {
-    if (manager == nullptr || group_id < 0 || group_id >= config.groupNums()) {
+    if (manager == nullptr) {
         return false;
     }
     const auto groups = manager->allocator_->cacheGroups();
-    if (static_cast<size_t>(group_id) >= groups.size() || groups[static_cast<size_t>(group_id)] == nullptr) {
+    const auto group  = std::find_if(
+        groups.begin(), groups.end(), [&](const auto& candidate) { return candidate && candidate->tag() == tag; });
+    const auto& tags        = config.groupTags();
+    const auto  pattern_row = std::find(tags.begin(), tags.end(), tag);
+    if (group == groups.end() || pattern_row == tags.end()) {
         return false;
     }
-    const auto& layer_ids = config.layerIdsForGroup(static_cast<size_t>(group_id));
+    // Preserve the fixture's original payload bytes; this row does not select a pool.
+    const int   group_id  = static_cast<int>(std::distance(tags.begin(), pattern_row));
+    const auto& layer_ids = config.layerIdsForGroup(tag);
     if (layer_ids.empty()) {
         return false;
     }
     for (size_t local_layer = 0; local_layer < layer_ids.size(); ++local_layer) {
-        if (!deviceBlockLayerHasPattern(groups[static_cast<size_t>(group_id)]->blockPool(),
-                                        block,
-                                        local_layer,
-                                        payloadPattern(group_id, path_index, local_layer))) {
+        if (!deviceBlockLayerHasPattern(
+                (*group)->blockPool(), block, local_layer, payloadPattern(group_id, path_index, local_layer))) {
             return false;
         }
     }
@@ -909,16 +923,16 @@ fillSeedPayload(const std::shared_ptr<KVCacheManager>& manager, const CacheConfi
     if (groups.size() != seed.blocks_by_group.size()) {
         return false;
     }
-    for (int group_id = 0; group_id < config.groupNums(); ++group_id) {
-        if (!isReusableGroup(config, group_id)) {
+    for (const auto& tag : config.groupTags()) {
+        if (!isReusableGroup(config, tag)) {
             continue;
         }
-        const auto& blocks = seed.blocks_by_group[static_cast<size_t>(group_id)];
+        const auto& blocks = seed.blocks_by_group.at(tag);
         if (blocks.size() != seed.cache_keys.size()) {
             return false;
         }
         for (size_t path_index = 0; path_index < blocks.size(); ++path_index) {
-            if (!fillGroupBlockPayload(manager, config, group_id, blocks[path_index], path_index, /*poison=*/false)) {
+            if (!fillGroupBlockPayload(manager, config, tag, blocks[path_index], path_index, /*poison=*/false)) {
                 return false;
             }
         }
@@ -926,14 +940,11 @@ fillSeedPayload(const std::shared_ptr<KVCacheManager>& manager, const CacheConfi
     return true;
 }
 
-inline std::optional<size_t>
-cpCanonicalBlockPosition(const CPSlotMapper& mapper, const CacheConfig& config, int group_id, size_t path_index) {
-    if (group_id < 0 || group_id >= config.groupNums()) {
-        return std::nullopt;
-    }
-    const size_t gid = static_cast<size_t>(group_id);
-    if (mapper.blockRoundRobinGroup(config, config.groupTags()[gid])
-        || mapper.compactLastRankGroup(config, config.groupTags()[gid])) {
+inline std::optional<size_t> cpCanonicalBlockPosition(const CPSlotMapper& mapper,
+                                                      const CacheConfig&  config,
+                                                      std::string_view    tag,
+                                                      size_t              path_index) {
+    if (mapper.blockRoundRobinGroup(config, tag) || mapper.compactLastRankGroup(config, tag)) {
         return path_index;
     }
     return (path_index + 1) * static_cast<size_t>(mapper.cpSize()) - 1;
@@ -946,15 +957,15 @@ inline bool fillCpCanonicalSeedPayload(const std::shared_ptr<KVCacheManager>& ma
     if (manager == nullptr || seed.blocks_by_group.size() != static_cast<size_t>(config.groupNums())) {
         return false;
     }
-    for (int group_id = 0; group_id < config.groupNums(); ++group_id) {
-        if (!isReusableGroup(config, group_id)) {
+    for (const auto& tag : config.groupTags()) {
+        if (!isReusableGroup(config, tag)) {
             continue;
         }
-        const auto& blocks = seed.blocks_by_group[static_cast<size_t>(group_id)];
+        const auto& blocks = seed.blocks_by_group.at(tag);
         for (size_t path_index = 0; path_index < seed.cache_keys.size(); ++path_index) {
-            const auto position = cpCanonicalBlockPosition(mapper, config, group_id, path_index);
+            const auto position = cpCanonicalBlockPosition(mapper, config, tag, path_index);
             if (!position.has_value() || *position >= blocks.size() || isNullBlockIdx(blocks[*position])
-                || !fillGroupBlockPayload(manager, config, group_id, blocks[*position], path_index, /*poison=*/false)) {
+                || !fillGroupBlockPayload(manager, config, tag, blocks[*position], path_index, /*poison=*/false)) {
                 return false;
             }
         }
@@ -969,7 +980,6 @@ inline bool pathDevicePayloadMatches(const std::shared_ptr<KVCacheManager>& mana
     if (manager == nullptr || !maybe_resources.has_value()) {
         return false;
     }
-    const auto groups = manager->allocator_->cacheGroups();
     for (size_t path_index = 0; path_index < maybe_resources->size(); ++path_index) {
         for (size_t group_set_id = 0; group_set_id < cache.groupSets().size(); ++group_set_id) {
             const auto& group_set = cache.groupSets()[group_set_id];
@@ -978,13 +988,9 @@ inline bool pathDevicePayloadMatches(const std::shared_ptr<KVCacheManager>& mana
                 return false;
             }
             for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
-                const size_t group_id = group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_index]);
-                if (group_id >= groups.size()
-                    || !groupBlockPayloadMatches(manager,
-                                                 manager->cacheConfig(),
-                                                 static_cast<int>(group_id),
-                                                 resource.device_blocks[member_index],
-                                                 path_index)) {
+                const auto& tag = group_set->groupTags()[member_index];
+                if (!groupBlockPayloadMatches(
+                        manager, manager->cacheConfig(), tag, resource.device_blocks[member_index], path_index)) {
                     return false;
                 }
             }
@@ -1016,11 +1022,9 @@ inline bool requestReusesExpectedPath(const BlockTreeCache&          cache,
         }
         const size_t reuse_begin = logical_reuse_blocks - reuse_count;
         for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
-            const size_t group_id = group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_index]);
-            if (group_id >= static_cast<size_t>(config.groupNums())) {
-                return false;
-            }
-            const auto& request_blocks = request_resource->blocks(0, static_cast<int>(group_id));
+            const auto& tag = group_set->groupTags()[member_index];
+            (void)config.group(tag);
+            const auto& request_blocks = request_resource->blocks(0, tag);
             if (request_blocks.size() < logical_reuse_blocks) {
                 return false;
             }
@@ -1065,21 +1069,15 @@ inline bool requestReusesExpectedCpCanonicalPath(const BlockTreeCache&          
         }
         const size_t reuse_begin = logical_reuse_blocks - reuse_count;
         for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
-            const int group_id =
-                static_cast<int>(group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_index]));
-            if (group_id < 0 || group_id >= config.groupNums()) {
+            const auto& tag        = group_set->groupTags()[member_index];
+            const auto  group_type = config.topology().group(tag).policy.group_type;
+            if ((group_type == CacheGroupType::FULL && !mapper.blockRoundRobinGroup(config, tag))
+                || (group_type == CacheGroupType::SWA && !mapper.compactLastRankGroup(config, tag))) {
                 return false;
             }
-            const auto group_type = config.typeForGroup(static_cast<size_t>(group_id));
-            if ((group_type == CacheGroupType::FULL
-                 && !mapper.blockRoundRobinGroup(config, config.groupTags()[static_cast<size_t>(group_id)]))
-                || (group_type == CacheGroupType::SWA
-                    && !mapper.compactLastRankGroup(config, config.groupTags()[static_cast<size_t>(group_id)]))) {
-                return false;
-            }
-            const auto& request_blocks = request_resource->blocks(0, group_id);
+            const auto& request_blocks = request_resource->blocks(0, tag);
             for (size_t path_index = reuse_begin; path_index < logical_reuse_blocks; ++path_index) {
-                const auto  position = cpCanonicalBlockPosition(mapper, config, group_id, path_index);
+                const auto  position = cpCanonicalBlockPosition(mapper, config, tag, path_index);
                 const auto* node     = found[path_index];
                 if (!position.has_value() || *position >= request_blocks.size() || node == nullptr
                     || group_set_id >= node->group_set_resources.size()) {
@@ -1121,18 +1119,14 @@ inline bool requestReusedPayloadMatchesExpectedPath(const std::shared_ptr<KVCach
         }
         const size_t reuse_begin = logical_reuse_blocks - reuse_count;
         for (const auto& tag : group_set->groupTags()) {
-            const size_t raw_group_id = group_set->topologyPtr()->groupIdForTag(tag);
-            if (raw_group_id >= static_cast<size_t>(config.groupNums())) {
-                return false;
-            }
-            const auto& blocks = request_resource->blocks(0, static_cast<int>(raw_group_id));
+            (void)config.group(tag);
+            const auto& blocks = request_resource->blocks(0, tag);
             if (blocks.size() < logical_reuse_blocks) {
                 return false;
             }
             for (size_t path_index = reuse_begin; path_index < logical_reuse_blocks; ++path_index) {
                 if (isNullBlockIdx(blocks[path_index])
-                    || !groupBlockPayloadMatches(
-                        manager, config, static_cast<int>(raw_group_id), blocks[path_index], path_index)) {
+                    || !groupBlockPayloadMatches(manager, config, tag, blocks[path_index], path_index)) {
                     return false;
                 }
             }
@@ -1229,8 +1223,8 @@ inline std::optional<SeededPrefix> seedDevicePrefix(const std::shared_ptr<KVCach
     seed.full_cache_keys = seed.resource->cacheKeys();
     seed.cache_keys      = seed.full_cache_keys;
     seed.blocks_by_group.reserve(static_cast<size_t>(config.groupNums()));
-    for (int group_id = 0; group_id < config.groupNums(); ++group_id) {
-        seed.blocks_by_group.push_back(seed.resource->blocks(0, group_id));
+    for (const auto& tag : config.groupTags()) {
+        seed.blocks_by_group.emplace(tag, seed.resource->blocks(0, tag));
     }
 
     // The next token makes the last allocated block a cacheable full prefix block,
@@ -1271,8 +1265,8 @@ inline std::optional<SeededPrefix> seedCpCanonicalDevicePrefix(const std::shared
     seed.full_cache_keys = seed.resource->cacheKeys();
     seed.cache_keys      = mapper->canonicalCacheKeys(seed.full_cache_keys);
     seed.blocks_by_group.reserve(static_cast<size_t>(config.groupNums()));
-    for (int group_id = 0; group_id < config.groupNums(); ++group_id) {
-        seed.blocks_by_group.push_back(seed.resource->blocks(0, group_id));
+    for (const auto& tag : config.groupTags()) {
+        seed.blocks_by_group.emplace(tag, seed.resource->blocks(0, tag));
     }
 
     // The sequence is exactly CP-virtual-block aligned, so manager insertion
@@ -1556,12 +1550,11 @@ protected:
                 if (path_index < reuse_begin) {
                     for (size_t member_group_id = 0; member_group_id < group_set->groupTags().size();
                          ++member_group_id) {
-                        const int group_id = static_cast<int>(
-                            group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_group_id]));
-                        const BlockIndicesType& blocks   = request->blocks(0, group_id);
+                        const auto&             tag    = group_set->groupTags()[member_group_id];
+                        const BlockIndicesType& blocks = request->blocks(0, tag);
                         ASSERT_EQ(blocks.size(), seed.cache_keys.size() + 1);
                         EXPECT_TRUE(isNullBlockIdx(blocks[path_index]))
-                            << "non-active SWA prefix must remain sparse, group=" << group_id << " path=" << path_index;
+                            << "non-active SWA prefix must remain sparse, group=" << tag << " path=" << path_index;
                     }
                     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
                     EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
@@ -1571,9 +1564,8 @@ protected:
                 EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 2u);
                 ASSERT_EQ(group_set->groupTags().size(), group_set->devicePools().size());
                 for (size_t member_group_id = 0; member_group_id < group_set->groupTags().size(); ++member_group_id) {
-                    const int group_id = static_cast<int>(
-                        group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_group_id]));
-                    const BlockIndicesType& blocks   = request->blocks(0, group_id);
+                    const auto&             tag    = group_set->groupTags()[member_group_id];
+                    const BlockIndicesType& blocks = request->blocks(0, tag);
                     ASSERT_EQ(blocks.size(), seed.cache_keys.size() + 1);
                     ASSERT_FALSE(isNullBlockIdx(blocks[path_index]));
                     EXPECT_EQ(group_set->devicePools()[member_group_id]->refCount(blocks[path_index]), 2u);
@@ -1610,9 +1602,8 @@ protected:
                 if (path_index < reuse_begin) {
                     for (size_t member_group_id = 0; member_group_id < group_set->groupTags().size();
                          ++member_group_id) {
-                        const int group_id = static_cast<int>(
-                            group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_group_id]));
-                        const BlockIndicesType& blocks   = request->blocks(0, group_id);
+                        const auto&             tag    = group_set->groupTags()[member_group_id];
+                        const BlockIndicesType& blocks = request->blocks(0, tag);
                         ASSERT_EQ(blocks.size(), seed.cache_keys.size() + 1);
                         EXPECT_TRUE(isNullBlockIdx(blocks[path_index]));
                     }
@@ -1627,9 +1618,8 @@ protected:
                 BlockIndicesType expected_device_blocks;
                 expected_device_blocks.reserve(group_set->groupTags().size());
                 for (size_t member_group_id = 0; member_group_id < group_set->groupTags().size(); ++member_group_id) {
-                    const int group_id = static_cast<int>(
-                        group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_group_id]));
-                    const BlockIndicesType& blocks   = request->blocks(0, group_id);
+                    const auto&             tag    = group_set->groupTags()[member_group_id];
+                    const BlockIndicesType& blocks = request->blocks(0, tag);
                     ASSERT_EQ(blocks.size(), seed.cache_keys.size() + 1);
                     ASSERT_FALSE(isNullBlockIdx(blocks[path_index]));
                     expected_device_blocks.push_back(blocks[path_index]);
@@ -1774,15 +1764,14 @@ protected:
             }
             ASSERT_EQ(group_set->groupTags().size(), group_set->devicePools().size());
             for (size_t member_group_id = 0; member_group_id < group_set->groupTags().size(); ++member_group_id) {
-                const int group_id =
-                    static_cast<int>(group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_group_id]));
-                const BlockIndicesType& blocks   = failed_resource->blocks(0, group_id);
+                const auto&             tag    = group_set->groupTags()[member_group_id];
+                const BlockIndicesType& blocks = failed_resource->blocks(0, tag);
                 ASSERT_FALSE(blocks.empty());
                 ASSERT_FALSE(isNullBlockIdx(blocks.front()));
                 failed_targets[group_set_id].push_back(blocks.front());
                 EXPECT_EQ(group_set->devicePools()[member_group_id]->refCount(blocks.front()), 2u);
                 ASSERT_TRUE(fillGroupBlockPayload(
-                    manager_, cache_config_, group_id, blocks.front(), /*path_index=*/0, /*poison=*/true));
+                    manager_, cache_config_, tag, blocks.front(), /*path_index=*/0, /*poison=*/true));
             }
         }
 
@@ -1871,13 +1860,12 @@ protected:
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);
             EXPECT_EQ(resource.getTopTier(), source_tiers[group_set_id]);
             for (size_t member_group_id = 0; member_group_id < group_set->groupTags().size(); ++member_group_id) {
-                const int group_id =
-                    static_cast<int>(group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_group_id]));
-                const BlockIndicesType& blocks   = retry_resource->blocks(0, group_id);
+                const auto&             tag    = group_set->groupTags()[member_group_id];
+                const BlockIndicesType& blocks = retry_resource->blocks(0, tag);
                 ASSERT_FALSE(blocks.empty());
                 ASSERT_FALSE(isNullBlockIdx(blocks.front()));
                 ASSERT_TRUE(fillGroupBlockPayload(
-                    manager_, cache_config_, group_id, blocks.front(), /*path_index=*/0, /*poison=*/true));
+                    manager_, cache_config_, tag, blocks.front(), /*path_index=*/0, /*poison=*/true));
             }
         }
 
@@ -2015,9 +2003,8 @@ protected:
             EXPECT_EQ(source_pool->referencedBlocksNum(BlockTreeRefType::LOAD), 1u);
             ASSERT_EQ(group_set->groupTags().size(), group_set->devicePools().size());
             for (size_t member_group_id = 0; member_group_id < group_set->groupTags().size(); ++member_group_id) {
-                const int group_id =
-                    static_cast<int>(group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_group_id]));
-                const BlockIndicesType& blocks   = first_resource->blocks(0, group_id);
+                const auto&             tag    = group_set->groupTags()[member_group_id];
+                const BlockIndicesType& blocks = first_resource->blocks(0, tag);
                 ASSERT_FALSE(blocks.empty());
                 ASSERT_FALSE(isNullBlockIdx(blocks.front()));
                 load_targets[group_set_id].push_back(blocks.front());
@@ -2053,10 +2040,9 @@ protected:
                 << "a joiner references the in-flight target, not the source";
             ASSERT_EQ(group_set->groupTags().size(), load_targets[group_set_id].size());
             for (size_t member_group_id = 0; member_group_id < group_set->groupTags().size(); ++member_group_id) {
-                const int group_id =
-                    static_cast<int>(group_set->topologyPtr()->groupIdForTag(group_set->groupTags()[member_group_id]));
-                const BlockIndicesType& first_blocks  = first_resource->blocks(0, group_id);
-                const BlockIndicesType& second_blocks = second_resource->blocks(0, group_id);
+                const auto&             tag           = group_set->groupTags()[member_group_id];
+                const BlockIndicesType& first_blocks  = first_resource->blocks(0, tag);
+                const BlockIndicesType& second_blocks = second_resource->blocks(0, tag);
                 ASSERT_FALSE(first_blocks.empty());
                 ASSERT_FALSE(second_blocks.empty());
                 EXPECT_EQ(first_blocks.front(), load_targets[group_set_id][member_group_id]);

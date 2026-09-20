@@ -116,7 +116,13 @@ class MockClientWrapper final: public kvcm::ClientWrapper {
 public:
     MockClientWrapper(): ClientWrapper(std::make_unique<kvcm::MockClientFactory>()) {}
 
-    MOCK_METHOD(bool, init, (const ConfigMap& config_map, const kv_cache_manager::InitParams& init_params), (override));
+    MOCK_METHOD(bool,
+                initForPools,
+                (const ConfigMap&,
+                 kv_cache_manager::RoleType,
+                 const std::vector<PoolRegistration>&,
+                 const std::vector<std::string>&),
+                (override));
     MOCK_METHOD(void, shutdown, (), (noexcept, override));
     MOCK_METHOD((std::pair<bool, kv_cache_manager::Locations>),
                 match,
@@ -145,23 +151,26 @@ public:
                  const kv_cache_manager::Locations&),
                 (override));
     MOCK_METHOD(bool,
-                loadKvCaches,
-                (const kv_cache_manager::UriStrVec&,
+                loadKvCachesForTag,
+                (const std::string&,
+                 const kv_cache_manager::UriStrVec&,
                  kv_cache_manager::BlockBuffers&,
                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&),
                 (override));
     MOCK_METHOD((std::pair<bool, kv_cache_manager::UriStrVec>),
-                saveKvCaches,
-                (const kv_cache_manager::UriStrVec&,
+                saveKvCachesForTag,
+                (const std::string&,
+                 const kv_cache_manager::UriStrVec&,
                  const kv_cache_manager::BlockBuffers&,
                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&),
                 (override));
 };
 
 struct BackendEnvironment {
-    CacheConfig        cache_config;
-    DeviceBlockPoolPtr device_pool;
-    BlockIdxType       block_id{NULL_BLOCK_IDX};
+    CacheConfig                cache_config;
+    DeviceBlockPoolPtr         device_pool;
+    StorageBackend::PoolsByTag pools_by_tag;
+    BlockIdxType               block_id{NULL_BLOCK_IDX};
 
     BackendEnvironment()                              = default;
     BackendEnvironment(BackendEnvironment&&) noexcept = default;
@@ -169,8 +178,10 @@ struct BackendEnvironment {
     BackendEnvironment(const BackendEnvironment&)       = delete;
     BackendEnvironment& operator=(const BackendEnvironment&) = delete;
     ~BackendEnvironment() {
-        if (device_pool && device_pool->isAllocated(block_id)) {
-            device_pool->decRef(block_id);
+        for (const auto& [tag, pool] : pools_by_tag) {
+            if (pool->isAllocated(block_id)) {
+                pool->decRef(block_id);
+            }
         }
     }
 };
@@ -204,8 +215,26 @@ public:
         pool_->incRef(blocks_);
     }
 
+    ScopedReferencedBlocks(const BackendEnvironment& environment, size_t count) {
+        for (const auto& tag : environment.cache_config.groupTags()) {
+            const auto& pool   = environment.pools_by_tag.at(tag);
+            const auto  blocks = pool->malloc(count);
+            RTP_LLM_CHECK(blocks.has_value());
+            pool->incRef(*blocks);
+            if (blocks_.empty()) {
+                blocks_ = *blocks;
+            }
+            RTP_LLM_CHECK(blocks_ == *blocks);
+            pools_.push_back(pool);
+        }
+    }
     ~ScopedReferencedBlocks() {
-        pool_->decRef(blocks_);
+        if (pool_) {
+            pool_->decRef(blocks_);
+        }
+        for (const auto& pool : pools_) {
+            pool->decRef(blocks_);
+        }
     }
 
     const std::vector<BlockIdxType>& get() const {
@@ -213,8 +242,9 @@ public:
     }
 
 private:
-    DeviceBlockPoolPtr        pool_;
-    std::vector<BlockIdxType> blocks_;
+    DeviceBlockPoolPtr              pool_;
+    std::vector<DeviceBlockPoolPtr> pools_;
+    std::vector<BlockIdxType>       blocks_;
 };
 
 struct MatchObservation {
@@ -232,6 +262,32 @@ T await(std::future<T>& future) {
     return future.get();
 }
 
+void initializeEnvironmentPools(BackendEnvironment& environment, const std::string& name, size_t count) {
+    for (const auto& group : environment.cache_config.topology().groups()) {
+        std::vector<block_tree_cache_test::DeviceLayerBufferSpec> layers(
+            environment.cache_config.layerIdsForGroup(group.tag).size(),
+            {group.kvBlockStrideBytes(), group.kvScaleStrideBytes()});
+        auto       pool  = block_tree_cache_test::makeDevicePool(layers, count, name + "_" + group.tag);
+        const auto block = pool->malloc();
+        RTP_LLM_CHECK(block.has_value());
+        pool->incRef(*block);
+        if (!environment.device_pool) {
+            environment.device_pool = pool;
+            environment.block_id    = *block;
+        }
+        RTP_LLM_CHECK(*block == environment.block_id);
+        RTP_LLM_CHECK(environment.pools_by_tag.emplace(group.tag, pool).second);
+    }
+}
+
+std::vector<BlockInfo>
+environmentBuffers(const BackendEnvironment& environment, int layer, const std::string& tag, int block) {
+    const auto layers = environment.cache_config.layerIdsForGroup(tag);
+    const auto it     = std::find(layers.begin(), layers.end(), layer);
+    RTP_LLM_CHECK(it != layers.end());
+    return environment.pools_by_tag.at(tag)->convertIndexToBuffer(std::distance(layers.begin(), it), block);
+}
+
 [[maybe_unused]] BackendEnvironment makeBackendEnvironment(const std::string& pool_name) {
     BackendEnvironment result;
     result.cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
@@ -240,14 +296,7 @@ T await(std::future<T>& future) {
                                                          DataType::TYPE_FP16,
                                                          /*local_head_num_kv=*/1,
                                                          /*size_per_head=*/2);
-    result.device_pool  = block_tree_cache_test::makeDevicePool(
-        {{result.cache_config.kvBlockStrideBytesForGroup(0), result.cache_config.kvScaleStrideBytesForGroup(0)}},
-        /*usable_count=*/8,
-        pool_name);
-    const auto block = result.device_pool->malloc();
-    RTP_LLM_CHECK(block.has_value());
-    result.block_id = *block;
-    result.device_pool->incRef(result.block_id);
+    initializeEnvironmentPools(result, pool_name, 8);
     return result;
 }
 
@@ -260,20 +309,7 @@ T await(std::future<T>& future) {
                                                                /*group_layer_num=*/2,
                                                                /*local_head_num_kv=*/1,
                                                                /*size_per_head=*/2);
-    std::vector<block_tree_cache_test::DeviceLayerBufferSpec> layer_specs;
-    const auto& layer_group_ids = result.cache_config.topology().layerGroupIdsSnapshot();
-    layer_specs.reserve(layer_group_ids.size());
-    for (const auto& group_ids : layer_group_ids) {
-        RTP_LLM_CHECK(group_ids.size() == 1u);
-        const auto group_id = static_cast<size_t>(group_ids.front());
-        layer_specs.push_back({result.cache_config.kvBlockStrideBytesForGroup(group_id),
-                               result.cache_config.kvScaleStrideBytesForGroup(group_id)});
-    }
-    result.device_pool = block_tree_cache_test::makeDevicePool(layer_specs, /*usable_count=*/8, pool_name);
-    const auto block   = result.device_pool->malloc();
-    RTP_LLM_CHECK(block.has_value());
-    result.block_id = *block;
-    result.device_pool->incRef(result.block_id);
+    initializeEnvironmentPools(result, pool_name, 8);
     return result;
 }
 
@@ -310,19 +346,7 @@ T await(std::future<T>& future) {
     result.cache_config.fromGroupedSpecs(specs, layers_by_group, types, tags);
     result.cache_config.finalizeBlockNums(/*baseline_block_num=*/8, RuntimeConfig{});
 
-    std::vector<block_tree_cache_test::DeviceLayerBufferSpec> layer_specs;
-    layer_specs.reserve(group_count);
-    for (size_t group_id = 0; group_id < group_count; ++group_id) {
-        const size_t kv_stride    = result.cache_config.kvBlockStrideBytesForGroup(group_id);
-        const size_t scale_stride = result.cache_config.kvScaleStrideBytesForGroup(group_id);
-        layer_specs.push_back({kv_stride, scale_stride});
-    }
-
-    result.device_pool = block_tree_cache_test::makeDevicePool(layer_specs, /*usable_count=*/12, pool_name);
-    const auto block   = result.device_pool->malloc();
-    RTP_LLM_CHECK(block.has_value());
-    result.block_id = *block;
-    result.device_pool->incRef(result.block_id);
+    initializeEnvironmentPools(result, pool_name, 12);
     return result;
 }
 
@@ -353,23 +377,22 @@ T await(std::future<T>& future) {
     RTP_LLM_CHECK(block_ids.empty() || block_ids.size() == request.keys->size());
     for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
         const auto block_id = block_ids.empty() ? environment.block_id : block_ids[key_index];
-        request.handles[key_index].push_back({/*group_id=*/0, block_id});
+        request.handles[key_index].push_back({environment.cache_config.groupTags().front(), block_id});
     }
     request.local_matched_blocks_num = local_matched_blocks;
     return request;
 }
 
-[[maybe_unused]] StorageRequest makeGroupedStorageRequest(const BackendEnvironment&        environment,
-                                                          CacheKeysType                    keys,
-                                                          size_t                           local_matched_blocks,
-                                                          const std::vector<BlockIdxType>& block_ids,
-                                                          std::vector<std::vector<size_t>> groups_by_key = {}) {
+[[maybe_unused]] StorageRequest makeGroupedStorageRequest(const BackendEnvironment&             environment,
+                                                          CacheKeysType                         keys,
+                                                          size_t                                local_matched_blocks,
+                                                          const std::vector<BlockIdxType>&      block_ids,
+                                                          std::vector<std::vector<std::string>> groups_by_key = {}) {
     RTP_LLM_CHECK(keys.size() == block_ids.size());
     if (groups_by_key.empty()) {
         groups_by_key.resize(keys.size());
         for (auto& groups : groups_by_key) {
-            groups.resize(environment.cache_config.topology().groups().size());
-            std::iota(groups.begin(), groups.end(), 0);
+            groups = environment.cache_config.groupTags();
         }
     }
     RTP_LLM_CHECK(groups_by_key.size() == keys.size());
@@ -378,19 +401,19 @@ T await(std::future<T>& future) {
     request.keys = std::make_shared<const CacheKeysType>(std::move(keys));
     request.handles.resize(request.keys->size());
     for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
-        for (const size_t group_id : groups_by_key[key_index]) {
-            RTP_LLM_CHECK(group_id < environment.cache_config.topology().groups().size());
-            request.handles[key_index].push_back({group_id, block_ids[key_index]});
+        for (const auto& tag : groups_by_key[key_index]) {
+            environment.cache_config.group(tag);
+            request.handles[key_index].push_back({tag, block_ids[key_index]});
         }
     }
     request.local_matched_blocks_num = local_matched_blocks;
     return request;
 }
 
-[[maybe_unused]] void* blockBase(const BackendEnvironment& environment, size_t group_id, BlockIdxType block_id) {
-    const auto layer_ids = environment.cache_config.layerIdsForGroup(group_id);
+[[maybe_unused]] void* blockBase(const BackendEnvironment& environment, const std::string& tag, BlockIdxType block_id) {
+    const auto layer_ids = environment.cache_config.layerIdsForGroup(tag);
     RTP_LLM_CHECK(layer_ids.size() == 1u);
-    const auto info = environment.device_pool->convertIndexToBuffer(layer_ids.front(), block_id);
+    const auto info = environmentBuffers(environment, layer_ids.front(), tag, block_id);
     RTP_LLM_CHECK(info.size() == 1u);
     return info.front().addr;
 }
@@ -423,10 +446,11 @@ read(KVCMStorageBackend& backend, StorageRequest request, std::shared_ptr<Storag
 }
 
 [[maybe_unused]] bool initSingleRank(KVCMStorageBackend& backend, const BackendEnvironment& environment) {
-    std::vector<DeviceBlockPoolPtr> pools(environment.cache_config.topology().groups().size(), environment.device_pool);
-    return backend.init(environment.cache_config.topologyPtr(), std::move(pools), [&](int layer_id, int, int block_id) {
-        return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-    });
+    return backend.init(environment.cache_config.topologyPtr(),
+                        environment.pools_by_tag,
+                        [&](int layer_id, const std::string& tag, int block_id) {
+                            return environmentBuffers(environment, layer_id, tag, block_id);
+                        });
 }
 
 }  // namespace

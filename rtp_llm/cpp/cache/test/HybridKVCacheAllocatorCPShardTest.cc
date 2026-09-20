@@ -96,8 +96,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, NullMapperIsPassthrough) {
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    const int full_group_id = 1;
-    auto      batch_res     = makeBatchRes(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
+    auto batch_res = makeBatchRes(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
     // seq_len=16 => 4 resources @ block_size=4
     auto       tokens = makeTokens(/*batch=*/1, /*seq_len=*/16, /*sspb=*/4);
     MallocInfo info{batch_res, tokens};
@@ -106,7 +105,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, NullMapperIsPassthrough) {
     // cp_slot_mapper intentionally left null.
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(batch_res->blocksNum(0, full_group_id), 4);
+    EXPECT_EQ(batch_res->blocksNum(0, "full"), 4);
     EXPECT_EQ(result.block_aligned_input_length, 16);
 }
 
@@ -117,7 +116,6 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    const int full_group_id = 1;
     auto      batch_res     = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
     auto      tokens        = makeTokens(1, 16, 4);  // 4 logical blocks worth
 
@@ -127,7 +125,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(batch_res->blocksNum(0, full_group_id), 2)
+    EXPECT_EQ(batch_res->blocksNum(0, "full"), 2)
         << "cp_size=2 should halve allocation to ceil(4/2)=2 physical blocks per rank";
     EXPECT_EQ(batch_res->cacheKeys(0), (CacheKeysType{100, 101, 102, 103}));
     EXPECT_EQ(result.block_aligned_input_length, 16);
@@ -163,7 +161,7 @@ void expectCpCanonicalReuse(int                  seq_len,
     EXPECT_EQ(result.block_aligned_input_length, expected_input_length) << "seq_len=" << seq_len;
     EXPECT_EQ(batch_res->cacheResource(0).reuseBlockNum(), static_cast<size_t>(expected_reuse_len / 8))
         << "seq_len=" << seq_len;
-    EXPECT_EQ(batch_res->blocksNum(0, /*full_group_id=*/1), expected_local_blocks) << "seq_len=" << seq_len;
+    EXPECT_EQ(batch_res->blocksNum(0, "full"), expected_local_blocks) << "seq_len=" << seq_len;
 }
 
 TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseOnCanonicalKeysStaysBelowQueryLength) {
@@ -182,8 +180,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocSkipsReuseWhenDisabled) {
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    const int  full_group_id = 1;
-    const auto seeded        = seedCompleteBlockTreePath(allocator, CacheKeysType{101});
+    const auto seeded = seedCompleteBlockTreePath(allocator, CacheKeysType{101});
     ASSERT_TRUE(seeded.success);
 
     auto batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
@@ -196,7 +193,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocSkipsReuseWhenDisabled) {
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 0);
-    EXPECT_EQ(batch_res->blocksNum(0, full_group_id), 2);
+    EXPECT_EQ(batch_res->blocksNum(0, "full"), 2);
 }
 
 // 5) insertIntoCache publishes the allocator's complete rank-local blocks on
@@ -217,8 +214,8 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVir
     malloc_info.reuse_cache         = false;
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
     ASSERT_TRUE(allocator->malloc(malloc_info).success);
-    ASSERT_EQ(batch_res->blocksNum(0, full_group_id), 2);
-    const auto full_blocks = batch_res->blocks(0, full_group_id);
+    ASSERT_EQ(batch_res->blocksNum(0, "full"), 2);
+    const auto full_blocks = batch_res->blocks(0, "full");
 
     InsertInfo insert_info{batch_res, tokens, /*is_resident=*/false};
     {
@@ -243,7 +240,6 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocCpSize4) {
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    const int     full_group_id = 1;
     CacheKeysType keys;
     for (int i = 0; i < 8; ++i) {
         keys.push_back(200 + i);
@@ -257,7 +253,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocCpSize4) {
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/2, /*cp_size=*/4, /*block_size=*/4));
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(batch_res->blocksNum(0, full_group_id), 2);  // ceil(8/4)=2
+    EXPECT_EQ(batch_res->blocksNum(0, "full"), 2);  // ceil(8/4)=2
 }
 
 }  // namespace test

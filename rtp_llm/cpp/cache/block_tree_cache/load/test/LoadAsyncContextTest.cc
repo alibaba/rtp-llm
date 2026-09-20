@@ -119,8 +119,8 @@ public:
     const std::vector<size_t>& readHandleCounts() const {
         return read_handle_counts_;
     }
-    const std::vector<std::vector<size_t>>& readGroupIds() const {
-        return read_group_ids_;
+    const std::vector<std::vector<std::string>>& readGroupTags() const {
+        return read_group_tags_;
     }
     const CacheKeysType& matchKeys() const {
         return match_keys_;
@@ -154,11 +154,11 @@ protected:
         read_keys_       = *request.keys;
         for (const auto& key_handles : request.handles) {
             read_handle_counts_.push_back(key_handles.size());
-            std::vector<size_t> group_ids;
+            std::vector<std::string> group_tags;
             for (const auto& handle : key_handles) {
-                group_ids.push_back(handle.group_id);
+                group_tags.push_back(handle.tag);
             }
-            read_group_ids_.push_back(std::move(group_ids));
+            read_group_tags_.push_back(std::move(group_tags));
         }
     }
     void writeImpl(const StorageRequest&) override {}
@@ -167,16 +167,16 @@ private:
     explicit ManualBackend(std::shared_ptr<ManualExecutor> executor):
         StorageBackend(executor), executor_(std::move(executor)) {}
 
-    std::shared_ptr<ManualExecutor>  executor_;
-    StorageMatchResult               pending_match_;
-    CacheKeysType                    read_keys_;
-    CacheKeysType                    match_keys_;
-    size_t                           match_local_blocks_{0};
-    std::vector<size_t>              read_handle_counts_;
-    std::vector<std::vector<size_t>> read_group_ids_;
-    std::shared_ptr<TestMatchMeta>   read_match_meta_;
-    bool                             fail_match_{false};
-    bool                             fail_read_{false};
+    std::shared_ptr<ManualExecutor>       executor_;
+    StorageMatchResult                    pending_match_;
+    CacheKeysType                         read_keys_;
+    CacheKeysType                         match_keys_;
+    size_t                                match_local_blocks_{0};
+    std::vector<size_t>                   read_handle_counts_;
+    std::vector<std::vector<std::string>> read_group_tags_;
+    std::shared_ptr<TestMatchMeta>        read_match_meta_;
+    bool                                  fail_match_{false};
+    bool                                  fail_read_{false};
 };
 
 std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> types = {CacheGroupType::FULL}) {
@@ -199,13 +199,20 @@ std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> ty
 }
 
 void initBackend(ManualBackend& backend, const DeviceBlockPoolPtr& pool) {
-    RTP_LLM_CHECK(backend.init(makeTopology(), {pool}, [](int, int, int) { return std::vector<BlockInfo>{}; }));
+    RTP_LLM_CHECK(backend.init(
+        makeTopology(), {{"group_0", pool}}, [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
 }
 
 void initBackend(ManualBackend&                         backend,
                  std::shared_ptr<const CacheTopology>   topology,
                  const std::vector<DeviceBlockPoolPtr>& pools) {
-    RTP_LLM_CHECK(backend.init(std::move(topology), pools, [](int, int, int) { return std::vector<BlockInfo>{}; }));
+    StorageBackend::PoolsByTag pools_by_tag;
+    RTP_LLM_CHECK(topology->groupTags().size() == pools.size());
+    for (size_t i = 0; i < pools.size(); ++i) {
+        RTP_LLM_CHECK(pools_by_tag.emplace(topology->groupTags()[i], pools[i]).second);
+    }
+    RTP_LLM_CHECK(backend.init(
+        topology, std::move(pools_by_tag), [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
 }
 
 StorageRequest makeRequest(size_t key_count) {
@@ -215,7 +222,7 @@ StorageRequest makeRequest(size_t key_count) {
     handles.reserve(key_count);
     for (size_t i = 0; i < key_count; ++i) {
         keys.push_back(i + 1);
-        handles.push_back({{0, NULL_BLOCK_IDX}});
+        handles.push_back({{"group_0", NULL_BLOCK_IDX}});
     }
     return {std::make_shared<CacheKeysType>(std::move(keys)), std::move(handles)};
 }
@@ -561,7 +568,7 @@ TEST(LoadAsyncContextTest, BackendReadFailureMarksCommittedContextFailedAndRelea
     coordinator->shutdown();
 }
 
-TEST(LoadAsyncContextTest, MatchedKeyExposesAllOfItsHandles) {
+TEST(LoadAsyncContextTest, DuplicateHandleTagIsRejectedBeforeMatch) {
     size_t commits     = 0;
     size_t aborts      = 0;
     auto   coordinator = makeCoordinator(commits, aborts);
@@ -571,7 +578,7 @@ TEST(LoadAsyncContextTest, MatchedKeyExposesAllOfItsHandles) {
     pool->incRef(block);
     initBackend(*backend, pool);
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1, 2}),
-                           {{{0, NULL_BLOCK_IDX}, {0, NULL_BLOCK_IDX}}, {{0, NULL_BLOCK_IDX}}}};
+                           {{{"group_0", NULL_BLOCK_IDX}, {"group_0", NULL_BLOCK_IDX}}, {{"group_0", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, 0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
@@ -583,14 +590,9 @@ TEST(LoadAsyncContextTest, MatchedKeyExposesAllOfItsHandles) {
         return current.commit();
     });
 
-    context->startBackendMatch();
-    backend->completeMatch(1);
-    ASSERT_TRUE(backend->readPending());
-    backend->completeRead();
-    EXPECT_EQ(backend->readKeys(), (CacheKeysType{1}));
-    EXPECT_EQ(backend->readHandleCounts(), (std::vector<size_t>{2}));
-    EXPECT_TRUE(context->success());
-    EXPECT_EQ(commits, 1u);
+    EXPECT_ANY_THROW(context->startBackendMatch());
+    EXPECT_FALSE(backend->readPending());
+    EXPECT_EQ(commits, 0u);
     EXPECT_EQ(aborts, 0u);
     pool->decRef(block);
     coordinator->shutdown();
@@ -618,7 +620,7 @@ TEST(LoadAsyncContextTest, MatchedKeysKeepReuseShapeAndForwardDerivedMatchMeta) 
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1, 2, 3, 4}),
                            std::vector<std::vector<StorageBlockHandle>>(4)};
     for (auto& handles : request.handles) {
-        handles = {{0, NULL_BLOCK_IDX}, {1, NULL_BLOCK_IDX}, {2, NULL_BLOCK_IDX}};
+        handles = {{"group_0", NULL_BLOCK_IDX}, {"group_1", NULL_BLOCK_IDX}, {"group_2", NULL_BLOCK_IDX}};
     }
     auto context = coordinator->create({}, {}, 0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
@@ -632,8 +634,8 @@ TEST(LoadAsyncContextTest, MatchedKeysKeepReuseShapeAndForwardDerivedMatchMeta) 
         EXPECT_EQ(handles[3].size(), 3u);
         for (size_t key_index = 0; key_index < handles.size(); ++key_index) {
             for (size_t handle_index = 0; handle_index < handles[key_index].size(); ++handle_index) {
-                current.setBackendTargetBlock(
-                    key_index, handle_index, blocks[handles[key_index][handle_index].group_id]);
+                const auto group_id = static_cast<size_t>(handles[key_index][handle_index].tag.back() - '0');
+                current.setBackendTargetBlock(key_index, handle_index, blocks[group_id]);
             }
         }
         return current.commit();
@@ -648,7 +650,9 @@ TEST(LoadAsyncContextTest, MatchedKeysKeepReuseShapeAndForwardDerivedMatchMeta) 
     ASSERT_EQ(backend->readMatchMeta(), match_meta);
     EXPECT_EQ(backend->readMatchMeta()->remote_version, 17u);
     EXPECT_EQ(backend->readHandleCounts(), (std::vector<size_t>{1, 1, 2, 3}));
-    EXPECT_EQ(backend->readGroupIds(), (std::vector<std::vector<size_t>>{{0}, {0}, {0, 2}, {0, 1, 2}}));
+    EXPECT_EQ(backend->readGroupTags(),
+              (std::vector<std::vector<std::string>>{
+                  {"group_0"}, {"group_0"}, {"group_0", "group_2"}, {"group_0", "group_1", "group_2"}}));
     EXPECT_TRUE(context->success());
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
@@ -671,7 +675,7 @@ TEST(LoadAsyncContextTest, FullKeyMatchKeepsLocalPrefixVisibleAndReadsOnlyRemote
     initBackend(*backend, pool);
 
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{10, 20, 30, 40}),
-                           std::vector<std::vector<StorageBlockHandle>>(4, {{0, NULL_BLOCK_IDX}}),
+                           std::vector<std::vector<StorageBlockHandle>>(4, {{"group_0", NULL_BLOCK_IDX}}),
                            /*local_matched_blocks_num=*/2};
     auto           context = coordinator->create({}, {}, 2, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));

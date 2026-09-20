@@ -29,14 +29,14 @@ kv_cache_manager::UriStrVec flattenUris(const kv_cache_manager::Locations& locat
     return uris;
 }
 
-std::vector<void*> expectedBases(const BackendEnvironment&               environment,
-                                 const std::vector<BlockIdxType>&        block_ids,
-                                 const std::vector<std::vector<size_t>>& groups_by_key) {
+std::vector<void*> expectedBases(const BackendEnvironment&                    environment,
+                                 const std::vector<BlockIdxType>&             block_ids,
+                                 const std::vector<std::vector<std::string>>& groups_by_key) {
     RTP_LLM_CHECK(block_ids.size() == groups_by_key.size());
     std::vector<void*> bases;
     for (size_t key_idx = 0; key_idx < block_ids.size(); ++key_idx) {
-        for (const size_t group_id : groups_by_key[key_idx]) {
-            bases.push_back(blockBase(environment, group_id, block_ids[key_idx]));
+        for (const auto& tag : groups_by_key[key_idx]) {
+            bases.push_back(blockBase(environment, tag, block_ids[key_idx]));
         }
     }
     return bases;
@@ -50,16 +50,58 @@ void expectBufferBases(const kv_cache_manager::BlockBuffers& buffers, const std:
     }
 }
 
+void expectTaggedTransfers(MockClientWrapper&                 client,
+                           const kv_cache_manager::Locations& locations,
+                           const std::vector<void*>&          bases,
+                           bool                               write,
+                           const kv_cache_manager::UriStrVec& actual_uris = {}) {
+    std::map<std::string, std::vector<size_t>> indices;
+    const auto                                 uris  = flattenUris(locations);
+    size_t                                     index = 0;
+    for (const auto& location : locations) {
+        for (const auto& spec : location) {
+            const auto tag = spec.spec_name.substr(spec.spec_name.find('_') + 2);
+            indices[tag].push_back(index++);
+        }
+    }
+    ASSERT_EQ(index, bases.size());
+    for (const auto& [tag, slots] : indices) {
+        kv_cache_manager::UriStrVec batch_uris, batch_actual;
+        std::vector<void*>          batch_bases;
+        for (size_t slot : slots) {
+            batch_uris.push_back(uris.at(slot));
+            batch_bases.push_back(bases.at(slot));
+            if (!actual_uris.empty()) {
+                batch_actual.push_back(actual_uris.at(slot));
+            }
+        }
+        if (write) {
+            EXPECT_CALL(client, saveKvCachesForTag(tag, batch_uris, _, _))
+                .WillOnce(
+                    Invoke([batch_bases, batch_actual](const auto&, const auto&, const auto& buffers, const auto&) {
+                        expectBufferBases(buffers, batch_bases);
+                        return std::make_pair(true, batch_actual);
+                    }));
+        } else {
+            EXPECT_CALL(client, loadKvCachesForTag(tag, batch_uris, _, _))
+                .WillOnce(Invoke([batch_bases](const auto&, const auto&, auto& buffers, const auto&) {
+                    expectBufferBases(buffers, batch_bases);
+                    return true;
+                }));
+        }
+    }
+}
+
 TEST(KVCMMockFullLinearTest, ReadsCompleteMultiGroupLocationWithoutLocalReuse) {
     auto environment = makeMultiGroupBackendEnvironment(
         "kvcm_storage_backend_full_linear_read_no_local", /*full_group_count=*/1, /*linear_group_count=*/2);
     auto client_wrapper = std::make_shared<MockClientWrapper>();
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
-    ScopedReferencedBlocks      source_blocks(environment.device_pool, 1);
+    ScopedReferencedBlocks      source_blocks(environment, 1);
     const auto&                 block_ids = source_blocks.get();
     kv_cache_manager::Locations locations{
         makeFullLinearLocation(/*full_group_count=*/1, /*linear_group_count=*/2, /*key=*/101, true)};
@@ -84,13 +126,8 @@ TEST(KVCMMockFullLinearTest, ReadsCompleteMultiGroupLocationWithoutLocalReuse) {
     ASSERT_EQ(result.matched_blocks_num, 1u);
     ASSERT_NE(result.match_meta, nullptr);
 
-    const auto uris  = flattenUris(locations);
-    const auto bases = expectedBases(environment, block_ids, {{0, 1, 2}});
-    EXPECT_CALL(*client_wrapper, loadKvCaches(uris, _, _))
-        .WillOnce(Invoke([bases](const auto&, auto& buffers, const auto&) {
-            expectBufferBases(buffers, bases);
-            return true;
-        }));
+    const auto bases = expectedBases(environment, block_ids, {{"full0", "linear0", "linear1"}});
+    expectTaggedTransfers(*client_wrapper, locations, bases, false);
     EXPECT_TRUE(read(*backend.backend, std::move(request), std::move(result.match_meta)));
 }
 
@@ -98,12 +135,12 @@ TEST(KVCMMockFullLinearTest, ReadsOnlyThroughNewestCompleteLinearStateAfterLocal
     auto environment = makeMultiGroupBackendEnvironment(
         "kvcm_storage_backend_full_linear_read_local", /*full_group_count=*/1, /*linear_group_count=*/2);
     auto client_wrapper = std::make_shared<MockClientWrapper>();
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
-    ScopedReferencedBlocks      source_blocks(environment.device_pool, 4);
+    ScopedReferencedBlocks      source_blocks(environment, 4);
     const auto&                 block_ids = source_blocks.get();
     kv_cache_manager::Locations locations{
         makeFullLinearLocation(/*full_group_count=*/1, /*linear_group_count=*/2, /*key=*/102, false),
@@ -138,13 +175,9 @@ TEST(KVCMMockFullLinearTest, ReadsOnlyThroughNewestCompleteLinearStateAfterLocal
     request.handles.front().clear();
 
     const kv_cache_manager::Locations selected_locations{locations[0], locations[1]};
-    const auto                        uris = flattenUris(selected_locations);
-    const auto bases                       = expectedBases(environment, {block_ids[1], block_ids[2]}, {{0}, {0, 1, 2}});
-    EXPECT_CALL(*client_wrapper, loadKvCaches(uris, _, _))
-        .WillOnce(Invoke([bases](const auto&, auto& buffers, const auto&) {
-            expectBufferBases(buffers, bases);
-            return true;
-        }));
+    const auto                        bases =
+        expectedBases(environment, {block_ids[1], block_ids[2]}, {{"full0"}, {"full0", "linear0", "linear1"}});
+    expectTaggedTransfers(*client_wrapper, selected_locations, bases, false);
     EXPECT_TRUE(read(*backend.backend, std::move(request), std::move(result.match_meta)));
 }
 
@@ -152,20 +185,20 @@ TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers)
     auto environment    = makeHybridBackendEnvironment("kvcm_storage_backend_full_linear_write");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
     std::vector<void*> expected_full_bases;
     std::vector<void*> expected_linear_bases;
-    for (const int layer_id : environment.cache_config.layerIdsForGroup(1)) {
-        const auto block_info = environment.device_pool->convertIndexToBuffer(layer_id, environment.block_id);
+    for (const int layer_id : environment.cache_config.layerIdsForGroup("full1")) {
+        const auto block_info = environmentBuffers(environment, layer_id, "full1", environment.block_id);
         ASSERT_EQ(block_info.size(), 1u);
         expected_full_bases.push_back(block_info.front().addr);
     }
-    for (const int layer_id : environment.cache_config.layerIdsForGroup(0)) {
-        const auto block_info = environment.device_pool->convertIndexToBuffer(layer_id, environment.block_id);
+    for (const int layer_id : environment.cache_config.layerIdsForGroup("linear")) {
+        const auto block_info = environmentBuffers(environment, layer_id, "linear", environment.block_id);
         ASSERT_EQ(block_info.size(), 1u);
         expected_linear_bases.push_back(block_info.front().addr);
     }
@@ -179,24 +212,19 @@ TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers)
     }};
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, std::vector<int64_t>{101}, _, std::vector<std::string>{}, 600))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    EXPECT_CALL(*client_wrapper, saveKvCaches(kv_cache_manager::UriStrVec({"full_uri", "linear_uri"}), _, _))
-        .WillOnce(Invoke(
-            [expected_full_bases, expected_linear_bases](const kv_cache_manager::UriStrVec&,
-                                                         const kv_cache_manager::BlockBuffers& buffers,
-                                                         const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&) {
-                if (buffers.size() != 2u || buffers[0].iovs.size() != expected_full_bases.size()
-                    || buffers[1].iovs.size() != expected_linear_bases.size()) {
-                    ADD_FAILURE() << "KVCM full-linear write received an invalid block-buffer shape";
-                    return std::make_pair(false, kv_cache_manager::UriStrVec{});
-                }
-                for (size_t index = 0; index < expected_full_bases.size(); ++index) {
-                    EXPECT_EQ(buffers[0].iovs[index].base, expected_full_bases[index]);
-                }
-                for (size_t index = 0; index < expected_linear_bases.size(); ++index) {
-                    EXPECT_EQ(buffers[1].iovs[index].base, expected_linear_bases[index]);
+    for (const auto& tag : std::vector<std::string>{"full1", "linear"}) {
+        const auto                        bases = tag == "full1" ? expected_full_bases : expected_linear_bases;
+        const kv_cache_manager::UriStrVec uris{tag == "full1" ? "full_uri" : "linear_uri"};
+        EXPECT_CALL(*client_wrapper, saveKvCachesForTag(tag, uris, _, _))
+            .WillOnce(Invoke([bases](const auto&, const auto&, const auto& buffers, const auto&) {
+                EXPECT_EQ(buffers.size(), 1u);
+                EXPECT_EQ(buffers.front().iovs.size(), bases.size());
+                for (size_t i = 0; i < bases.size(); ++i) {
+                    EXPECT_EQ(buffers.front().iovs.at(i).base, bases[i]);
                 }
                 return std::make_pair(true, kv_cache_manager::UriStrVec{});
             }));
+    }
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "full_linear_session", _, _))
         .WillOnce(Invoke([](const std::string&,
                             const std::string&,
@@ -214,25 +242,30 @@ TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers)
 
     StorageRequest request;
     request.keys    = std::make_shared<const CacheKeysType>(CacheKeysType{101});
-    request.handles = {{{/*group_id=*/0, environment.block_id}, {/*group_id=*/1, environment.block_id}}};
+    request.handles = {{{environment.cache_config.groupTags().at(0), environment.block_id},
+                        {environment.cache_config.groupTags().at(1), environment.block_id}}};
     backend->write(backend->prepareWrite(std::move(request)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+    for (const auto& [tag, pool] : environment.pools_by_tag) {
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+        EXPECT_EQ(pool->refCount(environment.block_id), 1u);
+    }
 }
 
 TEST(KVCMMockFullLinearTest, TwoFullTwoLinearWritePreservesMaskOrderAndActualUris) {
     auto environment = makeMultiGroupBackendEnvironment(
         "kvcm_storage_backend_two_full_two_linear_write", /*full_group_count=*/2, /*linear_group_count=*/2);
     auto client_wrapper = std::make_shared<MockClientWrapper>();
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
-    ScopedReferencedBlocks                 source_blocks(environment.device_pool, 3);
-    const auto&                            block_ids = source_blocks.get();
-    const std::vector<std::vector<size_t>> groups_by_key{{0, 1, 2, 3}, {0, 1}, {0, 1, 2, 3}};
-    const std::vector<std::string>         expected_write_groups{
+    ScopedReferencedBlocks                      source_blocks(environment, 3);
+    const auto&                                 block_ids = source_blocks.get();
+    const std::vector<std::vector<std::string>> groups_by_key{
+        {"full0", "full1", "linear0", "linear1"}, {"full0", "full1"}, {"full0", "full1", "linear0", "linear1"}};
+    const std::vector<std::string> expected_write_groups{
         "Ffull0Ffull1Llinear0Llinear1", "Ffull0Ffull1", "Ffull0Ffull1Llinear0Llinear1"};
 
     kv_cache_manager::WriteLocation write_location;
@@ -248,17 +281,14 @@ TEST(KVCMMockFullLinearTest, TwoFullTwoLinearWritePreservesMaskOrderAndActualUri
         .WillOnce(Return(std::make_pair(true, write_location)));
 
     const auto expected_uris = flattenUris(write_location.locations);
-    const auto bases         = expectedBases(environment, {block_ids[1], block_ids[2]}, {{0, 1}, {0, 1, 2, 3}});
+    const auto bases         = expectedBases(
+        environment, {block_ids[1], block_ids[2]}, {{"full0", "full1"}, {"full0", "full1", "linear0", "linear1"}});
     kv_cache_manager::UriStrVec actual_uris;
     actual_uris.reserve(expected_uris.size());
     for (size_t index = 0; index < expected_uris.size(); ++index) {
         actual_uris.push_back("actual_" + std::to_string(index));
     }
-    EXPECT_CALL(*client_wrapper, saveKvCaches(expected_uris, _, _))
-        .WillOnce(Invoke([bases, actual_uris](const auto&, const auto& buffers, const auto&) {
-            expectBufferBases(buffers, bases);
-            return std::make_pair(true, actual_uris);
-        }));
+    expectTaggedTransfers(*client_wrapper, write_location.locations, bases, true, actual_uris);
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "two_full_two_linear_session", _, _))
         .WillOnce(Invoke([actual_uris](const std::string&,
                                        const std::string&,
@@ -278,22 +308,25 @@ TEST(KVCMMockFullLinearTest, TwoFullTwoLinearWritePreservesMaskOrderAndActualUri
         makeGroupedStorageRequest(environment, {101, 102, 103}, /*local_matched_blocks=*/0, block_ids, groups_by_key);
     backend->write(backend->prepareWrite(std::move(request)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+    for (const auto& [tag, pool] : environment.pools_by_tag) {
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+        EXPECT_EQ(pool->refCount(environment.block_id), 1u);
+    }
 }
 
 TEST(KVCMMockFullLinearTest, AllMissingLinearGroupsWriteOnlyFullPayloads) {
     auto environment = makeMultiGroupBackendEnvironment(
         "kvcm_storage_backend_all_missing_linear", /*full_group_count=*/1, /*linear_group_count=*/2);
     auto client_wrapper = std::make_shared<MockClientWrapper>();
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
-    ScopedReferencedBlocks                 source_blocks(environment.device_pool, 3);
-    const auto&                            block_ids = source_blocks.get();
-    const std::vector<std::vector<size_t>> groups_by_key{{0}, {0}, {0}};
-    kv_cache_manager::WriteLocation        write_location;
+    ScopedReferencedBlocks                      source_blocks(environment, 3);
+    const auto&                                 block_ids = source_blocks.get();
+    const std::vector<std::vector<std::string>> groups_by_key{{"full0"}, {"full0"}, {"full0"}};
+    kv_cache_manager::WriteLocation             write_location;
     write_location.write_session_id = "full_only_session";
     write_location.block_mask       = kv_cache_manager::BlockMaskOffset{0};
     write_location.locations        = {
@@ -304,13 +337,8 @@ TEST(KVCMMockFullLinearTest, AllMissingLinearGroupsWriteOnlyFullPayloads) {
     EXPECT_CALL(*client_wrapper,
                 getWriteLocation(_, _, _, _, std::vector<std::string>({"Ffull0", "Ffull0", "Ffull0"}), 600))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    const auto uris  = flattenUris(write_location.locations);
     const auto bases = expectedBases(environment, block_ids, groups_by_key);
-    EXPECT_CALL(*client_wrapper, saveKvCaches(uris, _, _))
-        .WillOnce(Invoke([bases](const auto&, const auto& buffers, const auto&) {
-            expectBufferBases(buffers, bases);
-            return std::make_pair(true, kv_cache_manager::UriStrVec{});
-        }));
+    expectTaggedTransfers(*client_wrapper, write_location.locations, bases, true);
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "full_only_session", _, _))
         .WillOnce(Invoke([](const std::string&,
                             const std::string&,
@@ -336,21 +364,24 @@ TEST(KVCMMockFullLinearTest, IncompleteLinearGroupSetFailsBeforeClientIO) {
     auto environment = makeMultiGroupBackendEnvironment(
         "kvcm_storage_backend_incomplete_linear", /*full_group_count=*/1, /*linear_group_count=*/2);
     auto client_wrapper = std::make_shared<MockClientWrapper>();
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _)).Times(0);
-    EXPECT_CALL(*client_wrapper, saveKvCaches(_, _, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, saveKvCachesForTag(_, _, _, _)).Times(0);
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, _, _, _)).Times(0);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
-    ScopedReferencedBlocks source_blocks(environment.device_pool, 1);
+    ScopedReferencedBlocks source_blocks(environment, 1);
     const auto&            block_ids = source_blocks.get();
     auto                   request   = makeGroupedStorageRequest(
-        environment, {101}, /*local_matched_blocks=*/0, block_ids, /*groups_by_key=*/{{0, 1}});
+        environment, {101}, /*local_matched_blocks=*/0, block_ids, /*groups_by_key=*/{{"full0", "linear0"}});
     backend->write(backend->prepareWrite(std::move(request)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+    for (const auto& [tag, pool] : environment.pools_by_tag) {
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+        EXPECT_EQ(pool->refCount(environment.block_id), 1u);
+    }
 }
 
 }  // namespace

@@ -430,25 +430,23 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         storage_backend = nullptr;
     }
     std::shared_ptr<const CacheTopology> storage_topology;
-    std::vector<DeviceBlockPoolPtr>      storage_device_pools;
+    StorageBackend::PoolsByTag           storage_pools;
     StorageBackend::BufferResolver       storage_buffer_resolver;
     if (storage_backend != nullptr) {
         storage_topology = group_sets.front()->topologyPtr();
-        std::vector<DeviceBlockPoolPtr> device_pools(storage_topology->groups().size());
         for (const auto& group_set : group_sets) {
             for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
-                device_pools[storage_topology->groupIdForTag(group_set->groupTags()[member])] =
-                    group_set->devicePools()[member];
+                RTP_LLM_CHECK(
+                    storage_pools.emplace(group_set->groupTags()[member], group_set->devicePools()[member]).second);
             }
         }
-        storage_device_pools    = device_pools;
-        storage_buffer_resolver = [topology     = storage_topology,
-                                   device_pools = std::move(device_pools)](int layer_id, int group_id, int block_id) {
-            const auto layers = topology->layerIdsForGroup(static_cast<size_t>(group_id));
+        storage_buffer_resolver = [topology = storage_topology,
+                                   pools    = storage_pools](int layer_id, const std::string& tag, int block_id) {
+            const auto layers = topology->layerIdsForGroup(tag);
             const auto layer  = std::find(layers.begin(), layers.end(), layer_id);
             RTP_LLM_CHECK(layer != layers.end());
-            return device_pools[static_cast<size_t>(group_id)]->convertIndexToBuffer(
-                static_cast<int>(std::distance(layers.begin(), layer)), block_id);
+            return pools.at(tag)->convertIndexToBuffer(static_cast<int>(std::distance(layers.begin(), layer)),
+                                                       block_id);
         };
     }
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
@@ -477,7 +475,7 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                   std::move(cache_metrics_reporter));
     if (cache->storageBackend()) {
         RTP_LLM_CHECK_WITH_INFO(cache->storageBackend()->init(std::move(storage_topology),
-                                                              std::move(storage_device_pools),
+                                                              std::move(storage_pools),
                                                               std::move(storage_buffer_resolver)),
                                 "StorageBackend init failed");
     }
