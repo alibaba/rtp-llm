@@ -19,8 +19,8 @@ from rtp_llm.ops import (
     DataType,
     HWKernelConfig,
     HybridAttentionType,
-    KVCacheSpecType,
     KvCacheDataType,
+    KVCacheSpecType,
     ParallelismConfig,
     RoleType,
     RopeStyle,
@@ -388,6 +388,23 @@ class Qwen4ExpTest(unittest.TestCase):
         )
         self.assertTrue(rope_config.mrope_interleaved)
         self.assertEqual(self.config.mm_model_config.mm_position_ids_style, 2)
+
+    def test_linear_attn_norm_activation(self):
+        # Upstream falls back to hidden_act when output_gate_type is unset
+        # (this trimmed config has neither -> generic silu default).
+        self.assertEqual(self.config.linear_attn_norm_activation, "silu")
+        config_json = self._config()
+        config_json["text_config"]["output_gate_type"] = "sigmoid"
+        Path(self._temp_dir.name, "config.json").write_text(json.dumps(config_json))
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_ENABLE_QWEN4_EXP_PLE": "false",
+                "RTP_LLM_ENABLE_QWEN4_EXP_QSA": "false",
+            },
+        ):
+            config = Qwen4Exp.create_config(self._temp_dir.name)
+        self.assertEqual(config.linear_attn_norm_activation, "sigmoid")
 
     def test_moe_config(self):
         config = self.config

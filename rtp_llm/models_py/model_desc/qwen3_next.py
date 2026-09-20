@@ -1021,6 +1021,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        norm_activation: Optional[str] = None,
     ):
         super().__init__()
         self.linear_attn_config = linear_attn_config
@@ -1117,6 +1118,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             weights[W.linear_attn_norm_w],
             eps=layernorm_eps,
             group_size=linear_attn_config.linear_value_head_dim,
+            activation=norm_activation or "silu",
         )
         self.out_proj = LinearFactory.create_linear_from_weights(
             weights,
@@ -1412,6 +1414,9 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
+                # Qwen4-Exp gates this norm with `output_gate_type` (sigmoid);
+                # Qwen3-Next checkpoints leave it unset and keep silu.
+                norm_activation=getattr(config, "linear_attn_norm_activation", None),
             )
         else:
             attn_configs = config.getAttentionConfigs(

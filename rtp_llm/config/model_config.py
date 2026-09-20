@@ -129,6 +129,7 @@ class ModelConfig(CppModelConfig):
         "headwise_config",
         "enable_qwen4_ple",
         "enable_qwen4_qsa",
+        "linear_attn_norm_activation",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
