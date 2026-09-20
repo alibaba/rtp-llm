@@ -46,6 +46,26 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 # Bound both CP hidden-state transfers and the subsequent projections.
 _PRODUCE_GLOBAL_TILE_ROWS = 32768
 
+# Single-shot CP x-gather ceiling in GLOBAL padded rows. Below it, one bounded
+# all-gather of the raw hidden states replaces the per-(request, zigzag-half)
+# owner-projected broadcast tiles. Mid-size multi-request prefill batches
+# otherwise issue one small NCCL broadcast per segment on every kv-source
+# layer, and each broadcast kernel's duration is dominated by inter-rank
+# arrival skew rather than transfer (measured ~220ms of broadcast-kernel wait
+# per 6-request c8 forward, while the single-shot path shows none). Above the
+# ceiling the tiled path keeps the ~20x smaller projected-fp32 transfer volume
+# for large-context single requests. Default covers the 8x8192-token
+# shared-prefix batch geometry; set DSV41_SMALL_CP_X_GATHER_MAX_ROWS=32768 to
+# restore the previous boundary.
+_SMALL_CP_X_GATHER_MAX_ROWS = int(
+    os.environ.get("DSV41_SMALL_CP_X_GATHER_MAX_ROWS", "65536")
+)
+
+
+def _use_small_cp_x_gather(cp_ctx) -> bool:
+    """Whether the single-shot raw-x all-gather path serves this forward."""
+    return cp_ctx.padded_seq_len <= _SMALL_CP_X_GATHER_MAX_ROWS
+
 
 class _V41AsyncXGather:
     """One in-flight, globally ordered hidden-state tile."""
@@ -927,9 +947,7 @@ class AttentionV41FP8(AttentionFP8):
         # Launch the first bounded hidden-state transfer after the QKV gather.
         # It overlaps SWA work; subsequent transfers overlap global projection.
         x_gather = None
-        small_cp = (
-            common.cp_on and common.cp_ctx.padded_seq_len <= _PRODUCE_GLOBAL_TILE_ROWS
-        )
+        small_cp = common.cp_on and _use_small_cp_x_gather(common.cp_ctx)
         if self.is_kv_source and common.cp_on:
             if small_cp:
                 # One bounded all-gather avoids per-half launches on short requests.
