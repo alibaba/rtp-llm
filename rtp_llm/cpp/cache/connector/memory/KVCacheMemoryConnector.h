@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <utility>
 #include <vector>
 
 #include "autil/LockFreeThreadPool.h"
@@ -139,7 +140,8 @@ private:
     bool                     tryCopyCacheWithStagedMemoryCopy(const MemoryOperationRequestPB&     request,
                                                               CopyDirection                       direction,
                                                               const std::vector<LayerRegionSlot>& slots);
-    StagedMemoryCopyScratch& stagedCopyScratchForDevice(int device_index);
+    std::pair<StagedMemoryCopyScratch*, std::unique_lock<std::mutex>> acquireStagedCopyScratch(int device_index);
+    bool canUseStagedMemoryCopy(const std::vector<LayerRegionSlot>& slots, CopyDirection direction) const;
     bool                     appendCopyBytesToBuffers(const BlockInfo&            mem_block,
                                                       const BlockInfo&            gpu_block,
                                                       size_t                      byte_off,
@@ -161,7 +163,7 @@ private:
     void                         checkLayerBlockStrideBytes() const;
     std::vector<LayerRegionSlot> layerRegionSlots() const;
     bool                         hasTypedLayerRegionSlots(const std::vector<LayerRegionSlot>& slots) const;
-    bool                         isDsv4TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const;
+    bool isDsv4TypedCacheLayout(const std::vector<LayerRegionSlot>& slots, bool allow_shared_global = false) const;
     bool                         checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
     LayerAttnBlockIds            resourceLayerRegionBlocks(const KVCacheResource&                resource,
                                                            const std::vector<LayerRegionSlot>& slots) const;
@@ -295,7 +297,11 @@ private:
     std::shared_ptr<BlockPool>                              block_pool_;
     mutable std::mutex                                      malloc_mutex_;
     mutable std::mutex                                      staged_copy_scratch_mutex_;
-    std::map<int, std::unique_ptr<StagedMemoryCopyScratch>> staged_copy_scratch_by_device_;
+    struct StagedCopyScratchSlot {
+        std::unique_ptr<StagedMemoryCopyScratch> scratch;
+        std::mutex                               mutex;
+    };
+    std::map<int, std::vector<std::unique_ptr<StagedCopyScratchSlot>>> staged_copy_scratch_by_device_;
     std::shared_ptr<MemoryDiskBlockCache>                   block_cache_;
     std::shared_ptr<PrefixTreeMemoryBlockCache>             prefix_block_cache_;
     std::unique_ptr<DiskMountGuard>                         disk_mount_guard_;

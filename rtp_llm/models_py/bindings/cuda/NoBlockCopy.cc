@@ -119,6 +119,40 @@ void copyPinnedStagingToHost(const StagedMemoryCopyParams& params, const void* h
     unpackHostSegments(params, host_staging);
 }
 
+bool resolveHostTilePointers(const StagedMemoryCopyParams& params,
+                             const std::vector<size_t>&    offsets,
+                             const std::vector<size_t>&    sizes,
+                             std::vector<const void*>&     pointers) {
+    pointers.reserve(offsets.size());
+    if (params.host_segments.empty()) {
+        for (auto offset : offsets) {
+            pointers.push_back(static_cast<const char*>(params.host_base) + offset);
+        }
+        return true;
+    }
+    auto segments = params.host_segments;
+    std::sort(segments.begin(), segments.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.host_offset < rhs.host_offset;
+    });
+    for (size_t i = 0; i < offsets.size(); ++i) {
+        auto it =
+            std::upper_bound(segments.begin(), segments.end(), offsets[i], [](size_t offset, const auto& segment) {
+                return offset < segment.host_offset;
+            });
+        if (it == segments.begin()) {
+            return false;
+        }
+        --it;
+        const auto relative_offset = offsets[i] - it->host_offset;
+        if (relative_offset > it->bytes || sizes[i] > it->bytes - relative_offset) {
+            // A tile crossing discontiguous host segments still needs the CPU packing path.
+            return false;
+        }
+        pointers.push_back(static_cast<const char*>(it->host) + relative_offset);
+    }
+    return true;
+}
+
 void releaseDevicePointer(void*& ptr) {
     if (ptr != nullptr) {
         (void)cudaFree(ptr);
@@ -133,17 +167,15 @@ void releaseMetadataScratch(StagedMemoryCopyScratch& scratch) {
     scratch.meta_capacity = 0;
 }
 
-bool ensureStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch,
-                                   int                      device_index,
-                                   size_t                   host_bytes,
-                                   size_t                   tile_num) {
+bool ensureStagedMemoryCopyScratch(
+    StagedMemoryCopyScratch& scratch, int device_index, size_t host_bytes, size_t tile_num, bool allocate_host) {
     if (scratch.device_index >= 0 && scratch.device_index != device_index) {
         releaseStagedMemoryCopyScratch(scratch);
     }
     check_cuda_value(cudaSetDevice(device_index));
     scratch.device_index = device_index;
 
-    if (scratch.host_capacity < host_bytes) {
+    if (allocate_host && scratch.host_capacity < host_bytes) {
         if (scratch.host_staging != nullptr) {
             (void)cudaFreeHost(scratch.host_staging);
             scratch.host_staging = nullptr;
@@ -366,6 +398,13 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
         return true;
     }
 
+    std::vector<const void*> h_host_ptrs;
+    const auto*              properties = at::cuda::getDeviceProperties(params.device_index);
+    const bool direct_host = params.direction == StagedMemoryCopyDirection::H2D && properties->pageableMemoryAccess
+                             && properties->pageableMemoryAccessUsesHostPageTables
+                             && properties->canUseHostPointerForRegisteredMem
+                             && resolveHostTilePointers(params, h_offsets, h_sizes, h_host_ptrs);
+
     StagedMemoryCopyScratch local_scratch;
     auto*                   work_scratch = scratch != nullptr ? scratch : &local_scratch;
     auto cleanup_local_scratch = [&]() {
@@ -375,13 +414,15 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
     };
 
     const size_t tile_num = h_ptrs.size();
-    if (!ensureStagedMemoryCopyScratch(*work_scratch, params.device_index, params.host_bytes, tile_num)) {
+    if (!ensureStagedMemoryCopyScratch(*work_scratch, params.device_index, params.host_bytes, tile_num, !direct_host)) {
         cleanup_local_scratch();
         return false;
     }
 
+    const void* initial_ptrs =
+        direct_host ? static_cast<const void*>(h_host_ptrs.data()) : static_cast<const void*>(h_ptrs.data());
     auto err = cudaMemcpyAsync(
-        work_scratch->device_ptrs, h_ptrs.data(), tile_num * sizeof(void*), cudaMemcpyHostToDevice, stream);
+        work_scratch->device_ptrs, initial_ptrs, tile_num * sizeof(void*), cudaMemcpyHostToDevice, stream);
     if (err == cudaSuccess) {
         err = cudaMemcpyAsync(work_scratch->device_offsets,
                               h_offsets.data(),
@@ -395,12 +436,30 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
     }
 
     if (err == cudaSuccess && params.direction == StagedMemoryCopyDirection::H2D) {
-        copyHostToPinnedStaging(params, work_scratch->host_staging);
-        err = cudaMemcpyAsync(work_scratch->device_staging,
-                              work_scratch->host_staging,
-                              params.host_bytes,
-                              cudaMemcpyHostToDevice,
-                              stream);
+        if (direct_host) {
+            // Host-page-table devices (e.g. Grace Blackwell) can gather host KV on the GPU,
+            // avoiding the CPU pack and pinned host payload allocation.
+            sDevMPS::launch_dsv4_memory_cache_gather_copy_var_nooffset(
+                reinterpret_cast<const void**>(work_scratch->device_ptrs),
+                reinterpret_cast<const size_t*>(work_scratch->device_sizes),
+                reinterpret_cast<const size_t*>(work_scratch->device_offsets),
+                work_scratch->device_staging,
+                static_cast<int>(tile_num),
+                0,
+                stream);
+            err = cudaGetLastError();
+            if (err == cudaSuccess) {
+                err = cudaMemcpyAsync(
+                    work_scratch->device_ptrs, h_ptrs.data(), tile_num * sizeof(void*), cudaMemcpyHostToDevice, stream);
+            }
+        } else {
+            copyHostToPinnedStaging(params, work_scratch->host_staging);
+            err = cudaMemcpyAsync(work_scratch->device_staging,
+                                  work_scratch->host_staging,
+                                  params.host_bytes,
+                                  cudaMemcpyHostToDevice,
+                                  stream);
+        }
         if (err == cudaSuccess) {
             sDevMPS::launch_dsv4_memory_cache_scatter_copy_var_nooffset(
                 work_scratch->device_staging,

@@ -16,6 +16,21 @@ cuda13_torch_link_deps = select({
 })
 
 cc_test(
+    name = "staged_memory_copy_test",
+    srcs = ["StagedMemoryCopyTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings:no_block_copy_hdr",
+        "//rtp_llm/models_py/bindings/cuda:no_block_copy",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    exec_properties = {"gpu": "H20"},
+)
+
+cc_test(
     name = "no_block_copy_test",
     srcs = ["NoBlockCopyTest.cc"],
     copts = copts(),

@@ -128,9 +128,9 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
     state_swa_pool_.reset();
     {
         std::lock_guard<std::mutex> lock(staged_copy_scratch_mutex_);
-        for (auto& [_, scratch] : staged_copy_scratch_by_device_) {
-            if (scratch) {
-                releaseStagedMemoryCopyScratch(*scratch);
+        for (auto& [_, slots] : staged_copy_scratch_by_device_) {
+            for (auto& slot : slots) {
+                releaseStagedMemoryCopyScratch(*slot->scratch);
             }
         }
         staged_copy_scratch_by_device_.clear();
@@ -558,10 +558,11 @@ bool KVCacheMemoryConnector::hasTypedLayerRegionSlots(const std::vector<LayerReg
     return false;
 }
 
-bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const {
+bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegionSlot>& slots,
+                                                    bool                                allow_shared_global) const {
     // Keep this gate deliberately strict: this staged SM path is enabled by the current DSV4 typed
-    // cache schema, not by model name. DSV4 Flash/Pro currently use seven typed pools in the fixed
-    // order below, configured 128-aligned kernel tokens/block, sparse opaque KV cache store, and SWA_KV in group 6.
+    // cache schema, not by model name. DSV4.1 retains the seven pool positions but omits INDEXER_STATE
+    // and HCA_STATE, and its HCA owners also store INDEXER_KV. Copy sizes remain defined by the slots.
     // If that schema changes, update this matcher together with HybridPoolConfigCreator coverage.
     constexpr size_t            kDsv4PoolNum                      = 7;
     constexpr size_t            kDsv4MinTokensPerBlock            = 128;
@@ -601,12 +602,22 @@ bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegio
         return false;
     }
 
+    const auto group_stride = [&](size_t gid) {
+        return cache_config_.group_kv_block_stride_bytes[gid] + cache_config_.group_kv_scale_stride_bytes[gid];
+    };
+    const bool v41_layout = std::none_of(slots.begin(), slots.end(), [](const LayerRegionSlot& slot) {
+        return slot.region_name == KVCacheRegionName::INDEXER_STATE || slot.region_name == KVCacheRegionName::HCA_STATE;
+    });
+    // Shared-global layouts are eligible for staged copy, but retain their existing memory-pool policy.
+    if (v41_layout && !allow_shared_global) {
+        return false;
+    }
     for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
         if (cache_config_.group_region_names[gid] != kExpectedRegions[gid]
             || cache_config_.group_types[gid] != kExpectedGroupTypes[gid]) {
             return false;
         }
-        if (cache_config_.group_kv_block_stride_bytes[gid] + cache_config_.group_kv_scale_stride_bytes[gid] == 0) {
+        if (group_stride(gid) == 0 && !(v41_layout && (gid == 3 || gid == 5))) {
             return false;
         }
     }
@@ -620,6 +631,21 @@ bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegio
         }
         if (row[regionIndex(KVCacheRegionName::DEFAULT)] >= 0 || row[regionIndex(KVCacheRegionName::SWA_KV)] != 6) {
             return false;
+        }
+
+        if (v41_layout) {
+            const int csa = row[regionIndex(KVCacheRegionName::CSA_KV)];
+            const int hca = row[regionIndex(KVCacheRegionName::HCA_KV)];
+            if (row[regionIndex(KVCacheRegionName::INDEXER_STATE)] >= 0
+                || row[regionIndex(KVCacheRegionName::HCA_STATE)] >= 0 || (csa >= 0 && csa != 0)
+                || (hca >= 0 && hca != 1) || (csa >= 0 && hca >= 0)
+                || row[regionIndex(KVCacheRegionName::INDEXER_KV)] != ((csa >= 0 || hca >= 0) ? 2 : -1)
+                || row[regionIndex(KVCacheRegionName::CSA_STATE)] != (csa >= 0 ? 4 : -1)) {
+                return false;
+            }
+            saw_csa_layer = saw_csa_layer || csa >= 0;
+            saw_hca_layer = saw_hca_layer || hca >= 0;
+            continue;
         }
 
         const bool has_csa_region = row[regionIndex(KVCacheRegionName::CSA_KV)] >= 0
@@ -1692,7 +1718,7 @@ void KVCacheMemoryConnector::printCopyPlan(const std::shared_ptr<CopyPlan>& copy
 bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response) {
     RTP_LLM_PROFILE_FUNCTION();
     autil::ScopedTime2 timer;
-    CopyDirection copy_direction = CopyDirection::D2H;
+    CopyDirection      copy_direction = CopyDirection::D2H;
     if (request.copy_direction() == MemoryOperationRequestPB::H2D) {
         copy_direction = CopyDirection::H2D;
     }
@@ -1755,7 +1781,10 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
         reportCopyMetrics(true, timer.done_us(), copy_direction);
         return true;
     }
-    if (has_typed_slots && tryCopyCacheWithBatchedMemoryCopy(request, copy_direction, slots)) {
+    // A staged-copy failure must not re-enter the mixed-size CUDA batch path: R580 can SIGSEGV
+    // there on Blackwell. The generic fallback preserves correctness without that driver API.
+    if (has_typed_slots && !canUseStagedMemoryCopy(slots, copy_direction)
+        && tryCopyCacheWithBatchedMemoryCopy(request, copy_direction, slots)) {
         response.set_success(true);
         reportCopyMetrics(true, timer.done_us(), copy_direction);
         return true;
@@ -2111,7 +2140,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
                                                               CopyDirection                       direction,
                                                               const std::vector<LayerRegionSlot>& slots) {
     RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.plan_staged");
-    if (!isDsv4TypedCacheLayout(slots)) {
+    if (!canUseStagedMemoryCopy(slots, direction)) {
         return false;
     }
     if (!isDualPool() && block_pool_ == nullptr) {
@@ -2239,20 +2268,44 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
                       params.host_bytes,
                       params.device_index);
     RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.exec_staged");
-    std::lock_guard<std::mutex> scratch_lock(staged_copy_scratch_mutex_);
-    if (!execStagedMemoryCopy(params, &stagedCopyScratchForDevice(params.device_index))) {
+    auto scratch = acquireStagedCopyScratch(params.device_index);
+    if (!execStagedMemoryCopy(params, scratch.first)) {
         return false;
     }
     execHostMemoryCopyTiles(host_tiles);
     return true;
 }
 
-StagedMemoryCopyScratch& KVCacheMemoryConnector::stagedCopyScratchForDevice(int device_index) {
-    auto& scratch = staged_copy_scratch_by_device_[device_index];
-    if (!scratch) {
-        scratch = std::make_unique<StagedMemoryCopyScratch>();
+bool KVCacheMemoryConnector::canUseStagedMemoryCopy(const std::vector<LayerRegionSlot>& slots,
+                                                    CopyDirection                       direction) const {
+    if (!isDsv4TypedCacheLayout(slots, /*allow_shared_global=*/true)) {
+        return false;
     }
-    return *scratch;
+    // V4.1's mixed-size H2D batch triggers the driver fault. Its D2H batch is faster than
+    // staging through an extra host buffer; retain that path and the existing V4 policy.
+    const bool v41_layout = std::none_of(slots.begin(), slots.end(), [](const LayerRegionSlot& slot) {
+        return slot.region_name == KVCacheRegionName::INDEXER_STATE || slot.region_name == KVCacheRegionName::HCA_STATE;
+    });
+    return !v41_layout || direction == CopyDirection::H2D;
+}
+
+std::pair<StagedMemoryCopyScratch*, std::unique_lock<std::mutex>>
+KVCacheMemoryConnector::acquireStagedCopyScratch(int device_index) {
+    std::lock_guard<std::mutex> pool_lock(staged_copy_scratch_mutex_);
+    auto&                       slots = staged_copy_scratch_by_device_[device_index];
+    for (auto& slot : slots) {
+        std::unique_lock<std::mutex> copy_lock(slot->mutex, std::try_to_lock);
+        if (copy_lock.owns_lock()) {
+            return {slot->scratch.get(), std::move(copy_lock)};
+        }
+    }
+    // Only pool bookkeeping is serialized. Each in-flight copy owns scratch until its stream is drained.
+    auto slot     = std::make_unique<StagedCopyScratchSlot>();
+    slot->scratch = std::make_unique<StagedMemoryCopyScratch>();
+    std::unique_lock<std::mutex> copy_lock(slot->mutex);
+    auto*                        scratch = slot->scratch.get();
+    slots.push_back(std::move(slot));
+    return {scratch, std::move(copy_lock)};
 }
 
 bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const MemoryOperationRequestPB&     request,
