@@ -80,6 +80,7 @@ arch_with_version_dep = select({
 })
 
 requirement([
+    "typing-extensions",
     "sentencepiece",
     "transformers",
     "pynvml",
