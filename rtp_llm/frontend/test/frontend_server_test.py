@@ -375,10 +375,6 @@ class FrontendServerTest(TestCase):
         self.addCleanup(tracing.reset_telemetry_for_test)
         self.assertTrue(tracing.reset_telemetry_for_test())
 
-    async def _async_run(self, *args: Any, **kwargs: Any):
-        res = await self.frontend_server.inference(*args, **kwargs)
-        return res
-
     def test_root_and_batch_share_access_logs_metrics_and_concurrency(self):
         server = self.frontend_server
         for batch, body, expected in [

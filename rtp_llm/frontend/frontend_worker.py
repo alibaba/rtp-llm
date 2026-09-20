@@ -141,15 +141,14 @@ class FrontendWorker:
         return token_ids, tokens
 
     def inference(
-        self, batch: bool = False, /, **kwargs: Any
+        self, batch_endpoint: bool = False, /, **kwargs: Any
     ) -> CompleteResponseAsyncGenerator:
-        # The HTTP route selects the positional-only batch mode. A JSON "batch"
-        # key goes into **kwargs, so it cannot override the mode or conflict with it.
-        streaming = batch and self.is_streaming(kwargs)
-        if batch:
+        # Only the HTTP route selects endpoint behavior; JSON fields remain in kwargs.
+        streaming = batch_endpoint and self.is_streaming(kwargs)
+        if batch_endpoint:
             kwargs.setdefault("prompt_batch", [])
         request, kwargs = RequestExtractor(GenerateConfig()).extract_request(kwargs)
-        if batch and (streaming or request.is_streaming):
+        if batch_endpoint and (streaming or request.is_streaming):
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "batch_infer only supports non-streaming requests",
@@ -164,17 +163,17 @@ class FrontendWorker:
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "request is non_stream but use incremental decoder",
             )
-        if batch and not request.input_texts:
+        if batch_endpoint and not request.input_texts:
             response = CompleteResponseAsyncGenerator.generate_from_list(
                 [BatchPipelineResponse(response_batch=[])]
             )
-        elif batch and self._can_use_batch_rpc(request):
+        elif batch_endpoint and self._can_use_batch_rpc(request):
             response = self._yield_batch_generate(request, **kwargs)
         else:
             response = self._inference(request, **kwargs)
         collect = (
             CompleteResponseAsyncGenerator.get_last_value
-            if batch
+            if batch_endpoint
             else partial(
                 FrontendWorker.collect_complete_response,
                 incremental=request.incremental,
