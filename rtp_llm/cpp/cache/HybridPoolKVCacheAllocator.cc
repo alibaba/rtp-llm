@@ -164,7 +164,7 @@ bool HybridPoolKVCacheAllocator::doInit() {
             linear_group_ids_.push_back(gid);
         } else if (group_type == CacheGroupType::SWA) {
             group = std::make_shared<SWAKVCacheGroup>(
-                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_);
+                ids, spec, group_pool, gid, config_.stateCheckpointStep(gid), shared_cache_raw, metrics_reporter_);
             swa_group_ids_.push_back(gid);
         } else {
             group = std::make_shared<FullKVCacheGroup>(ids, spec, group_pool, gid, shared_cache_raw, metrics_reporter_);

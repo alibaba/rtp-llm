@@ -29,10 +29,10 @@ bool shouldUseHybridPoolLayout(const ModelConfig& model_config) {
 }
 
 size_t steppedBytes(size_t bytes, int step) {
-    return (bytes > 0 && step > 1) ? bytes / static_cast<size_t>(step) : bytes;
+    return step > 1 ? bytes / static_cast<size_t>(step) + (bytes % static_cast<size_t>(step) != 0) : bytes;
 }
 
-size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
+size_t fallbackFixedPoolHbmBytes(const CacheConfig& config, int step) {
     if (config.fixed_pool_uses_pinned_cpu) {
         return 0u;
     }
@@ -47,16 +47,16 @@ size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
             const bool explicit_hca   = region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0;
             const bool explicit_fixed = config.dsv4_fixed_pool_blocks > 0;
             if (!explicit_hca && !explicit_fixed) {
-                bytes += config.group_block_size_bytes[gid];
+                bytes += steppedBytes(config.group_block_size_bytes[gid], config.fixedPoolCapacityStep(gid));
             }
         }
         return bytes;
     }
-    return config.swa_block_size_bytes + config.state_block_size_bytes;
+    return steppedBytes(config.swa_block_size_bytes + config.state_block_size_bytes, step);
 }
 
 size_t effectivePagedBlockBytes(const CacheConfig& config, int step) {
-    return config.block_size_bytes + steppedBytes(fallbackFixedPoolHbmBytes(config), step);
+    return config.block_size_bytes + fallbackFixedPoolHbmBytes(config, step);
 }
 
 bool hasDsv4FixedPoolBytes(const CacheConfig& config) {

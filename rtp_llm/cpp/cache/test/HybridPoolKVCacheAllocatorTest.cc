@@ -389,6 +389,48 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitCreatesIndependentBlockPoolPerGroup) 
     EXPECT_EQ(allocator->groupBlockPools()[1]->totalBlocksNum(), 8u - 1u);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, CompactSwaCheckpointsAlignWithLinearTokenBoundaries) {
+    for (uint32_t cp_size : {1u, 2u, 4u}) {
+        for (int step : {1, 2, 3, 8}) {
+            for (bool request_cache : {false, true}) {
+                SCOPED_TRACE(testing::Message() << cp_size << "/" << step << "/" << request_cache);
+                auto config                                  = makeTinySwaMultiPoolHybridConfig(128, 64);
+                config.linear_step                           = step;
+                config.enable_linear_attention_request_cache = request_cache;
+                config.linear_disk_checkpoint_blocks         = request_cache ? 64 : 0;
+                const size_t row_tokens                      = config.seq_size_per_block * cp_size;
+                config.cache_specs[1]->seq_size_per_block    = row_tokens;
+                config.group_seq_size_per_block[1]           = row_tokens;
+                auto allocator                               = makeAllocator(config);
+                ASSERT_TRUE(allocator->init());
+                allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, cp_size, config.seq_size_per_block));
+                const int     seq_len  = 9 * row_tokens - 1;
+                auto          resource = makeBatchResource(1, config);
+                CacheKeysType keys;
+                for (size_t i = 0; i < 9 * cp_size; ++i) {
+                    keys.push_back(100 + i);
+                }
+                resource->setBatchCacheKeys(0, keys);
+                auto       tokens = makeCompleteTokenIds(1, seq_len, config.seq_size_per_block);
+                MallocInfo info{resource, tokens};
+                info.enable_device_cache = false;
+                info.reuse_cache         = true;
+                ASSERT_TRUE(allocator->malloc(info).success);
+                const auto& blocks = resource->blocks(0, 1);
+                ASSERT_EQ(blocks.size(), 9u);
+                for (size_t i = 0; i < blocks.size(); ++i) {
+                    const bool checkpoint = request_cache ?
+                                                ((i + 1) * row_tokens) % (config.seq_size_per_block * step) == 0 :
+                                                (i + 1) % step == 0;
+                    EXPECT_EQ(!isNullBlockIdx(blocks[i]), checkpoint || i >= 7) << "row=" << i;
+                }
+                FreeInfo free_info{resource, tokens};
+                allocator->free(free_info);
+            }
+        }
+    }
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, SwaDefaultRegionGroupPoolUsesGpuBacking) {
     auto config    = makeTinySwaMultiPoolHybridConfig(/*linear_block_num=*/6, /*swa_block_num=*/8);
     auto allocator = makeAllocator(config);

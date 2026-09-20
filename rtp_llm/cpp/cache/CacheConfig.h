@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -120,15 +121,42 @@ struct CacheConfig {
         return std::max<int>(1, static_cast<int>(cache_specs.size()));
     }
 
+    bool hasCompactRequestState(size_t gid) const {
+        return enable_linear_attention_request_cache && linear_group_num > 0 && gid < group_types.size()
+               && group_types[gid] == CacheGroupType::SWA && gid < cache_specs.size() && cache_specs[gid]
+               && cache_specs[gid]->seq_size_per_block > seq_size_per_block;
+    }
+
+    int stateCheckpointStep(size_t gid) const {
+        const int step = std::max(1, linear_step);
+        if (!hasCompactRequestState(gid)) {
+            return step;
+        }
+        // LINEAR_STEP counts logical pages; compact rows span CP-wide pages.
+        const size_t checkpoint_tokens = seq_size_per_block * step;
+        return checkpoint_tokens / std::gcd(checkpoint_tokens, cache_specs[gid]->seq_size_per_block);
+    }
+
+    int fixedPoolCapacityStep(size_t gid) const {
+        if (!hasCompactRequestState(gid)) {
+            return std::max(1, linear_step);
+        }
+        // FULL capacity counts rank-local pages on CP prefill, but logical
+        // pages on decode. Budget state checkpoints in that same namespace.
+        const size_t checkpoint_tokens = cache_specs[gid]->seq_size_per_block * stateCheckpointStep(gid);
+        const size_t local_page_tokens = seq_size_per_block * std::max(1u, linear_request_cache_alignment_blocks);
+        return std::max<size_t>(1, checkpoint_tokens / local_page_tokens);
+    }
+
     void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
         if (!use_independent_block_pools || group_block_nums.empty()) {
             fixed_pool_reserve_bytes = 0;
             return;
         }
 
-        const int step    = std::max(1, linear_step);
-        size_t    reserve = 0;
+        size_t reserve = 0;
         for (size_t gid = 0; gid < group_block_nums.size(); ++gid) {
+            const int  step      = fixedPoolCapacityStep(gid);
             const bool is_swa    = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
             const bool is_linear = gid < group_types.size() && group_types[gid] == CacheGroupType::LINEAR;
             const auto region = gid < group_region_names.size() ? group_region_names[gid] : KVCacheRegionName::DEFAULT;

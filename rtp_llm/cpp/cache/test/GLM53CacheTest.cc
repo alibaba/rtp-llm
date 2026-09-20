@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -548,6 +549,62 @@ TEST(GLM53CacheConfigTest, LinearRequestPoolBlockOverrideIsAppliedWithLiveReques
     config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 3);
     config.finalizeBlockNums(10000, runtime);
     EXPECT_EQ(config.group_block_nums[1], 193u);
+}
+
+TEST(GLM53CacheConfigTest, CompactStateCapacityAndBudgetUseLocalPageCoordinates) {
+    initLogger();
+    ScopedEnvVar host_budget("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "0");
+    for (bool request_cache : {false, true}) {
+        ScopedEnvVar request_cache_mode("ENABLE_LINEAR_ATTN_REQUEST_CACHE", request_cache ? "1" : "0");
+        for (int cp_size : {1, 4}) {
+            for (int step : {2, 3, 8}) {
+                for (bool prefill : {false, true}) {
+                    SCOPED_TRACE(testing::Message()
+                                 << request_cache << "/" << cp_size << "/" << step << "/" << prefill);
+                    auto model                         = makeGlm53Config();
+                    model.data_type                    = DataType::TYPE_BF16;
+                    model.max_seq_len                  = 4096;
+                    model.attn_config.tokens_per_block = model.attn_config.kernel_tokens_per_block = 64;
+                    auto kv                                                                        = makeKvConfig();
+                    kv.seq_size_per_block = kv.kernel_seq_size_per_block = 64;
+                    kv.dsv4_fixed_pool_blocks                            = 0;
+                    kv.linear_step                                       = step;
+                    kv.kv_cache_mem_mb                                   = 1024;
+                    ParallelismConfig pc;
+                    pc.role_type = prefill ? RoleType::PREFILL : RoleType::DECODE;
+                    pc.tp_size   = prefill ? cp_size : 1;
+                    pc.dp_size   = prefill ? 1 : cp_size;
+                    pc.ep_size = pc.world_size            = cp_size;
+                    pc.prefill_cp_config.kv_cache_sharded = cp_size > 1;
+                    if (!prefill && cp_size > 1) {
+                        pc.prefill_cp_config.method          = CPRotateMethod::PREFILL_CP;
+                        pc.prefill_cp_config.prefill_cp_size = cp_size;
+                    }
+                    RuntimeConfig runtime;
+                    runtime.max_generate_batch_size = 1;
+                    auto   config          = CacheConfigCreator::createConfig(model, pc, runtime, kv, std::nullopt);
+                    size_t allocated_bytes = 0;
+                    for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
+                        allocated_bytes +=
+                            static_cast<size_t>(config.group_block_nums[gid]) * config.group_block_size_bytes[gid];
+                    }
+                    EXPECT_LE(allocated_bytes, 1024u * 1024u * 1024u);
+                    constexpr uint32_t local_pages = 8192;
+                    config.finalizeBlockNums(local_pages, runtime);
+                    const size_t interval_tokens = 64u * std::lcm(step, cp_size);
+                    const size_t capacity_tokens = local_pages * 64u * (prefill ? cp_size : 1);
+                    const size_t expected_states =
+                        request_cache ? capacity_tokens / interval_tokens : local_pages / step;
+                    ASSERT_EQ(config.group_region_names[3], KVCacheRegionName::INDEXER_STATE);
+                    EXPECT_EQ(config.group_block_nums[3], expected_states);
+                    // Explicit pool sizing remains an intentional user override.
+                    config.dsv4_fixed_pool_blocks = 17;
+                    config.finalizeBlockNums(local_pages, runtime);
+                    EXPECT_EQ(config.group_block_nums[3], 17u);
+                }
+            }
+        }
+    }
 }
 
 TEST(GLM53CacheConfigTest, DiskCheckpointsReserveTransientBatchesEvenWithSmallPoolOverride) {
