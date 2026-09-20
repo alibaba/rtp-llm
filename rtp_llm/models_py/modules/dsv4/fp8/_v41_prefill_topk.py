@@ -78,7 +78,13 @@ def _prefill_topk_finite_kernel(
 
 
 def _select_tokens(
-    logits: torch.Tensor, visible: torch.Tensor, topk: int = 512, *, backend: str = "v3"
+    logits: torch.Tensor,
+    visible: torch.Tensor,
+    topk: int = 512,
+    *,
+    backend: str = "v3",
+    bounds=None,
+    out=None,
 ) -> torch.Tensor:
     """Internal candidate entry point, also used by the standalone benchmark.
 
@@ -89,11 +95,18 @@ def _select_tokens(
     if backend not in ("v3", "insertion", "radix"):
         raise ValueError(f"Unknown prefill TopK backend: {backend}")
     rows, width = logits.shape
-    bounds = torch.empty((2, rows), device=logits.device, dtype=torch.int32)
-    starts, ends = bounds.unbind(0)
-    output = torch.empty((rows, topk), device=logits.device, dtype=torch.int32)
-    _prefill_topk_bounds_kernel[(triton.cdiv(rows, 256),)](
-        visible, starts, ends, rows, width, visible.stride(0), 256
+    if bounds is None:
+        storage = torch.empty((2, rows), device=logits.device, dtype=torch.int32)
+        starts, ends = storage.unbind(0)
+        _prefill_topk_bounds_kernel[(triton.cdiv(rows, 256),)](
+            visible, starts, ends, rows, width, visible.stride(0), 256
+        )
+    else:
+        starts, ends = bounds
+    output = (
+        out
+        if out is not None
+        else torch.empty((rows, topk), device=logits.device, dtype=torch.int32)
     )
     if backend == "v3":
         rtp_llm_ops.topk_v3(
@@ -116,9 +129,32 @@ def _select_tokens(
 
 
 def try_select_tokens(
-    logits: torch.Tensor, visible: torch.Tensor, topk: int = 512
+    logits: torch.Tensor,
+    visible: torch.Tensor,
+    topk: int = 512,
+    *,
+    bounds=None,
+    out=None,
 ) -> torch.Tensor | None:
     """Return selected int32 indices, or None before launching if unsupported."""
     if not is_supported(logits, visible, topk):
         return None
-    return _select_tokens(logits, visible, topk)
+    if bounds is not None and not (
+        len(bounds) == 2
+        and all(
+            tensor.device == logits.device
+            and tensor.dtype == torch.int32
+            and tensor.shape == (logits.shape[0],)
+            and tensor.is_contiguous()
+            for tensor in bounds
+        )
+    ):
+        return None
+    if out is not None and not (
+        out.device == logits.device
+        and out.dtype == torch.int32
+        and out.shape == (logits.shape[0], topk)
+        and out.is_contiguous()
+    ):
+        return None
+    return _select_tokens(logits, visible, topk, bounds=bounds, out=out)

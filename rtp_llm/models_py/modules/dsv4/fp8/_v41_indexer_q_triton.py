@@ -34,15 +34,15 @@ def _indexer_rope_bf16(q, frequencies, position):
     cosine = tl.load(frequencies + position * 64 + angle * 2, rotary, other=1)
     sine = tl.load(frequencies + position * 64 + angle * 2 + 1, rotary, other=0)
     even = columns % 2 == 0
-    product = imag * tl.where(even, sine, cosine)
-    # PyTorch c10 complex multiplication: fma(a,c,-b*d), fma(a,d,b*c).
+    product = tl.where(even, imag, real) * sine
+    # PyTorch c10 complex multiplication: fma(a,c,-b*d), fma(b,c,a*d).
     # Triton unary minus can lower to 0-product, losing the negative zero
     # required by FP4's sign bit. Flip the bit instead of subtracting from 0.
     product_bits = product.to(tl.uint32, bitcast=True)
     signed_product = (product_bits ^ tl.where(even, 0x80000000, 0)).to(
         tl.float32, bitcast=True
     )
-    rotated = tl.fma(real, tl.where(even, cosine, sine), signed_product)
+    rotated = tl.fma(tl.where(even, real, imag), cosine, signed_product)
     return tl.where(rotary, rotated, values).to(tl.bfloat16)
 
 

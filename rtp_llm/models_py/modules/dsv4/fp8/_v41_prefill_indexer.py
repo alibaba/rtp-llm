@@ -218,7 +218,9 @@ def _use_clean_logits_only(device: torch.device) -> bool:
     )
 
 
-def score_indexer_chunk(q_payload, q_sf, k_payload, k_sf, weights, visible):
+def score_indexer_chunk(
+    q_payload, q_sf, k_payload, k_sf, weights, visible, *, bounds=None
+):
     """Fused dot/ReLU/head reduction; keep causal padding at negative infinity."""
     from ._indexer_score import fp8_fp4_mqa_indexer_score
 
@@ -227,8 +229,13 @@ def score_indexer_chunk(q_payload, q_sf, k_payload, k_sf, weights, visible):
         return torch.empty(
             q_payload.shape[0], count, dtype=torch.float32, device=q_payload.device
         )
-    ends = visible.to(torch.int32).clamp(0, count).contiguous()
-    starts = torch.zeros_like(ends)
+    if bounds is None:
+        ends = visible.to(torch.int32).clamp(0, count).contiguous()
+        starts = torch.zeros_like(ends)
+    else:
+        # Forward-local prefill metadata already clamps in int64 before
+        # narrowing. Reuse the exact same device bounds for scoring and TopK.
+        starts, ends = bounds
     # The scheduler skips future K tiles. Its SM100 cleaner writes every
     # logical output element, including rows with no completed ratio-2 pair.
     logits = fp8_fp4_mqa_indexer_score(

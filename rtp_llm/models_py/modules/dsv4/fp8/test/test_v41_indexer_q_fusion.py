@@ -196,6 +196,12 @@ class V41IndexerQFusionCUDA(unittest.TestCase):
                         torch.testing.assert_close(value, copies[key], rtol=0, atol=0)
 
     @torch.no_grad()
+    def test_long_prefill_imaginary_fma_rounding(self):
+        # The previous imaginary FMA ordering changed one FP4 nibble in this
+        # shape. Short decode batches seldom hit that BF16/FP4 midpoint.
+        case = make_case(16384, 1, seed=41)
+        assert_identical(candidate(case), baseline(case))
+
     def test_fp4_midpoints_scale_boundaries_and_signed_zero(self):
         case = make_case(1, 6)
         case["freqs_cis"].fill_(complex(1, 0))

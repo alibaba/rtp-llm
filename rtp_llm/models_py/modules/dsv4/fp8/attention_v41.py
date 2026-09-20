@@ -23,10 +23,13 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
 )
 from rtp_llm.models_py.modules.dsv4.cp import _cp_restore_gathered_full_2d
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_deepselect as prefill_deepselect
+from rtp_llm.models_py.modules.dsv4.fp8 import _v41_indexer_q_triton as indexer_q_fusion
 from rtp_llm.models_py.modules.dsv4.fp8 import (
     _v41_prefill_candidates as prefill_candidates,
 )
+from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_global as prefill_global
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_indexer as prefill_indexer
+from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_metadata as prefill_metadata
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_topk as prefill_topk
 from rtp_llm.models_py.modules.dsv4.fp8 import (
     _v41_sparse_prefill_indexer as sparse_prefill_indexer,
@@ -514,6 +517,7 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention.pop("prefill_candidate_mask", None)
             self._shared_attention.pop("prefill_sparse_candidates", None)
             self._shared_attention.pop("prefill_sparse_plans", None)
+            self._shared_attention.pop("prefill_score_bounds", None)
             # ``_prefill_chunk_meta`` caches per-source-group chunk offsets for
             # the duration of one forward; drop them with the rest of the
             # per-forward shared state.
@@ -563,6 +567,23 @@ class AttentionV41FP8(AttentionFP8):
         tpb = require_pool_tokens_per_block(self._kv_cache, region=region)
         cp = self._cp_ctx
         sharded = cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded
+        slots = prefill_metadata.try_slot_mapping(
+            positions,
+            req_ids,
+            bt,
+            eb,
+            tpb,
+            self.compress_ratio,
+            cp.cp_size if sharded else 1,
+            cp.cp_rank if sharded else 0,
+            owner_tokens_per_block=(
+                self._kv_cache.seq_size_per_block if sharded else tpb
+            ),
+            state=region == CSA_STATE,
+            seq_ends=state_end,
+        )
+        if slots is not None:
+            return slots
         if region == CSA_STATE:
             return cp_state_slot_mapping(
                 positions,
@@ -619,6 +640,8 @@ class AttentionV41FP8(AttentionFP8):
         slots = self._slots(CSA_STATE, positions, req_ids, state_end=seq_ends)
         if slots is not None:
             pool = self._source_pool(CSA_STATE)
+            if prefill_global.store_states(values, scores, slots, pool):
+                return
             data = torch.cat((values, scores), -1).float()
             # Scatter without a boolean-mask compact (``pool[slots[valid]]``
             # forces a device->host ``nonzero`` sync to size the gather).
@@ -685,38 +708,15 @@ class AttentionV41FP8(AttentionFP8):
                 if projected_tiles is not None
                 else _linear_bf16_bf16_fp32(x_tile, owner.global_wkv)
             )
+            scores = None
             if ratio == 2:
                 scores = (
                     x_tile[:, self.head_dim :]
                     if projected_tiles is not None
                     else _linear_bf16_bf16_fp32(x_tile, owner.global_wgate)
                 )
-                # The seam row's previous value/score is the last row of the
-                # previous tile; the first tile's head is replaced by the
-                # per-request state read below, exactly as the single-shot
-                # roll's head was.
-                if carry is not None:
-                    head_values, head_scores = carry
-                else:
-                    head_values, head_scores = values[:1], scores[:1]
-                value_prev = torch.cat((head_values, values[:-1]), 0)
-                score_prev = torch.cat((head_scores, scores[:-1]), 0)
-                first = pos_tile == starts[req_tile]
-                # Replace the boolean-mask index ``previous[req_ids[first]]`` (a
-                # device->host ``nonzero`` sync) with an integer gather on the full
-                # ``req_ids`` + a ``torch.where`` select. Same result, no sync.
-                value_prev = torch.where(
-                    first[:, None],
-                    previous[req_tile, : self.head_dim].to(values.dtype),
-                    value_prev,
-                )
-                score_prev = torch.where(
-                    first[:, None],
-                    previous[req_tile, self.head_dim :].to(scores.dtype),
-                    score_prev,
-                )
-                # Host request metadata gives fixed-size pair boundaries without
-                # a CUDA nonzero synchronization for every projection tile.
+                # Host lengths retain compact completed-pair rows without
+                # nonzero or doubling the index projection's GEMM row count.
                 pair_indices = []
                 for first, end in pair_ranges:
                     begin = max(first, t0 + (first - t0) % 2)
@@ -731,51 +731,121 @@ class AttentionV41FP8(AttentionFP8):
                     if pair_indices
                     else torch.empty(0, dtype=torch.long, device=x_full.device)
                 )
-                latent = compress_pairs(
-                    torch.stack((value_prev[boundary_idx], values[boundary_idx]), 1),
-                    torch.stack((score_prev[boundary_idx], scores[boundary_idx]), 1),
-                    owner.global_norm,
-                    self.eps,
-                )
-                self._write_states(values, scores, pos_tile, req_tile, starts + lengths)
                 boundary_pos, boundary_req = (
                     pos_tile[boundary_idx],
                     req_tile[boundary_idx],
                 )
-                carry = (values[-1:].clone(), scores[-1:].clone())
             else:
-                latent = rms_norm(values, owner.global_norm, self.eps).to(
-                    torch.bfloat16
-                )
-                # ratio == 1: every position is a boundary — skip the all-True
-                # boolean-mask compaction (``positions[torch.ones_like(...)]`` is a
-                # pure device->host ``nonzero`` sync that selects everything).
+                boundary_idx = torch.arange(t1 - t0, device=x_full.device)
                 boundary_pos, boundary_req = pos_tile, req_tile
-            freqs = self.freqs_cis[(boundary_pos // ratio) * ratio]
-            global_keys = rope_only(latent.clone(), freqs, self.rope_head_dim)
-            index_keys = rope_only(
-                rms_norm(
-                    F.linear(latent, owner.index_wk), owner.index_k_norm, self.eps
-                ),
-                freqs,
-                self.rope_head_dim,
+            main_slots = (
+                self._slots(self._global_region(), boundary_pos, boundary_req)
+                if main_pool is not None
+                else None
             )
+            index_slots = (
+                self._slots(INDEXER_KV, boundary_pos, boundary_req)
+                if index_pool is not None
+                else None
+            )
+            latent = (
+                prefill_global.compress_main(
+                    values,
+                    scores,
+                    owner.global_norm,
+                    self.eps,
+                    pos_tile,
+                    req_tile,
+                    starts,
+                    previous,
+                    boundary_idx,
+                    self.freqs_cis,
+                    main_pool,
+                    main_slots,
+                    ratio,
+                    carry,
+                )
+                if prefill and main_pool is not None
+                else None
+            )
+            main_stored = latent is not None
+            if latent is None:
+                if ratio == 2:
+                    head_values, head_scores = (
+                        carry if carry is not None else (values[:1], scores[:1])
+                    )
+                    value_prev = torch.cat((head_values, values[:-1]), 0)
+                    score_prev = torch.cat((head_scores, scores[:-1]), 0)
+                    first = pos_tile == starts[req_tile]
+                    value_prev = torch.where(
+                        first[:, None],
+                        previous[req_tile, : self.head_dim].to(values.dtype),
+                        value_prev,
+                    )
+                    score_prev = torch.where(
+                        first[:, None],
+                        previous[req_tile, self.head_dim :].to(scores.dtype),
+                        score_prev,
+                    )
+                    latent = compress_pairs(
+                        torch.stack(
+                            (value_prev[boundary_idx], values[boundary_idx]), 1
+                        ),
+                        torch.stack(
+                            (score_prev[boundary_idx], scores[boundary_idx]), 1
+                        ),
+                        owner.global_norm,
+                        self.eps,
+                    )
+                else:
+                    latent = rms_norm(values, owner.global_norm, self.eps).to(
+                        torch.bfloat16
+                    )
+            if ratio == 2:
+                # The immutable predecessor snapshot and old carry are consumed
+                # before any ring writes or publication of the next tile carry.
+                self._write_states(values, scores, pos_tile, req_tile, starts + lengths)
+                carry = (values[-1:].clone(), scores[-1:].clone())
+            projected_index = F.linear(latent, owner.index_wk)
+            index_stored = (
+                prefill
+                and main_pool is not None
+                and index_pool is not None
+                and prefill_global.store_index(
+                    projected_index,
+                    owner.index_k_norm,
+                    self.eps,
+                    boundary_pos,
+                    self.freqs_cis,
+                    index_pool,
+                    index_slots,
+                    ratio,
+                )
+            )
+            if not main_stored or not index_stored:
+                freqs = self.freqs_cis[(boundary_pos // ratio) * ratio]
+            if not main_stored:
+                global_keys = rope_only(latent.clone(), freqs, self.rope_head_dim)
+            if not index_stored:
+                index_keys = rope_only(
+                    rms_norm(projected_index, owner.index_k_norm, self.eps),
+                    freqs,
+                    self.rope_head_dim,
+                )
             if main_pool is not None:
                 from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
                     quantize_and_insert_k_cache_fp4,
                     quantize_indexer_k_fp4,
                 )
 
-                quantize_and_insert_k_cache_fp4(
-                    global_keys.contiguous(),
-                    main_pool,
-                    self._slots(self._global_region(), boundary_pos, boundary_req),
-                )
-                quantize_indexer_k_fp4(
-                    index_keys.contiguous(),
-                    self._slots(INDEXER_KV, boundary_pos, boundary_req),
-                    index_pool,
-                )
+                if not main_stored:
+                    quantize_and_insert_k_cache_fp4(
+                        global_keys.contiguous(), main_pool, main_slots
+                    )
+                if not index_stored:
+                    quantize_indexer_k_fp4(
+                        index_keys.contiguous(), index_slots, index_pool
+                    )
             else:
                 warm_keys.append((boundary_pos, boundary_req, global_keys, index_keys))
         if warm_keys:
@@ -785,7 +855,7 @@ class AttentionV41FP8(AttentionFP8):
             index_keys = torch.cat([tile[3] for tile in warm_keys])
         result = []
         fused_indexer = prefill and prefill_indexer.is_supported(
-            x_full.device, getattr(self, "index_n_heads", 0), index_keys.shape[-1]
+            x_full.device, getattr(self, "index_n_heads", 0), owner.index_wk.shape[0]
         )
         for b, end in enumerate(ends):
             count = int(end) // ratio
@@ -927,28 +997,40 @@ class AttentionV41FP8(AttentionFP8):
             q = self._lin(self.index_wq, qr).view(
                 -1, self.index_n_heads, self.index_head_dim
             )
-            q = rope_only(q, self.freqs_cis[positions], self.rope_head_dim)
-            weights = (
-                F.linear(x, self.index_weights).float()
-                * (self.index_head_dim * self.index_n_heads) ** -0.5
-            )
+            raw_weights = F.linear(x, self.index_weights)
             fused_indexer = isinstance(
                 globals_by_req[0][1], prefill_indexer.PrefillIndexerKeys
             )
-            if fused_indexer:
-                q_fp4, q_sf = prefill_indexer.quantize_indexer_q(q)
+            prepared = (
+                indexer_q_fusion.try_fused_indexer_q(
+                    q.unsqueeze(1),
+                    raw_weights.unsqueeze(1),
+                    self.freqs_cis,
+                    positions,
+                    self.rope_head_dim,
+                )
+                if fused_indexer and os.environ.get("DSV41_FUSED_PREFILL_Q", "1") != "0"
+                else None
+            )
+            if prepared is not None:
+                q_fp4, q_sf, weights = (value.squeeze(1) for value in prepared)
             else:
-                q = fp8_roundtrip(q)
+                q = rope_only(q, self.freqs_cis[positions], self.rope_head_dim)
+                weights = (
+                    raw_weights.float()
+                    * (self.index_head_dim * self.index_n_heads) ** -0.5
+                )
+                if fused_indexer:
+                    q_fp4, q_sf = prefill_indexer.quantize_indexer_q(q)
+                else:
+                    q = fp8_roundtrip(q)
             single_request = len(globals_by_req) == 1
             for b, (_, keys) in enumerate(globals_by_req):
                 # One-argument ``torch.where`` is ``nonzero``: it syncs to size
                 # its output. With a single request every token belongs to
                 # request 0, so the row selection is just the full range.
-                rows = (
-                    torch.arange(positions.shape[0], device=positions.device)
-                    if single_request
-                    else torch.where(req_ids == b)[0]
-                )
+                rows = None if single_request else torch.where(req_ids == b)[0]
+                row_count = positions.shape[0] if single_request else rows.numel()
                 key_count = len(keys)
                 candidates = shared.get("candidates")
                 probe = slice(0, 1) if single_request else rows[:1]
@@ -979,13 +1061,37 @@ class AttentionV41FP8(AttentionFP8):
                         else 64
                     )
                 )
-                for chunk_index, chunk in enumerate(rows.split(chunk_rows)):
+                request_bounds = None
+                if (
+                    single_request
+                    and fused_indexer
+                    and os.environ.get("DSV41_FUSED_PREFILL_METADATA", "1") != "0"
+                ):
+                    cache = shared.setdefault("prefill_score_bounds", {})
+                    bounds_key = (b, row_count, key_count, self.compress_ratio)
+                    request_bounds = cache.get(bounds_key)
+                    if request_bounds is None:
+                        request_bounds = prefill_metadata.try_score_bounds(
+                            positions, key_count, self.compress_ratio
+                        )
+                        if request_bounds is not None:
+                            cache[bounds_key] = request_bounds
+                for chunk_index, start in enumerate(range(0, row_count, chunk_rows)):
+                    stop = min(start + chunk_rows, row_count)
                     output_rows = (
-                        slice(chunk_index * chunk_rows, (chunk_index + 1) * chunk_rows)
-                        if single_request
-                        else chunk
+                        slice(start, stop) if single_request else rows[start:stop]
                     )
-                    visible = (positions[chunk] + 1) // self.compress_ratio
+                    chunk = output_rows
+                    bounds = (
+                        tuple(t[start:stop] for t in request_bounds)
+                        if request_bounds is not None
+                        else None
+                    )
+                    visible = (
+                        bounds[1]
+                        if bounds is not None
+                        else (positions[chunk] + 1) // self.compress_ratio
+                    )
                     if sparse_request:
                         with record_function_range(
                             "dsv41.prefill.indexer.sparse_logits"
@@ -995,7 +1101,7 @@ class AttentionV41FP8(AttentionFP8):
                                 (
                                     b,
                                     chunk_index,
-                                    len(chunk),
+                                    stop - start,
                                     key_count,
                                     self.compress_ratio,
                                     candidate_size,
@@ -1048,6 +1154,7 @@ class AttentionV41FP8(AttentionFP8):
                                 keys.scale,
                                 weights[chunk],
                                 visible,
+                                **({"bounds": bounds} if bounds is not None else {}),
                             )
                     else:
                         logits = torch.einsum(
@@ -1071,11 +1178,19 @@ class AttentionV41FP8(AttentionFP8):
                                 publish_candidates,
                             )
                     k = min(self.index_topk, key_count)
-                    selected = prefill_topk.try_select_tokens(logits, visible, k)
+                    target = out[output_rows, :k] if single_request else None
+                    selected = prefill_topk.try_select_tokens(
+                        logits,
+                        visible,
+                        k,
+                        bounds=bounds,
+                        out=target,
+                    )
                     if selected is None:
                         scores, selected = logits.topk(k, dim=-1)
                         selected = torch.where(scores.isfinite(), selected, -1).int()
-                    out[output_rows, :k] = selected
+                    if selected is not target:
+                        out[output_rows, :k] = selected
         shared["topk"] = {self.layer_id: out}
         return out
 

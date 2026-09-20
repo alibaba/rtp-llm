@@ -818,7 +818,7 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
                             columns[None] >= visible[:, None], -torch.inf
                         )
 
-                    def select(logits, visible, topk):
+                    def select(logits, visible, topk, **kwargs):
                         if not use_fused_topk:
                             return None
                         values, ids = logits.topk(topk, dim=-1)
@@ -869,7 +869,7 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
                     )
                     if single_request:
                         self.assertEqual(
-                            selections, [slice(0, 2), slice(2, 4), slice(4, 6)]
+                            selections, [slice(0, 2), slice(2, 4), slice(4, 5)]
                         )
                     else:
                         for actual_rows, expected_rows in zip(
