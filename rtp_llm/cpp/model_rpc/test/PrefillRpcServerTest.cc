@@ -15,10 +15,11 @@ namespace rtp_llm {
 
 class TestDecodeRpcService final: public RpcService::Service {
 public:
-    explicit TestDecodeRpcService(bool fail_first_allocate):
-        first_allocate_failure_(fail_first_allocate ? std::optional<grpc::Status>(
-                                    grpc::Status(grpc::StatusCode::INTERNAL, "allocate failed once")) :
-                                                      std::nullopt) {}
+    explicit TestDecodeRpcService(bool fail_first_allocate, bool supports_completion = false):
+        first_allocate_failure_(fail_first_allocate ? std::optional<grpc::Status>(grpc::Status(
+                                                          grpc::StatusCode::INTERNAL, "allocate failed once")) :
+                                                      std::nullopt),
+        supports_completion_(supports_completion) {}
 
     explicit TestDecodeRpcService(grpc::Status first_allocate_failure):
         first_allocate_failure_(std::move(first_allocate_failure)) {}
@@ -35,6 +36,7 @@ public:
         }
 
         GenerateOutputsPB response;
+        response.set_supports_prefill_completion(supports_completion_);
         if (!stream->Write(response)) {
             return grpc::Status(grpc::StatusCode::INTERNAL, "write allocate response failed");
         }
@@ -49,11 +51,13 @@ public:
 private:
     std::optional<grpc::Status> first_allocate_failure_;
     std::atomic<int>            allocate_count_{0};
+    bool                        supports_completion_ = false;
 };
 
 class TestDecodeRpcServer {
 public:
-    explicit TestDecodeRpcServer(bool fail_first_allocate): service_(fail_first_allocate) {}
+    explicit TestDecodeRpcServer(bool fail_first_allocate, bool supports_completion = false):
+        service_(fail_first_allocate, supports_completion) {}
     explicit TestDecodeRpcServer(grpc::Status first_allocate_failure): service_(std::move(first_allocate_failure)) {}
     ~TestDecodeRpcServer() {
         if (server_) {
@@ -214,8 +218,7 @@ protected:
         ModelConfig model_config;
         model_config.max_seq_len = 2048;
         model_config.vocab_size  = 1024;
-        return std::make_shared<NormalGenerateStream>(
-            input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+        return std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
     }
 
     std::unique_ptr<PrefillGenerateContext> makeContext(GenerateInputPB* request, int64_t timeout_ms = 0) {
@@ -230,6 +233,98 @@ protected:
     grpc::ServerContext          server_context_;
     kmonitor::MetricsReporterPtr metrics_reporter_;
 };
+
+TEST_F(PrefillRpcServerTest, PrefillCompletionRequiresCapabilityAndSuccessfulLocalFinish) {
+    class CompletionClient final: public PrefillGenerateContext::ClientStream {
+    public:
+        bool Read(GenerateOutputsPB*) override {
+            return true;
+        }
+        bool NextMessageSize(uint32_t*) override {
+            return false;
+        }
+        bool Write(const GenerateRequestPB& request, grpc::WriteOptions) override {
+            writes.push_back(request);
+            return write_ok;
+        }
+        void WaitForInitialMetadata() override {}
+        bool WritesDone() override {
+            return true;
+        }
+        grpc::Status Finish() override {
+            return grpc::Status::OK;
+        }
+        bool                           write_ok = true;
+        std::vector<GenerateRequestPB> writes;
+    };
+
+    for (const std::string mode : {"complete", "legacy", "continue", "unfinished", "error", "write_failure"}) {
+        SCOPED_TRACE(mode);
+        GenerateInputPB request;
+        request.set_request_id(42);
+        auto context                             = makeContext(&request);
+        context->meta                            = std::make_shared<RpcServerRuntimeMeta>();
+        context->generate_input                  = std::make_shared<GenerateInput>();
+        context->generate_input->generate_config = std::make_shared<GenerateConfig>();
+        auto stream                              = makeWaitingStream();
+        context->setStream(stream);
+        if (mode != "unfinished") {
+            stream->reportEvent(StreamEvents::GenerateDone);
+        }
+        if (mode == "continue") {
+            stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+        }
+        if (mode == "error") {
+            stream->reportError(ErrorCode::CANCELLED, "cancelled before completion");
+        }
+        context->supports_prefill_completion = mode != "legacy";
+        auto client                          = std::make_shared<CompletionClient>();
+        client->write_ok                     = mode != "write_failure";
+        context->client_stream               = client;
+        TestPrefillRpcServer server;
+        server.setProcessIdForTest("prefill");
+        server.remoteLoadCacheEnd(*context);
+        if (mode == "complete" || mode == "write_failure") {
+            ASSERT_EQ(client->writes.size(), 1u);
+            EXPECT_EQ(client->writes[0].stage(), RemoteStage::PREFILL_COMPLETE);
+            EXPECT_EQ(client->writes[0].request_id(), 42);
+            EXPECT_EQ(client->writes[0].client_id(), "prefill");
+        } else {
+            EXPECT_TRUE(client->writes.empty());
+        }
+        if (mode == "write_failure") {
+            EXPECT_TRUE(context->hasError());
+        } else if (mode == "complete" || mode == "legacy") {
+            EXPECT_TRUE(context->finished);
+            EXPECT_FALSE(context->hasError());
+        } else if (mode == "continue") {
+            EXPECT_FALSE(context->finished);
+        }
+        context->stream_.reset();
+    }
+}
+
+TEST_F(PrefillRpcServerTest, AllocateNegotiatesPrefillCompletionPerAttempt) {
+    for (const bool supported : {true, false}) {
+        SCOPED_TRACE(supported);
+        TestDecodeRpcServer decode_server(false, supported);
+        ASSERT_TRUE(decode_server.start());
+        GenerateInputPB request;
+        request.set_request_id(42);
+        request.add_token_ids(1);
+        auto context            = makeContext(&request);
+        context->generate_input = makeMultimodalInput();
+        context->generate_input->generate_config->role_addrs.emplace_back(
+            RoleType::DECODE, "127.0.0.1", 0, decode_server.listenPort());
+        context->supports_prefill_completion = !supported;
+        TestPrefillRpcServer server;
+        server.mm_processor_ = std::make_shared<TestMultimodalProcessor>(ErrorCode::NONE_ERROR);
+        server.prepareAllocateResource(*context);
+        ASSERT_TRUE(context->ok());
+        EXPECT_EQ(context->supports_prefill_completion, supported);
+        EXPECT_TRUE(context->closeGrpcStream().ok());
+    }
+}
 
 TEST_F(PrefillRpcServerTest, waitStreamBeforeRunUsesEachServerTimeout) {
     TestPrefillRpcServer first_server;
@@ -545,8 +640,7 @@ TEST_F(PrefillRpcServerTest, retrySleepSaturatesOverflowingInterval) {
     request.set_request_id(12);
     auto context = makeContext(&request);
 
-    EXPECT_EQ(context->cappedRetrySleepUs(std::numeric_limits<int64_t>::max()),
-              std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(context->cappedRetrySleepUs(std::numeric_limits<int64_t>::max()), std::numeric_limits<int64_t>::max());
 }
 
 TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {
@@ -567,52 +661,121 @@ TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {
 
 TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoReportsCompletedDecodeHandoffForColdPrefill) {
     AuxInfoPB aux_info;
-    aux_info.set_total_reuse_len(1280);
-    aux_info.set_local_reuse_len(1280);
+    aux_info.set_total_reuse_len(2560);
+    aux_info.set_local_reuse_len(2560);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0, /*use_independent_block_pools=*/true);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info,
+                                          /*prefill_total_reuse_len=*/0,
+                                          /*prefill_local_reuse_len=*/0,
+                                          /*prefill_remote_reuse_len=*/0,
+                                          /*prefill_memory_reuse_len=*/0,
+                                          /*prefill_disk_reuse_len=*/0,
+                                          /*use_independent_block_pools=*/true);
 
-    EXPECT_EQ(aux_info.total_reuse_len(), 1280);
+    EXPECT_EQ(aux_info.total_reuse_len(), 2560);
+    EXPECT_EQ(aux_info.local_reuse_len(), 2560);
     EXPECT_EQ(aux_info.prefill_total_reuse_len(), 0);
-    EXPECT_EQ(aux_info.decode_total_reuse_len(), 1280);
-    EXPECT_EQ(aux_info.decode_local_reuse_len(), 1280);
+    EXPECT_EQ(aux_info.decode_total_reuse_len(), 2560);
+    EXPECT_EQ(aux_info.decode_local_reuse_len(), 2560);
 }
 
-TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsLongerPrefillPrefixWithoutAddingPhases) {
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsLargerPrefillHitWithoutAddingPhases) {
     AuxInfoPB aux_info;
-    aux_info.set_total_reuse_len(1280);
-    aux_info.set_local_reuse_len(1280);
+    aux_info.set_total_reuse_len(2560);
+    aux_info.set_local_reuse_len(2560);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 1536, 1536, 0, 1536, /*use_independent_block_pools=*/true);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info,
+                                          /*prefill_total_reuse_len=*/2688,
+                                          /*prefill_local_reuse_len=*/2688,
+                                          /*prefill_remote_reuse_len=*/0,
+                                          /*prefill_memory_reuse_len=*/2688,
+                                          /*prefill_disk_reuse_len=*/0,
+                                          /*use_independent_block_pools=*/true);
 
-    EXPECT_EQ(aux_info.total_reuse_len(), 1536);
-    EXPECT_EQ(aux_info.memory_reuse_len(), 1536);
-    EXPECT_EQ(aux_info.prefill_total_reuse_len(), 1536);
-    EXPECT_EQ(aux_info.decode_total_reuse_len(), 1280);
+    EXPECT_EQ(aux_info.total_reuse_len(), 2688);
+    EXPECT_EQ(aux_info.local_reuse_len(), 2688);
+    EXPECT_EQ(aux_info.memory_reuse_len(), 2688);
+    EXPECT_EQ(aux_info.prefill_total_reuse_len(), 2688);
+    EXPECT_EQ(aux_info.decode_total_reuse_len(), 2560);
 }
 
-TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoPrefersPrefillAttributionOnEqualPrefix) {
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoPrefersPrefillTierOnEqualPrefix) {
     AuxInfoPB aux_info;
     aux_info.set_total_reuse_len(512);
     aux_info.set_local_reuse_len(512);
+    aux_info.set_memory_reuse_len(0);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 512, 512, 0, 512, /*use_independent_block_pools=*/true);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info,
+                                          /*prefill_total_reuse_len=*/512,
+                                          /*prefill_local_reuse_len=*/512,
+                                          /*prefill_remote_reuse_len=*/0,
+                                          /*prefill_memory_reuse_len=*/512,
+                                          /*prefill_disk_reuse_len=*/0,
+                                          /*use_independent_block_pools=*/true);
 
     EXPECT_EQ(aux_info.total_reuse_len(), 512);
+    EXPECT_EQ(aux_info.local_reuse_len(), 512);
     EXPECT_EQ(aux_info.memory_reuse_len(), 512);
+    EXPECT_EQ(aux_info.prefill_memory_reuse_len(), 512);
     EXPECT_EQ(aux_info.decode_memory_reuse_len(), 0);
 }
 
-TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsSharedPoolTopLevelPrefillOnly) {
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsLegacyTopLevelPrefillFields) {
     AuxInfoPB aux_info;
-    aux_info.set_total_reuse_len(1280);
-    aux_info.set_local_reuse_len(1280);
+    aux_info.set_total_reuse_len(8);
+    aux_info.set_local_reuse_len(8);
+    aux_info.set_memory_reuse_len(8);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0, /*use_independent_block_pools=*/false);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info,
+                                          /*prefill_total_reuse_len=*/0,
+                                          /*prefill_local_reuse_len=*/0,
+                                          /*prefill_remote_reuse_len=*/0,
+                                          /*prefill_memory_reuse_len=*/0,
+                                          /*prefill_disk_reuse_len=*/0,
+                                          /*use_independent_block_pools=*/false);
 
     EXPECT_EQ(aux_info.total_reuse_len(), 0);
+    EXPECT_EQ(aux_info.local_reuse_len(), 0);
+    EXPECT_EQ(aux_info.remote_reuse_len(), 0);
+    EXPECT_EQ(aux_info.memory_reuse_len(), 0);
+    EXPECT_EQ(aux_info.disk_reuse_len(), 0);
     EXPECT_EQ(aux_info.prefill_total_reuse_len(), 0);
-    EXPECT_EQ(aux_info.decode_total_reuse_len(), 1280);
+    EXPECT_EQ(aux_info.decode_total_reuse_len(), 8);
+    EXPECT_EQ(aux_info.decode_local_reuse_len(), 8);
+    EXPECT_EQ(aux_info.decode_memory_reuse_len(), 8);
+}
+
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoPreservesDecodeTiersForLargerIndependentPoolHit) {
+    AuxInfoPB aux_info;
+    aux_info.set_total_reuse_len(1024);
+    aux_info.set_local_reuse_len(768);
+    aux_info.set_remote_reuse_len(256);
+    aux_info.set_memory_reuse_len(256);
+    aux_info.set_disk_reuse_len(128);
+
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info,
+                                          /*prefill_total_reuse_len=*/512,
+                                          /*prefill_local_reuse_len=*/384,
+                                          /*prefill_remote_reuse_len=*/128,
+                                          /*prefill_memory_reuse_len=*/128,
+                                          /*prefill_disk_reuse_len=*/64,
+                                          /*use_independent_block_pools=*/true);
+
+    EXPECT_EQ(aux_info.total_reuse_len(), 1024);
+    EXPECT_EQ(aux_info.local_reuse_len(), 768);
+    EXPECT_EQ(aux_info.remote_reuse_len(), 256);
+    EXPECT_EQ(aux_info.memory_reuse_len(), 256);
+    EXPECT_EQ(aux_info.disk_reuse_len(), 128);
+    EXPECT_EQ(aux_info.prefill_total_reuse_len(), 512);
+    EXPECT_EQ(aux_info.prefill_local_reuse_len(), 384);
+    EXPECT_EQ(aux_info.prefill_remote_reuse_len(), 128);
+    EXPECT_EQ(aux_info.prefill_memory_reuse_len(), 128);
+    EXPECT_EQ(aux_info.prefill_disk_reuse_len(), 64);
+    EXPECT_EQ(aux_info.decode_total_reuse_len(), 1024);
+    EXPECT_EQ(aux_info.decode_local_reuse_len(), 768);
+    EXPECT_EQ(aux_info.decode_remote_reuse_len(), 256);
+    EXPECT_EQ(aux_info.decode_memory_reuse_len(), 256);
+    EXPECT_EQ(aux_info.decode_disk_reuse_len(), 128);
 }
 
 TEST_F(PrefillRpcServerTest, multimodalProcessMarksDeterministicErrorNonRetryable) {

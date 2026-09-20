@@ -1,0 +1,1120 @@
+{
+    "model_type": "deepseek_v4",
+    "model_path": "/mnt/nas1/hf/DeepSeek-V4-Flash",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "<｜begin▁of▁sentence｜><｜User｜>写一个一千字的小说，要具体内容，不要大纲，写一个西部牛仔故事<｜Assistant｜></think>",
+                "generate_config": {
+                    "max_new_tokens": 5000,
+                    "temperature": 0.0,
+                    "top_p": 0,
+                    "top_k": 1,
+                    "skip_special_tokens": true,
+                    "return_incremental": true,
+                    "is_streaming": true,
+                    "return_output_ids": true
+                }
+            },
+            "result": {
+                "response": "风滚草从镇子东边滚过来的时候，杰克·莫里森正坐在“老马刺”酒馆门口的长椅上，用一块脏得看不出颜色的布擦他的左轮手枪。枪管在午后的阳光下泛着冷光，像一条沉睡的蛇。他把枪管举到眼前，对着光眯起一只眼看了看，又放下，继续擦。\n\n酒馆的门吱呀一声开了，老板霍根探出半个身子，手里端着一杯冒着热气的咖啡。“杰克，你真打算在这儿等？”他把咖啡递过去，在围裙上擦了擦手，“都三年了，说不定那小子早就死在哪条沟里了。”\n\n杰克接过咖啡喝了一口，苦得他皱了皱眉。“他没死。”他说，声音像砂纸磨过木头，“比利·金那种人，祸害遗千年。”\n\n霍根叹了口气，在他旁边坐下。长椅不堪重负地发出呻吟。“就算他还活着，你找到他又能怎样？当年的事，镇上的人都知道是误会——”\n\n“误会？”杰克转过头看他，眼睛里有一种让人脊背发凉的东西，“他杀了我弟弟，当着我的面。一颗子弹从后脑勺打进去，从眉心穿出来。我弟弟倒下去的时候，手里还攥着给他女儿买的布娃娃。”他把咖啡杯放在地上，重新拿起枪，“这不是误会，霍根。这是血债。”\n\n霍根不再说话了。他认识杰克二十年，知道这个沉默寡言的牛仔一旦决定了什么事，九头牛都拉不回来。三年前那场枪战之后，杰克把警徽扔在了镇长的办公桌上，骑上马就消失在了西边的荒漠里。有人说他去找比利·金了，有人说他死在了路上，还有人说他在墨西哥边境的一个小镇上当了酒保。直到三个月前，一封信从图森寄来，信上只有一行字：“比利·金在红石镇。”没有署名。\n\n杰克收到信的当天就出发了。\n\n红石镇在亚利桑那和新墨西哥的交界处，一个在地图上都找不到的小地方。杰克骑了整整两个星期的马才到，一路上穿越了戈壁、盐碱地和被太阳烤裂的河床。他的马瘦了，他也瘦了，颧骨高高地凸出来，眼窝深陷，但他的手依然稳得像磐石。\n\n到红石镇的第一天，他就听说了比利·金的消息。那个混蛋现在化名威廉·泰勒，在镇子北边买了一片牧场，养了两百头牛，还娶了镇上一个寡妇。据说他每周六下午都会到镇上的杂货店买东西，风雨无阻。今天是周六。\n\n杰克看了看怀表，下午两点四十分。\n\n他把枪装好，插回腰间的枪套里，站起来活动了一下僵硬的膝盖。四十七岁了，他心想，已经不是当年那个能在马背上连续骑二十个小时的年轻人了。但他不在乎。有些事，年纪再大也得做。\n\n街上很安静。红石镇的午后总是这样，热得连狗都懒得叫。一个戴草帽的老头赶着一辆马车从街角经过，车轮碾过尘土发出沙沙的声响。杰克看见杂货店的门口停着一匹栗色的马，马鞍是新的，银质的马镫在阳光下闪闪发亮。\n\n他走过去的时候，心跳得很平稳。三年来，他在脑子里无数次预演过这个场景：他走进杂货店，比利·金背对着他站在柜台前，他叫他的名字，比利转身，然后——砰。干净利落，就像比利当年对他弟弟做的那样。\n\n杂货店的门半掩着，杰克推门进去的时候，门上的铃铛响了一声。店里很暗，窗户上积满了灰，只有从门口射进来的一束光照在柜台前面的地板上。一个穿格子衬衫的男人正背对着他站在柜台前，手里拿着一袋面粉。\n\n“比利。”杰克说。\n\n那个男人的动作停住了。他站在那里，像一尊雕像，过了好几秒钟才慢慢转过身来。是比利·金，没错。三年过去了，他胖了一些，脸上多了几道皱纹，下巴上留了一撮灰白的胡子，但那双眼睛杰克永远不会认错——浅蓝色的，像两块冰，看人的时候总带着一种漫不经心的残忍。\n\n比利看见杰克的时候，瞳孔猛地收缩了一下，但很快又恢复了平静。他把面粉袋放在柜台上，慢慢地举起双手。“杰克，”他说，声音比杰克记忆中的要低沉，“我知道你总有一天会来。”\n\n杰克拔出了枪。枪口稳稳地指着比利的胸口，他的手没有一丝颤抖。“你有什么遗言吗？”\n\n比利看着他，忽然笑了一下。那笑容里没有嘲讽，也没有恐惧，只有一种奇怪的、近乎悲伤的东西。“你弟弟的事，”他说，“我欠你一个解释。”\n\n“我不需要解释。”杰克说，手指扣在扳机上。\n\n“我知道你不需要，”比利说，“但我还是要说。那天我不是要杀他。我是要杀你。”\n\n杰克的手指僵住了。\n\n“你明白吗？”比利继续说，声音很轻，像是怕被外面的人听见，“那天在镇上，我是冲你去的。你弟弟突然冲出来挡在你前面，我收不住枪了。”他顿了顿，“这些年我一直在想，如果那天死的是你，我会不会像你现在这样，追着一个人追三年。”\n\n“你撒谎。”杰克说，但他的声音不像刚才那么坚定了。\n\n“我没有撒谎。”比利说，“你弟弟是个好人，他不该死。我每天晚上都梦见他，梦见他手里那个布娃娃，梦见血从那个小洞里流出来。”他的眼眶红了，“你以为只有你难受吗？你以为我想背着这条命过一辈子？”\n\n杰克盯着他，枪口依然指着他的胸口。但他忽然觉得那把枪变得很重，重得他几乎举不动。三年来支撑着他的那股力量，那个简单而清晰的复仇目标，此刻正在一点点瓦解。如果比利说的是真的——如果他追了三年的不是一个冷血的杀人犯，而是一个和他一样被那场意外折磨的可怜人——那他这三年的意义是什么？\n\n“你为什么不早说？”杰克的声音沙哑。\n\n“说了你会信吗？”比利反问，“你会给我解释的机会吗？”\n\n杰克沉默了。他知道比利说得对。三年前的他，那个被愤怒和悲痛吞噬的他，不会听任何解释。他只想复仇，只想用血来洗刷血。\n\n杂货店里很安静，只有墙上那座老钟在滴答滴答地响。杰克看着比利，看着那双曾经让他恨之入骨的眼睛，忽然发现那双眼睛里没有他想象中的恐惧，只有一种疲惫的、认命般的平静。\n\n“你走吧。”杰克说，把枪放了下来。\n\n比利愣住了，似乎不敢相信自己的耳朵。“你说什么？”\n\n“我说你走。”杰克转过身，背对着他，“别让我再看见你。”\n\n他听见身后传来一声长长的叹息，然后是脚步声，门铃响了一声，门关上了。杂货店里重新陷入寂静。杰克站在柜台前，看着地上那袋面粉，忽然觉得自己老了，老得连站都站不稳了。\n\n他走出杂货店的时候，阳光刺得他睁不开眼。比利已经骑着马走远了，只剩下一团尘土在路的尽头慢慢散去。杰克靠在门框上，从口袋里掏出一根烟卷，划了三根火柴才点着。\n\n他深深地吸了一口，烟雾在干燥的空气里散开，像一声无声的叹息。\n\n远处，风滚草又滚过来了，一个接一个，不知道从哪里来，也不知道要到哪里去。",
+                "finished": true
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "What is the capital of France?"
+                    }
+                ],
+                "max_tokens": 10,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "The capital of France is Paris.",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "total_tokens": 19,
+                    "completion_tokens": 8,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                }
+            },
+            "compare_config": {
+                "skip_choices": true
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Return only a JSON object with key answer and value ok."
+                    }
+                ],
+                "max_tokens": 64,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "json_format": true
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "answer"
+                ],
+                "expected_json": {
+                    "answer": "ok"
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Return only a JSON object with key city and value Hangzhou."
+                    }
+                ],
+                "max_tokens": 64,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "response_format": {
+                    "type": "json_object"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "city"
+                ],
+                "expected_json": {
+                    "city": "Hangzhou"
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "stream": true,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "math_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "enum": [
+                                            "我国",
+                                            "社会主义事业",
+                                            "两个文明建设"
+                                        ]
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ]
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "地点": [
+                        "我国"
+                    ],
+                    "人物": [],
+                    "组织": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "2+2="
+                    }
+                ],
+                "max_tokens": 15,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1788410273,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "2 + 2 = 4",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 8,
+                    "total_tokens": 16,
+                    "completion_tokens": 8,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 251.028,
+                    "iter_count": 4,
+                    "prefix_len": 0,
+                    "input_len": 8,
+                    "output_len": 8,
+                    "step_output_len": 7,
+                    "first_token_cost_time": 169.229,
+                    "wait_time": 0.022,
+                    "pd_sep": true,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "speculative_draft_rounds": 3,
+                    "speculative_accepted_tokens_per_pos": [
+                        2,
+                        1,
+                        1
+                    ],
+                    "role_addrs": [
+                        {
+                            "role": "DECODE",
+                            "ip": "127.0.0.1",
+                            "http_port": 18717,
+                            "grpc_port": 18718
+                        }
+                    ],
+                    "aux_string": ""
+                },
+                "extra_outputs": null,
+                "prompt_logprobs": null
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Return only a JSON object for a weather report in Hangzhou."
+                    }
+                ],
+                "max_tokens": 96,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "weather_report",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "city": {
+                                    "type": "string"
+                                },
+                                "condition": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "city",
+                                "condition"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "city",
+                    "condition"
+                ]
+            }
+        },
+        {
+            "endpoint": "/",
+            "expected_status_code": 500,
+            "query": {
+                "prompt": "invalid sampling config",
+                "generate_config": {
+                    "max_new_tokens": 8,
+                    "top_p": -1.0,
+                    "top_k": 1,
+                    "aux_info": true
+                }
+            },
+            "result": {
+                "error_code": 507,
+                "error_code_str": "507_ERROR_INPUT_FORMAT_ERROR",
+                "message": "top_p -1.0 is wrong data type",
+                "aux_info": null
+            }
+        },
+        {
+            "endpoint": "/",
+            "expected_status_code": 500,
+            "query": {
+                "prompt": "invalid top k sampling config",
+                "generate_config": {
+                    "max_new_tokens": 8,
+                    "top_p": 1.0,
+                    "top_k": -1,
+                    "aux_info": true
+                }
+            },
+            "result": {
+                "error_code": 507,
+                "error_code_str": "507_ERROR_INPUT_FORMAT_ERROR",
+                "message": "top_k -1 is wrong data type",
+                "aux_info": null
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "stream": true,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_object"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "杭州天气怎么样？请使用可用工具查询。"
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "description": "Get current weather for a city.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "city": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": [
+                                    "city"
+                                ]
+                            }
+                        }
+                    }
+                ],
+                "tool_choice": "none",
+                "max_tokens": 1,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "好的"
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 14,
+                    "total_tokens": 15,
+                    "completion_tokens": 1
+                }
+            },
+            "compare_config": {
+                "skip_choices": true
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_object"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "entity_extract_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "entity_extract_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": false
+                    }
+                },
+                "stream": true
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "entity_extract_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": false
+                    }
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/__dash_sc_grpc__",
+            "query": {
+                "prompt": "你好，请用一句话回答：1+1等于几？",
+                "generate_config": {
+                    "max_new_tokens": 16,
+                    "num_return_sequences": 0,
+                    "top_p": 1.0,
+                    "top_k": 1,
+                    "temperature": 0.0,
+                    "min_new_tokens": 0,
+                    "repetition_penalty": 1.0,
+                    "frequency_penalty": 0.0,
+                    "presence_penalty": 0.0,
+                    "stop_words_list": []
+                },
+                "enable_thinking": false,
+                "grpc_timeout_seconds": 180,
+                "stop_when_requirements_met": false,
+                "yield_generator": true
+            },
+            "result": {
+                "response": "1+1等于2。<｜end▁of▁sentence｜>",
+                "generated_ids": [
+                    19,
+                    13,
+                    19,
+                    15120,
+                    20,
+                    320,
+                    1
+                ],
+                "aux_info": {
+                    "input_len": 17
+                },
+                "finish_reason": 0
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "当前，我国社会主义事业正在胜利前进，两个文明建设正在蓬勃展开。\n\n请抽取以上句子中所有的 人物、组织、地点、其他实体，用json表示。例如：{\"人物\": [...], \"组织\": [...], \"地点\": [...], \"其他实体\": [...]}"
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "stream": true,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "entity_extract_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "人物": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "组织": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "地点": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                "其他实体": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": [
+                                "人物",
+                                "组织",
+                                "地点",
+                                "其他实体"
+                            ],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "人物",
+                    "组织",
+                    "地点",
+                    "其他实体"
+                ],
+                "expected_json": {
+                    "人物": [],
+                    "组织": [
+                        "我国"
+                    ],
+                    "地点": [],
+                    "其他实体": [
+                        "社会主义事业",
+                        "两个文明建设"
+                    ]
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "你好"
+                    }
+                ],
+                "max_tokens": 32,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": true,
+                "thinking_budget": 10,
+                "response_format": {
+                    "type": "text"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "hello, please write a haiku about the moon"
+                    }
+                ],
+                "max_tokens": 100,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1788410411,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Silver coin of night—\nA rabbit pounds the mochi,\nFullness fades to ghost.",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 14,
+                    "total_tokens": 34,
+                    "completion_tokens": 20,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": null,
+                "extra_outputs": null,
+                "prompt_logprobs": null
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你需要提取出name（名字，为string类型）、age（年龄，为string类型）与email（邮箱，为string类型），请输出JSON 字符串，不要输出其它无关内容。\n示例：\nQ：我叫张三，今年25岁，邮箱是zhangsan@example.com\nA：{\"name\":\"张三\",\"age\":\"25岁\",\"email\":\"zhangsan@example.com\"}\nQ：我叫李四，今年30岁，我的邮箱是lisi@example.com\nA：{\"name\":\"李四\",\"age\":\"30岁\",\"email\":\"lisi@example.com\"}\nQ：我叫王五，我的邮箱是wangwu@example.com，今年40岁\nA：{\"name\":\"王五\",\"age\":\"40岁\",\"email\":\"wangwu@example.com\"}"
+                    },
+                    {
+                        "role": "user",
+                        "content": "大家好，我叫刘五，今年34岁，邮箱是liuwu@example.com"
+                    }
+                ],
+                "max_tokens": 64,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "enable_thinking": false,
+                "response_format": {
+                    "type": "json_object"
+                }
+            },
+            "result": {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "json_content": true,
+                "json_object": true,
+                "required_json_keys": [
+                    "name",
+                    "age",
+                    "email"
+                ],
+                "expected_json": {
+                    "name": "刘五",
+                    "age": "34岁",
+                    "email": "liuwu@example.com"
+                }
+            }
+        }
+    ]
+}

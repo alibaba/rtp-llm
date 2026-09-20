@@ -311,7 +311,7 @@ protected:
         for (int i = 0; i < layer_num; ++i) {
             layer_to_group_ids[i] = {i};
         }
-        resource->initGroups(makeTestCacheTopology(layer_num, layer_num, layer_to_group_ids));
+        resource->initGroups(::rtp_llm::test::makeTestCacheTopology(layer_num, layer_num, layer_to_group_ids));
 
         for (int i = 0; i < layer_num; ++i) {
             if (i == layer_id) {
@@ -396,7 +396,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
     int     layer_id   = 0;
     int64_t request_id = 1002;
     auto    resource   = std::make_shared<KVCacheResource>();
-    resource->initGroups(makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0, 1}, {1}}));
+    resource->initGroups(::rtp_llm::test::makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0, 1}, {1}}));
     for (int group_id = 0; group_id < 2; ++group_id) {
         resource->mutableBlockIds(group_id).add({0, 1});
     }
@@ -419,7 +419,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
 TEST_F(P2PConnectorWorkerTest, WriteByLayerCountsOnlyTransferableSparseGroups) {
     constexpr int64_t request_id = 1003;
     auto              resource   = std::make_shared<KVCacheResource>();
-    resource->initGroups(makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0, 1}, {1}}));
+    resource->initGroups(::rtp_llm::test::makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0, 1}, {1}}));
     resource->mutableBlockIds(/*group_id=*/0).add({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
     resource->mutableBlockIds(/*group_id=*/1).add({3, 4});
     resource->cacheKeys() = {10, 11};
@@ -1148,7 +1148,7 @@ protected:
         for (int i = 0; i < num_layers; ++i) {
             layer_to_group_ids[i] = {i};
         }
-        resource->initGroups(makeTestCacheTopology(num_layers, num_layers, layer_to_group_ids));
+        resource->initGroups(::rtp_llm::test::makeTestCacheTopology(num_layers, num_layers, layer_to_group_ids));
         for (int layer = 0; layer < num_layers; ++layer) {
             for (int i = 0; i < blocks_per_layer; ++i) {
                 resource->mutableBlockIds(layer).add({i});

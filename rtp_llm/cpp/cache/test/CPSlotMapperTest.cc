@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <stdexcept>
+#include <limits>
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
@@ -34,6 +35,18 @@ TEST_F(CPSlotMapperTest, RejectsInvalidGeometry) {
     EXPECT_THROW(CPSlotMapper(0, 2, 0), std::invalid_argument);
     EXPECT_THROW(CPSlotMapper(-1, 2, 32), std::invalid_argument);
     EXPECT_THROW(CPSlotMapper(2, 2, 32), std::invalid_argument);
+}
+
+TEST_F(CPSlotMapperTest, RejectsOverflowingReuseGeometry) {
+    EXPECT_THROW(CPSlotMapper(0, 2, std::numeric_limits<int>::max()), std::invalid_argument);
+    CPSlotMapper mapper;
+    CacheConfig  config;
+    config.seq_size_per_block = 0;
+    EXPECT_THROW(mapper.reuseBlockTokens(config), std::invalid_argument);
+    config.seq_size_per_block = static_cast<size_t>(std::numeric_limits<int>::max()) + 1;
+    EXPECT_THROW(mapper.reuseBlockTokens(config), std::invalid_argument);
+    config.seq_size_per_block = std::numeric_limits<int>::max();
+    EXPECT_EQ(mapper.reuseBlockTokens(config), std::numeric_limits<int>::max());
 }
 
 TEST_F(CPSlotMapperTest, LocalBlockCount) {

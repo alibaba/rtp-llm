@@ -229,6 +229,16 @@ std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(const Cache
     return plan;
 }
 
+ErrorInfo DecodeRpcServer::validateRemoteLoadTopology(size_t worker_size, size_t peer_size) {
+    if (worker_size == 0 || peer_size == 0) {
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "worker or peer address list is empty");
+    }
+    if (worker_size % peer_size != 0 && peer_size % worker_size != 0) {
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "peer address count is not compatible with worker count");
+    }
+    return ErrorInfo::OkStatus();
+}
+
 size_t DecodeRpcServer::completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
                                                      const std::vector<size_t>& required_cache_key_counts,
                                                      const std::vector<size_t>& transferred_cache_key_counts) {
@@ -250,16 +260,6 @@ size_t DecodeRpcServer::minLoadedCacheBlockCount(const std::vector<size_t>& rank
         return 0;
     }
     return *std::min_element(rank_loaded_cache_block_counts.begin(), rank_loaded_cache_block_counts.end());
-}
-
-ErrorInfo DecodeRpcServer::validateRemoteLoadTopology(size_t worker_size, size_t peer_size) {
-    if (worker_size == 0 || peer_size == 0) {
-        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "worker or peer address list is empty");
-    }
-    if (worker_size % peer_size != 0 && peer_size % worker_size != 0) {
-        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "peer address count is not compatible with worker count");
-    }
-    return ErrorInfo::OkStatus();
 }
 
 std::vector<size_t> DecodeRpcServer::completionQueueExpectedResponseCounts(size_t worker_size) {
@@ -420,46 +420,42 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         }
 
         const auto observed_generation = cache_manager->allocationGeneration();
-        const auto allocation_status   = generate_stream->streamCacheResource().initKVBlock();
+        auto       allocation_status   = generate_stream->streamCacheResource().initKVBlock();
         ++allocation_attempts;
         decode_context.retry_times        = allocation_attempts;
         decode_context.retry_cost_time_ms = (currentTimeUs() - allocation_begin_us) / 1000;
 
         if (allocation_status.ok()) {
-            // Preserve the decode-side connector lookup that the old state-machine-driven
-            // allocation performed before the explicit P/D handoff.  Besides avoiding a redundant
-            // transfer for an already cached prefix, this is what attributes that prefix to the
-            // decode remote-cache counters.  The explicit P/D handoff below still fills the suffix.
             auto& cache_resource = generate_stream->streamCacheResource();
             if (cache_resource.asyncLoadCache()) {
                 generate_stream->recordLoadingCacheStartTime();
-                while (!cache_resource.loadCacheDone()) {
+                while (true) {
+                    const auto load_cost_ms = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
+                    if (decode_context.isRequestCancelled()) {
+                        finish_allocation_error(
+                            grpc::StatusCode::CANCELLED, ErrorCode::CANCELLED, "decode cache load cancelled by client");
+                        return;
+                    }
+                    if (decode_context.request_timeout_ms > 0 && load_cost_ms >= decode_context.request_timeout_ms) {
+                        finish_allocation_error(grpc::StatusCode::DEADLINE_EXCEEDED,
+                                                ErrorCode::GENERATE_TIMEOUT,
+                                                "decode cache load exceeded request timeout");
+                        return;
+                    }
+                    const auto load_status = cache_resource.pollAllocatorLoad();
+                    if (load_status.has_value()) {
+                        allocation_status = *load_status;
+                        break;
+                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
                 generate_stream->recordLoadingCacheDoneTime();
             }
-
-            if (generate_stream->hasError()) {
-                const auto  stream_error = generate_stream->statusInfo();
-                std::string error_msg    = stream_error.ToString();
-                if (error_msg.empty()) {
-                    error_msg = "decode initial cache load failed";
-                }
-                error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
-                decode_context.error_info   = ErrorInfo(stream_error.code(), error_msg);
-                decode_context.error_status =
-                    serializeErrorMsg(decode_context.request_key,
-                                      decode_context.request_info,
-                                      decode_context.error_info);
-                RTP_LLM_LOG_ERROR("%s", error_msg.c_str());
-                return;
+            if (allocation_status.ok()) {
+                // Only committed, materialized cache resources may enter the P/D handoff.
+                generate_stream->reportEvent(StreamEvents::LoadInitiated);
+                break;
             }
-
-            // Allocation and the optional connector lookup are complete. Mark the initial load
-            // phase as initiated so FIFO admission performs only the post-handoff incremental
-            // reservation and never repeats initKVBlock()/asyncLoadCache().
-            generate_stream->reportEvent(StreamEvents::LoadInitiated);
-            break;
         }
 
         if (!absl::IsUnavailable(allocation_status)) {
@@ -469,9 +465,14 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
             return;
         }
 
+        const auto wait_begin_cost_ms = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
+        if (decode_context.isRequestCancelled()
+            || (decode_context.request_timeout_ms > 0 && wait_begin_cost_ms >= decode_context.request_timeout_ms)) {
+            continue;
+        }
         int64_t wait_ms = cancellation_poll_ms;
         if (decode_context.request_timeout_ms > 0) {
-            wait_ms = std::min(wait_ms, decode_context.request_timeout_ms - request_cost_ms);
+            wait_ms = std::min(wait_ms, decode_context.request_timeout_ms - wait_begin_cost_ms);
         }
         wait_ms = std::max<int64_t>(wait_ms, 1);
 
@@ -481,7 +482,8 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         // Capacity wait therefore follows the request's own deadline/cancellation.  Timed wakeups
         // only service those stop conditions; a new allocator attempt is made exclusively after
         // the resource generation changes, avoiding the old 1 ms malloc storm.
-        while (!cache_manager->waitForAllocationChange(observed_generation, wait_ms)) {
+        while (!cache_manager->waitForAllocationChange(
+            observed_generation, wait_ms, allocation_attempts > 1 ? wait_ms : 0)) {
             const auto now_request_cost_ms    = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
             decode_context.retry_cost_time_ms = (currentTimeUs() - allocation_begin_us) / 1000;
             if (decode_context.isRequestCancelled()
@@ -489,11 +491,16 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
                     && now_request_cost_ms >= decode_context.request_timeout_ms)) {
                 break;
             }
+            if (decode_context.request_timeout_ms > 0) {
+                wait_ms = std::min(cancellation_poll_ms, decode_context.request_timeout_ms - now_request_cost_ms);
+            }
         }
     }
 
+    GenerateOutputsPB allocate_response;
+    allocate_response.set_supports_prefill_completion(true);
     GRPC_RET_IF_ERROR(decode_context,
-                      decode_context.rpc_context.grpc_stream->Write(GenerateOutputsPB()),
+                      decode_context.rpc_context.grpc_stream->Write(allocate_response),
                       grpc::StatusCode::INTERNAL,
                       "failed to write allocate output");
 
@@ -582,6 +589,27 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                             decode_context.request_key.c_str(),
                             cancelled ? 1 : 0,
                             static_cast<int>(decode_context.error_status.error_code()));
+        return;
+    }
+    if (generate_request.stage() == RemoteStage::PREFILL_COMPLETE) {
+        GRPC_RET_IF_ERROR(decode_context,
+                          generate_request.request_id() == decode_context.request_id
+                              && generate_request.client_id() == decode_context.allocate_request.client_id(),
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "prefill completion request identity mismatch");
+        GRPC_RET_IF_ERROR(
+            decode_context, !decode_context.isRequestCancelled(), grpc::StatusCode::CANCELLED, "request is cancelled");
+        GRPC_RET_IF_ERROR(decode_context,
+                          !decode_context.requestDeadlineExceeded(),
+                          grpc::StatusCode::DEADLINE_EXCEEDED,
+                          "request deadline exhausted");
+        if (!generate_stream->finishWithoutGenerate()) {
+            const auto error            = generate_stream->statusInfo();
+            decode_context.error_status = error.hasError() ?
+                                              serializeErrorMsg(decode_context.request_key, error) :
+                                              grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                                                           "decode stream cannot complete before generation");
+        }
         return;
     }
     GRPC_RET_IF_ERROR(decode_context,
@@ -1625,13 +1653,17 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     });
 
     try {
-        EXECUTE_STAGE_FUNC(prepareGenerateContext, decode_context);
+        // The first Read establishes the request protocol and owns its failure diagnostics. Do not let the generic
+        // pre-stage cancellation check bypass it: a cancelled synchronous gRPC stream makes Read return false, and
+        // prepareGenerateContext then classifies and logs the failure consistently.
+        decode_context.stat_info.nextStage();
+        prepareGenerateContext(decode_context);
+        CHECK_ERROR_STATUS(decode_context);
         if (decode_context.trace_span_guard) {
             // request_id becomes known only after the first ALLOCATE message;
             // `request_id` (string) is the Bailian Unitrace index key
             decode_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId,
                                                           std::to_string(decode_context.request_id));
-            decode_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, decode_context.request_id);
         }
         CHECK_REQUEST_STOP(decode_context);
         decode_context.stat_info.nextStage();
@@ -1646,7 +1678,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
+                                                                                  ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

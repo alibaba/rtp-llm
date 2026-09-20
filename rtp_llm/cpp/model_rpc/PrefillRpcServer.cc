@@ -353,7 +353,10 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
         return;
     }
 
-    auto result = mm_processor_->updateMultimodalFeatures(input);
+    auto result = updateMultimodalFeaturesWithTrace(input,
+                                                    prefill_context.trace_span_guard ?
+                                                        prefill_context.trace_span_guard->sharedSpan() :
+                                                        opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{});
     if (!result.ok()) {
         prefill_context.setRetryable(isRetryableMultimodalError(result.code()));
         setContextError(prefill_context, result);
@@ -451,8 +454,10 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Write(alloc_request), ErrorCode::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED);
     GenerateOutputsPB allocate_response;
+    prefill_context.supports_prefill_completion = false;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
+    prefill_context.supports_prefill_completion = allocate_response.supports_prefill_completion();
     if (prefillTraceLogEnabled() && allocate_response.has_error_info()
         && allocate_response.error_info().error_code() != 0) {
         RTP_LLM_LOG_WARNING("Prefill request trace: event=remote_allocate_response_error request_id=%ld "
@@ -556,6 +561,16 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
 
     prefill_context.dequeueStreamFromRuntimeMeta();
     if (!prefill_context.getStream()->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+        if (prefill_context.supports_prefill_completion
+            && prefill_context.getStream()->hasEvent(StreamEvents::GenerateDone)
+            && !prefill_context.getStream()->hasError()) {
+            GenerateRequestPB completion;
+            completion.set_stage(RemoteStage::PREFILL_COMPLETE);
+            completion.set_client_id(process_id_);
+            completion.set_request_id(prefill_context.request_id);
+            CLIENT_GRPC_RET_IF_ERROR(
+                prefill_context, prefill_context.client_stream->Write(completion), ErrorCode::REMOTE_GENERATE_FAILED);
+        }
         RTP_LLM_LOG_DEBUG("request [%ld] pd-sep prefill finished locally without remote generate, "
                           "skipping remote generate stages",
                           prefill_context.request_id);
@@ -620,7 +635,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_total_reuse_len  = prefill_context.getStream()->initialReuseLength();
     auto              prefill_local_reuse_len  = prefill_context.getStream()->localReuseLength();
     auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
-    auto              prefill_memory_reuse_len = prefill_context.getStream()->memoryReuseLength();
+    auto              prefill_memory_reuse_len = prefill_context.getStream()->hostReuseLength();
+    auto              prefill_disk_reuse_len   = prefill_context.getStream()->diskReuseLength();
     const auto        cache_manager            = prefill_context.getStream()->resourceContext().cache_manager;
     const bool use_independent_block_pools = cache_manager && cache_manager->cacheConfig().use_independent_block_pools;
     // Decode workers do not receive ViT features in PD mode, so preserve the
@@ -659,6 +675,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
                                 prefill_local_reuse_len,
                                 prefill_remote_reuse_len,
                                 prefill_memory_reuse_len,
+                                prefill_disk_reuse_len,
                                 use_independent_block_pools);
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
@@ -680,32 +697,41 @@ void PrefillRpcServer::mergeCacheReuseInfo(AuxInfoPB& aux_info,
                                            int        prefill_local_reuse_len,
                                            int        prefill_remote_reuse_len,
                                            int        prefill_memory_reuse_len,
+                                           int        prefill_disk_reuse_len,
                                            bool       use_independent_block_pools) {
     const int decode_total_reuse_len  = aux_info.total_reuse_len();
     const int decode_local_reuse_len  = aux_info.local_reuse_len();
     const int decode_remote_reuse_len = aux_info.remote_reuse_len();
     const int decode_memory_reuse_len = aux_info.memory_reuse_len();
+    const int decode_disk_reuse_len   = aux_info.disk_reuse_len();
 
     aux_info.set_prefill_total_reuse_len(prefill_total_reuse_len);
     aux_info.set_prefill_local_reuse_len(prefill_local_reuse_len);
     aux_info.set_prefill_remote_reuse_len(prefill_remote_reuse_len);
     aux_info.set_prefill_memory_reuse_len(prefill_memory_reuse_len);
+    aux_info.set_prefill_disk_reuse_len(prefill_disk_reuse_len);
 
     aux_info.set_decode_total_reuse_len(decode_total_reuse_len);
     aux_info.set_decode_local_reuse_len(decode_local_reuse_len);
     aux_info.set_decode_remote_reuse_len(decode_remote_reuse_len);
     aux_info.set_decode_memory_reuse_len(decode_memory_reuse_len);
+    aux_info.set_decode_disk_reuse_len(decode_disk_reuse_len);
 
+    // Legacy shared-pool models expose the prefill phase through the top-level
+    // fields. Independent pools may complete additional reuse during the
+    // direct handoff, so expose the longer proven phase for those models only.
     if (use_independent_block_pools && decode_total_reuse_len > prefill_total_reuse_len) {
         aux_info.set_total_reuse_len(decode_total_reuse_len);
         aux_info.set_local_reuse_len(decode_local_reuse_len);
         aux_info.set_remote_reuse_len(decode_remote_reuse_len);
         aux_info.set_memory_reuse_len(decode_memory_reuse_len);
+        aux_info.set_disk_reuse_len(decode_disk_reuse_len);
     } else {
         aux_info.set_total_reuse_len(prefill_total_reuse_len);
         aux_info.set_local_reuse_len(prefill_local_reuse_len);
         aux_info.set_remote_reuse_len(prefill_remote_reuse_len);
         aux_info.set_memory_reuse_len(prefill_memory_reuse_len);
+        aux_info.set_disk_reuse_len(prefill_disk_reuse_len);
     }
 }
 
@@ -828,10 +854,9 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
             "rtp_llm.prefill_generate_stream_call", server_context, true, "RpcService/GenerateStreamCall");
         prefill_context.trace_span_guard =
             std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &prefill_context.error_status);
-        // Bailian Unitrace index key (string) + internal numeric field
+        // Bailian Unitrace index key: the internal request ID's string form.
         prefill_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId,
                                                        std::to_string(prefill_context.request_id));
-        prefill_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, prefill_context.request_id);
     }
     telemetry::PhaseSpanSynthesisScope phase_span_scope([&prefill_context](bool exception_unwinding) {
         if (!prefill_context.trace_span_guard || !prefill_context.trace_span_guard->valid()) {

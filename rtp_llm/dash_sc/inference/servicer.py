@@ -1648,9 +1648,6 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     trace_state.set_attribute(
                         "request_id", str(current_rtp_llm_request_id)
                     )
-                    trace_state.set_attribute(
-                        "rtp_llm.request_id", current_rtp_llm_request_id
-                    )
                 if current_external_request_id:
                     trace_state.set_attribute(
                         "rtp_llm.external_request_id", current_external_request_id

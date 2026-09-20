@@ -241,8 +241,10 @@ public:
     int     localReuseLength() const;
     int     deviceReuseLength() const;
     int     remoteReuseLength() const;
-    void    setMemoryReuseLength(int length);
-    int     memoryReuseLength() const;
+    void    setHostReuseLength(int length);
+    int     hostReuseLength() const;
+    void    setDiskReuseLength(int length);
+    int     diskReuseLength() const;
     void    setInitialReuseLength(int initial_reuse_length);
     void    incLastOutputPos();
     void    setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory);
@@ -324,6 +326,7 @@ public:
         reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
     }
     bool         hasEvent(StreamEvents::EventType event) const;
+    void         clearCanRun();
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
     std::string  stopReason();
@@ -336,6 +339,8 @@ public:
 
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is finished
+    // Complete a Decode stream owned by the RPC handler, before scheduler enqueue.
+    bool                finishWithoutGenerate();
     bool                isActive() const;    // Returns true if stream is active (no error and not finished)
 
     // A response consumer may observe GenerateDone before the scheduler has
@@ -343,7 +348,7 @@ public:
     // wait for scheduler-owned resource release; otherwise publish cancellation
     // and wait for the same terminal transition.
     bool finishOrCancel(int64_t wait_timeout_ms, const std::string& cancel_reason);
-    bool                isSubGenerateDoneWithoutLock(int batch_id) const;
+    bool isSubGenerateDoneWithoutLock(int batch_id) const;
 
     size_t iterCount() const;
     size_t spIterCount() const;
@@ -787,6 +792,10 @@ public:
         return generate_input_->generate_config->enable_memory_cache;
     }
 
+    bool enableDiskCache() const {
+        return generate_input_->generate_config->enable_disk_cache;
+    }
+
     bool enableRemoteCache() const {
         return generate_input_->generate_config->enable_remote_cache;
     }
@@ -849,7 +858,6 @@ protected:
     void                     resizeSubGenerateStatus(size_t new_size);
 
     void reportStreamMetrics();
-    void reportCacheReuseMetrics() const;
     void reportMetricOnce();
 
 protected:
@@ -879,17 +887,18 @@ protected:
     // Prefill-to-decode transition is committed by the output/bookkeeping
     // worker and observed by the scheduler thread. Keep this flag atomic; the
     // shared_ptr preserves the existing CopyOnWrite sharing semantics.
-    std::shared_ptr<std::atomic<bool>>    is_context_stream_;
-    size_t                                iter_count_    = 0;
-    size_t                                sp_iter_count_ = 0;
-    std::vector<int32_t>                  speculative_accepted_tokens_per_pos_;
-    size_t                                last_output_pos_      = 0;
-    int                                   initial_reuse_length_ = 0;
-    int                                   reuse_length_         = 0;
-    int                                   local_reuse_length_   = 0;
-    int                                   device_reuse_length_  = 0;
-    int                                   remote_reuse_length_  = 0;
-    int                                   memory_reuse_length_  = 0;
+    std::shared_ptr<std::atomic<bool>> is_context_stream_;
+    size_t                             iter_count_    = 0;
+    size_t                             sp_iter_count_ = 0;
+    std::vector<int32_t>               speculative_accepted_tokens_per_pos_;
+    size_t                             last_output_pos_      = 0;
+    int                                initial_reuse_length_ = 0;
+    int                                reuse_length_         = 0;
+    int                                local_reuse_length_   = 0;
+    int                                device_reuse_length_  = 0;
+    int                                remote_reuse_length_  = 0;
+    int                                host_reuse_length_    = 0;
+    int                                disk_reuse_length_    = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;

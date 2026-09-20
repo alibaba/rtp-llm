@@ -1,0 +1,70 @@
+{
+    "model_type": "deepseek_v4",
+    "model_path": "/mnt/nas1/hf/DeepSeek-V4-Pro",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "What is the capital of France?"
+                    }
+                ],
+                "max_tokens": 10,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "The capital of France is **Paris**."
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "total_tokens": 20,
+                    "completion_tokens": 9
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "2+2="
+                    }
+                ],
+                "max_tokens": 15,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "That's correct! 2 + 2 = 4. \n\nIs"
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 8,
+                    "total_tokens": 23,
+                    "completion_tokens": 15
+                }
+            }
+        }
+    ]
+}
