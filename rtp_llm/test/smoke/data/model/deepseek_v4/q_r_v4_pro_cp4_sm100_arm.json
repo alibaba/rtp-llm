@@ -54,7 +54,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "That's correct! 2 + 2 = 4. \n\nIs"
+                            "content": "That’s an easy one! \n\n**2 + 2 = "
                         },
                         "finish_reason": "length"
                     }
