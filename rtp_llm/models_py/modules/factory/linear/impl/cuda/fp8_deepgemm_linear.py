@@ -26,6 +26,8 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
     supports_deferred_bias = True
     supports_fused_bias_gelu_quant = True
+    supports_prequantized_activation = True
+    fused_activation_quant_format = "fp8_ue8m0_block128_colmajor"
 
     # 全局共享的 scale cache，key = (device, K, max_len)
     _global_scale_cache: dict = {}
@@ -73,7 +75,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # Check if DeepGEMM is available
         if not has_deep_gemm():
-            error_msg = "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
+            error_msg = (
+                "DeepGEMM is not available. Please install the `deep_gemm` "
+                "package to enable DeepGEMM kernels."
+            )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
         # Check weight and weight scale dimensions
@@ -171,17 +176,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             f"successfully cached {self.cached_scales_max_len} scales, shape: {self.cached_scales.shape}"
         )
 
-    def forward(
-        self, input: torch.Tensor, out: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        return self._forward_impl(input, out, apply_bias=True)
-
-    def _forward_impl(
-        self,
-        input: torch.Tensor,
-        out: Optional[torch.Tensor] = None,
-        apply_bias: bool = True,
-    ) -> torch.Tensor:
+    def _validate_input(self, input: torch.Tensor) -> tuple[int, int]:
         # Check input dtype - only accept bfloat16
         if input.dtype != torch.bfloat16 and input.dtype != torch.float8_e4m3fn:
             error_msg = f"Input tensor dtype must be bfloat16 or float8_e4m3fn, got {input.dtype}"
@@ -198,7 +193,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             error_msg = f"Input tensor inner dimension expected to be {self.K}, got {K}"
             logger.error(error_msg)
             raise ValueError(error_msg)
+        return M, K
 
+    def _prepare_output(
+        self, input: torch.Tensor, M: int, out: Optional[torch.Tensor]
+    ) -> torch.Tensor:
         output = None
         if out is not None:
             if out.shape != (M, self.N):
@@ -223,7 +222,13 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                 logger.error(error_msg)
                 raise ValueError(error_msg)
             output = out
+        if output is None:
+            output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)
+        return output
 
+    def quantize_input(self, input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize a 2D BF16 input once for reuse across compatible FP8 GEMMs."""
+        M, _ = self._validate_input(input)
         if input.dtype == torch.float8_e4m3fn:
             if not self.scale_ue8m0:
                 error_msg = "Scale UE8M0 is required for float8_e4m3fn input"
@@ -258,11 +263,22 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                 scale_tma_aligned=True,
                 scale_ue8m0=self.scale_ue8m0,
             )
+        return input_fp8, input_scales
 
-        # Prepare output tensor
-        if output is None:
-            output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)
-        # Invoke DeepGEMM
+    def forward_quantized(
+        self,
+        input_fp8: torch.Tensor,
+        input_scales: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+        apply_bias: bool = True,
+    ) -> torch.Tensor:
+        """Run DeepGEMM with a caller-provided FP8 input and matching scales."""
+        if input_fp8.dtype != torch.float8_e4m3fn:
+            error_msg = f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        M, _ = self._validate_input(input_fp8)
+        output = self._prepare_output(input_fp8, M, out)
         fp8_gemm_nt(
             (input_fp8, input_scales),
             (self.weight, self.weight_scales),
@@ -271,11 +287,26 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             disable_ue8m0_cast=not self.scale_ue8m0,
         )
         if apply_bias and self.bias is not None:
-            output.add_(self.bias.to(output.dtype))
+            if output.is_cuda:
+                from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+                rtp_llm_ops.fused_bias_add(output, self.bias.to(output.dtype))
+            else:
+                output.add_(self.bias.to(output.dtype))
         return output
 
+    def forward(
+        self, input: torch.Tensor, out: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        M, _ = self._validate_input(input)
+        input_fp8, input_scales = self.quantize_input(input)
+
+        # Prepare output tensor
+        return self.forward_quantized(input_fp8, input_scales, out=out)
+
     def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
-        return self._forward_impl(input, apply_bias=False)
+        input_fp8, input_scales = self.quantize_input(input)
+        return self.forward_quantized(input_fp8, input_scales, apply_bias=False)
 
     def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
         output = self.forward_without_bias(input)
@@ -291,7 +322,12 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
         if not self.scale_ue8m0 or self.bias is None or self.N % 128 != 0:
             return None
-        output = self._forward_impl(input, apply_bias=False)
+        output = self.forward_without_bias(input)
+        return self._bias_gelu_quantize_output(output)
+
+    def _bias_gelu_quantize_output(
+        self, output: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         output_fp8 = torch.empty_like(output, dtype=torch.float8_e4m3fn)
         output_scales = create_per_token_group_quant_fp8_output_scale(
             x_shape=output.shape,
@@ -308,28 +344,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         )
         return output_fp8, output_scales
 
-    def forward_quantized(
-        self,
-        input: torch.Tensor,
-        input_scales: torch.Tensor,
-        apply_bias: bool = True,
-    ) -> torch.Tensor:
-        if not self.scale_ue8m0:
-            raise ValueError("pre-quantized activation requires UE8M0 scales")
-        if input.dtype != torch.float8_e4m3fn or input.dim() != 2:
-            raise ValueError("pre-quantized input must be a 2D float8_e4m3fn tensor")
-        if input.shape[1] != self.K:
-            raise ValueError(f"input K must be {self.K}, got {input.shape[1]}")
-        output = torch.empty(
-            input.shape[0], self.N, dtype=torch.bfloat16, device=input.device
-        )
-        fp8_gemm_nt(
-            (input, input_scales),
-            (self.weight, self.weight_scales),
-            output,
-            c=None,
-            disable_ue8m0_cast=False,
-        )
-        if apply_bias and self.bias is not None:
-            output.add_(self.bias.to(output.dtype))
-        return output
+    def forward_quantized_with_bias_gelu_quantized(
+        self, input: torch.Tensor, input_scales: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        if not self.scale_ue8m0 or self.bias is None or self.N % 128 != 0:
+            return None
+        output = self.forward_quantized(input, input_scales, apply_bias=False)
+        return self._bias_gelu_quantize_output(output)

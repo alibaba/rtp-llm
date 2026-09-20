@@ -135,3 +135,31 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
             self.variance_epsilon,
         )
         return hidden_states
+
+    def forward_quantized(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            create_per_token_group_quant_fp8_output_scale,
+        )
+
+        output = torch.empty_like(hidden_states, dtype=torch.float8_e4m3fn)
+        scales = create_per_token_group_quant_fp8_output_scale(
+            x_shape=hidden_states.shape,
+            device=hidden_states.device,
+            group_size=128,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        rtp_llm_ops.fused_add_layernorm_quant_fp8(
+            hidden_states,
+            residual,
+            bias,
+            self.weight.data,
+            self.beta,
+            output,
+            scales,
+            self.variance_epsilon,
+        )
+        return hidden_states, output, scales

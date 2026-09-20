@@ -110,7 +110,9 @@ class DenseMLP(nn.Module):
         return output
 
     def forward_without_output_bias(
-        self, x: torch.Tensor
+        self,
+        x: torch.Tensor,
+        quantized_x: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
         quantized_activation = None
@@ -122,7 +124,14 @@ class DenseMLP(nn.Module):
             and self.up_proj.supports_fused_bias_gelu_quant
             and self.down_proj.supports_fused_bias_gelu_quant
         ):
-            quantized_activation = self.up_proj.forward_with_bias_gelu_quantized(x)
+            if quantized_x is not None:
+                quantized_activation = (
+                    self.up_proj.forward_quantized_with_bias_gelu_quantized(
+                        *quantized_x
+                    )
+                )
+            else:
+                quantized_activation = self.up_proj.forward_with_bias_gelu_quantized(x)
         if quantized_activation is not None:
             output = self.down_proj.forward_quantized(
                 *quantized_activation, apply_bias=False
