@@ -308,8 +308,8 @@
                     "speculative_draft_rounds": 3,
                     "speculative_accepted_tokens_per_pos": [
                         2,
-                        1,
-                        1
+                        2,
+                        0
                     ],
                     "role_addrs": [
                         {
