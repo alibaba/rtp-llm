@@ -303,6 +303,15 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                     // Keep D2H at publication time; the store must not retain GPU storage.
                     side_data.propose_probs  = propose_probs_cpu.contiguous();
                     side_data.propose_hidden = propose_hidden_cpu.contiguous();
+                    const size_t probs_bytes  = side_data.propose_probs.nbytes();
+                    const size_t hidden_bytes = side_data.propose_hidden.nbytes();
+                    // Tensor payload only; excludes protobuf metadata and transport framing.
+                    RTP_LLM_LOG_INFO("[MTP_PD_TENSOR_BYTES] unique_key=%s propose_hidden_bytes=%zu "
+                                     "propose_probs_bytes=%zu total_bytes=%zu",
+                                     uniqueKey().c_str(),
+                                     hidden_bytes,
+                                     probs_bytes,
+                                     hidden_bytes + probs_bytes);
                 }
                 auto pos_ids = getContextPositionIds();
                 if (pos_ids.defined() && pos_ids.numel() > 0) {
