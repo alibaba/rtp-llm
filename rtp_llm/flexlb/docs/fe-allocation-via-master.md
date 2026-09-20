@@ -8,7 +8,7 @@ Keep the deployment's `MODEL_SERVICE_CONFIG` and `HIPPO_ROLE`; use mainline sche
 ```sh
 export FLEXLB_CONFIG='{"schemaVersion":2,"workerRegistry":{"engineType":"EMBEDDING"},"router":{"batchScheduleMaxCount":1000}}'
 ```
-`LLM` (default) selects alive published gRPC endpoints. `EMBEDDING` selects discovered workers and returns `arpc_port = http_port + 1`; register the HTTP base port. Embedding master-info `alive` means discovered, not independently probed. Legacy engine/count environment flags are rejected.
+`LLM` (default) selects alive published gRPC endpoints. `EMBEDDING` selects discovered workers and returns `arpc_port = http_port + 1`; register the HTTP base port. Embedding master-info `alive` means discovered, not independently probed. Legacy `ENGINE_TYPE`, `BATCH_SCHEDULE_MAX_COUNT` and `BATCH_LOAD_BALANCE_STRATEGY` environment variables (including their `FLEXLB_` variants) are rejected, even when empty or dispatcher is disabled. Migrate engine/count settings to the schema above and remove strategy flags; batch placement uses round-robin.
 
 Send `{"batch_count":5,"assign_be":true,"assign_fe":false}` for BE-only placement. Both flags default to true; at least one is required. Success has exactly `batch_count` targets; count must be 1–`batchScheduleMaxCount` (default 1000). BE assignment requires one configured role without active group routing. FE-only allocation is independent of BE topology/readiness.
 

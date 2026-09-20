@@ -16,14 +16,22 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
     _selected_pd_separation,
 )
 from rtp_llm.frontend.frontend_server import FrontendServer
-from rtp_llm.frontend.frontend_worker import BatchPipelineResponse, FrontendWorker
+from rtp_llm.frontend.frontend_worker import (
+    BatchPipelineResponse,
+    FrontendWorker,
+    PipelineResponse,
+)
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, FinisheReason
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import RoleType
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_constants import request_id_field_name
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateInput,
+    GenerateOutput,
+    GenerateOutputs,
+)
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -261,37 +269,74 @@ class BatchFrontendWorkerTest(TestCase):
         )
 
     def test_prepared_batch_invokes_backend_once_with_group_identity(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+        worker.generate_env_config = None
         pipeline = Pipeline.__new__(Pipeline)
+        worker.pipeline = pipeline
+        pipeline._special_tokens = None
         pipeline.tokenizer = MagicMock()
         pipeline.tokenizer.encode.return_value = [1, 2]
-        pipeline.backend_rpc_server_visitor = MagicMock()
-        pipeline.backend_rpc_server_visitor.batch_enqueue = AsyncMock(
-            return_value=[GenerateOutputs(), GenerateOutputs()]
+        pipeline.create_generate_config = lambda config, *args, **kwargs: config
+        visitor = pipeline.backend_rpc_server_visitor = MagicMock()
+        worker.backend_rpc_server_visitor = visitor
+        visitor.pd_sep_config.role_type = RoleType.PDFUSION
+        visitor.host_service.service_available = False
+        visitor.batch_enqueue = AsyncMock(
+            return_value=[
+                GenerateOutputs(generate_outputs=[GenerateOutput(finished=True)])
+                for _ in range(2)
+            ]
         )
         pipeline.decode_non_incremental_tokens = MagicMock(
             side_effect=[(["one"], [1], []), (["two"], [1], [])]
         )
-        configs = [GenerateConfig(aux_info=False), GenerateConfig(aux_info=False)]
-        responses = asyncio.run(
-            pipeline.batch_infer_prepared(
-                prompts=["first", "second"],
-                request_ids=[700, 10_700],
-                generate_configs=configs,
-                headers={"X-Request-ID": "trace", "ignored": "value"},
-                group_id=700,
-            )
+        response = worker.inference(
+            True,
+            prompt_batch=["first", "second"],
+            max_new_tokens=37,
+            generation_config={"max_new_tokens": 8, "aux_info": False},
+            headers={"X-Request-ID": "trace", "ignored": "value"},
+            **{request_id_field_name: 700},
         )
-        self.assertEqual(2, len(responses))
-        pipeline.backend_rpc_server_visitor.batch_enqueue.assert_awaited_once()
-        inputs = pipeline.backend_rpc_server_visitor.batch_enqueue.call_args.args[0]
+        result = asyncio.run(CompleteResponseAsyncGenerator.get_last_value(response))
+        self.assertEqual(
+            ["one", "two"], [item.response for item in result.response_batch]
+        )
+        self.assertTrue(all(item.finished for item in result.response_batch))
+        visitor.batch_enqueue.assert_awaited_once()
+        inputs = visitor.batch_enqueue.call_args.args[0]
         self.assertEqual([700, 10_700], [item.request_id for item in inputs])
         self.assertEqual([2, 2], [item.group_size for item in inputs])
         self.assertEqual([700, 700], [item.group_id for item in inputs])
         self.assertEqual(
             [{"x-request-id": "trace"}] * 2, [item.headers for item in inputs]
         )
-        for config, item in zip(configs, inputs):
-            self.assertIs(config, item.generate_config)
+        self.assertEqual(
+            [37, 37], [item.generate_config.max_new_tokens for item in inputs]
+        )
+        self.assertIsNot(inputs[0].generate_config, inputs[1].generate_config)
+
+    def test_master_scheduled_batch_collects_all_final_responses(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+        worker.backend_rpc_server_visitor = SimpleNamespace(
+            pd_sep_config=SimpleNamespace(role_type=RoleType.FRONTEND),
+            host_service=SimpleNamespace(service_available=True),
+        )
+
+        async def generate(request_id, text, urls, **kwargs):
+            yield PipelineResponse(response=text, finished=False)
+            yield PipelineResponse(response=text + "-done", finished=True)
+
+        worker._yield_generate = generate
+        response = worker.inference(
+            True, prompt_batch=["first", "second"], **{request_id_field_name: 700}
+        )
+        result = asyncio.run(CompleteResponseAsyncGenerator.get_last_value(response))
+        self.assertEqual(
+            ["first-done", "second-done"],
+            [item.response for item in result.response_batch],
+        )
+        self.assertTrue(all(item.finished for item in result.response_batch))
 
 
 class FakeRawRequest(object):
