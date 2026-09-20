@@ -4,15 +4,15 @@
 #include <thread>
 #include <atomic>
 #include <algorithm>
-#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
 namespace rtp_llm {
 namespace test {
 
-using DeviceFullKVCacheGroup = FullKVCacheGroup;
+using DeviceFullCacheManager = FullCacheManager;
 
-class DeviceFullKVCacheGroupTest: public ::testing::Test {
+class DeviceFullCacheManagerTest: public ::testing::Test {
 protected:
     void SetUp() override {}
 
@@ -21,28 +21,28 @@ protected:
 
 // ==================== Basic functionality tests ====================
 
-TEST_F(DeviceFullKVCacheGroupTest, NeedBlocksNumTest) {
+TEST_F(DeviceFullCacheManagerTest, NeedBlocksNumTest) {
     auto block_pool = createDeviceBlockPool();
     block_pool->init();
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
-    DeviceFullKVCacheGroup group1({}, spec, block_pool, 0);
+    DeviceFullCacheManager group1({}, spec, block_pool, 0);
     ASSERT_EQ(2, group1.needBlocksNum(10, 1));
     ASSERT_EQ(0, group1.needBlocksNum(10, 5));
     ASSERT_EQ(1, group1.needBlocksNum(1, 0));
     ASSERT_EQ(0, group1.needBlocksNum(2, 1));
 }
 
-TEST_F(DeviceFullKVCacheGroupTest, GetNeedBlocksTest) {
+TEST_F(DeviceFullCacheManagerTest, GetNeedBlocksTest) {
     auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
-    DeviceFullKVCacheGroup group({}, spec, block_pool, 0);
+    DeviceFullCacheManager group({}, spec, block_pool, 0);
 
     // common=8 => 2 blocks, seq=12 reserve=3 => ceil(15/4)=4 blocks => extra=2
     const auto need =
@@ -57,14 +57,14 @@ TEST_F(DeviceFullKVCacheGroupTest, GetNeedBlocksTest) {
     EXPECT_EQ(need2.extra_blocks, 0);
 }
 
-TEST_F(DeviceFullKVCacheGroupTest, RemoveSkippedBlocksTest) {
+TEST_F(DeviceFullCacheManagerTest, RemoveSkippedBlocksTest) {
     auto block_pool = createDeviceBlockPool();
     block_pool->init();
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
-    DeviceFullKVCacheGroup group1({}, spec, block_pool, 0);
+    DeviceFullCacheManager group1({}, spec, block_pool, 0);
 
     BlockIndicesType old_indices = {1, 2, 3, 4};
     BlockIds         block_ids(/*kernel_blocks_per_kv_block=*/1);
@@ -73,7 +73,7 @@ TEST_F(DeviceFullKVCacheGroupTest, RemoveSkippedBlocksTest) {
     ASSERT_EQ(old_indices, block_ids.blocks());
 }
 
-TEST_F(DeviceFullKVCacheGroupTest, MallocFreeTest) {
+TEST_F(DeviceFullCacheManagerTest, MallocFreeTest) {
     auto block_pool = createDeviceBlockPool();
     block_pool->init();
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
@@ -81,7 +81,7 @@ TEST_F(DeviceFullKVCacheGroupTest, MallocFreeTest) {
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
-    DeviceFullKVCacheGroup group1({}, spec, block_pool, 0);
+    DeviceFullCacheManager group1({}, spec, block_pool, 0);
 
     CacheKeysType cache_keys = {101, 102, 103};
     BlockIds      block_ids(/*kernel_blocks_per_kv_block=*/1);
@@ -100,13 +100,13 @@ TEST_F(DeviceFullKVCacheGroupTest, MallocFreeTest) {
     ASSERT_FALSE(group1.malloc(block_ids2, 180));
 }
 
-TEST_F(DeviceFullKVCacheGroupTest, MallocBackfillsMatchedLoadPlaceholder) {
+TEST_F(DeviceFullCacheManagerTest, MallocBackfillsMatchedLoadPlaceholder) {
     auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
-    DeviceFullKVCacheGroup group({}, spec, block_pool, 0);
+    DeviceFullCacheManager group({}, spec, block_pool, 0);
 
     auto resident = block_pool->malloc();
     ASSERT_TRUE(resident.has_value());
@@ -128,14 +128,14 @@ TEST_F(DeviceFullKVCacheGroupTest, MallocBackfillsMatchedLoadPlaceholder) {
 // Single-count co-hold: a block held by both a request (via group malloc) and a cache
 // holder (extra incRef) must survive the request release and only free on the final
 // decRef.
-TEST_F(DeviceFullKVCacheGroupTest, RequestReleaseKeepsCacheHeldBlock) {
+TEST_F(DeviceFullCacheManagerTest, RequestReleaseKeepsCacheHeldBlock) {
     auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
-    DeviceFullKVCacheGroup group1({}, spec, block_pool, 0);
+    DeviceFullCacheManager group1({}, spec, block_pool, 0);
 
     BlockIds block_ids(/*kernel_blocks_per_kv_block=*/1);
     ASSERT_TRUE(group1.malloc(block_ids, /*seq_len=*/2));
@@ -154,13 +154,13 @@ TEST_F(DeviceFullKVCacheGroupTest, RequestReleaseKeepsCacheHeldBlock) {
     EXPECT_FALSE(block_pool->isAllocated(block));
 }
 
-TEST_F(DeviceFullKVCacheGroupTest, ReleaseFiltersNullBlocksAndPreservesOtherReferences) {
+TEST_F(DeviceFullCacheManagerTest, ReleaseFiltersNullBlocksAndPreservesOtherReferences) {
     auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
-    DeviceFullKVCacheGroup group({}, spec, block_pool, 7);
+    DeviceFullCacheManager group({}, spec, block_pool, 7);
 
     BlockIds block_ids(/*kernel_blocks_per_kv_block=*/1);
     ASSERT_TRUE(group.malloc(block_ids, /*seq_len=*/2));

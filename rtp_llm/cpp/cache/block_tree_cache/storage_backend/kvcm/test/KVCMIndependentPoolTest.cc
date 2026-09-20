@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DirectSubscriber.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -108,7 +108,7 @@ protected:
         DeviceTestBase::SetUp();
         auto environment = makeMultiGroupBackendEnvironment("independent_config", 2, 1, 1);
         config_          = environment.cache_config;
-        allocator_       = std::make_shared<KVCacheAllocator>(config_);
+        allocator_       = std::make_shared<CoordinatorCacheManager>(config_);
         ASSERT_TRUE(allocator_->init());
         state_ = std::make_shared<PoolTransferState>();
         pools_ = allocator_->groupBlockPools();
@@ -241,7 +241,7 @@ protected:
     }
 
     CacheConfig                                          config_;
-    std::shared_ptr<KVCacheAllocator>                    allocator_;
+    std::shared_ptr<CoordinatorCacheManager>             allocator_;
     std::vector<DeviceBlockPoolPtr>                      pools_;
     std::vector<std::unique_ptr<ScopedReferencedBlocks>> refs_;
     std::vector<BlockIdxType>                            blocks_;

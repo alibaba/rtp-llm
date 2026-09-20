@@ -18,7 +18,7 @@
 
 namespace rtp_llm {
 
-class KVCacheAllocator;
+class CoordinatorCacheManager;
 
 using RequiredPositions = std::unordered_set<size_t>;
 
@@ -27,22 +27,22 @@ struct NeedBlocksInfo {
     int extra_blocks  = 0;  // extra blocks per batch
 };
 
-class KVCacheGroup {
+class SingleTypeCacheManager {
 public:
-    KVCacheGroup(GroupBase cache_group, DeviceBlockPoolPtr block_pool, int group_id):
+    SingleTypeCacheManager(GroupBase cache_group, DeviceBlockPoolPtr block_pool, int group_id):
         cache_group_(std::move(cache_group)), block_pool_(std::move(block_pool)), group_id_(group_id) {}
 
     // Transition-only constructor for HybridPool and existing focused tests.
-    KVCacheGroup(const LayerIdsType& layer_ids,
+    SingleTypeCacheManager(const LayerIdsType& layer_ids,
                            KVCacheSpecPtr      kvcache_spec,
                            DeviceBlockPoolPtr  block_pool,
                            int                 group_id,
                            CacheGroupPolicy    policy = CacheGroupPolicy{}):
-        KVCacheGroup(makeLegacyCacheGroup(std::move(kvcache_spec), policy), std::move(block_pool), group_id) {
+        SingleTypeCacheManager(makeLegacyCacheGroup(std::move(kvcache_spec), policy), std::move(block_pool), group_id) {
         initializeLayerMapping(layer_ids);
     }
 
-    virtual ~KVCacheGroup() = default;
+    virtual ~SingleTypeCacheManager() = default;
 
     bool init();
     bool init(const LayerIdsType& layer_ids) {
@@ -135,10 +135,10 @@ protected:
     std::unordered_map<int, int>           global_layer_to_local_layer;
 
 private:
-    friend class KVCacheAllocator;
+    friend class CoordinatorCacheManager;
     void setEvictCallback(EvictCallback callback);
 };
 
-using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
+using SingleTypeCacheManagerPtr = std::shared_ptr<SingleTypeCacheManager>;
 
 }  // namespace rtp_llm

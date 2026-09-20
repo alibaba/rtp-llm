@@ -2,23 +2,23 @@
 
 #include <gmock/gmock.h>
 
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 
 namespace rtp_llm {
 
-class MockKVCacheAllocator: public KVCacheAllocator {
+class MockCoordinatorCacheManager: public CoordinatorCacheManager {
 public:
-    explicit MockKVCacheAllocator(const CacheConfig& config, AllocationType atype = AllocationType::DEVICE):
-        KVCacheAllocator(config, atype) {}
-    ~MockKVCacheAllocator() override = default;
+    explicit MockCoordinatorCacheManager(const CacheConfig& config, AllocationType atype = AllocationType::DEVICE):
+        CoordinatorCacheManager(config, atype) {}
+    ~MockCoordinatorCacheManager() override = default;
 
 public:
     MOCK_METHOD(void, free, (const FreeInfo&), (override));
     MOCK_METHOD(void, insertIntoCache, (const InsertInfo&, size_t&), (override));
     MOCK_METHOD(BlockAddrInfo, convertIndexToAddr, (int layer_id, int block_id), (const, override));
     MOCK_METHOD(std::vector<BlockInfo>, convertIndexToBuffer, (int layer_id, int block_id), (const, override));
-    using KVCacheAllocator::convertIndexToAddr;
-    using KVCacheAllocator::convertIndexToBuffer;
+    using CoordinatorCacheManager::convertIndexToAddr;
+    using CoordinatorCacheManager::convertIndexToBuffer;
     MOCK_METHOD(std::vector<BlockInfo>,
                 convertIndexToBuffer,
                 (int layer_id, int block_id, int partition_count, int partition_id),

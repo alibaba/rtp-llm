@@ -16,7 +16,7 @@
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
@@ -217,7 +217,7 @@ static int dsv4ActiveTailBlocks(const CacheConfig& config, const std::string& ta
     return isHcaStateGroup(config, tag) ? 1 : 2;
 }
 
-static DeviceBlockPoolPtr poolForTag(const KVCacheAllocator& allocator, const std::string& tag) {
+static DeviceBlockPoolPtr poolForTag(const CoordinatorCacheManager& allocator, const std::string& tag) {
     for (const auto& group : allocator.cacheGroups()) {
         if (group->tag() == tag) {
             return group->blockPool();
@@ -524,8 +524,8 @@ TEST_F(KVCacheManagerTest, AvailableBlocksUsesCanonicalPoolCount) {
     auto manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
-    ASSERT_EQ(manager->allocator_->groupBlockPools().size(), 1u);
-    const DeviceBlockPoolPtr pool = manager->allocator_->groupBlockPools().front();
+    ASSERT_EQ(manager->coordinator_manager_->groupBlockPools().size(), 1u);
+    const DeviceBlockPoolPtr pool = manager->coordinator_manager_->groupBlockPools().front();
     ASSERT_NE(pool, nullptr);
     const size_t total_blocks = pool->totalBlocksNum();
     ASSERT_EQ(manager->availableBlocksNum(), total_blocks);
@@ -665,8 +665,8 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     const auto& config = manager.cacheConfig();
     EXPECT_EQ(config.group("default").block_num, candidate);
     ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
-    ASSERT_EQ(manager.allocator_->groupBlockPools().size(), 1u);
-    const auto& pool        = manager.allocator_->groupBlockPools()[0];
+    ASSERT_EQ(manager.coordinator_manager_->groupBlockPools().size(), 1u);
+    const auto& pool        = manager.coordinator_manager_->groupBlockPools()[0];
     const auto  pool_config = std::dynamic_pointer_cast<const DeviceBlockPoolConfig>(pool->config_);
     ASSERT_NE(pool_config, nullptr);
     ASSERT_EQ(pool_config->memory_layouts.size(), 3u);
@@ -700,10 +700,10 @@ TEST_F(KVCacheManagerTest, InitAcceptsSingleIndependentLinearGroup) {
 
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
-    ASSERT_NE(cache_manager->allocator_, nullptr);
-    ASSERT_EQ(cache_manager->allocator_->groupBlockPools().size(), 1u);
-    ASSERT_EQ(cache_manager->allocator_->groupBlockPools().size(), 1u);
-    EXPECT_NE(cache_manager->allocator_->groupBlockPools().front(), nullptr);
+    ASSERT_NE(cache_manager->coordinator_manager_, nullptr);
+    ASSERT_EQ(cache_manager->coordinator_manager_->groupBlockPools().size(), 1u);
+    ASSERT_EQ(cache_manager->coordinator_manager_->groupBlockPools().size(), 1u);
+    EXPECT_NE(cache_manager->coordinator_manager_->groupBlockPools().front(), nullptr);
 }
 
 TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
@@ -723,12 +723,12 @@ TEST_F(KVCacheManagerTest, InitPublishesSameSharedBlockTreeCacheToAllocator) {
 
     ASSERT_TRUE(cache_manager->init());
     ASSERT_NE(cache_manager->blockTreeCache(), nullptr);
-    ASSERT_NE(cache_manager->allocator_, nullptr);
-    const BlockTreeCachePtr allocator_cache = cache_manager->allocator_->blockTreeCache();
-    ASSERT_NE(allocator_cache, nullptr);
-    EXPECT_EQ(allocator_cache, cache_manager->blockTreeCache());
+    ASSERT_NE(cache_manager->coordinator_manager_, nullptr);
+    const BlockTreeCachePtr coordinator_cache = cache_manager->coordinator_manager_->blockTreeCache();
+    ASSERT_NE(coordinator_cache, nullptr);
+    EXPECT_EQ(coordinator_cache, cache_manager->blockTreeCache());
 
-    const auto target_groups = cache_manager->allocator_->cacheGroups();
+    const auto target_groups = cache_manager->coordinator_manager_->cacheGroups();
     ASSERT_EQ(target_groups.size(), static_cast<size_t>(cache_config.groupNums()));
     for (size_t group_id = 0; group_id < target_groups.size(); ++group_id) {
         const auto& target_group = target_groups[group_id];
@@ -755,7 +755,7 @@ TEST_F(KVCacheManagerTest, TeardownKeepsBlockTreeCacheAliveWithSurvivingAllocato
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
-    KVCacheAllocatorPtr    surviving_allocator = cache_manager->allocator_;
+    CoordinatorCacheManagerPtr    surviving_allocator = cache_manager->coordinator_manager_;
     std::weak_ptr<BlockTreeCache> cache_lifetime      = cache_manager->blockTreeCache();
     ASSERT_NE(surviving_allocator->blockTreeCache(), nullptr);
     ASSERT_FALSE(cache_lifetime.expired());
@@ -783,8 +783,8 @@ TEST_F(KVCacheManagerTest, FactoryFailureDoesNotPublishOrInjectBlockTreeCache) {
 
     EXPECT_FALSE(cache_manager->init());
     EXPECT_EQ(cache_manager->blockTreeCache(), nullptr);
-    ASSERT_NE(cache_manager->allocator_, nullptr);
-    EXPECT_EQ(cache_manager->allocator_->blockTreeCache(), nullptr);
+    ASSERT_NE(cache_manager->coordinator_manager_, nullptr);
+    EXPECT_EQ(cache_manager->coordinator_manager_->blockTreeCache(), nullptr);
 }
 
 TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysicalPools) {
@@ -815,7 +815,7 @@ TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysi
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
 
     ASSERT_TRUE(cache_manager->init());
-    auto allocator = std::dynamic_pointer_cast<KVCacheAllocator>(cache_manager->allocator_);
+    auto allocator = std::dynamic_pointer_cast<CoordinatorCacheManager>(cache_manager->coordinator_manager_);
     ASSERT_NE(allocator, nullptr);
     EXPECT_EQ(publishedGroupTags(cache_config.topology()), std::vector<std::string>({"linear", "full"}));
     EXPECT_NE(cache_config.blockSizeBytesForGroup("full"), cache_config.blockSizeBytesForGroup("linear"));
@@ -856,7 +856,7 @@ TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
                                                               pd_sep_config);
         ASSERT_TRUE(cache_manager->init());
 
-        auto allocator = std::dynamic_pointer_cast<KVCacheAllocator>(cache_manager->allocator_);
+        auto allocator = std::dynamic_pointer_cast<CoordinatorCacheManager>(cache_manager->coordinator_manager_);
         ASSERT_NE(allocator, nullptr);
         ASSERT_EQ(allocator->groupBlockPools().size(), static_cast<size_t>(config.groupNums()));
 
@@ -899,8 +899,8 @@ TEST_F(KVCacheManagerTest, AllocationWaitObservesReleaseGeneration) {
     ASSERT_TRUE(cache_manager->init());
 
     const auto release_capacity = [&] {
-        ASSERT_EQ(cache_manager->allocator_->groupBlockPools().size(), 1u);
-        auto       pool  = cache_manager->allocator_->groupBlockPools().front();
+        ASSERT_EQ(cache_manager->coordinator_manager_->groupBlockPools().size(), 1u);
+        auto       pool  = cache_manager->coordinator_manager_->groupBlockPools().front();
         const auto block = pool->malloc();
         ASSERT_TRUE(block.has_value());
         pool->incRef(*block);
@@ -2020,7 +2020,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialAndOut
         const std::string tag = item->group_blocks(0).tag();
         item->mutable_group_blocks(0)->set_block_id(usable + 1);
         EXPECT_EQ(item->group_blocks(0).tag(), tag);
-        const auto         backing     = tiered_manager->allocator_->cacheGroups().front()->blockPool();
+        const auto         backing     = tiered_manager->coordinator_manager_->cacheGroups().front()->blockPool();
         const size_t       free_before = backing->freeBlocksNum();
         const size_t       used_before = backing->usedBlocksNum();
         const size_t       unreferenced_before = block_tree_cache_test::unreferencedBlocksNum(*backing);
@@ -2111,7 +2111,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
-    ASSERT_NE(kv_cache_manager->allocator_, nullptr);
+    ASSERT_NE(kv_cache_manager->coordinator_manager_, nullptr);
     ASSERT_NE(kv_cache_manager->blockTreeCache(), nullptr);
 
     const KVCacheInfo empty = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true);
@@ -2305,7 +2305,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
-    auto hybrid_allocator = std::dynamic_pointer_cast<KVCacheAllocator>(kv_cache_manager->allocator_);
+    auto hybrid_allocator = std::dynamic_pointer_cast<CoordinatorCacheManager>(kv_cache_manager->coordinator_manager_);
     ASSERT_NE(hybrid_allocator, nullptr);
 
     size_t      expected_total_tokens     = std::numeric_limits<size_t>::max();
@@ -2333,7 +2333,7 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
-    auto hybrid_allocator = std::dynamic_pointer_cast<KVCacheAllocator>(kv_cache_manager->allocator_);
+    auto hybrid_allocator = std::dynamic_pointer_cast<CoordinatorCacheManager>(kv_cache_manager->coordinator_manager_);
     ASSERT_NE(hybrid_allocator, nullptr);
 
     const size_t physical_capacity = hybrid_allocator->maxAvailableTokensNum();
@@ -2379,8 +2379,8 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailabl
     // The "device-only" kv cache would be totalBlocksNum() * seq_size_per_block.
     // With host cache enabled, total_kv_cache/available_kv_cache should be >= device-only.
     const size_t device_only_total =
-        kv_cache_manager->allocator_->totalBlocksNum() * kv_cache_manager->cacheConfig().seq_size_per_block;
-    const size_t device_only_available = kv_cache_manager->allocator_->availableTokensNum();
+        kv_cache_manager->coordinator_manager_->totalBlocksNum() * kv_cache_manager->cacheConfig().seq_size_per_block;
+    const size_t device_only_available = kv_cache_manager->coordinator_manager_->availableTokensNum();
 
     EXPECT_GE(info.total_kv_cache, device_only_total);
     EXPECT_GE(info.available_kv_cache, device_only_available);
@@ -2980,8 +2980,8 @@ TEST_F(KVCacheManagerTest, AllocationWaitBackoffBoundsRepeatedPrefixRollback) {
     auto config  = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     auto manager = std::make_shared<KVCacheManager>(config, false);
     ASSERT_TRUE(manager->init());
-    ASSERT_EQ(manager->allocator_->groupBlockPools().size(), 1u);
-    auto pool  = manager->allocator_->groupBlockPools().front();
+    ASSERT_EQ(manager->coordinator_manager_->groupBlockPools().size(), 1u);
+    auto pool  = manager->coordinator_manager_->groupBlockPools().front();
     auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
     pool->incTreeRef(*block, BlockTreeRefType::CACHE);

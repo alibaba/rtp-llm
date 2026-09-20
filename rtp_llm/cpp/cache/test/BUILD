@@ -240,7 +240,7 @@ cc_test(
 cc_test(
     name = "single_type_kv_cache_allocator_test",
     srcs = [
-        "SingleTypeKVCacheAllocatorTest.cc",
+        "SingleTypeCoordinatorCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -310,7 +310,7 @@ cc_test(
 cc_test(
     name = "hybrid_kv_cache_allocator_test",
     srcs = [
-        "HybridTypeKVCacheAllocatorTest.cc",
+        "HybridTypeCoordinatorCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -327,7 +327,7 @@ cc_test(
 cc_test(
     name = "hybrid_kv_cache_allocator_cp_shard_test",
     srcs = [
-        "HybridKVCacheAllocatorCPShardTest.cc",
+        "HybridCoordinatorCacheManagerCPShardTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -343,7 +343,7 @@ cc_test(
 cc_test(
     name = "hybrid_pool_kv_cache_allocator_test",
     srcs = [
-        "HybridPoolKVCacheAllocatorTest.cc",
+        "HybridPoolCoordinatorCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,

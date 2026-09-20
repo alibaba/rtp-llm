@@ -1,14 +1,14 @@
-#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
-int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
+int FullCacheManager::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
     const int block_size = seqSizePerBlock();
     return std::max((seq_len + reserve_step + block_size - 1) / block_size - current_blocks, 0);
 }
 
-int FullKVCacheGroup::estimatePeakNeedBlocks(int                     seq_len,
+int FullCacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                              const BlockIndicesType& current_block_indices,
                                              int                     remaining_tokens,
                                              int                     reserve_step,
@@ -19,7 +19,7 @@ int FullKVCacheGroup::estimatePeakNeedBlocks(int                     seq_len,
         (seq_len + remaining_tokens + reserve_step + seqSizePerBlock() - 1) / seqSizePerBlock() - current_blocks, 0);
 }
 
-int FullKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
+int FullCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                          int  common_seq_len,
                                                          int  remaining_tokens,
                                                          int  reserve_step,
@@ -32,7 +32,7 @@ int FullKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
     return common_blocks + batch_size * std::max(peak_blocks - common_blocks, 0);
 }
 
-NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(int                      common_seq_len,
+NeedBlocksInfo FullCacheManager::getNeedBlocks(int                      common_seq_len,
                                                int                      seq_len,
                                                int                      reserve_step,
                                                int                      reuse_blocks_len,
@@ -54,7 +54,7 @@ NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(int                      common_s
     return info;
 }
 
-bool FullKVCacheGroup::malloc(BlockIds&            block_ids,
+bool FullCacheManager::malloc(BlockIds&            block_ids,
                               int                  seq_len,
                               bool                 enable_reuse_cache,
                               int                  reserve_step,
@@ -118,7 +118,7 @@ bool FullKVCacheGroup::malloc(BlockIds&            block_ids,
     return true;
 }
 
-void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/, bool /*enable_reuse_cache*/, int /*reserve_step*/) {
+void FullCacheManager::removeSkippedBlocks(BlockIds& /*block_ids*/, bool /*enable_reuse_cache*/, int /*reserve_step*/) {
 }
 
 }  // namespace rtp_llm

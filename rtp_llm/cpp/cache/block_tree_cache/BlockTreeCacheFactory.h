@@ -6,7 +6,7 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
@@ -20,7 +20,7 @@ std::string resolveDiskMountPath(const std::string& disk_paths_csv, int64_t loca
 
 BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                              cache_config,
                                        const KVCacheConfig&                            kv_cache_config,
-                                       const std::shared_ptr<KVCacheAllocator>& allocator,
+                                       const std::shared_ptr<CoordinatorCacheManager>& coordinator_manager,
                                        const ParallelismConfig&                        parallelism_config = {},
                                        std::shared_ptr<StorageBackend>                 storage_backend    = nullptr,
                                        std::shared_ptr<BroadcastManager>               broadcast_manager  = nullptr,

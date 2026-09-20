@@ -80,7 +80,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:kv_cache_specs",
-        "//rtp_llm/cpp/cache:kv_cache_allocator_hdr",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager_hdr",
         "//rtp_llm/cpp/cache:cache_async_context",
         "//rtp_llm/cpp/utils:core_utils",
     ] + select({

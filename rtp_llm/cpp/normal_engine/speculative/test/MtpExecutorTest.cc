@@ -785,9 +785,9 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
         if (with_linear) {
             config.layer_num = single_layer ? 1 : 2;
             config.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
-                                               {{0}, {single_layer ? 0 : 1}},
-                                               {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                               {"linear", "full"});
+                                    {{0}, {single_layer ? 0 : 1}},
+                                    {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                    {"linear", "full"});
         }
         auto groups = config.topology().groups();
         for (auto& group : groups) {

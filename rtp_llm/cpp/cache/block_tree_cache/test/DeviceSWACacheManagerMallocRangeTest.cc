@@ -4,13 +4,13 @@
 #include <memory>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
-#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SWACacheManager.h"
 
 namespace rtp_llm {
 namespace test {
 namespace {
 
-using DeviceSWAKVCacheGroup = SWAKVCacheGroup;
+using DeviceSWACacheManager = SWACacheManager;
 
 DeviceBlockPoolConfig makeDeviceBlockPoolConfig() {
     constexpr uint32_t kLayerNum        = 1;
@@ -41,7 +41,7 @@ DeviceBlockPoolConfig makeDeviceBlockPoolConfig() {
     return config;
 }
 
-// DeviceSWAKVCacheGroup only accepts a DeviceBlockPoolPtr. This test exercises only the SWA
+// DeviceSWACacheManager only accepts a DeviceBlockPoolPtr. This test exercises only the SWA
 // tail-block placement pattern (which slots are NULL vs REAL) and the free path, both
 // memory-medium-agnostic.
 DeviceBlockPoolPtr createDeviceBlockPool() {
@@ -61,12 +61,12 @@ std::shared_ptr<MHAKVCacheSpec> makeMHASpec(int seq_size_per_block) {
 
 }  // namespace
 
-TEST(DeviceSWAKVCacheGroupMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenUpTo1M) {
+TEST(DeviceSWACacheManagerMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenUpTo1M) {
     constexpr int kSeqSizePerBlock = 256;
     constexpr int kMaxSeqLen       = 1000000;
 
     auto                  block_pool = createDeviceBlockPool();
-    DeviceSWAKVCacheGroup group({}, makeMHASpec(kSeqSizePerBlock), block_pool, 0);
+    DeviceSWACacheManager group({}, makeMHASpec(kSeqSizePerBlock), block_pool, 0);
 
     auto check_seq_len = [&](int seq_len) {
         BlockIds block_ids;

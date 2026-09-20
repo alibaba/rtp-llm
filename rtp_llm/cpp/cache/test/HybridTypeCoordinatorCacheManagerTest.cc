@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -28,7 +28,7 @@
 namespace rtp_llm {
 namespace test {
 
-using TestHybridTypeKVCacheAllocator = BlockTreeCacheTestAllocator<KVCacheAllocator>;
+using TestHybridTypeCoordinatorCacheManager = BlockTreeCacheTestAllocator<CoordinatorCacheManager>;
 
 class PausableHybridPerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
@@ -122,7 +122,7 @@ static CacheConfig makeTinyHybridConfig() {
     return config;
 }
 
-static DeviceBlockPoolPtr poolForTag(const KVCacheAllocator& allocator, const std::string& tag) {
+static DeviceBlockPoolPtr poolForTag(const CoordinatorCacheManager& allocator, const std::string& tag) {
     for (const auto& group : allocator.cacheGroups()) {
         if (group->tag() == tag) {
             return group->blockPool();
@@ -302,7 +302,7 @@ makeBatchResource(int batch_size, const CacheConfig& config, CacheKeysType keys,
     return res;
 }
 
-static int estimateBatchPeakForSingleSequence(const KVCacheAllocator& allocator,
+static int estimateBatchPeakForSingleSequence(const CoordinatorCacheManager& allocator,
                                               const BatchKVCacheResourcePtr& batch_resource,
                                               int                            seq_len,
                                               int                            remaining_tokens,
@@ -327,7 +327,7 @@ static size_t countValidBlocks(const BlockIndicesType& blocks) {
     return n;
 }
 
-class HybridTypeKVCacheAllocatorTest: public ::testing::Test {
+class HybridTypeCoordinatorCacheManagerTest: public ::testing::Test {
 protected:
     void SetUp() override {
         rtp_llm::initLogger();
@@ -335,7 +335,7 @@ protected:
     }
 };
 
-TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigAllowsOnlyFullGroups) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigAllowsOnlyFullGroups) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/2);
     setHybridLayerDescs(cfg, {HybridAttentionType::NONE, HybridAttentionType::NONE});
 
@@ -347,7 +347,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigAllowsOnlyFullGroups) {
     EXPECT_EQ(cache_config.group("full").tag, "full");
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigRejectsMultipleFullGroups) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigRejectsMultipleFullGroups) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/2);
     setHybridLayerDescsWithTags(cfg, {HybridAttentionType::NONE, HybridAttentionType::NONE}, {"full", "full1"});
 
@@ -361,7 +361,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigRejectsMultipleFullGrou
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigKeepsModelTokensPerBlock) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigKeepsModelTokensPerBlock) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/2);
     setHybridLayerDescs(cfg, {HybridAttentionType::NONE, HybridAttentionType::NONE});
 
@@ -417,7 +417,7 @@ TEST(HybridCacheConfigTest, LinearSpecUsesTensorParallelLocalHeadsForBlockSizes)
     EXPECT_EQ(spec->block_size(), 160u);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, CreateConfigSupportsOneLinearIndependentPool) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateConfigSupportsOneLinearIndependentPool) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/2);
     setHybridLayerDescs(cfg, {HybridAttentionType::LINEAR, HybridAttentionType::LINEAR});
     cfg.linear_attention_config.linear_conv_kernel_dim = 2;
@@ -435,7 +435,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateConfigSupportsOneLinearIndependentP
     EXPECT_EQ(config.layerIdsForGroup("linear"), std::vector<int>({0, 1}));
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, CreateConfigRejectsLinearDescriptorWithoutAttentionMetadata) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateConfigRejectsLinearDescriptorWithoutAttentionMetadata) {
     auto cfg                                            = makeTinyModelConfig(/*num_layers=*/1);
     cfg.hybrid_attention_config.enable_hybrid_attention = false;
     cfg.kv_cache_spec_descs = {{KVCacheSpecDesc{"linear", KVCacheSpecType::LinearAttention}}};
@@ -455,7 +455,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateConfigRejectsLinearDescriptorWithou
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, InitSupportsOnlyLinearGroupsWithIndependentPools) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, InitSupportsOnlyLinearGroupsWithIndependentPools) {
     auto cache_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
     auto linear0 = makeLinearSpec("linear0", /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16, 1, 1);
@@ -465,13 +465,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitSupportsOnlyLinearGroupsWithIndepende
     cache_config.finalizeBlockNums(/*baseline_block_num=*/4, RuntimeConfig{});
     ASSERT_EQ(cache_config.groupNums(), 2);
 
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(cache_config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(cache_config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
     ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
     EXPECT_NE(poolForTag(*allocator, "linear0"), poolForTag(*allocator, "linear1"));
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, TopologyRejectsSpecPolicyTypeMismatch) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, TopologyRejectsSpecPolicyTypeMismatch) {
     auto config = makeSimpleLinearCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
     auto groups      = config.topology().groups();
@@ -480,7 +480,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TopologyRejectsSpecPolicyTypeMismatch) {
     EXPECT_THROW(config.setTopology(std::move(groups), std::move(layers)), std::runtime_error);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, TopologyRejectsUnknownLayerTag) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, TopologyRejectsUnknownLayerTag) {
     auto config = makeTinyHybridConfig();
     auto groups = config.topology().groups();
     auto layers = config.topology().layers();
@@ -489,7 +489,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TopologyRejectsUnknownLayerTag) {
     EXPECT_THROW(config.setTopology(std::move(groups), std::move(layers)), std::runtime_error);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, TopologyRejectsMissingLayerTagMapping) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, TopologyRejectsMissingLayerTagMapping) {
     auto config = makeTinyHybridConfig();
     auto groups = config.topology().groups();
     auto layers = config.topology().layers();
@@ -498,7 +498,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TopologyRejectsMissingLayerTagMapping) {
     EXPECT_THROW(config.setTopology(std::move(groups), std::move(layers)), std::runtime_error);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigUsesFirstSeenTagsWithFullAfterLinear) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigUsesFirstSeenTagsWithFullAfterLinear) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/8);
     setHybridLayerDescsWithTags(cfg,
                                 {HybridAttentionType::LINEAR,
@@ -537,7 +537,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigUsesFirstSeenTagsWithFu
     EXPECT_EQ(cache_config.layerIdsForGroup("linear2"), expected_linear2);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigKeepsExplicitPhysicallyHeterogeneousLinearTags) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigKeepsExplicitPhysicallyHeterogeneousLinearTags) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/4);
     setHybridLayerDescsWithTags(cfg,
                                 {HybridAttentionType::LINEAR,
@@ -565,7 +565,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigKeepsExplicitPhysically
     EXPECT_EQ(config.group("convolution_state").spec->memoryLayoutDType(), DataType::TYPE_FP32);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigRejectsDifferentLayoutsUnderOneLinearTag) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigRejectsDifferentLayoutsUnderOneLinearTag) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/4);
     setHybridLayerDescsWithTags(cfg,
                                 {HybridAttentionType::LINEAR,
@@ -586,9 +586,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigRejectsDifferentLayouts
                  std::runtime_error);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, InitAndAddressLookupSmoke) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     EXPECT_EQ(allocator->seqSizePerBlock(), 4);
@@ -597,7 +597,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
     EXPECT_EQ(allocator->freeBlocksNum(),
               (config.group("linear").block_num - 1) + (config.group("full1").block_num - 1));
 
-    const std::vector<KVCacheGroupPtr> groups = allocator->cacheGroups();
+    const std::vector<SingleTypeCacheManagerPtr> groups = allocator->cacheGroups();
     ASSERT_GT(groups.size(), 1u);
     const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator->poolMetricsSnapshots();
     ASSERT_EQ(snapshots.size(), 2u);
@@ -614,9 +614,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
     EXPECT_NE(addr3.kv_addr, nullptr);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridNoMtp) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdHybridNoMtp) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
 
     EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/0), 0u);
     EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/3), 3u);
@@ -628,9 +628,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridNoMtp) {
               std::numeric_limits<uint32_t>::max());
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridWithMtpSubConfigs) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdHybridWithMtpSubConfigs) {
     auto config    = makeTinyHybridMtpConfigByCreateSpConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
 
     ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
     for (size_t mtp_id = 0; mtp_id < config.mtp_sub_configs.size(); ++mtp_id) {
@@ -653,7 +653,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridWithMtpSubCon
               std::numeric_limits<uint32_t>::max());
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, EagleMapsSoleDefaultFullDraftGroupToUniqueFullTargetGroup) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, EagleMapsSoleDefaultFullDraftGroupToUniqueFullTargetGroup) {
     auto config = makeTinyHybridMtpConfigByCreateSpConfig(SP_TYPE_EAGLE, "default");
 
     ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
@@ -675,7 +675,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EagleMapsSoleDefaultFullDraftGroupToUniqu
     EXPECT_TRUE(layout.group("linear").empty());
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, MtpMapsDefaultFullDraftGroupForEveryModule) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MtpMapsDefaultFullDraftGroupForEveryModule) {
     auto config = makeTinyHybridMtpConfigByCreateSpConfig(SP_TYPE_MTP, "default", /*gen_num=*/2);
 
     ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
@@ -690,7 +690,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MtpMapsDefaultFullDraftGroupForEveryModul
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, CreateSpConfigPreservesQwenPackingAlignmentForFullMtpLayers) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateSpConfigPreservesQwenPackingAlignmentForFullMtpLayers) {
     auto score_model_cfg   = makeTinyModelConfig(/*num_layers=*/8);
     auto propose_model_cfg = makeTinyModelConfig(/*num_layers=*/1);
 
@@ -751,7 +751,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateSpConfigPreservesQwenPackingAlignme
 
     auto manager = std::make_shared<KVCacheManager>(config);
     ASSERT_TRUE(manager->init());
-    auto allocator = std::dynamic_pointer_cast<KVCacheAllocator>(manager->allocator_);
+    auto allocator = std::dynamic_pointer_cast<CoordinatorCacheManager>(manager->coordinator_manager_);
     ASSERT_NE(allocator, nullptr);
     ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
     const auto full_pool_config =
@@ -772,7 +772,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateSpConfigPreservesQwenPackingAlignme
     EXPECT_EQ(poolForTag(*allocator, "linear")->allLayerCacheBase().size(), 6u);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpAliasesCompatibleDefaultMlaGroup) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpAliasesCompatibleDefaultMlaGroup) {
     auto main_config    = makeSingleLayerCacheConfig(makeResolvedMlaSpec(DataType::TYPE_FP16,
                                                                       /*kv_lora_rank=*/1,
                                                                       /*rope_head_dim=*/1,
@@ -795,7 +795,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpAliasesCompatibleDefaultMlaGroup)
     EXPECT_EQ(main_config.layerIdsForGroup("full"), std::vector<int>({0, 1}));
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsAmbiguousDefaultFullGroupAlias) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpRejectsAmbiguousDefaultFullGroupAlias) {
     CacheConfig main_config;
     main_config.layer_num = 2;
     main_config.fromGroupedSpecs(
@@ -815,7 +815,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsAmbiguousDefaultFullGroupA
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasDefaultFullGroupToLinearTarget) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpDoesNotAliasDefaultFullGroupToLinearTarget) {
     auto main_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
     auto propose_config = makeSimpleMhaCacheConfig(
@@ -831,7 +831,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasDefaultFullGroupToLin
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsIncompatibleDefaultFullGroupAlias) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpRejectsIncompatibleDefaultFullGroupAlias) {
     const auto expect_no_compatible_alias = [](CacheConfig target_config, const CacheConfig& propose_config) {
         try {
             target_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1);
@@ -892,7 +892,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsIncompatibleDefaultFullGro
     expect_no_compatible_alias(target_with_different_policy, compatible_propose);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpPrefersExactDefaultGroupMatch) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpPrefersExactDefaultGroupMatch) {
     CacheConfig main_config;
     main_config.layer_num = 2;
     main_config.fromGroupedSpecs(
@@ -917,7 +917,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpPrefersExactDefaultGroupMatch) {
     EXPECT_EQ(main_config.layerIdsForGroup(main_config.topology().group("aux").tag), std::vector<int>({1}));
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasDefaultLinearProposeGroup) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpDoesNotAliasDefaultLinearProposeGroup) {
     auto main_config = makeSingleLayerCacheConfig(
         makeMhaSpec("full", /*tokens_per_block=*/4, DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/1),
         CacheGroupType::FULL);
@@ -934,7 +934,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasDefaultLinearProposeG
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpAliasErrorIdentifiesSourceAndTargetTags) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpAliasErrorIdentifiesSourceAndTargetTags) {
     auto main_config = makeSingleGroupCacheConfig(
         makeMhaSpec("full", /*tokens_per_block=*/4, DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/1),
         CacheGroupType::FULL,
@@ -954,7 +954,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpAliasErrorIdentifiesSourceAndTarg
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasMultiGroupProposeConfig) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpDoesNotAliasMultiGroupProposeConfig) {
     auto main_config = makeSingleLayerCacheConfig(
         makeMhaSpec("full", /*tokens_per_block=*/4, DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/1),
         CacheGroupType::FULL);
@@ -975,7 +975,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasMultiGroupProposeConf
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpAllowsUnequalIndependentGroupLayerCounts) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpAllowsUnequalIndependentGroupLayerCounts) {
     CacheConfig main_config;
     main_config.layer_num = 5;
     main_config.fromGroupedSpecs(
@@ -992,7 +992,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpAllowsUnequalIndependentGroupLaye
     EXPECT_EQ(sub_config->layerIdsForGroup("linear"), (std::vector<int>{0}));
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsPartialSourceAndDerivesOrderedLayers) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpRejectsPartialSourceAndDerivesOrderedLayers) {
     auto main_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
 
@@ -1012,9 +1012,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsPartialSourceAndDerivesOrd
     EXPECT_NO_THROW(main_config.mergeMTPModule(reordered_source, /*module_index=*/0, /*main_layer_num=*/2));
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, MtpPhysicalSlotsDoNotAliasMainSlots) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MtpPhysicalSlotsDoNotAliasMainSlots) {
     auto config    = makeTinyHybridMtpConfigByCreateSpConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     const auto main0 = allocator->convertIndexToAddr(/*layer_id=*/2, /*block_id=*/1);
@@ -1032,7 +1032,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MtpPhysicalSlotsDoNotAliasMainSlots) {
     EXPECT_NE(mtp0.kv_addr, mtp1.kv_addr);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, MtpLayoutProjectionRecountsActiveLayersAndKeepsEmptyPlaceholder) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MtpLayoutProjectionRecountsActiveLayersAndKeepsEmptyPlaceholder) {
     auto config  = makeTinyHybridMtpConfigByCreateSpConfig();
     auto manager = std::make_shared<KVCacheManager>(config);
     ASSERT_TRUE(manager->init());
@@ -1046,9 +1046,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MtpLayoutProjectionRecountsActiveLayersAn
     EXPECT_TRUE(layout.at("full", 0).kv_addr.defined());
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReuseFlag) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReuseFlag) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     // batch=2, seq_len=12 (3 resources), reserve_step=2
@@ -1083,9 +1083,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReu
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndLinearGroups) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, TieredJoinedLoadMapsTargetsAcrossFullAndLinearGroups) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
 
     KVCacheConfig tiered_config;
     tiered_config.enable_memory_cache  = true;
@@ -1226,9 +1226,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndL
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, DeviceLoadSourceMatchRefBecomesRequestRef) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, DeviceLoadSourceMatchRefBecomesRequestRef) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
 
     KVCacheConfig tiered_config;
     tiered_config.enable_memory_cache  = true;
@@ -1312,9 +1312,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DeviceLoadSourceMatchRefBecomesRequestRef
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, JointReuseUsesFullPrefixAndLinearTailOnly) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     // Config order: group_id=0 linear, group_id=1 full.
@@ -1404,9 +1404,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     EXPECT_FALSE(isNullBlockIdx(linear_out[2]));     // allocated tail for common length
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMalloc) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, DisableReuseKeepsOnlyLinearTailOnInitMalloc) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
@@ -1428,9 +1428,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMall
     EXPECT_FALSE(isNullBlockIdx(linear_out[2]));
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAllocatesOnlyLinearTail) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, DisableDeviceCacheSkipsReuseMatchAndAllocatesOnlyLinearTail) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     // Config order: group_id=0 linear, group_id=1 full.
@@ -1477,10 +1477,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAlloc
     EXPECT_EQ(countValidBlocks(linear_out), 1u);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, PreparedLoadReclaimsIndependentPoolTreeCandidatesBeforeRetry) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PreparedLoadReclaimsIndependentPoolTreeCandidatesBeforeRetry) {
     auto config = makeTinyHybridConfig();
     setGroupBlockCounts(config, 5, 5);
-    auto          allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto          allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     KVCacheConfig tree_config;
     // Exercise on-demand reclamation, without background watermark eviction
     // removing the seeded path before the capacity check begins.
@@ -1509,10 +1509,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PreparedLoadReclaimsIndependentPoolTreeCa
     EXPECT_GE(poolForTag(*allocator, "full1")->freeBlocksNum(), 1u);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, DeviceMissReclaimsIndependentPoolTreeCandidatesForReserve) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, DeviceMissReclaimsIndependentPoolTreeCandidatesForReserve) {
     auto config = makeTinyHybridConfig();
     setGroupBlockCounts(config, 6, 6);
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
     // Split the total reserve equally: one reserved block in each pool.
     allocator->setReserveBlocksNum(2);
@@ -1534,9 +1534,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DeviceMissReclaimsIndependentPoolTreeCand
     EXPECT_GE(poolForTag(*allocator, "full1")->freeBlocksNum(), 2u);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockForksAliasedBlocksAcrossGroups) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, UpdateKVBlockForksAliasedBlocksAcrossGroups) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     auto                   linear_pool   = poolForTag(*allocator, "linear");
@@ -1574,9 +1574,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockForksAliasedBlocksAcrossGrou
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockCopyLastBlockAcrossGroups) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, UpdateKVBlockCopyLastBlockAcrossGroups) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     auto                   linear_pool   = poolForTag(*allocator, "linear");
@@ -1628,9 +1628,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockCopyLastBlockAcrossGroups) {
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockReservationFailureLeavesResourceUnchanged) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, UpdateKVBlockReservationFailureLeavesResourceUnchanged) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     auto         linear_pool   = poolForTag(*allocator, "linear");
@@ -1675,9 +1675,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockReservationFailureLeavesReso
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockReusesDroppedBatchCapacityTransactionally) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, UpdateKVBlockReusesDroppedBatchCapacityTransactionally) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     auto                   linear_pool   = poolForTag(*allocator, "linear");
@@ -1716,9 +1716,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockReusesDroppedBatchCapacityTr
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedValidBlocksAcrossGroups) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, IncrDecrKVCacheRefReferencesOnlyMatchedValidBlocksAcrossGroups) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     auto                   linear_pool   = poolForTag(*allocator, "linear");
@@ -1755,7 +1755,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, DenseManagersFollowBoundTopologyOrder) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, DenseManagersFollowBoundTopologyOrder) {
     for (const bool reverse_topology : {false, true}) {
         auto config = makeTinyHybridConfig();
         if (reverse_topology) {
@@ -1764,7 +1764,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DenseManagersFollowBoundTopologyOrder) {
             config.setTopology(std::move(groups), config.topology().layers());
         }
         const auto bound_topology = config.topologyPtr();
-        auto       allocator      = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
+        auto       allocator      = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
 
         // Replace the caller's topology before initialization: the allocator owns its binding.
         auto replacement_groups = config.groups();
@@ -1794,9 +1794,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DenseManagersFollowBoundTopologyOrder) {
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, ReferenceAndReleaseReorderedResourceByTag) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ReferenceAndReleaseReorderedResourceByTag) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     auto         linear_pool   = poolForTag(*allocator, "linear");
@@ -1825,9 +1825,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ReferenceAndReleaseReorderedResourceByTag
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, ReferenceIdentityMismatchDoesNotMutatePools) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ReferenceIdentityMismatchDoesNotMutatePools) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     auto         linear_pool   = poolForTag(*allocator, "linear");
@@ -1862,9 +1862,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ReferenceIdentityMismatchDoesNotMutatePoo
     full_pool->decRef(full_blocks);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, FreeIdentityMismatchDoesNotPartiallyReleaseOrClearRows) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, FreeIdentityMismatchDoesNotPartiallyReleaseOrClearRows) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     auto         linear_pool   = poolForTag(*allocator, "linear");
@@ -1903,9 +1903,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, FreeIdentityMismatchDoesNotPartiallyRelea
     full_pool->decRef(full_blocks);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, ConnectorRefPreservesDummyTailAcrossGroupsAndReleasesValidBlocks) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ConnectorRefPreservesDummyTailAcrossGroupsAndReleasesValidBlocks) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     auto                   linear_pool   = poolForTag(*allocator, "linear");
@@ -1943,9 +1943,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConnectorRefPreservesDummyTailAcrossGroup
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     // group_id=0 linear, group_id=1 full.
@@ -1979,9 +1979,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCachePreservesLinearHoleAndPublishesLaterState) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCachePreservesLinearHoleAndPublishesLaterState) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto                   linear_pool   = poolForTag(*allocator, "linear");
@@ -2018,9 +2018,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCachePreservesLinearHoleAndPubl
     full_pool->decRef(full_blocks);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheStopsBeforeFullHole) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCacheStopsBeforeFullHole) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto                   linear_pool   = poolForTag(*allocator, "linear");
@@ -2046,12 +2046,12 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheStopsBeforeFullHole) {
     full_pool->decRef(full_blocks);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsInsertThenReuse) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, DefaultHybridLinearPrefixReuseSupportsInsertThenReuse) {
     auto config = makeTinyHybridConfig();
     ASSERT_EQ(config.groupNums(), 2);
     EXPECT_TRUE(config.group("linear").policy.enable_prefix_reuse);
 
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto seed_res    = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102});
@@ -2085,18 +2085,18 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsIns
     EXPECT_EQ(result.reuse_len, 12);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    KVCacheAllocator* base = allocator.get();
+    CoordinatorCacheManager* base = allocator.get();
     auto                     buf0 = base->convertIndexToBuffer(/*layer_id=*/0, /*block_id=*/1);
     ASSERT_FALSE(buf0.empty());
     EXPECT_NE(buf0[0].addr, nullptr);
 
-    auto       linear_buf      = base->convertIndexToBuffer(/*layer_id=*/0, "linear", /*block_id=*/1);
-    auto       full_buf        = base->convertIndexToBuffer(/*layer_id=*/2, "full1", /*block_id=*/1);
+    auto linear_buf = base->convertIndexToBuffer(/*layer_id=*/0, "linear", /*block_id=*/1);
+    auto full_buf   = base->convertIndexToBuffer(/*layer_id=*/2, "full1", /*block_id=*/1);
     ASSERT_FALSE(linear_buf.empty());
     ASSERT_FALSE(full_buf.empty());
     EXPECT_NE(linear_buf[0].addr, nullptr);
@@ -2117,10 +2117,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseS
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocatedBlocks) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, IncrMallocRollbackFreesPartiallyAllocatedBlocks) {
     auto config = makeTinyHybridConfig();
     setGroupBlockCounts(config, 6, 6);  // Five usable blocks per pool.
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto linear_pool = poolForTag(*allocator, "linear");
@@ -2178,12 +2178,11 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
 // With step=2 and reuse_blocks_len=3, the reused linear tail lands at pos 2, which is NOT
 // a step hit ((2+1)%2==1). Without sparse cleanup, that resource must survive so that
 // causal_conv1d can still read it by prefix_length.
-TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreservesReusedLinearTail) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefillInitSkipsSparseCleanupAndPreservesReusedLinearTail) {
     auto config = makeTinyHybridConfig();
     setGroupBlockCounts(config, 16, 16);  // Enough capacity for cached and new blocks in each pool.
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
-
 
     CacheKeysType shared_keys = {100, 101, 102};
     const auto    seeded      = seedCompleteBlockTreePath(allocator, shared_keys);
@@ -2218,15 +2217,14 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreserves
 // The allocator is invoked on an already-populated resource, so malloc() dispatches directly
 // to incrMalloc(). Sparse cleanup must prune non-step blocks while preserving step hits and
 // the configured active tail resource.
-TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLinearGroups) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, DecodeIncrMallocAppliesSparseCleanupOnLinearGroups) {
     auto config = makeTinyHybridConfig();
     setGroupBlockCounts(config, 7, 7);  // Six usable blocks per independent pool.
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto linear_pool = poolForTag(*allocator, "linear");
     auto full_pool   = poolForTag(*allocator, "full1");
-
 
     auto linear_alloc = linear_pool->malloc(6).value();
     auto full_alloc   = full_pool->malloc(6).value();
@@ -2275,10 +2273,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLin
     EXPECT_EQ(full_pool->freeBlocksNum(), 6u);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatePeakNeedBlocks) {
     // Config: [0,1]=linear group (group_id=0), [2,3]=full group (group_id=1). seq_size_per_block=4.
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     const int blk = config.seq_size_per_block;  // 4
@@ -2326,7 +2324,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
               std::max(expect_full_large - full_slots, 0) + expect_linear_large);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, EstimatePeakNeedBlocksUsesLinearActiveTailPolicy) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatePeakNeedBlocksUsesLinearActiveTailPolicy) {
     auto                          config = makeTinyHybridConfig();
     std::vector<CacheGroupPolicy> policies;
     for (const auto& group : config.topology().groups()) {
@@ -2337,7 +2335,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EstimatePeakNeedBlocksUsesLinearActiveTai
     policies[0].active_tail_blocks = 4;
     setTestGroupPolicies(config, policies);
 
-    auto allocator = std::make_shared<KVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto resource = makeBatchResource(/*batch_size=*/1, config, /*keys=*/{});
@@ -2353,9 +2351,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EstimatePeakNeedBlocksUsesLinearActiveTai
               12);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNonEmptyTargetWidth) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimateBatchPeakNeedBlocksAccountsForNonEmptyTargetWidth) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<KVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto resource = makeBatchResource(/*batch_size=*/2, config, /*keys=*/{});
@@ -2423,13 +2421,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNon
               0);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, FreshUnalignedMultiSequencePeakMatchesExactCapacity) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, FreshUnalignedMultiSequencePeakMatchesExactCapacity) {
     for (const bool reuse_cache : {false, true}) {
         SCOPED_TRACE(reuse_cache ? "reuse enabled" : "reuse disabled");
 
         auto config = makeTinyHybridConfig();
         setGroupBlockCounts(config, 4, 4);  // Three usable blocks each: six total, the exact initialization peak.
-        auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
         ASSERT_TRUE(allocator->init());
 
         auto resource = makeBatchResource(/*batch_size=*/2, config, /*keys=*/{});
@@ -2471,10 +2469,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, FreshUnalignedMultiSequencePeakMatchesExa
     }
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, EstimatedPeakCoversDecodeMallocAndSparseCleanup) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatedPeakCoversDecodeMallocAndSparseCleanup) {
     auto config = makeTinyHybridConfig();
     setGroupBlockCounts(config, 11, 18);  // LINEAR peak 10 + FULL peak 17 = 27 usable blocks.
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});
@@ -2512,10 +2510,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EstimatedPeakCoversDecodeMallocAndSparseC
     EXPECT_EQ(allocator->freeBlocksNum(), 1);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, FreshReusePeakCoversThreeBoundaryDecodeAtExactCapacity) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, FreshReusePeakCoversThreeBoundaryDecodeAtExactCapacity) {
     auto config = makeTinyHybridConfig();
     setGroupBlockCounts(config, 5, 6);  // LINEAR peak 4 + FULL peak 5 = 9 usable blocks.
-    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});

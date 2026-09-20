@@ -12,7 +12,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
-#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
@@ -288,16 +288,16 @@ protected:
         if (block_matches) {
             backend->blockMatches();
         }
-        cache_manager_->allocator_->block_tree_cache_.reset();
+        cache_manager_->coordinator_manager_->block_tree_cache_.reset();
         cache_manager_->block_tree_cache_.reset();
         auto cache = createBlockTreeCache(cache_manager_->cacheConfig(),
                                           kv_cache_config,
-                                          cache_manager_->allocator_,
+                                          cache_manager_->coordinator_manager_,
                                           ParallelismConfig{},
                                           backend);
         EXPECT_NE(cache, nullptr);
         cache_manager_->block_tree_cache_ = cache;
-        cache_manager_->allocator_->attachBlockTreeCache(cache);
+        cache_manager_->coordinator_manager_->attachBlockTreeCache(cache);
 
         if (seed_host) {
             auto& resource = stream_->streamCacheResource();
@@ -719,8 +719,8 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
     stream_->generate_input_->generate_config->enable_device_cache = true;
     resource.resource_context_.enable_device_cache                 = true;
 
-    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
 
     testing::InSequence seq;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
@@ -1062,8 +1062,8 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
 
     auto load_context =
         makeAllocatorLoadContext(/*matched_blocks=*/3, {Tier::DEVICE, Tier::HOST, Tier::DISK}, /*commit=*/false);
-    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/2, 0, load_context}));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
@@ -1089,8 +1089,8 @@ TEST_F(StreamCacheResourceTest, testInitRejectsSuccessfulNonLoadAllocatorContext
     auto& resource = stream_->streamCacheResource();
 
     auto context   = std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
-    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/0, 0, context}));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
@@ -1114,8 +1114,8 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessUsesCpGroupPolicyReuseUn
 
     cache_manager_->cp_slot_mapper_ = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/2);
     auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/2, {Tier::DEVICE, Tier::HOST}, /*commit=*/false);
-    auto allocator    = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto allocator    = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/2, 0, load_context}));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
@@ -1142,8 +1142,8 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadPendingPublishesZeroDeviceReady
     stream_->setDiskReuseLength(2);
 
     auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST}, /*commit=*/false);
-    auto allocator    = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto allocator    = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/0, 0, load_context}));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
@@ -1243,8 +1243,8 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
     EXPECT_EQ(counts->commits, 0u);
     EXPECT_EQ(counts->aborts, 1u);
 
-    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
             EXPECT_FALSE(info.verbose);

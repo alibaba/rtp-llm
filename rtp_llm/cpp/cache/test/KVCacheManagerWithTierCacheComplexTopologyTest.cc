@@ -17,7 +17,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     auto cp_mapper = std::make_shared<CPSlotMapper>(
         /*cp_rank=*/0, /*cp_size=*/2, static_cast<int>(cache_config_.seq_size_per_block));
     manager_->cp_slot_mapper_ = cp_mapper;
-    manager_->allocator_->setCPSlotMapper(cp_mapper);
+    manager_->coordinator_manager_->setCPSlotMapper(cp_mapper);
     ASSERT_EQ(manager_->cpSlotMapper(), cp_mapper);
     ASSERT_TRUE(cp_mapper->isSharded());
 

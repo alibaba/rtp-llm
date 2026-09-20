@@ -14,9 +14,9 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
-#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
-#include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
-#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/FullCacheManager.h"
+#include "rtp_llm/cpp/cache/LinearCacheManager.h"
+#include "rtp_llm/cpp/cache/SWACacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
@@ -25,8 +25,8 @@ class CPSlotMapper;
 class LoadAsyncContext;
 class BlockTreeCache;
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
-class KVCacheGroup;
-using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
+class SingleTypeCacheManager;
+using SingleTypeCacheManagerPtr = std::shared_ptr<SingleTypeCacheManager>;
 struct KVCacheTokenCapacity {
     size_t total_tokens     = 0;
     size_t available_tokens = 0;
@@ -50,9 +50,9 @@ struct KVCachePoolMetricsSnapshot {
     float       used_ratio                 = 0.0f;
 };
 
-class KVCacheAllocator: public std::enable_shared_from_this<KVCacheAllocator> {
+class CoordinatorCacheManager: public std::enable_shared_from_this<CoordinatorCacheManager> {
 public:
-    KVCacheAllocator(const CacheConfig&                 config,
+    CoordinatorCacheManager(const CacheConfig&                 config,
                             AllocationType                     allocation_type     = AllocationType::DEVICE,
                             const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
                             int64_t                            reserve_block_ratio = 0,
@@ -63,7 +63,7 @@ public:
         reserve_block_ratio_(reserve_block_ratio),
         role_type_(role_type) {}
 
-    virtual ~KVCacheAllocator() = default;
+    virtual ~CoordinatorCacheManager() = default;
 
     bool                           init();
     virtual void                   free(const FreeInfo& free_info);
@@ -107,7 +107,7 @@ public:
         return group_block_pools_;
     }
 
-    virtual std::vector<KVCacheGroupPtr> cacheGroups() const {
+    virtual std::vector<SingleTypeCacheManagerPtr> cacheGroups() const {
         return kv_cache_groups_;
     }
 
@@ -269,7 +269,7 @@ protected:
                                             const std::vector<size_t>&           original_sizes);
     virtual MemoryType   memoryTypeForGroup(int group_id) const;
 
-    std::vector<KVCacheGroupPtr> kv_cache_groups_;
+    std::vector<SingleTypeCacheManagerPtr> kv_cache_groups_;
     std::vector<int>                       full_group_ids_;
     std::vector<int>                       linear_group_ids_;
     std::vector<int>                       swa_group_ids_;
@@ -289,6 +289,6 @@ private:
     size_t groupIdForTag(std::string_view tag) const;
 };
 
-using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;
+using CoordinatorCacheManagerPtr = std::shared_ptr<CoordinatorCacheManager>;
 
 }  // namespace rtp_llm

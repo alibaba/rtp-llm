@@ -12,7 +12,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
@@ -120,26 +120,26 @@ GroupSetPtr createGroupSet(const GroupBase&                group,
     return result;
 }
 
-std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&                cache_config,
-                                                              const KVCacheAllocatorPtr& allocator) {
-    if (!allocator) {
-        RTP_LLM_LOG_ERROR("allocator is null");
+std::vector<SingleTypeCacheManagerPtr> alignCoordinatorGroups(const CacheConfig&                cache_config,
+                                                              const CoordinatorCacheManagerPtr& coordinator_manager) {
+    if (!coordinator_manager) {
+        RTP_LLM_LOG_ERROR("coordinator manager is null");
         return {};
     }
-    const auto allocator_groups = allocator->cacheGroups();
+    const auto coordinator_groups = coordinator_manager->cacheGroups();
     const auto group_count        = static_cast<size_t>(cache_config.groupNums());
-    if (allocator_groups.size() != group_count) {
-        RTP_LLM_LOG_ERROR("allocator/topology group count mismatch, allocator=%zu topology=%zu",
-                          allocator_groups.size(),
+    if (coordinator_groups.size() != group_count) {
+        RTP_LLM_LOG_ERROR("coordinator/topology group count mismatch, coordinator=%zu topology=%zu",
+                          coordinator_groups.size(),
                           group_count);
         return {};
     }
 
-    std::vector<KVCacheGroupPtr> aligned(group_count);
+    std::vector<SingleTypeCacheManagerPtr> aligned(group_count);
     const auto&                            topology_groups = cache_config.topology().groups();
-    for (const auto& group : allocator_groups) {
+    for (const auto& group : coordinator_groups) {
         if (!group || !group->blockPool()) {
-            RTP_LLM_LOG_ERROR("allocator group/direct pool must be non-null");
+            RTP_LLM_LOG_ERROR("coordinator group/direct pool must be non-null");
             return {};
         }
         const auto& tag   = group->tag();
@@ -147,13 +147,13 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&            
                                         topology_groups.end(),
                                         [&tag](const GroupBase& declared) { return declared.tag == tag; });
         if (found == topology_groups.end()) {
-            RTP_LLM_LOG_ERROR("allocator has unknown group tag=%s", tag.c_str());
+            RTP_LLM_LOG_ERROR("coordinator has unknown group tag=%s", tag.c_str());
             return {};
         }
         const size_t group_id      = static_cast<size_t>(std::distance(topology_groups.begin(), found));
         auto&        aligned_group = aligned[group_id];
         if (aligned_group != nullptr) {
-            RTP_LLM_LOG_ERROR("duplicate allocator group tag=%s", tag.c_str());
+            RTP_LLM_LOG_ERROR("duplicate coordinator group tag=%s", tag.c_str());
             return {};
         }
         aligned_group = group;
@@ -162,14 +162,14 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&            
     for (size_t group_id = 0; group_id < group_count; ++group_id) {
         const auto& group = aligned[group_id];
         if (group == nullptr) {
-            RTP_LLM_LOG_ERROR("allocator is missing tag=%s", topology_groups[group_id].tag.c_str());
+            RTP_LLM_LOG_ERROR("coordinator is missing tag=%s", topology_groups[group_id].tag.c_str());
             return {};
         }
         const auto& actual   = group->config();
         const auto& declared = topology_groups[group_id];
         if (actual.spec != declared.spec || !CacheConfig::samePolicy(actual.policy, declared.policy)
             || actual.block_num != declared.block_num) {
-            RTP_LLM_LOG_ERROR("allocator tag=%s does not exactly match topology", declared.tag.c_str());
+            RTP_LLM_LOG_ERROR("coordinator tag=%s does not exactly match topology", declared.tag.c_str());
             return {};
         }
     }
@@ -318,7 +318,7 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                c
     RTP_LLM_CHECK_WITH_INFO(
         layer != layer_ids.end(), "layer_id=%d does not belong to storage tag=%s", layer_id, tag.c_str());
     // Pools are laid out in group-local layer order. This is the same model-global -> pool-layer mapping used by
-    // KVCacheGroup::convertIndexToBuffer; model layer IDs cannot be passed
+    // SingleTypeCacheManager::convertIndexToBuffer; model layer IDs cannot be passed
     // directly to these physical pools.
     auto buffers = pool->convertIndexToBuffer(static_cast<int>(std::distance(layer_ids.begin(), layer)), block_id);
     const auto& physical_group = cache_config.physicalGroupForLayer(layer_id, tag);
@@ -364,7 +364,7 @@ std::string resolveDiskMountPath(const std::string& paths_csv, int64_t local_wor
 
 BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                         cache_config,
                                        const KVCacheConfig&                       kv_cache_config,
-                                       const KVCacheAllocatorPtr&          allocator,
+                                       const CoordinatorCacheManagerPtr&          coordinator_manager,
                                        const ParallelismConfig&                   parallelism_config,
                                        std::shared_ptr<StorageBackend>            storage_backend,
                                        std::shared_ptr<BroadcastManager>          broadcast_manager,
@@ -384,12 +384,12 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         RTP_LLM_LOG_ERROR("topology must contain at least one group");
         return nullptr;
     }
-    const auto groups = alignAllocatorGroups(cache_config, allocator);
+    const auto groups = alignCoordinatorGroups(cache_config, coordinator_manager);
     if (groups.size() != static_cast<size_t>(group_count)) {
         return nullptr;
     }
     std::vector<DeviceBlockPoolPtr> group_pools(static_cast<size_t>(group_count));
-    const auto&                     independent_pools = allocator->groupBlockPools();
+    const auto&                     independent_pools = coordinator_manager->groupBlockPools();
     if (independent_pools.size() != static_cast<size_t>(group_count)) {
         RTP_LLM_LOG_ERROR(
             "independent pool/topology count mismatch, pools=%zu topology=%d", independent_pools.size(), group_count);
@@ -406,7 +406,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         auto        pool = groups[static_cast<size_t>(group_id)]->blockPool();
         const auto& tag  = cache_config.topology().groupTags()[static_cast<size_t>(group_id)];
         if (!pool || pool->poolName() != tag || unique_pools.erase(pool.get()) != 1) {
-            RTP_LLM_LOG_ERROR("allocator/group direct pool mismatch for tag=%s", tag.c_str());
+            RTP_LLM_LOG_ERROR("coordinator/group direct pool mismatch for tag=%s", tag.c_str());
             return nullptr;
         }
         group_pools[static_cast<size_t>(group_id)] = std::move(pool);
@@ -509,7 +509,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     // Canonical CP keys cover a virtual token block. Keep the physical layout
     // unchanged and publish the key stride only to cache matching/remote storage.
     auto cache_topology = cache_config.topologyPtr();
-    if (const auto mapper = allocator->cpSlotMapper(); mapper && mapper->isSharded()) {
+    if (const auto mapper = coordinator_manager->cpSlotMapper(); mapper && mapper->isSharded()) {
         auto         groups  = cache_topology->groups();
         const size_t cp_size = static_cast<size_t>(mapper->cpSize());
         RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block <= std::numeric_limits<size_t>::max() / cp_size,
@@ -529,11 +529,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         for (const auto& tag : members) {
             device_pools.push_back(poolForTag(cache_config.topology(), group_pools, tag));
         }
-        const auto&  first     = cache_topology->group(members.front());
-        auto         group_set = createGroupSet(first,
-                                        std::move(device_pools),
-                                        std::move(host_pools[group_set_id]),
-                                        std::move(disk_pools[group_set_id]));
+        const auto& first     = cache_topology->group(members.front());
+        auto        group_set = createGroupSet(
+            first, std::move(device_pools), std::move(host_pools[group_set_id]), std::move(disk_pools[group_set_id]));
         group_set->initialize(group_set_id, cache_topology, members, group_set_payload_bytes[group_set_id]);
         RTP_LLM_LOG_INFO(
             "group_set[%zu] membership sealed: payload_bytes=%zu", group_set_id, group_set->payloadBytes());

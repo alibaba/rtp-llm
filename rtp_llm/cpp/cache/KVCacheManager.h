@@ -14,7 +14,7 @@
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -46,7 +46,7 @@ public:
     // 初始化和配置相关
     bool init();
     bool initialized() const {
-        return allocator_ != nullptr;
+        return coordinator_manager_ != nullptr;
     }
 
     // TP0 owns request block allocation; other ranks only receive the block IDs.
@@ -160,7 +160,7 @@ private:
 
     // 成员变量
     CacheConfig                config_;
-    KVCacheAllocatorPtr allocator_;
+    CoordinatorCacheManagerPtr coordinator_manager_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;

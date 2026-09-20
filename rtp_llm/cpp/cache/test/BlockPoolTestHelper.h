@@ -105,7 +105,7 @@ inline void createDevice() {
                          rtp_llm::MlaOpsType::AUTO);
 }
 
-// Build the DeviceBlockPool from the same test config, for the KVCacheGroup / allocator
+// Build the DeviceBlockPool from the same test config, for the SingleTypeCacheManager / allocator
 // tests (single-count incRef/decRef pool).
 inline DeviceBlockPoolPtr createDeviceBlockPool() {
     createDevice();

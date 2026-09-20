@@ -11,8 +11,8 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
@@ -31,8 +31,8 @@ namespace test {
 
 namespace {
 
-using TestDSV4HybridTypeAllocator = test::BlockTreeCacheTestAllocator<KVCacheAllocator>;
-using TestDSV4HybridPoolAllocator = test::BlockTreeCacheTestAllocator<KVCacheAllocator>;
+using TestDSV4HybridTypeAllocator = test::BlockTreeCacheTestAllocator<CoordinatorCacheManager>;
+using TestDSV4HybridPoolAllocator = test::BlockTreeCacheTestAllocator<CoordinatorCacheManager>;
 
 constexpr int                  kDsv4PoolNum                = 7;
 constexpr uint32_t             kDsv4TokensPerBlock         = 128;
@@ -962,7 +962,7 @@ TEST(CacheConfigCreatorTest, CreateCacheConfig) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
 
-    // 7 groups -> groupNums() > 1 -> KVCacheAllocator path
+    // 7 groups -> groupNums() > 1 -> CoordinatorCacheManager path
     EXPECT_EQ(config.groupNums(), 7);
     EXPECT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     EXPECT_EQ(static_cast<size_t>(config.groupNums()), 7u);
@@ -2542,7 +2542,7 @@ static CacheConfig makeDSV4CpAllocatorConfig(uint32_t cp_size) {
 }
 
 // ============================================================
-// KVCacheAllocator integration tests with DSV4 7-group config
+// CoordinatorCacheManager integration tests with DSV4 7-group config
 // ============================================================
 
 class DSV4AllocatorTest: public ::testing::Test {
@@ -2558,7 +2558,7 @@ TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
     auto allocator = std::make_shared<TestDSV4HybridTypeAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    // 7 groups → KVCacheAllocator path
+    // 7 groups → CoordinatorCacheManager path
     EXPECT_EQ(config.groupNums(), 7);
     EXPECT_EQ(allocator->seqSizePerBlock(), static_cast<int>(config.seq_size_per_block));
     size_t expected_blocks = 0;
@@ -2587,7 +2587,7 @@ TEST_F(DSV4AllocatorTest, CompressedBlockCopyIncludesEveryPageAndPadding) {
     cache_options.kernel_seq_size_per_block = 128;
     auto config = CacheConfigCreator::createWarmupConfig(model, ParallelismConfig{}, cache_options, 0);
     config.finalizeBlockNums(4, RuntimeConfig{});
-    KVCacheAllocator allocator(config, AllocationType::HOST);
+    CoordinatorCacheManager allocator(config, AllocationType::HOST);
     ASSERT_TRUE(allocator.init());
     ASSERT_EQ(config.group("compressed").kvBlockStrideBytes(), kBlockStrideBytes);
     auto* src  = static_cast<uint8_t*>(allocator.convertIndexToAddr(0, 1).kv_addr);
@@ -3331,7 +3331,7 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitFixedPoolCap
     setGroupBlockNumsForTest(config, config.groupTags(), block_nums);
 
     auto allocator =
-        std::make_shared<KVCacheAllocator>(config, AllocationType::DEVICE, nullptr, /*reserve_block_ratio=*/50);
+        std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE, nullptr, /*reserve_block_ratio=*/50);
     ASSERT_TRUE(allocator->init());
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();

@@ -265,7 +265,7 @@ TEST(KVCMMockFullLinearTest, TwoFullTwoLinearWritePreservesMaskOrderAndActualUri
     const auto&                                 block_ids = source_blocks.get();
     const std::vector<std::vector<std::string>> groups_by_key{
         {"full0", "full1", "linear0", "linear1"}, {"full0", "full1"}, {"full0", "full1", "linear0", "linear1"}};
-    const std::vector<std::string>         expected_write_groups{
+    const std::vector<std::string> expected_write_groups{
         "Ffull0Ffull1Llinear0Llinear1", "Ffull0Ffull1", "Ffull0Ffull1Llinear0Llinear1"};
 
     kv_cache_manager::WriteLocation write_location;
@@ -326,7 +326,7 @@ TEST(KVCMMockFullLinearTest, AllMissingLinearGroupsWriteOnlyFullPayloads) {
     ScopedReferencedBlocks                      source_blocks(environment, 3);
     const auto&                                 block_ids = source_blocks.get();
     const std::vector<std::vector<std::string>> groups_by_key{{"full0"}, {"full0"}, {"full0"}};
-    kv_cache_manager::WriteLocation        write_location;
+    kv_cache_manager::WriteLocation             write_location;
     write_location.write_session_id = "full_only_session";
     write_location.block_mask       = kv_cache_manager::BlockMaskOffset{0};
     write_location.locations        = {

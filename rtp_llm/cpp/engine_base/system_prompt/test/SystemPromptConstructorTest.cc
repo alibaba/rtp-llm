@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
-#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
@@ -154,7 +154,7 @@ TEST_F(SystemPromptConstructorTest, testMultiGroupPromptPreservesEveryTaggedRow)
     for (const auto& group : manager->cacheConfig().topology().groups()) {
         const auto& blocks = prompt.group_block_ids.at(group.tag);
         ASSERT_FALSE(blocks.empty()) << group.tag;
-        const auto& pools = manager->allocator_->cacheGroups();
+        const auto& pools = manager->coordinator_manager_->cacheGroups();
         auto        owner = std::find_if(
             pools.begin(), pools.end(), [&](const auto& candidate) { return candidate->tag() == group.tag; });
         ASSERT_NE(owner, pools.end());
@@ -170,8 +170,8 @@ TEST_F(SystemPromptConstructorTest, testResidentInsertFailureFailsWarmupAndRelea
     const DeviceBlockPoolPtr pool = engine_manager->blockTreeCache()->groupSets().front()->devicePools().front();
     const size_t             request_blocks_before = pool->referencedBlocksNum();
     auto                     insert_manager = std::make_shared<KVCacheManager>(engine_manager->cacheConfig(), true);
-    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(insert_manager->cacheConfig());
-    insert_manager->allocator_ = allocator;
+    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(insert_manager->cacheConfig());
+    insert_manager->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, insertIntoCache(testing::_, testing::_))
         .WillOnce(testing::Invoke([](const InsertInfo& info, size_t& resident_prefix_length) {
             EXPECT_TRUE(info.is_resident);
@@ -256,9 +256,9 @@ TEST_F(SystemPromptConstructorTest, testNormalEnginePreservesSchedulerReserveWit
 TEST_F(SystemPromptConstructorTest, testNormalEngineWaitsForAllocatorObserverBeforeSystemPromptExecution) {
     auto engine         = createFocusedEngine<NormalEngine>();
     auto manager        = engine->resourceContext().cache_manager;
-    auto real_allocator = manager->allocator_;
+    auto real_allocator = manager->coordinator_manager_;
     auto context        = CountingReadyContext::create();
-    auto mock_allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(manager->config_);
+    auto mock_allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(manager->config_);
 
     ON_CALL(*mock_allocator, initMallocForCommonLen(testing::_))
         .WillByDefault(testing::Return(MallocResult{true, 0, 0, context}));
@@ -289,14 +289,14 @@ TEST_F(SystemPromptConstructorTest, testNormalEngineWaitsForAllocatorObserverBef
             return real_allocator->singleBatchNeedBlocks(resource, seq_len, reserve_step);
         }));
 
-    manager->allocator_ = mock_allocator;
+    manager->coordinator_manager_ = mock_allocator;
     auto stream_status            = engine->preRun(makeSystemPromptInput(), preRunMode::build_system_prompt);
     ASSERT_TRUE(stream_status.ok()) << stream_status.status();
     EXPECT_EQ(context->waitCalls(), 1u);
     EXPECT_EQ(stream_status.value()->streamCacheResource().allocator_load_context_, nullptr);
 
     stream_status.value().reset();
-    manager->allocator_ = real_allocator;
+    manager->coordinator_manager_ = real_allocator;
 }
 
 }  // namespace rtp_llm
