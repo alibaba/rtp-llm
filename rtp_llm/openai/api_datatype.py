@@ -182,7 +182,11 @@ class ChatCompletionRequest(BaseModel):
     json_format: Optional[bool] = None
 
     # Standard OpenAI sampling penalties. None means "not stated by the caller",
-    # so an unset field leaves extra_configs alone instead of zeroing it.
+    # so an unset field leaves extra_configs alone instead of zeroing it. A
+    # non-neutral value is rejected on services that prune the output vocabulary
+    # (GenerateStream's validateOutputVocabRequest): the two features cannot be
+    # combined, and the engine returns INVALID_PARAMS rather than silently
+    # dropping the caller's request.
     presence_penalty: Optional[float] = None
     frequency_penalty: Optional[float] = None
     # RTP-specific; OpenAI has no repetition_penalty field.
@@ -272,9 +276,10 @@ class ChatCompletionRequest(BaseModel):
 
         ``extra_configs.chat_template_kwargs`` shadows the top-level field in
         every renderer, so writing to ``self.chat_template_kwargs`` alone would
-        be silently ignored whenever the nested mapping is present. A fresh dict
-        is assigned instead of mutating in place, so a caller-supplied
-        ``extra_configs`` object is never modified behind its owner's back.
+        be silently ignored whenever the nested mapping is present. The mapping
+        is replaced rather than updated in place, so a dict the caller also holds
+        is left untouched; the new mapping does end up attached to this request's
+        ``extra_configs``, which is endpoint-owned by the time rendering runs.
         """
         if (
             self.extra_configs is not None

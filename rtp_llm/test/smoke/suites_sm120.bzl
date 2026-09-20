@@ -50,8 +50,9 @@ def sm120_suites():
                 gpu_type = ["RTX_5000_PRO"],
             ),
             # Answer-mode no-think contract on the SM120 pool: think_mode=0 plus a
-            # caller that declares no response_format, so the endpoint compiles the
-            # no-think envelope itself and the only caller-visible contract is the
+            # caller that declares neither response_format nor template kwargs, so
+            # the endpoint aligns the template's thinking switch, compiles the
+            # no-think envelope itself, and the only caller-visible contract is the
             # answer shape. Kept in this suite -- a member of maga_model_smoke_light
             # -- so the sm12x pool actually runs it.
             smoke_test(

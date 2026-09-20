@@ -344,6 +344,8 @@ class OpenaiComparer(BaseComparer):
         where the endpoint compiles the constraint itself: the caller did not
         declare a format, so asserting the answer shape is the only way to catch
         the budget being spent on something else (prose, a re-opened think block).
+        A query that does declare a response_format keeps it -- the caller-declared
+        grammar wins, and the fixture-level expectation only fills the gap.
         """
         if self.is_stream:
             return  # streaming smoke for grammar isn't used today; keep simple

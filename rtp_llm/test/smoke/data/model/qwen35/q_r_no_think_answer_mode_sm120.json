@@ -2,7 +2,7 @@
     "model_type": "qwen35_dense",
     "model_path": "/mnt/nas1/hf/Qwen3.5-4B",
     "grammar_constraint_only": true,
-    "_comment": "SM120 twin of q_r_no_think_answer_mode.json: same production shape (server think_mode=0, caller declares no response_format, thinking off through chat_template_kwargs), on the dense model this pool can load. The answer-mode no-think hardening is a Python-endpoint contract with no arch branch, but the SM120 deployment line is a cherry-pick channel and carried no think coverage at all before this case, so the shape is pinned on the pool that has no full smoke suite. Single query: the caller-visible contract is the answer shape, declared through compare_config.expected_response_format -- a reply that spends the budget on untagged prose (the diversion failure) or re-opens a think block fails the fullmatch. grammar_constraint_only=true: validate the constraint only, never model-version-dependent bytes.",
+    "_comment": "SM120 twin of q_r_no_think_answer_mode.json: same production shape (server think_mode=0, caller declares neither response_format nor template kwargs, thinking off resolved by the endpoint), on the dense model this pool can load. Because the caller states no template kwargs, the endpoint's DISABLED-mode alignment is what renders the closed empty block; drop it and the prompt ends on an open <think> anchor, which exempts the request from the envelope. The answer-mode no-think hardening is a Python-endpoint contract with no arch branch, but the SM120 deployment line is a cherry-pick channel and carried no think coverage at all before this case, so the shape is pinned on the pool that has no full smoke suite. Single query: the caller-visible contract is the answer shape, declared through compare_config.expected_response_format -- a reply that spends the budget on untagged prose (the diversion failure) or re-opens a think block fails the fullmatch. grammar_constraint_only=true: validate the constraint only, never model-version-dependent bytes.",
     "query_result": [
         {
             "endpoint": "/v1/chat/completions",
@@ -20,12 +20,7 @@
                 "max_tokens": 24,
                 "temperature": 0.0,
                 "top_p": 1.0,
-                "stream": false,
-                "extra_configs": {
-                    "chat_template_kwargs": {
-                        "enable_thinking": false
-                    }
-                }
+                "stream": false
             },
             "compare_config": {
                 "expected_response_format": {

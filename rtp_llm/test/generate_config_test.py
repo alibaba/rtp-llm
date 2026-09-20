@@ -68,7 +68,10 @@ class _Qwen35TemplateTokenizer:
         return template.render(messages=messages, **kwargs)
 
     def encode(self, prompt, **kwargs):
-        return list(range(len(prompt)))
+        # Char codes keep the ids injective, so the endpoint's think-anchor and
+        # think-block probing matches the literal tag text in the prompt instead
+        # of a degenerate range artifact.
+        return [ord(char) for char in prompt]
 
     def decode(self, token_ids):
         return ""
@@ -1292,12 +1295,20 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.presence_penalty, 1.0)
         self.assertEqual(config.frequency_penalty, 1.0)
 
-    def _count_repetition_risk_warnings(self, mock_logging):
+    @staticmethod
+    def _patch_repetition_risk_warn():
+        """Patch the dedup helper so the assertions observe the decision itself."""
+        return patch("rtp_llm.openai.openai_endpoint._warn_once_per_renderer")
+
+    @staticmethod
+    def _count_repetition_risk_warnings(mock_warn_once):
+        """Count by warn key rather than message text, so rewording the
+        operator-facing message cannot silently disarm these assertions."""
         return len(
             [
                 call
-                for call in mock_logging.warning.call_args_list
-                if "anti-repetition is fully neutral" in str(call)
+                for call in mock_warn_once.call_args_list
+                if call.args[1] == ("repetition_collapse_risk",)
             ]
         )
 
@@ -1312,10 +1323,10 @@ class OpenaiGenerateConfigTest(TestCase):
             top_p=0.1,
         )
 
-        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+        with self._patch_repetition_risk_warn() as mock_warn_once:
             self._extract_openai_generation_config(request)
 
-        self.assertEqual(self._count_repetition_risk_warnings(mock_logging), 1)
+        self.assertEqual(self._count_repetition_risk_warnings(mock_warn_once), 1)
 
     def test_repetition_collapse_risk_silent_when_anti_repetition_is_set(self):
         """A caller that turned on any anti-repetition knob is not on the risk
@@ -1327,10 +1338,10 @@ class OpenaiGenerateConfigTest(TestCase):
             presence_penalty=1.0,
         )
 
-        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+        with self._patch_repetition_risk_warn() as mock_warn_once:
             self._extract_openai_generation_config(request)
 
-        self.assertEqual(self._count_repetition_risk_warnings(mock_logging), 0)
+        self.assertEqual(self._count_repetition_risk_warnings(mock_warn_once), 0)
 
     def test_repetition_collapse_risk_silent_with_no_repeat_ngram(self):
         """``no_repeat_ngram_size`` is the knob that actually breaks a loop, so a
@@ -1342,10 +1353,10 @@ class OpenaiGenerateConfigTest(TestCase):
             extra_configs=GenerateConfig(no_repeat_ngram_size=4),
         )
 
-        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+        with self._patch_repetition_risk_warn() as mock_warn_once:
             self._extract_openai_generation_config(request)
 
-        self.assertEqual(self._count_repetition_risk_warnings(mock_logging), 0)
+        self.assertEqual(self._count_repetition_risk_warnings(mock_warn_once), 0)
 
     def test_repetition_collapse_risk_silent_on_broad_sampling(self):
         request = ChatCompletionRequest(
@@ -1354,14 +1365,15 @@ class OpenaiGenerateConfigTest(TestCase):
             top_p=0.9,
         )
 
-        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+        with self._patch_repetition_risk_warn() as mock_warn_once:
             self._extract_openai_generation_config(request)
 
-        self.assertEqual(self._count_repetition_risk_warnings(mock_logging), 0)
+        self.assertEqual(self._count_repetition_risk_warnings(mock_warn_once), 0)
 
     def test_repetition_collapse_risk_warns_once_per_deployment(self):
         """The condition is a configuration shape, so a client that always sends
-        the same risky sampling must not log one line per request."""
+        the same risky sampling must not log one line per request. The dedup lives
+        inside the helper, so this one keeps the real one and counts log lines."""
         endpoint = self._make_openai_endpoint(self._make_default_model_config())
 
         with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
@@ -1371,7 +1383,8 @@ class OpenaiGenerateConfigTest(TestCase):
                 )
                 endpoint._extract_generation_config(request, input_ids=[1, 2])
 
-        self.assertEqual(self._count_repetition_risk_warnings(mock_logging), 1)
+        # The repetition-risk line is the only warning this path emits.
+        self.assertEqual(len(mock_logging.warning.call_args_list), 1)
 
     def test_disabled_closed_think_block_installs_no_think_constraint(self):
         """prompt 以闭合 think 块结尾（enable_thinking=false 的模板形态）时，

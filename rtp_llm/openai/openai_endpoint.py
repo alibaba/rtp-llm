@@ -516,8 +516,9 @@ class OpenaiEndpoint(object):
         anti-repetition knobs only decide whether the model can leave it. With all
         of them neutral -- which is the default -- and greedy-ish decoding there is
         no way out at all, and ``no_repeat_ngram`` is the one that breaks the loop
-        in practice. Warned once per deployment rather than per request: this is a
-        configuration shape, not a property of an individual prompt.
+        in practice. Warned once per renderer rather than per request -- one line
+        per deployment unless a user template brings in the second renderer: this
+        is a configuration shape, not a property of an individual prompt.
         """
         if any(size and size > 0 for size in _as_values(config.no_repeat_ngram_size)):
             return
