@@ -1,8 +1,10 @@
-"""Prepare the native RTP gate and shared-expert scale layout for MegaMoE."""
+"""Prepare the native RTP shared-expert gate for MegaMoE."""
 
 import torch
 import triton
 import triton.language as tl
+
+_SHARED_GATE_CACHE: dict[str, torch.Tensor] = {}
 
 
 @triton.jit
@@ -15,13 +17,39 @@ def _shared_expert_sigmoid(
     tl.store(gates + row, tl.sigmoid(value), row < N)
 
 
+def ensure_shared_gate_capacity(device, capacity: int) -> torch.Tensor:
+    """Preallocate a CUDA-graph-safe FP32 gate buffer of at least ``capacity``."""
+    capacity = max(int(capacity), 1)
+    device = torch.device(device)
+    key = str(device)
+    cached = _SHARED_GATE_CACHE.get(key)
+    if (
+        cached is None
+        or cached.numel() < capacity
+        or cached.device != device
+        or cached.dtype != torch.float32
+    ):
+        cached = torch.empty((capacity,), device=device, dtype=torch.float32)
+        _SHARED_GATE_CACHE[key] = cached
+    return cached
+
+
 def shared_expert_sigmoid(logits):
     if logits.ndim != 2 or logits.shape[1] != 1 or not logits.is_cuda:
         raise ValueError("Expected CUDA gate logits [tokens, 1]")
-    gates = torch.empty((logits.shape[0],), device=logits.device, dtype=torch.float32)
-    if gates.numel():
-        _shared_expert_sigmoid[(triton.cdiv(gates.numel(), 256),)](
-            logits, gates, gates.numel(), logits.stride(0), 256
+    tokens = logits.shape[0]
+    cached = _SHARED_GATE_CACHE.get(str(logits.device))
+    if cached is None or cached.numel() < max(tokens, 1):
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "shared_expert_sigmoid has no static gate buffer large enough "
+                f"for tokens={tokens} during CUDA graph capture"
+            )
+        cached = ensure_shared_gate_capacity(logits.device, max(tokens, 1))
+    gates = cached[:tokens]
+    if tokens:
+        _shared_expert_sigmoid[(triton.cdiv(tokens, 256),)](
+            logits, gates, tokens, logits.stride(0), 256
         )
     return gates
 

@@ -1,12 +1,17 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8 import (
     MegaMoeFp8Executor,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8_se import (
+    MegaMoeFp8SEExecutor,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.mega_moe_fp8 import (
+    CudaMegaMoeFp8SEStrategy,
     CudaMegaMoeFp8Strategy,
+    MegaMoeFp8Router,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import (
     StrategyRegistry,
@@ -47,38 +52,85 @@ class MegaMoeFp8SelectionTest(unittest.TestCase):
             hidden_size=4096,
             moe_inter_dim=1024,
             expert_num=512,
+            n_shared_experts=0,
+            has_shared_expert_gate=False,
+            moe_k=8,
         )
         values.update(overrides)
         return SimpleNamespace(**values)
 
-    def check_executor(self, **overrides):
+    def check_executor(self, executor_cls=MegaMoeFp8Executor, **overrides):
         checker = Checks()
         with patch.object(
             MoeConfigResolver, "get_quant_method", return_value="FP8_PER_BLOCK"
         ), patch.object(MoeConfigResolver, "is_bf16", return_value=True), patch(
             "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8.mega_moe_fp8_available",
             return_value=True,
+        ), patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8_se.mega_moe_fp8_se_available",
+            return_value=True,
         ):
-            MegaMoeFp8Executor.check_conditions(checker, self.config(**overrides))
+            executor_cls.check_conditions(checker, self.config(**overrides))
         return checker.passed
 
     def test_opt_in_only(self):
-        for value, expected in [
-            ("mega_moe_fp8", True),
-            ("auto", False),
-            ("mega_moe", False),
-        ]:
-            with self.subTest(strategy=value), patch.object(
+        cases = [
+            (CudaMegaMoeFp8Strategy, "mega_moe_fp8", True, {}),
+            (CudaMegaMoeFp8Strategy, "auto", False, {}),
+            (CudaMegaMoeFp8Strategy, "mega_moe", False, {}),
+            (CudaMegaMoeFp8Strategy, "mega_moe_fp8_se", False, {}),
+            (
+                CudaMegaMoeFp8SEStrategy,
+                "mega_moe_fp8_se",
+                True,
+                {"n_shared_experts": 1, "has_shared_expert_gate": True},
+            ),
+            (
+                CudaMegaMoeFp8SEStrategy,
+                "mega_moe_fp8",
+                False,
+                {"n_shared_experts": 1, "has_shared_expert_gate": True},
+            ),
+            (
+                CudaMegaMoeFp8SEStrategy,
+                "auto",
+                False,
+                {"n_shared_experts": 1, "has_shared_expert_gate": True},
+            ),
+            (CudaMegaMoeFp8SEStrategy, "mega_moe_fp8_se", False, {"n_shared_experts": 0}),
+            (CudaMegaMoeFp8SEStrategy, "mega_moe_fp8_se", False, {"n_shared_experts": 1}),
+        ]
+        for strategy_cls, value, expected, extra in cases:
+            with self.subTest(
+                strategy=strategy_cls.strategy_name, value=value
+            ), patch.object(
                 MoeConfigResolver, "get_quant_method", return_value="FP8_PER_BLOCK"
             ):
                 checker = Checks()
-                CudaMegaMoeFp8Strategy.check_conditions(
-                    checker, self.config(moe_strategy=value)
+                strategy_cls.check_conditions(
+                    checker, self.config(moe_strategy=value, **extra)
                 )
                 self.assertEqual(checker.passed, expected)
 
     def test_supported_parallelism(self):
         self.assertTrue(self.check_executor())
+        self.assertTrue(self.check_executor(enable_cuda_graph=True))
+        self.assertTrue(
+            self.check_executor(
+                MegaMoeFp8SEExecutor,
+                n_shared_experts=1,
+                has_shared_expert_gate=True,
+                enable_cuda_graph=True,
+            )
+        )
+        self.assertFalse(self.check_executor(MegaMoeFp8SEExecutor, n_shared_experts=0))
+        self.assertFalse(
+            self.check_executor(
+                MegaMoeFp8SEExecutor,
+                n_shared_experts=2,
+                has_shared_expert_gate=True,
+            )
+        )
         for invalid in [
             dict(swiglu_limit=1.0),
             dict(tp_size=2),
@@ -86,7 +138,6 @@ class MegaMoeFp8SelectionTest(unittest.TestCase):
             dict(world_size=8),
             dict(world_rank=1),
             dict(has_redundant_experts=True),
-            dict(enable_cuda_graph=True),
             dict(hidden_size=4000),
             dict(moe_inter_dim=1000),
             dict(expert_num=513),
@@ -108,35 +159,70 @@ class MegaMoeFp8SelectionTest(unittest.TestCase):
 
     def test_registry_selects_explicit_backend(self):
         registry = StrategyRegistry()
+        registry.register(CudaMegaMoeFp8SEStrategy())
         registry.register(CudaMegaMoeFp8Strategy())
         with patch.object(
             MoeConfigResolver, "get_quant_method", return_value="FP8_PER_BLOCK"
         ), patch.object(MoeConfigResolver, "is_bf16", return_value=True), patch(
             "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8.mega_moe_fp8_available",
             return_value=True,
+        ), patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8_se.mega_moe_fp8_se_available",
+            return_value=True,
         ):
             self.assertEqual(
                 registry.get_strategy(self.config()).strategy_name, "mega_moe_fp8"
             )
+            self.assertEqual(
+                registry.get_strategy(
+                    self.config(
+                        moe_strategy="mega_moe_fp8_se",
+                        n_shared_experts=1,
+                        has_shared_expert_gate=True,
+                    )
+                ).strategy_name,
+                "mega_moe_fp8_se",
+            )
+            self.assertIs(
+                registry.get_strategy(
+                    self.config(
+                        moe_strategy="mega_moe_fp8_se",
+                        n_shared_experts=1,
+                        has_shared_expert_gate=True,
+                    )
+                )
+                .get_attributes()
+                .executor_class,
+                MegaMoeFp8SEExecutor,
+            )
 
-    def test_capacity_allows_oversized_single_request(self):
-        from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
-            MoEConfigAdapter,
+    def test_router_and_executor_advertise_gate_pack(self):
+        router = MegaMoeFp8Router.__new__(MegaMoeFp8Router)
+        self.assertTrue(router.supports_gate_pack)
+        self.assertTrue(MegaMoeFp8Executor.gated_shared_expert_requested is False)
+        self.assertTrue(MegaMoeFp8SEExecutor.gated_shared_expert_requested)
+        executor = MegaMoeFp8Executor.__new__(MegaMoeFp8Executor)
+        executor.config = self.config(n_activated_experts=8)
+        with patch.dict("os.environ", {"MEGA_MOE_INPUT_PACKER_IMPL": "optimized"}):
+            self.assertTrue(executor.supports_gate_pack)
+        with patch.dict("os.environ", {"MEGA_MOE_INPUT_PACKER_IMPL": "legacy"}):
+            self.assertTrue(executor.supports_gate_pack)
+        se = MegaMoeFp8SEExecutor.__new__(MegaMoeFp8SEExecutor)
+        self.assertTrue(se.supports_gate_pack)
+
+    def test_se_block_m(self):
+        executor = MegaMoeFp8SEExecutor.__new__(MegaMoeFp8SEExecutor)
+        get_block_m = Mock(return_value=64)
+        executor.config = self.config()
+        executor._mega_buf = SimpleNamespace(num_max_tokens_per_rank=32768)
+        deep_gemm = SimpleNamespace(
+            mega_fp8=SimpleNamespace(
+                get_block_m_for_mega_moe_fp8=get_block_m,
+            )
         )
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8 import (
-            mega_moe_fp8_capacity,
-        )
-
-        config = object.__new__(MoEConfigAdapter)
-        config.model_config = SimpleNamespace(max_seq_len=30720)
-        config.max_tokens_per_rank = 20000
-        self.assertFalse(hasattr(config, "max_seq_len"))
-        self.assertEqual(mega_moe_fp8_capacity(config), 30720)
-        self.assertGreaterEqual(mega_moe_fp8_capacity(config), 24601)
-        config.max_tokens_per_rank = 40000
-        self.assertGreaterEqual(mega_moe_fp8_capacity(config), 40000)
-        self.assertEqual(mega_moe_fp8_capacity(config) % 256, 0)
-
+        with patch.dict("sys.modules", {"deep_gemm": deep_gemm}):
+            self.assertEqual(executor._block_m(123), 64)
+        get_block_m.assert_called_once_with(4, 512, 32768, 123, 8)
 
 class MegaMoeFp8ScaleLifetimeTest(unittest.TestCase):
     def test_checkpoint_scales_released_only_after_success(self):
@@ -157,6 +243,8 @@ class MegaMoeFp8ScaleLifetimeTest(unittest.TestCase):
             hidden_size=128,
             n_local_experts=1,
             moe_w1_layout="gate_up",
+            expert_num=8,
+            moe_k=2,
         )
         for fail in (False, True):
             with self.subTest(conversion_failure=fail):
@@ -185,6 +273,18 @@ class MegaMoeFp8ScaleLifetimeTest(unittest.TestCase):
                     module, "get_validated_world_ep_group", return_value=None
                 ), patch.object(
                     module, "prepare_mega_moe_fp8_weights", new=prepare
+                ), patch.object(
+                    module,
+                    "_get_or_create_mega_fp8_buf",
+                    return_value=SimpleNamespace(num_max_tokens_per_rank=256),
+                ), patch.object(
+                    module,
+                    "_get_or_create_mega_output",
+                    return_value=torch.empty(256, 128),
+                ), patch.object(
+                    module, "get_mega_moe_input_packer", return_value=Mock()
+                ), patch.object(
+                    MegaMoeFp8Executor, "_maybe_warmup_jit_once"
                 ), patch.object(
                     torch.cuda, "Event"
                 ), patch.object(

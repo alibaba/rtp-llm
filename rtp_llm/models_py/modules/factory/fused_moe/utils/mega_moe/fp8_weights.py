@@ -7,9 +7,22 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.weight_layout import (
 )
 
 
+def _pack_ue8m0_to_int(values):
+    """Pack UE8M0 floats into int32 without host-side reductions.
+
+    DeepGEMM's pack_ue8m0_to_int uses Tensor.all(), which is illegal during
+    CUDA graph capture.
+    """
+    if values.dtype != torch.float or values.size(-1) % 4 != 0:
+        raise ValueError(
+            "UE8M0 pack expects float values with last dim multiple of 4"
+        )
+    return (values.view(torch.int) >> 23).to(torch.uint8).view(torch.int)
+
+
 def expand_fp8_scale(scale, nrows, kcols):
     """Express 128-value UE8M0 groups as identical 32-value subgroups."""
-    from deep_gemm.utils.math import pack_ue8m0_to_int, unpack_ue8m0_from_int
+    from deep_gemm.utils.math import unpack_ue8m0_from_int
 
     if scale.dtype != torch.int32:
         raise ValueError(
@@ -22,7 +35,7 @@ def expand_fp8_scale(scale, nrows, kcols):
         values = values.repeat_interleave(4, dim=-1)
     if values.shape[-2:] != (nrows, kcols // 32):
         raise ValueError("FP8 scale geometry does not match the expert weight")
-    return pack_ue8m0_to_int(values.contiguous())
+    return _pack_ue8m0_to_int(values.contiguous())
 
 
 def _reuse_weight_storage(source, packed):

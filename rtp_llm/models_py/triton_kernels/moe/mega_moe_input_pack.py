@@ -434,6 +434,101 @@ if triton is not None:
                     mask=k_mask,
                 )
 
+    @triton.jit(do_not_specialize=["M"])
+    def _mega_moe_gate_pack_softmax_kernel(
+        x_ptr,
+        scores_ptr,
+        out_fp8_ptr,
+        out_sf_ptr,
+        out_weights_ptr,
+        out_indices_ptr,
+        M,
+        N: tl.constexpr,
+        E: tl.constexpr,
+        K: tl.constexpr,
+        x_stride_m: tl.constexpr,
+        scores_stride_m: tl.constexpr,
+        out_stride_m: tl.constexpr,
+        sf_stride_m: tl.constexpr,
+        out_weights_stride_m: tl.constexpr,
+        out_indices_stride_m: tl.constexpr,
+        route_scale: tl.constexpr,
+        norm_eps: tl.constexpr,
+        eps: tl.constexpr,
+        fp8_max: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_E: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        pid_m_blk = tl.program_id(0).to(tl.int64)
+        pid_blk = tl.program_id(1)
+        offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
+
+        _pack_x_block(
+            x_ptr,
+            out_fp8_ptr,
+            out_sf_ptr,
+            offs_m,
+            pid_blk,
+            M,
+            N,
+            x_stride_m,
+            out_stride_m,
+            sf_stride_m,
+            eps,
+            fp8_max,
+            BLOCK_M,
+        )
+
+        if pid_blk == 0:
+            # Softmax + top-k + renormalize == top-k on logits then softmax
+            # over the K selected scores.  Skip the E-wide exp/sum that the
+            # old row loop kept in registers (it spilled once BLOCK_M grew).
+            offs_e = tl.arange(0, BLOCK_E)
+            e_mask = offs_e < E
+            k_offs = tl.arange(0, BLOCK_K)
+            k_mask_base = k_offs < K
+
+            for row_i in tl.static_range(BLOCK_M):
+                row = pid_m_blk * BLOCK_M + row_i
+                row_mask = row < M
+                scores = tl.load(
+                    scores_ptr + row * scores_stride_m + offs_e,
+                    mask=row_mask & e_mask,
+                    other=-float("inf"),
+                ).to(tl.float32)
+                score_is_finite = tl.abs(scores) < float("inf")
+                bad_value = row_mask & e_mask & ~score_is_finite
+                row_is_finite = tl.sum(bad_value.to(tl.int32), axis=0) == 0
+                cur = tl.where(score_is_finite & e_mask, scores, -float("inf"))
+                selected_logits = tl.zeros((BLOCK_K,), dtype=tl.float32)
+
+                for k in tl.static_range(K):
+                    idx = tl.argmax(cur, axis=0)
+                    val = tl.sum(tl.where(offs_e == idx, cur, 0.0), axis=0)
+                    safe_idx = tl.where(row_is_finite, idx, k)
+                    tl.store(
+                        out_indices_ptr + row * out_indices_stride_m + k,
+                        safe_idx.to(tl.int64),
+                        mask=row_mask,
+                    )
+                    selected_logits = tl.where(k_offs == k, val, selected_logits)
+                    cur = tl.where(offs_e == idx, -float("inf"), cur)
+
+                k_mask = row_mask & k_mask_base
+                sel_max = tl.max(
+                    tl.where(k_mask_base, selected_logits, -float("inf")), axis=0
+                )
+                exps = tl.exp(tl.where(k_mask_base, selected_logits - sel_max, 0.0))
+                selected_sum = tl.sum(tl.where(k_mask_base, exps, 0.0), axis=0)
+                weights = exps / (selected_sum + norm_eps) * route_scale
+                weights = tl.where(row_is_finite, weights, route_scale / K)
+                tl.store(
+                    out_weights_ptr + row * out_weights_stride_m + k_offs,
+                    weights,
+                    mask=k_mask,
+                )
+
 
 def _validate_inputs(
     x: torch.Tensor,
@@ -676,6 +771,64 @@ def _gate_pack_block_m(tokens: int) -> int:
     return block_m
 
 
+def fused_pack_mega_moe_softmax_gate_inputs(
+    x: torch.Tensor,
+    scores: torch.Tensor,
+    out_fp8: torch.Tensor,
+    out_sf: torch.Tensor,
+    out_indices: torch.Tensor,
+    out_weights: torch.Tensor,
+    *,
+    topk: int,
+    route_scale: float,
+    norm_eps: float = 1.0e-12,
+) -> None:
+    """Fuse Qwen3.5 softmax top-k routing with K32 MegaMoE activation packing."""
+
+    tokens, dim, experts = _validate_gate_pack_inputs(
+        x,
+        scores,
+        out_fp8,
+        out_sf,
+        out_indices,
+        out_weights,
+        topk,
+    )
+    if tokens == 0:
+        return
+
+    block_m = _gate_pack_block_m(tokens)
+    block_k = triton.next_power_of_2(int(topk))
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    grid = (triton.cdiv(tokens, block_m), triton.cdiv(dim, 128))
+    _mega_moe_gate_pack_softmax_kernel[grid](
+        x,
+        scores,
+        out_fp8,
+        out_sf,
+        out_weights,
+        out_indices,
+        tokens,
+        dim,
+        experts,
+        int(topk),
+        x.stride(0),
+        scores.stride(0),
+        out_fp8.stride(0),
+        out_sf.stride(0),
+        out_weights.stride(0),
+        out_indices.stride(0),
+        float(route_scale),
+        float(norm_eps),
+        1.0e-4,
+        fp8_max,
+        BLOCK_M=block_m,
+        BLOCK_E=triton.next_power_of_2(experts),
+        BLOCK_K=block_k,
+        num_warps=4,
+    )
+
+
 def fused_pack_mega_moe_gate_inputs(
     x: torch.Tensor,
     scores: torch.Tensor,
@@ -692,12 +845,30 @@ def fused_pack_mega_moe_gate_inputs(
     input_ids: torch.Tensor | None = None,
     tid2eid: torch.Tensor | None = None,
 ) -> None:
-    """Fuse sqrt-softplus routing with MegaMoE activation/input packing.
+    """Fuse supported routing functions with MegaMoE activation/input packing.
 
-    Hash routing is selected by supplying both ``input_ids`` and ``tid2eid``;
-    score routing is selected by supplying ``bias``.  The API intentionally
-    contains no model-specific configuration or weight names.
+    Activations are packed at K32.  Within sqrtsoftplus, hash routing is
+    selected by supplying both ``input_ids`` and ``tid2eid``, score routing
+    by supplying ``bias``.  The API intentionally contains no model-specific
+    configuration or weight names.
     """
+
+    if score_func == "softmax":
+        if bias is not None or input_ids is not None or tid2eid is not None:
+            raise ValueError(
+                "softmax gate-pack does not accept bias, input_ids, or tid2eid"
+            )
+        return fused_pack_mega_moe_softmax_gate_inputs(
+            x,
+            scores,
+            out_fp8,
+            out_sf,
+            out_indices,
+            out_weights,
+            topk=topk,
+            route_scale=route_scale,
+            norm_eps=norm_eps,
+        )
 
     tokens, dim, experts = _validate_gate_pack_inputs(
         x,

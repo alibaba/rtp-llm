@@ -71,6 +71,8 @@ py_test(
     srcs = ["test_mega_shared_production.py"],
     deps = _TEST_DEPS,
     env = {"GPU_COUNT": "4"},
+    # DeepGEMM JIT reads $HOME/.deep_gemm; Bazel otherwise clears HOME.
+    env_inherit = ["HOME"],
     tags = ["manual", "cuda13", "sm10x"],
     exec_properties = {"gpu": "SM100_ARM", "gpu_count": "4"},
 )
