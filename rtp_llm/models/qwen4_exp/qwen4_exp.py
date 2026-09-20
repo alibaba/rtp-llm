@@ -173,6 +173,10 @@ class Qwen4Exp(Qwen35Moe):
         # hyper-connection mixer.  Each row therefore retains all hc branches;
         # the draft applies fc_hidden independently to every branch.
         config.mtp_input_hidden_size = config.hidden_size * config.hc_mult
+        # Linear-attention output gate activation; upstream falls back to hidden_act.
+        config.linear_attn_norm_activation = config_json.get(
+            "output_gate_type"
+        ) or config_json.get("hidden_act", "silu")
         # Keep unfinished subsystems disabled independently from the model-level
         # experimental gate. This prevents dense-fallback development from
         # allocating unused side pools or loading the 102-GB PLE table.
