@@ -1270,10 +1270,10 @@ class DeepSeekV4Model(GptModelBase):
         num_tokens >= 0: return the explicit row count without reading
             _mtp_hidden_valid_tokens. This is CUDA-graph safe because replay does
             not update Python attributes.
-        num_tokens < 0: return published rows. Decode (and CUDA-graph capture)
-            cannot read ``_mtp_hidden_valid_tokens`` — replay does not update
-            that Python attribute — so return the full allocated buffer. CP
-            prefill still uses the last non-graph-written rank-local count.
+        num_tokens < 0: return last non-graph-written rank-local rows. This is
+            only for CP prefill. Decode (including CUDA-graph capture) must
+            not read ``_mtp_hidden_valid_tokens`` and does not use the
+            MiniMax ``-1`` hook — return None so C++ passes an explicit count.
         """
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")
@@ -1283,10 +1283,9 @@ class DeepSeekV4Model(GptModelBase):
         requested = int(num_tokens)
         if requested < 0:
             if self._is_decode_role:
-                # CUDA graph capture asks for the last published tensor with
-                # -1 (MiniMax / generic-MoE contract). Do not consult
-                # _mtp_hidden_valid_tokens: that attr is not replay-safe.
-                return buf
+                # CUDA graph capture probes the MiniMax-style -1 hook. DSv4
+                # decode publishes rows only when given an explicit count.
+                return None
             requested = int(self.v4._mtp_hidden_valid_tokens)
             assert requested > 0, "MTP hidden buffer has no written rows"
         assert requested <= buf.size(0), (
