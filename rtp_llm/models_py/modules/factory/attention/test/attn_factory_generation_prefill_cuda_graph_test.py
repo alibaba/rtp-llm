@@ -201,5 +201,31 @@ class AttentionFactoryGenerationPrefillMlaCudaGraphTest(
             self._select([_SafeAttentionImpl], mode="invalid_graph_mode")
 
 
+class AttnFactoryRegistryDispatchTest(unittest.TestCase):
+    """Every registry entry must accept the dispatcher's positional call.
+
+    ``AttnImplFactory.get_fmha_impl`` invokes the selected registry function
+    with nine positional arguments: (attn_configs, weight, attn_inputs,
+    fmha_config, quant_config, is_cuda_graph, max_seq_len, parallelism_config,
+    cuda_graph_selection_mode). A family that lags behind that signature only
+    fails when it is actually routed to -- the qwen4 sparse-GQA path hit
+    "takes from 3 to 8 positional arguments but 9 were given" in the MTP smoke.
+    """
+
+    def test_registry_functions_accept_the_dispatcher_call(self):
+        import inspect
+
+        dispatcher_args = (None,) * 9
+        self.assertTrue(attn_factory.AttnImplFactory.FMHA_IMPL_REGISTRY)
+        for name, fn in attn_factory.AttnImplFactory.FMHA_IMPL_REGISTRY.items():
+            try:
+                inspect.signature(fn).bind(*dispatcher_args)
+            except TypeError as error:
+                self.fail(
+                    f"registry entry {name!r} ({fn.__name__}) cannot bind the "
+                    f"dispatcher's 9 positional arguments: {error}"
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
