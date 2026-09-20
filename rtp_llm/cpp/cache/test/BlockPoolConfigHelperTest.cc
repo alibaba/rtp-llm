@@ -4,7 +4,7 @@
 #include <memory>
 #include <stdexcept>
 
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
@@ -67,7 +67,7 @@ TEST_F(BlockPoolConfigHelperTest, MTPSparseIndexerUsesProposeTopologyAndScaleStr
     ASSERT_EQ(propose_config->specForGroup(0)->block_size_bytes(), 64u);
     ASSERT_EQ(propose_config->specForGroup(0)->scale_block_size_bytes(), 0u);
 
-    const auto pool_config = BlockPoolConfigHelper::createConfig(score_config);
+    const auto pool_config = DeviceBlockPoolConfigHelper::createConfig(score_config);
     ASSERT_EQ(pool_config.memory_layouts.size(), 2u);
 
     const auto& main_layout = pool_config.memory_layouts[0];
@@ -98,7 +98,7 @@ TEST_F(BlockPoolConfigHelperTest, MTPSparseIndexerPrefersSelectedGroupScaleStrid
     propose_config->setGroupBlockLayout({4}, {64}, {96});
     score_config.mtp_sub_configs = {propose_config};
 
-    const auto pool_config = BlockPoolConfigHelper::createConfig(score_config);
+    const auto pool_config = DeviceBlockPoolConfigHelper::createConfig(score_config);
     ASSERT_EQ(pool_config.memory_layouts.size(), 2u);
     EXPECT_EQ(propose_config->kv_scale_stride_bytes, 128u);
     EXPECT_EQ(propose_config->kvScaleStrideBytesForGroup(0), 96u);
@@ -121,7 +121,7 @@ TEST_F(BlockPoolConfigHelperTest, MTPNonSparseUsesNonzeroPhysicalScaleStride) {
 
     ASSERT_EQ(propose_config->specForGroup(0)->block_size_bytes(), 16u);
     ASSERT_EQ(propose_config->specForGroup(0)->scale_block_size_bytes(), 32u);
-    const auto pool_config = BlockPoolConfigHelper::createConfig(score_config);
+    const auto pool_config = DeviceBlockPoolConfigHelper::createConfig(score_config);
     ASSERT_EQ(pool_config.memory_layouts.size(), 2u);
 
     const auto& mtp_layout = pool_config.memory_layouts[1];
@@ -163,7 +163,7 @@ TEST_F(BlockPoolConfigHelperTest, MTPSelectsRealGroupAndAccumulatesMultipleOffse
     second->setGroupBlockLayout({4, 4}, {placeholder_kv_stride, real_kv_stride}, {0, 64});
 
     score_config.mtp_sub_configs = {first, second};
-    const auto pool_config       = BlockPoolConfigHelper::createConfig(score_config);
+    const auto pool_config       = DeviceBlockPoolConfigHelper::createConfig(score_config);
     ASSERT_EQ(pool_config.memory_layouts.size(), 3u);
 
     const auto& first_layout  = pool_config.memory_layouts[1];
@@ -187,14 +187,14 @@ TEST_F(BlockPoolConfigHelperTest, MTPSelectsRealGroupAndAccumulatesMultipleOffse
 TEST_F(BlockPoolConfigHelperTest, RejectsNullMTPSubConfig) {
     auto score_config = makeSparseMlaConfig(2, 4, 4, 4, 32);
     score_config.mtp_sub_configs.push_back(nullptr);
-    expectRuntimeErrorContains([&score_config] { BlockPoolConfigHelper::createConfig(score_config); }, "is null");
+    expectRuntimeErrorContains([&score_config] { DeviceBlockPoolConfigHelper::createConfig(score_config); }, "is null");
 }
 
 TEST_F(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithoutGroups) {
     auto score_config            = makeSparseMlaConfig(2, 4, 4, 4, 32);
     auto empty                   = std::make_shared<CacheConfig>();
     score_config.mtp_sub_configs = {empty};
-    expectRuntimeErrorContains([&score_config] { BlockPoolConfigHelper::createConfig(score_config); },
+    expectRuntimeErrorContains([&score_config] { DeviceBlockPoolConfigHelper::createConfig(score_config); },
                                "cache groups must not be empty");
 }
 
@@ -217,7 +217,7 @@ TEST_F(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithMultipleLayerOwningGrou
         {first_spec, second_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"first", "second"});
     score_config.mtp_sub_configs = {multiple};
 
-    expectRuntimeErrorContains([&score_config] { BlockPoolConfigHelper::createConfig(score_config); },
+    expectRuntimeErrorContains([&score_config] { DeviceBlockPoolConfigHelper::createConfig(score_config); },
                                "must have exactly one cache group containing layers");
 }
 
@@ -226,7 +226,7 @@ TEST_F(BlockPoolConfigHelperTest, MTPLayoutUsesSynchronizedMainBlockNum) {
     auto stale_mtp_config        = std::make_shared<CacheConfig>(makeSparseMlaConfig(1, 3, 4, 2, 128));
     score_config.mtp_sub_configs = {stale_mtp_config};
 
-    const auto pool_config = BlockPoolConfigHelper::createConfig(score_config);
+    const auto pool_config = DeviceBlockPoolConfigHelper::createConfig(score_config);
     ASSERT_EQ(pool_config.memory_layouts.size(), 2u);
     const auto& mtp_layout = pool_config.memory_layouts[1];
     EXPECT_EQ(stale_mtp_config->block_num, 3u);
@@ -245,7 +245,7 @@ TEST_F(BlockPoolConfigHelperTest, MTPWithoutScaleKeepsContiguousOffsets) {
         /*sparse=*/false));
     score_config.mtp_sub_configs = {no_scale};
 
-    const auto pool_config = BlockPoolConfigHelper::createConfig(score_config);
+    const auto pool_config = DeviceBlockPoolConfigHelper::createConfig(score_config);
     ASSERT_EQ(pool_config.memory_layouts.size(), 2u);
     const auto& mtp_layout = pool_config.memory_layouts[1];
     EXPECT_FALSE(mtp_layout.hasScale());
