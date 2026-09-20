@@ -13,6 +13,8 @@ against a stub so the dotted paths into the real config object are pinned too.
 
 import json
 import os
+import shutil
+import tempfile
 import unittest
 from types import SimpleNamespace
 
@@ -587,6 +589,142 @@ class EnforceReleaseProfile(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("padding must be enabled", message)
         self.assertIn("refusing to start", message)
+
+
+class GroupRendezvous(unittest.TestCase):
+    """Startup membership and provenance: bounded, attempt-scoped, group-wide.
+
+    A rank must not begin loading a model until the profile's declared membership is present with
+    agreeing configuration and artifact digests. A peer that never publishes has to stop every rank
+    (not leave the survivors entering capture alone), and a record from an earlier start must never be
+    mistaken for this one's.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="rp_group_")
+        self.artifact = {"git_sha": "abc"}
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def publish_all(self, attempt="a1", skip=()):
+        manifests = []
+        for rank in range(PROFILE.expected_decode_ranks):
+            if ("DECODE", rank) in skip:
+                continue
+            m = rp.build_manifest(decode_snapshot(rank_id=rank), PROFILE, self.artifact)
+            rp.publish_rank_manifest(m, self.dir, attempt)
+            manifests.append(m)
+        for rank in range(PROFILE.expected_prefill_ranks):
+            if ("PREFILL", rank) in skip:
+                continue
+            m = rp.build_manifest(prefill_snapshot(rank_id=rank), PROFILE, self.artifact)
+            rp.publish_rank_manifest(m, self.dir, attempt)
+            manifests.append(m)
+        return manifests
+
+    def test_published_manifest_is_attempt_scoped_and_round_trips(self):
+        manifest = rp.build_manifest(decode_snapshot(rank_id=1), PROFILE, self.artifact)
+        path = rp.publish_rank_manifest(manifest, self.dir, "attempt-7")
+        self.assertTrue(path.endswith("attempt-7__RoleType-DECODE__1.json"), path)
+        with open(path) as f:
+            self.assertEqual(manifest, json.load(f))
+        # No temporary file is left behind for a peer to trip over.
+        self.assertEqual([os.path.basename(path)], sorted(os.listdir(self.dir)))
+
+    def test_a_complete_group_is_verified_without_violations(self):
+        self.publish_all()
+        manifests, stale, timed_out = rp.collect_group_manifests(
+            self.dir, "a1", expected_total=8, timeout_s=0)
+        self.assertEqual(8, len(manifests))
+        self.assertFalse(timed_out)
+        self.assertEqual(0, stale)
+        self.assertEqual([], rp.check_group_consistency(manifests))
+
+    def test_a_missing_peer_is_reported_after_a_bounded_wait(self):
+        self.publish_all(skip={("DECODE", 3)})
+        now = [0.0]
+        slept = []
+
+        def fake_sleep(seconds):
+            slept.append(seconds)
+            now[0] += seconds
+
+        manifests, _stale, timed_out = rp.collect_group_manifests(
+            self.dir, "a1", expected_total=8, timeout_s=0.5,
+            clock=lambda: now[0], sleep=fake_sleep)
+        self.assertTrue(timed_out)
+        self.assertEqual(7, len(manifests))
+        # The wait is bounded by the budget, not by the peer eventually appearing.
+        self.assertLessEqual(len(slept), 3, slept)
+        self.assertGreaterEqual(now[0], 0.5)
+
+    def test_records_from_another_attempt_are_ignored_and_counted(self):
+        self.publish_all(attempt="old-run")
+        self.publish_all(attempt="current")
+        manifests, stale, timed_out = rp.collect_group_manifests(
+            self.dir, "current", expected_total=8, timeout_s=0)
+        self.assertFalse(timed_out)
+        self.assertEqual(8, len(manifests))
+        self.assertEqual(8, stale, "the earlier attempt's manifests must be ignored, not merged")
+
+    def test_join_without_a_configured_directory_is_a_violation(self):
+        manifest = rp.build_manifest(decode_snapshot(rank_id=0), PROFILE, self.artifact)
+        violations = rp.join_group_and_verify(manifest, env={}, attempt="a1", timeout_s=0)
+        self.assertTrue(any("GROUP VERIFICATION NOT CONFIGURED" in v for v in violations), violations)
+
+    def test_join_without_an_attempt_id_is_a_violation(self):
+        manifest = rp.build_manifest(decode_snapshot(rank_id=0), PROFILE, self.artifact)
+        violations = rp.join_group_and_verify(
+            manifest, env={rp.GROUP_DIR_ENV: self.dir}, timeout_s=0)
+        self.assertTrue(any("ATTEMPT" in v for v in violations), violations)
+
+    def test_an_incomplete_group_stops_the_rank(self):
+        self.publish_all(skip={("PREFILL", 2)})
+        manifest = rp.build_manifest(decode_snapshot(rank_id=0), PROFILE, self.artifact)
+        violations = rp.join_group_and_verify(
+            manifest,
+            env={rp.GROUP_DIR_ENV: self.dir, rp.GROUP_ATTEMPT_ENV: "a1"},
+            timeout_s=0,
+        )
+        self.assertTrue(any("GROUP INCOMPLETE" in v for v in violations), violations)
+
+    def test_a_rank_built_from_another_artifact_stops_the_rank(self):
+        self.publish_all()
+        odd = rp.build_manifest(decode_snapshot(rank_id=2), PROFILE, {"git_sha": "different"})
+        rp.publish_rank_manifest(odd, self.dir, "a1")
+        manifest = rp.build_manifest(decode_snapshot(rank_id=0), PROFILE, self.artifact)
+        violations = rp.join_group_and_verify(
+            manifest,
+            env={rp.GROUP_DIR_ENV: self.dir, rp.GROUP_ATTEMPT_ENV: "a1"},
+            timeout_s=0,
+        )
+        self.assertTrue(any("MIXED ARTIFACTS" in v for v in violations), violations)
+
+    def test_a_rank_outside_the_declared_membership_stops_the_rank(self):
+        self.publish_all(skip={("DECODE", 3)})
+        extra = rp.build_manifest(decode_snapshot(rank_id=9), PROFILE, self.artifact)
+        rp.publish_rank_manifest(extra, self.dir, "a1")
+        manifest = rp.build_manifest(decode_snapshot(rank_id=0), PROFILE, self.artifact)
+        violations = rp.join_group_and_verify(
+            manifest,
+            env={rp.GROUP_DIR_ENV: self.dir, rp.GROUP_ATTEMPT_ENV: "a1"},
+            timeout_s=0,
+        )
+        self.assertTrue(any("MEMBERSHIP" in v for v in violations), violations)
+
+    def test_join_group_is_opt_in_on_the_enforce_path(self):
+        # Developer mode stays untouched, and the parent leg process (no rank identity) must not join.
+        stub = SnapshotFromResolvedConfig().stub_config()
+        self.assertIsNone(rp.enforce_release_profile(stub, env={}))
+        with self.assertRaises(rp.ReleaseProfileError) as ctx:
+            rp.enforce_release_profile(
+                stub,
+                env={rp.RELEASE_PROFILE_ENV: "sm120_dp4ep4_n2", rp.DECODE_FIXED_BS_ENV: "2"},
+                artifact_ids={"git_sha": "abc"},
+                join_group=True,
+            )
+        self.assertIn("GROUP VERIFICATION NOT CONFIGURED", str(ctx.exception))
 
 
 if __name__ == "__main__":

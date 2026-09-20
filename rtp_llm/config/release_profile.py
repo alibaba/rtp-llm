@@ -16,8 +16,10 @@ Design rules followed here:
   silent pass. An absent knob must not be treated as a correct value.
 * Opt in. Nothing runs unless a release profile is selected, so developer modes and unrelated
   models/topologies are untouched.
-* No new per-step collective. Cross-rank agreement is a startup comparison of manifest digests, which
-  the caller can publish through the existing startup store.
+* No new per-step collective. Cross-rank agreement is a bounded, startup-only comparison of the
+  published rank manifests (``join_group_and_verify``): every rank publishes to one directory and waits
+  for the declared membership before model loading, so a missing, stale, mixed or differently-built peer
+  stops the whole group instead of leaving the others to enter capture alone.
 
 What this module deliberately does NOT check, and where those belong instead:
 
@@ -34,6 +36,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -57,6 +60,17 @@ MOE_FP4_BACKEND_ENV = "DSV4_MOE_FP4_BACKEND"
 # layer. At prefill scale that fallback is a large latency cliff, so a prefill admission bound above it
 # is a misconfiguration rather than a tuning choice.
 A2A_PAYLOAD_TOKEN_BOUND = 65536
+
+# Startup group verification (section 4.2 / 15.2): every rank publishes its manifest to a directory
+# both legs can see and waits, bounded, for the profile's declared membership before it loads a model.
+# A peer that never arrives (crashed, rejected locally, stuck) times out every other rank, so a partial
+# group cannot start; a peer that arrives with a different config or artifact is a rejection. This is a
+# startup-only file rendezvous, not a collective and not a per-step consensus.
+GROUP_DIR_ENV = "RTP_LLM_RELEASE_MANIFEST_DIR"
+GROUP_ATTEMPT_ENV = "RTP_LLM_RELEASE_ATTEMPT"
+GROUP_TIMEOUT_ENV = "RTP_LLM_RELEASE_JOIN_TIMEOUT_S"
+DEFAULT_GROUP_TIMEOUT_S = 120.0
+GROUP_POLL_S = 0.25
 
 
 class _Unset:
@@ -765,6 +779,153 @@ def check_group_consistency(
     return v
 
 
+def _manifest_identity(manifest: Mapping[str, Any]) -> Tuple[str, int]:
+    cfg = manifest.get("config") or {}
+    role = str(cfg.get("role_type") or "UNKNOWN")
+    rank = cfg.get("rank_id")
+    if rank is None:
+        raise ReleaseProfileError("a rank manifest without a rank_id cannot be published or compared")
+    return role, int(rank)
+
+
+def publish_rank_manifest(manifest: Mapping[str, Any], directory: str, attempt: str) -> str:
+    """Atomically publish this rank's manifest as ``<attempt>__<role>__<rank>.json``.
+
+    The write is tmp+rename so a peer never reads a half-written manifest, and the attempt id keeps a
+    previous start's records from being mistaken for this one's (section 15.2: stale records from an
+    earlier start must not be accepted). The file name is a label for humans; identity is always taken
+    from the manifest content when the group is assembled, so a mislabelled file cannot impersonate
+    another rank.
+    """
+    role, rank = _manifest_identity(manifest)
+    safe_role = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in role)
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"{attempt}__{safe_role}__{rank}.json")
+    tmp = f"{path}.tmp-{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(manifest, f, sort_keys=True, default=str)
+    os.replace(tmp, path)
+    return path
+
+
+def scan_group_directory(directory: str, attempt: str) -> Tuple[Dict[Tuple[str, int], dict], int]:
+    """-> ({(role, rank): manifest}, number of manifest files belonging to other attempts).
+
+    Identity comes from the manifest content, never from the file name. An unreadable file is skipped
+    rather than fatal: a peer can be observed mid-publish, and the caller's deadline decides whether
+    the group is complete.
+    """
+    manifests: Dict[Tuple[str, int], dict] = {}
+    stale = 0
+    prefix = attempt + "__"
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return manifests, stale
+    for name in names:
+        if not name.endswith(".json") or ".tmp-" in name:
+            continue
+        if not name.startswith(prefix):
+            stale += 1
+            continue
+        try:
+            with open(os.path.join(directory, name)) as f:
+                manifest = json.load(f)
+            role, rank = _manifest_identity(manifest)
+        except (OSError, ValueError, ReleaseProfileError):
+            continue
+        manifests[(role, rank)] = manifest
+    return manifests, stale
+
+
+def collect_group_manifests(
+    directory: str,
+    attempt: str,
+    expected_total: int,
+    timeout_s: Optional[float] = None,
+    env: Optional[Mapping[str, str]] = None,
+    clock=time.monotonic,
+    sleep=time.sleep,
+) -> Tuple[Dict[Tuple[str, int], dict], int, bool]:
+    """Wait, bounded, for ``expected_total`` distinct rank manifests of this attempt.
+
+    -> (manifests, stale_files, timed_out). The bounded wait IS the group-wide abort: a rank whose peer
+    never publishes cannot proceed to load a model, so one failed peer stops the group rather than
+    leaving the others entering capture alone.
+    """
+    environment = os.environ if env is None else env
+    if timeout_s is None:
+        raw = environment.get(GROUP_TIMEOUT_ENV)
+        try:
+            timeout_s = float(raw) if raw else DEFAULT_GROUP_TIMEOUT_S
+        except ValueError:
+            timeout_s = DEFAULT_GROUP_TIMEOUT_S
+    deadline = clock() + max(float(timeout_s), 0.0)
+    while True:
+        manifests, stale = scan_group_directory(directory, attempt)
+        if len(manifests) >= expected_total:
+            return manifests, stale, False
+        if clock() >= deadline:
+            return manifests, stale, True
+        sleep(GROUP_POLL_S)
+
+
+def join_group_and_verify(
+    manifest: Mapping[str, Any],
+    env: Optional[Mapping[str, str]] = None,
+    directory: Optional[str] = None,
+    attempt: Optional[str] = None,
+    timeout_s: Optional[float] = None,
+) -> List[str]:
+    """Publish this rank's manifest and verify the group it is about to join. -> violations.
+
+    Called from the rank process (after its real rank is known, before a model is loaded), never from
+    the per-leg parent, which has no rank identity of its own. Returns violations instead of raising so
+    the caller can report them together with the local ones; an empty list means the declared group is
+    present, complete and homogeneous.
+    """
+    environment = os.environ if env is None else env
+    profile = RELEASE_PROFILES.get(str(manifest.get("profile") or ""))
+    if profile is None:
+        return [f"GROUP VERIFICATION: manifest names unknown profile {manifest.get('profile')!r}"]
+    directory = directory or (environment.get(GROUP_DIR_ENV) or "").strip()
+    if not directory:
+        return [
+            f"GROUP VERIFICATION NOT CONFIGURED: {GROUP_DIR_ENV} is unset, so this rank cannot establish "
+            "that the group it is about to enter is complete and homogeneous"
+        ]
+    attempt = attempt or (environment.get(GROUP_ATTEMPT_ENV) or "").strip()
+    if not attempt:
+        return [
+            f"GROUP VERIFICATION NOT CONFIGURED: {GROUP_ATTEMPT_ENV} is unset; without an attempt id a "
+            "manifest from an earlier start could be accepted as one of this group's"
+        ]
+    expected_total = int(profile.expected_decode_ranks) + int(profile.expected_prefill_ranks)
+    path = publish_rank_manifest(manifest, directory, attempt)
+    logging.info(
+        "[RELEASE-PROFILE] published %s; waiting for %d rank manifests of attempt %s in %s",
+        path, expected_total, attempt, directory,
+    )
+    manifests, stale, timed_out = collect_group_manifests(
+        directory, attempt, expected_total, timeout_s, environment
+    )
+    if timed_out:
+        seen = sorted(f"{role}#{rank}" for role, rank in manifests)
+        return [
+            f"GROUP INCOMPLETE: {len(manifests)} of {expected_total} rank manifests after the bounded "
+            f"wait; seen {seen}. A rank that never publishes stops every rank, so no partial group may "
+            "proceed to model loading"
+        ]
+    violations = check_group_consistency(manifests)
+    if not violations:
+        logging.info(
+            "[RELEASE-PROFILE] group verified: %d ranks, digests agree%s",
+            len(manifests),
+            f" ({stale} manifest(s) from other attempts ignored)" if stale else "",
+        )
+    return violations
+
+
 # The canonical, runnable settings of each profile live beside this module as JSON, so the deployment
 # or benchmark that consumes them and the validator that checks them read ONE versioned artifact rather
 # than two hand-maintained descriptions of the same thing. The JSON is generated from the definitions
@@ -828,12 +989,17 @@ class ReleaseProfileError(RuntimeError):
 
 
 def enforce_release_profile(cfg: Any, env: Optional[Mapping[str, str]] = None,
-                            artifact_ids: Optional[Mapping[str, Any]] = None) -> Optional[Dict[str, Any]]:
+                            artifact_ids: Optional[Mapping[str, Any]] = None,
+                            join_group: bool = False) -> Optional[Dict[str, Any]]:
     """Validate the resolved config against the selected profile and log this rank's manifest.
 
     Returns the manifest, or ``None`` when no release profile is selected (developer mode, behaviour
     unchanged). Raises ``ReleaseProfileError`` on any violation so the process refuses to serve instead
     of loading a model it cannot run correctly.
+
+    ``join_group`` is set only by a rank process whose real rank is known: it publishes this rank's
+    manifest and requires the profile's declared membership to appear, with agreeing configuration and
+    artifact digests, within a bounded wait before the caller loads a model.
     """
     environment: Mapping[str, str] = os.environ if env is None else env
     name = (environment.get(RELEASE_PROFILE_ENV) or "").strip()
@@ -878,4 +1044,18 @@ def enforce_release_profile(cfg: Any, env: Optional[Mapping[str, str]] = None,
             f"({len(violations)} violation(s)); refusing to start so the group does not serve with a "
             "misconfigured peer:\n  - " + "\n  - ".join(violations)
         )
+
+    if join_group:
+        group_violations = join_group_and_verify(manifest, environment, timeout_s=None)
+        if group_violations:
+            logging.error(
+                "[RELEASE-PROFILE] group verification failed for rank=%s role=%s: %s",
+                manifest["config"].get("rank_id"), manifest["config"].get("role_type"),
+                "; ".join(group_violations),
+            )
+            raise ReleaseProfileError(
+                f"release profile {profile.name!r} rejected this rank's group "
+                f"({len(group_violations)} violation(s)); refusing to start so no partial or mixed "
+                "group enters collectives:\n  - " + "\n  - ".join(group_violations)
+            )
     return manifest

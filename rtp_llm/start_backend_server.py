@@ -241,6 +241,15 @@ def local_rank_start(
         py_env_configs.server_config.set_local_rank(local_rank)
         py_env_configs.distribute_config.set_local_rank(local_rank)
         setup_cuda_device_and_accl_env(local_rank)
+        # Per-rank release validation and group membership. This process's real rank is known now, and
+        # nothing has been loaded yet: the rank publishes its resolved manifest, waits (bounded) for the
+        # profile's declared membership, and refuses to continue if a peer is missing, stale, mixed or
+        # differently built -- so one failed peer stops the group instead of leaving the others entering
+        # capture alone. A no-op unless a release profile is selected; the parent leg process checked the
+        # same profile earlier (without rank identity), and no per-step collective is added.
+        from rtp_llm.config.release_profile import enforce_release_profile
+
+        enforce_release_profile(py_env_configs, join_group=True)
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
