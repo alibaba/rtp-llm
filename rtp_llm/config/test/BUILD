@@ -23,7 +23,9 @@ py_test(
         "release_profile_test.py",
     ],
     data = [
-        "//rtp_llm:sdk"
+        "//rtp_llm:sdk",
+        # The canonical runnable settings the profile test checks for drift.
+        "//rtp_llm/config/release_profiles:sm120_dp4ep4_n2",
     ],
     deps = [
         "//rtp_llm:testlib",

@@ -40,6 +40,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 # Selects a canonical release profile. Unset means developer mode: nothing in this module runs.
 RELEASE_PROFILE_ENV = "RTP_LLM_RELEASE_PROFILE"
 
+# Optional explicit provenance label injected by the packaging step (image digest, release tag, ...).
+# When absent the manifest still carries a non-empty identity derived from the running files, so a
+# manifest is never a digest of an empty artifact record.
+ARTIFACT_LABEL_ENV = "RTP_LLM_RELEASE_ARTIFACT_ID"
+
 # Knobs that are release-critical but are not represented on the resolved configuration object: the
 # decode padding batch is read directly by the engine, and the transport/backend overrides are plain
 # process environment. They are named explicitly here rather than silently ignored.
@@ -88,6 +93,25 @@ def _resolve(root: Any, path: str) -> Any:
     return UNSET if cur is None else cur
 
 
+def _call(root: Any, path: str) -> Any:
+    """Invoke a zero-argument method on the resolved config, UNSET if it is absent or raises.
+
+    Some release-relevant facts are only exposed as methods (for example whether context parallelism
+    is enabled for prefill), and calling one must never be able to abort startup on its own.
+    """
+    cur = root
+    for part in path.split("."):
+        if cur is None:
+            return UNSET
+        cur = getattr(cur, part, None)
+    if not callable(cur):
+        return UNSET
+    try:
+        return cur()
+    except Exception:  # noqa: BLE001 - a probe must not be able to fail startup by itself
+        return UNSET
+
+
 def _env_int(env: Mapping[str, str], name: str, default: int) -> int:
     raw = env.get(name)
     if raw is None or str(raw).strip() == "":
@@ -105,10 +129,21 @@ class ReleaseSnapshot:
 
     role_type: Any = UNSET
     rank_id: Any = UNSET
+    world_size: Any = UNSET
     tp_size: Any = UNSET
     dp_size: Any = UNSET
     ep_size: Any = UNSET
     concurrency_limit: Any = UNSET
+    enable_cuda_graph: Any = UNSET
+    # CP facts, named after the engine's own predicates (ConfigModules.h): is_enabled() means THIS leg
+    # computes context parallelism (ALL_GATHER / ..._WITH_OVERLAP / ALLTOALL), while is_prefill_enabled()
+    # means this leg CONSUMES a CP prefill (method == PREFILL_CP, used by the decode side). Conflating
+    # them rejects a correct prefill leg.
+    prefill_cp_method: Any = UNSET
+    cp_computes: Any = UNSET
+    cp_consumes_prefill: Any = UNSET
+    prefill_cp_kv_cache_sharded: Any = UNSET
+    prefill_cp_size: Any = UNSET
     sp_type: Any = UNSET
     gen_num_per_cycle: Any = UNSET
     max_seq_len: Any = UNSET
@@ -130,10 +165,17 @@ class ReleaseSnapshot:
         for name in (
             "role_type",
             "rank_id",
+            "world_size",
             "tp_size",
             "dp_size",
             "ep_size",
             "concurrency_limit",
+            "enable_cuda_graph",
+            "prefill_cp_method",
+            "cp_computes",
+            "cp_consumes_prefill",
+            "prefill_cp_kv_cache_sharded",
+            "prefill_cp_size",
             "sp_type",
             "gen_num_per_cycle",
             "max_seq_len",
@@ -164,10 +206,17 @@ def snapshot_from_env_configs(cfg: Any, env: Optional[Mapping[str, str]] = None)
     return ReleaseSnapshot(
         role_type=_resolve(cfg, "role_config.role_type"),
         rank_id=_resolve(cfg, "distribute_config.rank_id"),
+        world_size=_resolve(cfg, "parallelism_config.world_size"),
         tp_size=_resolve(cfg, "parallelism_config.tp_size"),
         dp_size=_resolve(cfg, "parallelism_config.dp_size"),
         ep_size=_resolve(cfg, "parallelism_config.ep_size"),
         concurrency_limit=_resolve(cfg, "concurrency_config.concurrency_limit"),
+        enable_cuda_graph=_resolve(cfg, "py_hw_kernel_config.enable_cuda_graph"),
+        prefill_cp_method=_resolve(cfg, "prefill_cp_config.method"),
+        cp_computes=_call(cfg, "prefill_cp_config.is_enabled"),
+        cp_consumes_prefill=_call(cfg, "prefill_cp_config.is_prefill_enabled"),
+        prefill_cp_kv_cache_sharded=_resolve(cfg, "prefill_cp_config.kv_cache_sharded"),
+        prefill_cp_size=_resolve(cfg, "prefill_cp_config.prefill_cp_size"),
         sp_type=_resolve(cfg, "sp_config.type"),
         gen_num_per_cycle=_resolve(cfg, "sp_config.gen_num_per_cycle"),
         max_seq_len=_resolve(cfg, "model_args.max_seq_len"),
@@ -182,6 +231,60 @@ def snapshot_from_env_configs(cfg: Any, env: Optional[Mapping[str, str]] = None)
         nccl_p2p_level=environment.get(NCCL_P2P_LEVEL_ENV) or None,
         moe_fp4_backend=environment.get(MOE_FP4_BACKEND_ENV) or None,
     )
+
+
+def _file_identity(path: str) -> Dict[str, Any]:
+    """Cheap identity for a file or model directory: entry size, plus config.json metadata for a
+    directory. Deliberately not a content hash: this runs on every rank at startup, and the manifest
+    only needs enough to tell one artifact from another and to detect a stale one."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    ident: Dict[str, Any] = {"size": int(st.st_size)}
+    if os.path.isdir(path):
+        try:
+            cst = os.stat(os.path.join(path, "config.json"))
+            ident["config_json_bytes"] = int(cst.st_size)
+            ident["config_json_mtime_ns"] = int(cst.st_mtime_ns)
+        except OSError:
+            pass
+    else:
+        ident["mtime_ns"] = int(st.st_mtime_ns)
+    return ident
+
+
+def artifact_identity_from(cfg: Any, env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+    """Non-empty provenance for this rank: which compiled ops library and which weights it runs.
+
+    The packaging step can add an explicit release label (image digest or tag) through
+    ``RTP_LLM_RELEASE_ARTIFACT_ID``. When it does not, this still identifies the running files, so a
+    manifest is never a digest of an empty artifact record and a stale one is detectable.
+    """
+    environment: Mapping[str, str] = os.environ if env is None else env
+    ids: Dict[str, Any] = {}
+    label = (environment.get(ARTIFACT_LABEL_ENV) or "").strip()
+    if label:
+        ids["release_label"] = label
+    try:
+        import rtp_llm.ops as _ops  # local import: this module stays importable without the extension
+
+        p = getattr(_ops, "__file__", None)
+        if p:
+            ids["ops_lib"] = dict({"name": os.path.basename(p)}, **_file_identity(p))
+    except Exception:  # noqa: BLE001 - provenance must not be able to fail startup by itself
+        pass
+    for key, path in (
+        ("model", _resolve(cfg, "model_args.ckpt_path")),
+        ("tokenizer", _resolve(cfg, "model_args.tokenizer_path")),
+        ("sp_model", _resolve(cfg, "sp_config.checkpoint_path")),
+    ):
+        if isinstance(path, _Unset) or not path:
+            continue
+        ident = _file_identity(str(path))
+        if ident:
+            ids[key] = dict({"name": os.path.basename(str(path).rstrip("/"))}, **ident)
+    return ids
 
 
 @dataclass(frozen=True)
@@ -200,11 +303,28 @@ class ReleaseProfile:
     decode_ep_size: int = 4
     decode_fixed_bs: int = 2
     decode_kernel_seq_size_per_block: int = 256
-    # prefill role
-    prefill_cp_size: int = 4
+    # The decode leg must replay captured graphs: without capture it is not the qualified candidate,
+    # and a configured capture set alone says nothing if graph execution is switched off.
+    decode_enable_cuda_graph: bool = True
+    # The decode leg names how the prefill sharded its KV, and how many ways.
+    decode_cp_rotate_method: str = "PREFILL_CP"
+    decode_prefill_cp_size: int = 4
+    # prefill role: context parallelism is what makes this the CP4 leg, so its topology, CP mode and
+    # PD KV-sharing contract are all part of the candidate rather than incidental settings.
+    prefill_tp_size: int = 4
+    prefill_dp_size: int = 1
     prefill_ep_size: int = 4
+    prefill_kernel_seq_size_per_block: int = 256
+    prefill_cp_rotate_method: str = "ALL_GATHER"
     prefill_max_batch_tokens_size: int = 64000
     # shared
+    pd_kv_cache_sharded: bool = True
+    # Membership: each PD leg numbers its own ranks from 0, so these are per-leg rank counts. The group
+    # comparison requires exactly this many manifests per role.
+    expected_decode_ranks: int = 4
+    expected_prefill_ranks: int = 4
+    # A manifest must identify what it is running; an empty artifact record identifies nothing.
+    require_artifact_identity: bool = True
     gen_num_per_cycle: int = 3
     # Matched as a substring of the resolved enum's name, so the check does not depend on how the
     # speculative type is spelled in the configuration layer. The depth alone is not enough: the wrong
@@ -303,6 +423,46 @@ def validate(snapshot: ReleaseSnapshot, profile: ReleaseProfile) -> List[str]:
     # ---- role-specific rules ---------------------------------------------------------------------
     if decode:
         fixed_bs = snapshot.decode_fixed_bs
+        # Graph execution must actually be on. A configured capture set is not evidence that the
+        # captured shapes are ever replayed, and a candidate serving path that silently ran eager
+        # would not be the configuration that was qualified.
+        graph = need("enable_cuda_graph")
+        if not isinstance(graph, _Unset) and bool(graph) != profile.decode_enable_cuda_graph:
+            v.append(
+                f"enable_cuda_graph={graph}: the decode leg must replay captured graphs "
+                f"(profile requires {profile.decode_enable_cuda_graph}); a configured capture set alone "
+                "does not mean the captured shapes are used"
+            )
+
+        # The decode leg states how the prefill sharded its KV; that contract is what makes a PD pair
+        # mutually compatible.
+        cp_method = need("prefill_cp_method")
+        if not isinstance(cp_method, _Unset) and profile.decode_cp_rotate_method not in str(cp_method).upper():
+            v.append(
+                f"cp_rotate_method={cp_method!r}: the decode leg of this profile expects "
+                f"{profile.decode_cp_rotate_method}"
+            )
+        cp_size = need("prefill_cp_size")
+        if not isinstance(cp_size, _Unset) and int(cp_size) != profile.decode_prefill_cp_size:
+            v.append(f"prefill_cp_size={cp_size}: profile requires {profile.decode_prefill_cp_size}")
+        # With a sharded KV, the decode side must declare that it consumes a CP prefill and must size it:
+        # the engine CHECKs prefill_cp_size > 1 at allocation time for exactly this combination, and a
+        # preflight rejection is cheaper than that assertion.
+        consumes = need("cp_consumes_prefill")
+        if not isinstance(consumes, _Unset) and not bool(consumes):
+            v.append(
+                "prefill_cp_config.is_prefill_enabled() is false: the decode leg of this profile must "
+                "declare that it consumes a context-parallel prefill"
+            )
+        if (
+            not isinstance(cp_size, _Unset)
+            and int(cp_size) <= 1
+            and bool(snapshot.prefill_cp_kv_cache_sharded) is True
+        ):
+            v.append(
+                f"prefill_cp_size={cp_size}: a sharded prefill KV requires an explicit prefill CP size > 1"
+            )
+
         if fixed_bs <= 0:
             v.append(
                 f"{DECODE_FIXED_BS_ENV}={fixed_bs}: fixed decode padding must be enabled for this profile; "
@@ -346,6 +506,38 @@ def validate(snapshot: ReleaseSnapshot, profile: ReleaseProfile) -> List[str]:
             )
 
     if prefill:
+        # The prefill leg is the CP4 leg: its topology, CP mode and PD KV-sharing contract are part of
+        # the candidate. Checking the topology only on the decode leg would accept a prefill running a
+        # different parallelism arrangement entirely.
+        for name, expected in (
+            ("tp_size", profile.prefill_tp_size),
+            ("dp_size", profile.prefill_dp_size),
+            ("ep_size", profile.prefill_ep_size),
+        ):
+            actual = need(name)
+            if not isinstance(actual, _Unset) and int(actual) != expected:
+                v.append(f"{name}={actual}: profile requires {expected} for the prefill role")
+
+        geom = need("kernel_seq_size_per_block")
+        if not isinstance(geom, _Unset) and int(geom) != profile.prefill_kernel_seq_size_per_block:
+            v.append(
+                f"kernel_seq_size_per_block={geom}: the prefill leg must use the qualified geometry "
+                f"{profile.prefill_kernel_seq_size_per_block}"
+            )
+
+        cp_method = need("prefill_cp_method")
+        if not isinstance(cp_method, _Unset) and profile.prefill_cp_rotate_method not in str(cp_method).upper():
+            v.append(
+                f"cp_rotate_method={cp_method!r}: the prefill leg of this profile expects "
+                f"{profile.prefill_cp_rotate_method}"
+            )
+        cp_on = need("cp_computes")
+        if not isinstance(cp_on, _Unset) and not bool(cp_on):
+            v.append(
+                "prefill_cp_config.is_enabled() is false: this leg is the CP4 leg and must actually "
+                "compute context parallelism"
+            )
+
         bound = need("max_batch_tokens_size")
         if not isinstance(bound, _Unset):
             bound = int(bound)
@@ -365,14 +557,34 @@ def validate(snapshot: ReleaseSnapshot, profile: ReleaseProfile) -> List[str]:
                     f"max_batch_tokens_size={bound} > profile value "
                     f"{profile.prefill_max_batch_tokens_size}"
                 )
-        for name, expected in (("ep_size", profile.prefill_ep_size),):
-            actual = need(name)
-            if not isinstance(actual, _Unset) and int(actual) != expected:
-                v.append(f"{name}={actual}: profile requires {expected} for the prefill role")
+    # PD KV-sharing contract, checked on both legs: they must agree on whether the prefill shards its
+    # paged KV across context-parallel ranks.
+    sharded = need("prefill_cp_kv_cache_sharded")
+    if not isinstance(sharded, _Unset) and bool(sharded) != profile.pd_kv_cache_sharded:
+        v.append(
+            f"prefill_cp_kv_cache_sharded={sharded}: profile requires {profile.pd_kv_cache_sharded} "
+            "(the PD pairing assumes a matching KV-sharing contract on both legs)"
+        )
 
     rank_id = need("rank_id")
     if not isinstance(rank_id, _Unset) and int(rank_id) < 0:
         v.append(f"rank_id={rank_id}: negative")
+
+    # A rank outside its own leg cannot take part in the collectives this profile assumes, so it must
+    # not start. Each leg numbers its own ranks, so the expected count is the role's rank count, not the
+    # two legs added together.
+    world = need("world_size")
+    if not isinstance(world, _Unset):
+        expected_ranks = profile.expected_decode_ranks if decode else profile.expected_prefill_ranks
+        if int(world) != expected_ranks:
+            v.append(
+                f"world_size={world}: this role's profile declares {expected_ranks} rank(s) per leg"
+            )
+        if not isinstance(rank_id, _Unset) and not (0 <= int(rank_id) < int(world)):
+            v.append(
+                f"rank_id={rank_id} is outside the group [0, {world}): a rank outside the declared "
+                "membership cannot join the collectives this profile assumes"
+            )
 
     return v
 
@@ -470,12 +682,53 @@ def check_group_consistency(
     if not manifests:
         return ["no rank manifests supplied"]
 
-    artifact_digests = {manifest_digest(m) for m in manifests.values()}
+    # The profile each rank names drives the membership and provenance requirements, so the caller does
+    # not have to remember to pass them.
+    profile_names = {str(m.get("profile", "")) for m in manifests.values()}
+    profile = RELEASE_PROFILES.get(next(iter(profile_names))) if len(profile_names) == 1 else None
+    if len(profile_names) > 1:
+        v.append(f"MIXED RELEASE PROFILES across ranks: {sorted(profile_names)}")
+
+    # Different artifacts in one group: the ranks would be running different binaries or weights while
+    # still entering the same collectives.
     by_artifact: Dict[str, List[Any]] = {}
     for rank, m in manifests.items():
         by_artifact.setdefault(str(m.get("artifact_digest", "")), []).append(rank)
     if len(by_artifact) > 1:
         v.append(f"MIXED ARTIFACTS across ranks: {by_artifact}")
+
+    # Required provenance: a manifest with no artifact identity cannot say what it is running, which is
+    # exactly the case that must not be read as agreement between ranks.
+    if profile is not None and profile.require_artifact_identity:
+        no_identity = sorted(str(r) for r, m in manifests.items() if not m.get("artifact"))
+        if no_identity:
+            v.append(
+                f"MISSING ARTIFACT IDENTITY for ranks {no_identity}: an empty artifact record identifies "
+                "nothing, so these manifests cannot establish what is running"
+            )
+
+    # Declared membership: a group is only validated when every rank it expects is present, with the
+    # expected identity. A partial group must not be reported as consistent.
+    if profile is not None:
+        for role_substr, expected in (
+            ("PREFILL", profile.expected_prefill_ranks),
+            ("DECODE", profile.expected_decode_ranks),
+        ):
+            present = sorted(
+                int((m.get("config") or {}).get("rank_id"))
+                for m in manifests.values()
+                if role_substr in str((m.get("config") or {}).get("role_type")).upper()
+                and (m.get("config") or {}).get("rank_id") is not None
+            )
+            if len(present) != expected:
+                v.append(
+                    f"INCOMPLETE MEMBERSHIP for {role_substr}: {len(present)} rank manifest(s) {present}, "
+                    f"the profile declares {expected}"
+                )
+            elif present != list(range(expected)):
+                v.append(
+                    f"MEMBERSHIP MISMATCH for {role_substr}: ranks {present}, expected {list(range(expected))}"
+                )
 
     # Same role => identical resolved configuration, ignoring per-rank identity.
     by_role: Dict[str, Dict[str, List[Any]]] = {}
@@ -512,6 +765,64 @@ def check_group_consistency(
     return v
 
 
+# The canonical, runnable settings of each profile live beside this module as JSON, so the deployment
+# or benchmark that consumes them and the validator that checks them read ONE versioned artifact rather
+# than two hand-maintained descriptions of the same thing. The JSON is generated from the definitions
+# below by ``dump_profile_json`` and a unit test fails if the checked-in file drifts from it.
+PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "release_profiles")
+
+
+def dump_profile_json(name: str, indent: int = 2) -> str:
+    """The canonical resolved settings of a profile, as JSON, for a runner to consume."""
+    profile = RELEASE_PROFILES[name]
+    payload = {
+        "profile": profile.name,
+        "per_leg": {
+            "decode": {
+                "tp_size": profile.decode_tp_size,
+                "dp_size": profile.decode_dp_size,
+                "ep_size": profile.decode_ep_size,
+                "world_size": profile.expected_decode_ranks,
+                "fixed_bs": profile.decode_fixed_bs,
+                "concurrency_limit": profile.decode_fixed_bs,
+                "capture_batch_sizes": list(range(1, profile.decode_fixed_bs + 1)),
+                "enable_cuda_graph": profile.decode_enable_cuda_graph,
+                "cp_rotate_method": profile.decode_cp_rotate_method,
+                "prefill_cp_size": profile.decode_prefill_cp_size,
+                "kernel_seq_size_per_block": profile.decode_kernel_seq_size_per_block,
+                "max_seq_len": profile.min_max_seq_len,
+                "reuse_cache": profile.reuse_cache,
+            },
+            "prefill": {
+                "tp_size": profile.prefill_tp_size,
+                "dp_size": profile.prefill_dp_size,
+                "ep_size": profile.prefill_ep_size,
+                "world_size": profile.expected_prefill_ranks,
+                "cp_rotate_method": profile.prefill_cp_rotate_method,
+                "prefill_cp_kv_cache_sharded": profile.pd_kv_cache_sharded,
+                "kernel_seq_size_per_block": profile.prefill_kernel_seq_size_per_block,
+                "max_batch_tokens_size": profile.prefill_max_batch_tokens_size,
+                "reuse_cache": profile.reuse_cache,
+            },
+        },
+        "shared": {
+            "pd_kv_cache_sharded": profile.pd_kv_cache_sharded,
+            "expected_decode_ranks": profile.expected_decode_ranks,
+            "expected_prefill_ranks": profile.expected_prefill_ranks,
+            "gen_num_per_cycle": profile.gen_num_per_cycle,
+            "speculative_type": profile.speculative_type,
+            "reuse_cache": profile.reuse_cache,
+            "nccl_transport": "default",
+            "moe_backend": "default",
+        },
+    }
+    return json.dumps(payload, indent=indent, sort_keys=True) + "\n"
+
+
+def profile_json_path(name: str) -> str:
+    return os.path.join(PROFILE_DIR, f"{name}.json")
+
+
 class ReleaseProfileError(RuntimeError):
     """Raised when a rank's resolved configuration violates the selected release profile."""
 
@@ -536,8 +847,17 @@ def enforce_release_profile(cfg: Any, env: Optional[Mapping[str, str]] = None,
         )
 
     snapshot = snapshot_from_env_configs(cfg, environment)
-    manifest = build_manifest(snapshot, profile, artifact_ids)
+    artifacts = dict(artifact_ids) if artifact_ids is not None else artifact_identity_from(cfg, environment)
+    manifest = build_manifest(snapshot, profile, artifacts)
     violations = validate(snapshot, profile)
+
+    # Provenance is part of the profile contract: an empty artifact record identifies nothing, so the
+    # manifest could not tell one deployment from another or detect a stale one.
+    if profile.require_artifact_identity and not manifest["artifact"]:
+        violations.append(
+            "artifact identity is empty: the manifest must identify the running artifact (set "
+            f"{ARTIFACT_LABEL_ENV}, or ensure the ops library and model path resolve)"
+        )
 
     # The manifest is logged whether or not validation passes: a rejected start must still show what
     # was resolved, and the digest is what peers compare at startup.

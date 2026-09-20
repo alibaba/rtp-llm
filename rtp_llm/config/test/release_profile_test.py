@@ -11,6 +11,8 @@ representation production validates, built here directly; `snapshot_from_env_con
 against a stub so the dotted paths into the real config object are pinned too.
 """
 
+import json
+import os
 import unittest
 from types import SimpleNamespace
 
@@ -22,10 +24,17 @@ def decode_snapshot(**overrides):
     base = dict(
         role_type="RoleType.DECODE",
         rank_id=1,
+        world_size=4,
         tp_size=1,
         dp_size=4,
         ep_size=4,
         concurrency_limit=2,
+        enable_cuda_graph=True,
+        prefill_cp_method="CPRotateMethod.PREFILL_CP",
+        cp_computes=False,
+        cp_consumes_prefill=True,
+        prefill_cp_kv_cache_sharded=True,
+        prefill_cp_size=4,
         sp_type="DSpark",
         gen_num_per_cycle=3,
         max_seq_len=32832,
@@ -49,10 +58,17 @@ def prefill_snapshot(**overrides):
     base = dict(
         role_type="RoleType.PREFILL",
         rank_id=0,
-        tp_size=1,
+        world_size=4,
+        tp_size=4,
         dp_size=1,
         ep_size=4,
         concurrency_limit=2,
+        enable_cuda_graph=False,
+        prefill_cp_method="CPRotateMethod.ALL_GATHER",
+        cp_computes=True,
+        cp_consumes_prefill=False,
+        prefill_cp_kv_cache_sharded=True,
+        prefill_cp_size=rp.UNSET,
         sp_type="DSpark",
         gen_num_per_cycle=3,
         max_seq_len=133120,
@@ -191,6 +207,121 @@ class RejectsPrefillMisconfiguration(unittest.TestCase):
         self.assertTrue(any("ep_size=2" in v for v in violations), violations)
 
 
+class RejectsGraphTopologyRankAndMembershipCases(unittest.TestCase):
+    """The cases an independent audit reproduced as accepted, plus the group-level equivalents.
+
+    Each of these is individually plausible and collectively broken: a decode leg that never replays
+    its captured graphs, a prefill leg running a different parallelism arrangement, an unqualified
+    geometry on the prefill side, a rank number outside the group, a partial group, and a manifest
+    that identifies no artifact at all.
+    """
+
+    def assertRejected(self, snapshot, needle):
+        violations = rp.validate(snapshot, PROFILE)
+        self.assertTrue(violations, f"expected a rejection for {needle!r}, got none")
+        self.assertTrue(
+            any(needle in v for v in violations),
+            f"expected a violation mentioning {needle!r}, got: {violations}",
+        )
+
+    # --- audit case 1 -------------------------------------------------------------------------
+    def test_decode_with_cuda_graph_disabled_is_rejected(self):
+        # Configured capture sizes are not evidence that the captured shapes are replayed.
+        self.assertRejected(decode_snapshot(enable_cuda_graph=False), "enable_cuda_graph=False")
+
+    def test_decode_with_unresolved_graph_setting_is_rejected(self):
+        self.assertRejected(decode_snapshot(enable_cuda_graph=rp.UNSET), "not resolvable")
+
+    # --- audit case 2 -------------------------------------------------------------------------
+    def test_prefill_running_decode_topology_is_rejected(self):
+        # TP1/DP4 on the prefill leg is the decode arrangement, not the CP4 leg.
+        self.assertRejected(prefill_snapshot(tp_size=1), "tp_size=1")
+        self.assertRejected(prefill_snapshot(dp_size=4), "dp_size=4")
+
+    def test_prefill_without_context_parallelism_is_rejected(self):
+        # is_enabled() is the engine predicate for 'this leg computes context parallelism'; a CP4 leg
+        # that reports false is not the qualified prefill arrangement.
+        self.assertRejected(prefill_snapshot(cp_computes=False), "is_enabled() is false")
+
+    def test_decode_not_declaring_a_cp_prefill_is_rejected(self):
+        # is_prefill_enabled() is the decode-side pairing predicate, and with a sharded KV the engine
+        # CHECKs the matching size at allocation time.
+        self.assertRejected(decode_snapshot(cp_consumes_prefill=False), "is_prefill_enabled() is false")
+
+    def test_sharded_kv_without_an_explicit_cp_size_is_rejected(self):
+        self.assertRejected(decode_snapshot(prefill_cp_size=1), "requires an explicit prefill CP size > 1")
+
+    def test_prefill_with_the_decode_cp_method_is_rejected(self):
+        self.assertRejected(
+            prefill_snapshot(prefill_cp_method="CPRotateMethod.PREFILL_CP"), "prefill leg of this profile expects"
+        )
+
+    # --- audit case 3 -------------------------------------------------------------------------
+    def test_prefill_geometry_128_is_rejected(self):
+        self.assertRejected(prefill_snapshot(kernel_seq_size_per_block=128), "prefill leg must use the qualified")
+
+    # --- audit case 4 -------------------------------------------------------------------------
+    def test_rank_outside_the_group_is_rejected(self):
+        self.assertRejected(decode_snapshot(rank_id=99), "outside the group")
+
+    def test_wrong_world_size_is_rejected(self):
+        self.assertRejected(decode_snapshot(world_size=8), "world_size=8")
+
+    def test_decode_leg_naming_the_wrong_prefill_cp_size_is_rejected(self):
+        self.assertRejected(decode_snapshot(prefill_cp_size=8), "prefill_cp_size=8")
+
+    def test_pd_kv_sharing_mismatch_is_rejected_on_either_leg(self):
+        self.assertRejected(decode_snapshot(prefill_cp_kv_cache_sharded=False), "prefill_cp_kv_cache_sharded=False")
+        self.assertRejected(prefill_snapshot(prefill_cp_kv_cache_sharded=False), "prefill_cp_kv_cache_sharded=False")
+
+    # --- audit case 5 -------------------------------------------------------------------------
+    def test_group_with_a_single_rank_is_rejected(self):
+        manifests = {
+            "decode-0": rp.build_manifest(decode_snapshot(rank_id=0), PROFILE, {"git_sha": "abc"}),
+            "prefill-0": rp.build_manifest(prefill_snapshot(rank_id=0), PROFILE, {"git_sha": "abc"}),
+        }
+        violations = rp.check_group_consistency(manifests)
+        self.assertTrue(any("INCOMPLETE MEMBERSHIP" in v for v in violations), violations)
+
+    def test_group_with_wrong_rank_ids_is_rejected(self):
+        manifests = {}
+        for i in range(4):
+            manifests[f"decode-{i}"] = rp.build_manifest(
+                decode_snapshot(rank_id=i + 10), PROFILE, {"git_sha": "abc"})
+            manifests[f"prefill-{i}"] = rp.build_manifest(
+                prefill_snapshot(rank_id=i + 10), PROFILE, {"git_sha": "abc"})
+        violations = rp.check_group_consistency(manifests)
+        self.assertTrue(any("MEMBERSHIP MISMATCH" in v for v in violations), violations)
+
+    # --- audit case 6 -------------------------------------------------------------------------
+    def test_group_without_artifact_identity_is_rejected(self):
+        manifests = {}
+        for i in range(4):
+            manifests[f"decode-{i}"] = rp.build_manifest(decode_snapshot(rank_id=i), PROFILE, None)
+            manifests[f"prefill-{i}"] = rp.build_manifest(prefill_snapshot(rank_id=i), PROFILE, None)
+        violations = rp.check_group_consistency(manifests)
+        self.assertTrue(any("MISSING ARTIFACT IDENTITY" in v for v in violations), violations)
+
+    def test_mixed_release_profiles_are_rejected(self):
+        other = rp.ReleaseProfile(name="another-profile")
+        manifests = {
+            "decode-0": rp.build_manifest(decode_snapshot(), PROFILE, {"a": 1}),
+            "decode-1": rp.build_manifest(decode_snapshot(), other, {"a": 1}),
+        }
+        violations = rp.check_group_consistency(manifests)
+        self.assertTrue(any("MIXED RELEASE PROFILES" in v for v in violations), violations)
+
+    def test_startup_rejects_an_empty_artifact_record(self):
+        class _Cfg:
+            pass
+
+        with self.assertRaises(rp.ReleaseProfileError) as ctx:
+            rp.enforce_release_profile(
+                _Cfg(), env={rp.RELEASE_PROFILE_ENV: "sm120_dp4ep4_n2"}, artifact_ids={}
+            )
+        self.assertIn("artifact identity is empty", str(ctx.exception))
+
+
 class FailsClosedOnUnresolvableConfiguration(unittest.TestCase):
     def test_a_missing_knob_is_a_violation_not_a_default(self):
         violations = rp.validate(decode_snapshot(concurrency_limit=rp.UNSET), PROFILE)
@@ -215,12 +346,19 @@ class SnapshotFromResolvedConfig(unittest.TestCase):
         return SimpleNamespace(
             role_config=SimpleNamespace(role_type="RoleType.DECODE"),
             distribute_config=SimpleNamespace(rank_id=2),
-            parallelism_config=SimpleNamespace(tp_size=1, dp_size=4, ep_size=4),
+            parallelism_config=SimpleNamespace(tp_size=1, dp_size=4, ep_size=4, world_size=4),
             concurrency_config=SimpleNamespace(concurrency_limit=2),
-            sp_config=SimpleNamespace(type="DSpark", gen_num_per_cycle=3),
-            model_args=SimpleNamespace(max_seq_len=32832),
+            sp_config=SimpleNamespace(type="DSpark", gen_num_per_cycle=3, checkpoint_path=None),
+            model_args=SimpleNamespace(max_seq_len=32832, ckpt_path=None, tokenizer_path=None),
             kv_cache_config=SimpleNamespace(kernel_seq_size_per_block=256, reuse_cache=False),
-            py_hw_kernel_config=SimpleNamespace(decode_capture_batch_sizes=[1, 2]),
+            py_hw_kernel_config=SimpleNamespace(decode_capture_batch_sizes=[1, 2], enable_cuda_graph=True),
+            prefill_cp_config=SimpleNamespace(
+                method="CPRotateMethod.PREFILL_CP",
+                kv_cache_sharded=True,
+                prefill_cp_size=4,
+                is_enabled=lambda: False,
+                is_prefill_enabled=lambda: True,
+            ),
             runtime_config=SimpleNamespace(
                 fifo_scheduler_config=SimpleNamespace(max_batch_tokens_size=32832, max_context_batch_size=1),
                 use_batch_decode_scheduler=False,
@@ -377,6 +515,46 @@ class GroupConsistency(unittest.TestCase):
 
     def test_empty_input_is_a_violation(self):
         self.assertEqual(["no rank manifests supplied"], rp.check_group_consistency({}))
+
+
+class CanonicalSettingsArtifact(unittest.TestCase):
+    """The checked-in runnable settings must be exactly what the profile describes.
+
+    A benchmark or deployment consumes the JSON while validation uses the profile definition; if the two
+    could drift, a run could be launched with settings the validator never agreed to, which is the
+    failure this artifact exists to prevent.
+    """
+
+    def test_the_checked_in_json_matches_the_profile(self):
+        path = rp.profile_json_path(PROFILE.name)
+        self.assertTrue(os.path.exists(path), f"canonical settings artifact is missing: {path}")
+        with open(path) as f:
+            on_disk = f.read()
+        self.assertEqual(
+            rp.dump_profile_json(PROFILE.name),
+            on_disk,
+            "the canonical settings artifact has drifted from the profile definition; regenerate it",
+        )
+
+    def test_the_json_parses_and_carries_both_legs(self):
+        with open(rp.profile_json_path(PROFILE.name)) as f:
+            payload = json.load(f)
+        self.assertEqual(PROFILE.name, payload["profile"])
+        for leg in ("decode", "prefill"):
+            self.assertIn(leg, payload["per_leg"])
+        self.assertEqual(PROFILE.decode_fixed_bs, payload["per_leg"]["decode"]["fixed_bs"])
+        self.assertEqual(PROFILE.decode_fixed_bs, payload["per_leg"]["decode"]["concurrency_limit"])
+        self.assertIn(PROFILE.decode_fixed_bs, payload["per_leg"]["decode"]["capture_batch_sizes"])
+        self.assertTrue(payload["per_leg"]["decode"]["enable_cuda_graph"])
+        self.assertEqual(PROFILE.prefill_max_batch_tokens_size, payload["per_leg"]["prefill"]["max_batch_tokens_size"])
+
+    def test_the_canonical_settings_are_self_consistent_with_the_validator(self):
+        # Every value the artifact publishes must be one the validator accepts, so a runner that applies
+        # the artifact verbatim cannot be rejected for a value another field contradicts.
+        self.assertEqual(
+            PROFILE.expected_decode_ranks, PROFILE.expected_prefill_ranks
+        )
+        self.assertLessEqual(PROFILE.prefill_max_batch_tokens_size, rp.A2A_PAYLOAD_TOKEN_BOUND)
 
 
 class EnforceReleaseProfile(unittest.TestCase):
