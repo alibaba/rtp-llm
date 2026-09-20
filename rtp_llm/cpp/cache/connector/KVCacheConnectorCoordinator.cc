@@ -25,11 +25,16 @@ CacheGroupType groupTypeForConnector(const CacheConfig& cache_config, int group_
 }
 
 bool isCpCompactFixedGroup(const CacheConfig& cache_config, int group_id, int cp_size) {
-    if (cp_size <= 1 || groupTypeForConnector(cache_config, group_id) == CacheGroupType::FULL || group_id < 0
-        || static_cast<size_t>(group_id) >= cache_config.group_seq_size_per_block.size()) {
+    if (cp_size <= 1 || groupTypeForConnector(cache_config, group_id) == CacheGroupType::FULL || group_id < 0) {
         return false;
     }
-    const auto row_tokens = cache_config.group_seq_size_per_block[static_cast<size_t>(group_id)];
+    const auto gid = static_cast<size_t>(group_id);
+    // Allocation summaries can retain the canonical page size. The spec used
+    // by the allocator defines the fixed state's actual CP-wide row size.
+    const auto row_tokens =
+        gid < cache_config.cache_specs.size() && cache_config.cache_specs[gid] ?
+            cache_config.cache_specs[gid]->seq_size_per_block :
+            (gid < cache_config.group_seq_size_per_block.size() ? cache_config.group_seq_size_per_block[gid] : 0);
     return row_tokens > 0 && row_tokens == cache_config.seq_size_per_block * static_cast<size_t>(cp_size);
 }
 
@@ -73,12 +78,11 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
     const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size);
     selected.setLastBlockAligned(selected_aligned);
 
-    // Memory connector intentionally drops the last key to avoid matching a
-    // partial tail.  After CP Page-RR remap, a source partial can belong to a
-    // non-last rank, making the selected last-rank key complete.  Append the
-    // original partial key as a connector-only dummy tail so the drop-last
-    // contract discards the dummy, not the usable selected key.
-    if (!source.lastBlockAligned() && selected_aligned && !source.cacheKeys().empty()) {
+    // The connector reserves its last key for the request tail. A complete
+    // CP-wide block remains reusable when more logical pages follow it, even
+    // when the final logical page itself is full. Keep that trailing key as a
+    // sentinel instead of discarding the last complete CP-wide checkpoint.
+    if (!source.cacheKeys().empty() && source.cacheKeys().size() % cp_size != 0) {
         selected.cacheKeys().push_back(source.cacheKeys().back());
         selected.rebuildLinearBlockDependencies();
         selected.setLastBlockAligned(false);
@@ -257,18 +261,25 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
     }
     if (memory_connector_ && connector_context->meta()->enableMemoryCache()
         && cache_config_.enable_linear_attention_request_cache && cache_config_.linear_group_num > 0) {
-        if (cp_size > 1) {
-            RTP_LLM_LOG_WARNING("whole-request memory cache currently requires unsharded cache keys; skip CP read");
-            return nullptr;
-        } else {
-            const size_t matched_blocks = memory_connector_->matchWholeRequest(ref_resource);
-            if (matched_blocks > ref_resource.reuseBlockNum()
-                && !allocator_->materializeRequestCacheState(ref_resource, matched_blocks - 1)) {
+        const size_t matched_blocks = memory_connector_->matchWholeRequest(ref_resource);
+        if (matched_blocks > ref_resource.reuseBlockNum()) {
+            // The connector counts CP-virtual blocks, while the live Linear
+            // state table uses logical blocks. Allocate through the shared live
+            // table so both the model and the connector reference the same state.
+            const bool      remapped      = cp_size > 1 && !kvcache_resource.cacheKeysAreCpCanonical();
+            KVCacheResource live_resource = kvcache_resource;
+            const size_t    state_index   = remapped ? matched_blocks * cp_size - 1 : matched_blocks - 1;
+            if (!allocator_->materializeRequestCacheState(live_resource, state_index)) {
                 RTP_LLM_LOG_WARNING(
                     "whole-request memory cache matched %zu blocks but failed to allocate Linear state target",
                     matched_blocks);
                 return nullptr;
             }
+            ref_resource =
+                remapped ?
+                    makeCpShardedConnectorResource(
+                        live_resource, cache_config_, live_resource.localCacheKeys(cp_size - 1, cp_size), cp_size) :
+                    live_resource;
         }
     }
     auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);

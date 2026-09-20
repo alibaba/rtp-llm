@@ -2,6 +2,7 @@
 #include <gmock/gmock.h>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/memory/test/mock/MockKVCacheMemoryConnector.h"
@@ -565,6 +566,176 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenCacheKeysEmpty
 
     auto ctx = coordinator_->asyncWrite(rw_ctx);
     EXPECT_EQ(ctx, nullptr);
+}
+
+TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_LinearCheckpointMaterializesLiveLogicalState) {
+    for (int cp_size : {1, 2, 4}) {
+        CacheConfig config = cache_config_;
+        config.layer_num = config.layer_all_num      = 2;
+        config.layer_to_group_id                     = {0, 1};
+        config.group_types                           = {CacheGroupType::FULL, CacheGroupType::LINEAR};
+        config.linear_group_num                      = 1;
+        config.enable_linear_attention_request_cache = true;
+        ParallelismConfig parallelism;
+        parallelism.tp_size                            = cp_size;
+        parallelism.prefill_cp_config.kv_cache_sharded = cp_size > 1;
+        auto coordinator                               = std::make_shared<KVCacheConnectorCoordinator>(
+            config, kv_cache_config_, runtime_config_, parallelism, SpeculativeExecutionConfig{}, allocator_);
+        auto memory = std::make_shared<KVCacheMemoryConnector>(
+            config, kv_cache_config_, parallelism, allocator_, std::vector<std::string>{}, nullptr);
+        memory->use_prefix_tree_memory_cache_ = true;
+        memory->prefix_block_cache_           = std::make_shared<PrefixTreeMemoryBlockCache>();
+        coordinator->memory_connector_        = memory;
+
+        KVCacheResource live;
+        live.initGroups(2, 2, config.layer_to_group_id, 1, config.group_types);
+        for (int i = 0; i < 3 * cp_size + 1; ++i) {
+            live.cacheKeys().push_back(100 + i);
+        }
+        live.mutableBlockIds(0).assign({10, 11, 12, 13});
+        live.mutableBlockIds(1).assign(BlockIndicesType(live.cacheKeys().size(), NULL_BLOCK_IDX));
+        live.setDeviceReuseBlockNum(1);
+        live.setLastBlockAligned(false);
+        for (int i = 0; i < 2; ++i) {
+            const auto key = live.cacheKeys()[(i + 1) * cp_size - 1];
+            for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+                PrefixTreeMemoryBlockCache::CacheItem item;
+                item.cache_key   = key;
+                item.kind        = kind;
+                item.block_index = i + 1;
+                item.block_size  = 1;
+                item.slot_valid_mask =
+                    kind == CacheBlockKind::COMPRESSED_KV ? std::vector<uint8_t>{1, 0} : std::vector<uint8_t>{0, 1};
+                BlockDependency dep;
+                dep.ordinal    = i;
+                dep.has_parent = i > 0;
+                dep.parent_key = live.cacheKeys()[cp_size - 1];
+                ASSERT_TRUE(memory->prefix_block_cache_->putCommitted(key, dep, item).first);
+            }
+        }
+        EXPECT_CALL(*allocator_, materializeRequestCacheState(testing::_, 2 * cp_size - 1))
+            .WillOnce(testing::Invoke([&](KVCacheResource& resource, size_t index) {
+                resource.mutableBlockIds(1).setAt(index, 77);
+                EXPECT_EQ(live.blocks(1)[index], 77);
+                return true;
+            }));
+        EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, true))
+            .WillOnce(testing::Invoke([&](const KVCacheResource& resource, const CacheKeysType&, bool) {
+                EXPECT_EQ(resource.blocks(1)[1], 77);
+                EXPECT_EQ(resource.blocks(0)[1], 11);
+                EXPECT_EQ(resource.cacheKeys()[1], live.cacheKeys()[2 * cp_size - 1]);
+                return std::make_shared<KVCacheResource>(resource);
+            }));
+        auto                  context = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+        std::shared_ptr<Meta> meta    = std::make_shared<TestMeta>(true, false, "");
+        ON_CALL(*context, kvCacheResource()).WillByDefault(testing::ReturnRef(live));
+        ON_CALL(*context, meta()).WillByDefault(testing::ReturnRef(meta));
+        auto read = coordinator->asyncRead(context);
+        EXPECT_NE(read, nullptr);
+        coordinator->fused_async_read_context_list_.clear();
+    }
+}
+
+TEST_F(KVCacheConnectorCoordinatorTest, CpRemapPreservesCheckpointBeforeFullLogicalTail) {
+    for (int cp_size : {2, 4}) {
+        for (int trailing_pages = 0; trailing_pages < cp_size; ++trailing_pages) {
+            for (bool aligned : {false, true}) {
+                for (bool write : {false, true}) {
+                    SCOPED_TRACE(testing::Message()
+                                 << cp_size << "/" << trailing_pages << "/" << aligned << "/" << write);
+                    ParallelismConfig parallelism;
+                    parallelism.tp_size                            = cp_size;
+                    parallelism.prefill_cp_config.kv_cache_sharded = true;
+                    auto            coordinator = std::make_shared<KVCacheConnectorCoordinator>(cache_config_,
+                                                                                     kv_cache_config_,
+                                                                                     runtime_config_,
+                                                                                     parallelism,
+                                                                                     SpeculativeExecutionConfig{},
+                                                                                     allocator_);
+                    KVCacheResource resource;
+                    resource.initGroups(1, 1, {0}, 1, {CacheGroupType::FULL});
+                    for (int i = 0; i < 4 * cp_size + trailing_pages; ++i) {
+                        resource.cacheKeys().push_back(100 + i);
+                    }
+                    resource.mutableBlockIds(0).assign({10, 11, 12, 13, 14});
+                    resource.setLastBlockAligned(aligned);
+                    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, true))
+                        .WillOnce(testing::Invoke([&](const KVCacheResource& mapped, const CacheKeysType& keys, bool) {
+                            EXPECT_EQ(keys.size(), trailing_pages ? 5u : 4u);
+                            // Drop only the request-tail sentinel. This must
+                            // leave the checkpoint at 4 * cp_size pages usable
+                            // whenever any further input tokens remain.
+                            EXPECT_EQ(keys.size() - 1, trailing_pages ? 4u : 3u);
+                            EXPECT_EQ(keys[3], resource.cacheKeys()[4 * cp_size - 1]);
+                            EXPECT_EQ(mapped.lastBlockAligned(), trailing_pages ? false : aligned);
+                            EXPECT_THAT(mapped.blocks(0), testing::ElementsAre(10, 11, 12, 13));
+                            return std::make_shared<KVCacheResource>(mapped);
+                        }));
+                    auto context = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+                    std::shared_ptr<Meta> meta = std::make_shared<TestMeta>(true, false, "");
+                    ON_CALL(*context, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
+                    ON_CALL(*context, meta()).WillByDefault(testing::ReturnRef(meta));
+                    auto operation = write ? coordinator->asyncWrite(context) : coordinator->asyncRead(context);
+                    EXPECT_NE(operation, nullptr);
+                    coordinator->fused_async_read_context_list_.clear();
+                    coordinator->fused_async_write_context_list_.clear();
+                }
+            }
+        }
+    }
+}
+
+TEST_F(KVCacheConnectorCoordinatorTest, CpRemapUsesFixedStateSpecInsteadOfAllocationSummary) {
+    for (int cp_size : {2, 4}) {
+        for (bool write : {false, true}) {
+            CacheConfig config = cache_config_;
+            config.layer_num = config.layer_all_num = 2;
+            config.seq_size_per_block               = 64;
+            config.layer_to_group_id                = {0, 1};
+            config.group_types                      = {CacheGroupType::FULL, CacheGroupType::SWA};
+            config.group_seq_size_per_block         = {64, 64};
+            config.cache_specs.resize(2);
+            config.cache_specs[1] = std::make_shared<DSV4StateSpec>(
+                KVCacheRegionName::INDEXER_STATE, 1, 256, 1, DataType::TYPE_FP32, 64 * cp_size);
+            ParallelismConfig parallelism;
+            parallelism.tp_size                            = cp_size;
+            parallelism.prefill_cp_config.kv_cache_sharded = true;
+            auto coordinator                               = std::make_shared<KVCacheConnectorCoordinator>(
+                config, kv_cache_config_, runtime_config_, parallelism, SpeculativeExecutionConfig{}, allocator_);
+            KVCacheResource resource;
+            resource.initGroups(2, 2, config.layer_to_group_id, 1, config.group_types);
+            for (int i = 0; i < 8 * cp_size + 1; ++i) {
+                resource.cacheKeys().push_back(100 + i);
+            }
+            resource.setLastBlockAligned(false);
+            resource.mutableBlockIds(0).assign({10, 11, 12, 13, 14, 15, 16, 17, 18});
+            // step=3 checkpoints plus the two active tail rows.
+            resource.mutableBlockIds(1).assign(
+                {NULL_BLOCK_IDX, NULL_BLOCK_IDX, 22, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 25, NULL_BLOCK_IDX, 27, 28});
+            EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, true))
+                .WillOnce(testing::Invoke([&](const KVCacheResource& mapped, const CacheKeysType&, bool) {
+                    EXPECT_THAT(mapped.blocks(1),
+                                testing::ElementsAre(NULL_BLOCK_IDX,
+                                                     NULL_BLOCK_IDX,
+                                                     22,
+                                                     NULL_BLOCK_IDX,
+                                                     NULL_BLOCK_IDX,
+                                                     25,
+                                                     NULL_BLOCK_IDX,
+                                                     27));
+                    EXPECT_EQ(mapped.cacheKeys()[2], resource.cacheKeys()[3 * cp_size - 1]);
+                    return std::make_shared<KVCacheResource>(mapped);
+                }));
+            auto                  context = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+            std::shared_ptr<Meta> meta    = std::make_shared<TestMeta>(true, false, "");
+            ON_CALL(*context, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
+            ON_CALL(*context, meta()).WillByDefault(testing::ReturnRef(meta));
+            auto operation = write ? coordinator->asyncWrite(context) : coordinator->asyncRead(context);
+            EXPECT_NE(operation, nullptr);
+            coordinator->fused_async_read_context_list_.clear();
+            coordinator->fused_async_write_context_list_.clear();
+        }
+    }
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsNonFullGroupsInLogicalCoordinates) {

@@ -1199,6 +1199,13 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         if (success) {
             resource->setMemoryReuseBlockNum(read_block_num);
             for (const auto& copy_info : copy_plan->copy_infos) {
+                // A whole-state read may restore only a subset of the cached
+                // regions. Consuming the entry loses the other regions and
+                // checkpoints that this request cannot write back. Keep the
+                // shared prefix backing until normal cache eviction.
+                if (wholeStateRequestCache()) {
+                    continue;
+                }
                 if (copy_info.kind == CacheBlockKind::COMPRESSED_KV || copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
                     const auto removed_item = prefix_block_cache_->detachIfMatch(copy_info.cache_key,
                                                                                  copy_info.kind,
@@ -1218,7 +1225,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
                     releaseCacheBacking(*removed_item);
                 }
             }
-            RTP_LLM_LOG_INFO("memory cache read success: read_blocks=%d released_blocks=%zu total_blocks=%zu",
+            RTP_LLM_LOG_INFO("memory cache read success: read_blocks=%d copied_blocks=%zu total_blocks=%zu",
                              read_block_num,
                              copy_plan->copy_infos.size(),
                              total_block_num);

@@ -13,6 +13,7 @@ public:
     ~MockKVCacheAllocator() override = default;
 
 public:
+    MOCK_METHOD(bool, materializeRequestCacheState, (KVCacheResource & resource, size_t key_index), (override));
     MOCK_METHOD(void, free, (const FreeInfo&), (override));
     MOCK_METHOD(void, insertIntoCache, (const InsertInfo&), (override));
     MOCK_METHOD(BlockAddrInfo, convertIndexToAddr, (int layer_id, int block_id), (const, override));

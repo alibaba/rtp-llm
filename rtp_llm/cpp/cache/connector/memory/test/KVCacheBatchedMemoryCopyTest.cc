@@ -1,5 +1,6 @@
 // Copyright (c) RTP-LLM
 
+#include <chrono>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -8,6 +9,7 @@
 #include <vector>
 
 #include <cuda_runtime.h>
+#include <grpc++/grpc++.h>
 #include <torch/torch.h>
 #include "gtest/gtest.h"
 
@@ -23,6 +25,45 @@
 
 namespace rtp_llm::test {
 namespace {
+
+// Exercise the real async completion and copy path on a local RPC endpoint.
+class CopyRpcServer final: public RpcService::Service {
+public:
+    ~CopyRpcServer() override {
+        if (server_) {
+            server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(1));
+            server_->Wait();
+        }
+    }
+
+    bool start() {
+        grpc::ServerBuilder builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port_);
+        builder.RegisterService(this);
+        server_ = builder.BuildAndStart();
+        return server_ && port_ != 0;
+    }
+
+    std::string address() const {
+        return "127.0.0.1:" + std::to_string(port_);
+    }
+
+    grpc::Status
+    ExecuteFunction(grpc::ServerContext*, const FunctionRequestPB* request, FunctionResponsePB* response) override {
+        auto connector = connector_.lock();
+        if (!connector) {
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, "test connector expired");
+        }
+        connector->copyCache(request->mem_request(), *response->mutable_mem_response());
+        return grpc::Status::OK;
+    }
+
+    std::weak_ptr<KVCacheMemoryConnector> connector_;
+
+private:
+    int                           port_ = 0;
+    std::unique_ptr<grpc::Server> server_;
+};
 
 BlockDependency rootDep(uint32_t ordinal = 0) {
     BlockDependency dep;
@@ -983,10 +1024,13 @@ TEST(KVCacheBatchedMemoryCopyTest, WholeRequestReadOnlyRestoresSelectedCheckpoin
     KVCacheConfig kv_config;
     kv_config.memory_cache_size_mb         = 8;
     kv_config.memory_cache_sync_timeout_ms = 1000;
-    auto allocator                         = std::make_shared<FakeTypedKVCacheAllocator>(config);
-    auto connector =
-        std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, std::vector<std::string>{"127.0.0.1:1"});
+    auto          allocator                = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    CopyRpcServer server;
+    ASSERT_TRUE(server.start());
+    auto connector = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, allocator, std::vector<std::string>{server.address()});
     ASSERT_TRUE(connector->init());
+    server.connector_ = connector;
     KVCacheResource resource;
     resource.cacheKeys() = {101, 102, 103, 104};
     resource.initGroups(
@@ -1012,6 +1056,7 @@ TEST(KVCacheBatchedMemoryCopyTest, WholeRequestReadOnlyRestoresSelectedCheckpoin
             copy.mem_block       = allocated[0];
             copy.block_size      = connector->prefixKindBlockSize(kind, slots);
             copy.slot_valid_mask = connector->prefixSlotValidMask(blocks, slots, index, kind);
+            setBlockInfosContent(pool->convertIndexToBuffer(0, allocated[0]), 'R');
             connector->putPrefixToCache(copy, resource.blockDependencies()[index], slots);
         }
     }
@@ -1036,6 +1081,29 @@ TEST(KVCacheBatchedMemoryCopyTest, WholeRequestReadOnlyRestoresSelectedCheckpoin
         if (copy.kind == CacheBlockKind::STATE_SWA_KV) {
             EXPECT_GE(copy.cache_key, 103);
         }
+    }
+
+    write.reset();
+    plan.reset();
+    const auto compressed_free = connector->compressed_pool_->freeBlocksNum();
+    const auto state_free      = connector->state_swa_pool_->freeBlocksNum();
+    // Repeated readers must preserve both the selected checkpoint and the
+    // cached compressed regions; a longer reader may not restore every region.
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        auto destination = std::make_shared<KVCacheResource>(resource);
+        auto read        = connector->asyncRead(destination, nullptr, nullptr, 0, 3);
+        ASSERT_NE(read, nullptr);
+        read->waitDone();
+        ASSERT_TRUE(read->success());
+        EXPECT_EQ(destination->memoryReuseBlockNum(), 3u);
+        EXPECT_EQ(connector->matchWholeRequest(resource), 3u);
+        for (const auto& slot : slots) {
+            const auto block = slot.group_id == 1 ? 7 : 3;
+            verifyBlockInfosContent(allocator->convertIndexToBuffer(slot.layer_id, slot.region_name, block), 'R');
+        }
+        read.reset();
+        EXPECT_EQ(connector->compressed_pool_->freeBlocksNum(), compressed_free);
+        EXPECT_EQ(connector->state_swa_pool_->freeBlocksNum(), state_free);
     }
 }
 
