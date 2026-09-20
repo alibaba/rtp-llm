@@ -89,3 +89,15 @@ py_test(
     env = {"GPU_COUNT": "1"},
     exec_properties = {"gpu": "A10", "gpu_count": "1"},
 )
+
+py_test(
+    name = "generic_moe_gate_pack_routing_test",
+    srcs = ["generic_moe_gate_pack_routing_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)

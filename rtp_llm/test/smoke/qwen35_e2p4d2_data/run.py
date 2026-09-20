@@ -103,7 +103,6 @@ def main():
         "--data-dir=" + str(data),
         "--output=" + str(out / "gpu-preflight"),
         "--reserve-mb=24576",
-        "--p-token-budget=20000",
         "--d-reserve-mb=8192",
         "--d-kv-mb=49152",
         "--d-seq-limit=96",

@@ -2,11 +2,18 @@ import logging
 from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import ExpertGatePayload
+from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
+from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
+from rtp_llm.utils.model_weight import W
+from torch import nn
+
 from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -24,15 +31,10 @@ from rtp_llm.models_py.modules import (
     SelectTopk,
     SigmoidGateScaleAdd,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
-    MoEConfigAdapter,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import ExpertGatePayload
-from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
-from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
+
+_MEGA_MOE_GATE_PACK_MAX_TOKENS = 4096
 
 
 class GenericMoeLayer(nn.Module):
@@ -64,7 +66,21 @@ class GenericMoeLayer(nn.Module):
         self.gate = LinearFactory.create_linear_from_weights(
             weights, W.moe_gate, None, None, quant_config, hw_kernel_config
         )
-        self.select_topk = SelectTopk(config=config)
+        # The measured Qwen3.5 FP8 prefill path favors fused gate-pack for
+        # small local batches, but topk512 + pack for larger ones.
+        self._split_mega_moe_gate_pack = (
+            getattr(moe_config, "moe_strategy", "auto")
+            in ("mega_moe_fp8", "mega_moe_fp8_se")
+            and config.expert_num == 512
+            and config.scoring_func == 0
+            and config.has_moe_norm
+            and float(config.routed_scaling_factor or 1.0) == 1.0
+            and weights.get(W.e_score_correction_b) is None
+        )
+        if self._split_mega_moe_gate_pack:
+            self.select_topk = SelectTopk(config=config, use_fused_512=True)
+        else:
+            self.select_topk = SelectTopk(config=config)
         if moe_config.fake_balance_expert:
             self.fake_balance_expert = FakeBalanceExpert(
                 expert_num=config.expert_num,
@@ -233,7 +249,10 @@ class GenericMoeLayer(nn.Module):
             gate_logits = self.shared_expert_gate(hidden_states)
             expert_args = {"shared_expert_gates": shared_expert_sigmoid(gate_logits)}
 
-        if self.fused_moe.supports_gate_pack:
+        if self.fused_moe.supports_gate_pack and not (
+            self._split_mega_moe_gate_pack
+            and num_tokens > _MEGA_MOE_GATE_PACK_MAX_TOKENS
+        ):
             experts_output = self.fused_moe.forward_gate_pack(
                 hidden_states=hidden_states,
                 gate_payload=self._build_mega_moe_gate_payload(router_logits),
