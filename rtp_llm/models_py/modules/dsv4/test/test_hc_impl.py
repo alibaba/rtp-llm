@@ -4,6 +4,7 @@ from contextlib import contextmanager
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head, build_hc_unit
 from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import (
     FallbackHCHead,
@@ -253,6 +254,7 @@ class TestHCImpl(unittest.TestCase):
                     unit.post(x, residual, bad_post, comb)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    @unittest.skipUnless(_tl.tilelang_available(), "tilelang not importable")
     def test_tilelang_matches_fallback_cuda(self) -> None:
         hc, dim = 4, 128
         fn, base, scale = _weights(hc, dim, device="cuda")
@@ -353,6 +355,7 @@ class TestHCImpl(unittest.TestCase):
                 tk_mhc_post(x_fp32, residual, post, comb, hc_mult=hc)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    @unittest.skipUnless(_tl.tilelang_available(), "tilelang not importable")
     def test_tilelang_post_in_place_matches_fresh_buffer_cuda(self) -> None:
         # Pins the out=residual aliasing invariant: writing the post output back
         # into the residual buffer must be bit-identical to writing into a fresh
@@ -384,6 +387,7 @@ class TestHCImpl(unittest.TestCase):
         torch.testing.assert_close(out_alias, out_fresh, atol=0, rtol=0)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    @unittest.skipUnless(_tl.tilelang_available(), "tilelang not importable")
     def test_tilelang_head_matches_fallback_cuda(self) -> None:
         hc, dim = 4, 128
         fn, base, scale = _weights(hc, dim, device="cuda")
