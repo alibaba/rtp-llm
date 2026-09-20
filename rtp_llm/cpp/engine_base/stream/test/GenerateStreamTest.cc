@@ -202,6 +202,7 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateStaleEpochReject) {
     // Step 1: publish state, capture epoch_1.
     GenerateStream::MtpAsyncDeviceState s1;
     s1.accept_len_gpu      = torch::ones({1}, torch::kInt32);
+    s1.engram_token_window_gpu = torch::tensor({{6, 5, 4, 3}}, torch::kInt32);
     const uint64_t epoch_1 = stream->setMtpAsyncDeviceState(std::move(s1));
     ASSERT_EQ(epoch_1, 1u);
     ASSERT_TRUE(stream->getMtpAsyncDeviceState().accept_len_gpu.defined());
@@ -210,6 +211,7 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateStaleEpochReject) {
     // bumps; old epoch should now be stale.
     GenerateStream::MtpAsyncDeviceState s2;
     s2.accept_len_gpu      = torch::ones({1}, torch::kInt32) * 2;
+    s2.engram_token_window_gpu = torch::tensor({{8, 7, 6, 5}}, torch::kInt32);
     const uint64_t epoch_2 = stream->setMtpAsyncDeviceState(std::move(s2));
     ASSERT_EQ(epoch_2, 2u);
     ASSERT_NE(epoch_1, epoch_2);
@@ -219,10 +221,12 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateStaleEpochReject) {
     ASSERT_FALSE(stream->clearMtpAsyncDeviceState(epoch_1));
     ASSERT_TRUE(stream->getMtpAsyncDeviceState().accept_len_gpu.defined());
     ASSERT_EQ(stream->getMtpAsyncDeviceState().epoch, epoch_2);
+    EXPECT_TRUE(torch::equal(stream->getEngramTokenWindowGpu(), torch::tensor({{8, 7, 6, 5}}, torch::kInt32)));
 
     // Worker for epoch_2 clears successfully.
     ASSERT_TRUE(stream->clearMtpAsyncDeviceState(epoch_2));
     ASSERT_FALSE(stream->getMtpAsyncDeviceState().accept_len_gpu.defined());
+    ASSERT_FALSE(stream->getEngramTokenWindowGpu().defined());
     ASSERT_EQ(stream->getMtpAsyncDeviceState().epoch, 0u);
 
     // Repeated stale clear after the live state is gone is also a no-op

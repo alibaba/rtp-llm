@@ -13,6 +13,10 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
+#endif
 
 namespace rtp_llm {
 namespace {
@@ -159,7 +163,18 @@ torch::Tensor dsparkNewestToken(const GenerateStreamPtr& stream) {
 // exactly the same stream state, so both consume this one derivation.
 std::pair<torch::Tensor, torch::Tensor>
 dsparkRoundHeadState(const StreamGroups& stream_groups, const GptModelInputs& model_input, TensorHolder& host_holder) {
-    const int64_t              batch_size = static_cast<int64_t>(stream_groups.size());
+    const int64_t batch_size = static_cast<int64_t>(stream_groups.size());
+    if (model_input.engram_token_windows.defined() && model_input.engram_token_windows.is_cuda()
+        && model_input.sequence_lengths.defined() && model_input.sequence_lengths.is_cuda()) {
+        RTP_LLM_CHECK_WITH_INFO(
+            model_input.engram_token_windows.dim() == 2 && model_input.engram_token_windows.size(0) == batch_size
+                && model_input.engram_token_windows.size(1) == 4 && model_input.sequence_lengths.numel() == batch_size,
+            "DSpark round head requires one gathered Engram anchor and position per stream");
+        // The gatherer already reconciled fresh and established streams. Reuse
+        // that GPU snapshot instead of reading a fresh stream's host tokens
+        // again or gathering the same accept-length-dependent anchor twice.
+        return {model_input.engram_token_windows.select(1, 0).contiguous(), model_input.sequence_lengths};
+    }
     std::vector<torch::Tensor> anchors;
     std::vector<torch::Tensor> committed_end_parts;
     anchors.reserve(batch_size);
@@ -879,11 +894,49 @@ torch::Tensor MtpBatchStreamProcessor::makeEngramVerifyWindows(const torch::Tens
                                 && verify_tokens.scalar_type() == torch::kInt32
                                 && anchor_windows.device() == verify_tokens.device(),
                             "Engram verify expects int32 history [batch,4] and tokens [batch,width] on one device");
+#if USING_CUDA
+    if (anchor_windows.is_cuda()) {
+        auto output = torch::empty({verify_tokens.numel(), 4}, anchor_windows.options());
+        invokeMtpEngramVerifyWindows(
+            anchor_windows.contiguous(), verify_tokens.contiguous(), output, at::cuda::getCurrentCUDAStream().stream());
+        return output;
+    }
+#endif
     // Chronological prefix [previous-3, previous-2, previous] followed by
     // [anchor, candidates...]. The unfold/flip restores current-first rows.
     auto history_tail = anchor_windows.narrow(1, 1, 3).flip({1});
     auto tokens       = torch::cat({history_tail, verify_tokens}, 1);
     return tokens.unfold(1, 4, 1).flip({2}).contiguous().reshape({verify_tokens.numel(), 4});
+}
+
+torch::Tensor MtpBatchStreamProcessor::advanceEngramTokenWindows(const torch::Tensor& anchor_windows,
+                                                                 const torch::Tensor& accept_tokens,
+                                                                 const torch::Tensor& accept_len) {
+    RTP_LLM_CHECK_WITH_INFO(
+        anchor_windows.dim() == 2 && anchor_windows.size(1) == 4 && accept_tokens.dim() == 2
+            && accept_tokens.size(0) == anchor_windows.size(0) && accept_tokens.size(1) > 0
+            && accept_len.numel() == anchor_windows.size(0) && anchor_windows.scalar_type() == torch::kInt32
+            && accept_tokens.scalar_type() == torch::kInt32 && accept_len.scalar_type() == torch::kInt32
+            && anchor_windows.device() == accept_tokens.device() && anchor_windows.device() == accept_len.device(),
+        "Engram commit expects int32 history [batch,4], tokens [batch,width] and lengths [batch] "
+        "on one device");
+#if USING_CUDA
+    if (anchor_windows.is_cuda()) {
+        auto output = torch::empty({anchor_windows.size(0), 4}, anchor_windows.options());
+        invokeMtpAdvanceEngramTokenWindows(anchor_windows.contiguous(),
+                                           accept_tokens.contiguous(),
+                                           accept_len.contiguous(),
+                                           output,
+                                           at::cuda::getCurrentCUDAStream().stream());
+        return output;
+    }
+#endif
+    // Chronological old tail followed by accepted tokens; each row gathers
+    // its own last four committed positions without inspecting lengths on CPU.
+    auto tokens  = torch::cat({anchor_windows.flip({1}), accept_tokens}, 1);
+    auto indexes = accept_len.reshape({-1, 1}).to(torch::kLong)
+                   + torch::arange(3, -1, -1, accept_len.options().dtype(torch::kLong)).reshape({1, 4});
+    return tokens.gather(1, indexes);
 }
 
 void MtpBatchStreamProcessor::updateDSparkTargetVerifyModelInput(const DSparkRoundHead& round_head,
@@ -910,8 +963,8 @@ void MtpBatchStreamProcessor::updateDSparkTargetVerifyModelInput(const DSparkRou
         if (!anchor_windows.is_cuda() && !anchor_windows.is_pinned()) {
             anchor_windows = anchor_windows.pin_memory();
         }
-        // Gathered history is pinned CPU memory; keep it alive until its
-        // nonblocking H2D completes. Candidate tokens never leave CUDA.
+        // Decode history is already on CUDA; retain host-source compatibility
+        // for callers initializing a fresh request. Candidates stay on CUDA.
         auto anchor_windows_cuda = toCudaInt32(anchor_windows, host_holder);
         model_input.engram_token_windows =
             makeEngramVerifyWindows(anchor_windows_cuda, verify.reshape({batch_size, propose_step_ + 1}));

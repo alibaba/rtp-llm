@@ -104,6 +104,39 @@ void checkCudaI32Vector(const torch::Tensor& tensor, const char* name, int64_t b
         tensor.numel() >= batch_size, "%s numel %ld is smaller than batch_size %ld", name, tensor.numel(), batch_size);
 }
 
+__global__ void mtpEngramVerifyWindowsKernel(const int32_t* __restrict__ anchor_windows,
+                                             const int32_t* __restrict__ verify_tokens,
+                                             int32_t* __restrict__ output,
+                                             int64_t width,
+                                             int64_t elements) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= elements) {
+        return;
+    }
+    const int64_t lag    = idx % 4;
+    const int64_t row    = idx / 4;
+    const int64_t batch  = row / width;
+    const int64_t source = row % width - lag;
+    output[idx]          = source >= 0 ? verify_tokens[batch * width + source] : anchor_windows[batch * 4 - source];
+}
+
+__global__ void mtpAdvanceEngramTokenWindowsKernel(const int32_t* __restrict__ anchor_windows,
+                                                   const int32_t* __restrict__ accept_tokens,
+                                                   const int32_t* __restrict__ accept_len,
+                                                   int32_t* __restrict__ output,
+                                                   int64_t width,
+                                                   int64_t elements) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= elements) {
+        return;
+    }
+    const int64_t batch  = idx / 4;
+    const int64_t source = static_cast<int64_t>(accept_len[batch]) - 1 - idx % 4;
+    // Replacement/bonus tokens come from accept_tokens, never uncommitted
+    // verify candidates. Negative positions refer to the previous anchor tail.
+    output[idx] = source >= 0 ? accept_tokens[batch * width + source] : anchor_windows[batch * 4 - source - 1];
+}
+
 }  // namespace
 
 void invokeMtpTargetVerifyPrepare(const torch::Tensor& sequence_lengths,
@@ -246,6 +279,53 @@ void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,
                                                                         next_seq_len.data_ptr<int32_t>(),
                                                                         hidden_idx.data_ptr<int64_t>(),
                                                                         static_cast<int32_t>(batch_size));
+}
+
+void invokeMtpEngramVerifyWindows(const torch::Tensor& anchor_windows,
+                                  const torch::Tensor& verify_tokens,
+                                  torch::Tensor&       output,
+                                  cudaStream_t         stream) {
+    const int64_t batch_size = anchor_windows.size(0);
+    const int64_t width      = verify_tokens.size(1);
+    const int64_t elements   = batch_size * width * 4;
+    checkCudaI32Vector(anchor_windows, "anchor_windows", batch_size * 4);
+    checkCudaI32Vector(verify_tokens, "verify_tokens", batch_size * width);
+    checkCudaI32Vector(output, "engram_verify_output", elements);
+    if (elements == 0) {
+        return;
+    }
+    constexpr int block_size = 128;
+    const int     grid_size  = static_cast<int>((elements + block_size - 1) / block_size);
+    mtpEngramVerifyWindowsKernel<<<grid_size, block_size, 0, stream>>>(anchor_windows.data_ptr<int32_t>(),
+                                                                       verify_tokens.data_ptr<int32_t>(),
+                                                                       output.data_ptr<int32_t>(),
+                                                                       width,
+                                                                       elements);
+}
+
+void invokeMtpAdvanceEngramTokenWindows(const torch::Tensor& anchor_windows,
+                                        const torch::Tensor& accept_tokens,
+                                        const torch::Tensor& accept_len,
+                                        torch::Tensor&       output,
+                                        cudaStream_t         stream) {
+    const int64_t batch_size = anchor_windows.size(0);
+    const int64_t width      = accept_tokens.size(1);
+    const int64_t elements   = batch_size * 4;
+    checkCudaI32Vector(anchor_windows, "anchor_windows", elements);
+    checkCudaI32Vector(accept_tokens, "accept_tokens", batch_size * width);
+    checkCudaI32Vector(accept_len, "accept_len", batch_size);
+    checkCudaI32Vector(output, "engram_committed_output", elements);
+    if (elements == 0) {
+        return;
+    }
+    constexpr int block_size = 128;
+    const int     grid_size  = static_cast<int>((elements + block_size - 1) / block_size);
+    mtpAdvanceEngramTokenWindowsKernel<<<grid_size, block_size, 0, stream>>>(anchor_windows.data_ptr<int32_t>(),
+                                                                             accept_tokens.data_ptr<int32_t>(),
+                                                                             accept_len.data_ptr<int32_t>(),
+                                                                             output.data_ptr<int32_t>(),
+                                                                             width,
+                                                                             elements);
 }
 
 }  // namespace rtp_llm

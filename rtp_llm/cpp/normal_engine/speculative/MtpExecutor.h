@@ -140,6 +140,7 @@ protected:
     absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
                                       const std::list<GenerateStreamPtr>&          streams,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                      const torch::Tensor&                         engram_anchor_windows,
                                       GptModelOutputs                              draft_prefill_model_output,
                                       SamplerOutput                                draft_prefill_sampler_output,
                                       std::shared_ptr<torch::Event>                rejection_event,
@@ -189,6 +190,7 @@ protected:
     // the main thread.
     absl::Status dispatchDecodeAsync(const StreamGroups&                          stream_groups,
                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                     const torch::Tensor&                         next_engram_windows,
                                      MergedOutput                                 draft_prefill_output,
                                      std::shared_ptr<torch::Event>                rejection_event,
                                      std::shared_ptr<torch::Event>                draft_event);
@@ -197,6 +199,7 @@ protected:
     // the async path, using the host seqLength after specUpdate as truth.
     void publishSyncMtpDeviceState(const StreamGroups&                          stream_groups,
                                    const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                   const torch::Tensor&                         next_engram_windows,
                                    const MergedOutput&                          draft_prefill_output);
 
     void releaseAllModelBuffers();
