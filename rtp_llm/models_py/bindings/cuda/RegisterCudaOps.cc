@@ -2,6 +2,9 @@
 #include "rtp_llm/models_py/bindings/cuda/RegisterBaseBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/RegisterAttnOpBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
+#ifdef ENABLE_W4A16_SM120
+#include "rtp_llm/models_py/bindings/cuda/W4A16GemmOp.h"
+#endif
 
 #if defined(ENABLE_FP4)
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
@@ -18,6 +21,19 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+#ifdef ENABLE_W4A16_SM120
+    rtp_ops_m.def("w4a16_sm120_hadamard", &w4a16Sm120Hadamard, py::arg("input"), py::arg("scale"));
+    rtp_ops_m.def("w4a16_sm120_transform", &w4a16Sm120Transform);
+    rtp_ops_m.def("w4a16_sm120_gemm",
+                  &w4a16Sm120Gemm,
+                  py::arg("input"),
+                  py::arg("packed"),
+                  py::arg("scales"),
+                  py::arg("output"),
+                  py::arg("output_size"),
+                  py::arg("input_size"),
+                  py::arg("split_k") = 0);
+#endif
 #ifndef USE_PPU
     rtp_ops_m.def("fast_bf16_int8_quantize",
                   &fastBf16Int8Quantize,

@@ -65,6 +65,7 @@ class ModelConfig(CppModelConfig):
         "has_lm_head_bias",
         "tie_word_embeddings",
         "quantization",
+        "enable_w4a16_sm120_dense_ffn",
         "mm_related_params",
         "src_quantization_bit",
         "config_dtype",
@@ -542,6 +543,7 @@ class ModelConfig(CppModelConfig):
         self.quantization: str = (
             ""  # Quantization method string (e.g., "INT8", "FP8", etc.)
         )
+        self.enable_w4a16_sm120_dense_ffn: bool = False
         self.src_quantization_bit: int = 0
         self.config_dtype: Optional[str] = None
 
@@ -565,6 +567,19 @@ class ModelConfig(CppModelConfig):
         self.render_config: Optional[Any] = None  # RenderConfig for renderer factory
         self.mm_related_params = VitParameters()
         self.quant_config = None
+
+    def validate_w4a16_sm120_dense_ffn(self) -> None:
+        """Validate model-level options before enabling W4A16 dense FFNs."""
+        if self.moe_style != 0 or self.expert_num > 0:
+            raise ValueError("SM120 W4A16 dense FFN does not support MoE models")
+        if self.quant_config is not None or self.quantization:
+            raise ValueError(
+                "SM120 W4A16 dense FFN cannot be combined with weight quantization"
+            )
+        if self.lora_infos:
+            raise ValueError("SM120 W4A16 dense FFN does not support LoRA")
+        if self.compute_dtype != torch.bfloat16:
+            raise ValueError("SM120 W4A16 dense FFN requires BF16 compute dtype")
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
@@ -902,6 +917,9 @@ def build_model_config(
     # Set quantization from quantization_config
     if quantization_config is not None:
         model_config.quantization = quantization_config.get_quantization()
+        model_config.enable_w4a16_sm120_dense_ffn = (
+            quantization_config.enable_w4a16_sm120_dense_ffn
+        )
 
     # Initialize precision configuration (uses self.ckpt_path and self.quantization)
     # This will initialize data_type from act_type (or config_dtype), set attn_config.kv_cache_dtype

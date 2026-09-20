@@ -97,6 +97,7 @@ class Qwen3DecoderLayer(nn.Module):
             weights,
             quant_config,
             hw_kernel_config,
+            enable_w4a16_sm120=config.enable_w4a16_sm120_dense_ffn,
         )
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps

@@ -798,6 +798,10 @@ rename_wheel(
 # target for wheel
 py_wheel(
     name = "rtp_llm_whl",
+    extra_distinfo_files = {
+        "//3rdparty/fast_hadamard_transform:LICENSE": "licenses/fast_hadamard_transform/LICENSE",
+        "//3rdparty/fast_hadamard_transform:AUTHORS": "licenses/fast_hadamard_transform/AUTHORS",
+    },
     distribution = "rtp_llm",
     python_tag = "py3",
     tags = ["manual", "local", "no-remote"],
@@ -817,6 +821,10 @@ py_wheel(
 
 py_wheel(
     name = "rtp_llm_kserve_whl",
+    extra_distinfo_files = {
+        "//3rdparty/fast_hadamard_transform:LICENSE": "licenses/fast_hadamard_transform/LICENSE",
+        "//3rdparty/fast_hadamard_transform:AUTHORS": "licenses/fast_hadamard_transform/AUTHORS",
+    },
     distribution = "rtp_llm",
     python_tag = "py3",
     tags = ["manual", "local"],

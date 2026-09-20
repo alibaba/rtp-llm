@@ -1267,6 +1267,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 weights,
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
+                enable_w4a16_sm120=config.enable_w4a16_sm120_dense_ffn,
             )
 
         self.input_layernorm = RMSResNorm(
