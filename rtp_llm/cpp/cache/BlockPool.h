@@ -80,6 +80,15 @@ public:
     size_t getTotalSizeBytes() const {
         return config_.total_size_bytes;
     }
+    bool usesDedicatedCudaAllocation() const {
+        return dedicated_cuda_allocation_;
+    }
+    size_t getAllocationSizeBytes() const {
+        return allocation_size_bytes_;
+    }
+    int getCudaDeviceId() const {
+        return cuda_device_id_;
+    }
     int getSharedMemoryFd() const {
         return shared_memory_fd_;
     }
@@ -148,6 +157,9 @@ private:
     void*                       cache_base_ptr_               = nullptr;
     int                         shared_memory_fd_             = -1;
     bool                        cache_buffer_registered_host_ = false;
+    bool                        dedicated_cuda_allocation_    = false;
+    size_t                      allocation_size_bytes_        = 0;
+    int                         cuda_device_id_               = -1;
     bool                        kvcache_reg_mr_               = false;
     int64_t                     mr_cost_time_ms_              = 0;
     std::shared_ptr<CacheStore> cache_store_;

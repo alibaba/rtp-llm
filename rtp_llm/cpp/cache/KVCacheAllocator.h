@@ -78,6 +78,9 @@ public:
     BlockPoolPtr getBlockPool() const {
         return block_pool_;
     }
+    virtual std::vector<BlockPoolPtr> allBlockPools() const {
+        return block_pool_ ? std::vector<BlockPoolPtr>{block_pool_} : std::vector<BlockPoolPtr>{};
+    }
 
     SharedBlockCachePtr sharedBlockCache() const {
         return shared_block_cache_;

@@ -25,6 +25,11 @@ bool externalZeroCopyConfigured(const KVCacheConfig& kv_cache_config) {
     return zero_copy_enabled && kv_cache_config.enable_memory_cache && memfd_configured;
 }
 
+bool remoteCacheGdrConfigured() {
+    const char* value = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_GDR_ZERO_COPY");
+    return value != nullptr && std::atoi(value) != 0;
+}
+
 struct MatchMetricsHelper {
     MatchMetricsHelper(const std::string& trace_id, const kmonitor::MetricsReporterPtr& metrics_reporter):
         trace_id(trace_id), begin_us(rtp_llm::currentTimeUs()), metrics_reporter(metrics_reporter) {}
@@ -182,6 +187,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                  const kmonitor::MetricsReporterPtr        metrics_reporter,
                                  const std::map<std::string, std::string>& lora_info_map):
     metrics_reporter_(metrics_reporter) {
+    allocator_ = allocator;
     RemoteConnector::InitParams init_params{cache_config,
                                             kv_cache_config,
                                             runtime_config,
@@ -396,8 +402,8 @@ bool RemoteConnector::init() {
         tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID : kv_cache_manager::RoleType::WORKER,
         &regist_span,
         genLocationSpecName(tp_rank, group_policy_->groups().at(full_group_idx).group_name)};
-    kv_cache_manager::SharedMemoryRegistration shared_memory_registration;
-    const kv_cache_manager::SharedMemoryRegistration* shared_memory_registration_ptr = nullptr;
+    kv_cache_manager::ClientMemoryRegistrations memory_registrations;
+    const kv_cache_manager::ClientMemoryRegistrations* memory_registrations_ptr = nullptr;
     auto memory_connector = memory_connector_.lock();
     if (externalZeroCopyConfigured(init_params_->kv_cache_config) &&
         (!memory_connector || memory_connector->hostPoolSharedMemoryFd() < 0)) {
@@ -407,25 +413,46 @@ bool RemoteConnector::init() {
     if (memory_connector) {
         const int shared_memory_fd = memory_connector->hostPoolSharedMemoryFd();
         if (shared_memory_fd >= 0) {
-            shared_memory_registration = {memory_connector->hostPoolBaseAddress(),
-                                          memory_connector->hostPoolSizeBytes(),
-                                          shared_memory_fd};
-            RTP_LLM_CHECK_WITH_INFO(shared_memory_registration.base != nullptr && shared_memory_registration.size > 0,
+            memory_registrations.host = {memory_connector->hostPoolBaseAddress(),
+                                         memory_connector->hostPoolSizeBytes(),
+                                         shared_memory_fd};
+            RTP_LLM_CHECK_WITH_INFO(memory_registrations.host.base != nullptr && memory_registrations.host.size > 0,
                                     "invalid shared host block pool registration: fd=%d base=%p size=%zu",
-                                    shared_memory_registration.fd,
-                                    shared_memory_registration.base,
-                                    shared_memory_registration.size);
-            shared_memory_registration_ptr = &shared_memory_registration;
+                                    memory_registrations.host.fd,
+                                    memory_registrations.host.base,
+                                    memory_registrations.host.size);
+            memory_registrations_ptr = &memory_registrations;
             RTP_LLM_LOG_INFO("remote connector uses shared host block pool: fd=%d base=%p size=%zu",
-                             shared_memory_registration.fd,
-                             shared_memory_registration.base,
-                             shared_memory_registration.size);
+                             memory_registrations.host.fd,
+                             memory_registrations.host.base,
+                             memory_registrations.host.size);
         }
+    }
+    if (remoteCacheGdrConfigured()) {
+        RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr, "RemoteCache GDR requires a KV cache allocator");
+        for (const auto& block_pool : allocator_->allBlockPools()) {
+            if (!block_pool || block_pool->where() != MemoryType::MEMORY_GPU) {
+                continue;
+            }
+            RTP_LLM_CHECK_WITH_INFO(block_pool->usesDedicatedCudaAllocation(),
+                                    "RemoteCache GDR requires dedicated cudaMalloc backing for every GPU block pool");
+            RTP_LLM_CHECK_WITH_INFO(block_pool->getBaseAddress() != nullptr
+                                        && block_pool->getAllocationSizeBytes() > 0,
+                                    "invalid GPU block pool registration span");
+            memory_registrations.gpu.push_back({block_pool->getBaseAddress(),
+                                                block_pool->getAllocationSizeBytes(),
+                                                block_pool->getCudaDeviceId()});
+        }
+        RTP_LLM_CHECK_WITH_INFO(!memory_registrations.gpu.empty(),
+                                "RemoteCache GDR is enabled but no GPU block pool was found");
+        memory_registrations_ptr = &memory_registrations;
+        RTP_LLM_LOG_INFO("RemoteCache GDR registers %zu dedicated GPU block pool(s)",
+                         memory_registrations.gpu.size());
     }
     int cur_device = -1;
     check_cuda_value(cudaGetDevice(&cur_device));
     RTP_LLM_LOG_INFO("cuda cur device: %d", cur_device);
-    if (!client_wrapper_->init(client_config_map, client_init_params, shared_memory_registration_ptr)) {
+    if (!client_wrapper_->init(client_config_map, client_init_params, memory_registrations_ptr)) {
         RTP_LLM_LOG_ERROR("create remote kv cache client failed");
         return false;
     }

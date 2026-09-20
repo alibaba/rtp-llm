@@ -153,6 +153,7 @@ private:
     int                                              get_broadcast_timeout_ = 2000;
     int                                              put_broadcast_timeout_ = 2000;
     std::shared_ptr<InitParams>                      init_params_;
+    std::shared_ptr<KVCacheAllocator>                allocator_;
 
     std::unique_ptr<remote_connector::GroupPolicy> group_policy_;
     std::weak_ptr<KVCacheMemoryConnector>           memory_connector_;

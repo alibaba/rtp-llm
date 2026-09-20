@@ -50,6 +50,8 @@ void releaseHostMemoryCache() {
 }
 
 bool shouldUseCudaMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const CacheStoreConfig& cache_store_config) {
+    const char* remote_cache_gdr_value = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_GDR_ZERO_COPY");
+    const bool  remote_cache_gdr = remote_cache_gdr_value != nullptr && std::atoi(remote_cache_gdr_value) != 0;
     // Only PD cache-store RDMA registers KV cache as user MR.  Keep the
     // raw cudaMalloc backing out of direct KVCacheManager users and non-RDMA
     // paths so PyTorch allocator behavior is unchanged elsewhere.
@@ -57,8 +59,9 @@ bool shouldUseCudaMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const C
     const bool has_cache_store_server = pd_sep_config.cache_store_listen_port > 0
                                         || pd_sep_config.cache_store_rdma_listen_port > 0
                                         || pd_sep_config.remote_rpc_server_port > 0;
-    return pd_role && pd_sep_config.cache_store_rdma_mode
-           && (cache_store_config.cache_store_rdma_mode || has_cache_store_server);
+    const bool cache_store_rdma = pd_role && pd_sep_config.cache_store_rdma_mode
+                                  && (cache_store_config.cache_store_rdma_mode || has_cache_store_server);
+    return cache_store_rdma || remote_cache_gdr;
 }
 
 void blockTerminationSignalsInEngineThread() {
