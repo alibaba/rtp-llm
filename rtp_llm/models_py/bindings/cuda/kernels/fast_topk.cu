@@ -38,6 +38,7 @@ constexpr size_t kSmem = 48 * 1024;  // bytes
 constexpr size_t kSmem = 32 * 1024 * sizeof(uint32_t);  // 128KB (bytes)
 #endif
 
+
 struct FastTopKParams {
     const float* __restrict__ input;         // [B, input_stride]
     const int32_t* __restrict__ row_starts;  // [B]
@@ -371,6 +372,7 @@ __global__ __launch_bounds__(kThreadsPerBlock)  // prefill
     }
 }
 
+
 __global__ __launch_bounds__(kThreadsPerBlock)  // prefill, ragged kv
     void topk_transform_prefill_ragged_kernel(const FastTopKParams params,
                                               int32_t* __restrict__ topk_indices_ragged,
@@ -620,9 +622,10 @@ void fast_topk_transform_ragged_fused(const at::Tensor&         score,
     const auto grid   = dim3{static_cast<uint32_t>(B)};
     const auto block  = dim3{kThreadsPerBlock};
 
+    // Launch the v1 kernel.
     setup_kernel_smem_once<topk_transform_prefill_ragged_kernel, kSmem>();
-    topk_transform_prefill_ragged_kernel<<<grid, block, kSmem, stream>>>(
-        params, topk_indices_ragged.data_ptr<int32_t>(), topk_indices_offset.data_ptr<int32_t>());
+    topk_transform_prefill_ragged_kernel<<<grid, block, kSmem, stream>>>(params,
+        topk_indices_ragged.data_ptr<int32_t>(), topk_indices_offset.data_ptr<int32_t>());
 
     const auto result = cudaGetLastError();
     TORCH_CHECK(result == cudaSuccess, "topk kernel failed:", ::cudaGetErrorString(result));

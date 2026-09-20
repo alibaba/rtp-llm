@@ -16,7 +16,10 @@ from rtp_llm.test.perf_test.batch_decode_test import (
     _engine_arg_argv,
     _fingerprint_engine_env,
     _load_cache_grid_cases,
+    _parse_grid_cases,
     _parse_name_value,
+    _parse_reuse_cache_lengths,
+    _positive_int_arg,
     _redact_argv,
     _require_cache_grid_success,
     main,
@@ -43,6 +46,7 @@ from rtp_llm.test.perf_test.perf_config import (
     _apply_run_overrides,
 )
 from rtp_llm.test.perf_test.perf_utils import write_test_info
+from rtp_llm.test.perf_test.test_util import target_reuse_len_for_hit_rate
 
 
 class _WhitespaceTokenizer:
@@ -1355,6 +1359,44 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertEqual(len(x_tick_positions), 7)
         self.assertEqual(len(set(x_tick_positions)), 7)
 
+    def test_parse_grid_cases_dedupes_in_order(self):
+        self.assertEqual(
+            _parse_grid_cases("1:8192, 2:262144,1:8192"),
+            [(1, 8192), (2, 262144)],
+        )
+
+    def test_parse_grid_cases_empty_uses_cartesian_grid(self):
+        self.assertIsNone(_parse_grid_cases(""))
+
+    def test_parse_grid_cases_rejects_malformed_items(self):
+        with self.assertRaises(ValueError):
+            _parse_grid_cases("1:8192,bad")
+
+    def test_parse_grid_cases_rejects_non_positive_values(self):
+        with self.assertRaises(ValueError):
+            _parse_grid_cases("0:8192")
+
+    def test_positive_int_arg_parses_forwarded_server_args(self):
+        self.assertEqual(
+            _positive_int_arg(["--seq_size_per_block", "64"], "seq_size_per_block", 1),
+            64,
+        )
+        self.assertEqual(_positive_int_arg([], "seq_size_per_block", 8), 8)
+
+    def test_target_reuse_len_rounds_to_block(self):
+        self.assertEqual(target_reuse_len_for_hit_rate(1048576, 0.85, 64), 891264)
+
+    def test_parse_exact_reuse_lengths(self):
+        self.assertEqual(
+            _parse_reuse_cache_lengths("0,512,20480,40960,61440,81408", 81920),
+            [0, 512, 20480, 40960, 61440, 81408],
+        )
+
+    def test_parse_exact_reuse_lengths_rejects_invalid_values(self):
+        with self.assertRaises(ValueError):
+            _parse_reuse_cache_lengths("0,0", 81920)
+        with self.assertRaises(ValueError):
+            _parse_reuse_cache_lengths("81920", 81920)
 
 if __name__ == "__main__":
     unittest.main()

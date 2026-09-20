@@ -307,7 +307,9 @@ public:
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput> inputs,
-                                                      std::string = "") override {
+                                                      std::string                        = "",
+                                                      int64_t                            = 0,
+                                                      grpc::ServerContext*               = nullptr) override {
         ++calls;
         if (throws) {
             throw std::runtime_error("embedding failed");

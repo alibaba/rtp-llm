@@ -30,8 +30,8 @@ class MoEConfigAdapter:
         self.quant_config = quant_config
 
         # Provide shortcut access to commonly used attributes
-        self.ep_size = parallelism_config.ep_size
-        self.ep_rank = parallelism_config.ep_rank
+        self.ep_size = int(getattr(parallelism_config, "ep_size", 1) or 1)
+        self.ep_rank = int(getattr(parallelism_config, "ep_rank", 0) or 0)
         # tp_size/tp_rank reflect the attention/MoE-input view: when CP is
         # enabled, get_attn_tp_size() returns 1, so MoE input slicing
         # (deepep narrow/allgather) stays a no-op. Router selectors that
@@ -81,6 +81,9 @@ class MoEConfigAdapter:
             self.n_shared_experts = shared_inter_size // routed_inter_size
         self.has_shared_expert_gate = False
         self.swiglu_limit = float(model_config.swiglu_limit)
+        # OAI SwiGLU alpha. Zero keeps the plain SwiGLU activation; only the
+        # MegaMoE kernels consume a non-zero value (as ``swiglu_oai``).
+        self.swiglu_alpha = float(getattr(model_config, "swiglu_alpha", 0.0) or 0.0)
         if self.physical_expert_num % max(self.ep_size, 1) != 0:
             raise ValueError(
                 f"physical_expert_num={self.physical_expert_num} must be "
@@ -105,6 +108,9 @@ class MoEConfigAdapter:
         # Generic execution is not chunked, so JIT warmup only needs the
         # request-visible bucket representatives rather than the capacity cap.
         self.warmup_include_capacity = False
+        # Decode batch width. Executors that size a per-rank staging buffer
+        # need it; the layer sets it because the adapter is not batch-bound.
+        self.max_generate_batch_size = 0
         effective_quant_config = (
             quant_config if quant_config is not None else model_config.quant_config
         )

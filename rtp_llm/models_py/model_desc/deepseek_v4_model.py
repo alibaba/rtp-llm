@@ -765,15 +765,22 @@ class DeepSeekV4Model(GptModelBase):
         # JIT — which would otherwise abort via __unexpected (noexcept violation).
         model_warm_up = model_warm_up_enabled()
         if device_str.startswith("cuda") and model_warm_up:
-            from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
+            try:
+                from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
 
-            first_attn = self.v4.layers[0].attn
-            _tl_kernels.prewarm(
-                first_attn.n_heads,
-                first_attn.head_dim,
-                first_attn.softmax_scale,
-                device_str,
-            )
+                first_attn = self.v4.layers[0].attn
+                _tl_kernels.prewarm(
+                    first_attn.n_heads,
+                    first_attn.head_dim,
+                    first_attn.softmax_scale,
+                    device_str,
+                )
+            except Exception as e:
+                logging.warning(
+                    "[DeepSeekV4Model] TileLang sparse_attn prewarm skipped: %s: %s",
+                    type(e).__name__,
+                    e,
+                )
 
             # Pre-warm the v4_indexer_score Triton kernel for the SAME
             # constexpr config the live decode (and CSA prefill) call will
@@ -1288,6 +1295,11 @@ class DeepSeekV4Model(GptModelBase):
 
     def has_mtp_hidden_buffer(self) -> bool:
         """Whether the DeepSeek MTP hand-off already stores CP-local rows."""
+
+        return self.v4 is not None and self.v4._mtp_hidden_buffer is not None
+
+    def supports_mtp_target_hidden_states(self) -> bool:
+        """Whether this instance owns the compact target-hidden hand-off buffer."""
 
         return self.v4 is not None and self.v4._mtp_hidden_buffer is not None
 

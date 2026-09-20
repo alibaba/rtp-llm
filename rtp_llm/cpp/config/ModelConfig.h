@@ -84,7 +84,12 @@ public:
 
     int64_t max_seq_len       = 0;
     int64_t gen_num_per_cycle = 0;  // speculative decoding: tokens per cycle
-    int64_t vocab_size        = 0;
+    // Number of physical MTP modules in the draft checkpoint. Zero preserves
+    // the legacy policy that derives the count from the speculative method and
+    // gen_num_per_cycle. Recurrent native MTP models set this to one even when
+    // one module is reused for several proposal steps.
+    int64_t physical_mtp_module_num = 0;
+    int64_t vocab_size              = 0;
     // Output vocab pruning contract: empty means disabled; otherwise ids must be strictly
     // ascending and deduplicated, each in [0, vocab_size), and output_vocab_padded_size >= ids.size().
     std::vector<int64_t> output_vocab_ids;
@@ -105,8 +110,10 @@ public:
     int64_t hc_mult           = 1;
     int64_t hc_sinkhorn_iters = 0;
     double  hc_eps            = 1e-6;
-    double  swiglu_limit      = 0.0;
-    int64_t num_hash_layers   = 0;
+    // Clamp limit for SwiGLU (linear in [-limit,limit], gate <= limit). 0 disables clamp.
+    double swiglu_limit = 0.0;
+    // Number of leading MoE layers that route via deterministic token-id hash.
+    int64_t num_hash_layers = 0;
 
     bool   has_positional_encoding    = false;
     bool   has_pre_decoder_layernorm  = false;
@@ -118,6 +125,8 @@ public:
     bool   has_moe_norm               = false;
     double logit_scale                = 1.0;
     bool   use_kvcache                = true;
+
+    bool use_opaque_kv_cache_store = false;
 
     int64_t pre_seq_len       = 0;
     bool    prefix_projection = false;

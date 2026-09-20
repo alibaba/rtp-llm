@@ -57,7 +57,10 @@ class FakeSelectTopk(nn.Module):
 
 
 class FakeSharedExpert(nn.Module):
-    def forward(self, hidden_states, skip_allreduce=False):
+    def forward(
+        self, hidden_states, skip_allreduce=False, x_fp8=None, x_scale=None, **kwargs
+    ):
+        # GenericMoeLayer overlap path forwards x_fp8/x_scale; F16 tests ignore them.
         return hidden_states * 2
 
 

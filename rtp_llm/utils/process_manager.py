@@ -31,6 +31,10 @@ DEFAULT_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS = 60.0
 DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS = 120.0
 
 
+class TerminalHealthCheckError(RuntimeError):
+    """A startup health probe reached a permanent failure state."""
+
+
 class ProcessManager:
     """Process manager for managing and monitoring processes"""
 
@@ -51,6 +55,7 @@ class ProcessManager:
         pre_stop_drain_signal: bool = False,
         backend_post_frontend_drain_seconds: float = DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS,
         pre_exit_cleanup: Optional[Callable[[], None]] = None,
+        normal_reap_window: Optional[float] = None,
     ):
         if shutdown_timeout != -1 and shutdown_timeout <= 0:
             logging.warning(
@@ -82,6 +87,7 @@ class ProcessManager:
                 backend_post_frontend_drain_seconds
             )
         )
+        self.normal_reap_window = normal_reap_window
         self.process_groups: Dict[str, List[Process]] = {}
         self.shutdown_group_order: List[str] = []
         self._defer_first_sigterm = allow_defer_first_sigterm and (
@@ -690,6 +696,15 @@ class ProcessManager:
         """Check if all processes are still alive"""
         return all(proc.is_alive() for proc in self.processes)
 
+    def _wait_for_post_term_exit(self, timeout: float):
+        """Wait up to timeout, returning as soon as every child has exited."""
+        deadline = time.monotonic() + timeout
+        while self._is_any_process_alive():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(self.monitor_interval, remaining))
+
     def is_available(self) -> bool:
         """
         Check if ProcessManager is available.
@@ -752,7 +767,10 @@ class ProcessManager:
                 logging.error("Some processes died unexpectedly, terminating all...")
                 self._terminate_processes(drain_timeout=0, staged=False)
 
-            time.sleep(self.POST_KILL_REAP_WINDOW)
+            reap_window = self.POST_KILL_REAP_WINDOW
+            if self.shutdown_requested and not self.failure_detected:
+                reap_window = max(reap_window, self.normal_reap_window or 0)
+            self._wait_for_post_term_exit(reap_window)
             self._force_kill_processes()
             break
 
@@ -853,7 +871,7 @@ class ProcessManager:
             process_name: Name of the process to check
         """
         config = self.health_check_configs[process_name]
-        # fail fast, if backend fail, frontend should exit as soon as possible
+        # A failure in any startup component makes the whole instance unusable.
         processes = self.health_check_processes
         retry_interval = config["retry_interval_seconds"]
         check_ready_fn = config["check_ready_fn"]
@@ -880,6 +898,12 @@ class ProcessManager:
                         self.health_check_status[process_name]["checked"] = True
                     logging.info(f"{process_name} is ready")
                     return
+            except TerminalHealthCheckError as e:
+                with self.health_check_lock:
+                    self.health_check_status[process_name]["ready"] = False
+                    self.health_check_status[process_name]["checked"] = True
+                logging.error(f"{process_name} health check failed permanently: {e}")
+                return
             except Exception as e:
                 logging.debug(f"{process_name} health check exception: {str(e)}")
             time.sleep(retry_interval)
@@ -925,22 +949,36 @@ class ProcessManager:
             f"Waiting for {len(self.health_check_threads)} health checks to complete..."
         )
 
-        for thread in self.health_check_threads:
-            thread.join(timeout=timeout)
+        deadline = None if timeout is None else time.monotonic() + max(0, timeout)
+        while True:
+            with self.health_check_lock:
+                statuses = dict(self.health_check_status)
 
-        # Check results
+            # Do not wait behind another probe that may currently be blocked in
+            # network I/O once any startup component has reached a terminal
+            # failure. Cleanup must start immediately in that case.
+            if any(s["checked"] and not s["ready"] for s in statuses.values()):
+                break
+            if statuses and all(s["checked"] for s in statuses.values()):
+                break
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.1, remaining))
+            else:
+                time.sleep(0.1)
+
         all_ready = True
-        with self.health_check_lock:
-            for process_name, status in self.health_check_status.items():
-                if not status["checked"]:
-                    logging.warning(f"{process_name} health check did not complete")
-                    all_ready = False
-                elif not status["ready"]:
-                    logging.error(f"{process_name} health check failed")
-                    all_ready = False
-                else:
-                    logging.info(f"{process_name} health check passed")
-
+        for process_name, status in statuses.items():
+            if not status["checked"]:
+                logging.warning(f"{process_name} health check did not complete")
+                all_ready = False
+            elif not status["ready"]:
+                logging.error(f"{process_name} health check failed")
+                all_ready = False
+            else:
+                logging.info(f"{process_name} health check passed")
         return all_ready
 
     def run_health_checks(self, timeout: Optional[float] = None) -> bool:

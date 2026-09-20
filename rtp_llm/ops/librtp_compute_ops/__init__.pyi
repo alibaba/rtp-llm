@@ -239,6 +239,7 @@ class PyAttentionInputs:
     input_lengths: torch.Tensor
     is_cuda_graph: bool
     is_prefill: bool
+    is_mtp_draft_prefill: bool
     is_s_padded: bool
     is_target_verify: bool
     padding_offset: torch.Tensor
@@ -252,6 +253,7 @@ class PyAttentionInputs:
     kv_cache_kernel_block_id_device: torch.Tensor
     kv_cache_block_id: torch.Tensor
     kv_cache_block_id_device: torch.Tensor
+    mtp_iteration_step: int
     @property
     def input_lengths_device(self) -> torch.Tensor: ...
     @property

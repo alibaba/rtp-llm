@@ -282,10 +282,15 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         return output
 
     def forward(
-        self, input: torch.Tensor, out: Optional[torch.Tensor] = None
+        self,
+        input: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+        input_scales: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if input_scales is not None:
+            return self.forward_quantized(input, input_scales, out=out)
         M, _ = self._validate_input(input)
-        input_fp8, input_scales = self.quantize_input(input)
+        input_fp8, quantized_scales = self.quantize_input(input)
 
         # Prepare output tensor
-        return self.forward_quantized(input_fp8, input_scales, out=out)
+        return self.forward_quantized(input_fp8, quantized_scales, out=out)

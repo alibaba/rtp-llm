@@ -1,6 +1,157 @@
 import torch
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 
+from rtp_llm.ops import KvCacheDataType
+
+
+def build_cp_sharded_prefix_gather_plan(
+    local_block_table: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    *,
+    page_size: int,
+    cp_size: int,
+    cp_rank: int,
+):
+    """Build reusable addressing for page-RR-sharded request prefixes.
+
+    ``local_block_table`` is the cache manager's compact, rank-local physical
+    table. Logical page ``p`` belongs to rank ``p % cp_size`` and is stored at
+    local table column ``p // cp_size``. Each request therefore contributes
+    ``ceil(prefix_pages / cp_size)`` physical pages per rank to the collective.
+
+    The result is independent of layer and pool dtype and should be built once
+    per forward, then reused for main K/V and idx-K gathers.
+    """
+    if page_size <= 0:
+        raise ValueError(f"page_size must be positive, got {page_size}")
+    if cp_size <= 1:
+        raise ValueError(f"sharded prefix gather requires cp_size > 1, got {cp_size}")
+    if local_block_table.dim() != 2:
+        raise ValueError(
+            "local_block_table must be [batch,max_local_pages], got "
+            f"{tuple(local_block_table.shape)}"
+        )
+
+    prefix_cpu = prefix_lengths.detach().cpu().to(torch.int64)
+    if prefix_cpu.numel() != local_block_table.shape[0]:
+        raise ValueError(
+            f"prefix batch {prefix_cpu.numel()} != block-table batch "
+            f"{local_block_table.shape[0]}"
+        )
+    if bool((prefix_cpu % page_size != 0).any().item()):
+        raise ValueError(
+            f"prefix lengths must be multiples of page_size({page_size}), "
+            f"got {prefix_cpu.tolist()}"
+        )
+
+    # Keep the generic CP collective/interleave implementation in one place.
+    # Import lazily to avoid pulling the full DSV4 module into non-sharded CP.
+    from rtp_llm.models_py.modules.dsv4.cp import build_cp_batched_pool_gather_plan
+
+    logical_page_counts = []
+    for batch_idx, prefix_len in enumerate(prefix_cpu.tolist()):
+        logical_pages = int(prefix_len) // page_size
+        logical_page_counts.append(logical_pages)
+        if logical_pages == 0:
+            continue
+        local_pages = (logical_pages + cp_size - 1) // cp_size
+        if local_pages > local_block_table.shape[1]:
+            raise ValueError(
+                f"request {batch_idx} needs {local_pages} local prefix pages, "
+                f"but block table has width {local_block_table.shape[1]}"
+            )
+    return build_cp_batched_pool_gather_plan(
+        local_block_table,
+        tuple(logical_page_counts),
+        cp_size,
+        cp_rank,
+    )
+
+
+def gather_cp_sharded_prefix_pool(
+    local_pool: torch.Tensor,
+    local_block_table: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    *,
+    page_size: int,
+    cp_size: int,
+    cp_rank: int,
+    gather_plan=None,
+    restore_logical_order: bool = True,
+) -> torch.Tensor:
+    """Gather page-RR prefixes using reusable per-forward addressing."""
+    if gather_plan is None:
+        gather_plan = build_cp_sharded_prefix_gather_plan(
+            local_block_table,
+            prefix_lengths,
+            page_size=page_size,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
+        )
+    if gather_plan.total_logical_blocks == 0:
+        return local_pool[:0]
+
+    from rtp_llm.models_py.modules.dsv4.cp import cp_gather_batched_request_pool_blocks
+
+    return cp_gather_batched_request_pool_blocks(
+        local_pool,
+        local_block_table,
+        gather_plan.logical_blocks_per_req,
+        cp_size,
+        cp_rank,
+        plan=gather_plan,
+        restore_logical_order=restore_logical_order,
+    )
+
+
+def cast_kv_for_cache_append(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache,
+    kv_cache_dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Cast K/V to the paged cache dtype before FlashInfer append (FP8 only)."""
+    if kv_cache_dtype != KvCacheDataType.FP8:
+        return key, value
+    cache_dtype = kv_cache.kv_cache_base.dtype
+    return key.to(dtype=cache_dtype), value.to(dtype=cache_dtype)
+
+
+def fill_fp8_kv_cache_scale(
+    kv_cache,
+    params,
+    batch_indices: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    num_kv_heads: int,
+    page_size: int,
+    kv_cache_dtype,
+) -> None:
+    """Set FP8 KV-cache scale=1.0 for slots written by FlashInfer append.
+
+    The fused RoPE+KV writer normally handles this; CP path writes through
+    FlashInfer instead and would leave scales uninitialized.
+    """
+    if kv_cache_dtype != KvCacheDataType.FP8:
+        return
+
+    scale_base = getattr(kv_cache, "kv_scale_base", None)
+    if scale_base is None or scale_base.numel() == 0 or positions.numel() == 0:
+        return
+
+    batch_indices_l = batch_indices.to(dtype=torch.long)
+    positions_l = positions.to(dtype=torch.long)
+    page_offsets = params.decode_page_indptr_d[batch_indices_l] + torch.div(
+        positions_l, page_size, rounding_mode="floor"
+    )
+    block_ids = params.page_indice_d[page_offsets.to(dtype=torch.long)].to(
+        dtype=torch.long
+    )
+    local_pos = torch.remainder(positions_l, page_size)
+
+    scale_view = scale_base.view(-1, 2, num_kv_heads, page_size)
+    scale_view[block_ids, :, :, local_pos] = 1.0
+
 
 def plan_prefix_paged_attention(
     wrapper: BatchPrefillWithPagedKVCacheWrapper,
@@ -13,6 +164,8 @@ def plan_prefix_paged_attention(
     head_dim: int,
     page_size: int,
     device,
+    kv_data_type: torch.dtype = torch.bfloat16,
+    contiguous_page_indices: bool = False,
 ) -> None:
     """Plan paged attention for the prefix portion of KV cache.
 
@@ -30,11 +183,14 @@ def plan_prefix_paged_attention(
     page_indptr = torch.zeros(batch_size + 1, dtype=torch.int32)
     page_indptr[1:] = prefix_pages.cumsum(0)
 
-    full_page_starts = params.decode_page_indptr_h[:batch_size].to(torch.int32)
-    all_page_indices = params.page_indice_d
-
     total_pages = page_indptr[-1].item()
-    if total_pages > 0:
+    if contiguous_page_indices:
+        prefix_page_indices = torch.arange(
+            total_pages, dtype=torch.int32, device=device
+        )
+    elif total_pages > 0:
+        full_page_starts = params.decode_page_indptr_h[:batch_size].to(torch.int32)
+        all_page_indices = params.page_indice_d
         expanded_starts = torch.repeat_interleave(full_page_starts, prefix_pages)
         local_offsets = torch.arange(
             total_pages, dtype=torch.int32
@@ -57,6 +213,7 @@ def plan_prefix_paged_attention(
         page_size=page_size,
         causal=False,
         q_data_type=torch.bfloat16,
+        kv_data_type=kv_data_type,
     )
 
 

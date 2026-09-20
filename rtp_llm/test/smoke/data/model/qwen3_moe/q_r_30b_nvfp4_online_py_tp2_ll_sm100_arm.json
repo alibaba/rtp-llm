@@ -22,7 +22,7 @@
                 "_prompt_source": "chat-template wrapping $prompt:s1"
             },
             "result": {
-                "response": "The **CAP Theorem**, also known as **Brewer's Theorem**, is a fundamental principle in distributed systems that states that a distributed system can only guarantee **two out of three** of the following properties simultaneously:\n\n1. **Consistency (C)**: Every read receives the most recent write or an error",
+                "response": "The **CAP Theorem**, also known as **Brewer's Theorem**, is a fundamental principle in distributed systems that states:\n\n> **In any distributed data system, you can only guarantee two out of the following three properties simultaneously:**\n\n1. **Consistency (C)**  \n   - All nodes see the",
                 "response_alternatives": null,
                 "hidden_states": null,
                 "logits": null,
@@ -50,7 +50,8 @@
                     "cum_log_probs": [],
                     "beam_responses": [],
                     "pd_sep": false,
-                    "softmax_probs": []
+                    "softmax_probs": [],
+                    "generation_prefill_cuda_graph_status": "not_requested"
                 }
             }
         },
@@ -70,7 +71,7 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": "The **CAP Theorem**, also known as **Brewer's Theorem**, is a fundamental principle in distributed systems that states:\n\n> **In any distributed data system, you can only guarantee two out of the following three properties simultaneously:**\n\n1. **Consistency (C)**  \n   - All nodes see the",
+                        "response": "The CAP Theorem, also known as Brewer's Theorem, is a fundamental concept in distributed systems that states that a distributed system can only guarantee **two out of three** of the following properties simultaneously:\n\n1. **Consistency (C)**: Every read receives the most recent write or an error. All nodes see",
                         "response_alternatives": null,
                         "hidden_states": null,
                         "logits": null,
@@ -98,11 +99,12 @@
                             "cum_log_probs": [],
                             "beam_responses": [],
                             "pd_sep": false,
-                            "softmax_probs": []
+                            "softmax_probs": [],
+                            "generation_prefill_cuda_graph_status": "not_requested"
                         }
                     },
                     {
-                        "response": "The `NameError: name 'screen_manager' is not defined` error occurs when you try to use a variable named `screen_manager` in your code, but it hasn't been defined or created yet.\n\nThis commonly happens in Kivy applications where you're trying to access a `ScreenManager` instance that wasn't",
+                        "response": "The `NameError: name 'screen_manager' is not defined` error occurs when you try to use a variable named `screen_manager` that hasn't been defined or created in your code.\n\nThis is common in Kivy applications where you're trying to access a `ScreenManager` instance but forgot to define it.\n\n",
                         "response_alternatives": null,
                         "hidden_states": null,
                         "logits": null,
@@ -130,7 +132,8 @@
                             "cum_log_probs": [],
                             "beam_responses": [],
                             "pd_sep": false,
-                            "softmax_probs": []
+                            "softmax_probs": [],
+                            "generation_prefill_cuda_graph_status": "not_requested"
                         }
                     }
                 ]

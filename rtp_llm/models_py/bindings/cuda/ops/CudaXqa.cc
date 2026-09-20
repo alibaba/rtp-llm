@@ -1,7 +1,10 @@
 #include "rtp_llm/models_py/bindings/cuda/ops/CudaXqa.h"
+#ifndef USING_CUDA13
 #include "3rdparty/xqa/mha.h"
+#endif
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/utils/math_utils.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <torch/torch.h>
 #include <c10/cuda/CUDAStream.h>
 
@@ -9,6 +12,41 @@ using namespace std;
 using namespace rtp_llm;
 
 namespace rtp_llm {
+
+#ifdef USING_CUDA13
+bool supportXqa(DataType /*input_type*/,
+                DataType /*output_type*/,
+                DataType /*kv_cache_type*/,
+                size_t /*group_size*/,
+                size_t /*head_dim*/,
+                size_t /*page_size*/) {
+    return false;
+}
+
+void runXqa(void* /*input*/,
+            bool /*is_input_bf16*/,
+            void* /*output*/,
+            size_t /*head_num*/,
+            size_t /*kv_head_num*/,
+            size_t /*head_dim*/,
+            size_t /*batch_size*/,
+            size_t /*max_blocks_per_seq*/,
+            size_t /*max_seq_len*/,
+            size_t /*page_size*/,
+            void* /*kv_cache_pool*/,
+            int32_t* /*kv_cache_page_list*/,
+            bool /*is_kv_cache_fp8*/,
+            uint32_t* /*sequence_lengths*/,
+            float* /*rcp_out_scale*/,
+            size_t /*max_q_len*/,
+            void* /*q_cu_seqlens*/,
+            size_t /*max_batch_size*/,
+            float /*q_scale*/,
+            uint32_t /*beam_width*/) {
+    RTP_LLM_FAIL("SM90 XQA is not built for CUDA 13");
+}
+
+#else
 
 static const cudaDeviceProp& getDeviceProp() {
     static cudaDeviceProp prop = []() {
@@ -219,5 +257,7 @@ void runXqa(void*     input,
 
     check_cuda_error();
 }
+
+#endif  // !USING_CUDA13
 
 }  // namespace rtp_llm

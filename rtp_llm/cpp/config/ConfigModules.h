@@ -359,8 +359,11 @@ struct SpeculativeExecutionConfig {
     int64_t         sp_max_token_match            = 2;
     std::string     tree_decode_config            = "";
     int64_t         gen_num_per_cycle             = 1;
-    bool            force_stream_sample           = false;
-    bool            force_score_context_attention = true;
+    bool            force_stream_sample             = false;
+    bool            deterministic_draft_exact_match = false;
+    bool            force_score_context_attention   = true;
+    // -1 inherit target KV dtype; 0 force BF16/FP16; 1 force FP8.
+    int             fp8_kv_cache                    = -1;
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
     // DSpARK noise/mask token used to build each fixed-width draft block.
@@ -445,6 +448,7 @@ PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode);
 struct FIFOSchedulerConfig {
     int64_t max_context_batch_size = 1;
     int64_t max_batch_tokens_size  = 0;
+    int64_t max_batch_kv_len       = 0;
     // PDFUSION scheduler mode. Supported values:
     //   ""      -> default FIFO/decode-first scheduler
     //   "ratio" -> PDFusionRatioScheduler with decode_prefill_ratio

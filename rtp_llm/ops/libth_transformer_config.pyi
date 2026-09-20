@@ -5,7 +5,7 @@ import typing
 import torch
 
 __all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
-                      'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
+                      'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_multimodal_token_spans', 'get_rope_cache', 'get_rope_cache_once']
 
 
 class ActivationType:
@@ -396,6 +396,7 @@ class EplbMode:
 class FIFOSchedulerConfig:
     cp_force_single_prefill: bool
     decode_prefill_ratio: str
+    max_batch_kv_len: int
     max_batch_tokens_size: int
     max_batch_tokens_without_cache: int
     max_context_batch_size: int
@@ -889,9 +890,10 @@ class MMModelConfig:
         ...
 class MMPreprocessConfig:
     crop_positions: list[float]
-    fps: int
+    fps: float
     height: int
     max_frames: int
+    max_long_side_pixel: int
     max_pixels: int
     min_frames: int
     min_pixels: int
@@ -899,7 +901,7 @@ class MMPreprocessConfig:
     width: int
     def __getstate__(self) -> tuple:
         ...
-    def __init__(self, width: int = -1, height: int = -1, min_pixels: int = -1, max_pixels: int = -1, fps: int = -1, min_frames: int = -1, max_frames: int = -1, crop_positions: list[float] = ..., mm_timeout_ms: int = -1) -> None:
+    def __init__(self, width: int = -1, height: int = -1, min_pixels: int = -1, max_pixels: int = -1, fps: float = -1.0, min_frames: int = -1, max_frames: int = -1, crop_positions: list[float] = ..., mm_timeout_ms: int = -1, max_long_side_pixel: int = -1) -> None:
         ...
     def __setstate__(self, arg0: tuple) -> None:
         ...
@@ -1112,6 +1114,7 @@ class ModelConfig:
     use_kvcache: bool
     use_norm_attn_out_residual: bool
     use_norm_input_residual: bool
+    use_opaque_kv_cache_store: bool
     vocab_size: int
     def __init__(self) -> None:
         ...
@@ -1673,6 +1676,8 @@ class SpeculativeExecutionConfig:
     checkpoint_path: str
     force_score_context_attention: bool
     force_stream_sample: bool
+    deterministic_draft_exact_match: bool
+    fp8_kv_cache: int
     gen_num_per_cycle: int
     model_type: str
     quantization: str
@@ -1855,6 +1860,8 @@ def check_rope_cache(rope_config: RopeConfig, rope_cache: RopeCache) -> bool:
     Check if RoPE cache matches the given config
     """
 def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]:
+    ...
+def get_multimodal_token_spans(tokens: list[int], separators: list[list[int]], include_separators: bool) -> list[tuple[int, int]]:
     ...
 def get_rope_cache(rope_config: RopeConfig, max_position_embeddings: int, interleave: bool) -> torch.Tensor:
     """

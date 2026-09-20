@@ -283,6 +283,16 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
             // proposal width, not a count of independent one-layer modules.
             num_mtp_modules = 1;
         }
+        if (propose_model_config.physical_mtp_module_num > 0) {
+            // A recurrent native MTP checkpoint declares its physical module
+            // count explicitly (one physical module may be reused across
+            // several proposal steps), overriding the derivation above.
+            num_mtp_modules = static_cast<int>(propose_model_config.physical_mtp_module_num);
+        }
+        RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0 && num_mtp_modules <= sp_config.gen_num_per_cycle,
+                                "physical MTP module count must be in [1, gen_num_per_cycle]: modules=%d steps=%d",
+                                num_mtp_modules,
+                                sp_config.gen_num_per_cycle);
     }
 
     score_config.finalizeBlockNums(0, runtime_config);

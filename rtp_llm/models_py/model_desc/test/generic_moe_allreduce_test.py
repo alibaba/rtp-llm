@@ -13,6 +13,12 @@ from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 from rtp_llm.utils.model_weight import W
 
 
+def _empty_param_module():
+    module = Mock()
+    module.parameters.side_effect = lambda: iter([])
+    return module
+
+
 def _make_layer(
     *,
     supports_skip_tp_allreduce=True,
@@ -66,7 +72,7 @@ def _make_layer(
         ),
         patch(
             "rtp_llm.models_py.model_desc.generic_moe.DenseMLP",
-            return_value=Mock(),
+            return_value=_empty_param_module(),
         ),
         patch("rtp_llm.models_py.model_desc.generic_moe.MoEConfigAdapter"),
         patch(
@@ -94,6 +100,7 @@ def _configure_forward(layer, *, gate_enabled=False):
     fused_moe.topk_ids_dtype = torch.int32
     layer.fused_moe = fused_moe
     layer.shared_expert = MagicMock(spec=DenseMLP, return_value=shared_output)
+    layer.shared_expert.parameters.return_value = iter([])
     if gate_enabled:
         layer.shared_expert_gate = Mock(return_value=gate_output)
         layer.sigmoid_gate_scale_add = Mock(
