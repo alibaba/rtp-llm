@@ -2691,7 +2691,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         for error, expected_status in cases:
             with self.subTest(error=type(error).__name__):
                 validator = MagicMock()
-                validator.validate_response_format.side_effect = error
+                validator.validate_and_norm_response_format.side_effect = error
                 servicer = DashScInferenceServicer(
                     backend_visitor=self._terminal_visitor(),
                     grammar_validator=validator,
@@ -2702,10 +2702,11 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                     json_format=False,
                 )
 
-                status, message = await servicer._validate_request_grammar(
+                (status, message), normalized_sampling = await servicer._validate_request_grammar(
                     sampling, "grammar-status-test"
                 )
 
+                self.assertIs(normalized_sampling, sampling)
                 self.assertEqual(status, expected_status)
                 if isinstance(error, GrammarCheckOverloaded):
                     self.assertEqual("Too many requests.", message)
