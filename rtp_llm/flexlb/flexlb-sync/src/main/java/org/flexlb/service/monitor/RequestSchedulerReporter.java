@@ -220,7 +220,8 @@ public class RequestSchedulerReporter {
      * Report one priority preemption via
      * {@code auto_tpm.priority_preempt.count}.
      *
-     * @param stage victim scheduling stage (prefill_queued / decode_reserved)
+     * @param stage victim scheduling stage (prefill_queued / decode_reserved /
+     *              decode_running / decode_cancel)
      */
     public void reportPriorityPreempt(String stage) {
         monitor.report(AUTO_TPM_PRIORITY_PREEMPT_COUNT,
