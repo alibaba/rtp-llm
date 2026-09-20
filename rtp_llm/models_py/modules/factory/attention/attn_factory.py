@@ -347,12 +347,23 @@ def get_sparse_gqa_impl(
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
+    cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
 ) -> AttentionImpl:
     """Factory entry for the sparse GQA family (qwen4 prefill and decode).
 
     Imported lazily: the impl pulls in the qwen4 Triton scoring kernels, which
     should not be imported for models that never route here.
     """
+    selection_mode = _normalize_cuda_graph_selection_mode(
+        is_cuda_graph, cuda_graph_selection_mode
+    )
+    if selection_mode != CudaGraphSelectionMode.EAGER:
+        raise RuntimeError(
+            "qwen4_exp sparse GQA does not support CUDA Graph "
+            f"(selection mode: {selection_mode.value})"
+        )
+    # The impl's prepare path validates this flag and rejects graphs.
+    attn_inputs.is_cuda_graph = is_cuda_graph
     from rtp_llm.models_py.modules.qwen4_exp.sparse_gqa_impl import SparseGqaFmhaImpl
 
     return SparseGqaFmhaImpl(attn_configs, attn_inputs, parallelism_config)
