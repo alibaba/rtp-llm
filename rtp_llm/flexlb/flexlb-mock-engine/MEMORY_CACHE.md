@@ -33,10 +33,21 @@ the normal connector lifecycle. Cancellation or injected prefill failure does no
 populate memory. Master cache status includes the union of GPU and memory keys,
 while its total/available execution capacity remains GPU-only.
 
-Memory uses access-order LRU. Reads and duplicate writes refresh recency without
-resetting insertion time. Eviction lifetime measures insertion-to-eviction age,
+Memory defaults to the production prefix-tree policy: reads refresh recency,
+in-flight reads and writes own protected capacity, resident entries are never
+victims, and allocation pressure evicts the oldest eligible leaf one block at a
+time. An internal prefix becomes eligible only after its last descendant is
+removed. Set `prefill.memory_cache.enable_prefix_tree` to `false` only when
+comparing against a production deployment that explicitly disables the prefix
+tree. Eviction lifetime measures insertion-to-eviction age,
 not time since last access and not an eviction timeout. Capacity is not adjusted
 to force this metric to a target. Engine crash clears both caches.
+
+A successful memory-to-device read consumes the matched host entries: after H2D
+completion they are detached from the memory tree and their backing capacity is
+returned. A failed or cancelled read only releases its in-flight protection and
+keeps the entries reusable. This mirrors the connector's `read_done` contract;
+the memory tier is not a permanent duplicate of device cache.
 
 `read_ms_per_block` adds a modeled host-to-device copy delay for memory-only hits,
 outside `rtp_llm_model_forward_us`. Zero means idealized instantaneous copies.

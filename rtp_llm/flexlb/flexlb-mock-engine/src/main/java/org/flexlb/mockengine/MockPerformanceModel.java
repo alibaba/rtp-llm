@@ -327,6 +327,7 @@ final class MockPerformanceModel {
         copy.decodeGpuPrefixTree = decodeGpuPrefixTree;
         copy.memoryCacheBlocks = memoryCacheBlocks;
         copy.memoryCopyLifecycle = memoryCopyLifecycle;
+        copy.memoryPrefixTree = memoryPrefixTree;
         copy.decodeReserveBlockRatio = decodeReserveBlockRatio;
         copy.prefillReserveBlockRatio = prefillReserveBlockRatio;
         copy.prefillBatchPolicy = prefillBatchPolicy;
@@ -468,6 +469,9 @@ final class MockPerformanceModel {
             if (!blocks.isIntegralNumber() || !blocks.canConvertToInt() || blocks.asInt() <= 0)
                 throw new IllegalStateException("prefill.memory_cache.capacity_blocks must be a positive integer");
             model.memoryCacheBlocks = blocks.asInt();
+            if (memory.has("enable_prefix_tree") && !memory.get("enable_prefix_tree").isBoolean())
+                throw new IllegalStateException("prefill.memory_cache.enable_prefix_tree must be boolean");
+            model.memoryPrefixTree = memory.path("enable_prefix_tree").asBoolean(true);
             // Legacy read/write latency settings are ignored: copies are instantaneous.
             if (memory.has("copy_lifecycle") && !memory.get("copy_lifecycle").isBoolean())
                 throw new IllegalStateException("prefill.memory_cache.copy_lifecycle must be boolean");
@@ -862,6 +866,7 @@ final class MockPerformanceModel {
 
     int memoryCacheBlocks;
     boolean memoryCopyLifecycle;
+    boolean memoryPrefixTree = true;
 
     record RequestShape(EngineRpcService.GenerateInputPB input,
                         int inputLen,

@@ -670,7 +670,7 @@ public final class JavaMockEngineCluster {
         }
 
         private List<BatchMember> prepareMemoryReads(List<BatchMember> members) {
-            if (memoryCache == null || !performance.memoryCopyLifecycle) return members;
+            if (memoryCache == null) return members;
             List<BatchMember> prepared = new ArrayList<>();
             for (var member : members) {
                 var old = member.shape();
@@ -1438,7 +1438,7 @@ public final class JavaMockEngineCluster {
             this.performance = performance.forEngine();
             if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL && performance.memoryCacheBlocks > 0)
                 this.memoryCache = new MockMemoryBlockCache(performance.memoryCacheBlocks,
-                        ms -> reportCacheEviction("memory", ms));
+                        performance.memoryPrefixTree, ms -> reportCacheEviction("memory", ms), System::nanoTime);
             this.cache = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
                     && performance.decodeReserveBlockRatio != null
                     ? new MockLruBlockCache(totalBlocks, performance.decodeReserveBlockRatio / 100.0, true)
@@ -3703,14 +3703,16 @@ public final class JavaMockEngineCluster {
                 }, startDelayNanos, TimeUnit.NANOSECONDS);
             }
 
-            if (memoryCache != null && performance.memoryCopyLifecycle) {
+            if (memoryCache != null) {
                 for (var member : members) {
                     long id = member.shape().input().getRequestId();
                     var read = memoryReads.get(id);
                     // Pins last until the existing execution lane starts; copying adds no delay.
                     long readDelay = startDelayNanos;
                     Runnable release = () -> {
-                        if (read != null && memoryReads.remove(id, read)) read.close();
+                        if (read != null && memoryReads.remove(id, read)) {
+                            if (read.consume() > 0) cacheVersion.incrementAndGet();
+                        }
                     };
                     if (readDelay == 0) release.run();
                     else {

@@ -6,6 +6,7 @@ import java.nio.file.Path;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import org.flexlb.engine.grpc.EngineRpcService;
 import static org.junit.jupiter.api.Assertions.*;
@@ -132,7 +133,7 @@ class MockMemoryBlockCacheTest {
     }
 
     @Test void duplicateWriteDoesNotTouchLruAndAbortOrClearCannotResurrectKeys() {
-        var c = new MockMemoryBlockCache(2, ignored -> {});
+        var c = new MockMemoryBlockCache(2, false, ignored -> {}, System::nanoTime);
         c.write(List.of(1L, 2L));
         c.beginWrite(List.of(1L)).commit();
         var w = c.beginWrite(List.of(3L));
@@ -207,7 +208,8 @@ class MockMemoryBlockCacheTest {
         assertEquals(2, c.pendingBlocks(), "existing suffix still needs a temporary backing");
         time.set(10_000_000);
         copy.commit();
-        assertEquals(List.of(1L, 4L, 2L, 3L), c.keys());
+        assertEquals(List.of(1L, 4L, 3L, 2L), c.keys(),
+                "duplicate commit must not refresh the existing suffix entry");
         assertEquals(1, c.pinnedBlocks(), "duplicate commit must preserve existing readers");
         assertEquals(0, c.pendingBlocks());
         read.close();
@@ -231,6 +233,54 @@ class MockMemoryBlockCacheTest {
         read.close();
         c.write(List.of(4L, 5L, 6L));
         assertEquals(List.of(4L, 5L, 6L), c.keys());
+    }
+
+    @Test void prefixTreeEvictsOnlyLeavesAndPromotesTheirParents() {
+        var c = new MockMemoryBlockCache(4, ignored -> {});
+        c.write(List.of(1L, 2L, 3L));
+        c.write(List.of(1L, 4L));
+
+        c.write(List.of(5L));
+        assertEquals(Set.of(1L, 2L, 4L, 5L), Set.copyOf(c.keys()));
+        assertFalse(c.keys().contains(3L), "oldest leaf is evicted first");
+        assertTrue(c.keys().contains(1L), "an internal prefix cannot be selected as a victim");
+
+        c.write(List.of(6L));
+        assertFalse(c.keys().contains(2L), "parent becomes an eligible leaf after its child is removed");
+        assertTrue(c.keys().contains(1L), "branch point remains structurally protected");
+    }
+
+    @Test void residentAndPinnedLeavesAreNotEvictable() {
+        var c = new MockMemoryBlockCache(2, ignored -> {});
+        c.writeResident(List.of(1L));
+        c.write(List.of(2L));
+        var read = c.pinRead(List.of(2L), 0);
+        assertNull(c.beginWrite(List.of(3L)));
+        assertEquals(Set.of(1L, 2L), Set.copyOf(c.keys()));
+        read.close();
+        c.write(List.of(3L));
+        assertEquals(Set.of(1L, 3L), Set.copyOf(c.keys()));
+    }
+
+    @Test void successfulReadConsumesHostEntriesButCancelledReadKeepsThem() {
+        var c = new MockMemoryBlockCache(4, ignored -> {});
+        c.write(List.of(1L, 2L, 3L));
+        var successful = c.pinRead(List.of(1L, 2L), 0);
+        assertEquals(2, successful.consume());
+        assertEquals(List.of(3L), c.keys());
+        assertEquals(0, c.pinnedBlocks());
+
+        var cancelled = c.pinRead(List.of(3L), 0);
+        cancelled.close();
+        assertEquals(List.of(3L), c.keys(), "failed/cancelled H2D only releases in-flight protection");
+    }
+
+    @Test void memoryPrefixTreeDefaultsOnAndCanBeDisabled() throws Exception {
+        assertTrue(model("{\"enabled\":true,\"capacity_blocks\":10}").memoryPrefixTree);
+        assertFalse(model("{\"enabled\":true,\"capacity_blocks\":10,\"enable_prefix_tree\":false}")
+                .memoryPrefixTree);
+        assertThrows(IllegalStateException.class,
+                () -> model("{\"enabled\":true,\"capacity_blocks\":10,\"enable_prefix_tree\":1}"));
     }
 
     @Test void concurrentCopiesOwnSeparateBackingsAndCommitCannotResetReaders() {
