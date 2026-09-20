@@ -216,12 +216,13 @@ class _TimedGrammarValidator(GrammarValidator):
                 )
             )
 
-    def _record_validation(self, request_id: str, validate: Any) -> bool:
+    def _record_validation(self, request_id: str, validate: Any) -> Any:
         started = time.perf_counter()
         ok = False
         try:
-            ok = validate()
-            return ok
+            result = validate()
+            ok = result[0] if isinstance(result, tuple) else result
+            return result
         finally:
             self.timings.append(
                 _ValidationTiming(
@@ -257,6 +258,26 @@ class _TimedGrammarValidator(GrammarValidator):
             lambda: super(_TimedGrammarValidator, self).validate_response_format(
                 response_format, request_id
             ),
+        )
+
+    def validate_and_norm_structural_tag(
+        self, payload: str | dict, request_id: str = ""
+    ) -> tuple[bool, str | None]:
+        return self._record_validation(
+            request_id,
+            lambda: super(
+                _TimedGrammarValidator, self
+            ).validate_and_norm_structural_tag(payload, request_id),
+        )
+
+    def validate_and_norm_response_format(
+        self, response_format: str | dict, request_id: str = ""
+    ) -> tuple[bool, str | None]:
+        return self._record_validation(
+            request_id,
+            lambda: super(
+                _TimedGrammarValidator, self
+            ).validate_and_norm_response_format(response_format, request_id),
         )
 
 
