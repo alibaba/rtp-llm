@@ -254,6 +254,9 @@ void P2PConnectorResourceStore::checkTimeout(int64_t now_ms) {
         while (!deadline_index_.empty() && deadline_index_.begin()->first <= now_ms) {
             const auto it = request_states_.find(deadline_index_.begin()->second);
             deadline_index_.erase(deadline_index_.begin());
+            if (it == request_states_.end()) {
+                continue;
+            }
             auto& state = it->second;
             state.scheduled_deadline_ms = 0;
             if (!state.terminal) {

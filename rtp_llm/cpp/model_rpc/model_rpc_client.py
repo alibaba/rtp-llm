@@ -401,6 +401,8 @@ def _split_host_port(address: str) -> tuple[str, int]:
         host = address[1:close_pos]
         port_text = address[close_pos + 2 :]
     else:
+        if ":" not in address:
+            raise ValueError(f"invalid grpc address: {address}")
         host, port_text = address.rsplit(":", 1)
     port = int(port_text)
     if not host or port < 1 or port > 65535:
