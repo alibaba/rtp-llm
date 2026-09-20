@@ -83,7 +83,7 @@ CacheConfig makeSwaConfig(int block_size = 4) {
     policy.sliding_window_size = 128;
     const size_t stride        = spec->block_size_bytes();
     test::configureIndexedTestGroups(config, {spec}, {{0, 1}}, {CacheGroupType::SWA}, {policy});
-    config.setGroupBlockLayout({8}, {stride}, {0});
+    config.setGroupBlockLayout({"group0"}, {8}, {stride}, {0});
     return config;
 }
 
@@ -117,7 +117,7 @@ CacheConfig makeHybridConfig(bool disable_linear_reuse = false) {
 
     const size_t linear_stride = linear_spec->block_size_bytes();
     const size_t full_stride   = full_spec->block_size_bytes();
-    config.setGroupBlockLayout({8, 8}, {linear_stride, full_stride}, {0, 0});
+    config.setGroupBlockLayout({"group0", "group1"}, {8, 8}, {linear_stride, full_stride}, {0, 0});
     return config;
 }
 
@@ -142,7 +142,7 @@ CacheConfig makeIndependentWatermarkConfig() {
                                      {{0, 2}, {1, 3}},
                                      {CacheGroupType::FULL, CacheGroupType::LINEAR},
                                      {full_policy, linear_policy});
-    config.setGroupBlockLayout({8, 8}, {full_stride, linear_stride}, {0, 0});
+    config.setGroupBlockLayout({"group0", "group1"}, {8, 8}, {full_stride, linear_stride}, {0, 0});
     return config;
 }
 
@@ -171,7 +171,7 @@ CacheConfig makeDifferentFullGroupsConfig(uint32_t second_seq_size_per_block, Cp
 
     const size_t first_stride  = first->block_size_bytes();
     const size_t second_stride = second->block_size_bytes();
-    config.setGroupBlockLayout({9, 7}, {first_stride, second_stride}, {0, 0});
+    config.setGroupBlockLayout({"group0", "group1"}, {9, 7}, {first_stride, second_stride}, {0, 0});
     return config;
 }
 
@@ -202,7 +202,7 @@ CacheConfig makeCompatibleFullGroupsConfig() {
                                      {first_policy, second_policy});
 
     const size_t stride = first->block_size_bytes();
-    config.setGroupBlockLayout({8, 8}, {stride, stride}, {0, 0});
+    config.setGroupBlockLayout({"group0", "group1"}, {8, 8}, {stride, stride}, {0, 0});
     return config;
 }
 
@@ -260,7 +260,7 @@ CacheConfig makeCompatibleSwaGroupsConfig(int                second_window,
         config, {first, second}, {{0}, {1}}, {CacheGroupType::SWA, CacheGroupType::SWA}, {first_policy, second_policy});
 
     const size_t stride = first->block_size_bytes();
-    config.setGroupBlockLayout({8, 8}, {stride, stride}, {0, 0});
+    config.setGroupBlockLayout({"group0", "group1"}, {8, 8}, {stride, stride}, {0, 0});
     return config;
 }
 
@@ -299,7 +299,7 @@ CacheConfig makeCompatibleLinearGroupsConfig(uint32_t second_active_tail_blocks)
                                      {first_policy, second_policy});
 
     const size_t stride = first->block_size_bytes();
-    config.setGroupBlockLayout({8, 8}, {stride, stride}, {0, 0});
+    config.setGroupBlockLayout({"group0", "group1"}, {8, 8}, {stride, stride}, {0, 0});
     return config;
 }
 
@@ -322,7 +322,7 @@ CacheConfig makeReusableGroupsAroundDisabledConfig() {
         config, specs, {{0}, {1}, {2}}, {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::FULL}, policies);
 
     const size_t stride = config.specForGroup(0)->block_size_bytes();
-    config.setGroupBlockLayout({8, 8, 8}, {stride, stride, stride}, {0, 0, 0});
+    config.setGroupBlockLayout({"group0", "group1", "group2"}, {8, 8, 8}, {stride, stride, stride}, {0, 0, 0});
     return config;
 }
 
@@ -2189,7 +2189,7 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     test::setTestGroupPolicies(cache_config, policies);
 
     const size_t stride = specs.front()->block_size_bytes();
-    cache_config.setGroupBlockLayout({8, 8, 8}, {stride, stride, stride}, {0, 0, 0});
+    cache_config.setGroupBlockLayout({"group0", "group1", "group2"}, {8, 8, 8}, {stride, stride, stride}, {0, 0, 0});
 
     auto allocator = std::make_shared<KVCacheAllocator>(cache_config);
     allocator->setUseDeviceMallocBlockPool(true);

@@ -25,6 +25,25 @@ GroupBase makeGroup(std::string tag, CacheGroupType type = CacheGroupType::FULL)
     return group;
 }
 
+GroupBase makeLayoutGroup(const std::string& tag, int head_dim) {
+    AttentionConfigs attention;
+    attention.kv_head_num   = 1;
+    attention.size_per_head = head_dim;
+    ParallelismConfig parallelism;
+    KVCacheSpecDesc   desc;
+    desc.tag        = tag;
+    desc.dtype      = DataType::TYPE_INT8;
+    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+    SpecBuildContext context;
+    context.attn_config             = &attention;
+    context.parallelism_config      = &parallelism;
+    context.seq_size_per_block      = 8;
+    context.kernel_tokens_per_block = 2;
+    auto group                      = makeGroup(tag);
+    group.spec                      = MHAKVCacheSpec::build(desc, context);
+    return group;
+}
+
 TEST(CacheTopologyTest, SupportsSingleGlobalGroupAsNEqualsOne) {
     auto topology = CacheTopology::create({makeGroup("full")}, {{0, {"full"}}, {1, {"full"}}});
 
@@ -120,9 +139,95 @@ TEST(CacheTopologyTest, PhysicalGroupResolvesMultipleMtpModuleLayerRanges) {
     EXPECT_ANY_THROW((void)config.physicalGroupForLayer(5, "full"));
 }
 
+TEST(CacheTopologyTest, GroupTagsKeepConstructionOrderAndStableStorage) {
+    auto        topology = CacheTopology::create({makeGroup("zeta"), makeGroup("alpha")}, {{0, {"alpha", "zeta"}}});
+    const auto& tags     = topology->groupTags();
+    EXPECT_EQ(tags, (std::vector<std::string>{"zeta", "alpha"}));
+    EXPECT_EQ(&tags, &topology->groupTags());
+    EXPECT_EQ(tags.data(), topology->groupTags().data());
+    for (size_t row = 0; row < tags.size(); ++row) {
+        EXPECT_EQ(tags[row], topology->groups()[row].tag);
+    }
+    EXPECT_ANY_THROW(CacheTopology::create({makeGroup("alpha"), makeGroup("alpha")}, {{0, {"alpha"}}}));
+}
+
+TEST(CacheTopologyTest, TaggedLayoutPreservesOrderAndRetainedTopology) {
+    auto        first  = makeLayoutGroup("zeta", 2);
+    auto        second = makeLayoutGroup("alpha", 3);
+    CacheConfig config;
+    config.layer_num = 1;
+    config.setTopology({first, second}, {{0, {"zeta", "alpha"}}});
+    const auto  retained      = config.topologyPtr();
+    const auto& retained_tags = retained->groupTags();
+    EXPECT_EQ(&config.groupTags(), &retained_tags);
+
+    config.setGroupBlockLayout({"alpha", "zeta"},
+                               {23, 31},
+                               {second.kvBlockStrideBytes(), first.kvBlockStrideBytes()},
+                               {second.kvScaleStrideBytes(), first.kvScaleStrideBytes()});
+    EXPECT_EQ(config.groupTags(), (std::vector<std::string>{"zeta", "alpha"}));
+    EXPECT_EQ(config.group("alpha").block_num, 23u);
+    EXPECT_EQ(config.group("zeta").block_num, 31u);
+    EXPECT_EQ(config.group("alpha").kvBlockStrideBytes(), second.kvBlockStrideBytes());
+    EXPECT_EQ(retained->group("alpha").block_num, 16u);
+    EXPECT_EQ(retained_tags, (std::vector<std::string>{"zeta", "alpha"}));
+    EXPECT_EQ(&retained_tags, &retained->groupTags());
+    EXPECT_NE(config.topologyPtr(), retained);
+}
+
+TEST(CacheTopologyTest, TaggedLayoutKeepsMtpPhysicalGeometry) {
+    CacheConfig config;
+    config.layer_num = 1;
+    config.setTopology({makeLayoutGroup("full", 2)}, {{0, {"full"}}});
+    CacheConfig draft;
+    draft.layer_num = 1;
+    draft.setTopology({makeLayoutGroup("full", 5)}, {{0, {"full"}}});
+    const auto child = config.mergeMTPModule(draft, 0, 1);
+    config.mtp_sub_configs.push_back(child);
+    const auto main_stride  = config.group("full").kvBlockStrideBytes();
+    const auto draft_stride = config.physicalGroupForLayer(1, "full").kvBlockStrideBytes();
+    const auto total_bytes  = config.blockSizeBytesForGroup("full");
+    ASSERT_NE(main_stride, draft_stride);
+    config.setGroupBlockLayout({"full"}, {23}, {main_stride}, {config.group("full").kvScaleStrideBytes()});
+    EXPECT_EQ(config.group("full").block_num, 23u);
+    EXPECT_EQ(config.physicalGroupForLayer(1, "full").kvBlockStrideBytes(), draft_stride);
+    EXPECT_EQ(config.blockSizeBytesForGroup("full"), total_bytes);
+    EXPECT_EQ(config.mtp_sub_configs.front(), child);
+}
+
+TEST(CacheTopologyTest, InvalidTaggedLayoutsNeverPublishPartialUpdates) {
+    CacheConfig config;
+    config.layer_num = 1;
+    config.setTopology({makeLayoutGroup("first", 2), makeLayoutGroup("second", 2)}, {{0, {"first", "second"}}});
+    const auto original = config.topologyPtr();
+    const auto kv       = config.group("first").kvBlockStrideBytes();
+    const auto scale    = config.group("first").kvScaleStrideBytes();
+    const auto rejects  = [&](const std::vector<std::string>& tags,
+                             const std::vector<uint32_t>&    blocks,
+                             const std::vector<size_t>&      strides,
+                             const std::vector<size_t>&      scales) {
+        EXPECT_ANY_THROW(config.setGroupBlockLayout(tags, blocks, strides, scales));
+        EXPECT_EQ(config.topologyPtr(), original);
+        EXPECT_EQ(config.group("first").block_num, 16u);
+        EXPECT_EQ(config.group("second").block_num, 16u);
+    };
+    rejects({"first"}, {21}, {kv}, {scale});
+    rejects({"first", "second"}, {21}, {kv, kv}, {scale, scale});
+    rejects({"first", "second"}, {21, 22}, {kv}, {scale, scale});
+    rejects({"first", "second"}, {21, 22}, {kv, kv}, {scale});
+    rejects({"first", "first"}, {21, 22}, {kv, kv}, {scale, scale});
+    rejects({"first", "unknown"}, {21, 22}, {kv, kv}, {scale, scale});
+    rejects({"first", ""}, {21, 22}, {kv, kv}, {scale, scale});
+    rejects({"first", "second"}, {21, 22}, {kv, kv + 1}, {scale, scale});
+    rejects({"first", "second"}, {21, 22}, {kv, kv}, {scale, scale + 1});
+}
+
 TEST(CacheTopologyTest, DerivesReverseMembershipFromLayers) {
     auto topology = CacheTopology::create({makeGroup("full")}, {{0, {"full"}}, {1, {"full"}}});
     EXPECT_EQ(topology->layerIdsForGroup(0), (std::vector<int>{0, 1}));
+    EXPECT_EQ(topology->layerIdsForGroup("full"), (std::vector<int>{0, 1}));
+    EXPECT_ANY_THROW(topology->layerIdsForGroup("missing"));
+    EXPECT_ANY_THROW(topology->blockSizeBytesForGroup("missing"));
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full")}, {{0, {"missing"}}}));
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full")}, {{0, {"full", "full"}}}));
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full"), makeGroup("full")}, {{0, {"full"}}}));

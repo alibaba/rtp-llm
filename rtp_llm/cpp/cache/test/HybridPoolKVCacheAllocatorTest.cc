@@ -76,7 +76,10 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
 
     const auto linear_stride = linear_spec->block_size_bytes();
     const auto full_stride   = full_spec->block_size_bytes();
-    config.setGroupBlockLayout({linear_block_num, full_block_num}, {linear_stride, full_stride}, {0, 0});
+    config.setGroupBlockLayout({"linear", second_type == CacheGroupType::SWA ? "swa" : "full"},
+                               {linear_block_num, full_block_num},
+                               {linear_stride, full_stride},
+                               {0, 0});
     return config;
 }
 
@@ -105,7 +108,7 @@ static CacheConfig makeTinyFullSwaMultiPoolHybridConfig(uint32_t full_block_num 
 
     const size_t full_stride = full_spec->block_size_bytes();
     const size_t swa_stride  = swa_spec->block_size_bytes();
-    config.setGroupBlockLayout({full_block_num, swa_block_num}, {full_stride, swa_stride}, {0, 0});
+    config.setGroupBlockLayout({"full", "swa"}, {full_block_num, swa_block_num}, {full_stride, swa_stride}, {0, 0});
     return config;
 }
 
@@ -410,16 +413,17 @@ static std::vector<uint32_t> groupBlockNumsSnapshot(const CacheConfig& config) {
     return block_nums;
 }
 
-static void setGroupBlockNums(CacheConfig& config, const std::vector<uint32_t>& block_nums) {
+static void
+setGroupBlockNums(CacheConfig& config, const std::vector<std::string>& tags, const std::vector<uint32_t>& block_nums) {
     std::vector<size_t> kv_strides;
     std::vector<size_t> scale_strides;
     kv_strides.reserve(static_cast<size_t>(config.groupNums()));
     scale_strides.reserve(static_cast<size_t>(config.groupNums()));
-    for (size_t group_id = 0; group_id < static_cast<size_t>(config.groupNums()); ++group_id) {
-        kv_strides.push_back(config.kvBlockStrideBytesForGroup(group_id));
-        scale_strides.push_back(config.kvScaleStrideBytesForGroup(group_id));
+    for (const auto& tag : tags) {
+        kv_strides.push_back(config.group(tag).kvBlockStrideBytes());
+        scale_strides.push_back(config.group(tag).kvScaleStrideBytes());
     }
-    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
+    config.setGroupBlockLayout(tags, block_nums, kv_strides, scale_strides);
 }
 
 static size_t validBlockCount(const BlockIndicesType& blocks) {
@@ -1987,7 +1991,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) 
     ASSERT_EQ(config.tagForGroup(hca_state_group_id), "hca_state");
     auto block_nums                = groupBlockNumsSnapshot(config);
     block_nums[hca_state_group_id] = 2;
-    setGroupBlockNums(config, block_nums);
+    setGroupBlockNums(config, config.groupTags(), block_nums);
 
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());

@@ -350,11 +350,12 @@ inline void setGroupBlockNums(CacheConfig& config, uint32_t block_num) {
     std::vector<size_t>   scale_strides;
     kv_strides.reserve(block_nums.size());
     scale_strides.reserve(block_nums.size());
-    for (size_t group_id = 0; group_id < block_nums.size(); ++group_id) {
-        kv_strides.push_back(config.kvBlockStrideBytesForGroup(group_id));
-        scale_strides.push_back(config.kvScaleStrideBytesForGroup(group_id));
+    for (const auto& group : config.groups()) {
+        kv_strides.push_back(group.kvBlockStrideBytes());
+        scale_strides.push_back(group.kvScaleStrideBytes());
     }
-    config.setGroupBlockLayout(std::move(block_nums), std::move(kv_strides), std::move(scale_strides));
+    config.setGroupBlockLayout(
+        config.groupTags(), std::move(block_nums), std::move(kv_strides), std::move(scale_strides));
 }
 
 inline CacheConfig makeCompactDsv4CacheConfig(uint32_t block_num) {

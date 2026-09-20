@@ -68,6 +68,21 @@ uint32_t GroupBase::localKvHeadNum() const {
     return spec->local_kv_head_num;
 }
 
+size_t CacheTopology::blockSizeBytesForGroup(std::string_view group_tag) const {
+    const auto& cache_group           = group(group_tag);
+    const auto  kv_block_stride_bytes = cache_group.kvBlockStrideBytes();
+    const auto  kv_scale_stride_bytes = cache_group.kvScaleStrideBytes();
+    const auto  layer_count           = layerIdsForGroup(group_tag).size();
+    RTP_LLM_CHECK_WITH_INFO(kv_scale_stride_bytes <= std::numeric_limits<size_t>::max() - kv_block_stride_bytes,
+                            "CacheTopology tag=%s stride overflow",
+                            cache_group.tag.c_str());
+    const auto stride = kv_block_stride_bytes + kv_scale_stride_bytes;
+    RTP_LLM_CHECK_WITH_INFO(layer_count == 0 || stride <= std::numeric_limits<size_t>::max() / layer_count,
+                            "CacheTopology tag=%s block size overflow",
+                            cache_group.tag.c_str());
+    return layer_count * stride;
+}
+
 size_t CacheTopology::blockSizeBytesForGroup(size_t group_id) const {
     const auto& group                 = groupById(group_id);
     const auto  kv_block_stride_bytes = group.kvBlockStrideBytes();
@@ -98,6 +113,7 @@ void CacheTopology::validateAndBuildIndex() {
     RTP_LLM_CHECK_WITH_INFO(!layers_.empty(), "CacheTopology requires at least one cache layer");
 
     tag_to_group_id_.reserve(groups_.size());
+    group_tags_.reserve(groups_.size());
     for (size_t group_id = 0; group_id < groups_.size(); ++group_id) {
         const auto& group = groups_[group_id];
         RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "CacheTopology group_id=%zu has empty tag", group_id);
@@ -109,6 +125,7 @@ void CacheTopology::validateAndBuildIndex() {
         RTP_LLM_CHECK_WITH_INFO(tag_to_group_id_.emplace(group.tag, group_id).second,
                                 "CacheTopology has duplicate tag=%s",
                                 group.tag.c_str());
+        group_tags_.push_back(group.tag);
         RTP_LLM_CHECK_WITH_INFO(
             group.seqSizePerBlock() > 0, "CacheTopology tag=%s has zero seq_size_per_block", group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(group.kernelSeqSizePerBlock() > 0,
@@ -241,6 +258,17 @@ std::vector<int> CacheTopology::groupIdsForLayer(int layer_id) const {
         group_ids.push_back(static_cast<int>(groupIdForTag(tag)));
     }
     return group_ids;
+}
+
+std::vector<int> CacheTopology::layerIdsForGroup(std::string_view group_tag) const {
+    const auto&      tag = group(group_tag).tag;
+    std::vector<int> ids;
+    for (const auto& layer : layers_) {
+        if (std::find(layer.group_tags.begin(), layer.group_tags.end(), tag) != layer.group_tags.end()) {
+            ids.push_back(layer.layer_id);
+        }
+    }
+    return ids;
 }
 
 std::vector<int> CacheTopology::layerIdsForGroup(size_t group_id) const {

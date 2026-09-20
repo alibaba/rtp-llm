@@ -241,7 +241,7 @@ CacheConfig makeSingleBlockWriteConfig(const std::string& tag,
                                                    /*layer_num=*/1,
                                                    /*block_num=*/static_cast<int>(kBlockNum));
     config.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
-    rtp_llm::test::setGroupBlockLayout(config, {kBlockNum}, {kv_stride}, {kv_scale_stride});
+    rtp_llm::test::setGroupBlockLayout(config, {tag}, {kBlockNum}, {kv_stride}, {kv_scale_stride});
     return config;
 }
 

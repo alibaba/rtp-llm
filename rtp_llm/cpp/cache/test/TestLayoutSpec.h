@@ -1,5 +1,7 @@
 #pragma once
 
+#include <unordered_set>
+
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 
 namespace rtp_llm::test {
@@ -83,20 +85,29 @@ inline void setGroupLayout(GroupBase& group, size_t kv_stride, size_t scale_stri
     group.spec = std::make_shared<TestLayoutSpec>(*group.spec, kv_stride, scale_stride);
 }
 
-inline void setGroupBlockLayout(CacheConfig&                 config,
-                                const std::vector<uint32_t>& block_nums,
-                                const std::vector<size_t>&   kv_strides,
-                                const std::vector<size_t>&   scale_strides) {
+inline void setGroupBlockLayout(CacheConfig&                    config,
+                                const std::vector<std::string>& group_tags,
+                                const std::vector<uint32_t>&    block_nums,
+                                const std::vector<size_t>&      kv_strides,
+                                const std::vector<size_t>&      scale_strides) {
     auto groups = config.topology().groups();
+    RTP_LLM_CHECK(groups.size() == group_tags.size());
     RTP_LLM_CHECK(groups.size() == block_nums.size());
     RTP_LLM_CHECK(groups.size() == kv_strides.size());
     RTP_LLM_CHECK(groups.size() == scale_strides.size());
-    for (size_t gid = 0; gid < groups.size(); ++gid) {
-        groups[gid].block_num = block_nums[gid];
-        setGroupLayout(groups[gid], kv_strides[gid], scale_strides[gid]);
+    std::unordered_set<std::string> seen_tags;
+    for (size_t row = 0; row < groups.size(); ++row) {
+        RTP_LLM_CHECK(seen_tags.emplace(group_tags[row]).second);
+        auto group = std::find_if(
+            groups.begin(), groups.end(), [&](const GroupBase& candidate) { return candidate.tag == group_tags[row]; });
+        RTP_LLM_CHECK(group != groups.end());
+        group->block_num = block_nums[row];
+        setGroupLayout(*group, kv_strides[row], scale_strides[row]);
     }
-    config.setTopology(std::move(groups), config.topology().layers());
-    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
+    auto candidate = config;
+    candidate.setTopology(std::move(groups), config.topology().layers());
+    candidate.setGroupBlockLayout(group_tags, block_nums, kv_strides, scale_strides);
+    config = std::move(candidate);
 }
 
 }  // namespace rtp_llm::test

@@ -550,7 +550,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
     initFullCacheConfig(cache_config, model_config.num_layers);
-    rtp_llm::test::setGroupBlockLayout(cache_config, {cache_config.group("default").block_num}, {4096}, {256});
+    rtp_llm::test::setGroupBlockLayout(cache_config, {"default"}, {cache_config.group("default").block_num}, {4096}, {256});
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(

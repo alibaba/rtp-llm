@@ -870,6 +870,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsIncompatibleDefaultFullGro
 
     auto different_group_stride = compatible_propose;
     setGroupBlockLayout(different_group_stride,
+                        {"default"},
                         {different_group_stride.blockNumForGroup(0)},
                         {different_group_stride.kvBlockStrideBytesForGroup(0) + 1},
                         {different_group_stride.kvScaleStrideBytesForGroup(0)});

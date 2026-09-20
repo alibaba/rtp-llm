@@ -90,6 +90,7 @@ inline DeviceBlockPoolConfig createTestConfig(size_t   k_block_stride_bytes = 51
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
     test::setGroupBlockLayout(cache_config,
+                              {"default"},
                               {kBlockNum},
                               {k_block_stride_bytes + v_block_stride_bytes},
                               {k_scale_stride_bytes + v_scale_stride_bytes});

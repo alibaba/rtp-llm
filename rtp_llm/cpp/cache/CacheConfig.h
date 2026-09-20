@@ -7,6 +7,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -107,6 +108,10 @@ public:
         return topology().group(tag);
     }
 
+    const std::vector<GroupBase>& groups() const {
+        return topology().groups();
+    }
+
     CacheTopology::GroupRefs groupsForLayer(int layer_id) const {
         return topology().groupsForLayer(layer_id);
     }
@@ -133,6 +138,10 @@ public:
 
     int groupIdForTag(const std::string& tag) const {
         return static_cast<int>(topology().groupIdForTag(tag));
+    }
+
+    std::vector<int> layerIdsForGroup(std::string_view group_tag) const {
+        return topology().layerIdsForGroup(group_tag);
     }
 
     std::vector<int> layerIdsForGroup(size_t gid) const {
@@ -235,6 +244,26 @@ public:
         return topology().groupById(gid).kvScaleStrideBytes();
     }
 
+    size_t blockSizeBytesForGroup(std::string_view group_tag) const {
+        size_t      total = 0;
+        const auto& tag   = topology().group(group_tag).tag;
+        for (int layer_id : layerIdsForGroup(group_tag)) {
+            const auto&  physical_group = physicalGroupForLayer(layer_id, tag);
+            const size_t kv_bytes       = physical_group.kvBlockStrideBytes();
+            const size_t scale_bytes    = physical_group.kvScaleStrideBytes();
+            RTP_LLM_CHECK_WITH_INFO(scale_bytes <= std::numeric_limits<size_t>::max() - kv_bytes,
+                                    "CacheConfig tag=%s layer=%d stride overflow",
+                                    tag.c_str(),
+                                    layer_id);
+            const size_t layer_bytes = kv_bytes + scale_bytes;
+            RTP_LLM_CHECK_WITH_INFO(layer_bytes <= std::numeric_limits<size_t>::max() - total,
+                                    "CacheConfig tag=%s block size overflow",
+                                    tag.c_str());
+            total += layer_bytes;
+        }
+        return total;
+    }
+
     size_t blockSizeBytesForGroup(size_t gid) const {
         size_t      total = 0;
         const auto& tag   = tagForGroup(gid);
@@ -257,8 +286,8 @@ public:
 
     size_t totalGroupBlockSizeBytes() const {
         size_t total = 0;
-        for (size_t gid = 0; gid < static_cast<size_t>(groupNums()); ++gid) {
-            const size_t group_bytes = blockSizeBytesForGroup(gid);
+        for (const auto& group : topology().groups()) {
+            const size_t group_bytes = blockSizeBytesForGroup(group.tag);
             RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - total,
                                     "CacheConfig total block size overflow");
             total += group_bytes;
@@ -284,9 +313,14 @@ public:
         return topology().groupById(gid).localKvHeadNum();
     }
 
-    void setGroupBlockLayout(const std::vector<uint32_t>& block_nums,
-                             const std::vector<size_t>&   kv_block_stride_bytes,
-                             const std::vector<size_t>&   kv_scale_stride_bytes);
+    const std::vector<std::string>& groupTags() const {
+        return topology().groupTags();
+    }
+
+    void setGroupBlockLayout(const std::vector<std::string>& group_tags,
+                             const std::vector<uint32_t>&    block_nums,
+                             const std::vector<size_t>&      kv_block_stride_bytes,
+                             const std::vector<size_t>&      kv_scale_stride_bytes);
 
     std::shared_ptr<CacheConfig>
     mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);

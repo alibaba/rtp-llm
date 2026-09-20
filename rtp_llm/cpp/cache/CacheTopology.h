@@ -49,6 +49,11 @@ public:
         return groups_;
     }
 
+    // References remain valid for the lifetime of this immutable topology.
+    const std::vector<std::string>& groupTags() const {
+        return group_tags_;
+    }
+
     const std::vector<LayerBase>& layers() const {
         return layers_;
     }
@@ -67,6 +72,8 @@ public:
     // Canonical topology geometry. A merged MTP CacheConfig may have child-owned
     // physical strides; its callers must use CacheConfig::{blockSizeBytesForGroup,
     // totalGroupBlockSizeBytes} instead.
+    size_t           blockSizeBytesForGroup(std::string_view group_tag) const;
+    std::vector<int> layerIdsForGroup(std::string_view group_tag) const;
     size_t           totalGroupBlockSizeBytes() const;
     size_t           blockSizeBytesForGroup(size_t group_id) const;
     std::vector<int> layerIdsForGroup(size_t group_id) const;
@@ -91,6 +98,7 @@ private:
 
     std::vector<GroupBase> groups_;
     std::vector<LayerBase> layers_;
+    std::vector<std::string> group_tags_;
 
     std::unordered_map<std::string, size_t> tag_to_group_id_;
 };

@@ -160,24 +160,27 @@ static ModelConfig makeDSV4ManagerFlashModelConfig() {
     return mc;
 }
 
-static void setGroupBlockNumsForTest(CacheConfig& config, const std::vector<uint32_t>& block_nums) {
+static void setGroupBlockNumsForTest(CacheConfig&                    config,
+                                     const std::vector<std::string>& tags,
+                                     const std::vector<uint32_t>&    block_nums) {
     std::vector<size_t> kv_strides;
     std::vector<size_t> scale_strides;
     kv_strides.reserve(static_cast<size_t>(config.groupNums()));
     scale_strides.reserve(static_cast<size_t>(config.groupNums()));
-    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        kv_strides.push_back(config.kvBlockStrideBytesForGroup(gid));
-        scale_strides.push_back(config.kvScaleStrideBytesForGroup(gid));
+    for (const auto& tag : tags) {
+        kv_strides.push_back(config.group(tag).kvBlockStrideBytes());
+        scale_strides.push_back(config.group(tag).kvScaleStrideBytes());
     }
-    rtp_llm::test::setGroupBlockLayout(config, block_nums, kv_strides, scale_strides);
+    rtp_llm::test::setGroupBlockLayout(config, tags, block_nums, kv_strides, scale_strides);
 }
 
 static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
     ParallelismConfig pc;
     auto              mc = makeDSV4ManagerFlashModelConfig();
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
-    auto config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
-    setGroupBlockNumsForTest(config, std::vector<uint32_t>(static_cast<size_t>(config.groupNums()), block_num));
+    auto config      = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
+    setGroupBlockNumsForTest(
+        config, config.groupTags(), std::vector<uint32_t>(static_cast<size_t>(config.groupNums()), block_num));
     return config;
 }
 
@@ -258,7 +261,7 @@ static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, ui
     for (int gid = 0; gid < config.groupNums(); ++gid) {
         block_nums[static_cast<size_t>(gid)] = isFullGroup(config, gid) ? full_block_num : (2u * swa_batch_size);
     }
-    setGroupBlockNumsForTest(config, block_nums);
+    setGroupBlockNumsForTest(config, config.groupTags(), block_nums);
     return config;
 }
 
@@ -944,6 +947,7 @@ TEST_F(KVCacheManagerTest, WriteKVBlockUsesTargetLayerSpec) {
     config.fromGroupedSpecs(
         {large_spec, small_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"large", "small"});
     rtp_llm::test::setGroupBlockLayout(config,
+                                       {"large", "small"},
                                        {4, 4},
                                        {large_spec->block_size_bytes(), small_spec->block_size_bytes()},
                                        {large_spec->scale_block_size_bytes(), small_spec->scale_block_size_bytes()});
@@ -967,6 +971,7 @@ TEST_F(KVCacheManagerTest, WriteKVBlockRejectsMultiGroupLayer) {
     config.fromGroupedSpecs(
         {first, second}, {{0}, {0}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"first", "second"});
     rtp_llm::test::setGroupBlockLayout(config,
+                                       {"first", "second"},
                                        {4, 4},
                                        {first->block_size_bytes(), second->block_size_bytes()},
                                        {first->scale_block_size_bytes(), second->scale_block_size_bytes()});

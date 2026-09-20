@@ -171,10 +171,15 @@ void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<Lay
     cache_topology = CacheTopology::create(std::move(new_groups), std::move(new_layers));
 }
 
-void CacheConfig::setGroupBlockLayout(const std::vector<uint32_t>& block_nums,
-                                      const std::vector<size_t>&   kv_block_stride_bytes,
-                                      const std::vector<size_t>&   kv_scale_stride_bytes) {
+void CacheConfig::setGroupBlockLayout(const std::vector<std::string>& group_tags,
+                                      const std::vector<uint32_t>&    block_nums,
+                                      const std::vector<size_t>&      kv_block_stride_bytes,
+                                      const std::vector<size_t>&      kv_scale_stride_bytes) {
     const size_t group_num = topology().groups().size();
+    RTP_LLM_CHECK_WITH_INFO(group_tags.size() == group_num,
+                            "CacheConfig::setGroupBlockLayout tags size %zu != group size %zu",
+                            group_tags.size(),
+                            group_num);
     RTP_LLM_CHECK_WITH_INFO(block_nums.size() == group_num,
                             "CacheConfig::setGroupBlockLayout block_nums size %zu != group size %zu",
                             block_nums.size(),
@@ -188,12 +193,19 @@ void CacheConfig::setGroupBlockLayout(const std::vector<uint32_t>& block_nums,
                             kv_scale_stride_bytes.size(),
                             group_num);
     auto groups = topology().groups();
-    for (size_t gid = 0; gid < group_num; ++gid) {
-        groups[gid].block_num = block_nums[gid];
-        RTP_LLM_CHECK_WITH_INFO(groups[gid].kvBlockStrideBytes() == kv_block_stride_bytes[gid]
-                                    && groups[gid].kvScaleStrideBytes() == kv_scale_stride_bytes[gid],
+    std::unordered_set<std::string> seen_tags;
+    for (size_t row = 0; row < group_num; ++row) {
+        const auto& tag = group_tags[row];
+        RTP_LLM_CHECK_WITH_INFO(
+            seen_tags.emplace(tag).second, "CacheConfig::setGroupBlockLayout duplicate tag=%s", tag.c_str());
+        auto group = std::find_if(
+            groups.begin(), groups.end(), [&](const GroupBase& candidate) { return candidate.tag == tag; });
+        RTP_LLM_CHECK_WITH_INFO(group != groups.end(), "CacheConfig::setGroupBlockLayout unknown tag=%s", tag.c_str());
+        group->block_num = block_nums[row];
+        RTP_LLM_CHECK_WITH_INFO(group->kvBlockStrideBytes() == kv_block_stride_bytes[row]
+                                    && group->kvScaleStrideBytes() == kv_scale_stride_bytes[row],
                                 "CacheConfig layout must match Spec for tag=%s",
-                                groups[gid].tag.c_str());
+                                tag.c_str());
     }
     cache_topology = CacheTopology::create(std::move(groups), topology().layers());
 }
@@ -462,15 +474,15 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
 
     const auto step   = static_cast<uint32_t>(std::max(1, linear_step));
     auto       groups = topology().groups();
-    for (size_t gid = 0; gid < groups.size(); ++gid) {
-        const auto explicit_independent_blocks = groups[gid].policy.explicit_block_num;
+    for (auto& group : groups) {
+        const auto explicit_independent_blocks = group.policy.explicit_block_num;
         uint32_t   rule_blocks                 = global_block_num;
         if (explicit_independent_blocks > 0) {
             rule_blocks = explicit_independent_blocks;
-        } else if (groups[gid].policy.group_type == CacheGroupType::SWA) {
+        } else if (group.policy.group_type == CacheGroupType::SWA) {
             rule_blocks = global_block_num / step + (global_block_num % step != 0 ? 1u : 0u);
         }
-        groups[gid].block_num = rule_blocks;
+        group.block_num = rule_blocks;
     }
     // The published topology already owns frozen Specs; changing capacity does
     // not require cloning their immutable byte layouts again.
