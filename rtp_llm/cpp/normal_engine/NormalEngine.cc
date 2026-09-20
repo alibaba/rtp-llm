@@ -188,6 +188,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 }
 
 void NormalEngine::initExecutor(const EngineInitParams& params) {
+    should_loop_ = [this]() { return running_.load(); };
     if (parallelism_config.pp_size > 1) {
         auto* pp_executor = new PPExecutor(
             params,
@@ -197,7 +198,7 @@ void NormalEngine::initExecutor(const EngineInitParams& params) {
             [this]() { step_profiler_.startStep(); },
             [this]() { step_profiler_.finishStep(); },
             propose_params_.get());
-        pp_executor->setCommWatchdogArmedFn([this]() { return !running_.load(); });
+        should_loop_ = [pp_executor]() { return !pp_executor->shutdownCompleted(); };
         executor_.reset(pp_executor);
     } else if (sp_config.type != SP_TYPE_NONE) {
         executor_.reset(new MtpExecutor(
@@ -564,6 +565,7 @@ absl::Status NormalEngine::startLoop() {
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
+    executor_->notifyShutdown();
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
     return absl::OkStatus();
@@ -574,7 +576,7 @@ void NormalEngine::loop() {
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
-    while (running_) {
+    while (should_loop_()) {
         absl::Status status;
         try {
             status = parallelism_config.pp_size > 1 ? pp_step() : step();
@@ -712,9 +714,6 @@ absl::Status NormalEngine::pp_step() {
     if (is_first_stage_scheduler) {
         while (pause_ && running_) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        if (!running_) {
-            return absl::OkStatus();
         }
     }
 

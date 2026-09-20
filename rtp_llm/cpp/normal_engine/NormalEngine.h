@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -70,6 +71,7 @@ private:
 private:
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
+    std::function<bool()>                         should_loop_;
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;

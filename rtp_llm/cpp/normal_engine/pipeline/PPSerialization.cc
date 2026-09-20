@@ -422,6 +422,7 @@ torch::Tensor serializePlan(const PPExecutionPlan& plan, bool empty_plan) {
         writeSamplingPlan(w, plan.sampling_plan);
         writeOutputConfig(w, plan.output_config);
         w.flag(plan.is_decode);
+        w.flag(plan.shutdown);
         w.tensor(plan.draft_next_position_ids);
         w.val<uint64_t>(plan.finished_request_ids.size());
         for (const auto request_id : plan.finished_request_ids) {
@@ -442,6 +443,7 @@ PPExecutionPlan deserializePlan(const torch::Tensor& buffer) {
     readSamplingPlan(r, plan.sampling_plan);
     readOutputConfig(r, plan.output_config);
     plan.is_decode                  = r.flag();
+    plan.shutdown                   = r.flag();
     plan.draft_next_position_ids    = r.tensor();
     const auto finished_request_num = r.val<uint64_t>();
     plan.finished_request_ids.resize(finished_request_num);

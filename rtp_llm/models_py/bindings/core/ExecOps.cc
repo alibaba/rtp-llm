@@ -25,6 +25,7 @@
 #include <atomic>
 #include <chrono>
 #include <string>
+#include <thread>
 #include <utility>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
@@ -690,9 +691,15 @@ public:
         if (!work_) {
             return true;
         }
-        /* torch Work.wait(timeout) returns False once the timeout expires; the work
-         * stays alive for a later retry. */
-        return work_.attr("wait")(py::cast(timeout)).cast<bool>();
+        try {
+            return work_.attr("wait")(py::cast(timeout)).cast<bool>();
+        } catch (const py::error_already_set& e) {
+            /* gloo terminates the transfer when the bounded wait expires (or the peer
+             * dies); the caller only uses this path while stopping, where "not delivered"
+             * means exit. Report and surface it as an incomplete wait. */
+            RTP_LLM_LOG_WARNING("P2P bounded wait failed: %s", e.what());
+            return false;
+        }
     }
 
 private:

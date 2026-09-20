@@ -111,7 +111,11 @@ void PPExecutor::asyncSendPlan(const PPExecutionPlan& plan, bool empty_plan, PPT
 }
 
 PPExecutionPlan PPExecutor::receivePlan() {
-    return pp_serialization::deserializePlan(receiveObject());
+    auto plan = pp_serialization::deserializePlan(receiveObject());
+    if (plan.shutdown) {
+        RTP_LLM_LOG_INFO("received pipeline shutdown sentinel from previous stage");
+    }
+    return plan;
 }
 
 void PPExecutor::asyncSendExecutionResult(const PPExecutionResult& result, PPTickets& tickets) {
@@ -137,42 +141,36 @@ PPIntermediateTensors PPExecutor::receiveTensors(PPTickets& tickets) {
     return tensors;
 }
 
-void PPExecutor::waitTicket(PPCommTicket& ticket, const char* what) {
-    if (!comm_watchdog_armed_fn_) {
-        ticket.wait();
+void PPExecutor::waitTicket(PPCommTicket& ticket, const char* what, bool throw_on_timeout) {
+    const bool armed = stopping_;
+    if (!armed) {
+        /* Running: unbounded wait, which also drives backend progress; the shutdown
+         * window is re-evaluated by the next wait once data arrives. */
+        try {
+            ticket.wait();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("PP comm failed while running (peer likely died): %s", e.what());
+            throw PPCommWatchdogTimeout(std::string("peer communication failed: ") + e.what());
+        }
         return;
     }
-    /** Poll in slices so the watchdog notices the shutdown window promptly without
-     *  bounding the transfer itself. */
-    constexpr auto                                       kPollSlice = std::chrono::milliseconds(1000);
-    std::optional<std::chrono::steady_clock::time_point> armed_since;
-    while (true) {
-        const auto now   = std::chrono::steady_clock::now();
-        const bool armed = comm_watchdog_armed_fn_();
-        if (!armed) {
-            armed_since.reset();
-        } else if (!armed_since) {
-            armed_since = now;
-        }
-        if (armed_since) {
-            const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - *armed_since).count();
-            if (waited_ms >= comm_watchdog_timeout_ms_) {
-                RTP_LLM_LOG_ERROR("PP comm watchdog: waited %ld ms for %s after shutdown started, peer is not "
-                                  "responding; aborting wait",
-                                  static_cast<long>(waited_ms),
-                                  what);
-                throw PPCommWatchdogTimeout(std::string("timed out waiting for ") + what);
-            }
-        }
-        if (ticket.wait(kPollSlice)) {
-            return;
-        }
+    /* Stopping: bound the wait for the final frames/sentinel. Not delivering within the
+     * bound means the peer is gone and this stage must exit. */
+    if (ticket.wait(std::chrono::milliseconds(comm_watchdog_timeout_ms_))) {
+        return;
+    }
+    RTP_LLM_LOG_ERROR("PP comm watchdog: %s not received within %ld ms after shutdown started%s",
+                      what,
+                      static_cast<long>(comm_watchdog_timeout_ms_),
+                      throw_on_timeout ? "; aborting wait" : "; ignored during teardown");
+    if (throw_on_timeout) {
+        throw PPCommWatchdogTimeout(std::string("timed out waiting for ") + what);
     }
 }
 
-void PPExecutor::waitAll(PPTickets& tickets, const char* what) {
+void PPExecutor::waitAll(PPTickets& tickets, const char* what, bool throw_on_timeout) {
     for (auto& ticket : tickets) {
-        waitTicket(*ticket, what);
+        waitTicket(*ticket, what, throw_on_timeout);
     }
     tickets.clear();
 }
@@ -414,9 +412,9 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
 
 PPExecutor::~PPExecutor() {
     for (auto& slot : slots_) {
-        waitAll(slot.plan_sends, "plan send completion");
-        waitAll(slot.activation_sends, "activation send completion");
-        waitAll(slot.execution_result_sends, "execution result send completion");
+        waitAll(slot.plan_sends, "plan send completion", false);
+        waitAll(slot.activation_sends, "activation send completion", false);
+        waitAll(slot.execution_result_sends, "execution result send completion", false);
     }
     cudaProfilerEnd();
 }
@@ -1008,6 +1006,10 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         auto plan_status        = buildPlan(scheduled_stream_groups, schedule_output.finished_request_ids);
         RETURN_IF_STATUS_OR_ERROR(plan_status);
         plan = std::move(plan_status.value());
+        if (isStageRoot() && stopping_ && idle_streak_ >= parallelism_config_.pp_size + 1) {
+            plan.shutdown = true;
+            RTP_LLM_LOG_INFO("pipeline drained, emitting shutdown sentinel to next stage");
+        }
     } else {
         plan = receivePlan();
     }
@@ -1117,8 +1119,10 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     current_slot_ = (current_slot_ + 1) % slots_.size();
 
     /** 6. recv the execution result of next batch and process it. */
-    auto& next_batch = slots_[current_slot_];
+    auto& next_batch                = slots_[current_slot_];
+    bool  received_result_this_step = false;
     if (isFirstStage() && isStageRoot() && !next_batch.skip_run) {
+        received_result_this_step = true;
 
         const auto& stream_groups            = next_batch.stream_groups;
         auto        token_counts_by_priority = stream_groups.tokenCountsByPriority();
@@ -1137,6 +1141,16 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             tps_reporter_.report(&tps_collector);
             wall_tps_reporter_.report(&tps_collector);
         }
+    }
+
+    if (isFirstStage() && isStageRoot() && !plan.shutdown) {
+        // A step counts as idle only when it neither runs a batch nor receives a result.
+        const bool no_work   = plan.model_input.skip_run;
+        const bool no_result = !received_result_this_step;
+        idle_streak_         = (no_work && no_result) ? idle_streak_ + 1 : 0;
+    }
+    if (plan.shutdown) {
+        shutdown_completed_ = true;
     }
     return absl::OkStatus();
 }

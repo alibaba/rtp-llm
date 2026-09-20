@@ -17,6 +17,7 @@ class Executor {
 public:
     Executor() {};
     virtual absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) = 0;
+    virtual void         notifyShutdown() {}
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,
