@@ -249,6 +249,8 @@ def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor, b_tensors
     ...
 def cutlass_scaled_fp4_mm(out: torch.Tensor, a: torch.Tensor, b: torch.Tensor, a_sf: torch.Tensor, b_sf: torch.Tensor, alpha: torch.Tensor) -> None:
     ...
+def cutlass_scaled_mm_blockwise_sm120_fp8(D: torch.Tensor, A: torch.Tensor, B: torch.Tensor, A_sf: torch.Tensor, B_sf: torch.Tensor, bias: torch.Tensor | None = None, use_gelu: bool = False) -> None:
+    ...
 def debug_kernel(data: torch.Tensor, start_row: int, start_col: int, m: int, n: int, row_len: int, info_id: int) -> None:
     """
     Debug kernel to print 2D data blocks from GPU tensor
@@ -291,8 +293,8 @@ def fused_bias_add(input: torch.Tensor, bias: torch.Tensor) -> None:
     """In-place per-column bias add kernel."""
 def fused_bias_gelu(input: torch.Tensor, bias: torch.Tensor) -> None:
     """In-place fused bias add and exact GELU kernel."""
-def fused_bias_gelu_quant_fp8(input: torch.Tensor, bias: torch.Tensor, output: torch.Tensor, scales: torch.Tensor) -> None:
-    """Fused bias, exact GELU, and per-block FP8 UE8M0 quantization."""
+def fused_bias_gelu_quant_fp8(input: torch.Tensor, bias: torch.Tensor, output: torch.Tensor, scales: torch.Tensor, add_bias: bool = True) -> None:
+    """Fused optional bias, exact GELU, and per-block FP8 quantization."""
 def fused_add_rmsnorm(input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float, cuda_stream: int = 0) -> None:
     """
     Fused Add RMSNorm kernel

@@ -125,8 +125,9 @@ def fused_bias_gelu_quant_fp8(
     bias: torch.Tensor,
     output: torch.Tensor,
     scales: torch.Tensor,
+    add_bias: bool = True,
 ) -> None:
-    """Fused bias, exact GELU, and per-block FP8 UE8M0 quantization."""
+    """Fused optional bias, exact GELU, and per-block FP8 quantization."""
 
 def fused_add_rmsnorm(
     input: torch.Tensor,

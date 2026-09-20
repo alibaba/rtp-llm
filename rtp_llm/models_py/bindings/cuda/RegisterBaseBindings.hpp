@@ -131,7 +131,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("input"),
                   py::arg("bias"),
                   py::arg("output"),
-                  py::arg("scales"));
+                  py::arg("scales"),
+                  py::arg("add_bias") = true);
 
     rtp_ops_m.def("per_token_group_quant_int8",
                   &per_token_group_quant_int8,
