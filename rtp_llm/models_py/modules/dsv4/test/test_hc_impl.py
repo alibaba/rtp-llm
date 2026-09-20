@@ -103,6 +103,9 @@ class TestHCImpl(unittest.TestCase):
                 norm_eps=1e-6,
                 hc_eps=1e-6,
             )
+        if not _tl.tilelang_available():
+            self.assertIsInstance(unit, FallbackHCUnit)
+            return
         self.assertIsInstance(unit, TileLangHCUnit)
         x = torch.randn(2, 5, hc, dim, dtype=torch.bfloat16)
         with self.assertRaises(RuntimeError):
