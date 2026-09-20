@@ -30,7 +30,7 @@ from importlib import metadata
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib import request as urllib_request
 
 try:
@@ -67,6 +67,7 @@ _KVCM_STARTUP_TEMPLATE = Path(
         str(_KVCM_ROOT / "package/etc/default_startup_config.json"),
     )
 )
+_KVCM_START_ATTEMPTS = 3
 
 
 @contextmanager
@@ -79,13 +80,20 @@ def _working_directory(path: Path):
         os.chdir(previous)
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        # KVCM listens on the IPv4 wildcard address.  Probing loopback alone
-        # can select a port already occupied on another local interface, which
-        # then makes an otherwise healthy integration server fail its bind.
-        sock.bind(("0.0.0.0", 0))
-        return sock.getsockname()[1]
+def _reserve_ports(count: int) -> tuple[list[socket.socket], tuple[int, ...]]:
+    reservations = []
+    try:
+        for _ in range(count):
+            reservation = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            reservation.bind(("0.0.0.0", 0))
+            reservations.append(reservation)
+        return reservations, tuple(
+            reservation.getsockname()[1] for reservation in reservations
+        )
+    except Exception:
+        for reservation in reservations:
+            reservation.close()
+        raise
 
 
 def _read_log_tail(path: Path, max_chars: int = 16_384) -> str:
@@ -99,15 +107,38 @@ def _process_output_path(tmp_path: Path) -> Path:
     return tmp_path / "logs" / "kvcm_process.log"
 
 
-def _terminate_process(process: subprocess.Popen, timeout: float = 5.0) -> None:
+def _terminate_process(process: subprocess.Popen, timeout: float = 5.0) -> bool:
     if process.poll() is not None:
-        return
+        return True
     process.terminate()
     try:
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait(timeout=timeout)
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False
+    return True
+
+
+def _has_port_bind_failure(output: str) -> bool:
+    return any(
+        marker in output
+        for marker in (
+            "Address already in use",
+            "Failed to start rpc server",
+            "Failed to start admin rpc server",
+            "Failed to start meta http server on port",
+            "Failed to start admin http server on port",
+        )
+    )
+
+
+class _KvcmStartupFailure(RuntimeError):
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def _write_startup_config(tmp_path: Path):
@@ -166,14 +197,11 @@ def _require_kvcm_dependencies() -> None:
         raise RuntimeError(f"KVCM integration binary is not executable: {_KVCM_BIN}")
 
 
-def _start_kvmeta(tmp_path: Path, startup_path: Path):
-    ports = []
-    while len(ports) < 4:
-        candidate = _free_port()
-        if candidate not in ports:
-            ports.append(candidate)
+def _start_kvmeta_attempt(tmp_path: Path, startup_path: Path, attempt: int):
+    reservations, ports = _reserve_ports(4)
     rpc_port, http_port, admin_rpc_port, admin_http_port = ports
-    (tmp_path / "logs").mkdir(exist_ok=True)
+    attempt_path = tmp_path / f"kvcm-attempt-{attempt}"
+    (attempt_path / "logs").mkdir(parents=True)
     command = [
         str(_KVCM_BIN),
         "-c",
@@ -195,29 +223,50 @@ def _start_kvmeta(tmp_path: Path, startup_path: Path):
         "-e",
         f"kvcm.startup_config={startup_path}",
     ]
-    process_output = _process_output_path(tmp_path)
+    process_output = _process_output_path(attempt_path)
     # Do not leave an undrained PIPE behind a verbose server: it can fill and
     # deadlock the integration test before teardown gets a chance to call
     # communicate(). The child owns its duplicated file descriptor after
     # Popen returns, so the parent can close this handle immediately.
-    with process_output.open("wb") as output_stream:
-        process = subprocess.Popen(
-            command,
-            cwd=tmp_path,
-            stdout=output_stream,
-            stderr=subprocess.STDOUT,
-        )
+    try:
+        # Hold all wildcard bindings together so the selected ports are unique
+        # and unavailable on every local IPv4 interface. Close them only at the
+        # Popen boundary; a bounded retry below covers the unavoidable handoff
+        # window because KVCM cannot inherit pre-bound test sockets.
+        with process_output.open("wb") as output_stream:
+            for reservation in reservations:
+                reservation.close()
+            reservations.clear()
+            process = subprocess.Popen(
+                command,
+                cwd=attempt_path,
+                stdout=output_stream,
+                stderr=subprocess.STDOUT,
+            )
+    finally:
+        for reservation in reservations:
+            reservation.close()
 
-    server_log = tmp_path / "logs" / "kv_cache_manager.log"
+    server_log = attempt_path / "logs" / "kv_cache_manager.log"
     expected_ports = {rpc_port, http_port, admin_rpc_port, admin_http_port}
     listening_ports = set()
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
+        diagnostics = (
+            f"process output tail:\n{_read_log_tail(process_output)}\n"
+            f"log tail:\n{_read_log_tail(server_log)}"
+        )
         if process.poll() is not None:
-            raise RuntimeError(
-                f"KVCM exited during startup ({process.returncode})\n"
-                f"process output tail:\n{_read_log_tail(process_output)}\n"
-                f"log tail:\n{_read_log_tail(server_log)}"
+            raise _KvcmStartupFailure(
+                f"KVCM exited during startup ({process.returncode})\n" f"{diagnostics}",
+                retryable=_has_port_bind_failure(diagnostics),
+            )
+        if _has_port_bind_failure(diagnostics):
+            terminated = _terminate_process(process)
+            suffix = "" if terminated else "\nKVCM did not exit after SIGKILL"
+            raise _KvcmStartupFailure(
+                f"KVCM failed to bind an integration port\n{diagnostics}{suffix}",
+                retryable=terminated,
             )
         for port in expected_ports - listening_ports:
             try:
@@ -238,12 +287,28 @@ def _start_kvmeta(tmp_path: Path, startup_path: Path):
             )
         time.sleep(0.1)
 
-    _terminate_process(process)
-    raise RuntimeError(
+    terminated = _terminate_process(process)
+    suffix = "" if terminated else "\nKVCM did not exit after SIGKILL"
+    raise _KvcmStartupFailure(
         "KVCM did not become ready within 30 seconds\n"
         f"process output tail:\n{_read_log_tail(process_output)}\n"
-        f"log tail:\n{_read_log_tail(server_log)}"
+        f"log tail:\n{_read_log_tail(server_log)}{suffix}",
+        retryable=False,
     )
+
+
+def _start_kvmeta(tmp_path: Path, startup_path: Path):
+    failures = []
+    for attempt in range(1, _KVCM_START_ATTEMPTS + 1):
+        try:
+            return _start_kvmeta_attempt(tmp_path, startup_path, attempt)
+        except _KvcmStartupFailure as error:
+            failures.append(f"attempt {attempt}: {error}")
+            if not error.retryable or attempt == _KVCM_START_ATTEMPTS:
+                raise RuntimeError(
+                    "KVCM integration startup failed\n" + "\n".join(failures)
+                ) from error
+    raise AssertionError("unreachable KVCM startup retry state")
 
 
 def _stop_kvmeta(
@@ -256,7 +321,8 @@ def _stop_kvmeta(
         try:
             process.wait(timeout=20)
         except subprocess.TimeoutExpired:
-            _terminate_process(process)
+            if not _terminate_process(process):
+                raise RuntimeError("KVCM did not exit after SIGKILL")
     process_output = (
         _read_log_tail(
             _process_output_path(server_log.parent.parent), max_chars=1024 * 1024
@@ -512,6 +578,62 @@ def _variable_embedding_tensors():
             torch.arange(rows * columns, dtype=dtype).reshape(rows, columns) + index
         )
     return tensors
+
+
+class RtpKvMetaIntegrationHarnessTest(TestCase):
+    def test_port_reservations_are_unique_and_cover_wildcard_bindings(self):
+        reservations, ports = _reserve_ports(4)
+        try:
+            self.assertEqual(len(ports), 4)
+            self.assertEqual(len(set(ports)), 4)
+            for port in ports:
+                with (
+                    self.subTest(port=port),
+                    socket.socket(socket.AF_INET, socket.SOCK_STREAM) as contender,
+                    self.assertRaises(OSError),
+                ):
+                    contender.bind(("127.0.0.1", port))
+        finally:
+            for reservation in reservations:
+                reservation.close()
+
+    def test_force_termination_is_bounded_after_sigkill(self):
+        exited_after_kill = Mock()
+        exited_after_kill.poll.return_value = None
+        exited_after_kill.wait.side_effect = [
+            subprocess.TimeoutExpired("kvcm", 0),
+            0,
+        ]
+        self.assertTrue(_terminate_process(exited_after_kill, timeout=0))
+        exited_after_kill.terminate.assert_called_once_with()
+        exited_after_kill.kill.assert_called_once_with()
+
+        stuck = Mock()
+        stuck.poll.return_value = None
+        stuck.wait.side_effect = subprocess.TimeoutExpired("kvcm", 0)
+        self.assertFalse(_terminate_process(stuck, timeout=0))
+        stuck.terminate.assert_called_once_with()
+        stuck.kill.assert_called_once_with()
+
+    def test_startup_retries_only_retryable_bind_failures(self):
+        expected = (Mock(), "endpoint", "admin", Path("server.log"))
+        retryable = _KvcmStartupFailure("bind race", retryable=True)
+        with patch(
+            f"{__name__}._start_kvmeta_attempt",
+            side_effect=(retryable, expected),
+        ) as start_attempt:
+            self.assertEqual(_start_kvmeta(Path("tmp"), Path("startup")), expected)
+        self.assertEqual(start_attempt.call_count, 2)
+
+        fatal = _KvcmStartupFailure("invalid config", retryable=False)
+        with (
+            patch(
+                f"{__name__}._start_kvmeta_attempt", side_effect=fatal
+            ) as start_attempt,
+            self.assertRaisesRegex(RuntimeError, "invalid config"),
+        ):
+            _start_kvmeta(Path("tmp"), Path("startup"))
+        start_attempt.assert_called_once()
 
 
 @skipUnless(

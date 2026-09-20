@@ -35,7 +35,7 @@ _MAX_CALL_TIMEOUT_MS = 600_000
 _MAX_WRITE_TIMEOUT_SECONDS = 1800
 _MAX_INT32 = (1 << 31) - 1
 _MAX_UINT32 = (1 << 32) - 1
-_MIN_SDK_QUEUE_SIZE = 64
+_KV_META_MAX_BATCH_ITEMS = 64
 _DEFAULT_WRITE_TIMEOUT_SECONDS = 30
 _KV_META_MODEL_NAME = "__kv_meta_object__"
 _KV_META_DTYPE = "opaque_bytes"
@@ -406,20 +406,16 @@ def _derive_identity(primary: dict, field: str, maximum: int) -> str:
     return derived
 
 
-def _validate_sdk_config(primary: dict) -> tuple[int, int]:
+def _validate_sdk_config(primary: dict) -> tuple[int, int, int]:
     sdk_config = _required_mapping(primary.get("sdk_config"), "KVCM sdk_config")
     _positive_int(sdk_config.get("thread_num"), "KVCM SDK thread_num", _MAX_INT32)
     queue_size = _positive_int(
         sdk_config.get("queue_size"), "KVCM SDK queue_size", _MAX_INT32
     )
-    if queue_size < _MIN_SDK_QUEUE_SIZE:
-        raise RtpKvMetaObjectConfigError(
-            f"KVCM SDK queue_size must be at least {_MIN_SDK_QUEUE_SIZE} for KVMeta"
-        )
     backend_configs = sdk_config.get("sdk_backend_configs")
-    if not isinstance(backend_configs, list):
+    if not isinstance(backend_configs, list) or not backend_configs:
         raise RtpKvMetaObjectConfigError(
-            "KVCM sdk_backend_configs must be a JSON array"
+            "KVCM sdk_backend_configs must be a non-empty JSON array"
         )
     for index, backend_config in enumerate(backend_configs):
         if not isinstance(backend_config, dict):
@@ -445,7 +441,7 @@ def _validate_sdk_config(primary: dict) -> tuple[int, int]:
         "KVCM SDK get_timeout_ms",
         _MAX_INT32,
     )
-    return put_timeout_ms, get_timeout_ms
+    return put_timeout_ms, get_timeout_ms, queue_size
 
 
 def _parse_env_bool(value: str, name: str) -> bool:
@@ -773,7 +769,11 @@ def _derive_primary_config(
         "KVCM metadata call_timeout",
         _MAX_CALL_TIMEOUT_MS,
     )
-    configured_put_timeout_ms, configured_get_timeout_ms = _validate_sdk_config(primary)
+    (
+        configured_put_timeout_ms,
+        configured_get_timeout_ms,
+        configured_queue_size,
+    ) = _validate_sdk_config(primary)
     effective_call_timeout_ms = (
         configured_call_timeout_ms
         if override_call_timeout_ms is None
@@ -816,6 +816,13 @@ def _derive_primary_config(
 
     transfer_config = copy.deepcopy(primary)
     transfer_config["meta_channel_config"]["call_timeout"] = effective_call_timeout_ms
+    # KVMeta can fan one native request out into 64 independent object I/Os.
+    # The exact-object client owns a deep-copied SDK config, so raising only
+    # its queue floor preserves a smaller fixed-block queue while preventing a
+    # valid maximum-size KVMeta batch from being partially submitted.
+    transfer_config["sdk_config"]["queue_size"] = max(
+        configured_queue_size, _KV_META_MAX_BATCH_ITEMS
+    )
     transfer_config["sdk_config"]["timeout_config"].update(
         {
             "put_timeout_ms": effective_put_timeout_ms,

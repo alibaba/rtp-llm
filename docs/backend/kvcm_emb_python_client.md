@@ -111,6 +111,10 @@ the fixed-block client; the client prepends `kve_` to the selected original
 group and id. Its SDK, backend, timeout and unknown top-level fields are
 preserved, while `model_deployment` is replaced with the KVMeta object marker;
 only `model_deployment.user_data` is carried over from the fixed-block entry.
+The derived client requires at least one SDK backend. If the existing SDK
+`queue_size` is below KVCM's 64-object native batch limit, only the deep-copied
+`kve_` client config raises it to 64; the fixed-block client and its parsed
+configuration are not mutated, and no new environment variable is required.
 
 Static `RECO_SERVER_ADDRESS` values use `hostname:port`, `IPv4:port`, or
 `[IPv6]:port`. Ports must be in the range 1-65535. VIPServer IPv4 and IPv6
