@@ -282,6 +282,20 @@ class Block(nn.Module):
             self.engram_token_mask,
         ).reshape(shape)
 
+    def _try_mega_mhc(self, attn_out, residual, post, comb):
+        """Fuse the intra-layer delayed mHC seam and FFN RMSNorm."""
+        from rtp_llm.models_py.modules.dsv4.hc.v41_mega_mhc import try_fused_post_pre
+
+        return try_fused_post_pre(
+            attn_out,
+            residual,
+            post,
+            comb,
+            self.attn_hc,
+            self.ffn_hc,
+            self.ffn_norm,
+        )
+
     def prefill_fast_attn_pre(self, x: torch.Tensor):
         attn_hc_pre, _, _, _ = self._prefill_fast_hc_impls()
         residual = x
@@ -347,8 +361,8 @@ class Block(nn.Module):
         attn_fn=None,
     ) -> torch.Tensor:
         """Decode-only block forward — mirrors prefill ``forward`` but
-        delegates attention to ``Attention.forward_decode``. Prefill
-        ``forward`` is byte-identical for PD-disagg cleanliness.
+        delegates attention to ``Attention.forward_decode``. Both paths share
+        the optional intra-layer delayed mHC/RMSNorm fusion.
 
         ``attn_fn`` overrides the attention call (normed input -> attention
         output) while keeping this block's hyper-connection choreography as
@@ -377,18 +391,32 @@ class Block(nn.Module):
             attn_out = self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
-        x = self.attn_hc.post(attn_out, residual, post, comb)
+        fused_mhc = (
+            None if _dbg_layer else self._try_mega_mhc(attn_out, residual, post, comb)
+        )
+        x = (
+            self.attn_hc.post(attn_out, residual, post, comb)
+            if fused_mhc is None
+            else fused_mhc[0]
+        )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_residual", x)
 
         # FFN path — MoE has no per-step state, reuse existing forward
         residual = x
-        x_pre, post, comb = self.ffn_hc.pre(
-            x,
-            dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
-        )
-        bsz, q_len, dim_ = x_pre.shape
-        x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+        if fused_mhc is None:
+            x_pre, post, comb = self.ffn_hc.pre(
+                x,
+                dbg_tag=(
+                    f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None
+                ),
+            )
+            bsz, q_len, dim_ = x_pre.shape
+            x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(
+                bsz, q_len, dim_
+            )
+        else:
+            _, x_pre, post, comb = fused_mhc
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
         ffn_out = self.ffn(x_pre, input_ids)
@@ -484,12 +512,20 @@ class Block(nn.Module):
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
             )
-        x = attn_hc_post(attn_out, residual, post, comb)
+        fused_mhc = self._try_mega_mhc(attn_out, residual, post, comb)
+        x = (
+            attn_hc_post(attn_out, residual, post, comb)
+            if fused_mhc is None
+            else fused_mhc[0]
+        )
         self._sync_after_first_cp_prefill_attention()
 
         residual = x
-        x_pre, post, comb = ffn_hc_pre(x)
-        x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
+        if fused_mhc is None:
+            x_pre, post, comb = ffn_hc_pre(x)
+            x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
+        else:
+            _, x_pre, post, comb = fused_mhc
         ffn_out = self.ffn(x_pre, input_ids)
         return ffn_hc_post(ffn_out, residual, post, comb)
 
@@ -623,7 +659,14 @@ class Block(nn.Module):
                     f"L{self.layer_id:02d}_attn_out_{dbg_pos_name}",
                     attn_out[dbg_pos_mask].contiguous(),
                 )
-        x = self.attn_hc.post(attn_out, residual, post, comb)  # [T, hc, dim]
+        fused_mhc = (
+            None if _dbg_layer else self._try_mega_mhc(attn_out, residual, post, comb)
+        )
+        x = (
+            self.attn_hc.post(attn_out, residual, post, comb)
+            if fused_mhc is None
+            else fused_mhc[0]
+        )  # [T, hc, dim]
         self._sync_after_first_cp_prefill_attention()
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_residual", x)
@@ -636,11 +679,14 @@ class Block(nn.Module):
 
         # FFN path
         residual = x
-        x_pre, post, comb = self.ffn_hc.pre(
-            x,
-            dbg_tag=f"L{self.layer_id:02d}_ffn_hc_pre" if _dbg_layer else None,
-        )  # [T, dim], ...
-        x_pre = self.ffn_norm(x_pre)  # [T, dim]
+        if fused_mhc is None:
+            x_pre, post, comb = self.ffn_hc.pre(
+                x,
+                dbg_tag=f"L{self.layer_id:02d}_ffn_hc_pre" if _dbg_layer else None,
+            )  # [T, dim], ...
+            x_pre = self.ffn_norm(x_pre)  # [T, dim]
+        else:
+            _, x_pre, post, comb = fused_mhc
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_in", x_pre)
             if dbg_pos_mask is not None:

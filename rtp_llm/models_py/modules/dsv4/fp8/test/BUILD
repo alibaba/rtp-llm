@@ -97,6 +97,19 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_indexer_q_fusion",
+    srcs = [
+        "test_v41_decode_indexer.py",
+        "test_v41_indexer_q_fusion.py",
+    ],
+    main = "test_v41_indexer_q_fusion.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
+
+py_test(
     name = "test_v41_prefill_indexer_cuda",
     srcs = ["test_v41_prefill_indexer.py"],
     main = "test_v41_prefill_indexer.py",

@@ -1267,29 +1267,30 @@ class AttentionV41FP8(AttentionFP8):
         q = self._lin(self.index_wq, qr.reshape(T, -1)).view(
             T, self.index_n_heads, self.index_head_dim
         )
-        weights = (
-            F.linear(flat, self.index_weights).float()
-            * (self.index_head_dim * self.index_n_heads) ** -0.5
-        )
-        freqs = self.freqs_cis[positions]
+        weights = F.linear(flat, self.index_weights)
         visible_per_token = (positions + 1) // self.compress_ratio
         if paged:
             all_logits = decode_indexer.score_decode_indexer(
                 q.view(B, S, self.index_n_heads, self.index_head_dim),
                 weights.view(B, S, self.index_n_heads),
-                freqs,
+                self.freqs_cis,
                 keys.pool,
                 keys.block_table,
                 visible_per_token.view(B, S),
                 max_ctx_len=capacity,
                 rope_head_dim=self.rope_head_dim,
                 logical_entries_per_block=keys.logical_entries_per_block,
+                positions=positions.reshape(T),
             )
             if all_logits is None:
                 raise RuntimeError(
                     "V4.1 paged indexer support changed within a forward"
                 )
         else:
+            weights = (
+                weights.float() * (self.index_head_dim * self.index_n_heads) ** -0.5
+            )
+            freqs = self.freqs_cis[positions]
             q = fp4_roundtrip(rope_only(q, freqs, self.rope_head_dim))
         config = self.v41_config
         candidate_source = int(config.get("candidate_source_layer_id", -1))

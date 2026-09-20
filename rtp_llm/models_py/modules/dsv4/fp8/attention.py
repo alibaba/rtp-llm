@@ -81,7 +81,11 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, Compres
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
-from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
+from rtp_llm.models_py.modules.dsv4.utils import (
+    V41MXFP8Linear,
+    _v4_fp8_linear,
+    merge_v41_qkv_weights,
+)
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import KVCacheRegionName, rtp_llm_ops
 
@@ -986,6 +990,13 @@ class AttentionFP8(nn.Module):
             linear._sleep_col_slice = col_slice
             return linear
 
+        self.wq_a_wkv = merge_v41_qkv_weights(
+            layer_weights,
+            W.v4_attn_wq_a_w,
+            W.v4_attn_wq_a_s,
+            W.v4_attn_wkv_w,
+            W.v4_attn_wkv_s,
+        )
         self.wq_a = _fp8_w_s(W.v4_attn_wq_a_w, W.v4_attn_wq_a_s)
         # wq_b is row-split along N (n_heads * head_dim)
         self.wq_b = _fp8_w_s(
@@ -1230,26 +1241,33 @@ class AttentionFP8(nn.Module):
             s = raw
             if row_slice is not None:
                 w = w[row_slice]
+                scale_rows = raw_w.shape[0] // raw.shape[0]
                 s = (
                     s[row_slice]
                     if s.dtype == torch.int32
-                    else s[row_slice.start // 128 : row_slice.stop // 128]
+                    else s[row_slice.start // scale_rows : row_slice.stop // scale_rows]
                 )
             if col_slice is not None:
                 w = w[:, col_slice]
+                scale_cols = raw_w.shape[1] // raw.shape[1]
                 s = (
                     s[:, col_slice.start // 512 : col_slice.stop // 512]
                     if s.dtype == torch.int32
-                    else s[:, col_slice.start // 128 : col_slice.stop // 128]
+                    else s[
+                        :, col_slice.start // scale_cols : col_slice.stop // scale_cols
+                    ]
                 )
             if row_slice is not None or col_slice is not None:
                 w = w.contiguous()
                 s = s.contiguous()
-            rebuilt = (
-                _repack_v4_fp8_scale_to_int32(s)
-                if s.dtype == torch.float8_e8m0fnu
-                else s
-            )
+            if isinstance(linear, V41MXFP8Linear):
+                rebuilt = linear.pack_scales(s)
+            else:
+                rebuilt = (
+                    _repack_v4_fp8_scale_to_int32(s)
+                    if s.dtype == torch.float8_e8m0fnu
+                    else s
+                )
             if resident_w is not None:
                 if w.shape != resident_w.shape:
                     raise RuntimeError(
@@ -1273,6 +1291,7 @@ class AttentionFP8(nn.Module):
             seen_cos_sin = set()
 
         for linear in (
+            getattr(self, "wq_a_wkv", None),
             getattr(self, "wq_a", None),
             getattr(self, "wq_b", None),
             getattr(self, "wkv", None),
@@ -1289,11 +1308,14 @@ class AttentionFP8(nn.Module):
         if src_w is not None and src_s is not None and stk_w is not None:
             with suppress_weights_region():
                 if row_slice is not None:
+                    scale_rows = src_w.shape[0] // src_s.shape[0]
                     src_w = src_w[row_slice]
                     src_s = (
                         src_s[row_slice]
                         if src_s.dtype == torch.int32
-                        else src_s[row_slice.start // 128 : row_slice.stop // 128]
+                        else src_s[
+                            row_slice.start // scale_rows : row_slice.stop // scale_rows
+                        ]
                     )
                     src_w = src_w.contiguous()
                     src_s = src_s.contiguous()
@@ -2097,6 +2119,14 @@ class AttentionFP8(nn.Module):
             out, x_2d, weight, self.eps, torch.cuda.current_stream().cuda_stream
         )
         return out.view(orig_shape)
+
+    def _try_fused_qr_kv(self, x: torch.Tensor):
+        linear = getattr(self, "wq_a_wkv", None)
+        if linear is None:
+            return None
+        from rtp_llm.models_py.modules.dsv4._v41_fused_qkv import try_project_qr_kv
+
+        return try_project_qr_kv(linear, x, self.q_norm, self.q_lora_rank, self.eps)
 
     def _lin(
         self,
@@ -5084,6 +5114,7 @@ class AttentionFP8(nn.Module):
         """
         x_3d = x.unsqueeze(0)
         rd = common.rd
+        fused_qkv = self._try_fused_qr_kv(x_3d) if shared_input_quant is None else None
         if self._can_reuse_qkv_input_quant():
             if shared_input_quant is None:
                 with record_function_range("dsv4.fp8.attn.qkv.shared_input_quant"):
@@ -5098,6 +5129,8 @@ class AttentionFP8(nn.Module):
             # ``_materialize_prefill_q`` so the 16 GiB Q buffer can reuse the
             # union workspace storage after the compressors finish.
             with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
+                if fused_qkv is not None:
+                    return fused_qkv[0]
                 if shared_input_quant is not None:
                     q_proj = self._lin_from_shared_quant(
                         self.wq_a, shared_input_quant, x_3d.shape
@@ -5110,7 +5143,9 @@ class AttentionFP8(nn.Module):
 
         def compute_kv() -> torch.Tensor:
             with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
-                if shared_input_quant is not None:
+                if fused_qkv is not None:
+                    kv_in = fused_qkv[1]
+                elif shared_input_quant is not None:
                     kv_in = self._lin_from_shared_quant(
                         self.wkv, shared_input_quant, x_3d.shape
                     )

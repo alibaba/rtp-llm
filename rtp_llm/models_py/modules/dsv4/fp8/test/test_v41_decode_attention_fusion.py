@@ -60,6 +60,10 @@ def _keys_from_packed(pool, table, capacity, logical_entries):
 
 def _original_paged_score(q, weights, freqs, pool, table, lengths, **kwargs):
     """Old arithmetic with the paged helper's causal -inf output contract."""
+    positions = kwargs.get("positions")
+    if positions is not None:
+        weights = weights.float() * (q.shape[-1] * q.shape[-2]) ** -0.5
+        freqs = freqs[positions.reshape(-1)]
     capacity = kwargs["max_ctx_len"]
     b, s, h, d = q.shape
     keys = _keys_from_packed(pool, table, capacity, kwargs["logical_entries_per_block"])

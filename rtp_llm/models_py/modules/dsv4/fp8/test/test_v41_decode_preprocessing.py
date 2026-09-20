@@ -76,6 +76,7 @@ class V41DecodePreprocessingCUDA(unittest.TestCase):
             eps=1e-6,
             _lin=lambda layer, x: projections[layer].clone(),
             _rmsnorm_weighted=lambda x, weight: x,
+            _try_fused_qr_kv=lambda x: None,
         )
         starts = torch.tensor([0, 127, 1024, 1500][:batch], device="cuda")
         positions = (starts[:, None] + torch.arange(span, device="cuda")).flatten()

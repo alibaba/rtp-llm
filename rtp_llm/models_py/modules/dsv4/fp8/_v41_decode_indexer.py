@@ -158,6 +158,30 @@ def prepare_indexer_q(
     return payload.view(b, s, h, d // 2), sf.view(b, s, h)
 
 
+def prepare_indexer_q_and_weights(
+    q: torch.Tensor,
+    weights: torch.Tensor,
+    freqs_cis: torch.Tensor,
+    positions: torch.Tensor,
+    rope_head_dim: int = 64,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare Q from raw head weights and a complete frequency lookup table.
+
+    DSV41_FUSED_INDEXER_Q=0 retains the original gather/cast/scale/clone/
+    RoPE/quant chain. Unsupported layouts take that same path automatically.
+    """
+    from ._v41_indexer_q_triton import try_fused_indexer_q
+
+    result = try_fused_indexer_q(q, weights, freqs_cis, positions, rope_head_dim)
+    if result is not None:
+        return result
+    scaled_weights = weights.float() * (q.shape[-1] * q.shape[-2]) ** -0.5
+    payload, sf = prepare_indexer_q(
+        q, scaled_weights, freqs_cis[positions], rope_head_dim
+    )
+    return payload, sf, scaled_weights
+
+
 def score_decode_indexer(
     q: torch.Tensor,
     weights: torch.Tensor,
@@ -169,6 +193,7 @@ def score_decode_indexer(
     max_ctx_len: int,
     rope_head_dim: int = 64,
     logical_entries_per_block: int | None = None,
+    positions: torch.Tensor | None = None,
 ) -> torch.Tensor | None:
     """Return FP32 [B*S,max_ctx_len], or None for an unsupported fast path.
 
@@ -191,6 +216,10 @@ def score_decode_indexer(
     short-context ordering and invalid-index semantics stay in the caller.
     Returned logits are already causally masked; no repeated caller mask is
     needed. The compaction kernel never reads DeepGEMM's unwritten columns.
+
+    With positions, weights are the unscaled projection and freqs_cis is the
+    full frequency table, enabling fused Q preparation. Without positions,
+    preserve the original scaled-FP32-weights/gathered-frequencies contract.
     """
     if (
         pool.ndim != 3
@@ -232,7 +261,12 @@ def score_decode_indexer(
         raise ValueError("V4.1 indexer block table and lengths must be integers")
     from ._indexer_score import fp8_fp4_paged_indexer_score
 
-    q_payload, q_sf = prepare_indexer_q(q, weights, freqs_cis, rope_head_dim)
+    if positions is None:
+        q_payload, q_sf = prepare_indexer_q(q, weights, freqs_cis, rope_head_dim)
+    else:
+        q_payload, q_sf, weights = prepare_indexer_q_and_weights(
+            q, weights, freqs_cis, positions, rope_head_dim
+        )
     lengths = context_lens.to(torch.int32).contiguous()
     physical_lengths = torch.empty_like(lengths)
     safe_table = torch.empty(block_table.shape, dtype=torch.int32, device=q.device)

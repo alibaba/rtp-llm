@@ -81,10 +81,12 @@ def decode_compute_qkv(
     )
     freqs_cis = attn.freqs_cis.index_select(0, position_ids).contiguous()
 
-    # Q path
-    qr = attn._rmsnorm_weighted(
-        attn._lin(attn.wq_a, x), attn.q_norm
-    )  # [B, 1, q_lora_rank]
+    fused_qkv = attn._try_fused_qr_kv(x)
+    # Q path; fused KV remains a view until its strided RMSNorm/RoPE below.
+    if fused_qkv is None:
+        qr = attn._rmsnorm_weighted(attn._lin(attn.wq_a, x), attn.q_norm)
+    else:
+        qr = fused_qkv[0]
     q = attn._lin(attn.wq_b, qr).unflatten(
         -1, (attn.n_heads, attn.head_dim)
     )  # [B, S, H, D]
@@ -95,7 +97,7 @@ def decode_compute_qkv(
 
     # KV path (single MQA head) — per-token RoPE using the same table lookup.
     kv = fused_rmsnorm_rope(
-        attn._lin(attn.wkv, x),
+        attn._lin(attn.wkv, x) if fused_qkv is None else fused_qkv[1],
         attn.kv_norm,
         freqs_cis,
         rd,

@@ -268,6 +268,7 @@ class PrefillFastPathTest(unittest.TestCase):
         object.__setattr__(
             FakeV4.layers[0], "attn", FakeAttention.__new__(FakeAttention)
         )
+        object.__setattr__(FakeV4.layers[0], "engram", None)
 
         with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
             prefill_forward._rt, "ENABLED", False

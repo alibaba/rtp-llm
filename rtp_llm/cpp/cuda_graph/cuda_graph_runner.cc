@@ -1058,7 +1058,13 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
+    // Prepare inputs on the caller stream, but initialize stream-local kernel
+    // state on the same stream that will capture the operations.
+    auto warmup_inputs_ready = cuda_graph::makeGraphEvent();
+    warmup_inputs_ready.record(cuda_graph::graphGetCurrentStream());
+    warmup_inputs_ready.block(capture_stream_);
     try {
+        CudaGraphStreamLife stream_life(capture_stream_);
         py_forward_method_(inputs, attn_pyobj);
         py_forward_method_(inputs, attn_pyobj);
     } catch (const py::error_already_set& e) {
