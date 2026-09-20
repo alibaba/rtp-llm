@@ -135,7 +135,33 @@ void LoadContext::load(const std::vector<std::shared_ptr<RequestBlockBuffer>>& r
     rdma_port_       = rdma_port;
     partition_count_ = partition_count;
     partition_id_    = partition_id;
-    call(request_block_buffer, timeout_ms, check_cancel_func);
+    if (combine_load_ || request_block_buffer.size() <= 1) {
+        call(request_block_buffer, timeout_ms, check_cancel_func);
+        return;
+    }
+
+    // Typed hybrids otherwise issue one TCP RPC per layer and cache group,
+    // exhausting the channel queue before Prefill publishes their blocks.
+    // Bound response size while sharing the original destination ownership.
+    constexpr size_t                                 kMaxBatchBytes  = 4 * 1024 * 1024;
+    constexpr size_t                                 kMaxBatchBlocks = 128;
+    std::vector<std::shared_ptr<RequestBlockBuffer>> batches;
+    std::shared_ptr<RequestBlockBuffer>              batch;
+    for (const auto& buffer : request_block_buffer) {
+        const auto blocks = buffer->getBlocks();
+        if (blocks.empty()) {
+            continue;
+        }
+        for (const auto& [key, block] : blocks) {
+            if (!batch || batch->getRequestId() != buffer->getRequestId() || batch->getBlocksCount() >= kMaxBatchBlocks
+                || batch->getBlocksSize() + block->len > kMaxBatchBytes || batch->getBlock(key) != nullptr) {
+                batch = std::make_shared<RequestBlockBuffer>(buffer->getRequestId());
+                batches.push_back(batch);
+            }
+            batch->addBlock(block);
+        }
+    }
+    call(batches, timeout_ms, check_cancel_func);
 }
 
 bool LoadContext::doCall(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, int64_t timeout_ms) {

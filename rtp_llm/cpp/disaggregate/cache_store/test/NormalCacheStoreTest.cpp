@@ -847,4 +847,84 @@ TEST_F(NormalCacheStoreTest, testLoadPatition_Success) {
     set_block_thread.join();
 }
 
+class RecordingLoadContext: public LoadContext {
+public:
+    explicit RecordingLoadContext(const std::shared_ptr<CacheStore>& store): LoadContext(store, false) {}
+    std::vector<std::shared_ptr<RequestBlockBuffer>> calls;
+
+protected:
+    bool doCall(const std::shared_ptr<RequestBlockBuffer>& buffer, int64_t) override {
+        calls.push_back(buffer);
+        updateResult(true, CacheStoreErrorCode::None, buffer);
+        return true;
+    }
+};
+
+TEST_F(NormalCacheStoreTest, TcpLoadBatchesPreserveDestinationsAndResponseLimits) {
+    ASSERT_TRUE(initCacheStores());
+    std::vector<std::shared_ptr<RequestBlockBuffer>> buffers;
+    auto add = [&](const std::string& request, const std::string& key, uint32_t len) {
+        auto buffer = std::make_shared<RequestBlockBuffer>(request);
+        // Metadata-only dispatch: RecordingLoadContext never dereferences storage.
+        buffer->addBlock(key, std::make_shared<char>(0), len, false, false);
+        buffers.push_back(buffer);
+    };
+    for (int i = 0; i < 129; ++i) {
+        add("small", std::to_string(i), 16);
+    }
+    for (int i = 0; i < 5; ++i) {
+        add("large", std::to_string(i), 1024 * 1024);
+    }
+    add("other", "same", 16);
+    add("other", "same", 16);  // Distinct destinations must not be deduplicated.
+    auto context = std::make_shared<RecordingLoadContext>(cache_store1_);
+    context->load(buffers, "127.0.0.1", port2_, 0, 1000, nullptr, 1, 0);
+    context->waitDone();
+    ASSERT_TRUE(context->success());
+    ASSERT_EQ(context->calls.size(), 6u);
+    EXPECT_EQ(context->calls[0]->getBlocksCount(), 128u);
+    EXPECT_EQ(context->calls[1]->getBlocksCount(), 1u);
+    EXPECT_EQ(context->calls[2]->getBlocksSize(), 4u * 1024u * 1024u);
+    EXPECT_EQ(context->calls[3]->getBlocksSize(), 1024u * 1024u);
+    size_t matched = 0;
+    for (const auto& buffer : buffers) {
+        for (const auto& [key, block] : buffer->getBlocks()) {
+            size_t copies = 0;
+            for (const auto& batch : context->calls) {
+                if (batch->getRequestId() == buffer->getRequestId() && batch->getBlock(key) == block) {
+                    ++copies;
+                }
+            }
+            EXPECT_EQ(copies, 1u);
+            matched += copies;
+        }
+    }
+    EXPECT_EQ(matched, buffers.size());
+}
+
+TEST_F(NormalCacheStoreTest, TcpLoadManyTypedGroupsIntoMixedHostAndDeviceDestinations) {
+    ASSERT_TRUE(initCacheStores());
+    auto                                             source = std::make_shared<RequestBlockBuffer>("typed-many-groups");
+    std::vector<std::shared_ptr<RequestBlockBuffer>> destinations;
+    for (int i = 0; i < 257; ++i) {
+        const auto key = std::to_string(i);
+        source->addBlock(block_buffer_util_->makeBlockBuffer(key, 16, static_cast<char>(i % 127), false));
+        auto buffer = std::make_shared<RequestBlockBuffer>(source->getRequestId());
+        buffer->addBlock(block_buffer_util_->makeBlockBuffer(key, 16, 0, i % 2 == 0));
+        destinations.push_back(buffer);
+    }
+    auto stored = cache_store2_->storeBuffers({source}, 5000);
+    ASSERT_NE(stored, nullptr);
+    stored->waitDone();
+    ASSERT_TRUE(stored->success());
+    auto loaded = cache_store1_->loadBuffers(destinations, autil::NetUtil::getBindIp(), port2_, 0, 5000, nullptr, 1, 0);
+    ASSERT_NE(loaded, nullptr);
+    loaded->waitDone();
+    ASSERT_TRUE(loaded->success()) << loaded->getErrorInfoString();
+    for (int i = 0; i < 257; ++i) {
+        const auto key = std::to_string(i);
+        verifyBlock(destinations[i]->getBlock(key), key, 16, i % 2 == 0, static_cast<char>(i % 127));
+    }
+}
+
 }  // namespace rtp_llm
