@@ -607,21 +607,29 @@ class GroupRendezvous(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def publish_all(self, attempt="a1", skip=()):
+    def publish_all(self, attempt="a1", skip=(), artifact_for=None):
+        artifact_for = artifact_for or {}
         manifests = []
         for rank in range(PROFILE.expected_decode_ranks):
             if ("DECODE", rank) in skip:
                 continue
-            m = rp.build_manifest(decode_snapshot(rank_id=rank), PROFILE, self.artifact)
+            m = rp.build_manifest(
+                decode_snapshot(rank_id=rank), PROFILE,
+                artifact_for.get(("DECODE", rank), self.artifact))
             rp.publish_rank_manifest(m, self.dir, attempt)
             manifests.append(m)
         for rank in range(PROFILE.expected_prefill_ranks):
             if ("PREFILL", rank) in skip:
                 continue
-            m = rp.build_manifest(prefill_snapshot(rank_id=rank), PROFILE, self.artifact)
+            m = rp.build_manifest(
+                prefill_snapshot(rank_id=rank), PROFILE,
+                artifact_for.get(("PREFILL", rank), self.artifact))
             rp.publish_rank_manifest(m, self.dir, attempt)
             manifests.append(m)
         return manifests
+
+    def join_env(self):
+        return {rp.GROUP_DIR_ENV: self.dir, rp.GROUP_ATTEMPT_ENV: "a1"}
 
     def test_published_manifest_is_attempt_scoped_and_round_trips(self):
         manifest = rp.build_manifest(decode_snapshot(rank_id=1), PROFILE, self.artifact)
@@ -634,11 +642,12 @@ class GroupRendezvous(unittest.TestCase):
 
     def test_a_complete_group_is_verified_without_violations(self):
         self.publish_all()
-        manifests, stale, timed_out = rp.collect_group_manifests(
+        manifests, stale, timed_out, duplicates = rp.collect_group_manifests(
             self.dir, "a1", expected_total=8, timeout_s=0)
         self.assertEqual(8, len(manifests))
         self.assertFalse(timed_out)
         self.assertEqual(0, stale)
+        self.assertEqual({}, duplicates)
         self.assertEqual([], rp.check_group_consistency(manifests))
 
     def test_a_missing_peer_is_reported_after_a_bounded_wait(self):
@@ -650,11 +659,12 @@ class GroupRendezvous(unittest.TestCase):
             slept.append(seconds)
             now[0] += seconds
 
-        manifests, _stale, timed_out = rp.collect_group_manifests(
+        manifests, _stale, timed_out, duplicates = rp.collect_group_manifests(
             self.dir, "a1", expected_total=8, timeout_s=0.5,
             clock=lambda: now[0], sleep=fake_sleep)
         self.assertTrue(timed_out)
         self.assertEqual(7, len(manifests))
+        self.assertEqual({}, duplicates)
         # The wait is bounded by the budget, not by the peer eventually appearing.
         self.assertLessEqual(len(slept), 3, slept)
         self.assertGreaterEqual(now[0], 0.5)
@@ -662,11 +672,55 @@ class GroupRendezvous(unittest.TestCase):
     def test_records_from_another_attempt_are_ignored_and_counted(self):
         self.publish_all(attempt="old-run")
         self.publish_all(attempt="current")
-        manifests, stale, timed_out = rp.collect_group_manifests(
+        manifests, stale, timed_out, _dup = rp.collect_group_manifests(
             self.dir, "current", expected_total=8, timeout_s=0)
         self.assertFalse(timed_out)
         self.assertEqual(8, len(manifests))
         self.assertEqual(8, stale, "the earlier attempt's manifests must be ignored, not merged")
+
+    def test_a_second_claimant_cannot_overwrite_the_incumbent(self):
+        # The audit's probe: eight ranks published, then a ninth claimant for decode rank 0. The slot has
+        # exactly one publisher, so the claim must fail and the incumbent's manifest must survive.
+        self.publish_all()
+        with open(os.path.join(self.dir, "a1__RoleType-DECODE__0.json")) as f:
+            incumbent = json.load(f)
+        impostor = rp.build_manifest(decode_snapshot(rank_id=0), PROFILE, {"git_sha": "impostor"})
+        with self.assertRaises(rp.ReleaseProfileError) as ctx:
+            rp.publish_rank_manifest(impostor, self.dir, "a1")
+        self.assertIn("already claimed", str(ctx.exception))
+        with open(os.path.join(self.dir, "a1__RoleType-DECODE__0.json")) as f:
+            self.assertEqual(incumbent, json.load(f))
+
+    def test_a_duplicate_claim_by_a_peer_is_preserved_and_rejected(self):
+        # A peer that bypassed the exclusive claim (a copied file, another publisher) must not be merged
+        # away: the collision itself is the violation.
+        self.publish_all()
+        role, rank = "RoleType.DECODE", 0
+        copy = os.path.join(self.dir, "a1__RoleType-DECODE__0-copy.json")
+        with open(os.path.join(self.dir, "a1__RoleType-DECODE__0.json")) as f:
+            manifest = json.load(f)
+        with open(copy, "w") as f:
+            json.dump(manifest, f)
+        manifests, _stale, _timed_out, duplicates = rp.collect_group_manifests(
+            self.dir, "a1", expected_total=8, timeout_s=0)
+        self.assertEqual([(role, rank)], list(duplicates))
+        violations = rp.check_group_consistency(manifests, duplicates=duplicates)
+        self.assertTrue(any("DUPLICATE RANK OWNERSHIP" in v for v in violations), violations)
+        self.assertTrue(any(f"{role}#{rank}" in v for v in violations), violations)
+
+    def test_a_non_finite_join_timeout_is_rejected(self):
+        # nan never compares greater than the clock and inf never expires: both turn the bounded
+        # rendezvous into an unbounded wait, so neither is accepted as a budget.
+        for bad in ("nan", "inf", "-inf"):
+            with self.assertRaises(rp.ReleaseProfileError) as ctx:
+                rp.collect_group_manifests(
+                    self.dir, "a1", expected_total=8,
+                    env={rp.GROUP_TIMEOUT_ENV: bad}, clock=lambda: 1.0, sleep=lambda s: None)
+            self.assertIn("finite", str(ctx.exception))
+        with self.assertRaises(rp.ReleaseProfileError):
+            rp.collect_group_manifests(
+                self.dir, "a1", expected_total=8, timeout_s=float("nan"),
+                clock=lambda: 1.0, sleep=lambda s: None)
 
     def test_join_without_a_configured_directory_is_a_violation(self):
         manifest = rp.build_manifest(decode_snapshot(rank_id=0), PROFILE, self.artifact)
@@ -680,37 +734,28 @@ class GroupRendezvous(unittest.TestCase):
         self.assertTrue(any("ATTEMPT" in v for v in violations), violations)
 
     def test_an_incomplete_group_stops_the_rank(self):
-        self.publish_all(skip={("PREFILL", 2)})
-        manifest = rp.build_manifest(decode_snapshot(rank_id=0), PROFILE, self.artifact)
-        violations = rp.join_group_and_verify(
-            manifest,
-            env={rp.GROUP_DIR_ENV: self.dir, rp.GROUP_ATTEMPT_ENV: "a1"},
-            timeout_s=0,
-        )
+        # Two ranks never publish; the joining rank (which claims the last free slot) must time out
+        # rather than proceed with a partial group.
+        self.publish_all(skip={("PREFILL", 3), ("DECODE", 2), ("DECODE", 3)})
+        manifest = rp.build_manifest(decode_snapshot(rank_id=3), PROFILE, self.artifact)
+        violations = rp.join_group_and_verify(manifest, env=self.join_env(), timeout_s=0)
         self.assertTrue(any("GROUP INCOMPLETE" in v for v in violations), violations)
 
     def test_a_rank_built_from_another_artifact_stops_the_rank(self):
-        self.publish_all()
-        odd = rp.build_manifest(decode_snapshot(rank_id=2), PROFILE, {"git_sha": "different"})
-        rp.publish_rank_manifest(odd, self.dir, "a1")
-        manifest = rp.build_manifest(decode_snapshot(rank_id=0), PROFILE, self.artifact)
-        violations = rp.join_group_and_verify(
-            manifest,
-            env={rp.GROUP_DIR_ENV: self.dir, rp.GROUP_ATTEMPT_ENV: "a1"},
-            timeout_s=0,
+        self.publish_all(
+            skip={("DECODE", 3)},
+            artifact_for={("DECODE", 2): {"git_sha": "different"}},
         )
+        manifest = rp.build_manifest(decode_snapshot(rank_id=3), PROFILE, self.artifact)
+        violations = rp.join_group_and_verify(manifest, env=self.join_env(), timeout_s=0)
         self.assertTrue(any("MIXED ARTIFACTS" in v for v in violations), violations)
 
     def test_a_rank_outside_the_declared_membership_stops_the_rank(self):
         self.publish_all(skip={("DECODE", 3)})
         extra = rp.build_manifest(decode_snapshot(rank_id=9), PROFILE, self.artifact)
         rp.publish_rank_manifest(extra, self.dir, "a1")
-        manifest = rp.build_manifest(decode_snapshot(rank_id=0), PROFILE, self.artifact)
-        violations = rp.join_group_and_verify(
-            manifest,
-            env={rp.GROUP_DIR_ENV: self.dir, rp.GROUP_ATTEMPT_ENV: "a1"},
-            timeout_s=0,
-        )
+        manifest = rp.build_manifest(decode_snapshot(rank_id=3), PROFILE, self.artifact)
+        violations = rp.join_group_and_verify(manifest, env=self.join_env(), timeout_s=0)
         self.assertTrue(any("MEMBERSHIP" in v for v in violations), violations)
 
     def test_join_group_is_opt_in_on_the_enforce_path(self):
@@ -725,6 +770,111 @@ class GroupRendezvous(unittest.TestCase):
                 join_group=True,
             )
         self.assertIn("GROUP VERIFICATION NOT CONFIGURED", str(ctx.exception))
+
+
+class ContentIdentity(unittest.TestCase):
+    """Artifact identity must be CONTENT, and must name the binary that actually runs.
+
+    The audit's probe: identity used size+mtime of the Python initializer, so a different library or a
+    different checkpoint could pass as identical. These tests pin content hashing, the sampled/full
+    distinction, coverage enforcement for a packaging-supplied digest list, and that the discovered
+    library paths are the compiled shared objects rather than a .py file.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="rp_content_")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def write(self, name, data):
+        if isinstance(data, str):
+            data = data.encode()
+        path = os.path.join(self.dir, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def test_same_size_and_mtime_but_different_content_differs(self):
+        a = self.write("a.bin", b"A" * 4096)
+        b = self.write("b.bin", b"B" * 4096)
+        os.utime(a, (1_700_000_000, 1_700_000_000))
+        os.utime(b, (1_700_000_000, 1_700_000_000))
+        ia = rp._content_digest(a, 10 * 1024 * 1024, 1024)
+        ib = rp._content_digest(b, 10 * 1024 * 1024, 1024)
+        self.assertEqual(ia["size"], ib["size"])
+        self.assertEqual("full", ia["mode"])
+        self.assertNotEqual(ia["sha256"], ib["sha256"])
+
+    def test_a_large_file_is_marked_sampled_and_a_small_one_full(self):
+        small = self.write("small.bin", b"x" * 1024)
+        large = self.write("large.bin", b"y" * 8192)
+        self.assertEqual("full", rp._content_digest(small, 4096, 512)["mode"])
+        sampled = rp._content_digest(large, 4096, 512)
+        self.assertEqual("sampled", sampled["mode"])
+        self.assertEqual(512, sampled["sample_bytes"])
+
+    def test_a_tree_identity_changes_when_a_file_changes(self):
+        self.write("config.json", b'{"a": 1}')
+        self.write("shard-1.safetensors", b"weights-1" * 1000)
+        first = rp._tree_identity(self.dir, 4096, 256)
+        self.write("shard-1.safetensors", b"weights-2" * 1000)
+        second = rp._tree_identity(self.dir, 4096, 256)
+        self.assertNotEqual(first["sha256"], second["sha256"])
+        self.assertEqual(first["file_count"], second["file_count"])
+
+    def test_a_weights_manifest_must_cover_every_file(self):
+        self.write("config.json", b"{}")
+        shard = self.write("shard-1.safetensors", b"w" * 4096)
+        tree = rp._tree_identity(self.dir, 1024, 256)
+        manifest = self.write(
+            "weights.sha256",
+            "%s  shard-1.safetensors\n" % ("0" * 64),
+        )
+        ident, errors = rp._weights_manifest(manifest, tree)
+        self.assertTrue(any("does not cover" in e for e in errors), errors)
+        self.assertEqual(1, ident["declared_files"])
+        # A manifest that covers the shard but not the metadata file is still incomplete.
+        with open(manifest, "a") as f:
+            f.write("%s  config.json\n" % ("1" * 64))
+        _ident, errors2 = rp._weights_manifest(manifest, tree)
+        self.assertEqual([], errors2)
+        self.assertTrue(shard)
+
+    def test_a_malformed_digest_line_is_an_error(self):
+        self.write("config.json", b"{}")
+        tree = rp._tree_identity(self.dir, 1024, 256)
+        manifest = self.write("weights.sha256", "not-a-digest  config.json\n")
+        _ident, errors = rp._weights_manifest(manifest, tree)
+        self.assertTrue(any("malformed" in e for e in errors), errors)
+
+    def test_discovered_libraries_are_compiled_shared_objects(self):
+        paths = rp._running_library_paths()
+        self.assertTrue(paths, "no library path was discovered in the deployed layout")
+        self.assertTrue(all(p.endswith(".so") for p in paths), paths)
+        self.assertTrue(any("libth_transformer" in os.path.basename(p) for p in paths), paths)
+        self.assertTrue(any("librtp_compute_ops" in os.path.basename(p) for p in paths), paths)
+        self.assertEqual(len(paths), len({os.path.realpath(p) for p in paths}), "duplicates not collapsed")
+
+    def test_require_full_weights_rejects_a_sampled_identity(self):
+        stub = SnapshotFromResolvedConfig().stub_config()
+        model = os.path.join(self.dir, "model")
+        os.makedirs(model)
+        with open(os.path.join(model, "config.json"), "wb") as f:
+            f.write(b"{}")
+        with open(os.path.join(model, "shard.safetensors"), "wb") as f:
+            f.write(b"w" * 8192)
+        stub.model_args.ckpt_path = model
+        env = {rp.FULL_HASH_MAX_ENV: "0.001", rp.SAMPLE_BYTES_ENV: "0.0005",
+               rp.REQUIRE_FULL_WEIGHTS_ENV: "1"}
+        ids = rp.artifact_identity_from(stub, env)
+        self.assertTrue(any("requires a full content digest" in e for e in ids.get("errors", [])),
+                        ids.get("errors"))
+        ids2 = rp.artifact_identity_from(stub, {rp.FULL_HASH_MAX_ENV: "1"})
+        self.assertFalse(
+            [e for e in ids2.get("errors", []) if "requires a full content digest" in e], ids2)
+        self.assertEqual("full", ids2["model"]["mode"])
 
 
 if __name__ == "__main__":

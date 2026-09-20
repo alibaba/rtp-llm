@@ -32,10 +32,13 @@ What this module deliberately does NOT check, and where those belong instead:
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import logging
+import math
 import os
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -71,6 +74,24 @@ GROUP_ATTEMPT_ENV = "RTP_LLM_RELEASE_ATTEMPT"
 GROUP_TIMEOUT_ENV = "RTP_LLM_RELEASE_JOIN_TIMEOUT_S"
 DEFAULT_GROUP_TIMEOUT_S = 120.0
 GROUP_POLL_S = 0.25
+
+# Artifact identity is CONTENT, not size/mtime: two builds or two checkpoints can share a size and an
+# mtime and still be different binaries. The cost is bounded instead of avoided -- the compiled
+# libraries and small metadata files are hashed in full, while multi-hundred-GB weight shards are hashed
+# to a bounded head+tail sample that is marked as such, never passed off as a full digest. A packaging
+# step that already hashed the weights can supply those digests and have their coverage enforced.
+FULL_HASH_MAX_ENV = "RTP_LLM_RELEASE_FULL_HASH_MAX_MB"
+SAMPLE_BYTES_ENV = "RTP_LLM_RELEASE_SAMPLE_MB"
+WEIGHTS_MANIFEST_ENV = "RTP_LLM_RELEASE_WEIGHTS_MANIFEST"
+REQUIRE_FULL_WEIGHTS_ENV = "RTP_LLM_RELEASE_REQUIRE_FULL_WEIGHTS"
+DEFAULT_FULL_HASH_MAX_BYTES = 256 * 1024 * 1024
+DEFAULT_SAMPLE_BYTES = 1024 * 1024
+MAX_TREE_FILES = 4096
+MAX_LISTED_FILES = 64
+# The libraries the process actually loads: the engine/ops shared objects and the kernel/collective
+# libraries shipped in the package's libs directory.
+LIBRARY_DIR = "libs"
+LIBRARY_GLOBS = ("libth_transformer*.so", "librtp_compute_ops*.so")
 
 
 class _Unset:
@@ -247,47 +268,210 @@ def snapshot_from_env_configs(cfg: Any, env: Optional[Mapping[str, str]] = None)
     )
 
 
-def _file_identity(path: str) -> Dict[str, Any]:
-    """Cheap identity for a file or model directory: entry size, plus config.json metadata for a
-    directory. Deliberately not a content hash: this runs on every rank at startup, and the manifest
-    only needs enough to tell one artifact from another and to detect a stale one."""
+def _truthy(raw: Optional[str]) -> bool:
+    """An env switch: only an explicit affirmative value enables it."""
+    return (raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_bytes(environment: Mapping[str, str], name: str, default: int) -> int:
+    """An env value in MiB as bytes, falling back to the default for anything unusable."""
+    raw = environment.get(name)
+    if not raw:
+        return default
     try:
-        st = os.stat(path)
-    except OSError:
-        return {}
-    ident: Dict[str, Any] = {"size": int(st.st_size)}
-    if os.path.isdir(path):
-        try:
-            cst = os.stat(os.path.join(path, "config.json"))
-            ident["config_json_bytes"] = int(cst.st_size)
-            ident["config_json_mtime_ns"] = int(cst.st_mtime_ns)
-        except OSError:
-            pass
-    else:
-        ident["mtime_ns"] = int(st.st_mtime_ns)
+        value = int(float(raw) * 1024 * 1024)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _content_digest(
+    path: str,
+    full_max_bytes: int,
+    sample_bytes: int,
+    force_full: bool = False,
+) -> Dict[str, Any]:
+    """A CONTENT identity for one file: full sha256 when affordable, else a marked head+tail sample.
+
+    ``mode`` says which one it is, so a sampled digest is never presented as a verified full one and a
+    comparison against a packaging-supplied digest stays meaningful.
+    """
+    size = int(os.stat(path).st_size)
+    if force_full or size <= full_max_bytes:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+                h.update(chunk)
+        return {"size": size, "sha256": h.hexdigest(), "mode": "full"}
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        h.update(f.read(sample_bytes))
+        if size > sample_bytes:
+            f.seek(max(size - sample_bytes, sample_bytes))
+            h.update(f.read(sample_bytes))
+    h.update(str(size).encode())
+    return {"size": size, "sha256": h.hexdigest(), "mode": "sampled", "sample_bytes": sample_bytes}
+
+
+def _tree_identity(root: str, full_max_bytes: int, sample_bytes: int) -> Dict[str, Any]:
+    """Content identity of a model/tokenizer directory tree, file by file.
+
+    Every file contributes its size and a content digest (full for metadata, marked-sample for a weight
+    shard), and the aggregate digest is taken over that sorted list, so a changed or added file changes
+    the identity even when the total size does not.
+    """
+    files: Dict[str, Any] = {}
+    truncated = False
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if len(files) >= MAX_TREE_FILES:
+                truncated = True
+                break
+            path = os.path.join(dirpath, name)
+            try:
+                files[os.path.relpath(path, root)] = _content_digest(path, full_max_bytes, sample_bytes)
+            except OSError:
+                continue
+        if truncated:
+            break
+    ident: Dict[str, Any] = {
+        "kind": "tree",
+        "file_count": len(files),
+        "total_bytes": sum(int(v["size"]) for v in files.values()),
+        "sha256": _digest(files),
+        "mode": "sampled" if any(v["mode"] == "sampled" for v in files.values()) else "full",
+    }
+    if truncated:
+        ident["truncated_at"] = MAX_TREE_FILES
+    if len(files) <= MAX_LISTED_FILES:
+        ident["files"] = files
     return ident
 
 
-def artifact_identity_from(cfg: Any, env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
-    """Non-empty provenance for this rank: which compiled ops library and which weights it runs.
+def _weights_manifest(path: str, tree: Optional[Dict[str, Any]]) -> Tuple[Dict[str, Any], List[str]]:
+    """Read a packaging-supplied ``<sha256>  <path>`` digest list and require it to cover the tree.
 
-    The packaging step can add an explicit release label (image digest or tag) through
-    ``RTP_LLM_RELEASE_ARTIFACT_ID``. When it does not, this still identifies the running files, so a
-    manifest is never a digest of an empty artifact record and a stale one is detectable.
+    Returns (manifest identity, errors). The list itself is content-hashed, so a changed digest list
+    changes the manifest even though the weight bytes are not re-read at startup.
+    """
+    errors: List[str] = []
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        return {}, [f"cannot read {path}: {e}"]
+    declared: Dict[str, str] = {}
+    for line in raw.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.replace(" *", "  ").split()
+        if len(parts) != 2 or len(parts[0]) != 64 or any(c not in "0123456789abcdefABCDEF" for c in parts[0]):
+            errors.append(f"malformed digest line: {line[:80]!r}")
+            continue
+        declared[parts[1].lstrip("./")] = parts[0].lower()
+    ident: Dict[str, Any] = {
+        "path": path,
+        "declared_files": len(declared),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    if tree is None:
+        return ident, errors
+    listed = tree.get("files") or {}
+    if tree.get("truncated_at"):
+        errors.append(
+            f"the weights tree was not walked in full ({tree['truncated_at']} file limit), so digest "
+            "coverage cannot be established"
+        )
+        return ident, errors
+    missing = sorted(name for name in listed if name not in declared and os.path.basename(name) not in declared)
+    if missing:
+        errors.append(
+            f"the weights digest manifest does not cover {len(missing)} file(s), e.g. {missing[:3]}"
+        )
+    ident["covered"] = len(listed) - len(missing)
+    return ident, errors
+
+
+def _running_library_paths() -> List[str]:
+    """The compiled shared objects this deployment loads, deduplicated by real path.
+
+    Deliberately path-based (not an import): the engine libraries are opened by the C++ layer, and
+    importing the extension in a validation path could have side effects. The package's libs directory
+    holds the kernel/collective libraries and the engine config library; the engine and ops libraries
+    sit beside the package in the deployed runfiles layout and inside it in a pip layout.
+    """
+    try:
+        import rtp_llm
+    except Exception:  # noqa: BLE001
+        return []
+    pkg = os.path.dirname(os.path.abspath(rtp_llm.__file__))
+    # The package's libs directory holds the kernel/collective libraries and the engine config library;
+    # the engine and ops shared objects live beside the package in a runfiles tree, inside it in a pip
+    # layout, or on an import path -- so all three are searched, and only for the specific names, never
+    # "every .so" (which would pull in unrelated packages).
+    library_dirs = [os.path.join(pkg, LIBRARY_DIR), pkg, os.path.dirname(pkg)]
+    for entry in list(sys.path)[:32]:
+        if entry and os.path.isdir(entry):
+            library_dirs.append(entry)
+    patterns = [os.path.join(pkg, LIBRARY_DIR, "*.so")]
+    patterns += [os.path.join(d, p) for d in library_dirs for p in LIBRARY_GLOBS]
+    unique: List[str] = []
+    seen = set()
+    for pattern in patterns:
+        for path in sorted(glob.glob(pattern)):
+            real = os.path.realpath(path)
+            if real not in seen:
+                seen.add(real)
+                unique.append(path)
+    return unique
+
+
+def artifact_identity_from(cfg: Any, env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+    """Non-empty, CONTENT-based provenance for this rank: the binaries it loaded and the weights it
+    will serve.
+
+    Size and mtime are not an identity -- two builds can share both -- so every compiled library and
+    every model/tokenizer file contributes a content digest. The packaging step can add an explicit
+    release label (image digest or tag) through ``RTP_LLM_RELEASE_ARTIFACT_ID`` and, for weights too
+    large to re-hash at startup, a digest manifest through ``RTP_LLM_RELEASE_WEIGHTS_MANIFEST``, whose
+    coverage is required rather than assumed. Anything that could not be established is reported in
+    ``errors`` so the caller can refuse the start instead of proceeding with an unknown artifact.
     """
     environment: Mapping[str, str] = os.environ if env is None else env
+    full_max = _env_bytes(environment, FULL_HASH_MAX_ENV, DEFAULT_FULL_HASH_MAX_BYTES)
+    sample = _env_bytes(environment, SAMPLE_BYTES_ENV, DEFAULT_SAMPLE_BYTES)
+    require_full = _truthy(environment.get(REQUIRE_FULL_WEIGHTS_ENV))
     ids: Dict[str, Any] = {}
+    errors: List[str] = []
     label = (environment.get(ARTIFACT_LABEL_ENV) or "").strip()
     if label:
         ids["release_label"] = label
-    try:
-        import rtp_llm.ops as _ops  # local import: this module stays importable without the extension
 
-        p = getattr(_ops, "__file__", None)
-        if p:
-            ids["ops_lib"] = dict({"name": os.path.basename(p)}, **_file_identity(p))
-    except Exception:  # noqa: BLE001 - provenance must not be able to fail startup by itself
-        pass
+    # Compiled libraries: always hashed in full. The set is bounded (the engine plus the kernel and
+    # collective libraries) and it is the code that actually runs, so a sampled digest would be the
+    # wrong trade here.
+    libs: Dict[str, Any] = {}
+    for path in _running_library_paths():
+        try:
+            libs[os.path.basename(path)] = _content_digest(path, full_max, sample, force_full=True)
+        except OSError as e:
+            errors.append(f"cannot hash library {path}: {e}")
+    if libs:
+        ids["libraries"] = {
+            "count": len(libs),
+            "total_bytes": sum(int(v["size"]) for v in libs.values()),
+            "sha256": _digest(libs),
+            "files": libs,
+        }
+    else:
+        errors.append("no compiled library could be identified, so the running binary is not identified")
+
+    manifest_path = (environment.get(WEIGHTS_MANIFEST_ENV) or "").strip()
+    # The same tree can be referenced through several config paths (a model directory is also its own
+    # tokenizer directory); hash it once and reference the result.
+    seen_trees: Dict[str, str] = {}
     for key, path in (
         ("model", _resolve(cfg, "model_args.ckpt_path")),
         ("tokenizer", _resolve(cfg, "model_args.tokenizer_path")),
@@ -295,9 +479,41 @@ def artifact_identity_from(cfg: Any, env: Optional[Mapping[str, str]] = None) ->
     ):
         if isinstance(path, _Unset) or not path:
             continue
-        ident = _file_identity(str(path))
-        if ident:
-            ids[key] = dict({"name": os.path.basename(str(path).rstrip("/"))}, **ident)
+        path = str(path)
+        try:
+            real = os.path.realpath(path)
+        except OSError:
+            continue
+        if real in seen_trees:
+            ids[key] = {"name": os.path.basename(path.rstrip("/")), "same_as": seen_trees[real]}
+            continue
+        try:
+            if os.path.isdir(path):
+                ident = _tree_identity(path, full_max, sample)
+            elif os.path.isfile(path):
+                ident = _content_digest(path, full_max, sample)
+            else:
+                errors.append(f"{key} path does not exist: {path}")
+                continue
+        except OSError as e:
+            errors.append(f"cannot identify {key} at {path}: {e}")
+            continue
+        ident["name"] = os.path.basename(path.rstrip("/"))
+        if manifest_path and ident.get("kind") == "tree":
+            wm, wm_errors = _weights_manifest(manifest_path, ident)
+            if wm:
+                ident["weights_manifest"] = wm
+            errors.extend(wm_errors)
+        if require_full and ident.get("mode") != "full" and "weights_manifest" not in ident:
+            errors.append(
+                f"{key} identity is '{ident.get('mode')}': {REQUIRE_FULL_WEIGHTS_ENV} requires a full "
+                f"content digest, either by raising {FULL_HASH_MAX_ENV} or by supplying "
+                f"{WEIGHTS_MANIFEST_ENV}"
+            )
+        ids[key] = ident
+        seen_trees[real] = key
+    if errors:
+        ids["errors"] = errors
     return ids
 
 
@@ -684,17 +900,31 @@ def group_token_envelope(manifests: Mapping[Any, Mapping[str, Any]]) -> Tuple[Op
 
 
 def check_group_consistency(
-    manifests: Mapping[Any, Mapping[str, Any]], enforce_token_envelope: bool = False
+    manifests: Mapping[Any, Mapping[str, Any]],
+    enforce_token_envelope: bool = False,
+    duplicates: Optional[Mapping[Any, Sequence[Mapping[str, Any]]]] = None,
 ) -> List[str]:
     """Compare resolved per-rank manifests at startup. No per-step collective is involved.
 
-    Catches mixed artifacts or configurations across ranks and duplicate rank ids within a role. The
-    prefill/decode token-envelope mismatch is reported only when ``enforce_token_envelope`` is set, so
-    that the rule can be turned on together with the ingress bound that actually satisfies it.
+    Catches mixed artifacts or configurations across ranks, duplicate rank ownership (two claimants for
+    one slot, passed in by the rendezvous rather than collapsed away) and duplicate rank ids within a
+    role. The prefill/decode token-envelope mismatch is reported only when ``enforce_token_envelope``
+    is set, so that the rule can be turned on together with the ingress bound that actually satisfies
+    it.
     """
     v: List[str] = []
     if not manifests:
         return ["no rank manifests supplied"]
+
+    # Two processes claiming one slot is not agreement between ranks: it is an identity collision, and the
+    # extra claimants must be visible even though the manifest map holds only one of them.
+    for key, claimants in sorted((duplicates or {}).items(), key=lambda kv: str(kv[0])):
+        digests = sorted({str(c.get("manifest_digest", ""))[:16] for c in claimants})
+        role, rank = key if isinstance(key, tuple) else (str(key), "?")
+        v.append(
+            f"DUPLICATE RANK OWNERSHIP: {role}#{rank} was claimed by {len(claimants) + 1} processes "
+            f"(extra manifest digests {digests}); a rank slot has exactly one publisher"
+        )
 
     # The profile each rank names drives the membership and provenance requirements, so the caller does
     # not have to remember to pass them.
@@ -789,13 +1019,13 @@ def _manifest_identity(manifest: Mapping[str, Any]) -> Tuple[str, int]:
 
 
 def publish_rank_manifest(manifest: Mapping[str, Any], directory: str, attempt: str) -> str:
-    """Atomically publish this rank's manifest as ``<attempt>__<role>__<rank>.json``.
+    """Claim this rank's slot by publishing its manifest, atomically and EXCLUSIVELY.
 
-    The write is tmp+rename so a peer never reads a half-written manifest, and the attempt id keeps a
-    previous start's records from being mistaken for this one's (section 15.2: stale records from an
-    earlier start must not be accepted). The file name is a label for humans; identity is always taken
-    from the manifest content when the group is assembled, so a mislabelled file cannot impersonate
-    another rank.
+    A rank is a single slot: a second process claiming the same ``(role, rank)`` is a misconfiguration
+    or an identity collision, not an update to accept. The manifest is written to a private temporary
+    file and then linked into place, which fails with ``EEXIST`` when the slot is already claimed, so
+    two publishers can never silently overwrite each other. The attempt id keeps a previous start's
+    records from being mistaken for this one's (section 15.2: stale records must not be accepted).
     """
     role, rank = _manifest_identity(manifest)
     safe_role = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in role)
@@ -804,24 +1034,40 @@ def publish_rank_manifest(manifest: Mapping[str, Any], directory: str, attempt: 
     tmp = f"{path}.tmp-{os.getpid()}"
     with open(tmp, "w") as f:
         json.dump(manifest, f, sort_keys=True, default=str)
-    os.replace(tmp, path)
+    try:
+        os.link(tmp, path)  # atomic create-if-absent: fails when the slot is already claimed
+    except FileExistsError:
+        raise ReleaseProfileError(
+            f"rank {role}#{rank} is already claimed in {directory}; a rank slot has exactly one "
+            "publisher, so two processes claiming it cannot be treated as agreement"
+        )
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
     return path
 
 
-def scan_group_directory(directory: str, attempt: str) -> Tuple[Dict[Tuple[str, int], dict], int]:
-    """-> ({(role, rank): manifest}, number of manifest files belonging to other attempts).
+def scan_group_directory(
+    directory: str, attempt: str
+) -> Tuple[Dict[Tuple[str, int], dict], int, Dict[Tuple[str, int], List[dict]]]:
+    """-> ({(role, rank): manifest}, files from other attempts, {(role, rank): [extra claimants]}).
 
-    Identity comes from the manifest content, never from the file name. An unreadable file is skipped
-    rather than fatal: a peer can be observed mid-publish, and the caller's deadline decides whether
-    the group is complete.
+    Identity comes from the manifest content, never from the file name. Duplicate claimants for one
+    slot are preserved, not collapsed: the group must see the collision and refuse it, so the earliest
+    claimant is kept in the manifest map and every further claimant is retained separately. An
+    unreadable file is skipped: a peer can be observed mid-publish, and the caller's deadline decides
+    whether the group is complete.
     """
     manifests: Dict[Tuple[str, int], dict] = {}
+    duplicates: Dict[Tuple[str, int], List[dict]] = {}
     stale = 0
     prefix = attempt + "__"
     try:
         names = os.listdir(directory)
     except OSError:
-        return manifests, stale
+        return manifests, stale, duplicates
     for name in names:
         if not name.endswith(".json") or ".tmp-" in name:
             continue
@@ -831,11 +1077,14 @@ def scan_group_directory(directory: str, attempt: str) -> Tuple[Dict[Tuple[str, 
         try:
             with open(os.path.join(directory, name)) as f:
                 manifest = json.load(f)
-            role, rank = _manifest_identity(manifest)
+            key = _manifest_identity(manifest)
         except (OSError, ValueError, ReleaseProfileError):
             continue
-        manifests[(role, rank)] = manifest
-    return manifests, stale
+        if key in manifests:
+            duplicates.setdefault(key, []).append(manifest)
+        else:
+            manifests[key] = manifest
+    return manifests, stale, duplicates
 
 
 def collect_group_manifests(
@@ -846,12 +1095,14 @@ def collect_group_manifests(
     env: Optional[Mapping[str, str]] = None,
     clock=time.monotonic,
     sleep=time.sleep,
-) -> Tuple[Dict[Tuple[str, int], dict], int, bool]:
+) -> Tuple[Dict[Tuple[str, int], dict], int, bool, Dict[Tuple[str, int], List[dict]]]:
     """Wait, bounded, for ``expected_total`` distinct rank manifests of this attempt.
 
-    -> (manifests, stale_files, timed_out). The bounded wait IS the group-wide abort: a rank whose peer
-    never publishes cannot proceed to load a model, so one failed peer stops the group rather than
-    leaving the others entering capture alone.
+    -> (manifests, stale_files, timed_out, duplicate_claimants). The bounded wait IS the group-wide
+    abort: a rank whose peer never publishes cannot proceed to load a model, so one failed peer stops
+    the group rather than leaving the others entering capture alone. A non-finite timeout is rejected
+    rather than accepted: ``nan`` never compares greater than the clock and ``inf`` never expires, so
+    either would turn the bounded wait into an unbounded one.
     """
     environment = os.environ if env is None else env
     if timeout_s is None:
@@ -860,13 +1111,21 @@ def collect_group_manifests(
             timeout_s = float(raw) if raw else DEFAULT_GROUP_TIMEOUT_S
         except ValueError:
             timeout_s = DEFAULT_GROUP_TIMEOUT_S
-    deadline = clock() + max(float(timeout_s), 0.0)
+        if not math.isfinite(float(timeout_s)):
+            raise ReleaseProfileError(
+                f"{GROUP_TIMEOUT_ENV}={raw!r} is not a finite number of seconds; a non-finite budget "
+                "would never expire, which is exactly the unbounded wait this rendezvous must not have"
+            )
+    timeout_s = float(timeout_s)
+    if not math.isfinite(timeout_s):
+        raise ReleaseProfileError(f"join timeout {timeout_s!r} is not finite")
+    deadline = clock() + max(timeout_s, 0.0)
     while True:
-        manifests, stale = scan_group_directory(directory, attempt)
+        manifests, stale, duplicates = scan_group_directory(directory, attempt)
         if len(manifests) >= expected_total:
-            return manifests, stale, False
+            return manifests, stale, False, duplicates
         if clock() >= deadline:
-            return manifests, stale, True
+            return manifests, stale, True, duplicates
         sleep(GROUP_POLL_S)
 
 
@@ -901,12 +1160,17 @@ def join_group_and_verify(
             "manifest from an earlier start could be accepted as one of this group's"
         ]
     expected_total = int(profile.expected_decode_ranks) + int(profile.expected_prefill_ranks)
-    path = publish_rank_manifest(manifest, directory, attempt)
+    try:
+        path = publish_rank_manifest(manifest, directory, attempt)
+    except ReleaseProfileError as e:
+        # The slot is already claimed: this rank must not overwrite the incumbent and must not treat two
+        # processes as one rank's agreement.
+        return [str(e)]
     logging.info(
         "[RELEASE-PROFILE] published %s; waiting for %d rank manifests of attempt %s in %s",
         path, expected_total, attempt, directory,
     )
-    manifests, stale, timed_out = collect_group_manifests(
+    manifests, stale, timed_out, duplicates = collect_group_manifests(
         directory, attempt, expected_total, timeout_s, environment
     )
     if timed_out:
@@ -916,7 +1180,7 @@ def join_group_and_verify(
             f"wait; seen {seen}. A rank that never publishes stops every rank, so no partial group may "
             "proceed to model loading"
         ]
-    violations = check_group_consistency(manifests)
+    violations = check_group_consistency(manifests, duplicates=duplicates)
     if not violations:
         logging.info(
             "[RELEASE-PROFILE] group verified: %d ranks, digests agree%s",
@@ -1018,12 +1282,16 @@ def enforce_release_profile(cfg: Any, env: Optional[Mapping[str, str]] = None,
     violations = validate(snapshot, profile)
 
     # Provenance is part of the profile contract: an empty artifact record identifies nothing, so the
-    # manifest could not tell one deployment from another or detect a stale one.
+    # manifest could not tell one deployment from another or detect a stale one. Anything the identity
+    # could not establish (an unhashable library, a weights manifest that does not cover the tree, a
+    # required full digest that is only sampled) is a violation too: an unknown artifact must not start.
     if profile.require_artifact_identity and not manifest["artifact"]:
         violations.append(
             "artifact identity is empty: the manifest must identify the running artifact (set "
             f"{ARTIFACT_LABEL_ENV}, or ensure the ops library and model path resolve)"
         )
+    for problem in manifest["artifact"].get("errors", []) if isinstance(manifest["artifact"], Mapping) else []:
+        violations.append(f"artifact identity incomplete: {problem}")
 
     # The manifest is logged whether or not validation passes: a rejected start must still show what
     # was resolved, and the digest is what peers compare at startup.
@@ -1037,6 +1305,17 @@ def enforce_release_profile(cfg: Any, env: Optional[Mapping[str, str]] = None,
         manifest["manifest_digest"][:16],
     )
     logging.info("[RELEASE-PROFILE] resolved manifest: %s", json.dumps(manifest, sort_keys=True, default=str))
+    # A compact, greppable line for run evidence: how the artifact was identified and whether anything
+    # about it could not be established (a sampled weights digest, a missing manifest, ...).
+    artifact = manifest.get("artifact") if isinstance(manifest.get("artifact"), Mapping) else {}
+    libs = artifact.get("libraries") or {}
+    weights = artifact.get("model") or {}
+    logging.info(
+        "[RELEASE-PROFILE] artifact: libraries=%s libraries_digest=%s weights_mode=%s weights_files=%s "
+        "identity_errors=%d",
+        libs.get("count"), str(libs.get("sha256", ""))[:16], weights.get("mode"),
+        weights.get("file_count"), len(artifact.get("errors", []) or []),
+    )
 
     if violations:
         raise ReleaseProfileError(
