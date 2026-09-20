@@ -108,6 +108,45 @@ class HotHookRuntimeTest(unittest.TestCase):
         self.assertIn('"name": "after"', notes)
         self.assertIn('"name": "exception"', notes)
 
+    def test_backend_settings_are_isolated_and_survive_reload(self):
+        self._write_hooks("def replace(ctx): return 10\n")
+        self._write_config(
+            {"function_hooks": [{"target": _target("add"), "replace": "replace"}]}
+        )
+        backend_hook = self.root / "backend.py"
+        backend_config = self.root / "backend.json"
+        backend_hook.write_text("def replace(ctx): return 20\n")
+        backend_config.write_text(self.config_file.read_text())
+        os.environ["RTP_HOT_HOOK_BACKEND_FILE"] = str(backend_hook)
+        os.environ["RTP_HOT_HOOK_BACKEND_CONFIG"] = str(backend_config)
+        os.environ["RTP_HOT_HOOK_BACKEND_DUMP_DIR"] = str(self.root / "backend_dumps")
+        self.assertTrue(hot_hook_runtime.install_if_enabled(role="backend"))
+        self.assertEqual(20, hot_hook_target.add(1, b=2))
+        backend_hook.write_text("def replace(ctx): return 30\n")
+        self.assertTrue(hot_hook_runtime.runtime().reload(force=True))
+        self.assertEqual(30, hot_hook_target.add(1, b=2))
+        self.assertEqual(
+            str(self.root / "backend_dumps"), hot_hook_runtime.runtime().dump_dir
+        )
+        self.assertEqual(str(self.hook_file), os.environ["RTP_HOT_HOOK_FILE"])
+        hot_hook_runtime.reset_for_test()
+        self.assertTrue(hot_hook_runtime.install_if_enabled())
+        self.assertEqual(10, hot_hook_target.add(1, b=2))
+
+    def test_backend_settings_fall_back_to_common_settings(self):
+        self._write_hooks("def replace(ctx): return 20\n")
+        self._write_config(
+            {"function_hooks": [{"target": _target("add"), "replace": "replace"}]}
+        )
+        self.assertTrue(hot_hook_runtime.install_if_enabled(role="backend"))
+        self.assertEqual(20, hot_hook_target.add(1, b=2))
+
+    def test_backend_settings_do_not_enable_disabled_runtime(self):
+        os.environ["RTP_HOT_HOOK"] = "0"
+        os.environ["RTP_HOT_HOOK_BACKEND_CONFIG"] = "/nonexistent/config.json"
+        self.assertFalse(hot_hook_runtime.install_if_enabled(role="backend"))
+        self.assertEqual(3, hot_hook_target.add(1, b=2))
+
     def test_reload_new_hook_and_syntax_error_keeps_previous_version(self):
         self._install(
             {

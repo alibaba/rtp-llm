@@ -24,7 +24,6 @@ from pathlib import Path
 from types import FrameType, ModuleType
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-
 _LOGGER = logging.getLogger(__name__)
 
 _ENV_ENABLE = "RTP_HOT_HOOK"
@@ -40,9 +39,7 @@ def _truthy(value: Optional[str]) -> bool:
 
 
 def _safe_name(name: str) -> str:
-    safe = "".join(
-        c if c.isalnum() or c in ("-", "_", ".") else "_" for c in name
-    )
+    safe = "".join(c if c.isalnum() or c in ("-", "_", ".") else "_" for c in name)
     encoded = safe.encode("utf-8")
     if len(encoded) <= _SAFE_NAME_MAX_BYTES:
         return safe
@@ -249,7 +246,9 @@ class HookContext:
             "value": _json_default(value),
         }
         with open(path, "a") as f:
-            f.write(json.dumps(record, default=_json_default, ensure_ascii=False) + "\n")
+            f.write(
+                json.dumps(record, default=_json_default, ensure_ascii=False) + "\n"
+            )
         return str(path)
 
 
@@ -271,6 +270,7 @@ class HotHookRuntime:
         self._installed_trace = False
         self._reload_error: Optional[str] = None
         self._lock = threading.RLock()
+        self._role: Optional[str] = None
 
     def reset(self) -> None:
         with self._lock:
@@ -285,14 +285,22 @@ class HotHookRuntime:
             self._dump_index += 1
             return self._dump_index
 
-    def install_if_enabled(self) -> bool:
+    def _env(self, name: str, default=None):
+        if self._role:
+            role_name = name.replace("RTP_HOT_HOOK_", f"RTP_HOT_HOOK_{self._role}_", 1)
+            if role_name in os.environ:
+                return os.environ[role_name]
+        return os.environ.get(name, default)
+
+    def install_if_enabled(self, role: Optional[str] = None) -> bool:
         if not _truthy(os.environ.get(_ENV_ENABLE)):
             return False
         with self._lock:
+            self._role = role.upper() if role else None
             self.enabled = True
-            self._hook_file = os.environ.get(_ENV_HOOK_FILE)
-            self._config_file = os.environ.get(_ENV_CONFIG)
-            self.dump_dir = os.environ.get(_ENV_DUMP_DIR, self.dump_dir)
+            self._hook_file = self._env(_ENV_HOOK_FILE)
+            self._config_file = self._env(_ENV_CONFIG)
+            self.dump_dir = self._env(_ENV_DUMP_DIR, self.dump_dir)
             if not self.reload(force=True):
                 return False
             self._update_trace_state()
@@ -302,9 +310,9 @@ class HotHookRuntime:
         if not self.enabled:
             return False
         with self._lock:
-            hook_file = os.environ.get(_ENV_HOOK_FILE, self._hook_file)
-            config_file = os.environ.get(_ENV_CONFIG, self._config_file)
-            dump_dir = os.environ.get(_ENV_DUMP_DIR, self.dump_dir)
+            hook_file = self._env(_ENV_HOOK_FILE, self._hook_file)
+            config_file = self._env(_ENV_CONFIG, self._config_file)
+            dump_dir = self._env(_ENV_DUMP_DIR, self.dump_dir)
             self._hook_file = hook_file
             self._config_file = config_file
             self.dump_dir = dump_dir
@@ -332,12 +340,16 @@ class HotHookRuntime:
                     return True
 
                 if not hook_file:
-                    raise RuntimeError(f"{_ENV_HOOK_FILE} is required when hooks are enabled")
+                    raise RuntimeError(
+                        f"{_ENV_HOOK_FILE} is required when hooks are enabled"
+                    )
                 new_hook_module = self._load_hook_module(hook_file)
                 new_function_hooks = self._parse_function_hooks(new_config)
                 new_line_hooks = self._parse_line_hooks(new_config)
 
-                self._validate_callbacks(new_hook_module, new_function_hooks, new_line_hooks)
+                self._validate_callbacks(
+                    new_hook_module, new_function_hooks, new_line_hooks
+                )
                 self.config = new_config
                 self.case = str(new_config.get("case", "default"))
                 self._hook_module = new_hook_module
@@ -560,7 +572,9 @@ class HotHookRuntime:
         if hook is None or not hook.enabled:
             return original(*args, **kwargs)
         if hook.replace:
-            ctx = HookContext(self, "function", target, "replace", hook.config, args, kwargs)
+            ctx = HookContext(
+                self, "function", target, "replace", hook.config, args, kwargs
+            )
             replacement = self._run_callback(hook.replace, ctx)
             if replacement is not None:
                 return replacement
@@ -645,9 +659,8 @@ class HotHookRuntime:
         matched = []
         for hook in hooks:
             exact_match = hook.file is not None and file_name == hook.file
-            suffix_match = (
-                hook.file_suffix is not None
-                and normalized_file.endswith(hook.file_suffix)
+            suffix_match = hook.file_suffix is not None and normalized_file.endswith(
+                hook.file_suffix
             )
             if exact_match or suffix_match:
                 matched.append(hook)
@@ -657,8 +670,9 @@ class HotHookRuntime:
 _RUNTIME = HotHookRuntime()
 
 
-def install_if_enabled() -> bool:
-    return _RUNTIME.install_if_enabled()
+def install_if_enabled(role: Optional[str] = None) -> bool:
+    """Install hooks, optionally preferring RTP_HOT_HOOK_<ROLE>_* settings."""
+    return _RUNTIME.install_if_enabled(role)
 
 
 def reset_for_test() -> None:

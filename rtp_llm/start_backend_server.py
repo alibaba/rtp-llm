@@ -81,6 +81,15 @@ def local_rank_start(
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
         install_oom_dump()
+        try:
+            from rtp_llm.utils.hot_hook_runtime import install_if_enabled
+
+            if install_if_enabled(role="backend"):
+                logging.info(
+                    "RTP hot hook runtime installed for backend_rank_%s", local_rank
+                )
+        except Exception as e:
+            logging.error("failed to install RTP hot hook runtime for backend: %s", e)
         from rtp_llm.server.backend_manager import BackendManager
 
         backend_manager = BackendManager(py_env_configs)
