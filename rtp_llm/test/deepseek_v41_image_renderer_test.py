@@ -223,8 +223,16 @@ class V41ImageRendererTest(TestCase):
         self.assertFalse(actual.v41_inputs.image_mask.any().item())
         appended = prepared.append_text(" tail", [17, 18])
         self.assertEqual(appended.token_types[-2:], (-1, -1))
-        with self.assertRaisesRegex(ValueError, "placeholders"):
-            prepared.append_text(" image", [129264])
+        before = (prepared.prompt, prepared.token_ids, prepared.token_types)
+        appended = prepared.append_text(" image", [129264])
+        self.assertEqual(appended.prompt, prepared.prompt + " image")
+        self.assertEqual(appended.token_ids, prepared.token_ids + (129264,))
+        self.assertEqual(appended.token_types, prepared.token_types + (-1,))
+        self.assertFalse(appended.image_mask.any().item())
+        self.assertIs(appended.images, prepared.images)
+        self.assertEqual(
+            (prepared.prompt, prepared.token_ids, prepared.token_types), before
+        )
         request = ChatCompletionRequest.model_validate(
             {
                 "messages": [

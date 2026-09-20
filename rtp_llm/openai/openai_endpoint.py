@@ -40,6 +40,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RendererParams,
     StreamResponseObject,
 )
+from rtp_llm.openai.renderers.v41_recipe import IMAGE as V41_IMAGE_PLACEHOLDER
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.request_headers import extract_request_headers
@@ -595,6 +596,11 @@ class OpenaiEndpoint(object):
         if prepopulate_str != "":
             v41_inputs = getattr(rendered_input, "v41_inputs", None)
             if v41_inputs is not None:
+                if V41_IMAGE_PLACEHOLDER in prepopulate_str:
+                    raise FtRuntimeException(
+                        ExceptionType.INVALID_PARAMS,
+                        "literal V4.1 image placeholders are not valid API text",
+                    )
                 rendered_input.v41_inputs = v41_inputs.append_text(
                     prepopulate_str, self.tokenizer.encode(prepopulate_str)
                 )

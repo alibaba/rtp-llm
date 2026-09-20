@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from PIL import Image
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -91,6 +92,69 @@ class EndpointConfigTest(unittest.TestCase):
         self.renderer = make_renderer()
         self.endpoint = make_endpoint(self.renderer)
         self.endpoint.stop_words_str_list = ["engine_stop"]
+
+    def test_partial_text_preserves_v41_ids_and_masks(self):
+        suffix = " answer prefix"
+        prepared = self.renderer.render_chat(request()).v41_inputs
+        rendered = self.endpoint.render_chat(
+            request(
+                messages=[
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": suffix, "partial": True},
+                ]
+            )
+        )
+        suffix_ids = tuple(self.renderer.tokenizer.encode(suffix))
+        self.assertEqual(rendered.v41_inputs.token_ids, prepared.token_ids + suffix_ids)
+        self.assertEqual(rendered.input_ids, list(rendered.v41_inputs.token_ids))
+        self.assertEqual(rendered.rendered_prompt, prepared.prompt + suffix)
+        self.assertEqual(
+            rendered.v41_inputs.token_types,
+            prepared.token_types + (-1,) * len(suffix_ids),
+        )
+        self.assertFalse(rendered.v41_inputs.image_mask.any().item())
+
+    def test_literal_image_placeholder_rejected_in_text_and_partial(self):
+        for partial in (False, True):
+            with self.subTest(partial=partial):
+                req = request(
+                    messages=[
+                        {"role": "user", "content": "hello"},
+                        {
+                            "role": "assistant",
+                            "content": "prefix " + IMAGE_PLACEHOLDER + " suffix",
+                            "partial": partial,
+                        },
+                    ]
+                )
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "literal V4.1 image placeholders"
+                ) as raised:
+                    self.endpoint.render_chat(req)
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.INVALID_PARAMS
+                )
+
+    def test_partial_placeholder_keeps_basic_renderer_behavior(self):
+        rendered = self.endpoint.render_chat(
+            request(
+                messages=[
+                    {"role": "user", "content": "hello"},
+                    {
+                        "role": "assistant",
+                        "content": IMAGE_PLACEHOLDER,
+                        "partial": True,
+                    },
+                ],
+                user_template="{{ messages[0].content }}",
+            )
+        )
+        self.assertIsNone(rendered.v41_inputs)
+        self.assertEqual(rendered.rendered_prompt, "hello" + IMAGE_PLACEHOLDER)
+        self.assertEqual(
+            rendered.input_ids,
+            self.renderer.tokenizer.encode("hello" + IMAGE_PLACEHOLDER),
+        )
 
     def test_user_template_uses_basic_renderer_stop_and_thinking_rules(self):
         for stop in ("STOP", ["STOP"]):
@@ -181,6 +245,34 @@ class EndpointConfigTest(unittest.TestCase):
 
 
 class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_partial_image_placeholder_rejected_before_backend(self):
+        endpoint = make_endpoint(make_renderer())
+        for streaming in (False, True):
+            with self.subTest(stream=streaming), patch.object(
+                endpoint, "_chat_completion_from_inputs"
+            ) as start_backend:
+                req = request(
+                    messages=[
+                        {"role": "user", "content": "hello"},
+                        {
+                            "role": "assistant",
+                            "content": IMAGE_PLACEHOLDER,
+                            "partial": True,
+                        },
+                    ],
+                    stream=streaming,
+                )
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "literal V4.1 image placeholders"
+                ) as raised:
+                    await endpoint.chat_completion_async(
+                        1, req, SimpleNamespace(headers={})
+                    )
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.INVALID_PARAMS
+                )
+                start_backend.assert_not_called()
+
     async def test_cancel_during_preparation_does_not_start_backend(self):
         endpoint = make_endpoint(make_renderer())
         loop = asyncio.get_running_loop()
