@@ -1,5 +1,6 @@
 package org.flexlb.config;
 
+import org.flexlb.enums.EngineType;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
@@ -26,6 +27,8 @@ class ConfigServiceTest {
                 config.getDispatcher().getType());
         assertTrue(config.isFixedWindowDecision());
         assertEquals(2, config.getSchemaVersion());
+        assertEquals(1000, config.getRouter().getBatchScheduleMaxCount());
+        assertEquals(EngineType.LLM, config.getWorkerRegistry().getEngineType());
 
         // An omitted estimator keeps the upstream default expression
         // (the legacy 1 ms/token sum). Test lines that need the production
@@ -62,8 +65,13 @@ class ConfigServiceTest {
                         ConfigService.FLEXLB_CONFIG_ENV, "{}",
                         "CACHE_STATUS_MAX_INTERVAL_MS", "100",
                         "DEFAULT_SCHEDULE_MODE", "QUEUE",
-                        "FLEXLB_MONITOR_MODE", "all")));
+                        "FLEXLB_MONITOR_MODE", "all",
+                        "ENGINE_TYPE", "EMBEDDING", "FLEXLB_ENGINE_TYPE", "EMBEDDING",
+                        "BATCH_SCHEDULE_MAX_COUNT", "16", "BATCH_LOAD_BALANCE_STRATEGY", "ROUND_ROBIN")));
 
+        for (String key : new String[]{"ENGINE_TYPE", "FLEXLB_ENGINE_TYPE", "BATCH_SCHEDULE_MAX_COUNT", "BATCH_LOAD_BALANCE_STRATEGY"}) {
+            assertTrue(failure.getMessage().contains(key));
+        }
         assertTrue(failure.getMessage().contains("CACHE_STATUS_MAX_INTERVAL_MS"));
         assertTrue(failure.getMessage().contains("DEFAULT_SCHEDULE_MODE"));
         assertTrue(failure.getMessage().contains("FLEXLB_MONITOR_MODE"));
@@ -138,6 +146,7 @@ class ConfigServiceTest {
                     "enqueueRpcTimeoutMs": 4000
                   },
                   "router": {
+                    "batchScheduleMaxCount": 32,
                     "groupSelector": {
                       "defaultTargets": [{"group": "blue", "weight": 1}],
                       "rules": [{
@@ -181,6 +190,7 @@ class ConfigServiceTest {
                     }
                   },
                   "workerRegistry": {
+                    "engineType": "EMBEDDING",
                     "health": {
                       "statusPollIntervalMs": 25,
                       "statusRpcTimeoutMs": 5000,
@@ -208,6 +218,8 @@ class ConfigServiceTest {
 
         assertTrue(config.isPriorityOrdering());
         DispatcherConfig dispatcher = config.getDispatcher();
+        assertEquals(32, config.getRouter().getBatchScheduleMaxCount());
+        assertEquals(EngineType.EMBEDDING, config.getWorkerRegistry().getEngineType());
         assertEquals(DispatcherConfig.Type.BATCH, dispatcher.getType());
         assertEquals(60, config.priorityOrdering().getDefaultPriority());
         assertEquals(75, config.priorityOrdering().getPreemption()
@@ -328,6 +340,10 @@ class ConfigServiceTest {
 
     @Test
     void rejects_duplicate_keys_nulls_and_scalar_coercion() {
+        for (String json : new String[]{"{\"router\":{\"batchScheduleMaxCount\":0}}",
+                "{\"workerRegistry\":{\"engineType\":\"UNKNOWN\"}}", "{\"batchScheduleMaxCount\":32}"}) {
+            assertThrows(ConfigValidationException.class, () -> ConfigService.parse(json));
+        }
         assertThrows(ConfigValidationException.class,
                 () -> ConfigService.parse("{\"schemaVersion\":1,\"schemaVersion\":1}"));
         assertThrows(ConfigValidationException.class,
