@@ -79,6 +79,42 @@ class PvLogDataTest {
     }
 
     @Test
+    void pvKeepsDecodePreemptRequestIdsUnderServerStatusCompaction() throws Exception {
+        BalanceContext context = new BalanceContext();
+        Request request = new Request();
+        request.setRequestId("incoming");
+        context.setRequest(request);
+        org.flexlb.dao.loadbalance.ServerStatus decode = new org.flexlb.dao.loadbalance.ServerStatus();
+        decode.setRole(RoleType.DECODE);
+        decode.setServerIp("10.0.0.3");
+        decode.setRequestId("decode-internal");
+        decode.setPrefillTime(7);
+        decode.setDebugInfo(new org.flexlb.dao.loadbalance.DebugInfo());
+        decode.setPreemptRequestIds(List.of("victim-a", "victim-b"));
+        org.flexlb.dao.loadbalance.ServerStatus prefill = new org.flexlb.dao.loadbalance.ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("10.0.0.1");
+        Response response = new Response();
+        response.setServerStatus(List.of(decode, prefill));
+        context.setResponse(response);
+
+        var json = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+
+        var statuses = json.path("response").path("server_status");
+        var decodeIds = statuses.get(0).path("preempt_request_ids");
+        assertEquals(2, decodeIds.size());
+        assertEquals("victim-a", decodeIds.get(0).asText());
+        assertEquals("victim-b", decodeIds.get(1).asText());
+        assertEquals("DECODE", statuses.get(0).path("role").asText());
+        assertEquals(0, statuses.get(1).path("preempt_request_ids").size());
+        assertFalse(statuses.get(0).has("request_id"));
+        assertFalse(statuses.get(0).has("prefill_time"));
+        assertFalse(statuses.get(0).has("debug_info"));
+        assertEquals(List.of("victim-a", "victim-b"), decode.getPreemptRequestIds());
+    }
+
+    @Test
     void omitsRoutingDecisionWhenSnapshotIsAbsent() {
         Request request = new Request();
         request.setRequestId("1001");
