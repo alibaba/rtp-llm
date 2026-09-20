@@ -476,9 +476,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         if active_batch_size > batch_size:
             raise ValueError("active_batch_size must not exceed batch_size")
 
-        # The runner pads a captured batch with decode slots whose previous
-        # sequence length is zero; fill_params() therefore exposes one page
-        # with last_page_len=1 for every padding slot.
+        # Only active slots have input tokens. The planned batch size preserves
+        # graph capacity; inactive slots get a safe dummy page even if their
+        # block-table rows retain stale capture-time IDs.
         logical_sequence_lengths = sequence_lengths + [1] * (
             batch_size - active_batch_size
         )
@@ -551,7 +551,6 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         seq_size_per_block: int,
         batch_size: Optional[int] = None,
         block_id_offset: int = 0,
-        padding_block_id: int = 0,
     ) -> PageMetadata:
         active_batch_size = len(active_sequence_lengths)
         if batch_size is None:
@@ -574,7 +573,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                 page_indices.extend(range(next_block_id, next_block_id + page_count))
                 next_block_id += page_count
             else:
-                page_indices.extend([padding_block_id] * page_count)
+                page_indices.extend([0] * page_count)
         last_page_lens = [
             seq_len % seq_size_per_block or seq_size_per_block
             for seq_len in sequence_lengths
@@ -657,6 +656,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             reference,
             name=f"CUDA-core graph replay output ({sequence_lengths})",
         )
+
     def test_empty_device_mirror_falls_back_to_base_tensor(self):
         host = torch.tensor([7], dtype=torch.int32)
         empty_device = torch.empty(0, dtype=torch.int32, device="cuda")
@@ -927,10 +927,12 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             fmha_params.page_indice_d.data_ptr(),
             fmha_params.paged_kv_last_page_len_d.data_ptr(),
         )
+        original_plan = attn_op.decode_wrapper.plan
         plan_calls = []
 
         def counted_plan(*args, **kwargs):
             plan_calls.append((args, kwargs))
+            return original_plan(*args, **kwargs)
 
         attn_op.decode_wrapper.plan = counted_plan
 
@@ -965,6 +967,12 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
 
     def test_cuda_core_replay_replans_only_on_page_topology_change(self):
+        self._check_cuda_core_replay_plan_cache(device_metadata=False)
+
+    def test_cuda_core_device_state_replay_replans_on_page_topology_change(self):
+        self._check_cuda_core_replay_plan_cache(device_metadata=True)
+
+    def _check_cuda_core_replay_plan_cache(self, device_metadata):
         """CUDA-core replay caches only topology and refreshes graph buffers."""
         config = self._create_config(head_num=32, head_num_kv=32)
         capture_bs = 4
@@ -1019,6 +1027,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                 config.seq_size_per_block,
                 active_batch_size=active_bs,
             )
+            if device_metadata:
+                changed_inputs.sequence_lengths = changed_inputs.sequence_lengths.cuda()
+                changed_inputs.input_lengths = changed_inputs.input_lengths.cuda()
             attn_op.prepare_for_cuda_graph_replay(changed_inputs)
             expected = self._expected_page_metadata(
                 changed_seq_lens,
@@ -1050,6 +1061,13 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                 active_batch_size=active_bs,
                 block_id_offset=block_id_offset,
             )
+            if device_metadata:
+                same_topology_inputs.sequence_lengths = (
+                    same_topology_inputs.sequence_lengths.cuda()
+                )
+                same_topology_inputs.input_lengths = (
+                    same_topology_inputs.input_lengths.cuda()
+                )
             plan_mock.reset_mock()
             attn_op.prepare_for_cuda_graph_replay(same_topology_inputs)
             expected = self._expected_page_metadata(
@@ -1110,6 +1128,13 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                 config.seq_size_per_block,
                 active_batch_size=active_bs,
             )
+            if device_metadata:
+                crossed_page_inputs.sequence_lengths = (
+                    crossed_page_inputs.sequence_lengths.cuda()
+                )
+                crossed_page_inputs.input_lengths = (
+                    crossed_page_inputs.input_lengths.cuda()
+                )
             attn_op.prepare_for_cuda_graph_replay(crossed_page_inputs)
             expected = self._expected_page_metadata(
                 crossed_page_seq_lens,
@@ -1146,14 +1171,12 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             changed_seq_lens,
             config.seq_size_per_block,
             batch_size=capture_bs,
-            padding_block_id=padding_block_id,
         )
         crossed_page_seq_lens = [129, 201]
         crossed_expected = self._expected_page_metadata(
             crossed_page_seq_lens,
             config.seq_size_per_block,
             batch_size=capture_bs,
-            padding_block_id=padding_block_id,
         )
         required_block_count = (
             max(
@@ -1190,7 +1213,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                 self.assertEqual(plan_mock.call_count, 1)
                 self.assertEqual(
                     changed_expected.page_indices[-2:],
-                    [padding_block_id, padding_block_id],
+                    [0, 0],
                 )
                 self._assert_page_metadata(fmha_params, changed_expected)
                 self._assert_active_output_matches_reference(

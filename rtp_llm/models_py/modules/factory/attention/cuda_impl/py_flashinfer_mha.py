@@ -1431,16 +1431,16 @@ class PyFlashinferDecodeAttnOp(object):
                 _host_i32(block_id_host),
                 self.seq_size_per_block,
                 forbid_realloc=True,
+                planned_batch_size=self.decode_wrapper._fixed_batch_size,
             )
             if self._cuda_graph_replay_needs_replan():
                 self._plan_decode_wrapper(attn_inputs)
             return
 
-        if self._tensor_core_cuda_graph_needs_replan():
-            # Tensor-core planning consumes the host mirrors. Device-state
-            # callers must therefore refresh both mirrors before rebuilding
-            # the plan; updating only the device buffers would replay stale
-            # sequence lengths and page tables.
+        if self.enable_cuda_graph:
+            # Both graph backends plan from host mirrors. Device-state
+            # callers must refresh those mirrors too: tensor-core always
+            # replans, while CUDA-core replans only when page topology changes.
             self.fmha_params.fill_params(
                 _host_i32(
                     _device_or(
@@ -1463,8 +1463,10 @@ class PyFlashinferDecodeAttnOp(object):
                 ),
                 self.seq_size_per_block,
                 forbid_realloc=True,
+                planned_batch_size=self.decode_wrapper._fixed_batch_size,
             )
-            self._plan_decode_wrapper(attn_inputs)
+            if self._cuda_graph_replay_needs_replan():
+                self._plan_decode_wrapper(attn_inputs)
             return
 
         # Match initial planning's active-slot predicate. Sequence lengths and
