@@ -4,7 +4,7 @@
 # First-version scope: torch + torchvision + triton + deep_gemm + flash_mla
 # + fast_safetensors + fastsafetensors (the last two rebuilt against
 # torch 2.11+cu130 and mirrored to oss://rtp-maga/0502/).  Other
-# torch-ABI-bound wheels (flash_attn, flashinfer, deep_ep, rtp_kernel,
+# torch-ABI-bound wheels (flash_attn, deep_ep, rtp_kernel,
 # fast_hadamard, nvidia_cutlass_dsl) are deferred — see plan
 # §K and bazel/arch_select.bzl whl_deps() cuda13_x86 branch for how
 # rtp_llm/BUILD selects subset out of that set.
@@ -17,18 +17,23 @@ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2B
 # Triton 3.6.0 supports CUDA 13.x ptxas natively (no wrapper needed).
 triton==3.6.0
 
+# Use the same RTP FlashInfer fork as CUDA 12.9; upstream 0.6.9 copies
+# an unpinned CPU scale during FMHA v2 CUDA graph capture.
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_python-0.6.9-py3-none-any.whl
+
 # The HC regression target imports the vendored TileKernels implementation.
 tilelang==0.1.9
 
-# Self-built wheels (built from GitHub deepseek-ai/{DeepGEMM,FlashMLA} main
-# against torch 2.11+cu130 with gcc-toolset-12; SHAs encoded in filename).
-http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl
+# Self-built wheels against torch 2.11+cu130 with gcc-toolset-12.
+# DeepGEMM 8bcfcab preserves native SM120 kernels and adds MegaMoE shared_recipe.
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_sm120/8bcfcab8757e7df2fcb0e4f65796da5cd5bdd6b4/deep_gemm-2.6.1%2B8bcfcab.cu132-cp310-cp310-linux_x86_64.whl
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl
 
-# rtp_kernel built from gitlab cuda_extension main (sm_80/90a/100a)
+# rtp_kernel built from gitlab cuda_extension main@3bc0ca45
+# (sm_80/90a/100a/103a/120a)
 # against torch 2.11+cu130; flashinfer-dependent submodules (xqa,
 # sparse_attention*, clustered_gather) are import-tolerant in this build.
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu13.4a1a7e3-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/cu13/rtp_kernel_260902/rtp_kernel-0.1.0%2B3bc0ca45.cu13-cp310-cp310-linux_x86_64.whl
 
 # fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
 # (originals were torch 2.1.2 + cu121).  Project name is `fast-safetensors`

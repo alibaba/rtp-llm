@@ -108,9 +108,12 @@ class StreamStatus:
     tokenizer = None
     responded_string = ""
     delta_output_string = ""
+    has_real_aux_info: bool = True
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
+        self.has_real_aux_info = True
+        self._fallback_aux_info: Optional[AuxInfo] = None
 
     def update_output(
         self,
@@ -122,6 +125,18 @@ class StreamStatus:
         self.output = output
         delta_output_ids = output.output_ids.cpu().flatten().tolist()
         self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
+        if output.aux_info is None:
+            self.has_real_aux_info = False
+            if self._fallback_aux_info is None:
+                self._fallback_aux_info = AuxInfo()
+            # ModelRpcClient attaches the request token IDs even when the backend
+            # omits aux_info. Keep token accounting and length limits independent
+            # of whether timing/cache statistics were requested.
+            if output.input_ids is not None:
+                self._fallback_aux_info.input_len = output.input_ids.shape[-1]
+            self._fallback_aux_info.output_len = len(self.output_ids_list)
+            self._fallback_aux_info.step_output_len = len(delta_output_ids)
+            output.aux_info = self._fallback_aux_info
         self.finish_reason = check_finish_func(
             self.output_ids_list, self.input_token_length
         )
@@ -1076,7 +1091,11 @@ class CustomChatRenderer:
                 input_token_length = buffer.output.aux_info.input_len
                 reuse_length = buffer.output.aux_info.reuse_len
                 multimodal_lengths = buffer.output.aux_info.multimodal_lengths
-                aux_info = buffer.output.aux_info if request.aux_info else None
+                aux_info = (
+                    buffer.output.aux_info
+                    if request.aux_info and buffer.has_real_aux_info
+                    else None
+                )
             output_token_length += buffer.output.aux_info.output_len
         return StreamResponseObject(
             choices=[

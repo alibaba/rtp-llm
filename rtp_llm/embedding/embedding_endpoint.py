@@ -75,6 +75,27 @@ class EmbeddingEndpoint(object):
             options=self.options, cleanup_interval=60
         )
 
+    async def start_profile(self, req: Any) -> Dict[str, Any]:
+        try:
+            if isinstance(req, str):
+                req = json.loads(req)
+            req = req or {}
+            request = pb2.StartProfileRequestPB(
+                trace_name=str(req.get("trace_name", "")),
+                start_step=int(req.get("start_step", 0)),
+                num_steps=int(req.get("num_steps", 0)),
+                enable_all_rank=self._as_bool(
+                    req.get("enable_all_rank", req.get("all_tp", False))
+                ),
+            )
+            channel = await self._channel_pool.get(self.address)
+            stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
+            await stub.StartProfile(request, timeout=3)
+            return {"status": "ok"}
+        except Exception as e:
+            logging.error("Start embedding profile failed: %s", e)
+            return {"error": f"Failed to start profile: {e}"}
+
     async def close(self) -> None:
         await self._channel_pool.close()
 
@@ -100,16 +121,17 @@ class EmbeddingEndpoint(object):
         return response, logable_response
 
     @staticmethod
+    def _as_bool(value, default=False):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes")
+        return bool(value) if value is not None else default
+
+    @staticmethod
     def _extract_profile_config(request: Dict[str, Any]) -> Dict[str, Any]:
         def as_dict(value):
             return value if isinstance(value, dict) else {}
-
-        def as_bool(value, default=False):
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                return value.lower() in ("true", "1", "yes")
-            return bool(value) if value is not None else default
 
         def as_int(value, default=1):
             try:
@@ -121,7 +143,9 @@ class EmbeddingEndpoint(object):
         generate_config = as_dict(request.get("generate_config"))
         config = {**extra_configs, **generate_config}
         return {
-            "gen_timeline": as_bool(config.get("gen_timeline", False)),
+            "gen_timeline": EmbeddingEndpoint._as_bool(
+                config.get("gen_timeline", False)
+            ),
             "profile_step": as_int(config.get("profile_step", 1)),
             "profile_trace_name": re.sub(
                 r"[^A-Za-z0-9_-]", "", str(config.get("profile_trace_name", ""))

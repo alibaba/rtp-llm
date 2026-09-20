@@ -155,7 +155,7 @@ class TorchSymmMemCommunicator:
         local_ok = True
         reason = ""
 
-        if self.device_capability < 9:
+        if self.device_capability not in TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES:
             local_ok = False
             reason = f"device capability {self.device_capability} not supported"
         elif (
@@ -166,9 +166,9 @@ class TorchSymmMemCommunicator:
             reason = f"world size {self.world_size} not supported"
 
         if local_ok:
-            self.max_size = TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES[
-                self.device_capability
-            ][self.world_size]
+            self.max_size = TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][
+                self.world_size
+            ]
             try:
                 self.buffer = torch_symm_mem.empty(
                     self.max_size // self.dtype.itemsize,
@@ -347,14 +347,20 @@ class TorchSymmMemCommunicator:
 _symm_mem_comm: Optional[TorchSymmMemCommunicator] = None
 
 
-def _custom_all_reduce_enabled() -> bool:
-    """Honor the server-wide custom AllReduce kill switch."""
+def _custom_all_reduce_enabled(
+    disable_custom_all_reduce: Optional[bool] = None,
+) -> bool:
+    """Honor an explicit config override, then the legacy environment switch."""
+    if disable_custom_all_reduce is not None:
+        return not disable_custom_all_reduce
     value = os.getenv("FT_DISABLE_CUSTOM_AR")
     return value is None or value.strip().lower() not in ("1", "true", "on", "yes")
 
 
 def init_symm_mem_communicator(
     tp_group: ProcessGroup,
+    *,
+    disable_custom_all_reduce: Optional[bool] = None,
 ) -> Optional[TorchSymmMemCommunicator]:
     """Initialize TorchSymmMemCommunicator for TP group.
 
@@ -369,10 +375,8 @@ def init_symm_mem_communicator(
     startup fails fast, on every rank, with the real reason.
     """
     global _symm_mem_comm
-    if not _custom_all_reduce_enabled():
-        logging.info(
-            "TorchSymmMemCommunicator disabled by FT_DISABLE_CUSTOM_AR"
-        )
+    if not _custom_all_reduce_enabled(disable_custom_all_reduce):
+        logging.info("TorchSymmMemCommunicator disabled by FT_DISABLE_CUSTOM_AR")
         _symm_mem_comm = None
         return None
     symm_mem_comm = TorchSymmMemCommunicator(tp_group, torch.cuda.current_device())

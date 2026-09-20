@@ -5,8 +5,8 @@ py_test (
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO"],
-    exec_properties = {'gpu':'RTX_5000_PRO', 'gpu_count':'1'},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {'gpu':'RTX_5000_PRO_CU13', 'gpu_count':'1'},
 )
 
 py_test (

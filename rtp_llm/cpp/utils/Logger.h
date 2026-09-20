@@ -88,6 +88,9 @@ public:
 
     template<typename... Args>
     void log_access(uint32_t level, const std::string format, const Args&... args) {
+        if (disable_access_log_) {
+            return;
+        }
         std::string logstr = rtp_llm::fmtstr(format, args...);
         logger_->log(level, "%s", logstr.c_str());
         tryFlush(level);
@@ -159,7 +162,8 @@ private:
                                                                          {alog::LOG_LEVEL_WARN, "WARNING"},
                                                                          {alog::LOG_LEVEL_ERROR, "ERROR"}};
 
-    int32_t     rank_ = 0;
+    const bool  disable_access_log_ = autil::EnvUtil::getEnv("DISABLE_ACCESS_LOG", 0) == 1;
+    int32_t     rank_               = 0;
     std::string ip_;
 };
 
