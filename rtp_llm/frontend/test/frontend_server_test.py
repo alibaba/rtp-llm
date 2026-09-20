@@ -164,26 +164,23 @@ class BatchFrontendWorkerTest(TestCase):
                     visitor.host_service.service_available = scheduling
                     worker._yield_batch_generate = MagicMock(side_effect=generate)
                     worker._inference = MagicMock(side_effect=generate)
-                    response = worker.inference(
-                        True,
-                        batch=False,
-                        prompt_batch=["first", "second"],
-                        max_new_tokens=37,
-                        headers={"x-request-id": "trace"},
-                        **{
-                            request_id_field_name: 700,
-                            key: {
-                                "max_new_tokens": 8,
-                                "temperature": 0.5,
-                                "role_addrs": [
-                                    RoleAddr(
-                                        role=r, ip="be", http_port=80, grpc_port=81
-                                    )
-                                    for r in assignments
-                                ],
-                            },
+                    payload = {
+                        "batch": False,
+                        "prompt_batch": ["first", "second"],
+                        "max_new_tokens": 37,
+                        "headers": {"x-request-id": "trace"},
+                        request_id_field_name: 700,
+                        key: {
+                            "max_new_tokens": 8,
+                            "temperature": 0.5,
+                            "role_addrs": [
+                                RoleAddr(role=r, ip="be", http_port=80, grpc_port=81)
+                                for r in assignments
+                            ],
                         },
-                    )
+                    }
+                    # The route selects batch execution; JSON fields cannot override it.
+                    response = worker.inference(True, **payload)
                     self.assertIs(
                         expected,
                         asyncio.run(
@@ -211,9 +208,8 @@ class BatchFrontendWorkerTest(TestCase):
 
     def test_batch_endpoint_rejects_streaming_and_root_preserves_it(self):
         worker = FrontendWorker.__new__(FrontendWorker)
-        worker._yield_generate = MagicMock()
+        worker._inference = MagicMock()
         worker._yield_batch_generate = MagicMock()
-        worker._parallel_batch_async_generators = MagicMock(return_value="per-item")
         for items in ([], ["first", "second"]):
             for flags in (
                 {"stream": True},
@@ -230,9 +226,17 @@ class BatchFrontendWorkerTest(TestCase):
                 self.assertEqual(
                     ExceptionType.UNSUPPORTED_OPERATION, raised.exception.exception_type
                 )
-        # Keyword batch=True is body data; the positional mode stays False,
-        # so root inference must still accept this streaming request.
-        worker.inference(batch=True, **args)
+        worker._inference.assert_not_called()
+        # Root inference accepts streaming even when the JSON body contains batch=True.
+        payload = {
+            request_id_field_name: 700,
+            "prompt_batch": ["first", "second"],
+            "stream": True,
+            "batch": True,
+        }
+        worker.inference(**payload)
+        worker._inference.assert_called_once()
+        self.assertTrue(worker._inference.call_args.args[0].is_streaming)
         worker._yield_batch_generate.assert_not_called()
 
     def test_root_inference_preserves_generate_config_alias_precedence(self):
