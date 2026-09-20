@@ -1407,6 +1407,7 @@ class EnvManager:
         elif spec.discovery == "discovery_file":
             payload = json.loads(env.endpoint_file.read_text(encoding="utf-8"))
             service_config = json.loads(payload["env"]["MODEL_SERVICE_CONFIG"])
+            service_config.pop("hosts", None)
             service_config["discovery_file"] = str(env.discovery_file)
             menv["MODEL_SERVICE_CONFIG"] = json.dumps(service_config)
         elif spec.discovery == "domain":
