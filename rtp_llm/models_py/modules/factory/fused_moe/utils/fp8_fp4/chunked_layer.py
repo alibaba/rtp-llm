@@ -57,7 +57,18 @@ def resolve_moe_max_tokens_per_rank(
         )
     if is_decode_role:
         tokens_per_batch = max(int(gen_num_per_cycle) + 1, 1) if is_speculative else 1
-        return max_generate_batch_size * tokens_per_batch
+        resolved = max_generate_batch_size * tokens_per_batch
+        # RELEASE FIX (GB200 decode TPOT): the old dsv4 MoE module sized the
+        # MegaMoE symm-mem dispatch buffer from max_seq_len, which makes
+        # deep_gemm pick a fast tiling (block_m 96-128). Sizing from the
+        # decode batch makes the kernel pick a slow tiling (block_m 16-64),
+        # regressing decode TPOT ~2x on 2-host EP8 topologies. Keep the
+        # V4Args pre-resolve floor for the buffer: the module-level buffer
+        # cache means one allocation, not per-layer.
+        floor = int(current_max_tokens_per_rank or 0)
+        if floor > resolved:
+            return floor
+        return resolved
 
     budget = int(current_max_tokens_per_rank)
     cp_size = max(int(cp_size), 1)
