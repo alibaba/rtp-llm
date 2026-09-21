@@ -53,6 +53,25 @@ QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale"
 
 
+def _quantized_moe_ckpt_names(ckpt_name: str) -> Tuple[str, str]:
+    """Return the INT8/FP8 kernel and scale keys for an MoE checkpoint tensor.
+
+    Most Hugging Face MoE tensors use a ``.weight`` suffix, so their kernel
+    key is unchanged and their scale replaces that suffix.  Qwen3.5's fused
+    expert tensors are different: ``gate_up_proj`` and ``down_proj`` are
+    stacked checkpoint keys with no ``.weight`` suffix.  Those kernels retain
+    the original key and their scales are stored at ``<key>.weight_scale``.
+    """
+    if ckpt_name.endswith(W_SUFFIX):
+        return ckpt_name, ckpt_name[: -len(W_SUFFIX)] + QS_SUFFIX
+    return ckpt_name, ckpt_name + QS_SUFFIX
+
+
+def _ckpt_module_name(ckpt_name: str) -> str:
+    """Return a checkpoint's module path without assuming a ``.weight`` suffix."""
+    return ckpt_name[: -len(W_SUFFIX)] if ckpt_name.endswith(W_SUFFIX) else ckpt_name
+
+
 @functools.lru_cache(maxsize=None)
 def _exclude_pattern_for(base_name_template: str) -> Optional["re.Pattern"]:
     """Compile a regex for ``base_name_template`` (with ``{i}``→\\d+); cached.
@@ -111,7 +130,9 @@ def _ckpt_base_matches_quant_exclude(
     return False
 
 
-def _ckpt_base_matches_regex_exclude(base_name_template: str, exclude_modules: set) -> bool:
+def _ckpt_base_matches_regex_exclude(
+    base_name_template: str, exclude_modules: set
+) -> bool:
     """Return whether a regex ignore matches the whole weight template."""
     candidate = base_name_template.replace("{i}", "0")
     for exclude in exclude_modules:
@@ -328,7 +349,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         ckpt_weights = src_weight_info.weights
         if quant_config.exclude_modules and ckpt_weights:
             for ckpt_w in ckpt_weights:
-                base_name = ckpt_w.name.rsplit(".", 1)[0]
+                base_name = _ckpt_module_name(ckpt_w.name)
                 if _ckpt_base_matches_quant_exclude(
                     base_name, quant_config.exclude_modules
                 ):
@@ -545,50 +566,78 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
 
     def _get_moe_w2_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w2]
-        w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
+        kernel_name, scale_name = _quantized_moe_ckpt_names(
+            src_weight_info.weights[0].name
+        )
+        # A suffix-less stacked Qwen3.5 scale already has [expert, channel,
+        # 1] shape. Keep its merge function as identity so fastsafetensors can
+        # map the stacked scale key just like the kernel key. Split checkpoints
+        # and older .weight-stacked formats still normalize legacy 1D scales.
+        is_suffixless_stacked = src_weight_info.stacked_ckpt_keys and not (
+            src_weight_info.weights[0].name.endswith(W_SUFFIX)
+        )
+        scale_merge_fun = identity if is_suffixless_stacked else _identity_ensure_2d
+        process_fun = (
+            src_weight_info.process_fun if src_weight_info.stacked_ckpt_keys else stack_
+        )
         kernel = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
             W.moe_w2,
-            [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
-            stack_,
+            [CkptWeightInfo(kernel_name, identity)],
+            process_fun,
             data_type=self.weight_dtype,
             config=src_weight_info.config,
+            stacked_ckpt_keys=src_weight_info.stacked_ckpt_keys,
+            enable_pure_tp_preshard=src_weight_info.enable_pure_tp_preshard,
         )
         scale = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
             W.moe_s2,
-            [CkptWeightInfo(w_name + QS_SUFFIX, _identity_ensure_2d)],
-            stack_,
+            [CkptWeightInfo(scale_name, scale_merge_fun)],
+            process_fun,
             data_type=torch.float32,
             config=src_weight_info.config,
+            stacked_ckpt_keys=src_weight_info.stacked_ckpt_keys,
+            enable_pure_tp_preshard=src_weight_info.enable_pure_tp_preshard,
         )
         return [kernel, scale]
 
     def _get_moe_w1_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w1]
+        ckpt_names = [
+            _quantized_moe_ckpt_names(weight.name) for weight in src_weight_info.weights
+        ]
+        is_suffixless_stacked = src_weight_info.stacked_ckpt_keys and all(
+            not weight.name.endswith(W_SUFFIX) for weight in src_weight_info.weights
+        )
+        scale_merge_fun = identity if is_suffixless_stacked else _identity_ensure_2d
+        process_fun = (
+            src_weight_info.process_fun
+            if src_weight_info.stacked_ckpt_keys
+            else stack_moe_w1
+        )
         kernel = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
             W.moe_w1,
-            [
-                CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QW_SUFFIX, identity)
-                for w in src_weight_info.weights
-            ],
-            stack_moe_w1,
+            [CkptWeightInfo(kernel_name, identity) for kernel_name, _ in ckpt_names],
+            process_fun,
             data_type=self.weight_dtype,
             config=src_weight_info.config,
+            stacked_ckpt_keys=src_weight_info.stacked_ckpt_keys,
+            enable_pure_tp_preshard=src_weight_info.enable_pure_tp_preshard,
         )
         scale = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
             W.moe_s1,
             [
-                CkptWeightInfo(
-                    w.name[: -len(W_SUFFIX)] + QS_SUFFIX, _identity_ensure_2d
-                )
-                for w in src_weight_info.weights
+                CkptWeightInfo(scale_name, scale_merge_fun)
+                for _, scale_name in ckpt_names
             ],
-            stack_moe_w1,
+            process_fun,
             data_type=torch.float32,
             config=src_weight_info.config,
+            stacked_ckpt_keys=src_weight_info.stacked_ckpt_keys,
+            enable_pure_tp_preshard=src_weight_info.enable_pure_tp_preshard,
         )
         return [kernel, scale]
 
@@ -916,16 +965,13 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
             swapped_scale[:, half:, :].copy_(scale_out[:, :half, :])
             scale_out = swapped_scale
 
-        used_prequant = (
-            has_prequant
-            and any(
-                tensor_source.has_prequantized_scale(
-                    ckpt_weights[0].name.format(
-                        i=str(layer_id), i_1=str((layer_id or 0) + 1), expert_id=str(eid)
-                    )
+        used_prequant = has_prequant and any(
+            tensor_source.has_prequantized_scale(
+                ckpt_weights[0].name.format(
+                    i=str(layer_id), i_1=str((layer_id or 0) + 1), expert_id=str(eid)
                 )
-                for eid in selected_experts[:1]
             )
+            for eid in selected_experts[:1]
         )
         logging.info(
             f"inline MoE FP8 quant: {self.kernel.name} layer={layer_id} "
