@@ -13,7 +13,14 @@ from flexlb_test_framework.scenario.runtime import (
     StageTimeout,
 )
 from test_scenario_backend import Ops
-from test_scenario_rpc_fault_probe import RpcError
+
+
+class RpcError(Exception):
+    def __init__(self, status):
+        self.status = status
+
+    def code(self):
+        return NS(name=self.status)
 
 
 class Clock:

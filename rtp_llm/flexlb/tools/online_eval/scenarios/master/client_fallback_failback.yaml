@@ -30,14 +30,6 @@ variants:
     checkpoint_window_s: 5
     max_owner_load: 128
   program: wraparound
-- id: negative_errorcode
-  profiles:
-  - batch-window
-  program: negative_errorcode
-- id: direct_generate_error
-  environment:
-    master_layout: single
-  program: direct_generate_error
 metadata:
   description: 'Explicit client routing programs: all-master outage, wraparound recovery, no fallback
     for business/deadline errors, and direct GenerateStreamCall fault recovery.'

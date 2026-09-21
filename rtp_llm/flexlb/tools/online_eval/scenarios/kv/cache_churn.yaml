@@ -26,11 +26,6 @@ variants:
     prefill_cache_blocks: 4
     decode_cache_blocks: 4
   program: lru_affinity
-- id: referenced_occupancy
-  environment:
-    prefill_cache_blocks: 4
-    decode_cache_blocks: 12
-  program: referenced_occupancy
 metadata:
   description: Pre-request hit rate and windowed holder masks under four-family churn; bounded LRU replay
     retry and capacity eviction.

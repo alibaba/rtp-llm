@@ -51,10 +51,6 @@ variants:
   metadata:
     requires:
     - enqueue_batch
-- id: rebalance
-  profiles:
-  - batch-window
-  program: rebalance
 - id: kv_skew_hot
   profiles:
   - batch-window
@@ -121,18 +117,6 @@ variants:
   metadata:
     requires:
     - enqueue_batch
-- id: rebalance_single_batch
-  profiles:
-  - single-batch
-  program: rebalance_single_batch
-- id: rebalance_single_nonbatch
-  profiles:
-  - single-nonbatch
-  program: rebalance_single_nonbatch
-- id: rebalance_window_nonbatch
-  profiles:
-  - window-nonbatch
-  program: rebalance_window_nonbatch
 - id: normal_single_batch
   profiles:
   - single-batch

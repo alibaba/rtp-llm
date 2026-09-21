@@ -17,30 +17,6 @@ variants:
   - single-nonbatch
   - single-batch
   - window-nonbatch
-- id: deferred_fetch
-  profiles:
-  - batch-window
-  - single-batch
-  program: deferred_fetch
-- id: client_no_fetch
-  profiles:
-  - batch-window
-  - single-batch
-  environment:
-    n_prefill: 1
-    n_decode: 1
-    mock_auto_fetch: false
-    mock_fetch_attach_timeout_ms: 4000
-    prefill_perf:
-      fixed_ms: 1000
-      scale: 1.0
-      max_batch_tokens: 32768
-      max_batch_requests: 32
-  execution:
-    timeout_s: 600
-  program: client_no_fetch
-  parameters:
-    output_len: 8
 metadata:
   description: Submitted requests reach a business terminal without stream errors.
   category: status

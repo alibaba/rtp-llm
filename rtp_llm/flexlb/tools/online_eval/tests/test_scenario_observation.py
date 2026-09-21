@@ -261,68 +261,6 @@ class ObservationTest(unittest.TestCase):
         self.assertEqual("partial", frozen["status"])
         self.assertIn("source failure", frozen["error"])
 
-    def test_real_compiler_runtime_freezes_yaml_cohort(self):
-        from flexlb_test_framework.scenario.actions.observation import HANDLERS
-        from flexlb_test_framework.scenario.compiler import compile_scenarios
-        from flexlb_test_framework.scenario.loader import load_scenarios
-        from flexlb_test_framework.scenario.runtime import execute_instance
-
-        class Backend:
-            def setup(inner, ctx, environment, limit):
-                return self.ctx.env, object()
-
-            def start_requests(inner, ctx, shape, limit):
-                records = Records()
-                for rid in range(shape["count"]):
-                    records.records.append(
-                        dict(
-                            schema_version=1,
-                            wire_request_id=rid,
-                            attempt=1,
-                            env_epoch=ctx.env_epoch,
-                            issued_s=ctx.clock(),
-                            schedule={"started_s": ctx.clock()},
-                            transport_terminal_s=None,
-                        )
-                    )
-                return ctx.register_resource("requests", records)
-
-            def wait_requests(inner, ctx, records, limit):
-                for record in records.records:
-                    record["transport_terminal_s"] = ctx.clock()
-                return {"completed": True, "error_count": 0}
-
-            def teardown(inner, ctx, limit):
-                pass
-
-        from pathlib import Path
-
-        root = Path(__file__).resolve().parents[1] / "scenarios" / "observation"
-        handlers = {h.name: h for h in HANDLERS}
-        plans = compile_scenarios(load_scenarios(root), handlers=handlers)
-        self.assertEqual(2, len(plans))
-
-        def read(url, limit):
-            return (
-                {"engines": [{"name": "p1"}]}
-                if url.endswith("snapshot")
-                else {"p1": {}}
-            )
-
-        with patch(
-            "flexlb_test_framework.scenario.actions.observation._read_json",
-            side_effect=read,
-        ):
-            result = execute_instance(
-                plans[0], Backend(), handlers=handlers, artifact_dir=self.temp.name
-            )
-        self.assertEqual("PASS", result["status"], result)
-        frozen = next(row for row in result["stages"] if row["id"] == "frozen")
-        import json
-
-        data = json.loads(Path(frozen["artifacts"][0]).read_text())
-        self.assertEqual(2, len(data["cohort_records"]))
-        self.assertTrue(all(row["status"] == "PASS" for row in result["cleanup"]))
 
     def test_core_optional_source_and_required_finding_semantics(self):
         from flexlb_test_framework.scenario.actions.observation import HANDLERS

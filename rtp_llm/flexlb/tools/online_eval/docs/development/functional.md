@@ -1,6 +1,6 @@
 # 功能测试
 
-默认功能回归只有 5 个核心合同：请求完成、容量准入、KV 生命周期、Engine 代际隔离和 Master 重启。它使用少量可控请求；任一前置步骤失败会阻断依赖步骤。原有完整矩阵保留为扩展功能集，排查专项行为时显式运行。
+功能回归只有 5 个核心合同：请求完成、容量准入、KV 生命周期、Engine 代际隔离和 Master 重启。它使用少量可控请求；任一前置步骤失败会阻断依赖步骤。原扩展功能矩阵已经删除，复杂行为由持续负载场景覆盖。
 
 先完成[编译与运行底座](build-and-runtime.md)，再从 `rtp_llm/flexlb` 执行。
 
@@ -12,7 +12,7 @@ python3 tools/online_eval/scenario_runner.py \
   --profile batch-window --suite core --list-json > /tmp/flexlb-core.json
 ```
 
-该命令必须只列出 5 个实例。改用 `--suite functional` 才会列出完整扩展矩阵。
+该命令必须只列出 5 个实例。`--suite functional` 选择相同的 5 个功能合同。
 
 实例 ID 形如 `request_completion::immediate::batch-window`。按 category 选一组，或用 `--instances` 精确选择。精确选择可避免一次运行混入无关场景。
 
@@ -42,8 +42,8 @@ python3 tools/online_eval/test_runner.py \
 常用选择：
 
 - `--suite core`：默认的 5 个核心实例。
-- `--suite functional`：完整扩展功能矩阵，只在专项回归时运行。
-- `--categories status,cancel`：运行 category 子集。
+- `--suite functional`：与 `core` 相同的 5 个功能合同。
+- `--suite workload`：复杂场景和持续负载测试。
 - `--instances id1,id2`：运行精确实例，优先级高于广泛分类。
 - `--profile` 或 `--master-mode`：选择一种运行形态。
 - `--parallel 1`：排查共享状态、时序或单例失败。

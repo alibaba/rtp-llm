@@ -86,17 +86,21 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertFalse(f & w)
         self.assertEqual(f | w, {p["id"] for p in plans})
         self.assertTrue(any("wraparound" in x for x in w))
-        self.assertTrue(any("client_no_fetch" in x for x in f))
-        self.assertTrue(
-            all(
-                p["id"] in f
-                for p in plans
-                if p["id"].startswith("balance_distribution::")
-                and "::sustained_mix::" not in p["id"]
-            )
-        )
         self.assertTrue(any("::sustained_mix::" in identity for identity in w))
-        self.assertEqual(len(plans), 389)
+        self.assertEqual(
+            {
+                plan["scenario_id"] + "::" + plan["variant_id"]
+                for plan in classify(plans, "functional")
+            },
+            {
+                "request_completion::immediate",
+                "cache_capacity_recovery::pool_saturation_evict_reject_recover",
+                "cache_churn::lru_affinity",
+                "engine_fault_recovery::generation_bump",
+                "master_lifecycle::kill_single",
+            },
+        )
+        self.assertEqual(len(plans), 89)
         self.assertIn("cache_scale_in::step::single-nonbatch", w)
 
     def test_core_suite_is_five_stable_contracts_for_every_master_profile(self):

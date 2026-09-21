@@ -66,13 +66,13 @@ class ChildTest(unittest.TestCase):
         rows = json.loads(proc.stdout)["instances"]
         self.assertEqual(
             {r["variant_id"] for r in rows},
-            {"immediate", "deferred_fetch", "client_no_fetch"},
+            {"immediate"},
         )
         self.assertTrue(all(row["grade"] == "loose" for row in rows))
         self.assertNotIn("stages", rows[0])
         self.assertNotIn("environment", rows[0])
         self.assertGreater(rows[0]["execution"]["cleanup_timeout_s"], 0)
-        self.assertEqual(select(rows, rows[1]["id"]), [rows[1]])
+        self.assertEqual(select(rows, rows[0]["id"]), [rows[0]])
         for ids in ("", "missing", rows[0]["id"] + "," + rows[0]["id"]):
             with self.assertRaises(ScenarioError):
                 select(rows, ids)

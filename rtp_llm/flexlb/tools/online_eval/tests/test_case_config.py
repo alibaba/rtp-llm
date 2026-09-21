@@ -21,36 +21,28 @@ from flexlb_test_framework.scenario.loader import load_document
 
 
 class CaseConfigTest(unittest.TestCase):
-    def test_debug_and_no_fetch_keep_retained_smoke_construction(self):
+    def test_core_contract_keeps_production_master_configuration(self):
         from flexlb_cfg import ConfigOverride, render_env
 
         plans = compile_scenarios(
-            load_scenarios(ROOT / "scenarios/status/status_protocol.yaml"),
+            load_scenarios(ROOT / "scenarios/core/request_completion.yaml"),
             handlers=handlers(),
         )
-        selected = [
-            p for p in plans if p["variant_id"] in ("debug_snapshot", "normal_no_fetch")
-        ]
-        self.assertEqual(len(selected), 2)
-        for plan in selected:
+        self.assertEqual(len(plans), 4)
+        for plan in plans:
             self.assertEqual(
                 (plan["environment"]["n_prefill"], plan["environment"]["n_decode"]),
-                (2, 4),
+                (2, 2),
             )
             self.assertEqual(
                 plan["environment"]["resolved_config"],
                 json.loads(
-                    render_env("batch-window", ConfigOverride(request_timeout_ms=30000))
+                    render_env(plan["profile"], ConfigOverride())
                 ),
             )
 
     def config(self):
         config = load_document(ROOT / "scenarios/core/request_completion.yaml")
-        # These tests vary request cohort count/PD scale. The dedicated
-        # missing-Fetch experiment has its own fixed topology and parameters.
-        config["variants"] = [
-            v for v in config["variants"] if v["id"] in ("immediate", "deferred_fetch")
-        ]
         return config
 
     def compile(self, config):
@@ -90,6 +82,13 @@ class CaseConfigTest(unittest.TestCase):
         config = self.config()
         config["parameters"]["count"] = 2
         config["variants"][0]["parameters"] = {"count": 4}
+        config["variants"].append(
+            {
+                "id": "default_count",
+                "program": "immediate",
+                "profiles": ["single-nonbatch"],
+            }
+        )
         original = copy.deepcopy(config)
         plans = self.compile(config)
         self.assertEqual(
@@ -104,7 +103,7 @@ class CaseConfigTest(unittest.TestCase):
             {
                 p["stages"][1]["params"]["count"]
                 for p in plans
-                if p["variant_id"] == "deferred_fetch"
+                if p["variant_id"] == "default_count"
             },
             {2},
         )
@@ -123,7 +122,7 @@ class CaseConfigTest(unittest.TestCase):
             ):
                 (Path(directory) / name).write_text(json.dumps(data))
             plans = compile_scenarios(load_scenarios(directory), handlers=handlers())
-        self.assertEqual(len(plans), 12)
+        self.assertEqual(len(plans), 8)
         self.assertEqual(
             {p["scenario_id"] for p in plans},
             {"request_completion", "another_pd_scale"},
@@ -249,12 +248,6 @@ class CaseConfigTest(unittest.TestCase):
         documents = load_scenarios(ROOT / "scenarios")
         plans = compile_scenarios(documents, handlers=handlers())
         expected = json.loads((ROOT / "tests/fixtures/instance_ids.json").read_text())
-        from flexlb_test_framework.scenario.loader import load_document
-
-        aliases = load_document(ROOT / "suites.yaml")["covered_instances"]
-        self.assertEqual(len(aliases), 9)
-        self.assertTrue(set(aliases).issubset(expected))
-        expected = sorted({aliases.get(identity, identity) for identity in expected})
         self.assertEqual(sorted(p["id"] for p in plans), expected)
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for source, _ in documents:

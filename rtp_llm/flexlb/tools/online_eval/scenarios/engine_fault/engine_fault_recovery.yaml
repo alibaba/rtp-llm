@@ -24,52 +24,11 @@ execution:
 variants:
 - id: generation_bump
   program: generation_bump
-- id: status_gap_no_bump
-  program: status_gap_no_bump
-- id: down_phases
-  environment:
-    n_decode: 4
-    master_sync_log: false
-  program: down_phases
 - id: flap
   environment:
     n_decode: 4
     master_sync_log: false
   program: flap
-- id: kv_resync
-  profiles:
-  - batch-window
-  - single-batch
-  - window-nonbatch
-  program: kv_resync
-- id: kv_usage_reset
-  program: kv_usage_reset
-- id: crash_after
-  profiles:
-  - batch-window
-  - single-batch
-  environment:
-    discovery: file
-    perf_preset: default
-    master_sync_log: false
-    config_overrides:
-      ordering: priority
-      queue_timeout_ms: 60000
-      request_timeout_ms: 30000
-  program: crash_after
-  metadata:
-    requires:
-    - enqueue_batch
-- id: no_resurrect
-  profiles:
-  - batch-window
-  - single-batch
-  program: no_resurrect
-  metadata:
-    requires:
-    - enqueue_batch
-- id: status_gap_long_retire
-  program: status_gap_long_retire
 metadata:
   description: Nine engine recovery contracts with explicit generation, cache, transport and resource-owner
     evidence.

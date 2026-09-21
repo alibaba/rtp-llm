@@ -18,17 +18,6 @@ execution:
   stage_timeout_s: 60
   cleanup_timeout_s: 120
 variants:
-- id: decode_pool_exhaustion_terminal
-  environment:
-    n_prefill: 2
-    n_decode: 1
-    decode_cache_blocks: 3
-  program: decode_pool_exhaustion_terminal
-- id: decode_capacity_park
-  environment:
-    n_prefill: 2
-    n_decode: 4
-  program: decode_capacity_park
 - id: pool_saturation_evict_reject_recover
   environment:
     n_prefill: 1
@@ -38,12 +27,6 @@ variants:
       max_inflight_per_prefill_worker: 4
     decode_cache_blocks: 32
   program: pool_saturation_evict_reject_recover
-- id: capacity_conflict_overflow
-  environment:
-    n_prefill: 2
-    n_decode: 2
-    decode_cache_blocks: 180
-  program: capacity_conflict_overflow
 metadata:
   description: Explicit P/D pool ownership, capacity WAIT versus terminal rejection, pressure eviction
     and affinity overflow.

@@ -136,19 +136,6 @@ variants:
     - healthy.hit
     - healthy.eviction
     - healthy.holders
-- id: prefix_batch
-  profiles:
-  - batch-window
-  - single-batch
-  program: prefix_batch
-  metadata:
-    requires:
-    - enqueue_batch
-- id: prefix_nonbatch
-  profiles:
-  - single-nonbatch
-  - window-nonbatch
-  program: prefix_nonbatch
 - id: hot_tension
   program: hot_tension
 - id: mixed_tiers

@@ -483,8 +483,8 @@ class MasterActionsTest(unittest.TestCase):
                 h.name: h for h in master.HANDLERS + observations + controls + faults
             },
         )
-        self.assertEqual(29, len(plans))
-        self.assertEqual(5, len({p["scenario_id"] for p in plans}))
+        self.assertEqual(18, len(plans))
+        self.assertEqual(3, len({p["scenario_id"] for p in plans}))
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for plan in plans:
             if plan["variant_id"] in {"kill_single", "kill_dual_b_to_a"}:

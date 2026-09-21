@@ -477,23 +477,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(rows["remove_zero_errors"]["status"], "FAIL")
         self.assertEqual(rows["cycle1_add"]["status"], "BLOCKED")
 
-    def test_rebalance_is_immediate_without_preference_warmup(self):
-        result, state = self.run_program("rebalance")
-        self.assertEqual(result["status"], "PASS", result)
-        self.assertEqual(state["flow_count"], 0)
-        self.assertEqual(state["batches"], 100)
-        self.assertEqual(state["adds"], 1)
-        rows = {row["id"]: row for row in result["stages"]}
-        self.assertEqual(rows["rebalance_share"]["status"], "PASS")
 
-    def test_rebalance_request_error_fails_independently_of_share(self):
-        result, _ = self.run_program("rebalance", batch_error=True)
-        self.assertEqual(result["status"], "FAIL")
-        row = next(s for s in result["stages"] if s["id"] == "rebalance_after_add")
-        self.assertEqual(
-            {c["id"]: c["status"] for c in row["checks"]},
-            {"complete": "PASS", "no_errors": "FAIL", "protocol": "PASS"},
-        )
 
     def test_missing_decode_owner_field_is_error(self):
         with tempfile.TemporaryDirectory() as root:

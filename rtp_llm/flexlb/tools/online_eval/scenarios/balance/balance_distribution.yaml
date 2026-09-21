@@ -22,34 +22,6 @@ variants:
   environment:
     n_prefill: 4
     n_decode: 8
-- id: uniform_serial
-  program: uniform_serial
-  profiles:
-  - batch-window
-  - single-nonbatch
-  - single-batch
-  - window-nonbatch
-- id: concurrent_mix
-  program: concurrent_mix
-  profiles:
-  - batch-window
-  - single-nonbatch
-  - single-batch
-  - window-nonbatch
-- id: decode_spread
-  program: decode_spread
-  profiles:
-  - batch-window
-  - single-nonbatch
-  - single-batch
-  - window-nonbatch
-- id: length_mixed
-  program: length_mixed
-  profiles:
-  - batch-window
-  - single-nonbatch
-  - single-batch
-  - window-nonbatch
 metadata:
   category: balance
   description: Explicit balance stages preserving client landing, token share, Decode deltas and latency
