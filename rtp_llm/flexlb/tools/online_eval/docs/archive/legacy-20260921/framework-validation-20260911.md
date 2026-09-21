@@ -1,3 +1,6 @@
+> [!WARNING]
+> 历史快照：此文件不是当前操作依据。当前入口为 `tools/online_eval/README.md`。
+
 # 功能与持续负载框架验证（2026-09-11）
 
 本轮从 `3d47e5c5f860b4fa3a32b2ee2ae08fadba1a4ef8` 修复采集、证据、报告和持续场景执行问题。改动限于 `online_eval` 与 `flexlb-mock-engine`（含测试客户端），没有修改 master 或生产引擎。原始失败结果保留，未降低成功率、命中率、分布或恢复阈值。

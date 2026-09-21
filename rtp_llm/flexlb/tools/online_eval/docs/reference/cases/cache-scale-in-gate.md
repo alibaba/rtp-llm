@@ -1,4 +1,4 @@
-> Current traffic contract: see [traffic-sources-consolidation.md](traffic-sources-consolidation.md).
+> Current traffic contract: see [traffic-sources-consolidation.md](../concepts/traffic-sources-consolidation.md).
 > The source names/CLI recipes below describe the pre-migration experiment.
 > New runs use `synthetic/realistic/1` or `trace/prefix_lineage/2`; pacing is in
 > `client.playback`. Do not reuse old generated plans as a new-version baseline.

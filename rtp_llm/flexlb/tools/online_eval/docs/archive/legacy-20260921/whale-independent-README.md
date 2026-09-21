@@ -1,0 +1,112 @@
+> [!WARNING]
+> 历史快照：此文件不是当前操作依据。当前入口为 `tools/online_eval/README.md`。
+
+# Whale 单引擎 Pod
+
+此入口只用于显式启用的 Whale mock 部署。每个 Pod 一个 P 或 D JVM，镜像不包含 master 启动程序。frontend、master 保留各自角色和真实 RPC；P 使用 master 在 `role_addrs` 中选择的 D 地址，通过 `RemoteGenerate` 完成 ALLOCATE、LOAD、GENERATE 和输出回传。
+
+LOAD 模拟 KV 字节传输，缓存容量、预留、排队、生成与取消使用现有 mock 状态机。它验证协议和资源生命周期，不模拟 GPU/RDMA 性能。
+
+## 构建与依赖
+
+离线入口和默认 Maven profile 保持不变。开源环境可执行：
+
+```sh
+bash mvnw -P'opensource,!internal' -pl flexlb-mock-engine -am package
+```
+
+公司环境先按 master CI 的顺序构建 common，再在 `internal_source/java` 执行 `mvn -pl kmonitor -am install -DskipTests`（不构建 mock 不需要的 VipServer），最后执行 `-Pinternal` Maven package。该 profile 为 mock jar 加入现有 KMonitor 适配包；没有私有包的开源构建不引用其类型。将 `target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar` 复制为 `whale/mock-engine.jar`，以 `whale/` 为 Docker build context。内部 CI 通过 `JAVA_BASE_IMAGE` 使用 master 同源的内部 Java 21 基础镜像，覆盖其入口为 mock 启动脚本，不启动 master；开源构建默认使用 Temurin。
+
+`--kmonitor true` 只允许与 `--whale true` 同时启用。启用后若私有适配缺失或退化为 NoOp，启动失败，避免把未上报指标误当成上线成功。开源网络联调显式设置 `MOCK_KMONITOR_ENABLED=false`。
+
+`mode_defaults.sh` 由共享的 `tools/online_eval/mode_profiles.yaml` 生成，镜像只需这个小型 shell 投影，不依赖 Python/YAML 运行时。修改模式表后执行：
+
+```sh
+python3 rtp_llm/flexlb/tools/online_eval/mode_profiles.py \
+  --runtime whale_independent --render-shell \
+  > rtp_llm/flexlb/flexlb-mock-engine/whale/mode_defaults.sh
+```
+
+## Whale 角色配置
+
+为 P、D 分别配置 CPU 资源模板、独立 VIP 域和各自 Pod 数；两者使用同一 mock 镜像。master 与 frontend 使用原有独立角色镜像。不要把 mock 镜像放入 master 角色，不要将 P/D 行数设为零后借用 master Pod。
+
+下列环境由角色配置或平台注入：
+
+| 变量 | 语义 |
+| --- | --- |
+| `FLEXLB_MOCK_WHALE=1` | 必填；缺失时启动包装拒绝运行 |
+| `ROLE_TYPE` | `PREFILL` 或 `DECODE` |
+| `POD_IP` | 平台通告的 Pod 地址；未注入时取 `hostname -i` 的首个地址，不能用物理机 IP 或 `0.0.0.0` |
+| `START_PORT` | HTTP 健康/控制端口，gRPC 固定为其加一 |
+| `MOCK_PERFORMANCE_CONFIG` | 挂载的性能配置路径 |
+| `MOCK_MASTER_CONFIG` | 与 master 性能模型对应的配置路径 |
+| `MOCK_PERFORMANCE_CONFIG_JSON`、`MOCK_MASTER_CONFIG_JSON` | 无挂载时传入完整 JSON；由启动脚本写入运行目录，与对应路径变量互斥 |
+| `FETCH_OUTPUT_STREAM` | 默认 1；0 时 P 计算完成直接接续 D，不等 Fetch 或超时 |
+| `MOCK_KMONITOR_ENABLED` | Whale 包装默认 true；开源联调设 false |
+| `MOCK_EVENT_LOG_ENABLED` | 默认 0，不创建请求级 JSONL；诊断时设 1 |
+| `MOCK_RUN_DIR` | 配置文件及可选事件日志目录，默认 `/tmp/flexlb-mock` |
+| `FLEXLB_MONITOR_SERVICE_NAME`、`FLEXLB_MONITOR_TENANT_NAME` | 复用 master 内部监控适配的环境配置 |
+
+平台启动命令使用 `sh /opt/flexlb/start.sh`，不要把带引号的 `sh -c` 脚本放进 `cmd`：Whale 会按空格拆分该字段。配置 JSON 通过上述环境变量传递，内容不会作为 shell 命令求值。
+
+Whale CPU inference 模板必须初始化 `resource_plan.meta_tag_list: []`，否则 PD gang 信息填充可能空指针。镜像实际由顶层 `image_infos` 选择，资源槽位的 `package_infos` 会被覆盖；frontend 的独立镜像保持在 `front_app_zone_plan`。资源池的容忍配置也必须与目标池匹配，即使 GPU 请求为 0。以最终 Carbon 计划确认这些字段，而非只检查提交模板。
+
+Whale 健康探测使用 `START_PORT` 的 `/health`；停止/排空状态返回 503。平台应把健康 P/D HTTP 地址注册到各自 VIP 域，master 使用已有 VipServerDiscovery 消费这些地址，并按 HTTP+1 访问 gRPC。mock P 不查询 VIP，也不自行选择 D，因此不需要引入 VipServer 客户端依赖。部署时需核实最终 Carbon launch plan 的地址、端口和健康检查配置，不能向生产 master 注入本地 `discovery.json`。
+
+`--bind-host` 只控制 gRPC 监听地址，默认 `0.0.0.0`；`--host` 是通告地址。Whale 模式禁止 `/add_engine`，扩容应创建新 Pod。
+
+## 监控和验证边界
+
+`hippo_app`、`hippo_role` 默认沿用平台环境。需要把寄生 P/D 指标分开时，可显式设置 `MOCK_PREFILL_HIPPO_ROLE` 和 `MOCK_DECODE_HIPPO_ROLE`；独立 Pod 通常直接使用自身角色。别名只影响 mock 指标，不改服务发现或真实 Pod 地址。所有 mock 指标还带 `engine`、`engine_port`、`engine_ip`、`role`、`generation`、`backend`，供同 Pod 引擎拆分；`host_ip` 仍是物理机，`container_ip` 仍是真实 Pod IP。
+
+Whale KMonitor 上报累计 context/generate token、KV tokens、waiting/running requests、completed/cancelled 数，以及按实际时间差计算的 TPS。所有指标带 engine、role、进程 generation、backend=mock 标签。累计 token 读数不被 HTTP 抓取消耗。
+
+引擎指标使用无 `whale-lb.` 前缀的 `rtp_llm_*` 名称，兼容现有引擎大盘。标签与 C++ 引擎一致：小写 hippo_app/hippo_role/hippo_group、host_ip（物理宿主）、container_ip（Pod）、dp_rank=0；mock 汇总吞吐使用 priority=0。队列、batch 和 KV 空闲/可用块等从 mock 状态读取，used_ratio 为不可用块占总量的百分比。mock 的 TPS 为采样窗口 token 增量除以墙钟时间，不代表真实 GPU step 的吞吐；不伪造 GPU 指标或优先级拆分。内部适配只复用 master 的 sink 初始化，mock 在自己的进程内创建不带 master 指标前缀的 reporter；生产 master 的监控代码和大盘无需修改。
+
+本地跨进程测试使用不同回环 IP 模拟 Pod，覆盖两个 D 同端口的地址路由、Fetch、显式无 Fetch、P 进程死亡和 D 进程死亡。真实 Whale 验收仍需核对镜像来源、平台注册、KMonitor 数据和 frontend→master→P→D→frontend；单测或镜像编译成功不能代替已部署验收。
+
+### Bounded cache diagnosis (parasitic P cluster)
+
+`POST /cache_diagnostics` with `{"action":"start","seconds":120,"sample_every":100,"max_keys":4000000}`
+starts a default-off shadow observation on the mock control port. `GET /cache_diagnostics`
+returns token sums and the last 128 sampled admission observations, without request content or keys.
+`POST` with `{"action":"stop"}` detaches the observer; the last report remains readable.
+
+Compare `actual_tokens`, `local_no_eviction_tokens`, `best_resident_tokens`, and
+`global_no_eviction_tokens` against the SAME `input_tokens`. Local/global histories are
+seeded with resident GPU+Memory keys and subsequently updated only after successful P
+computation. Shadow entries never evict: duration/key limits stop collection explicitly.
+The key budget counts local plus global set entries, including seed entries.
+
+These are diagnostic counterfactuals, not production verdicts. Observations occur at P
+admission (including requests that later fail); best-resident reads traverse colocated P
+engines without touching their LRU order, but are not an atomic cluster snapshot or a
+check of master candidate eligibility. The global history is a hypothetical shared cache:
+it may combine blocks held on different engines and is not necessarily routable. Seed
+reads and observer attachment are also non-atomic. Use only with a stable, homogeneous,
+colocated P topology; separate-pod mode cannot inspect other processes with this endpoint.
+
+### Optional Memory copy lifecycle
+
+In the existing `prefill.memory_cache` performance JSON, set `copy_lifecycle: true`.
+It defaults to false to preserve existing case behavior. Copies add no simulated latency;
+legacy `read_ms_per_block` and `write_ms_per_block` settings are ignored.
+Capacity remains one host pool plus one
+device pool; there is no unconditional write-on-GPU-eviction rule.
+
+At batch preparation, host matches are revalidated and pinned; pins release when the
+execution lane starts, with no copy timer. Successful P compute performs an optional host
+write: missing entries reserve host capacity, GPU source blocks retain a connector lease,
+and new host keys become visible only at copy commit. Existing host keys are skipped
+without LRU refresh. Host pressure skips pinned and pending blocks; a failed optional host
+reservation skips the cache write without failing inference. Cancellation/reset/shutdown
+release leases, and old callbacks cannot republish keys after reset. Host writes commit
+synchronously while the GPU source is pinned. These host copies remain reusable after
+GPU eviction; no Memory capacity is added to GPU admission capacity.
+
+`mock_memory_cache_pinned_blocks`, `mock_memory_cache_pending_write_blocks`, and
+`mock_memory_cache_write_rejected_total` expose copy pressure. Host allocated blocks
+include pending writes; available blocks exclude pins and reservations but include
+reclaimable LRU entries. The model remains metadata-only (no layer-wise DMA overlap,
+partial-block payloads, or device index/reference separation).

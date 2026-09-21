@@ -1,3 +1,6 @@
+> [!WARNING]
+> 历史快照：此文件不是当前操作依据。当前入口为 `tools/online_eval/README.md`。
+
 # Case 收缩分析（暂不实施）
 
 可以压缩到 **9 个业务 Python 入口文件**，YAML 扩展 P/D 规模、输入长度、负载量与运行形态。

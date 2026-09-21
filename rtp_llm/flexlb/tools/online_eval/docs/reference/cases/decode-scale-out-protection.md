@@ -17,7 +17,7 @@ YAML 可调整 PD 数量、容量、并发数、输出长度和观测时间；�
 
 这项测试使用 Java Mock，验证调度与完成性；采样不能证明两个采样点之间绝无短暂峰值，也不等同于真实 GPU 的显存 OOM 验证。
 
-运行示例（在已取得租约的远端容器中）：
+完成开发机前置条件后，从 `online_eval` 目录执行：
 
 ```bash
 python3 parallel_runner.py --parallel 1 --profile batch-window \

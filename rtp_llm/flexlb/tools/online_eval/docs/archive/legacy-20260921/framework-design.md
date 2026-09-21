@@ -1,3 +1,6 @@
+> [!WARNING]
+> 历史快照：此文件不是当前操作依据。当前入口为 `tools/online_eval/README.md`。
+
 # FlexLB case 框架设计
 
 框架采用 **YAML 配置 → Python case → 公共执行器 → Java Master / Mock engine**。

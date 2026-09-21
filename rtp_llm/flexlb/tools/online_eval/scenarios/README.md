@@ -4,8 +4,8 @@
 编排与断言位于 [`case_programs/`](../flexlb_test_framework/case_programs)；
 公共 action 位于 `scenario/actions/`。旧实现仍保留作契约对照。
 
-先读 [框架设计](../docs/framework-design.md) 了解执行和资源模型；
-新增用例按 [如何添加新 case](../docs/adding-cases.md) 操作。
+先读 [框架结构](../docs/reference/architecture.md) 了解执行和资源模型；
+新增用例按 [如何添加新 case](../docs/reference/adding-cases.md) 操作。
 
 从仓库根目录列出全部可执行实例：
 

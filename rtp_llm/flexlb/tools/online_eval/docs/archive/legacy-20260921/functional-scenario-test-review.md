@@ -1,3 +1,6 @@
+> [!WARNING]
+> 历史快照：此文件不是当前操作依据。当前入口为 `tools/online_eval/README.md`。
+
 # FlexLB 功能与场景测试逐项审查
 
 > 基线：`codex/ft-case-framework` 提交 `e580ca2fb25f65cc2cecb90668ba51de5e54a85f`，2026-09-18。清单来自 `scenario_runner.py --source scenarios --list-json --suite all`，并核对 YAML 参数和对应 Python 程序。`elastic/lifecycle.yaml`、`case_programs/elastic_lifecycle.py`、`scenario/actions/elastic_lifecycle.py` 在审查时另有未提交改动；本报告描述当时工作区可编译出的实例，相关判断须在这些改动定稿后复核。本文是**设计审查**，不是通过率报告；没有把一次 PASS/FAIL 当成测试价值的依据。

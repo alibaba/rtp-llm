@@ -57,7 +57,7 @@ Prefill 总容量为 4 块，Mock 保留 1 块作为 reserve，因此单次请�
 
 ## 定向执行
 
-在已分配的远端环境、已设置租约端口的情况下，从 `online_eval/` 运行：
+完成开发机前置条件后，从 `online_eval/` 运行：
 
 ```bash
 python3 parallel_runner.py --parallel 3 --profile batch-window \

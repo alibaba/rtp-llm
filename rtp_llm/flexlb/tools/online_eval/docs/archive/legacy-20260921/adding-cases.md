@@ -1,3 +1,6 @@
+> [!WARNING]
+> 历史快照：此文件不是当前操作依据。当前入口为 `tools/online_eval/README.md`。
+
 # 如何添加新 case
 
 新增 case 先选择 functional 或 workload，并在 `suites.yaml` 登记分类；复杂场景的独立检查使用 Python `case.observe`。具体执行策略和产物见 [两类测试](test-suites.md)。

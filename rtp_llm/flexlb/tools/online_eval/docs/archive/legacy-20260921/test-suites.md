@@ -1,3 +1,6 @@
+> [!WARNING]
+> 历史快照：此文件不是当前操作依据。当前入口为 `tools/online_eval/README.md`。
+
 # 功能测试与复杂场景测试
 
 case 分为两类，分类和迁移清单在 `suites.yaml`。分类不等于业务 category，也不等于 batch/non-batch profile。

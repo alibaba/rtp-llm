@@ -1,3 +1,6 @@
+> [!WARNING]
+> 历史快照：此文件不是当前操作依据。当前入口为 `tools/online_eval/README.md`。
+
 # 实验监控与专用测试证据
 
 曲线的数据源只能是监控系统。线上使用 KMonitor；线下使用 Prometheus 采集同一套生产指标定义。HTTP `/metrics` 是监控 exporter，不是从业务 API 推测指标的适配器。

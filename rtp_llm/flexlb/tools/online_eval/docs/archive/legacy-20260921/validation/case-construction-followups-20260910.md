@@ -1,3 +1,6 @@
+> [!WARNING]
+> 历史快照：此文件不是当前操作依据。当前入口为 `tools/online_eval/README.md`。
+
 # Case 构造与观测修复（2026-09-10）
 
 基于 `f43708ccbe`。只修改测试侧 Python、YAML 和测试模型；master、真实引擎及 Java mock 均未修改。参数及新增观测预算全部由 YAML 提供。

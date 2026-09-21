@@ -1,3 +1,6 @@
+> [!WARNING]
+> 历史快照：此文件不是当前操作依据。当前入口为 `tools/online_eval/README.md`。
+
 # Case framework integration — 2026-09-10
 
 The delivery branch is `codex/ft-case-framework`, checked out at

@@ -1,54 +1,23 @@
-# FlexLB 测试工具
+# FlexLB Mock 测试
 
-日常功能测试使用 **YAML 配置 + Python case**。默认入口是 `parallel_runner.py`，
-默认读取本目录的 `scenarios/`，使用 `batch-window` profile、4 个并行 lane。
-Python 定义步骤和断言，YAML 传入 P/D 规模等数据。
+这里是 Mock 测试的唯一入口。本文档只讨论代码内的编译、启动、运行、结果和配置；机器连接、资源租约和代码同步由外部执行环境负责。
 
-## 先看哪里
+## 选择测试类型
 
-| 目录 / 文件 | 用途 |
-|---|---|
-| [scenarios/](scenarios/README.md) | 当前 YAML 配置 |
-| [flexlb_test_framework/case_programs/](flexlb_test_framework/case_programs/) | 当前 Python 业务流程；仍为 31 个程序，未合并为 9 个 |
-| [flexlb_test_framework/scenario/](flexlb_test_framework/scenario/README.md) | 加载、编译、action、执行与资源清理 |
-| [flexlb_cfg.py](flexlb_cfg.py)、[框架公共模块](flexlb_test_framework/README.md) | 配置、进程、RPC 和上下文能力 |
-| [tests/](tests/) | 框架及压测工具的回归测试 |
-| [stress/](stress/README.md) | 性能压测、指标采集、A/B 对比和报告工具 |
-| [mode_profiles.yaml](mode_profiles.yaml) | 功能/场景/压测/Whale 运行模式与 sb/sn/wb/wn 两层模式表 |
-| [experiment_archive.py](experiment_archive.py) | 本地实验单文件压缩归档 |
-| [remote_compare.py](remote_compare.py) | real/mock KMonitor 导出数据的保守对比 |
-| [compare_case_runs.py](compare_case_runs.py) | 功能/场景两次跑批的实例、断言与耗时对比 |
-| [data/](data/) | 性能预设和流量输入数据，属于有效输入 |
+| 目标 | 运行位置 | 文档 |
+|---|---|---|
+| 测吞吐、延迟、容量或做 A/B | 开发机 | [压测](docs/development/stress.md) |
+| 验证协议、状态转换和确定性边界 | 开发机 | [功能测试](docs/development/functional.md) |
+| 验证持续负载、故障、扩缩容和恢复 | 开发机 | [场景测试](docs/development/scenario.md) |
+| 构建镜像并部署 Mock 到 Whale | Whale | [Whale 部署](docs/whale/README.md) |
 
-## 运行新版 case
+开发机上的三类测试共享同一套[编译与运行底座](docs/development/build-and-runtime.md)。运行前先读它，再读对应的测试文档。参数含义集中在[参数参考](docs/reference/parameters.md)，结果判定集中在[结果与指标](docs/reference/results.md)。
 
-以下命令从本目录执行。`--case-dir` 省略时使用内置配置，路径不依赖当前工作目录。
+## 文档状态
 
-```bash
-# 列出全部 profile 的实例；不启动服务
-python3 scenario_runner.py --source scenarios --list-json
+- `docs/development/` 和 `docs/whale/` 是当前 runbook。
+- `docs/reference/` 是当前概念、参数和特定 case 契约。
+- `docs/archive/` 只用于追溯，不是操作依据。
+- `stress/run_online_eval.sh` 等脚本保留兼容性；使用者不需要阅读脚本来理解流程。
 
-# 预览一个实例的资源与执行计划
-python3 parallel_runner.py \
-  --instances 'request_completion::immediate::batch-window' \
-  --parallel 1 --dry-run
-```
-
-真实执行使用已分配的远端资源和新的输出目录，去掉 `--dry-run`。
-端口、租约、构建和完整示例见 [添加新 case](docs/adding-cases.md)。
-`--source yaml` 可以省略；实例选择统一使用 `--instances`。
-
-## 文档
-
-- [框架设计、术语与分层图](docs/framework-design.md)
-- [统一 Mock 框架模式、扩展工具与归档](docs/unified-mock-framework-design.md)
-- [添加配置与 Python case](docs/adding-cases.md)
-- [功能与持续负载套件分类](docs/test-suites.md)
-- [本轮框架验证与 A/B 结果](docs/framework-validation-20260911.md)
-- [多 P 缓存热点溢出探针、指标与校准](docs/cache-hotspot-storm.md)
-- [9 个业务入口的收缩分析，尚未实施](docs/case-consolidation-analysis.md)
-
-## 压测入口
-
-性能压测从 `stress/` 进入。根目录同名压测脚本是相对符号链接，指向唯一实现。
-功能测试统一使用上述 Python case 入口。
+完整目录和旧文档去向见[文档导航](docs/README.md)与[迁移映射](docs/migration-map.md)。

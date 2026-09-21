@@ -1,3 +1,6 @@
+> [!WARNING]
+> 历史快照：此文件不是当前操作依据。当前入口为 `tools/online_eval/README.md`。
+
 # 2026-09-10 case 侧失败修复复核
 
 基线：`49663020a986ca7e902e2d3881cacd4a93064707`，交付分支 `codex/ft-case-framework`。

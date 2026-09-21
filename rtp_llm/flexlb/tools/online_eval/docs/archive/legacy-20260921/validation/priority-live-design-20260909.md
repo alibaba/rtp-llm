@@ -1,3 +1,6 @@
+> [!WARNING]
+> 历史快照：此文件不是当前操作依据。当前入口为 `tools/online_eval/README.md`。
+
 # Priority live 探针：构造与验证
 
 基线 `168ad89170`；远端租约 `priority-live-design-20260909`，111，Java mock，无 GPU。只改 YAML、Python 编排、framework action 与测试。Master 与 mock 引擎代码不变。
