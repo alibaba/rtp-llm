@@ -120,3 +120,11 @@ py_test(
     tags = ["open_skip"],
     exec_properties = {"gpu": "H20_CU13"},
 )
+
+py_test(
+    name = "select_topk_bf16_fusion_test",
+    srcs = ["select_topk_bf16_fusion_test.py"],
+    deps = py_test_deps,
+    tags = ["open_skip"],
+    exec_properties = {"gpu": "H20"},
+)

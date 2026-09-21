@@ -6,8 +6,8 @@ from unittest import TestCase, main, skipUnless
 from unittest.mock import Mock, patch
 
 import torch
-from rtp_llm.config.model_config import ModelConfig
 
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.model_desc import generic_moe
 from rtp_llm.models_py.modules.base.cuda.select_topk import SelectTopk
 
@@ -107,6 +107,10 @@ class GenericMoeGatePackRoutingTest(TestCase):
                     select.call_args.kwargs.get("use_fused_512"),
                     True if split else None,
                 )
+                self.assertEqual(
+                    select.call_args.kwargs.get("fuse_bf16_cast"),
+                    True if split else None,
+                )
                 for n in (0, 1, 4095, 4096, 4097, 8192):
                     x = torch.zeros(n, 1)
                     layer.gate = Mock(
@@ -130,6 +134,7 @@ class GenericMoeGatePackRoutingTest(TestCase):
                 layer, _ = make_layer(**overrides)
                 self.assertFalse(layer._split_mega_moe_gate_pack)
                 self.assertNotIn("use_fused_512", select.call_args.kwargs)
+                self.assertNotIn("fuse_bf16_cast", select.call_args.kwargs)
 
     def test_explicit_topk_override_and_environment_default(self):
         config = ModelConfig()
