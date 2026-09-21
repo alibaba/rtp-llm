@@ -9,6 +9,7 @@
 #include <cuda_fp16.h>
 #include <float.h>
 #include <math.h>
+#include <type_traits>
 
 #include "rtp_llm/models_py/bindings/common/kernels/moe/moe_routing_kernels.h"
 #include "rtp_llm/models_py/bindings/cuda/trt_utils.h"
@@ -267,20 +268,31 @@ template<int VPT,
          int WARPS_PER_CTA,
          int BYTES_PER_LDG,
          typename TOPK_T,
-         bool MATCH_FALLBACK_REDUCTION = false>
+         bool MATCH_FALLBACK_REDUCTION = false,
+         typename INPUT_T              = float>
 __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
-    void topkGatingSoftmax(float const*                    input,
+    void topkGatingSoftmax(INPUT_T const*                  input,
                            bool const*                     finished,
                            float*                          output,
                            int64_t const                   num_rows,
                            TOPK_T*                         indices,
                            int*                            source_rows,
-                           int const                       k,
-                           int const                       startk,
-                           int const                       endk,
-                           int const                       start_expert,
-                           int const                       end_expert,
-                           MOEExpertScaleNormalizationMode norm_mode) {
+                           int const                       runtime_k,
+                           int const                       runtime_startk,
+                           int const                       runtime_endk,
+                           int const                       runtime_start_expert,
+                           int const                       runtime_end_expert,
+                           MOEExpertScaleNormalizationMode runtime_norm_mode) {
+    // BF16 is the Qwen3.5 E=512/K=10 normalized routing specialization.
+    // Keep the FP32 path's arithmetic and load layout unchanged.
+    constexpr bool BF16_INPUT   = std::is_same_v<INPUT_T, cutlass::bfloat16_t>;
+    int const      k            = BF16_INPUT ? 10 : runtime_k;
+    int const      startk       = BF16_INPUT ? 0 : runtime_startk;
+    int const      endk         = BF16_INPUT ? 10 : runtime_endk;
+    int const      start_expert = BF16_INPUT ? 0 : runtime_start_expert;
+    int const      end_expert   = BF16_INPUT ? 512 : runtime_end_expert;
+    auto const     norm_mode    = BF16_INPUT ? MOEExpertScaleNormalizationMode::RENORMALIZE : runtime_norm_mode;
+
     static_assert(VPT == (VPT & -VPT));
     static_assert(NUM_EXPERTS == (NUM_EXPERTS & -NUM_EXPERTS));
     static_assert(BYTES_PER_LDG == (BYTES_PER_LDG & -BYTES_PER_LDG));
@@ -301,21 +313,28 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
 
     if (thread_row >= num_rows)
         return;
-    bool const row_is_active = finished ? !finished[thread_row] : true;
+    bool const row_is_active = BF16_INPUT ? true : (finished ? !finished[thread_row] : true);
 
-    float const* thread_row_ptr           = input + thread_row * ELTS_PER_ROW;
-    int const    thread_group_idx         = threadIdx.x % THREADS_PER_ROW;
-    int const    first_elt_read_by_thread = thread_group_idx * ELTS_PER_LDG;
-    float const* thread_read_ptr          = thread_row_ptr + first_elt_read_by_thread;
-
-    using AccessType = cutlass::AlignedArray<float, ELTS_PER_LDG>;
+    INPUT_T const* thread_row_ptr           = input + thread_row * ELTS_PER_ROW;
+    int const      thread_group_idx         = threadIdx.x % THREADS_PER_ROW;
+    int const      first_elt_read_by_thread = thread_group_idx * ELTS_PER_LDG;
+    INPUT_T const* thread_read_ptr          = thread_row_ptr + first_elt_read_by_thread;
 
     cutlass::Array<float, VPT> row_chunk;
-    AccessType*                row_chunk_vec_ptr   = reinterpret_cast<AccessType*>(&row_chunk);
-    AccessType const*          vec_thread_read_ptr = reinterpret_cast<AccessType const*>(thread_read_ptr);
+    if constexpr (BF16_INPUT) {
+        static_assert(NUM_EXPERTS == 512 && VPT == 16 && ELTS_PER_LDG == 1);
 #pragma unroll
-    for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
-        row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
+        for (int ii = 0; ii < VPT; ++ii) {
+            row_chunk[ii] = static_cast<float>(thread_read_ptr[ii * THREADS_PER_ROW]);
+        }
+    } else {
+        using AccessType                      = cutlass::AlignedArray<float, ELTS_PER_LDG>;
+        AccessType*       row_chunk_vec_ptr   = reinterpret_cast<AccessType*>(&row_chunk);
+        AccessType const* vec_thread_read_ptr = reinterpret_cast<AccessType const*>(thread_read_ptr);
+#pragma unroll
+        for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+            row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
+        }
     }
 
     float thread_max = row_chunk[0];
@@ -408,7 +427,9 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
             int64_t const idx = k * thread_row + k_idx;
             output[idx]       = max_val;
             indices[idx]      = should_process_row ? (expert - start_expert) : (NUM_EXPERTS + expert);
-            source_rows[idx]  = k_idx * num_rows + thread_row;
+            if constexpr (!BF16_INPUT) {
+                source_rows[idx] = k_idx * num_rows + thread_row;
+            }
 
             if (norm_mode == MOEExpertScaleNormalizationMode::RENORMALIZE) {
                 renorm_value += max_val;
@@ -434,6 +455,32 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
         }
     }
 }
+
+// The BF16 path writes final routing buffers directly and needs no source-row
+// workspace. The caller validates E=512, K=10, normalized routing and layout.
+template<typename TOPK_T>
+void invokeSelectExpertsForTokensBf16(
+    void const* input, float* output, TOPK_T* indices, int64_t num_rows, cudaStream_t stream) {
+    if (num_rows == 0) {
+        return;
+    }
+    dim3 block(WARP_SIZE, 4);
+    topkGatingSoftmax<16, 512, 4, 4, TOPK_T, true, cutlass::bfloat16_t>
+        <<<(num_rows + 3) / 4, block, 0, stream>>>(static_cast<cutlass::bfloat16_t const*>(input),
+                                                   nullptr,
+                                                   output,
+                                                   num_rows,
+                                                   indices,
+                                                   nullptr,
+                                                   10,
+                                                   0,
+                                                   10,
+                                                   0,
+                                                   512,
+                                                   MOEExpertScaleNormalizationMode::RENORMALIZE);
+}
+template void invokeSelectExpertsForTokensBf16<int32_t>(void const*, float*, int32_t*, int64_t, cudaStream_t);
+template void invokeSelectExpertsForTokensBf16<int64_t>(void const*, float*, int64_t*, int64_t, cudaStream_t);
 
 // ====================== Launcher helpers ======================
 

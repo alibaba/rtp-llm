@@ -124,6 +124,11 @@ void invokeSelectExpertsForTokens(float const*                    input,
                                   cudaStream_t                    stream,
                                   bool                            use_fused_512 = false);
 
+// Qwen3.5 BF16 input specialization: E=512, K=10, renormalization enabled.
+template<typename TOPK_T>
+void invokeSelectExpertsForTokensBf16(
+    void const* input, float* output, TOPK_T* indices, int64_t num_rows, cudaStream_t stream);
+
 void sortAndScanSoftmaxOutput(int*               expert_for_source_row,
                               int*               source_rows,
                               int*               permuted_experts,

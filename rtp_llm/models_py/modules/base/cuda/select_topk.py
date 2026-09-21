@@ -1,17 +1,32 @@
 import os
 
-import rtp_llm.ops.compute_ops as compute_ops
 import torch
-from rtp_llm.config.model_config import ModelConfig
 from torch import nn
+
+import rtp_llm.ops.compute_ops as compute_ops
+from rtp_llm.config.model_config import ModelConfig
 
 
 class SelectTopk(nn.Module):
-    def __init__(self, config: ModelConfig, use_fused_512: bool | None = None):
+    def __init__(
+        self,
+        config: ModelConfig,
+        use_fused_512: bool | None = None,
+        fuse_bf16_cast: bool = True,
+    ):
         super().__init__()
         self.config = config
         if use_fused_512 is None:
-            use_fused_512 = os.environ.get("RTP_FUSED_TOPK_512", "0") == "1"
+            use_fused_512 = os.environ.get("RTP_FUSED_TOPK_512", "1") == "1"
+        # Enabling fused topk512 also fuses supported BF16 casts by default.
+        # Pass fuse_bf16_cast=False to retain the FP32 baseline path.
+        self.fuse_bf16_cast = (
+            fuse_bf16_cast
+            and use_fused_512
+            and config.expert_num == 512
+            and config.moe_k == 10
+            and config.has_moe_norm
+        )
         self.select_topk_op = compute_ops.SelectTopkOp(
             self.config, use_fused_512=use_fused_512
         )
@@ -22,7 +37,15 @@ class SelectTopk(nn.Module):
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
-        self.select_topk_op.forward(router_logits.float(), topk_ids, topk_weights)
+        if (
+            self.fuse_bf16_cast
+            and router_logits.is_cuda
+            and router_logits.dtype == torch.bfloat16
+            and router_logits.is_contiguous()
+        ):
+            self.select_topk_op.forward(router_logits, topk_ids, topk_weights)
+        else:
+            self.select_topk_op.forward(router_logits.float(), topk_ids, topk_weights)
 
 
 class GroupTopK(nn.Module):
