@@ -11,8 +11,13 @@
 
 ```sh
 python3 rtp_llm/flexlb/tools/online_eval/scenario_runner.py \
-  --source rtp_llm/flexlb/tools/online_eval/scenarios --list-json
+  --source rtp_llm/flexlb/tools/online_eval/scenarios \
+  --profile batch-window --suite core --list-json
 ```
+
+日常入口 `test_runner.py` 默认只运行 `suites.yaml` 登记的 5 个核心功能实例。
+直接使用底层 `scenario_runner.py` 时应显式指定 suite；完整功能矩阵使用
+`--suite functional`，持续负载使用 `--suite workload`，两类全集使用 `--suite all`。
 
 | 类别 | YAML 文件 |
 |---|---|

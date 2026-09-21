@@ -674,9 +674,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--suite",
-        choices=("functional", "workload", "all"),
-        default="all",
-        help="select functional contracts, sustained workloads, or both",
+        choices=("core", "functional", "workload", "all"),
+        default="core",
+        help="select five core contracts, the extended functional matrix, sustained workloads, or all",
     )
     args = parser.parse_args()
     if args.master_mode:

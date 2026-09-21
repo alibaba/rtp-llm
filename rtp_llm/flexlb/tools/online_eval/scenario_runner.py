@@ -93,7 +93,7 @@ def main(argv=None):
     parser.add_argument("--profile")
     parser.add_argument("--master-mode", choices=("sb", "sn", "wb", "wn"))
     parser.add_argument(
-        "--suite", choices=("functional", "workload", "all"), default="all"
+        "--suite", choices=("core", "functional", "workload", "all"), default="all"
     )
     parser.add_argument(
         "--grade", choices=("strict", "normal", "loose"), default="normal"

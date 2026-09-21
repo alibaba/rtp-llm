@@ -98,3 +98,32 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertTrue(any("::sustained_mix::" in identity for identity in w))
         self.assertEqual(len(plans), 389)
         self.assertIn("cache_scale_in::step::single-nonbatch", w)
+
+    def test_core_suite_is_five_stable_contracts_for_every_master_profile(self):
+        plans = compile_scenarios(
+            load_scenarios(ROOT / "scenarios"), handlers=handlers()
+        )
+        expected = {
+            "request_completion::immediate",
+            "cache_capacity_recovery::pool_saturation_evict_reject_recover",
+            "cache_churn::lru_affinity",
+            "engine_fault_recovery::generation_bump",
+            "master_lifecycle::kill_single",
+        }
+        for profile in (
+            "batch-window",
+            "single-batch",
+            "single-nonbatch",
+            "window-nonbatch",
+        ):
+            selected = classify(
+                [plan for plan in plans if plan["profile"] == profile], "core"
+            )
+            self.assertEqual(len(selected), 5)
+            self.assertEqual(
+                {
+                    plan["scenario_id"] + "::" + plan["variant_id"]
+                    for plan in selected
+                },
+                expected,
+            )

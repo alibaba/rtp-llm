@@ -7,10 +7,11 @@ from .scenario.loader import ScenarioError, load_document
 
 CATALOG = Path(__file__).resolve().parents[1] / "suites.yaml"
 KINDS = ("functional", "workload")
+SUITES = ("core", *KINDS, "all")
 
 
 def classify(plans, suite="all", catalog=CATALOG):
-    if suite not in (*KINDS, "all"):
+    if suite not in SUITES:
         raise ScenarioError("unknown suite: " + suite)
     data = load_document(catalog)
     if data.get("schema_version") != 1 or not isinstance(data.get("cases"), dict):
@@ -34,6 +35,13 @@ def classify(plans, suite="all", catalog=CATALOG):
     if runtime["max_sample_gap_s"] < runtime["sample_interval_s"]:
         raise ScenarioError("maximum sample gap is shorter than sampling interval")
     entries = data["cases"]
+    core = data.get("core_cases")
+    if (
+        not isinstance(core, dict)
+        or len(core) != 5
+        or any(not isinstance(key, str) or not reason for key, reason in core.items())
+    ):
+        raise ScenarioError("core_cases must define exactly five documented variants")
     for key, entry in entries.items():
         if (
             not isinstance(entry, dict)
@@ -53,7 +61,12 @@ def classify(plans, suite="all", catalog=CATALOG):
         ):
             raise ScenarioError("unclassified bundled case: " + key)
         kind = entry["kind"] if entry else "functional"
-        if suite in ("all", kind):
+        selected_by_suite = (
+            suite == "all"
+            or suite == kind
+            or (suite == "core" and kind == "functional" and key in core)
+        )
+        if selected_by_suite:
             selected.append(
                 dict(
                     plan,
@@ -64,4 +77,16 @@ def classify(plans, suite="all", catalog=CATALOG):
                     ),
                 )
             )
+    if suite == "core":
+        selected_keys = {
+            plan["scenario_id"] + "::" + plan["variant_id"] for plan in selected
+        }
+        missing = set(core) - selected_keys
+        if missing:
+            raise ScenarioError(
+                "core suite is unsupported by the selected profile: "
+                + ", ".join(sorted(missing))
+            )
+        if len(selected) != 5:
+            raise ScenarioError("core suite must compile to exactly five instances")
     return selected
