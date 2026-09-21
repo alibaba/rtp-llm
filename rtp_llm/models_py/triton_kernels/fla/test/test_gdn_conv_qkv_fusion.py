@@ -7,6 +7,8 @@ from pathlib import Path
 
 import torch
 
+from rtp_llm.models_py.triton_kernels.common.prefill_fusion import prefill_fusion_scope
+
 OUT = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "/tmp/gdn-fusion-tests"))
 LENGTHS = [10007, 16384, 24601, 32768, 40009]
 
@@ -182,23 +184,25 @@ class ConvQkvFusionTest(unittest.TestCase):
                 _get_ssm_states=lambda c: c[:, :hv],
                 _get_conv_states=lambda _: cs[:, :3, : (2 * hq + hv) * 128],
             )
-            with patch.dict(os.environ, {"RTP_QWEN35_FUSED_CONV_QKV_NORM": "0"}):
+            with prefill_fusion_scope(True), patch.dict(
+                os.environ, {"RTP_QWEN35_FUSED_CONV_QKV_NORM": "0"}
+            ):
                 mixed = Qwen3NextGatedDeltaNetPrefill._conv1d(
                     obj, run.x, None, 2048, args, metadata=run.meta
                 )
-            with patch.dict(os.environ, {"RTP_QWEN35_FUSED_CONV_QKV_NORM": "1"}):
+            with prefill_fusion_scope(True), patch.dict(
+                os.environ, {"RTP_QWEN35_FUSED_CONV_QKV_NORM": "1"}
+            ):
                 qkv = Qwen3NextGatedDeltaNetPrefill._conv1d(
                     obj, run.x, None, 2048, args, metadata=run.meta
                 )
                 self.assertIsInstance(qkv, tuple)
             c0 = cache.clone()
             c1 = cache.clone()
-            with patch.dict(
+            with prefill_fusion_scope(True), patch.dict(
                 os.environ,
                 {
                     "RTP_QWEN35_GDN_PREFILL_BACKEND": "native",
-                    "RTP_QWEN35_FUSED_PREFILL_QK_NORM": "1",
-                    "RTP_QWEN35_TILED_PREFILL_GATING": "1",
                 },
             ):
                 ref = Qwen3NextGatedDeltaNetPrefill._fla(

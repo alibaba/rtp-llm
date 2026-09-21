@@ -1,9 +1,8 @@
-import os
 import unittest
-from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.triton_kernels.common.prefill_fusion import prefill_fusion_scope
 from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
 from rtp_llm.models_py.triton_kernels.fla.exact_qk_norm import (
     fused_l2norm_qk_exact,
@@ -87,21 +86,20 @@ class ExactQKNormTest(unittest.TestCase):
                         dtype=torch.int32,
                     )
 
-                    def run(enabled):
-                        with patch.dict(
-                            os.environ,
-                            {"RTP_QWEN35_FUSED_PREFILL_QK_NORM": str(int(enabled))},
-                        ):
+                    def run(fused):
+                        # Explicit reference: preserve the original two norm calls.
+                        qn, kn = (q, k) if fused else (l2norm_fwd(q), l2norm_fwd(k))
+                        with prefill_fusion_scope(True):
                             return chunk_gated_delta_rule(
-                                q,
-                                k,
+                                qn,
+                                kn,
                                 v,
                                 g,
                                 beta,
                                 initial_state=state,
                                 output_final_state=True,
                                 cu_seqlens=cu,
-                                use_qk_l2norm_in_kernel=True,
+                                use_qk_l2norm_in_kernel=fused,
                             )
 
                     original, actual = run(False), run(True)

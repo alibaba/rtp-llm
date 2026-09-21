@@ -11,6 +11,7 @@ from typing import Optional
 import torch
 from einops import rearrange
 
+from rtp_llm.models_py.triton_kernels.common.prefill_fusion import in_prefill
 from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h import (
     chunk_gated_delta_rule_fwd_h,
 )
@@ -416,13 +417,11 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         if use_qk_l2norm_in_kernel:
             if is_amd:
                 q, k = fused_l2norm_qk(q, k)
-            elif os.environ.get(
-                "RTP_QWEN35_FUSED_PREFILL_QK_NORM", "0"
-            ) == "1" and supports_exact_qk_norm(q, k):
+            elif in_prefill() and supports_exact_qk_norm(q, k):
                 q, k = fused_l2norm_qk_exact(q, k)
             else:
-                # NOTE: fused_l2norm_qk is only validated on AMD/ROCm backend.
-                # On CUDA, fall back to l2norm_fwd until the fused kernel is verified.
+                # Keep the original implementation outside the validated prefill
+                # contract, including decode/verification and unsupported layouts.
                 q = l2norm_fwd(q)
                 k = l2norm_fwd(k)
 

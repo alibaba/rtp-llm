@@ -226,3 +226,23 @@ py_test(
     tags = ["manual", "cuda13", "sm10x"],
     exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
 )
+
+py_test(
+    name = "test_qwen35_prefill_four",
+    env_inherit = ["HOME"],
+    srcs = ["test_qwen35_prefill_four.py"],
+    deps = ["//rtp_llm:rtp_llm_lib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual", "cuda13", "sm10x"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
+    name = "bench_qwen35_prefill_four",
+    srcs = ["bench_qwen35_prefill_four.py", "test_qwen35_prefill_four.py"],
+    main = "bench_qwen35_prefill_four.py",
+    deps = ["//rtp_llm:rtp_llm_lib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual", "cuda13", "sm10x"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
