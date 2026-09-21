@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/LinearCacheManager.h"
 #include "rtp_llm/cpp/cache/SWACacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/models_py/bindings/core/GpuBlockCopy.h"
 
 namespace rtp_llm {
 
@@ -102,6 +103,11 @@ public:
     virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
     virtual void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
+
+    // Payload rows index group_tags, never the coordinator's private group order.
+    // Enqueue on the forward stream when the single-group GPU path is supported.
+    virtual void blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
+                                          const std::vector<std::string>& group_tags);
 
     virtual const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const {
         return group_block_pools_;
@@ -284,6 +290,8 @@ protected:
     size_t                                 reserveBlocksForPool(size_t group_id) const;
     std::vector<DeviceBlockPoolPtr>        group_block_pools_;
     RoleType                               role_type_{RoleType::PDFUSION};
+    // Drain pending copies before releasing the cache groups and pools.
+    std::unique_ptr<GpuBlockCopy> gpu_block_copy_;
 
 private:
     size_t groupIdForTag(std::string_view tag) const;
