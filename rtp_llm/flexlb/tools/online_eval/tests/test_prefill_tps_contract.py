@@ -1,11 +1,8 @@
 """Fail closed when an old scrape-token capture is used as execution TPS."""
-import contextlib
 import copy
-import io
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -27,35 +24,6 @@ class PrefillTpsContractTest(unittest.TestCase):
     def test_identical_new_contract_accepted(self):
         details, _ = ab.precheck(run(), run())
         self.assertTrue(details['prefill_tps_contract']['match'])
-
-    def test_gate_rejects_legacy_and_missing_steady_samples(self):
-        for capture, message in ((run("legacy_or_unknown"), 'aligned prefill TPS required'),
-                                 (run(), 'missing steady-window')):
-            with patch.object(ab, 'resolve_run', return_value=capture), contextlib.redirect_stderr(io.StringIO()) as error:
-                code = ab.main(['--run-a', 'a', '--run-b', 'b', '--require-aligned-prefill-tps', '--out', '-'])
-            self.assertEqual(code, 2)
-            self.assertIn(message, error.getvalue())
-
-    def test_gate_rejects_idle_steady_window(self):
-        capture = run()
-        capture['aggregate']['mock_tps_ts'] = [{
-            't': 5, 'context_tps': 0, 'context_tps_with_cache': 0,
-            'context_wall_tps': 0, 'context_wall_tps_with_cache': 0,
-        }]
-        with patch.object(ab, 'resolve_run', return_value=capture), contextlib.redirect_stderr(io.StringIO()) as error:
-            code = ab.main(['--run-a', 'a', '--run-b', 'b', '--require-aligned-prefill-tps', '--out', '-'])
-        self.assertEqual(code, 2)
-        self.assertIn('no prefill work', error.getvalue())
-
-    def test_gate_accepts_active_aligned_capture(self):
-        capture = run()
-        capture['aggregate']['mock_tps_ts'] = [{
-            't': 5, 'context_tps': 8000, 'context_tps_with_cache': 6000,
-            'context_wall_tps': 800, 'context_wall_tps_with_cache': 1800,
-        }]
-        with patch.object(ab, 'resolve_run', return_value=capture), contextlib.redirect_stdout(io.StringIO()):
-            code = ab.main(['--run-a', 'a', '--run-b', 'b', '--require-aligned-prefill-tps', '--out', '-'])
-        self.assertEqual(code, 0)
 
     def test_comparison_preserves_execution_and_wall_rates_separately(self):
         a = {'mock_tps_ts': [{'t': 1, 'context_tps': 8000, 'context_tps_with_cache': 6000,

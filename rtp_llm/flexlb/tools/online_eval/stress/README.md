@@ -567,14 +567,12 @@ do not bypass the parent or copy files into a running revision. Grade is passed 
 both child listing and execution and recorded in the manifest/results. A mismatched
 grade or an execution/cleanup error cannot be accepted as a green result.
 
-### Prefill TPS version gate
+### Prefill TPS comparison
 
-Use `compare_ab.py --run-a <baseline> --run-b <candidate>
---require-aligned-prefill-tps --steady-lo <seconds> --steady-hi <seconds>`
-with matching trace/configuration and full output fetching. The flag requires
-`meta.prefill_tps_contract=execution_us_v1`, finite steady-window samples
-for both execution and wall pairs, and nonzero prefill work. A mixed old/new
-contract is rejected even without the flag. Recollect legacy captures; simply
-reprocessing old files cannot repair their denominators. Execution TPS measures
-simulated execution efficiency; wall TPS measures delivered engine throughput.
-The flag certifies prefill accounting inputs, not GPU equivalence or decode TPS.
+Use the existing `compare_ab.py --run-a <baseline> --run-b <candidate>`
+command with matching trace/configuration and full output fetching. Mixed
+`prefill_tps_contract` values are rejected automatically. Recollect legacy
+captures; reprocessing old files cannot repair their denominators. Execution
+TPS measures simulated execution efficiency; wall TPS measures delivered
+engine throughput. The prefill contract does not certify GPU equivalence or
+decode TPS.

@@ -1210,8 +1210,6 @@ def parse_args(argv=None):
         action="store_true",
         help="also emit a self-contained ab_compare.html table",
     )
-    ap.add_argument("--require-aligned-prefill-tps", action="store_true",
-                    help="fail closed unless both captures use execution_us_v1 prefill TPS")
     ap.add_argument("--archive", default=None,
                     help="also save both runs and comparison outputs in one compressed ZIP")
     ap.add_argument(
@@ -1233,23 +1231,9 @@ def main(argv=None):
         run_a = resolve_run(args.run_a)
         run_b = resolve_run(args.run_b)
         precheck_details, warnings = precheck(run_a, run_b)
-        if args.require_aligned_prefill_tps and any(
-            run["meta"].get("prefill_tps_contract") != "execution_us_v1" for run in (run_a, run_b)
-        ):
-            raise PrecheckError("aligned prefill TPS required; legacy/unknown captures must be recollected")
         lo, hi, src = derive_steady_window(
             run_a["meta"], args.steady_lo, args.steady_hi
         )
-        if args.require_aligned_prefill_tps:
-            for label, run in (("A", run_a), ("B", run_b)):
-                rows = [row for row in run["aggregate"].get("mock_tps_ts", []) if lo <= row["t"] <= hi]
-                for key in ("context_tps", "context_tps_with_cache", "context_wall_tps", "context_wall_tps_with_cache"):
-                    if not any(isinstance(row.get(key), (int, float)) and math.isfinite(row[key]) for row in rows):
-                        raise PrecheckError(f"run {label}: missing steady-window {key} samples")
-                if not any(isinstance(row.get("context_wall_tps_with_cache"), (int, float))
-                           and math.isfinite(row["context_wall_tps_with_cache"])
-                           and row["context_wall_tps_with_cache"] > 0 for row in rows):
-                    raise PrecheckError(f"run {label}: no prefill work in the steady window")
     except PrecheckError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

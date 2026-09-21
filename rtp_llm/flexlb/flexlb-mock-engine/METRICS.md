@@ -142,9 +142,8 @@ execution time is not evidence of absolute GPU throughput. Decode TPS was
 not changed or certified by this prefill migration.
 
 Consumers preserve separate execution and wall curves. Elastic throughput
-checks use wall TPS. `compare_ab.py --require-aligned-prefill-tps` rejects
-legacy/unknown contracts, missing steady-window samples and windows without
-prefill work. Even without this flag, mixed contracts are rejected. Capture
+checks use wall TPS. The existing `compare_ab.py` command automatically
+rejects mixed prefill contracts; no extra TPS option is needed. Capture
 both versions with aligned producers/collectors and matching workload, and
 use full output fetching; old raw captures cannot be repaired by renaming.
 The aggregator infers the contract from the new measured-window series;
@@ -155,7 +154,9 @@ Verification on 2026-09-21:
 - 191 Python tests across collector/runtime/telemetry/migration/cache/twin,
   elastic scenarios and the prefill contract. These cover deliberately
   unequal execution denominators, wall hit ratios, missing samples and both
-  accepting and rejecting gate paths.
+  accepting and rejecting gate paths at that revision. The optional TPS gate
+  and its three tests were subsequently removed; comparison retains the
+  automatic mixed-contract check.
 - 49 remote Java tests passed on host 111, run `20260921_070951.`, job
   `tps-final`; after adjusting Whale's wall endpoint to follow its atomic
   snapshot, the 30 TPS/Whale tests passed again (`tps-clock-final`).
