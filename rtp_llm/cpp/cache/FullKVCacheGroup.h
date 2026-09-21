@@ -34,6 +34,13 @@ public:
     void
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;
     void free(const BlockIndicesType& block_indices) override;
+    void freeBatch(const std::vector<const BlockIndicesType*>& blocks) {
+        block_pool_->requestFreeBatch(blocks);
+    }
+    bool reassignRequestBlocks(const std::vector<BlockPool::RequestRefDelta>& deltas,
+                               int allocate_count, BlockIndicesType& allocated, int& required_free_blocks) {
+        return block_pool_->reassignRequestBlocks(deltas, allocate_count, allocated, required_free_blocks);
+    }
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     int  needBlocksNum(int seq_len, int current_blocks = 0, int reserve_step = 0) const override;
     int estimatePeakNeedBlocks(int                     seq_len,

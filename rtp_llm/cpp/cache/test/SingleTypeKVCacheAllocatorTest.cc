@@ -140,6 +140,71 @@ protected:
 };
 
 // Test init
+TEST_F(SingleTypeKVCacheAllocatorTest, BatchBeamUpdateReusesDroppedCapacityAndReleasesOnce) {
+    auto config = createSingleTypeTestConfig(1, 7, 4);
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+    auto resource = createBatchKVCacheResource(3, config);
+    auto owned = allocator_->getBlockPool()->malloc(6);
+    ASSERT_EQ(owned.size(), 6u);
+    for (int i = 0; i < 3; ++i) {
+        resource->setBatchBlocks(i, 0, {owned[2*i], owned[2*i+1]});
+    }
+    std::vector<TaggedBlockIdPair> mapping;
+    ASSERT_TRUE(allocator_->updateKVBlock(resource, {0, 0, 0, 2}, true, mapping));
+    ASSERT_EQ(mapping.size(), 2u);
+    EXPECT_EQ(allocator_->freeBlocksNum(), 0u);
+    EXPECT_EQ(resource->blocks(2, 0), (BlockIndicesType{owned[0], owned[1]}));
+    EXPECT_EQ(resource->blocks(3, 0), (BlockIndicesType{owned[4], owned[5]}));
+    for (int i = 0; i < 2; ++i) {
+        EXPECT_EQ(mapping[i].src, owned[1]);
+        EXPECT_EQ(resource->blocks(i, 0), (BlockIndicesType{owned[0], mapping[i].dst}));
+    }
+    allocator_->free(FreeInfo{resource});
+    EXPECT_EQ(allocator_->freeBlocksNum(), 6u);
+    allocator_->free(FreeInfo{resource});
+    EXPECT_EQ(allocator_->freeBlocksNum(), 6u);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, FailedBeamExpansionPreservesOldTablesAndReferences) {
+    auto config = createSingleTypeTestConfig(1, 5, 4);
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+    auto resource = createBatchKVCacheResource(2, config);
+    auto owned = allocator_->getBlockPool()->malloc(4);
+    resource->setBatchBlocks(0, 0, {owned[0], owned[1]});
+    resource->setBatchBlocks(1, 0, {owned[2], owned[3]});
+    std::vector<TaggedBlockIdPair> mapping;
+    EXPECT_FALSE(allocator_->updateKVBlock(resource, {0, 0, 0, 0, 0}, true, mapping));
+    EXPECT_EQ(resource->batchSize(), 2);
+    EXPECT_EQ(resource->blocks(0, 0), (BlockIndicesType{owned[0], owned[1]}));
+    EXPECT_EQ(resource->blocks(1, 0), (BlockIndicesType{owned[2], owned[3]}));
+    EXPECT_TRUE(mapping.empty());
+    EXPECT_EQ(allocator_->freeBlocksNum(), 0u);
+    allocator_->free(FreeInfo{resource});
+    EXPECT_EQ(allocator_->freeBlocksNum(), 4u);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, AlignedBeamUpdateReordersAndSharesWithoutTailAllocation) {
+    auto config = createSingleTypeTestConfig(1, 5, 4);
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+    auto resource = createBatchKVCacheResource(2, config);
+    auto owned = allocator_->getBlockPool()->malloc(4);
+    resource->setBatchBlocks(0, 0, {owned[0], owned[1]});
+    resource->setBatchBlocks(1, 0, {owned[2], owned[3]});
+    std::vector<TaggedBlockIdPair> mapping;
+    ASSERT_TRUE(allocator_->updateKVBlock(resource, {1, 0, 1, 1}, false, mapping));
+    EXPECT_TRUE(mapping.empty());
+    EXPECT_EQ(allocator_->freeBlocksNum(), 0u);
+    EXPECT_EQ(resource->blocks(1, 0), (BlockIndicesType{owned[0], owned[1]}));
+    for (const int i : {0, 2, 3}) {
+        EXPECT_EQ(resource->blocks(i, 0), (BlockIndicesType{owned[2], owned[3]}));
+    }
+    allocator_->free(FreeInfo{resource});
+    EXPECT_EQ(allocator_->freeBlocksNum(), 4u);
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, ConstructorAndInit) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);

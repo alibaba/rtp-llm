@@ -215,6 +215,10 @@ public:
         batch_resource[batch_idx] = std::move(resource);
     }
 
+    void swapResources(std::vector<KVCacheResource>& resources) noexcept {
+        batch_resource.swap(resources);
+    }
+
     std::vector<BlockIndicesType> getAllBatchBlocks(int group_id) const {
         std::vector<BlockIndicesType> all_blocks;
         all_blocks.reserve(batch_resource.size());
