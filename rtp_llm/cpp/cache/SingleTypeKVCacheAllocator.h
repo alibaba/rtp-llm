@@ -3,6 +3,7 @@
 #include <memory>
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
+#include "rtp_llm/models_py/bindings/core/GpuBlockCopy.h"
 
 namespace rtp_llm {
 
@@ -26,6 +27,7 @@ public:
                                                     const CacheKeysType&   cache_keys,
                                                     bool                   is_connector = false) override;
     GroupedCacheLayerLayout          allLayerCacheBase() const override;
+    void blockBatchCopyForForward(const torch::Tensor& copy_mapping) override;
 
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,
@@ -59,6 +61,8 @@ private:
 
 private:
     std::shared_ptr<FullKVCacheGroup> full_kv_cache_group_;
+    // Destroy and drain the copy op before releasing its cache group.
+    std::unique_ptr<GpuBlockCopy> gpu_block_copy_;
 };
 
 using SingleTypeKVCacheAllocatorPtr = std::shared_ptr<SingleTypeKVCacheAllocator>;

@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <unordered_map>
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -67,8 +69,41 @@ bool SingleTypeKVCacheAllocator::doInit() {
         return false;
     }
 
+#if USING_CUDA
+    const char* block_copy_env = std::getenv("RTP_LLM_GPU_BLOCK_ID_COPY");
+    if (allocation_type_ == AllocationType::DEVICE
+        && (block_copy_env == nullptr || std::strcmp(block_copy_env, "0") != 0)) {
+        const auto kv_tensors = full_kv_cache_group_->allLayerCacheBase();
+        const auto scale_tensors = full_kv_cache_group_->allLayerScaleCacheBase();
+        std::vector<GpuBlockCopyPlane> planes;
+        for (int layer_id : cache_group.layer_ids) {
+            planes.push_back({kv_tensors.at(layer_id), cache_group.kv_block_stride_bytes});
+            if (cache_group.kv_scale_stride_bytes > 0) {
+                planes.push_back({scale_tensors.at(layer_id), cache_group.kv_scale_stride_bytes});
+            }
+        }
+        const bool supported = !planes.empty() && std::all_of(planes.begin(), planes.end(), [](const auto& plane) {
+            return plane.blocks.defined() && plane.blocks.is_cuda() && plane.blocks.dim() > 0
+                   && plane.blocks.size(0) > 0 && plane.blocks.stride(0) > 0 && plane.copy_bytes > 0
+                   && plane.copy_bytes <= plane.blocks.stride(0) * plane.blocks.element_size();
+        });
+        if (supported) {
+            gpu_block_copy_ = GpuBlockCopy::create(std::move(planes));
+            RTP_LLM_LOG_INFO("GPU block ID copy enabled for single-group KV forward updates");
+        }
+    }
+#endif
     RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initialized successfully");
     return true;
+}
+
+void SingleTypeKVCacheAllocator::blockBatchCopyForForward(const torch::Tensor& copy_mapping) {
+    if (gpu_block_copy_ && copy_mapping.dim() == 2 && copy_mapping.size(1) == 3) {
+        RTP_LLM_PROFILE_SCOPE("kv.block_id_copy");
+        gpu_block_copy_->copy(copy_mapping);
+    } else {
+        KVCacheAllocator::blockBatchCopyForForward(copy_mapping);
+    }
 }
 
 MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
