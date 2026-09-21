@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import socket
 import subprocess
 import sys
@@ -96,9 +97,7 @@ def launch_config(args):
 
 def require_local(path):
     resolved = Path(path).resolve(strict=True)
-    if not str(resolved).startswith(
-        ("/ssd/", "/data/", "/data0/", "/data1/", "/data5/")
-    ):
+    if not re.match(r"^/(?:ssd|data[0-9]*)/", str(resolved)):
         raise ValueError(f"Not a local data destination: {resolved}")
     fs = subprocess.check_output(
         ["findmnt", "-T", str(resolved), "-n", "-o", "FSTYPE"], text=True

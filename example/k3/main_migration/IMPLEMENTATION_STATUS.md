@@ -38,8 +38,8 @@ On macOS, a separate Python 3.9 / PyTorch 2.8 CPU environment ran:
 python -m pytest -q tests/kimi_k3
 ```
 
-Result: 77 passed: 36 model math/checkpoint checks, 16 chunk-planning checks,
-six chunk-input/controller checks, five launch-profile checks and 14 smoke-harness
+Result: 84 passed: 36 model math/checkpoint checks, 16 chunk-planning checks,
+six chunk-input/controller checks, twelve launch-profile checks and 14 smoke-harness
 contract checks. These cover AttnRes against a scalar float64 reference, unused
 residual-bank capacity, output normalization, MTP source-layer and safetensors
 shape/dtype/payload validation, and TP1/2/4/8 fused KDA projection equivalence
@@ -151,8 +151,29 @@ or shorter-prefix substitute may be counted as the required full smoke.
 The 2026-09-22 fleet snapshot rejected 144/145 for eight external compute
 processes per host (minimum free memory 12.7/19.0 GiB). It selected 114/110
 in l20-a, with approximately 268.6 GiB free per GPU. This is not a reservation.
-Source clones are in progress; both hosts need independent local builds.
-114's literal lhc_GPU does not mount the host's full checkpoint at /data2.
-The same-image lhc_GPU_k3_bs8_20260921 does mount it and can execute as the
-personal user, but its mounts omit /data6. Resolve a common source/build path
-before using it for runtime. No existing container was changed.
+Both independent local service builds are now running inside literal `lhc_GPU`.
+110 cloned commit `9cb7e821be`; 114's full clone failed with GitHub early EOF,
+then a new shallow experimental-branch clone succeeded. Latest changes must be
+synced and rebuilt after those builds terminate; do not mutate a building tree.
+
+110 source/output reside under `/data7/luohaocheng.lhc`; 114 uses
+`/data0/luohaocheng.lhc`, both ext4. 114's runtime will use the existing
+same-image `lhc_GPU_k3_bs8_20260921`, which exposes both that source/output root
+and the local full checkpoint; its personal identity was verified. No existing
+container was changed. The older `lhc_GPU_k3_bf16_full_20260920` was rejected
+because it lacks the personal account.
+
+Each selected host passed an independent full-target guard (96 shards,
+497220 tensors) and normalized MTP guard (nine shards, 5404 tensors), plus
+5400-required-tensor MTP validation. Runtime paths:
+
+- 110 target `/data5/kimi-k3`; draft
+  `/data5/luohaocheng.lhc/k3-main-mtp-normalized-20260922`.
+- 114 target `/data2/kimi-k3`; draft
+  `/data2/luohaocheng.lhc/k3-main-mtp-normalized-20260922`.
+
+Normalized copies hard-link unchanged weight shards and correct only index
+`metadata.total_size`, recording provenance. Original checkpoints were not
+modified. Both runtime containers use host networking and expose ACTIVE RDMA
+ports. This is infrastructure preflight, not proof of actual RDMA transfer or
+FastSafetensors usage by the eventual model service. No GPU service has run.

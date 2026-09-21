@@ -62,3 +62,26 @@ def test_reject_rank_port_overflow(tmp_path, field):
     setattr(args, field, 65500)
     with pytest.raises(ValueError, match="port"):
         launcher.launch_config(args)
+
+
+@pytest.mark.parametrize(
+    "path", ["/data2/user/run", "/data7/user/run", "/ssd/5/user/run"]
+)
+def test_selected_host_data_roots_are_allowed_after_mount_check(monkeypatch, path):
+    monkeypatch.setattr(Path, "resolve", lambda self, **kwargs: self)
+    monkeypatch.setattr(launcher.subprocess, "check_output", lambda *a, **kw: "ext4\n")
+    launcher.require_local(path)
+
+
+@pytest.mark.parametrize("path", ["/database/run", "/data-old/run", "/tmp/run"])
+def test_unrelated_path_prefixes_are_not_local_data_roots(monkeypatch, path):
+    monkeypatch.setattr(Path, "resolve", lambda self, **kwargs: self)
+    with pytest.raises(ValueError, match="local data destination"):
+        launcher.require_local(path)
+
+
+def test_allowed_prefix_does_not_exempt_network_mount(monkeypatch):
+    monkeypatch.setattr(Path, "resolve", lambda self, **kwargs: self)
+    monkeypatch.setattr(launcher.subprocess, "check_output", lambda *a, **kw: "nfs4\n")
+    with pytest.raises(ValueError, match="filesystem"):
+        launcher.require_local("/data7/user/run")
