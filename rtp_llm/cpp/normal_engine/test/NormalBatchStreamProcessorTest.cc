@@ -1,6 +1,15 @@
+#include <chrono>
+#include <condition_variable>
+#include <cstdlib>
+#include <exception>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <numeric>
+#include <optional>
+#include <string>
+#include <thread>
+#include <utility>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -30,6 +39,31 @@ std::vector<T> toVec(const torch::Tensor& t) {
 static torch::Tensor hostIntBuffer(std::vector<int32_t> data) {
     return torch::tensor(data, torch::kInt32);
 }
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value): name_(name) {
+        const char* old_value = std::getenv(name_);
+        if (old_value != nullptr) {
+            old_value_ = old_value;
+            had_value_ = true;
+        }
+        setenv(name_, value, 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (had_value_) {
+            setenv(name_, old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_);
+        }
+    }
+
+private:
+    const char* name_;
+    std::string old_value_;
+    bool        had_value_ = false;
+};
 
 static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
     auto spec = std::make_shared<MHAKVCacheSpec>();
@@ -290,6 +324,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForBlockingLogitsProcessorState) {
+    ScopedEnvVar    device_input_env("RTP_LLM_DEVICE_INPUT", "1");
     ResourceContext resource_context;
     ModelConfig     model_config;
     model_config.max_seq_len = 128;
@@ -318,21 +353,21 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForBlockingLo
     });
 
     std::list<GenerateStreamPtr> streams{stream};
-    StreamGroups                 stream_groups(streams);
+    PDSepConfig                  pd_sep_config;
+    ProfilingDebugLoggingConfig  profiling_debug_logging_config;
+    CacheConfig                  cache_config;
+    NormalBatchStreamProcessor   processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
-    EngineInitParams params;
-    params.model_config_ = model_config;
-    params.py_model      = py::none();
-    NormalExecutor executor(params, nullptr, true);
-
-    EXPECT_TRUE(executor.gatherCanUseDeviceState(stream_groups));
+    EXPECT_EQ(processor.prepareDeviceStateInputs(streams).size(), 1);
     stream->logits_processor_list_.push_back(std::make_shared<TestStatefulLogitsProcessor>(false));
     stream->incPendingAsyncBookkeeping();
-    EXPECT_FALSE(executor.gatherCanUseDeviceState(stream_groups));
+    EXPECT_TRUE(processor.prepareDeviceStateInputs(streams).empty());
     stream->decPendingAsyncBookkeepingAndMaybeRelease();
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathAllowsAsyncLogitsProcessorState) {
+    ScopedEnvVar    device_input_env("RTP_LLM_DEVICE_INPUT", "1");
     ResourceContext resource_context;
     ModelConfig     model_config;
     model_config.max_seq_len = 128;
@@ -358,15 +393,584 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathAllowsAsyncLogitsP
     stream->logits_processor_list_.push_back(std::make_shared<TestStatefulLogitsProcessor>(true));
 
     std::list<GenerateStreamPtr> streams{stream};
-    StreamGroups                 stream_groups(streams);
+    PDSepConfig                  pd_sep_config;
+    ProfilingDebugLoggingConfig  profiling_debug_logging_config;
+    CacheConfig                  cache_config;
+    NormalBatchStreamProcessor   processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    stream->incPendingAsyncBookkeeping();
+    EXPECT_EQ(processor.prepareDeviceStateInputs(streams).size(), 1);
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathRejectsPendingKvCacheMapping) {
+    ScopedEnvVar    device_input_env("RTP_LLM_DEVICE_INPUT", "1");
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 128;
+    model_config.vocab_size  = 128900;
+    RuntimeConfig runtime_config;
+
+    auto query             = make_shared<GenerateInput>();
+    query->input_ids       = hostIntBuffer({1, 2, 3});
+    query->generate_config = make_shared<GenerateConfig>();
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(false);
+    stream->generate_status_->status = StreamState::RUNNING;
+    const auto cuda_i32              = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::full({1}, 42, cuda_i32),
+        .next_seq_len_gpu      = torch::full({1}, 4, cuda_i32),
+        .last_real_seq_len     = 3,
+        .next_real_seq_len     = 4,
+    });
+
+    std::list<GenerateStreamPtr> streams{stream};
+    PDSepConfig                  pd_sep_config;
+    ProfilingDebugLoggingConfig  profiling_debug_logging_config;
+    CacheConfig                  cache_config;
+    NormalBatchStreamProcessor   processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    ASSERT_EQ(processor.prepareDeviceStateInputs(streams).size(), 1);
+
+    auto pending_state                    = stream->getNormalAsyncDeviceState();
+    pending_state.kv_cache_update_pending = true;
+    stream->setNormalAsyncDeviceState(std::move(pending_state));
+    EXPECT_TRUE(processor.prepareDeviceStateInputs(streams).empty());
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDeviceStatePlanRejectsIneligibleBatch) {
+    enum class InvalidState {
+        MISSING_HOST_LENGTH,
+        BAD_DTYPE,
+        BAD_NUMEL
+    };
+    struct Case {
+        const char*                 name;
+        int                         num_beams;
+        int                         num_return_sequences;
+        std::optional<InvalidState> invalid_state;
+    };
+    const std::vector<Case> cases = {
+        {"beam", 2, 1, std::nullopt},
+        {"multiple_return_sequences", 1, 2, std::nullopt},
+        {"missing_host_length", 1, 1, InvalidState::MISSING_HOST_LENGTH},
+        {"malformed_dtype", 1, 1, InvalidState::BAD_DTYPE},
+        {"malformed_numel", 1, 1, InvalidState::BAD_NUMEL},
+    };
+
+    ScopedEnvVar    device_input_env("RTP_LLM_DEVICE_INPUT", "1");
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 128;
+    model_config.vocab_size  = 128900;
+    RuntimeConfig               runtime_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+
+    auto make_valid_stream = [&] {
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({1, 2, 3});
+        query->generate_config = make_shared<GenerateConfig>();
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->setIsContextStream(false);
+        stream->generate_status_->status = StreamState::RUNNING;
+        stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .last_sample_token_gpu = torch::full({1}, 42, cuda_i32),
+            .next_seq_len_gpu      = torch::full({1}, 4, cuda_i32),
+            .last_real_seq_len     = 3,
+            .next_real_seq_len     = 4,
+        });
+        return std::pair{query, stream};
+    };
+
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        auto [query, stream]                         = make_valid_stream();
+        query->generate_config->num_beams            = test_case.num_beams;
+        query->generate_config->num_return_sequences = test_case.num_return_sequences;
+        if (test_case.invalid_state.has_value()) {
+            auto state = stream->getNormalAsyncDeviceState();
+            switch (*test_case.invalid_state) {
+                case InvalidState::MISSING_HOST_LENGTH:
+                    state.next_real_seq_len = -1;
+                    break;
+                case InvalidState::BAD_DTYPE:
+                    state.last_sample_token_gpu =
+                        torch::full({1}, 42.0f, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+                    break;
+                case InvalidState::BAD_NUMEL:
+                    state.next_seq_len_gpu = torch::full({2}, 4, cuda_i32);
+                    break;
+            }
+            stream->setNormalAsyncDeviceState(std::move(state));
+        }
+        EXPECT_TRUE(processor.prepareDeviceStateInputs({stream}).empty());
+    }
+
+    // The selected map is all-or-none. A valid row cannot overlap when a
+    // peer has an unsafe mapping state, because StreamGroups must use one
+    // coherent source for the entire batch.
+    auto [valid_query, valid_stream]     = make_valid_stream();
+    auto [invalid_query, invalid_stream] = make_valid_stream();
+    (void)valid_query;
+    (void)invalid_query;
+    auto invalid_state                    = invalid_stream->getNormalAsyncDeviceState();
+    invalid_state.kv_cache_update_pending = true;
+    invalid_stream->setNormalAsyncDeviceState(std::move(invalid_state));
+    EXPECT_TRUE(processor.prepareDeviceStateInputs({valid_stream, invalid_stream}).empty());
+
+    {
+        ScopedEnvVar disabled_device_input("RTP_LLM_DEVICE_INPUT", "0");
+        EXPECT_TRUE(processor.prepareDeviceStateInputs({valid_stream}).empty());
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathFallsBackWhenPositionSnapshotIsUnavailable) {
+    struct PositionIdCase {
+        const char*      name;
+        PositionIdsStyle position_style;
+        bool             has_positional_encoding;
+        int              position_id_len_factor;
+    };
+    // Keep one genuinely ineligible position-id case.  The MRoPE case below
+    // has an immutable anchor and a complete normal-device snapshot, so it is
+    // deliberately tested as an async-capable decode rather than folded into
+    // this conservative fallback check.
+    const PositionIdCase cases[] = {{"absolute_position_encoding", PositionIdsStyle::DEFAULT, true, 1}};
+
+    ScopedEnvVar device_input_env("RTP_LLM_DEVICE_INPUT", "1");
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        ResourceContext resource_context;
+        ModelConfig     model_config;
+        model_config.max_seq_len                           = 128;
+        model_config.vocab_size                            = 128900;
+        model_config.mm_model_config.mm_position_ids_style = test_case.position_style;
+        model_config.has_positional_encoding               = test_case.has_positional_encoding;
+        model_config.attn_config.rope_config.index_factor  = test_case.position_id_len_factor;
+        RuntimeConfig runtime_config;
+
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({1, 2, 3});
+        query->generate_config = make_shared<GenerateConfig>();
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->setIsContextStream(false);
+        stream->generate_status_->status = StreamState::RUNNING;
+        const auto cuda_i32              = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .last_sample_token_gpu = torch::full({1}, 42, cuda_i32),
+            .next_seq_len_gpu      = torch::full({1}, 4, cuda_i32),
+            .last_real_seq_len     = 3,
+            .next_real_seq_len     = 4,
+        });
+        stream->incPendingAsyncBookkeeping();
+
+        std::list<GenerateStreamPtr> streams{stream};
+
+        // This case has a valid device snapshot, but gather still needs
+        // host token/length/position state. The pending worker must therefore
+        // be joined before processDecodeStreams reads those accessors.
+        PDSepConfig                 pd_sep_config;
+        ProfilingDebugLoggingConfig profiling_debug_logging_config;
+        CacheConfig                 cache_config;
+        NormalBatchStreamProcessor  processor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        EXPECT_TRUE(processor.prepareDeviceStateInputs(streams).empty());
+        StreamGroups stream_groups(streams);
+        TensorHolder holder;
+        auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
+        EXPECT_TRUE(model_input_status.ok());
+        if (model_input_status.ok()) {
+            // The gatherer publishes CPU-derived metadata to CUDA at its final
+            // boundary. Check the values, not the output device: host token 3
+            // and seq_len 3 differ from the pending device snapshot (42, 4).
+            const auto& model_input = model_input_status.value();
+            EXPECT_EQ(toVec<int>(model_input.combo_tokens), std::vector<int>({3}));
+            EXPECT_EQ(toVec<int>(model_input.sequence_lengths), std::vector<int>({2}));
+        }
+        stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testMropeDeviceSnapshotKeepsDecodeRowsCoherentAcrossStreams) {
+    // Host histories are one output step behind (token 3), while the normal
+    // device snapshots already describe the next decode rows. The selected
+    // plan supplies one epoch to both StreamGroups and gather.
+    ScopedEnvVar    device_input_env("RTP_LLM_DEVICE_INPUT", "1");
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                           = 128;
+    model_config.vocab_size                            = 128900;
+    model_config.mm_model_config.mm_position_ids_style = PositionIdsStyle::MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    RuntimeConfig runtime_config;
+    const auto    cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+
+    auto make_stream = [&](int token, int next_seq_len, int next_real_seq_len, const torch::Tensor& anchor) {
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({1, 2, 3});  // intentionally stale worker-owned history
+        query->generate_config = make_shared<GenerateConfig>();
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->setIsContextStream(false);
+        stream->generate_status_->status = StreamState::RUNNING;
+        stream->setContextPositionIds(anchor);
+        stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .last_sample_token_gpu = torch::full({1}, token, cuda_i32),
+            .next_seq_len_gpu      = torch::full({1}, next_seq_len, cuda_i32),
+            .last_real_seq_len     = next_real_seq_len - 1,
+            .next_real_seq_len     = next_real_seq_len,
+        });
+        stream->incPendingAsyncBookkeeping();
+        return stream;
+    };
+
+    // First row is ordinary pure-text MRoPE: context [0, 1, 2], next length
+    // 4, therefore position [3, 3, 3].  The second has a nontrivial tail
+    // anchor [12, 14, 13]; next length 7 must yield [18, 18, 18], proving the
+    // formula uses the immutable anchor and the post-sample length rather
+    // than the stale host seqLength()==3.
+    auto first = make_stream(42, 4, 4, torch::tensor({0, 0, 0, 1, 1, 1, 2, 2, 2}, torch::kInt32).reshape({3, 3}));
+    auto second =
+        make_stream(43, 7, 7, torch::tensor({10, 11, 9, 11, 12, 10, 12, 14, 13}, torch::kInt32).reshape({3, 3}));
+    std::list<GenerateStreamPtr> streams{first, second};
+    PDSepConfig                  pd_sep_config;
+    ProfilingDebugLoggingConfig  profiling_debug_logging_config;
+    CacheConfig                  cache_config;
+    NormalBatchStreamProcessor   processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    auto normal_states = processor.prepareDeviceStateInputs(streams);
+    ASSERT_EQ(normal_states.size(), 2);
+
+    // Freeze the selected epoch, then replace the live stream state before
+    // groups/gather read it.  Both consumers must keep using the original
+    // plan: token 42 / length 4, never this later token 99 / length 9.
+    first->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::full({1}, 99, cuda_i32),
+        .next_seq_len_gpu      = torch::full({1}, 9, cuda_i32),
+        .last_real_seq_len     = 8,
+        .next_real_seq_len     = 9,
+    });
+    // The plan also owns the validated anchor. Replacing the live stream
+    // anchor after selection must not pair token 42 with another round's
+    // position basis.
+    first->setContextPositionIds(
+        torch::tensor({100, 100, 100, 101, 101, 101, 102, 102, 102}, torch::kInt32).reshape({3, 3}));
+    StreamGroups stream_groups(streams, std::move(normal_states));
+
+    // StreamGroups is constructed before gather.  Its capacity must come
+    // from the selected snapshot epoch: host history remains length 3 and
+    // the later live state above must not change its capacity.
+    EXPECT_EQ(stream_groups.totalDecodeBatchSize(), 2);
+    EXPECT_EQ(stream_groups.modelExecuteTokenSize(), 2);
+    EXPECT_EQ(stream_groups.maxSeqLen(), 7);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_TRUE(model_input_status.ok());
+    const auto& model_input = model_input_status.value();
+
+    // `next_seq_len` is the committed length after the sampled token.  The
+    // decode model input uses its zero-based predecessor, so 4 -> 3 and
+    // 7 -> 6.  Token and position values must belong to that same snapshot.
+    EXPECT_EQ(toVec<int>(model_input.combo_tokens), (std::vector<int>{42, 43}));
+    EXPECT_EQ(toVec<int>(model_input.sequence_lengths), (std::vector<int>{3, 6}));
+    EXPECT_EQ(toVec<int>(model_input.combo_position_ids), (std::vector<int>{3, 3, 3, 18, 18, 18}));
+    // The normal snapshot route is allowed to make only this published
+    // position payload device-resident.  The shared ordinary/MTP gather path
+    // retains its host layout, because some MTP consumers dereference it.
+    EXPECT_TRUE(model_input.combo_position_ids.is_cuda());
+
+    first->decPendingAsyncBookkeepingAndMaybeRelease();
+    second->decPendingAsyncBookkeepingAndMaybeRelease();
+}
+
+struct ProcessOverlapProbe {
+    std::mutex              mutex;
+    std::condition_variable cv;
+    bool                    forward_entered    = false;
+    bool                    sampler_entered    = false;
+    bool                    worker_started     = false;
+    bool                    release_worker     = false;
+    int                     worker_iter_count  = -1;
+    int                     sampler_iter_count = -1;
+    std::vector<int>        combo_tokens;
+    std::vector<int>        sequence_lengths;
+    std::vector<int>        combo_position_ids;
+};
+
+class SnapshotRecordingModel final: public ModelBase {
+public:
+    SnapshotRecordingModel(std::shared_ptr<ProcessOverlapProbe> probe, size_t vocab_size):
+        probe_(std::move(probe)), vocab_size_(vocab_size) {}
+
+    GptModelOutputs forward(const GptModelInputs& inputs) override {
+        {
+            std::lock_guard<std::mutex> lock(probe_->mutex);
+            probe_->combo_tokens       = toVec<int>(inputs.combo_tokens);
+            probe_->sequence_lengths   = toVec<int>(inputs.sequence_lengths);
+            probe_->combo_position_ids = toVec<int>(inputs.combo_position_ids);
+            probe_->forward_entered    = true;
+        }
+        probe_->cv.notify_all();
+        GptModelOutputs outputs;
+        const auto      row_count = inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 1;
+        outputs.logits            = torch::zeros({std::max<int64_t>(1, row_count), static_cast<int64_t>(vocab_size_)},
+                                      torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        return outputs;
+    }
+
+private:
+    std::shared_ptr<ProcessOverlapProbe> probe_;
+    size_t                               vocab_size_;
+};
+
+class StopAtSamplerProcessor final: public NormalBatchStreamProcessor {
+public:
+    StopAtSamplerProcessor(const ModelConfig&                   model_config,
+                           const PDSepConfig&                   pd_sep_config,
+                           const ProfilingDebugLoggingConfig&   profiling_debug_logging_config,
+                           const CacheConfig&                   cache_config,
+                           std::shared_ptr<ProcessOverlapProbe> probe):
+        NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false),
+        probe_(std::move(probe)) {}
+
+    absl::StatusOr<SamplerInputs> gatherSamplerInput(const StreamGroups& stream_groups,
+                                                     const GptModelInputs&,
+                                                     const GptModelOutputs&) const override {
+        {
+            std::lock_guard<std::mutex> lock(probe_->mutex);
+            probe_->sampler_entered    = true;
+            probe_->sampler_iter_count = stream_groups.allStreams().empty() ?
+                                             -1 :
+                                             static_cast<int>(stream_groups.allStreams().front()->iterCount());
+        }
+        probe_->cv.notify_all();
+        // This is a controlled terminal point. It proves process passed the
+        // real gather/model-forward path without running a sampler or sending
+        // dispatch work that could obscure the previous-worker ordering.
+        return absl::AbortedError(kStoppedAtSamplerMarker);
+    }
+
+private:
+    static constexpr const char*         kStoppedAtSamplerMarker = "test stops after pre-sampler ordering check";
+    std::shared_ptr<ProcessOverlapProbe> probe_;
+};
+
+TEST_F(NormalBatchStreamProcessorTest, testProcessOverlapsMropeSnapshotButJoinsBeforeSampler) {
+    // A real previous-worker task is held on NormalExecutor's AsyncRunner.
+    // Snapshot decode may reach model forward before release; it still must
+    // join at the pre-sampler boundary, where host sampler metadata is read.
+    ScopedEnvVar    device_input_env("RTP_LLM_DEVICE_INPUT", "1");
+    ScopedEnvVar    stream_async_env("RTP_LLM_STREAM_ASYNC", "1");
+    ScopedEnvVar    drop_broad_sync_env("RTP_LLM_DROP_BROAD_SYNC", "1");
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                           = 128;
+    model_config.vocab_size                            = 128900;
+    model_config.mm_model_config.mm_position_ids_style = PositionIdsStyle::MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    RuntimeConfig runtime_config;
+
+    auto query                             = make_shared<GenerateInput>();
+    query->input_ids                       = hostIntBuffer({1, 2, 3});
+    query->generate_config                 = make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens = 2;
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(false);
+    stream->generate_status_->status = StreamState::RUNNING;
+    stream->setContextPositionIds(torch::tensor({0, 0, 0, 1, 1, 1, 2, 2, 2}, torch::kInt32).reshape({3, 3}));
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::full({1}, 42, cuda_i32),
+        .next_seq_len_gpu      = torch::full({1}, 4, cuda_i32),
+        .last_real_seq_len     = 3,
+        .next_real_seq_len     = 4,
+    });
+    stream->incPendingAsyncBookkeeping();
 
     EngineInitParams params;
     params.model_config_ = model_config;
     params.py_model      = py::none();
-    NormalExecutor executor(params, nullptr, true);
+    NormalExecutor executor(params, nullptr, false);
+    auto           probe = std::make_shared<ProcessOverlapProbe>();
+    executor.setModel(std::make_unique<SnapshotRecordingModel>(probe, model_config.vocab_size));
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    executor.setBatchProcessor(std::make_unique<StopAtSamplerProcessor>(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, probe));
 
+    executor.dispatch_runner_.launch([&] {
+        std::unique_lock<std::mutex> lock(probe->mutex);
+        probe->worker_started = true;
+        probe->cv.notify_all();
+        // Wait until gather/model forward has consumed the selected snapshot.
+        // If the implementation takes the conservative fallback, the main
+        // thread is waiting in sync; release_worker breaks that test deadlock.
+        probe->cv.wait(lock, [&] { return probe->forward_entered || probe->release_worker; });
+        if (probe->forward_entered) {
+            probe->worker_iter_count = static_cast<int>(stream->iterCount());
+        }
+        probe->cv.wait(lock, [&] { return probe->release_worker; });
+    });
+    {
+        std::unique_lock<std::mutex> lock(probe->mutex);
+        EXPECT_TRUE(probe->cv.wait_for(lock, std::chrono::seconds(2), [&] { return probe->worker_started; }));
+    }
+
+    absl::Status       process_status = absl::UnknownError("process did not return");
+    std::exception_ptr process_exception;
+    std::thread        process_thread([&] {
+        try {
+            process_status = executor.process({stream});
+        } catch (...) {
+            process_exception = std::current_exception();
+        }
+    });
+    bool               forward_before_release = false;
+    bool               sampler_before_release = false;
+    {
+        std::unique_lock<std::mutex> lock(probe->mutex);
+        forward_before_release =
+            probe->cv.wait_for(lock, std::chrono::seconds(2), [&] { return probe->forward_entered; });
+        // A single immediate read could race a missing pre-sampler join. Hold
+        // a bounded observation window while the previous worker remains
+        // blocked; sampler must not consume its host metadata in that window.
+        sampler_before_release =
+            forward_before_release
+            && probe->cv.wait_for(lock, std::chrono::milliseconds(100), [&] { return probe->sampler_entered; });
+    }
+
+    // Always release before joining, including when an expectation above
+    // fails. This prevents a failing test from leaving the executor worker
+    // blocked and contaminating a later GPU test.
+    {
+        std::lock_guard<std::mutex> lock(probe->mutex);
+        probe->release_worker = true;
+    }
+    probe->cv.notify_all();
+    process_thread.join();
+
+    EXPECT_TRUE(forward_before_release);
+    EXPECT_FALSE(sampler_before_release);
+    EXPECT_EQ(process_exception, nullptr);
+    EXPECT_EQ(process_status.code(), absl::StatusCode::kAborted);
+    EXPECT_EQ(process_status.message(), "test stops after pre-sampler ordering check");
+    {
+        std::lock_guard<std::mutex> lock(probe->mutex);
+        // Snapshot gather must not call step() while the previous worker may
+        // still inspect the old round.  The executor performs that advance
+        // only after its pre-sampler join.
+        EXPECT_EQ(probe->worker_iter_count, 0);
+        EXPECT_EQ(probe->combo_tokens, (std::vector<int>{42}));
+        EXPECT_EQ(probe->sequence_lengths, (std::vector<int>{3}));
+        EXPECT_EQ(probe->combo_position_ids, (std::vector<int>{3, 3, 3}));
+        EXPECT_TRUE(probe->sampler_entered);
+        EXPECT_EQ(probe->sampler_iter_count, 1);
+    }
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testProcessJoinsBeforeFallbackGatherWithoutMropeAnchor) {
+    // The no-anchor case cannot derive a safe snapshot position. It must not
+    // enter model forward while the previous worker is blocked; after release
+    // it follows ordinary host gather and reaches the controlled sampler stop.
+    ScopedEnvVar    device_input_env("RTP_LLM_DEVICE_INPUT", "1");
+    ScopedEnvVar    stream_async_env("RTP_LLM_STREAM_ASYNC", "1");
+    ScopedEnvVar    drop_broad_sync_env("RTP_LLM_DROP_BROAD_SYNC", "1");
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                           = 128;
+    model_config.vocab_size                            = 128900;
+    model_config.mm_model_config.mm_position_ids_style = PositionIdsStyle::MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    RuntimeConfig runtime_config;
+
+    auto query                             = make_shared<GenerateInput>();
+    query->input_ids                       = hostIntBuffer({1, 2, 3});
+    query->generate_config                 = make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens = 2;
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(false);
+    stream->generate_status_->status = StreamState::RUNNING;
+    // This is a valid normal device state except for the MRoPE anchor.  It
+    // distinguishes the anchor fallback from a generic no-state fallback.
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::full({1}, 42, cuda_i32),
+        .next_seq_len_gpu      = torch::full({1}, 4, cuda_i32),
+        .last_real_seq_len     = 3,
+        .next_real_seq_len     = 4,
+    });
     stream->incPendingAsyncBookkeeping();
-    EXPECT_TRUE(executor.gatherCanUseDeviceState(stream_groups));
+
+    EngineInitParams params;
+    params.model_config_ = model_config;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, nullptr, false);
+    auto           probe = std::make_shared<ProcessOverlapProbe>();
+    executor.setModel(std::make_unique<SnapshotRecordingModel>(probe, model_config.vocab_size));
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    executor.setBatchProcessor(std::make_unique<StopAtSamplerProcessor>(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, probe));
+
+    executor.dispatch_runner_.launch([&] {
+        std::unique_lock<std::mutex> lock(probe->mutex);
+        probe->worker_started = true;
+        probe->cv.notify_all();
+        probe->cv.wait(lock, [&] { return probe->forward_entered || probe->release_worker; });
+        // This is the previous worker's commit point in the test. Once it is
+        // released, ordinary host gather has a valid anchor and cannot write
+        // uninitialized MRoPE positions.
+        if (probe->release_worker) {
+            stream->setContextPositionIds(torch::tensor({0, 0, 0, 1, 1, 1, 2, 2, 2}, torch::kInt32).reshape({3, 3}));
+        }
+        probe->cv.wait(lock, [&] { return probe->release_worker; });
+    });
+    {
+        std::unique_lock<std::mutex> lock(probe->mutex);
+        EXPECT_TRUE(probe->cv.wait_for(lock, std::chrono::seconds(2), [&] { return probe->worker_started; }));
+    }
+
+    absl::Status       process_status = absl::UnknownError("process did not return");
+    std::exception_ptr process_exception;
+    std::thread        process_thread([&] {
+        try {
+            process_status = executor.process({stream});
+        } catch (...) {
+            process_exception = std::current_exception();
+        }
+    });
+    bool               forward_before_release = false;
+    {
+        std::unique_lock<std::mutex> lock(probe->mutex);
+        forward_before_release =
+            probe->cv.wait_for(lock, std::chrono::milliseconds(100), [&] { return probe->forward_entered; });
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(probe->mutex);
+        probe->release_worker = true;
+    }
+    probe->cv.notify_all();
+    process_thread.join();
+
+    EXPECT_FALSE(forward_before_release);
+    EXPECT_EQ(process_exception, nullptr);
+    EXPECT_EQ(process_status.code(), absl::StatusCode::kAborted);
+    EXPECT_EQ(process_status.message(), "test stops after pre-sampler ordering check");
+    {
+        std::lock_guard<std::mutex> lock(probe->mutex);
+        EXPECT_TRUE(probe->forward_entered);
+        EXPECT_TRUE(probe->sampler_entered);
+        EXPECT_EQ(probe->sampler_iter_count, 1);
+    }
     stream->decPendingAsyncBookkeepingAndMaybeRelease();
 }
 
@@ -705,11 +1309,16 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabPassesCompactEosOnlyToMult
     stream->logits_processor_list_[0]->process(inputs, 0, 2);
 
     auto processed_logits = inputs.logits.cpu();
+    // CUDA masks with -inf and ROCm with the lowest finite float. Verify the
+    // sampling contract instead: a finished row can select only compact EOS.
+    auto probabilities = processed_logits.softmax(-1);
     for (int token_id = 0; token_id < 5; ++token_id) {
+        EXPECT_FLOAT_EQ(processed_logits[0][token_id].item<float>(), 0.0f);
         if (token_id == 3) {
             EXPECT_FLOAT_EQ(processed_logits[1][token_id].item<float>(), 0.0f);
+            EXPECT_FLOAT_EQ(probabilities[1][token_id].item<float>(), 1.0f);
         } else {
-            EXPECT_EQ(processed_logits[1][token_id].item<float>(), -std::numeric_limits<float>::infinity());
+            EXPECT_FLOAT_EQ(probabilities[1][token_id].item<float>(), 0.0f);
         }
     }
 }
