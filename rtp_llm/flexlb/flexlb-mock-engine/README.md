@@ -232,10 +232,10 @@ response latency. The P value uses prefill completion as its first-token
 boundary; it does not observe when a streamed token reaches the client. With
 Fetch enabled, the frontend owns completion timing.
 
-**Block-pool observability series (`mock_engine_*`, 20260902)**: `/metrics`
+**Block-pool observability series**: `/metrics`
 reports the KV v2 block-pool state as time series in BOTH emission modes
 (per-engine and role-aggregated) — four per-scrape GAUGES
-`mock_engine_cache_blocks` / `mock_engine_available_blocks` /
+`rtp_llm_kv_cache_pool_total_blocks` / `rtp_llm_kv_cache_pool_available_blocks` /
 `mock_engine_held_blocks` / `mock_engine_referenced_blocks` (the three-state
 split: available = free + pure LRU, held = in-flight keyless leases,
 referenced = in-flight-referenced key blocks — the same snapshot fields the
@@ -262,8 +262,8 @@ memory pages — read the shapes and the admission/reuse events, not
 absolute block counts against production.
 
 **Cache key-hit series (`mock_engine_*`, 20260902)**: `/metrics` also reports
-two cumulative counters aligning the mock with the production
-`recent_cache_key_hit_count / total_count` caliber —
+two cumulative key counters (not the real recent-cache-key token gauges;
+see [metric contract](METRICS.md)) —
 `mock_engine_cache_key_hits_total` (Σ block keys matched by the
 admission-time `prefixHitBlocks` call: keys the engine could reuse) and
 `mock_engine_cache_keys_requested_total` (Σ requested `blockKeys`;

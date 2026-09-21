@@ -30,8 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Key-level cache-hit observability (the production
- * recent_cache_key_hit_count / total_count caliber) the mock reports as two
+ * Mock key-level cache-hit observability reported as two
  * cumulative counters on {@code /metrics} in BOTH emission modes plus the
  * {@code /snapshot} terminal state:
  *

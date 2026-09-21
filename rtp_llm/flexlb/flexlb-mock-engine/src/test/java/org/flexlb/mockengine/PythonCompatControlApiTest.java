@@ -492,8 +492,22 @@ class PythonCompatControlApiTest {
     // Test 9: /metrics — Python names in both modes
     // ════════════════════════════════════════════════════════════════
 
+    private static void assertRemovedMetricsAbsent(String body) {
+        for (String name : List.of("mock_engine_up", "mock_engine_cache_keys",
+                "mock_engine_active_kv_tokens", "mock_engine_available_kv_tokens",
+                "mock_engine_rpc_total", "mock_engine_running", "mock_engine_waiting",
+                "mock_engine_cache_blocks", "mock_engine_available_blocks",
+                "mock_engine_prefill_ms_p99", "mock_engine_prefill_ms_count",
+                "mock_engine_decode_ms_p99", "mock_engine_decode_ms_count",
+                "mock_engine_cancelled_total")) {
+            assertFalse(body.contains(name + "{"), name);
+            assertFalse(body.contains("# HELP " + name + " "), name);
+            assertFalse(body.contains("# TYPE " + name + " "), name);
+        }
+    }
+
     @Test
-    void metricsDefaultModeContainsPythonNames() throws Exception {
+    void metricsDefaultModeContainsSupportedNames() throws Exception {
         startCluster(model("10", 0.1), 2, 2);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         enqueueAndFetch(prefill, batch(8000, slot(0,
@@ -503,14 +517,12 @@ class PythonCompatControlApiTest {
         awaitCompleted(decodeServices.get(1), 1, 10_000);
 
         String body = httpGet("/metrics");
-        // Python metric names required by the Grafana dashboard.
+        // Production names where units and lifecycle semantics match.
         for (String metric : new String[]{
-                "mock_engine_up", "mock_engine_running", "mock_engine_waiting",
+                "rtp_llm_running_stream_size", "rtp_llm_wait_stream_size",
                 "mock_engine_accepted_total", "mock_engine_completed_total",
-                "mock_engine_cancelled_total", "mock_engine_cache_keys",
-                "mock_engine_cache_evictions_total", "mock_engine_active_kv_tokens",
-                "mock_engine_available_kv_tokens", "mock_engine_rpc_total",
-                "mock_engine_prefill_ms_avg", "mock_engine_decode_ms_p99"}) {
+                "mock_engine_cache_evictions_total",
+                "mock_engine_prefill_ms_avg", "mock_engine_decode_ms_avg"}) {
             assertTrue(body.contains(metric), "/metrics should contain " + metric);
         }
         // Aggregated mode uses role-only labels.
@@ -518,7 +530,7 @@ class PythonCompatControlApiTest {
                 "aggregated prefill accepted should be 2:\n" + body);
         assertTrue(body.contains("mock_engine_completed_total{role=\"decode\"} 2"),
                 "aggregated decode completed should be 2");
-        assertTrue(body.contains("mock_engine_rpc_total{role=\"prefill\",rpc_method=\"enqueue_batch\"} 1"));
+        assertRemovedMetricsAbsent(body);
         assertFalse(body.contains("rtp_llm_context_tps{role=\"decode\"}"));
         assertFalse(body.contains("rtp_llm_generate_tps{role=\"prefill\"}"));
         assertFalse(body.contains("mock_engine_prefill_ms_avg{role=\"decode\"}"));
@@ -536,11 +548,9 @@ class PythonCompatControlApiTest {
         String body = httpGet("/metrics?per_engine=true");
         String expectedLabels = "engine_name=\"prefill-0\",role=\"prefill\","
                 + "grpc_port=\"" + prefill.getGrpcPort() + "\",engine_ip=\"127.0.0.1\"";
-        assertTrue(body.contains("mock_engine_up{" + expectedLabels + "} 1"),
-                "per-engine up series expected:\n" + body);
+        assertRemovedMetricsAbsent(body);
+        assertTrue(body.contains("rtp_llm_running_stream_size{" + expectedLabels + "} 0"));
         assertTrue(body.contains("mock_engine_accepted_total{" + expectedLabels + "} 1"));
-        assertTrue(body.contains("mock_engine_rpc_total{" + expectedLabels
-                + ",rpc_method=\"enqueue_batch\"} 1"));
         assertTrue(body.contains("mock_engine_completed_total{engine_name=\"decode-0\","
                 + "role=\"decode\",grpc_port=\"" + decodeServices.get(0).getGrpcPort()
                 + "\",engine_ip=\"127.0.0.1\"} 1"));

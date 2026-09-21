@@ -42,43 +42,31 @@ import urllib.request
 # the KV v2 block-pool family (three-state block gauges + admission /
 # reuse / eviction counters; consumed by aggregate kv_blocks_ts_by_role
 # and the report-layer 5. KV 块池面板 — dead-key discipline: every
-# entry below is consumer-backed or explicitly P1-committed, nothing
+# entry below is consumer-backed, nothing
 # else is admissible).
 MOCK_KEEP_SERIES = {
-    "mock_engine_running",
-    "mock_engine_waiting",
+    "rtp_llm_running_stream_size",
+    "rtp_llm_wait_stream_size",
     "rtp_llm_context_tps",
     "rtp_llm_context_tps_with_cache",
     "rtp_llm_generate_tps",
-    "mock_engine_cache_blocks",
-    "mock_engine_available_blocks",
+    "rtp_llm_kv_cache_pool_total_blocks",
+    "rtp_llm_kv_cache_pool_available_blocks",
     "mock_engine_held_blocks",
     "mock_engine_referenced_blocks",
     "mock_engine_cache_evictions_total",
     "mock_engine_kv_admission_fails_total",
     "mock_engine_lack_mem_rejects_total",
     "mock_engine_decode_reuse_blocks_total",
-    # Key-level cache-hit pair (production recent_cache_key_hit_count /
-    # total_count caliber): cumulative counters recorded at the prefill
+    # Mock key-level cache-hit pair: cumulative counters recorded at the prefill
     # admission hit computation; consumed by aggregate cache_hit_ts /
     # cache_hit_summary and the report-layer cache 命中率面板.
     "mock_engine_cache_key_hits_total",
     "mock_engine_cache_keys_requested_total",
-    # Per-engine exec_ms family (prefill/decode execution-time gauges,
-    # MockControlServer.appendPerEngineMetrics): the avg pair is
-    # consumer-backed (aggregate balance_ts_by_engine.exec_ms passes it
-    # through as the prefill_avg/decode_avg per-engine series); the
-    # p99/count quartet is explicitly P1-committed — the
-    # balance-metrics-v2 P1 derived-score layer (design §1.2 dim 4,
-    # count-weighted differential) rides the same G1 timeline and needs
-    # the count series as its weighting input, so these stay whitelisted
-    # as committed inputs rather than dead keys.
+    # Simulated execution means consumed by balance_ts_by_engine.exec_ms.
+    # p99/count had no downstream calculation; snapshot diagnostics retain them.
     "mock_engine_prefill_ms_avg",
-    "mock_engine_prefill_ms_p99",
-    "mock_engine_prefill_ms_count",
     "mock_engine_decode_ms_avg",
-    "mock_engine_decode_ms_p99",
-    "mock_engine_decode_ms_count",
 }
 
 # G3 C whitelist — every entry is a consumer-backed series (B3 queue curves,
@@ -156,9 +144,7 @@ def run_mock_per_engine_poller(port, out_path, interval_s):
                 with urllib.request.urlopen(url, timeout=2) as response:
                     body = response.read().decode("utf-8", "replace")
                 # C: keep only the analyzer-consumed series — the raw
-                # endpoint still emits the full ~25-per-engine surface (server
-                # cost unchanged), but the appended bytes drop to a small
-                # fraction of it.
+                # endpoint also emits counters used only by scenario analysis.
                 kept = [
                     line
                     for line in body.splitlines()

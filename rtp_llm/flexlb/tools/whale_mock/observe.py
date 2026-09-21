@@ -17,12 +17,19 @@ def read_metrics(url):
         )
         if match:
             values[match[2] + "." + match[1]] = float(match[3])
-        match = re.fullmatch(
-            r'mock_engine_rpc_total\{role="(prefill|decode)",rpc_method="fetch_response"\} (\S+)',
-            line,
-        )
-        if match:
-            values[match[1] + ".fetch_response"] = float(match[2])
+    # Fetch is a protocol invariant, not a dashboard series. Read the existing
+    # diagnostic snapshot; absent role/counter data must never mean zero Fetches.
+    with urllib.request.urlopen(url.rstrip("/") + "/snapshot", timeout=5) as response:
+        snapshot = json.load(response)
+    for engine in snapshot["engines"]:
+        role = engine["role"]
+        if role not in {"prefill", "decode"}:
+            continue
+        count = engine["rpc_counts"]["fetch_response"]
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError("invalid Fetch counter in snapshot")
+        key = role + ".fetch_response"
+        values[key] = values.get(key, 0) + count
     return values
 
 

@@ -201,6 +201,19 @@ class MathTests(unittest.TestCase):
 
 
 class PromParsingTests(unittest.TestCase):
+    def test_recent_token_gauges_are_not_cumulative_key_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "prom.jsonl"
+            path.write_text("\n".join(json.dumps({
+                "t": t,
+                "rtp_llm_prefill_worker_recent_cache_key_hit_count": 32 * t,
+                "rtp_llm_prefill_worker_recent_cache_key_total_count": 64 * t,
+                "rtp_llm_prefill_worker_recent_cache_key_hit_ratio": 0.5,
+            }) for t in (1, 2, 3)))
+            side = ct.SideData("real", "real")
+            ct._load_prom_series(side, str(path))
+            self.assertNotIn("cache_hit_key_pct", side.series)
+
     def test_long_wide_and_mixed_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "prom_export.jsonl"

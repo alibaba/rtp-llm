@@ -86,6 +86,10 @@ class MockRemoteDecodeEngineTest {
             stream.allocated().get(3, TimeUnit.SECONDS);
             assertEquals(1024, decode.getOccupiedKvTokens());
             assertEquals(0, decode.getActiveDecodeCount());
+            assertEquals(1, decode.getMetricsSnapshot().get("running"),
+                    "lifecycle inventory still includes the allocated reservation");
+            assertEquals(0, decode.getMetricsSnapshot().get("scheduler_running"),
+                    "Prometheus scheduler gauge must exclude allocated reservations");
             var metrics = decode.whaleMetrics();
             assertEquals(0, metrics.get("rtp_llm_running_stream_size").intValue());
             assertEquals(0, metrics.get("rtp_llm_wait_stream_size").intValue(),

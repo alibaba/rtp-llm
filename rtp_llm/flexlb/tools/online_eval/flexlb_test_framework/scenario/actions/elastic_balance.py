@@ -190,8 +190,8 @@ def points(window, names, metric, start=None, end=None):
             if not isinstance(row, dict):
                 raise ValueError(f"balance window lacks engine {name}")
             if metric == "occupancy":
-                total, available = row.get("mock_engine_cache_blocks"), row.get(
-                    "mock_engine_available_blocks"
+                total, available = row.get("rtp_llm_kv_cache_pool_total_blocks"), row.get(
+                    "rtp_llm_kv_cache_pool_available_blocks"
                 )
                 if (
                     any(
@@ -353,7 +353,7 @@ def verdict(ctx, params, deadline):
     tail_share = shares(steady, survivors, tail)
     base_spread = spread(points(base, old, "occupancy"))
     occ = points(steady, survivors, "occupancy", tail)
-    depth = points(steady, survivors, "mock_engine_waiting", tail)
+    depth = points(steady, survivors, "rtp_llm_wait_stream_size", tail)
     cap = max(max(base_share.values()) + 0.10, 1 / 3 + 0.15)
     subshares = {n: [] for n in survivors}
     for i in range(20):

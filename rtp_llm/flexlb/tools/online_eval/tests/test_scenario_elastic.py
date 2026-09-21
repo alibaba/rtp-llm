@@ -269,9 +269,9 @@ class ElasticMetricTests(unittest.TestCase):
                             role="prefill",
                             mock_engine_cache_key_hits_total=second * 9,
                             mock_engine_cache_keys_requested_total=second * 10,
-                            mock_engine_waiting=1,
-                            mock_engine_cache_blocks=100,
-                            mock_engine_available_blocks=20,
+                            rtp_llm_wait_stream_size=1,
+                            rtp_llm_kv_cache_pool_total_blocks=100,
+                            rtp_llm_kv_cache_pool_available_blocks=20,
                         )
                     },
                 )

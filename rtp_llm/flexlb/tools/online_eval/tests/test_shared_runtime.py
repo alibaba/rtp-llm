@@ -95,15 +95,15 @@ class SharedRuntimeTests(unittest.TestCase):
     def test_balance_filter_retains_parser_skip_and_timestamp_semantics(self):
         body = "\n".join(
             [
-                "# HELP mock_engine_running running",
-                'mock_engine_running{engine_name="P0",role="PREFILL",} 3 12345',
-                'mock_engine_running{engine_name="P1"} invalid',
+                "# HELP rtp_llm_running_stream_size running",
+                'rtp_llm_running_stream_size{engine_name="P0",role="PREFILL",} 3 12345',
+                'rtp_llm_running_stream_size{engine_name="P1"} invalid',
                 "unrelated 4",
             ]
         )
-        sample = ("mock_engine_running", {"engine_name": "P0", "role": "PREFILL"}, 3.0)
+        sample = ("rtp_llm_running_stream_size", {"engine_name": "P0", "role": "PREFILL"}, 3.0)
         self.assertEqual(
-            parse_prometheus_samples(body, "mock_engine_", {"role": "PREFILL"}),
+            parse_prometheus_samples(body, "rtp_llm_", {"role": "PREFILL"}),
             [sample],
         )
         self.assertEqual(_parse_per_engine_lines(body), [sample])

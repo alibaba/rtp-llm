@@ -39,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code /metrics} in BOTH emission modes (per-engine and role-aggregated):
  *
  * <ul>
- *   <li>{@code mock_engine_cache_blocks} / {@code available_blocks} /
+ *   <li>{@code rtp_llm_kv_cache_pool_total_blocks} / {@code available_blocks} /
  *       {@code held_blocks} / {@code referenced_blocks} — the three-state block
  *       decomposition as per-scrape GAUGES (prefill leases hold keyless blocks
  *       mid-flight; completion hands them to the LRU restoring availability;
@@ -159,7 +159,7 @@ class BlockPoolMetricsObservabilityTest {
                 "the decode bucket must carry no prefill rejection");
         assertEquals(null, byRole.get("mock_engine_kv_admission_fails_total").get("decode"),
                 "the decode bucket must carry no admission failure");
-        assertEquals(10L, byRole.get("mock_engine_cache_blocks").getOrDefault("prefill", -1L),
+        assertEquals(10L, byRole.get("rtp_llm_kv_cache_pool_total_blocks").getOrDefault("prefill", -1L),
                 "aggregated cache_blocks = the role's pool total");
 
         // A serviceable request afterwards: the counter holds (no double
@@ -200,14 +200,14 @@ class BlockPoolMetricsObservabilityTest {
         Map<String, Map<Integer, Long>> mid =
                 parsePerEngineMetrics(httpGet(controlPort(), "/metrics?per_engine=true"));
         int prefillPort = prefill.getGrpcPort();
-        assertEquals(100L, mid.get("mock_engine_cache_blocks").getOrDefault(prefillPort, -1L),
+        assertEquals(100L, mid.get("rtp_llm_kv_cache_pool_total_blocks").getOrDefault(prefillPort, -1L),
                 "the pool size gauge is the configured block count");
         assertEquals(3L, mid.get("mock_engine_held_blocks").getOrDefault(prefillPort, -1L),
                 "the in-flight lease holds its 3 keyless blocks");
         assertEquals(0L, mid.get("mock_engine_referenced_blocks")
                         .getOrDefault(prefillPort, -1L),
                 "fresh keys carry no references");
-        assertEquals(97L, mid.get("mock_engine_available_blocks")
+        assertEquals(97L, mid.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(prefillPort, -1L),
                 "held blocks leave the available set");
 
@@ -223,7 +223,7 @@ class BlockPoolMetricsObservabilityTest {
         assertEquals(0L, done.get("mock_engine_referenced_blocks")
                         .getOrDefault(prefillPort, -1L),
                 "no in-flight references remain");
-        assertEquals(100L, done.get("mock_engine_available_blocks")
+        assertEquals(100L, done.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(prefillPort, -1L),
                 "parked pure-LRU keys count as available (release != delete)");
     }
@@ -390,7 +390,7 @@ class BlockPoolMetricsObservabilityTest {
         assertEquals(0L, metrics.get("mock_engine_held_blocks")
                         .getOrDefault(decodePort, -1L),
                 "no lease residue on the pool");
-        assertEquals(10L, metrics.get("mock_engine_available_blocks")
+        assertEquals(10L, metrics.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(decodePort, -1L),
                 "the pool is fully available again");
         assertEquals(0, MockEngineTestSupport.activeDecodeRequests(decode),
@@ -458,7 +458,7 @@ class BlockPoolMetricsObservabilityTest {
         assertEquals(0L, metrics.get("mock_engine_held_blocks")
                         .getOrDefault(decodePort, -1L),
                 "no D lease residue");
-        assertEquals(10L, metrics.get("mock_engine_available_blocks")
+        assertEquals(10L, metrics.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(decodePort, -1L),
                 "the D pool is untouched (the failed acquire changed no state)");
         assertEquals(0, MockEngineTestSupport.activeDecodeRequests(decode),
@@ -505,7 +505,7 @@ class BlockPoolMetricsObservabilityTest {
         assertEquals(4L, reserved.get("mock_engine_held_blocks")
                         .getOrDefault(decodePort, -1L),
                 "the P-enqueue reservation holds the SAME 4 blocks on the D pool");
-        assertEquals(16L, reserved.get("mock_engine_available_blocks")
+        assertEquals(16L, reserved.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(decodePort, -1L),
                 "reserved blocks leave the D pool's available set");
         assertEquals(0L, reserved.get("mock_engine_kv_admission_fails_total")
@@ -528,7 +528,7 @@ class BlockPoolMetricsObservabilityTest {
                 "adoption must reuse the reserved blocks (held 4..5 with the "
                         + "26-token growth, never doubled 8+), got " + heldWhileDecoding);
         assertEquals(20L - heldWhileDecoding,
-                decoding.get("mock_engine_available_blocks")
+                decoding.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(decodePort, -1L),
                 "the D pool keeps capacity conservation while decoding");
 
@@ -539,7 +539,7 @@ class BlockPoolMetricsObservabilityTest {
                 parsePerEngineMetrics(httpGet(controlPort(), "/metrics?per_engine=true"));
         assertEquals(0L, done.get("mock_engine_held_blocks").getOrDefault(decodePort, -1L),
                 "completion returns the lease");
-        assertEquals(20L, done.get("mock_engine_available_blocks")
+        assertEquals(20L, done.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(decodePort, -1L),
                 "parked pure-LRU keys count as available (admit != delete)");
         assertEquals(0L, done.get("mock_engine_kv_admission_fails_total")

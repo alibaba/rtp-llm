@@ -1102,8 +1102,7 @@ public final class JavaMockEngineCluster {
          *  drained): /metrics carries it as mock_engine_decode_reuse_blocks_total,
          *  /snapshot as decode_reuse_blocks. */
         private final LongAdder decodeReuseBlocks = new LongAdder();
-        /** Key-level cache-hit observability (production recent_cache_key_hit_count /
-         *  total_count caliber): cumulative counters recorded at the prefill
+        /** Mock key-level cache-hit observability: cumulative counters recorded at the prefill
          *  admission hit computation (MockPerformanceModel.shape's prefixHitBlocks
          *  call — BOTH the enqueue-batch path and the direct generate_stream
          *  path). cacheKeyHits = Σ raw prefix-match run lengths (keys),
@@ -6509,6 +6508,9 @@ public final class JavaMockEngineCluster {
             snap.put("grpc_addr", host + ":" + grpcPort);
             snap.put("http_addr", host + ":" + (grpcPort - 1));
             snap.put("running", runningTasks.size());
+            // Lifecycle inventory above includes queued/allocated requests. The real
+            // scheduler gauge counts only executing streams, as in whaleMetrics().
+            snap.put("scheduler_running", activePrefillRequests.get() + activeDecodeRequests.get());
             // Python: max(_injected_queue_depth, _prefill_waiting). Java has no fake injected
             // depth (see /set_queue_depth note), so this is the real waiting count.
             // For decode engines, report the decode pending queue depth (consistent

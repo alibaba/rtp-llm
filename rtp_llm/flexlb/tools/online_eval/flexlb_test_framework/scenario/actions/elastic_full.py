@@ -379,7 +379,7 @@ def steady(ctx, params, deadline):
     ss_share = shares(ss, names)
     tail = ss["start_s"] + 40
     occ = points(ss, names, "occupancy", tail)
-    depth = points(ss, names, "mock_engine_waiting", tail)
+    depth = points(ss, names, "rtp_llm_wait_stream_size", tail)
     occ_cap = spread(points(base, ["decode-0", "decode-1"], "occupancy")) + 0.05
     cap = max(max(bs.values()) + 0.10, 0.65)
     checks = dict(

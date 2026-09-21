@@ -16,7 +16,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
@@ -998,30 +997,20 @@ final class MockControlServer {
     // ────────────────── Metrics builders ──────────────────
 
     /**
-     * HELP/TYPE lines for the Python metric set (legacy ~L825-877 / ~L1344-1396).
+     * HELP/TYPE lines for the supported metrics contract (see METRICS.md).
      */
     private static void appendMetricsMeta(StringBuilder sb) {
         String[][] meta = {
                 {"mock_context_compute_tokens_total", "cumulative computed input tokens", "counter"},
                 {"mock_context_tokens_total", "cumulative input tokens including hits", "counter"},
                 {"mock_generate_tokens_total", "cumulative output tokens of completed requests", "counter"},
-                {"mock_engine_up", "1 if engine is running, 0 if stopped", "gauge"},
-                {"mock_engine_running", "current running requests", "gauge"},
-                {"mock_engine_waiting", "current waiting requests", "gauge"},
+                {"rtp_llm_running_stream_size", "currently executing scheduler streams", "gauge"},
+                {"rtp_llm_wait_stream_size", "scheduler waiting streams (excludes pre-GENERATE decode reservations)", "gauge"},
                 {"mock_engine_accepted_total", "total accepted requests", "counter"},
                 {"mock_engine_completed_total", "total completed requests", "counter"},
-                {"mock_engine_cancelled_total", "total cancelled requests", "counter"},
-                {"mock_engine_cache_keys", "number of cache keys", "gauge"},
                 {"mock_engine_cache_evictions_total", "total cache evictions", "counter"},
-                {"mock_engine_active_kv_tokens", "active KV cache tokens", "gauge"},
-                {"mock_engine_available_kv_tokens", "available KV cache tokens", "gauge"},
-                {"mock_engine_rpc_total", "total RPC calls by method", "counter"},
                 {"mock_engine_prefill_ms_avg", "average prefill execution time in ms", "gauge"},
-                {"mock_engine_prefill_ms_p99", "p99 prefill execution time in ms", "gauge"},
-                {"mock_engine_prefill_ms_count", "number of prefill samples", "gauge"},
                 {"mock_engine_decode_ms_avg", "average decode execution time in ms", "gauge"},
-                {"mock_engine_decode_ms_p99", "p99 decode execution time in ms", "gauge"},
-                {"mock_engine_decode_ms_count", "number of decode samples", "gauge"},
                 // Production-caliber TPS series (pure accounting on completion
                 // events; window = scrape interval, 1s under the G1 poller).
                 // Same metric names as the real engine (RtpLLMMetrics) so mock
@@ -1035,18 +1024,17 @@ final class MockControlServer {
                 // (prefill rejects synchronously, decode degrades un-pooled
                 // and stalls growth; decode reuse = the fix #5 net-demand
                 // deduction against the engine's own LRU).
-                {"mock_engine_cache_blocks", "total block-pool size in blocks", "gauge"},
-                {"mock_engine_available_blocks", "available blocks (free + pure-LRU, held excluded)", "gauge"},
+                {"rtp_llm_kv_cache_pool_total_blocks", "total block-pool size in blocks", "gauge"},
+                {"rtp_llm_kv_cache_pool_available_blocks", "available blocks (free + pure-LRU, held excluded)", "gauge"},
                 {"mock_engine_held_blocks", "blocks held by in-flight requests", "gauge"},
                 {"mock_engine_referenced_blocks", "cache-key blocks referenced by in-flight requests", "gauge"},
                 {"mock_engine_kv_admission_fails_total", "total decode KV admission/growth failures, RETRYABLE family (temporarily short; 8211 terminals after the ALLOCATE retry window)", "counter"},
                 {"mock_engine_lack_mem_rejects_total", "total LACK_MEM rejections, PERMANENT family (never fits) + prefill pool 602 surface", "counter"},
                 {"mock_engine_decode_reuse_blocks_total", "total decode prefix-reuse blocks (own-LRU net-demand deduction)", "counter"},
-                // Key-level cache-hit observability (recent_cache_key_hit_count /
-                // total_count production caliber): cumulative counters recorded at
+                // Mock key-level cache-hit observability: cumulative counters recorded at
                 // the prefill admission hit computation (shape()'s prefixHitBlocks
                 // call). hit ratio = hits/requested, both per-engine + role.
-                {"mock_engine_cache_key_hits_total", "total prefix-matched cache keys at prefill admission (recent_cache_key_hit caliber)", "counter"},
+                {"mock_engine_cache_key_hits_total", "total prefix-matched cache keys at prefill admission", "counter"},
                 {"mock_engine_cache_keys_requested_total", "total request block keys observed at prefill admission (empty-bh adds 0)", "counter"},
         };
         for (String[] m : meta) {
@@ -1072,26 +1060,13 @@ final class MockControlServer {
                     escapeLabel(service.getRoleName().toLowerCase()),
                     service.getGrpcPort(),
                     escapeLabel(service.getHost()));
-            sb.append(String.format("mock_engine_up{%s} %d%n", labels, service.isStopped() ? 0 : 1));
-            sb.append(String.format("mock_engine_running{%s} %s%n", labels, snap.get("running")));
-            sb.append(String.format("mock_engine_waiting{%s} %s%n", labels, snap.get("waiting")));
+            sb.append(String.format("rtp_llm_running_stream_size{%s} %s%n", labels, snap.get("scheduler_running")));
+            sb.append(String.format("rtp_llm_wait_stream_size{%s} %s%n", labels, snap.get("waiting")));
             sb.append(String.format("mock_engine_accepted_total{%s} %s%n", labels, snap.get("accepted")));
             sb.append(String.format("mock_engine_completed_total{%s} %s%n", labels, snap.get("completed")));
-            sb.append(String.format("mock_engine_cancelled_total{%s} %s%n", labels, snap.get("cancelled_count")));
-            sb.append(String.format("mock_engine_cache_keys{%s} %s%n", labels, snap.get("cache_keys")));
             sb.append(String.format("mock_engine_cache_evictions_total{%s} %s%n", labels, snap.get("cache_evictions")));
-            sb.append(String.format("mock_engine_active_kv_tokens{%s} %s%n", labels, snap.get("active_kv_tokens")));
-            sb.append(String.format("mock_engine_available_kv_tokens{%s} %s%n", labels, snap.get("available_kv_tokens")));
-            @SuppressWarnings("unchecked")
-            Map<String, Object> rpcCounts = (Map<String, Object>) snap.get("rpc_counts");
-            for (Map.Entry<String, Object> entry : rpcCounts.entrySet()) {
-                sb.append(String.format("mock_engine_rpc_total{%s,rpc_method=\"%s\"} %s%n",
-                        labels, escapeLabel(entry.getKey()), entry.getValue()));
-            }
             if ("prefill".equalsIgnoreCase(service.getRoleName())) {
                 sb.append(String.format("mock_engine_prefill_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("prefill_ms_avg"))));
-                sb.append(String.format("mock_engine_prefill_ms_p99{%s} %.1f%n", labels, asDouble(snap.get("prefill_ms_p99"))));
-                sb.append(String.format("mock_engine_prefill_ms_count{%s} %s%n", labels, snap.get("prefill_ms_count")));
                 for (String name : List.of("context_compute_tokens_total", "context_tokens_total")) {
                     sb.append(String.format("mock_%s{%s} %s%n", name, labels, snap.get(name)));
                 }
@@ -1099,15 +1074,13 @@ final class MockControlServer {
                 sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %s%n", labels, snap.get("context_tps_with_cache")));
             } else if ("decode".equalsIgnoreCase(service.getRoleName())) {
                 sb.append(String.format("mock_engine_decode_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_avg"))));
-                sb.append(String.format("mock_engine_decode_ms_p99{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_p99"))));
-                sb.append(String.format("mock_engine_decode_ms_count{%s} %s%n", labels, snap.get("decode_ms_count")));
                 sb.append(String.format("mock_generate_tokens_total{%s} %s%n", labels, snap.get("generate_tokens_total")));
                 sb.append(String.format("rtp_llm_generate_tps{%s} %s%n", labels, snap.get("generate_tps")));
             }
             // Block-pool observability (KV v2): gauges + cumulative counters,
             // same snapshot fields the /snapshot endpoint exposes.
-            sb.append(String.format("mock_engine_cache_blocks{%s} %s%n", labels, snap.get("cache_blocks")));
-            sb.append(String.format("mock_engine_available_blocks{%s} %s%n", labels, snap.get("available_blocks")));
+            sb.append(String.format("rtp_llm_kv_cache_pool_total_blocks{%s} %s%n", labels, snap.get("cache_blocks")));
+            sb.append(String.format("rtp_llm_kv_cache_pool_available_blocks{%s} %s%n", labels, snap.get("available_blocks")));
             sb.append(String.format("mock_engine_held_blocks{%s} %s%n", labels, snap.get("held_blocks")));
             sb.append(String.format("mock_engine_referenced_blocks{%s} %s%n", labels, snap.get("referenced_blocks")));
             sb.append(String.format("mock_engine_kv_admission_fails_total{%s} %s%n", labels, snap.get("kv_admission_fails")));
@@ -1124,8 +1097,8 @@ final class MockControlServer {
     /**
      * Default mode: series aggregated per role with a single {@code role} label,
      * mirroring the legacy Python generate_aggregated_prometheus_metrics
-     * ~L882-958) — sums for counters/gauges, weighted avg and max-of-p99 for
-     * latency, sorted rpc_method labels.
+     * ~L882-958) — sums for counters/gauges, sample-count weighted avg for
+     * latency.
      */
     private static void appendAggregatedMetrics(StringBuilder sb, List<Map<String, Object>> snaps) {
         Map<String, List<Map<String, Object>>> buckets = new LinkedHashMap<>();
@@ -1144,17 +1117,11 @@ final class MockControlServer {
             }
             String label = "role=\"" + bucket.getKey() + "\"";
 
-            long up = group.stream().filter(e -> !Boolean.TRUE.equals(e.get("stopped"))).count();
-            sb.append(String.format("mock_engine_up{%s} %d%n", label, up));
-            sb.append(String.format("mock_engine_running{%s} %d%n", label, sumLong(group, "running")));
-            sb.append(String.format("mock_engine_waiting{%s} %d%n", label, sumLong(group, "waiting")));
+            sb.append(String.format("rtp_llm_running_stream_size{%s} %d%n", label, sumLong(group, "scheduler_running")));
+            sb.append(String.format("rtp_llm_wait_stream_size{%s} %d%n", label, sumLong(group, "waiting")));
             sb.append(String.format("mock_engine_accepted_total{%s} %d%n", label, sumLong(group, "accepted")));
             sb.append(String.format("mock_engine_completed_total{%s} %d%n", label, sumLong(group, "completed")));
-            sb.append(String.format("mock_engine_cancelled_total{%s} %d%n", label, sumLong(group, "cancelled_count")));
-            sb.append(String.format("mock_engine_cache_keys{%s} %d%n", label, sumLong(group, "cache_keys")));
             sb.append(String.format("mock_engine_cache_evictions_total{%s} %d%n", label, sumLong(group, "cache_evictions")));
-            sb.append(String.format("mock_engine_active_kv_tokens{%s} %d%n", label, sumLong(group, "active_kv_tokens")));
-            sb.append(String.format("mock_engine_available_kv_tokens{%s} %d%n", label, sumLong(group, "available_kv_tokens")));
             if ("prefill".equals(bucket.getKey())) {
                 for (String name : List.of("context_compute_tokens_total", "context_tokens_total")) {
                     sb.append(String.format("mock_%s{%s} %d%n", name, label, sumLong(group, name)));
@@ -1168,8 +1135,8 @@ final class MockControlServer {
             // Block-pool observability (KV v2): blocks and cumulative counters
             // sum across engines (role-level pool totals; the report layer
             // derives per-engine averages via its engine-count chain).
-            sb.append(String.format("mock_engine_cache_blocks{%s} %d%n", label, sumLong(group, "cache_blocks")));
-            sb.append(String.format("mock_engine_available_blocks{%s} %d%n", label, sumLong(group, "available_blocks")));
+            sb.append(String.format("rtp_llm_kv_cache_pool_total_blocks{%s} %d%n", label, sumLong(group, "cache_blocks")));
+            sb.append(String.format("rtp_llm_kv_cache_pool_available_blocks{%s} %d%n", label, sumLong(group, "available_blocks")));
             sb.append(String.format("mock_engine_held_blocks{%s} %d%n", label, sumLong(group, "held_blocks")));
             sb.append(String.format("mock_engine_referenced_blocks{%s} %d%n", label, sumLong(group, "referenced_blocks")));
             sb.append(String.format("mock_engine_kv_admission_fails_total{%s} %d%n", label, sumLong(group, "kv_admission_fails")));
@@ -1179,21 +1146,6 @@ final class MockControlServer {
                 sb.append(String.format("mock_engine_cache_keys_requested_total{%s} %d%n", label, sumLong(group, "cache_keys_requested")));
             } else {
                 sb.append(String.format("mock_engine_decode_reuse_blocks_total{%s} %d%n", label, sumLong(group, "decode_reuse_blocks")));
-            }
-
-            Map<String, Long> rpcTotals = new TreeMap<>();
-            for (Map<String, Object> e : group) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> rpcCounts = (Map<String, Object>) e.get("rpc_counts");
-                if (rpcCounts != null) {
-                    for (Map.Entry<String, Object> entry : rpcCounts.entrySet()) {
-                        rpcTotals.merge(entry.getKey(), ((Number) entry.getValue()).longValue(), Long::sum);
-                    }
-                }
-            }
-            for (Map.Entry<String, Long> entry : rpcTotals.entrySet()) {
-                sb.append(String.format("mock_engine_rpc_total{role=\"%s\",rpc_method=\"%s\"} %d%n",
-                        bucket.getKey(), escapeLabel(entry.getKey()), entry.getValue()));
             }
 
             appendLatencyAggregates(sb, label, group, bucket.getKey());
@@ -1211,13 +1163,7 @@ final class MockControlServer {
             }
             avg = weighted / totalCount;
         }
-        double p99 = 0.0;
-        for (Map<String, Object> e : group) {
-            p99 = Math.max(p99, asDouble(e.get(kind + "_ms_p99")));
-        }
         sb.append(String.format("mock_engine_%s_ms_avg{%s} %.1f%n", kind, label, avg));
-        sb.append(String.format("mock_engine_%s_ms_p99{%s} %.1f%n", kind, label, p99));
-        sb.append(String.format("mock_engine_%s_ms_count{%s} %d%n", kind, label, totalCount));
     }
 
     private static long sumLong(List<Map<String, Object>> group, String key) {

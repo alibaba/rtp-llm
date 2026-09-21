@@ -561,8 +561,7 @@ final class MockPerformanceModel {
             }
         }
         // hitBlocks carries the RAW prefix-match run length (key count) — the
-        // key-level cache-hit caliber (production recent_cache_key_hit_count /
-        // total_count analogue) recorded by the engine at this admission hit
+        // mock key-level cache-hit counter recorded by the engine at this admission hit
         // computation point. Unlike hitTokens it is NOT clamped to inputLen, so
         // a trace whose bh keys exceed the request's own block count keeps an
         // honest requested/hit key pair.

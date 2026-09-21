@@ -181,8 +181,8 @@ class FullTests(unittest.TestCase):
                         time_s=t,
                         engines={
                             "survivor": dict(
-                                mock_engine_cache_blocks=1000,
-                                mock_engine_available_blocks=available,
+                                rtp_llm_kv_cache_pool_total_blocks=1000,
+                                rtp_llm_kv_cache_pool_available_blocks=available,
                                 mock_engine_lack_mem_rejects_total=0,
                                 mock_engine_kv_admission_fails_total=(
                                     rejects if t == 20 else 0
@@ -328,9 +328,9 @@ class FullTests(unittest.TestCase):
                                     and t >= state["stop_at"]
                                     else 0
                                 ),
-                                mock_engine_cache_blocks=24,
-                                mock_engine_available_blocks=20,
-                                mock_engine_waiting=(
+                                rtp_llm_kv_cache_pool_total_blocks=24,
+                                rtp_llm_kv_cache_pool_available_blocks=20,
+                                rtp_llm_wait_stream_size=(
                                     3
                                     if stop_queue
                                     and state.get("stop_at") is not None

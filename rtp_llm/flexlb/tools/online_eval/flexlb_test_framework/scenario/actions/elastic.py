@@ -850,9 +850,9 @@ METRICS = {
     "mock_engine_kv_admission_fails_total",
     "mock_engine_cache_key_hits_total",
     "mock_engine_cache_keys_requested_total",
-    "mock_engine_waiting",
-    "mock_engine_available_blocks",
-    "mock_engine_cache_blocks",
+    "rtp_llm_wait_stream_size",
+    "rtp_llm_kv_cache_pool_available_blocks",
+    "rtp_llm_kv_cache_pool_total_blocks",
     "rtp_llm_context_tps",
     "rtp_llm_generate_tps",
 }
@@ -1042,11 +1042,11 @@ def metric_window(data, start, end, survivor=None):
         waiting, occupancy = [], []
         for sample in samples:
             values = sample["engines"][survivor]
-            total = values["mock_engine_cache_blocks"]
-            available = values["mock_engine_available_blocks"]
+            total = values["rtp_llm_kv_cache_pool_total_blocks"]
+            available = values["rtp_llm_kv_cache_pool_available_blocks"]
             if total <= 0 or not 0 <= available <= total:
                 raise ValueError("invalid KV block gauge")
-            waiting.append(values["mock_engine_waiting"])
+            waiting.append(values["rtp_llm_wait_stream_size"])
             occupancy.append(1 - available / total)
         result.update(waiting_peak=max(waiting), occupancy_peak=max(occupancy))
     return result

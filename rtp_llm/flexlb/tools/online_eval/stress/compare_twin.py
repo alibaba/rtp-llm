@@ -110,7 +110,6 @@ PROM_SERIES_CANDIDATES = {
     "cache_hit_key_pct": (
         "engine_key_hit_pct",
         "cache_hit_key_pct",
-        "recent_cache_key_hit_ratio",
     ),
     "kv_used_pct": (
         "kv_cache_used_pct",
@@ -128,8 +127,8 @@ PROM_RATIO_PAIRS = {
         ("engine_input_tokens", "cache_input_tokens", "input_tokens"),
     ),
     "cache_hit_key_pct": (
-        ("cache_key_hits", "recent_cache_key_hit_count", "key_hits"),
-        ("cache_keys_requested", "recent_cache_total_count", "keys_requested"),
+        ("cache_key_hits", "key_hits"),
+        ("cache_keys_requested", "keys_requested"),
     ),
     "kv_used_pct": (
         ("kv_used_tokens", "used_tokens"),

@@ -1518,7 +1518,7 @@ def _ts_role_ip_split(groups, base_name):
     """[{ts, metrics}] timeline -> {role: {engineIp: [(epoch_ms, value)]}}.
 
     Splits a per-engine metric carrying both role and engineIp tags (e.g.
-    app.flexlb.batcher.queue.size / mock_engine_running) by the two labels
+    app.flexlb.batcher.queue.size / rtp_llm_running_stream_size) by the two labels
     at once. Series missing either label are skipped.
     """
     role_re = re.compile(r'(?:^|,)role="([^"]*)"(?:,|$)')
@@ -2212,9 +2212,12 @@ if batcher_role_series:
 # 引擎侧 running / waiting（mock_per_engine_timeseries.json.gz，mock 引擎
 # 自身上报的 per-engine gauge，1s 采样）。
 for _side, _role_tag in (("p", "prefill"), ("d", "decode")):
-    for _metric in ("running", "waiting"):
+    for _metric, _series_name in (
+        ("running", "rtp_llm_running_stream_size"),
+        ("waiting", "rtp_llm_wait_stream_size"),
+    ):
         _series = (
-            _ts_role_ip_split(mock_per_engine_ts, "mock_engine_" + _metric).get(
+            _ts_role_ip_split(mock_per_engine_ts, _series_name).get(
                 _role_tag
             )
             or {}
@@ -2266,8 +2269,8 @@ mock_tps_ts = [{"t": t, **vals} for t, vals in rel_axis(sorted(_tps_by_ts.items(
 #     （KV v2 fix #5 净需求折减量，“越用省越多”正反馈的直接读数）。
 # 旧 run（白名单未含该系列）→ 空表 → 报告层整节静默省略。
 _KV_BLOCK_COLUMNS = {
-    "mock_engine_cache_blocks": "total_blocks",
-    "mock_engine_available_blocks": "available_blocks",
+    "rtp_llm_kv_cache_pool_total_blocks": "total_blocks",
+    "rtp_llm_kv_cache_pool_available_blocks": "available_blocks",
     "mock_engine_held_blocks": "held_blocks",
     "mock_engine_referenced_blocks": "referenced_blocks",
     "mock_engine_cache_evictions_total": "cache_evictions",
@@ -2298,7 +2301,7 @@ kv_blocks_ts_by_role = {
 #     族口径，master 代码零改动）。
 #   口径 2｜engine key 级（理论）：新 counter mock_engine_cache_key_
 #     hits/keys_requested_total（引擎 prefill 准入 prefixHitBlocks 记账
-#     点累计，对齐生产 recent_cache_key_hit_count/total_count 口径）
+#     点累计；不同于 real recent-cache-key 的请求级 token gauge）
 #     跨引擎同拍求和后同法差分。空 bh 请求 0/0 自然不贡献。只有
 #     prefill 引擎跑准入记账，但两 counter 同记账点，role 不拆。
 #   口径 3｜engine token 级（实际）：ΣhitTokens/Σil（对齐生产 reuse/
@@ -2474,13 +2477,13 @@ balance_ts_by_engine["queue"]["p_master_batcher"] = _engine_rel_rows(
 )
 for _side, _role_tag in (("p", "prefill"), ("d", "decode")):
     balance_ts_by_engine["queue"][_side + "_waiting"] = _engine_rel_rows(
-        _ts_role_ip_split(mock_per_engine_ts, "mock_engine_waiting").get(_role_tag)
+        _ts_role_ip_split(mock_per_engine_ts, "rtp_llm_wait_stream_size").get(_role_tag)
         or {}
     )
 
 # kv.occupancy：三态块池两 gauge 同拍对齐逐样本计算，分母 0 跳过。
-_cache_by_role = _ts_role_ip_split(mock_per_engine_ts, "mock_engine_cache_blocks")
-_avail_by_role = _ts_role_ip_split(mock_per_engine_ts, "mock_engine_available_blocks")
+_cache_by_role = _ts_role_ip_split(mock_per_engine_ts, "rtp_llm_kv_cache_pool_total_blocks")
+_avail_by_role = _ts_role_ip_split(mock_per_engine_ts, "rtp_llm_kv_cache_pool_available_blocks")
 _occ_by_ip = {}
 for _role, _engines in _cache_by_role.items():
     for _ip, _tot_pts in _engines.items():

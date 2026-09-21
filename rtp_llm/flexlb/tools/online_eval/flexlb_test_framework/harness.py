@@ -2040,34 +2040,27 @@ class ClientOps:
 # ---------------------------------------------------------------------------
 
 # Mock per-engine series the sampler records (Prometheus series names; the
-# emitter is MockControlServer.appendPerEngineMetrics — 6 gauge / 7 counter
-# / 6 exec_ms / 3 TPS families).  The whitelist is a SAMPLER-side concern:
-# the /metrics endpoint exposes the full ~25-per-engine surface and the
-# case-side store keeps only these.  Master inflight_status fields ride the
-# same per-key store under "master:*" keys (see BalanceSampler docstring).
+# emitter is MockControlServer.appendPerEngineMetrics). The whitelist
+# retains the series used by the case-side analysis. Master inflight_status
+# fields ride the same per-key store under "master:*" keys (see BalanceSampler docstring).
 BALANCE_MOCK_SERIES = (
     # gauges
-    "mock_engine_running",
-    "mock_engine_waiting",
-    "mock_engine_cache_blocks",
-    "mock_engine_available_blocks",
+    "rtp_llm_running_stream_size",
+    "rtp_llm_wait_stream_size",
+    "rtp_llm_kv_cache_pool_total_blocks",
+    "rtp_llm_kv_cache_pool_available_blocks",
     "mock_engine_held_blocks",
     "mock_engine_referenced_blocks",
     # cumulative counters
     "mock_engine_accepted_total",
     "mock_engine_completed_total",
-    "mock_engine_cancelled_total",
     "mock_engine_kv_admission_fails_total",
     "mock_engine_lack_mem_rejects_total",
     "mock_engine_cache_key_hits_total",
     "mock_engine_cache_keys_requested_total",
     # exec_ms family (gauge-style per-window stats)
     "mock_engine_prefill_ms_avg",
-    "mock_engine_prefill_ms_p99",
-    "mock_engine_prefill_ms_count",
     "mock_engine_decode_ms_avg",
-    "mock_engine_decode_ms_p99",
-    "mock_engine_decode_ms_count",
     # production-caliber TPS trio (window = scrape interval)
     "rtp_llm_context_tps",
     "rtp_llm_context_tps_with_cache",

@@ -150,24 +150,24 @@ class MetricsValidationTest {
                                 + ") leak_detected should be false");
 
                 // ── Cross-verify /metrics per-engine Python series match /snapshot ──
-                long running = engineNode.get("running").asLong();
+                long running = engineNode.get("scheduler_running").asLong();
                 Map<Integer, Long> acceptedMetrics =
                         perEngineMetrics.get("mock_engine_accepted_total");
                 Map<Integer, Long> completedMetrics =
                         perEngineMetrics.get("mock_engine_completed_total");
                 Map<Integer, Long> runningMetrics =
-                        perEngineMetrics.get("mock_engine_running");
+                        perEngineMetrics.get("rtp_llm_running_stream_size");
                 Map<Integer, Long> waitingMetrics =
-                        perEngineMetrics.get("mock_engine_waiting");
+                        perEngineMetrics.get("rtp_llm_wait_stream_size");
 
                 assertNotNull(acceptedMetrics,
                         "mock_engine_accepted_total should exist in per-engine /metrics");
                 assertNotNull(completedMetrics,
                         "mock_engine_completed_total should exist in per-engine /metrics");
                 assertNotNull(runningMetrics,
-                        "mock_engine_running should exist in per-engine /metrics");
+                        "rtp_llm_running_stream_size should exist in per-engine /metrics");
                 assertNotNull(waitingMetrics,
-                        "mock_engine_waiting should exist in per-engine /metrics");
+                        "rtp_llm_wait_stream_size should exist in per-engine /metrics");
 
                 assertEquals(accepted, acceptedMetrics.getOrDefault(port, -1L),
                         "/metrics accepted mismatch for port " + port);
@@ -214,9 +214,9 @@ class MetricsValidationTest {
 
             // ── Verify Prometheus metrics contain expected Python metric names ──
             for (String metric : new String[]{
-                    "mock_engine_running", "mock_engine_waiting",
+                    "rtp_llm_running_stream_size", "rtp_llm_wait_stream_size",
                     "mock_engine_accepted_total", "mock_engine_completed_total",
-                    "mock_engine_active_kv_tokens", "mock_engine_rpc_total"}) {
+                    "rtp_llm_kv_cache_pool_total_blocks", "rtp_llm_kv_cache_pool_available_blocks"}) {
                 assertTrue(metricsBody.contains(metric),
                         "/metrics should contain " + metric);
             }

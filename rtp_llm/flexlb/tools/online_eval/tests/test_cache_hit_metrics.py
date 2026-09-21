@@ -5,7 +5,7 @@
   * engine key counter 差分三窗（= 3 个 prefill 请求）：
       0/3（冷启动，keys=[k1,k2,k3] 无命中）→ 3/3（暖，全命中）→
       2/3（部分前缀，keys=[k1,k2,k90] 命中 k1,k2）
-    → key 级 run = 5/9 ≈ 55.6%（对齐生产 recent_cache_key_hit）
+    → key 级 run = 5/9 ≈ 55.6%（mock 累计 key 口径）
   * token 时序窗口 (with_cache−context)/with_cache = 600/1000 = 60%；
     run 级 = Σhit_tokens_total(120) ÷ Σok il(3×80=240) = 50%
     （对齐生产 reuse/input）

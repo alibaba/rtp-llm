@@ -58,9 +58,9 @@ def metrics(start, end, override=None):
         for name in (tr.VICTIM,) + tr.SURVIVORS:
             rows[name] = dict(
                 mock_engine_accepted_total=30 * t,
-                mock_engine_cache_blocks=1000,
-                mock_engine_available_blocks=800,
-                mock_engine_waiting=1,
+                rtp_llm_kv_cache_pool_total_blocks=1000,
+                rtp_llm_kv_cache_pool_available_blocks=800,
+                rtp_llm_wait_stream_size=1,
                 mock_engine_lack_mem_rejects_total=0,
                 mock_engine_kv_admission_fails_total=0,
                 rtp_llm_context_tps=10,
@@ -92,8 +92,8 @@ class TransientTests(unittest.TestCase):
         pre = snapshots()
 
         def override(t, name, row):
-            row["mock_engine_waiting"] = p if name in tr.P else d
-            row["mock_engine_available_blocks"] = free
+            row["rtp_llm_wait_stream_size"] = p if name in tr.P else d
+            row["rtp_llm_kv_cache_pool_available_blocks"] = free
             row["mock_engine_lack_mem_rejects_total"] = (
                 rejects * t / 20 if name == tr.P[0] else 0
             )

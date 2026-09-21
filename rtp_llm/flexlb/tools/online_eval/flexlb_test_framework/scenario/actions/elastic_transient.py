@@ -258,8 +258,8 @@ def bounds(ctx, params, deadline):
     mwin = dict(
         start_s=transient["start_s"], end_s=transient["end_s"], data=master.snapshot()
     )
-    ppeak = peak(balance.points(transient, P, "mock_engine_waiting"))
-    dpeak = peak(balance.points(transient, D, "mock_engine_waiting"))
+    ppeak = peak(balance.points(transient, P, "rtp_llm_wait_stream_size"))
+    dpeak = peak(balance.points(transient, D, "rtp_llm_wait_stream_size"))
     # Registry keys are HTTP addresses. The victim's RPC port is never a filter.
     mpeak = peak(
         balance.points(mwin, [pre[n]["http_addr"] for n in P], "inflight_requests")
@@ -368,7 +368,7 @@ def steady(ctx, params, deadline):
     dbase = balance.spread(balance.points(before, D, "occupancy"))
     pspread = balance.spread(balance.points(after, P, "occupancy", start=tail))
     dspread = balance.spread(balance.points(after, D, "occupancy", start=tail))
-    wait = peak(balance.points(after, SURVIVORS, "mock_engine_waiting", start=tail))
+    wait = peak(balance.points(after, SURVIVORS, "rtp_llm_wait_stream_size", start=tail))
     try:
         decode_share = dict(value=accepted_shares(after, D), unavailable_reason=None)
     except ValueError as exc:

@@ -115,16 +115,16 @@ class BalanceTests(unittest.TestCase):
                             row = dict(
                                 role="decode",
                                 mock_engine_completed_total=count,
-                                mock_engine_cache_blocks=100,
-                                mock_engine_available_blocks=80,
-                                mock_engine_waiting=3 if high_queue and t >= 80 else 1,
+                                rtp_llm_kv_cache_pool_total_blocks=100,
+                                rtp_llm_kv_cache_pool_available_blocks=80,
+                                rtp_llm_wait_stream_size=3 if high_queue and t >= 80 else 1,
                                 mock_engine_decode_ms_avg=10,
                                 rtp_llm_generate_tps=10,
                                 mock_engine_cache_key_hits_total=t * 10,
                                 mock_engine_cache_keys_requested_total=t * 20,
                             )
                             if missing and i == 2 and t >= 80:
-                                row.pop("mock_engine_available_blocks")
+                                row.pop("rtp_llm_kv_cache_pool_available_blocks")
                             rows[f"decode-{i}"] = row
                         samples.append(dict(time_s=float(t), engines=rows))
                     return dict(samples=samples, errors=[], env_epoch=1)
