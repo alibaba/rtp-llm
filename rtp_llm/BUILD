@@ -607,6 +607,21 @@ py_library(
     ]
 )
 
+py_binary(
+    name = "rtp_llm_server",
+    srcs = ["start_server.py"],
+    main = "start_server.py",
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+    deps = [
+        ":rtp_llm_lib",
+        ":sdk",
+    ],
+)
+
 py_library(
     name = "rtp_llm_package_libs",
     deps = [
