@@ -67,7 +67,7 @@ For DIRECT use `"scheduler":{"type":"DIRECT"}` and
 | `router.roles.prefill.cacheAffinity.maxExtraTtftMs` | `0` ms | Non-negative; only when cacheAffinity exists |
 | `router.roles.prefill.cacheAffinity.minPrefixHitPercent` | `5` | Percentage in `[0,100]`; only when cacheAffinity exists |
 | `router.roles.decode.costEstimator.expression` | `kvcache_used_ratio` | Valid, non-empty Decode cost formula; lowest cost wins within each availability tier |
-| `router.roles.decode.availability.maxKvUsagePercent` | `90` | Percentage in `[0,100]`; `0` means zero usage is allowed, not disabled admission |
+| `router.roles.decode.availability.maxKvUsagePercent` | `90` | Percentage in `[1,100]`; zero and negative values are invalid |
 | `router.roles.decode.availability.maxEngineRequests` | Omitted | Positive Decode request cap; required when the cost expression uses `max_running_size`, otherwise optional. Dispatch counts Engine ownership and permits, while every QUEUE placement also counts queued reservations |
 | `router.groupSelector` | Omitted | First matching rule wins; no match uses `defaultTargets` |
 | `workerRegistry.health.statusPollIntervalMs` | `20` ms | Positive |

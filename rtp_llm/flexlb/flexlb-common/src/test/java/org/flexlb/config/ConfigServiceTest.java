@@ -387,6 +387,25 @@ class ConfigServiceTest {
     }
 
     @Test
+    void decodeKvUsagePercentageRequiresOneThroughOneHundred() {
+        String field = "router.roles.decode.availability.maxKvUsagePercent";
+        assertEquals(90L, ConfigTestFixtures.parse("{}").getRouter().getRoles()
+                .getDecode().getAvailability().getMaxKvUsagePercent());
+        for (long percent : new long[]{-1L, 0L, 101L}) {
+            ConfigValidationException error = assertThrows(ConfigValidationException.class,
+                    () -> ConfigTestFixtures.parse("{\"router\":{\"roles\":{\"decode\":{\"availability\":{\"maxKvUsagePercent\":"
+                            + percent + "}}}}}"));
+            assertTrue(error.getMessage().contains(field), error.getMessage());
+            assertTrue(error.getMessage().contains("[1.0, 100.0]"), error.getMessage());
+        }
+        for (long percent : new long[]{1L, 90L, 100L}) {
+            var config = ConfigTestFixtures.parse("{\"router\":{\"roles\":{\"decode\":{\"availability\":{\"maxKvUsagePercent\":"
+                    + percent + "}}}}}");
+            assertEquals(percent, config.getRouter().getRoles().getDecode().getAvailability().getMaxKvUsagePercent());
+        }
+    }
+
+    @Test
     void validates_required_values_and_retained_bounds() {
         for (String patch : new String[]{
                 "{\"requestLifecycle\":{\"request\":{\"timeoutMs\":0}}}",

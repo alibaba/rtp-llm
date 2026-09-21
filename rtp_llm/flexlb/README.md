@@ -304,7 +304,8 @@ Request and KV measurements include queued reservations and ownership retained d
 Equal costs rotate. Workers with a non-finite formula result are excluded from the preferred
 availability tier; if that tier has no finite result, routing fails with a formula error.
 Reservation and delivery always recheck current
-inventory under the selected generation's lock. `maxKvUsagePercent` defaults to 90.
+inventory under the selected generation's lock. `maxKvUsagePercent` defaults to 90 and must
+be in `[1, 100]`; zero and negative values are rejected during configuration validation.
 `maxEngineRequests`, when configured, covers the ownership scope of the current admission stage,
 including dispatch shadows and permits; it is not the Engine's physical RUNNING concurrency.
 

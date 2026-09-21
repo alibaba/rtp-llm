@@ -224,7 +224,7 @@ final class FlexlbConfigValidator {
                     "router.roles.decode.availability.maxEngineRequests",
                     "is required when costEstimator.expression uses max_running_size");
         }
-        range(decodeAvailability.getMaxKvUsagePercent(), 0,
+        range(decodeAvailability.getMaxKvUsagePercent(), 1,
                 RoutingConfig.PERCENTAGE_SCALE,
                 "router.roles.decode.availability.maxKvUsagePercent");
         if (decodeAvailability.getMaxEngineRequests() != null) {
