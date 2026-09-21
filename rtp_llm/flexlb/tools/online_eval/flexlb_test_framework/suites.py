@@ -23,7 +23,6 @@ def classify(plans, suite="all", catalog=CATALOG):
             "sample_interval_s",
             "collector_shutdown_s",
             "max_sample_gap_s",
-            "sample_history_limit",
         }
         or type(runtime["capture_metrics"]) is not bool
     ):
@@ -34,16 +33,12 @@ def classify(plans, suite="all", catalog=CATALOG):
             raise ScenarioError("invalid workload budget: " + key)
     if runtime["max_sample_gap_s"] < runtime["sample_interval_s"]:
         raise ScenarioError("maximum sample gap is shorter than sampling interval")
-    if (
-        type(runtime["sample_history_limit"]) is not int
-        or runtime["sample_history_limit"] < 1
-    ):
-        raise ScenarioError("sample_history_limit must be a positive integer")
     entries = data["cases"]
     for key, entry in entries.items():
         if (
             not isinstance(entry, dict)
             or entry.get("kind") not in KINDS
+            or entry.get("collection", "aggregate") not in ("aggregate", "request", "diagnostic")
             or not entry.get("reason")
         ):
             raise ScenarioError("invalid suite entry: " + key)
@@ -63,6 +58,7 @@ def classify(plans, suite="all", catalog=CATALOG):
                 dict(
                     plan,
                     test_kind=kind,
+                    collection_profile=(entry or {}).get("collection", "aggregate" if kind == "workload" else "diagnostic"),
                     workload_runtime=(
                         dict(data["workload_runtime"]) if kind == "workload" else {}
                     ),

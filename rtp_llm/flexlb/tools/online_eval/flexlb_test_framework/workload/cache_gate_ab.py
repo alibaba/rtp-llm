@@ -4,6 +4,7 @@ import argparse
 import copy
 import json
 import math
+import shutil
 from pathlib import Path
 
 from online_eval.reporting import write_bundle, run_meta, compare_controls, details
@@ -87,6 +88,11 @@ def compare(old_path, new_path, output):
     for label, e, shift in zip(("old", "new"), evidence, shifts):
         d = output / label
         d.mkdir(exist_ok=True)
+        original = Path(old_path if label == "old" else new_path).parent
+        for archive in original.glob("telemetry/*/queries.json"):
+            target = d / archive.relative_to(original)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(archive, target)
         result = analyze(e)
         spec = write_report(d, e, result)
         results.append(result)
@@ -94,7 +100,7 @@ def compare(old_path, new_path, output):
         panel["id"] = label
         sha = e["provenance"]["historical_master"]["source_commit"]
         panel["title"] = f'{label} · {sha[:9]} · {result["verdict"]}'
-        panel["caption"] += " Model forward 为各 P 最近批次均值的非加权平均。"
+
         panel["caption"] += (
             f" 原始缩容时刻 {shift:.2f}s；本图统一对齐至 {origin:.2f}s。"
             if aligned_withdrawals

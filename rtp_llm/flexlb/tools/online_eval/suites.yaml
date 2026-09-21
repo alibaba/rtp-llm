@@ -3,18 +3,20 @@ schema_version: 1
 workload_runtime:
   capture_metrics: true
   sample_interval_s: 1.0
-  sample_history_limit: 128
   max_sample_gap_s: 5.0
   collector_shutdown_s: 10.0
 cases:
   cache_scale_in::step:
     kind: workload
+    collection: request
     reason: Fixed Java traffic across one-step P withdrawal with cache collapse adjudication
   trace_scale_out::prepared_background:
     kind: workload
+    collection: request
     reason: Java background traffic persists across Python checkpoints and Decode scale-out
   balance_distribution::sustained_mix:
     kind: workload
+    collection: request
     reason: Twelve paced windows with full request completion and continuous telemetry
   admission_queue::queue_depth:
     kind: functional
@@ -183,54 +185,70 @@ cases:
     reason: Bounded added-worker serve, stop and restart contracts
   elastic_concurrent_mutation::default:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_concurrent_mutation::single_batch:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_concurrent_mutation::single_nonbatch:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_concurrent_mutation::window_nonbatch:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_concurrent_mutation::single_nonbatch_convergence:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_concurrent_mutation::window_nonbatch_convergence:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_concurrent_mutation::batch_convergence:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_concurrent_mutation::single_batch_convergence:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::decode_scale_out_protection:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::normal:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::strict:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::rebalance:
     kind: functional
     reason: Finite before/after-add placement contract; no sustained producer
   elastic_lifecycle::kv_skew_hot:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::kv_skew_cold:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::steady_recovery:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::kv_full_shrink:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::transient_imbalance:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::rebalance_single_batch:
     kind: functional
@@ -243,30 +261,39 @@ cases:
     reason: Finite before/after-add placement contract; no sustained producer
   elastic_lifecycle::normal_single_batch:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::strict_single_batch:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::normal_single_nonbatch:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::strict_single_nonbatch:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::normal_window_nonbatch:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::strict_window_nonbatch:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_pending_drain::legacy_terminal:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_pending_drain::zero_errors:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   elastic_pending_drain::single_batch_terminal:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   engine_fault_recovery::generation_bump:
     kind: functional
@@ -279,6 +306,7 @@ cases:
     reason: Bounded protocol, state or admission contract
   engine_fault_recovery::flap:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   engine_fault_recovery::kv_resync:
     kind: functional
@@ -309,12 +337,15 @@ cases:
     reason: Bounded protocol, state or admission contract
   cache_affinity::leader_spill_p2:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   cache_affinity::leader_spill_p3:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   cache_affinity::leader_spill_p4:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   cache_affinity::prefix_batch:
     kind: functional
@@ -324,15 +355,19 @@ cases:
     reason: Bounded protocol, state or admission contract
   cache_affinity::hot_tension:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   cache_affinity::mixed_tiers:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   cache_affinity::leader_spill_batch:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   cache_affinity::leader_spill_nonbatch:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   cache_capacity_recovery::decode_pool_exhaustion_terminal:
     kind: functional
@@ -348,6 +383,7 @@ cases:
     reason: Bounded protocol, state or admission contract
   cache_churn::hot_churn:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   cache_churn::lru_affinity:
     kind: functional
@@ -405,9 +441,11 @@ cases:
     reason: Bounded protocol, state or admission contract
   client_fallback_failback::all_masters_down:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   client_fallback_failback::wraparound:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   client_fallback_failback::negative_errorcode:
     kind: functional
@@ -423,15 +461,18 @@ cases:
     reason: Bounded protocol, state or admission contract
   master_ha_failover::standalone_a_to_b:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   master_lifecycle::kill_single:
     kind: functional
     reason: Bounded protocol, state or admission contract
   master_lifecycle::freeze_short_long:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   master_lifecycle::kill_dual_b_to_a:
     kind: workload
+    collection: request
     reason: Multi-window load, topology or recovery lifecycle
   observed_terminal_cohort::deferred:
     kind: functional

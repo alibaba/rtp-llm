@@ -47,6 +47,24 @@ class JavaLoadClientParityTest {
     }
 
     @Test
+    void monitorExportsCumulativeHistogramFromObservedLatency() throws Exception {
+        try (JavaLoadClient client = dryRunClient()) {
+            var observe = JavaLoadClient.class.getDeclaredMethod("observeLatency", String.class, double.class);
+            observe.setAccessible(true);
+            observe.invoke(client, "ttft", 10.0);
+            observe.invoke(client, "ttft", 30.0);
+            var field = JavaLoadClient.class.getDeclaredField("monitor");
+            field.setAccessible(true);
+            var registry = (io.micrometer.prometheus.PrometheusMeterRegistry) field.get(client);
+            String body = registry.scrape();
+            assertTrue(body.contains("flexlb_client_ttft_seconds_bucket{"));
+            assertTrue(body.contains("flexlb_client_ttft_seconds_count 2.0"));
+            assertTrue(body.contains("flexlb_client_ttft_seconds_sum 0.04"));
+            assertFalse(body.contains("quantile="));
+        }
+    }
+
+    @Test
     void compactTokensPreservePartialTailAndActualHashes() throws Exception {
         var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
         var compact = mapper.createObjectNode().put("rid", "compact").put("il", 1031)

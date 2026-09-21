@@ -169,7 +169,7 @@ PRIORITY 省略 preemption 会启用默认抢占，不能用省略字段构造�
 
 请求优先使用公共 `RecordedRequests`，并把持有它的资源注册到运行上下文。自定义生产器公开 `snapshot_records()`；需要同时提供自定义完整性信息时公开 `evidence_snapshot()`，返回 `records`、`complete`、`errors`。Python 生产器注明 `producer_kind: python`。不能只在最终汇总中写一个成功数；每笔请求须保留 ID、发出时间、终态、协议结果和错误，异常路径也如此。直接构造前置状态的请求标记 `purpose: preconditioning`，仍进入统一关联表，但单独写入聚合目录的 `preconditioning-requests.json`。
 
-读取 Mock 指标时使用公共 `online_eval.telemetry.http_text` 或共享序列 API。不要直接请求会清空计数的指标接口。内存保留条数由 `suites.yaml` 的 `sample_history_limit` 决定；较早样本从原始日志流式回放。每个环境、每个 master 都有独立采集日志和采集生命周期；首尾缺采、断采、缺失数据源或失败收尾都不能当作有效运行。
+曲线只消费 Prometheus 聚合查询结果。API、日志和 JSONL 只用于专用测试。工作负载必须通过共享监控源读取指标，不能额外抓取会推进 TPS 窗口的 exporter。采集档位与生命周期见 [监控管线](monitoring-pipeline.md)。
 
 一个功能合同可以只发送几笔请求验证边界，不需要为了生成压测图而延长等待。一个复杂场景则必须提供足够的持续负载与观测窗口。参考 `balance_distribution` 的 `sustained_mix` 和 `elastic_concurrent_mutation`，同时检查请求完成、资源清理、时间序列与恢复质量。
 

@@ -142,7 +142,7 @@ class CacheGateTest(unittest.TestCase):
                 "FAIL",
             )
             self.assertIn(
-                "缩 P 实验 · 关键曲线",
+                "监控聚合曲线",
                 (Path(d) / "reports/run/cache-scale-in/report.html").read_text(),
             )
 
@@ -154,13 +154,8 @@ class CacheGateTest(unittest.TestCase):
             html = (Path(d) / "reports/run/cache-scale-in/report.html").read_text()
             spec, _ = json.JSONDecoder().raw_decode(html.split("const SPEC = ", 1)[1])
             curves = {s["name"]: s["points"] for s in spec["panels"][0]["series"]}
-            for name in ("发送 QPS", "完成 QPS", "Model forward"):
-                self.assertEqual(curves[name][0]["x"], 1)
-                self.assertIsNotNone(curves[name][0]["y"])
-            hit = {p["x"]: p["y"] for p in curves["命中率"]}
-            survivor = {p["x"]: p["y"] for p in curves["保留 P 命中率"]}
-            self.assertIsNone(hit[25])
-            self.assertAlmostEqual(survivor[25], 45)
+            self.assertEqual(curves, {})
+            self.assertIn("缺少监控数据", spec["panels"][0]["caption"])
             self.assertEqual(analyze(e), result)
 
     def test_ab_requires_aligned_controls(self):

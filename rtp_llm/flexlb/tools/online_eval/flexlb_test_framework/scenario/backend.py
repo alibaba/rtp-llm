@@ -647,6 +647,7 @@ class JavaMockBackend:
                     owner.environments.append(env)
 
         spec = make_env_spec(plan, ctx.instance["profile"], self.lease)
+        spec.diagnostic_events = ctx.instance.get("collection_profile", "diagnostic") == "diagnostic"
         # Keep the first-epoch artifact layout compatible with existing runs.
         # Later environments never overwrite its config, logs or cleanup proof.
         artifact_dir = (

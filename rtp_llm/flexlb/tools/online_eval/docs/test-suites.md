@@ -117,4 +117,4 @@ Java 客户端的 `MAX_CONCURRENCY` 限制客户端尚未结束的整条请求�
 
 有限请求的过载转移、加机服务/重启、扩容前后分布合同属于功能套件，不强制等待压测统计窗口。证据为 INVALID 时，PASS 或探针裁决不能进入成功出口：报告改为 ERROR，原裁决保存在 `workload.prior_status`；原有 FAIL/TIMEOUT 不被覆盖。
 
-采集缓存由 `sample_history_limit` 限定内存中的最近样本数，历史数据仍保留在原始文件中，落后的消费者按原始偏移流式回读。采集生命周期校验覆盖首拍和尾拍；指标标签缺值只使对应曲线断开，不等于采集源离线。直接缓存预热请求带 `purpose: preconditioning`，进入请求关联表并单独留档，正式聚合的计数范围见 `request-scope.json`。
+监控采样与存储由 Prometheus 承担。`collection` 指定专用证据档位：aggregate、request、diagnostic。缺采不能用日志补曲线，详细约定见 [监控管线](monitoring-pipeline.md)。

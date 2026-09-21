@@ -1002,6 +1002,10 @@ final class MockControlServer {
         String[][] meta = {
                 {"mock_context_compute_tokens_total", "cumulative computed input tokens", "counter"},
                 {"mock_context_tokens_total", "cumulative input tokens including hits", "counter"},
+                {"mock_hit_tokens_total", "cache hit tokens of completed prefill requests", "counter"},
+                {"mock_context_requests_total", "completed prefill requests", "counter"},
+                {"mock_prefill_batches_total", "executed prefill batches", "counter"},
+                {"mock_prefill_batch_requests_total", "requests in executed prefill batches", "counter"},
                 {"mock_generate_tokens_total", "cumulative output tokens of completed requests", "counter"},
                 {"rtp_llm_running_stream_size", "currently executing scheduler streams", "gauge"},
                 {"rtp_llm_wait_stream_size", "scheduler waiting streams (excludes pre-GENERATE decode reservations)", "gauge"},
@@ -1055,11 +1059,12 @@ final class MockControlServer {
         for (int i = 0; i < engineServices.size(); i++) {
             JavaMockEngineCluster.FastRpcService service = engineServices.get(i);
             Map<String, Object> snap = snaps.get(i);
-            String labels = String.format("engine_name=\"%s\",role=\"%s\",grpc_port=\"%d\",engine_ip=\"%s\"",
+            String labels = String.format("engine_name=\"%s\",role=\"%s\",grpc_port=\"%d\",engine_ip=\"%s\",engine_incarnation=\"%s\"",
                     escapeLabel(service.getEngineName()),
                     escapeLabel(service.getRoleName().toLowerCase()),
                     service.getGrpcPort(),
-                    escapeLabel(service.getHost()));
+                    escapeLabel(service.getHost()),
+                    escapeLabel(String.valueOf(snap.get("engine_incarnation"))));
             sb.append(String.format("rtp_llm_running_stream_size{%s} %s%n", labels, snap.get("scheduler_running")));
             sb.append(String.format("rtp_llm_wait_stream_size{%s} %s%n", labels, snap.get("waiting")));
             sb.append(String.format("mock_engine_accepted_total{%s} %s%n", labels, snap.get("accepted")));
@@ -1069,6 +1074,12 @@ final class MockControlServer {
                 sb.append(String.format("mock_engine_prefill_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("prefill_ms_avg"))));
                 for (String name : List.of("context_compute_tokens_total", "context_tokens_total")) {
                     sb.append(String.format("mock_%s{%s} %s%n", name, labels, snap.get(name)));
+                }
+                for (String name : List.of("hit_tokens_total", "context_requests_total")) {
+                    sb.append(String.format("mock_%s{%s} %s%n", name, labels, snap.get(name)));
+                }
+                for (String name : List.of("prefill_batches", "prefill_batch_requests")) {
+                    sb.append(String.format("mock_%s_total{%s} %s%n", name, labels, snap.get(name)));
                 }
                 appendPrefillTps(sb, labels, List.of(snap), true);
             } else if ("decode".equalsIgnoreCase(service.getRoleName())) {

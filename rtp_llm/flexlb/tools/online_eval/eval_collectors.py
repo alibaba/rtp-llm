@@ -1,1 +1,0 @@
-stress/eval_collectors.py

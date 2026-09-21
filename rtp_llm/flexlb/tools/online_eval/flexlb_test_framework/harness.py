@@ -814,6 +814,7 @@ class EnvSpec:
 
     label: str = "env"
     runtime_mode: str = "functional"
+    diagnostic_events: bool = True
     n_prefill: int = 2
     n_decode: int = 4
     mock_heap: str = DEFAULT_MOCK_HEAP
@@ -1187,9 +1188,9 @@ class EnvManager:
             # kept moving / stalled" for hang forensics (3c-class issues)
             # without any behavioral change to the engine itself.
             "--stats-stdout",
-            "true",
+            str(spec.diagnostic_events).lower(),
             "--events-file",
-            str(env.run_dir / "engine_events.jsonl"),
+            str(env.run_dir / "engine_events.jsonl") if spec.diagnostic_events else "",
             "--prefill-kv-pool-blocks",
             str(spec.prefill_cache_blocks),
             "--decode-kv-pool-blocks",
@@ -1377,6 +1378,8 @@ class EnvManager:
             f"--management.server.port={env.master_management_port}",
             f"--spring.profiles.active={spec.spring_profile}",
         ]
+        if not spec.diagnostic_events:
+            argv.append("--logging.level.pvLogger=WARN")
         if spec.master_debug_log:
             argv.append("--logging.level.org.flexlb=DEBUG")
             # flexlbLogger (org.flexlb.util.Logger's slf4j name —
@@ -1643,6 +1646,8 @@ class EnvManager:
             f"--flexlb.log.path={log_dir}",
             f"--spring.profiles.active={spec.spring_profile}",
         ]
+        if not spec.diagnostic_events:
+            argv.append("--logging.level.pvLogger=WARN")
         if spec.master_debug_log:
             argv.append("--logging.level.org.flexlb=DEBUG")
         argv.extend(spec.master_extra_args)

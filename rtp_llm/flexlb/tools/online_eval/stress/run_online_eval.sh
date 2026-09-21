@@ -42,6 +42,19 @@ PERFORMANCE_FILE="${PERFORMANCE_FILE:-${ONLINE_EVAL_DIR}/data/performance/dsv4_f
 RUN_ROOT="${RUN_ROOT:-${ONLINE_EVAL_DIR}/run}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="${RUN_DIR:-${RUN_ROOT}/${RUN_ID}}"
+# Evidence is task-specific; all performance curves come from Prometheus.
+export COLLECTION_PROFILE="${COLLECTION_PROFILE:-aggregate}"
+export CLIENT_MONITORING=true
+if [[ "${COLLECTION_PROFILE}" != diagnostic ]]; then export SKIP_SERVER_LATENCY=true; fi
+case "${COLLECTION_PROFILE}" in aggregate|request|diagnostic) ;; *) echo "invalid COLLECTION_PROFILE" >&2; exit 2;; esac
+command -v "${PROMETHEUS_BIN:-prometheus}" >/dev/null || { echo "Prometheus required (set PROMETHEUS_BIN)" >&2; exit 2; }
+MONITOR_PID=""
+MOCK_EVENTS_FILE=""
+MOCK_STATS_STDOUT=false
+if [[ "${COLLECTION_PROFILE}" == diagnostic ]]; then
+  MOCK_EVENTS_FILE="${RUN_DIR}/engine_events.jsonl"
+  MOCK_STATS_STDOUT=true
+fi
 # Optional portable archive. Keep disabled for the default fast path.
 EXPERIMENT_ARCHIVE_PATH="${EXPERIMENT_ARCHIVE_PATH:-}"
 FLEXLB_LOG_PATH="${FLEXLB_LOG_PATH:-${RUN_DIR}/flexlb_logs}"
@@ -211,18 +224,8 @@ FLEXLB_PV_LOG="${FLEXLB_PV_LOG:-off}"
 JFR_FILE="${JFR_FILE:-${RUN_DIR}/flexlb_profile.jfr}"
 JFR_DURATION="${JFR_DURATION:-300s}"
 FLEXLB_MONITOR_ENABLED="${FLEXLB_MONITOR_ENABLED:-true}"
-# Metric exposure is controlled by a single configurable whitelist — there
-# is no mode switch. The master registers/reports only the series matching
-# the comma-separated prometheus-form prefixes below — the master-side
-# counterpart of the G3 collector whitelist (the collector re-filters on
-# top of this; the whitelist trims at the source, ~100 unconsumed series
-# down to the consumed set). MUST stay in sync with
-# MASTER_PROMETHEUS_PREFIXES in eval_collectors.py (bidirectional
-# reference: the collector-side comment points back here); env ->
-# flexlb.monitor.metric-whitelist via relaxed binding (see
-# WhitelistMetricsFilterConfig). An explicitly empty/blank value fails
-# closed (no flexlb_* series at all); use the bare "flexlb_" prefix to
-# expose everything flexlb_*.
+# Limit metric families at the producer; Prometheus stores the exposed series.
+# A blank whitelist exposes no flexlb metrics; flexlb_ exposes all families.
 FLEXLB_MONITOR_METRIC_WHITELIST="${FLEXLB_MONITOR_METRIC_WHITELIST:-flexlb_app_cache_,flexlb_app_flexlb_batcher_queue_size,flexlb_app_flexlb_inflight_max_age_ms,flexlb_app_flexlb_inflight_ttl,flexlb_app_engine_balancing_master_dispatch_reason_total,flexlb_app_engine_balancing_master_batch_size,flexlb_auto_tpm_request_count,flexlb_app_engine_balancing_master_all_qps,flexlb_app_flexlb_scheduler_inflight_size,flexlb_app_flexlb_inflight_batch_count,flexlb_app_flexlb_inflight_request_count,flexlb_auto_tpm_decode_reserved_count,flexlb_auto_tpm_decode_running_count}"
 # HIPPO_ROLE: ZK election role id of the master (lock path
 # /master_lb_leader/{HIPPO_ROLE}); a blank value aborts master startup
@@ -257,13 +260,6 @@ export FLEXLB_GRPC_EXECUTOR_MAX_SIZE="${FLEXLB_GRPC_EXECUTOR_MAX_SIZE:-128}"
 
 MOCK_PID=""
 FLEXLB_PID=""
-# Secondary collectors (see start_secondary_pollers below): mock per-engine
-# prometheus (G1), master prometheus (G3) and process CPU/RSS sampling (G5) —
-# all threads of one eval_collectors.py process, so every *POLLER_PID below
-# captures that single process pid.
-MOCK_PER_ENGINE_POLLER_PID=""
-MASTER_PROMETHEUS_POLLER_PID=""
-PROCESS_USAGE_POLLER_PID=""
 CLIENT_PIDS=()
 JAVA_MODULE_OPTS=(
   --add-modules ALL-SYSTEM
@@ -293,7 +289,7 @@ cleanup() {
   local run_exit_status=$?
   # One stop covers all collector threads (G1/G3/G5) of the single
   # secondary collector process.
-  stop_secondary_pollers
+  stop_monitoring || run_exit_status=1
   for pid in "${CLIENT_PIDS[@]}"; do
     kill "${pid}" >/dev/null 2>&1 || true
   done
@@ -324,16 +320,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Best-effort run output consolidation (runs at most once — CONSOLIDATED
-# sentinel). Called AFTER the client exit code is known and the summary=
-# line is printed: consolidation (notably the per_request gzip pass) can
-# take tens of seconds on large runs while the orchestrator's
-# timeout window is only DURATION+180s, so the exit code and the summary
-# line must be decided first — a slow machine then reports the correct
-# result instead of a spurious TIMEOUT with a half-written directory.
-# Two call sites: the load-client failure path (right before exit) and the
-# happy path (after the artifact echo, before the test_valid verdict).
-# Startup failures that never reach the load client do not consolidate.
+# Archive the monitor once on either client completion or failure.
 CONSOLIDATED=0
 
 # sha256 of a file (Linux sha256sum), with shasum -a 256 (macOS local smoke
@@ -373,71 +360,10 @@ consolidate_run_outputs_now() {
     return 0
   fi
   CONSOLIDATED=1
-  # Stop the secondary pollers first: consolidation merges their one-shot
-  # output files and deletes them, so no writer may still be appending (a
-  # writer holding an unlinked fd would keep writing into the void). The
-  # stop is idempotent — also called at the load-client stop point / cleanup.
-  stop_secondary_pollers
-  local consolidate_mock_port_args=()
-  if [[ "${START_MOCK}" == "1" ]]; then
-    consolidate_mock_port_args+=(--mock-http-port "$((MOCK_BASE_GRPC_PORT - 1))")
-  fi
-  # Consolidate the run directory into the per-component JSON+log layout
-  # (run_meta/mock/master/client .json + .log, merged client_events.jsonl[.gz],
-  # run-root engine_events.jsonl[.gz];
-  # see consolidate_run_outputs.py's docstring for the full keep/delete list).
-  # Runs while the mock cluster and master are still alive (cleanup kills them
-  # on EXIT), so the final cluster snapshot is captured from the control plane.
-  # Kept in place on purpose: endpoints.json, flexlb_env.txt, flexlb_profile.jfr
-  # and load_client/server_latency.json (aggregate validity input; the orchestrator's
-  # fetch_server_latency also reads it). Phase B: the client no longer writes
-  # summary.json / report.md, so they no longer appear in the keep list.
-  local trace_file_sha256 trace_file_lines
-  trace_file_sha256="$(compute_file_digest "${TRACE_FILE}")"
-  trace_file_lines="$(count_file_lines "${TRACE_FILE}")"
-  python3 "${SCRIPT_DIR}/consolidate_run_outputs.py" \
-    --run-dir "${RUN_DIR}" \
-    ${consolidate_mock_port_args[@]+"${consolidate_mock_port_args[@]}"} \
-    --param "n_prefill=${N_PREFILL}" \
-    --param "n_decode=${N_DECODE}" \
-    --param "mock_base_grpc_port=${MOCK_BASE_GRPC_PORT}" \
-    --param "flexlb_http_port=${FLEXLB_HTTP_PORT}" \
-    --param "flexlb_management_port=${FLEXLB_MANAGEMENT_PORT}" \
-    --param "start_mock=${START_MOCK}" \
-    --param "start_flexlb=${START_FLEXLB}" \
-    --param "replay_speed=${REPLAY_SPEED}" \
-    --param "send_mode=${SEND_MODE:-replay}" \
-    --param "send_mode_qps=${SEND_MODE_QPS:-}" \
-    --param "ramp_up_seconds=${RAMP_UP_SECONDS}" \
-    --param "limit=${LIMIT}" \
-    --param "duration_s=${DURATION_S}" \
-    --param "max_concurrency=${MAX_CONCURRENCY}" \
-    --param "load_client_workers=${LOAD_CLIENT_WORKERS}" \
-    --param "sla_ttft_ms=${SLA_TTFT_MS}" \
-    --param "fetch_output_stream=${FETCH_OUTPUT_STREAM}" \
-    --param "loop=${LOOP}" \
-    --param "gradient=${GRADIENT}" \
-    --param "trace_file=${TRACE_FILE}" \
-    --param "trace_file_sha256=${trace_file_sha256}" \
-    --param "trace_file_lines=${trace_file_lines}" \
-    --param "performance_file=${PERFORMANCE_FILE}" \
-    --param "process_config_file=${PROCESS_CONFIG_FILE}" \
-    --param "java_mock_jvm_xms=${JAVA_MOCK_JVM_XMS}" \
-    --param "java_mock_jvm_xmx=${JAVA_MOCK_JVM_XMX}" \
-    --param "java_mock_event_loop_threads=${JAVA_MOCK_EVENT_LOOP_THREADS}" \
-    --param "java_mock_completion_threads=${JAVA_MOCK_COMPLETION_THREADS}" \
-    --param "prefill_cache_blocks=${PREFILL_CACHE_BLOCKS}" \
-    --param "decode_cache_blocks=${DECODE_CACHE_BLOCKS}" \
-    --param "timeout_ms=${TIMEOUT_MS}" \
-    --param "response_timeout=${RESPONSE_TIMEOUT:-}" \
-    --param "java_mock_stats_interval_ms=${JAVA_MOCK_STATS_INTERVAL_MS}" \
-    --param "java_mock_decode_max_concurrency=${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
-    --param "flexlb_pv_log=${FLEXLB_PV_LOG}" \
-    --param "flexlb_config=${FLEXLB_CONFIG}" \
-    --param "flexlb_profile=${FLEXLB_PROFILE}" \
-    --param "flexlb_master_mode=${FLEXLB_MASTER_MODE}" \
-    --param "flexlb_config_override=${FLEXLB_CONFIG_OVERRIDE}" \
-    || echo "WARNING: run output consolidation failed (original files kept as-is)" >&2
+  # Stop and archive the owned Prometheus session before rendering.
+  stop_monitoring
+  # No raw-log consolidation or per-request replication on the monitor path.
+  return 0
 }
 
 wait_for_port() {
@@ -577,224 +503,39 @@ save_master_info() {
     -d '{}' >"${output}"
 }
 
-save_master_prometheus() {
-  local output=$1
-  local path
-  for path in prometheus actuator/prometheus; do
-    if curl -fsS "http://127.0.0.1:${FLEXLB_MANAGEMENT_PORT}/${path}" >"${output}"; then
-      return 0
-    fi
-  done
-  rm -f "${output}"
-  echo "WARNING: unable to save Master Prometheus snapshot" >&2
-  return 1
-}
-
-# ---- Secondary 1s collectors (unified-analysis data audit G1/G3/G5) ----
-# All three pollers (G1/G3/G5) are collector threads inside the single
-# eval_collectors.py background process started by start_secondary_pollers
-# below, each appending to a one-shot file under RUN_DIR, *POLLER_PID
-# bookkeeping variables (all capture the same process pid), best-effort
-# semantics (a failed sample or a missing dependency — e.g. no `ps` binary —
-# is a WARNING, never a load-test blocker), and a stop path wired into the
-# load-client stop point, consolidate_run_outputs_now and the EXIT trap.
-# None of them needs curl: urllib covers both HTTP planes. The G3 lane is
-# exempt from the M7 A/B switch (its counter/gauge series feed aggregate
-# master_arrivals_ts / inflight_ts / KPI consistency, so A/B-off baselines
-# keep collecting it — the exemption transferred from the retired G6
-# counter lane; see start_secondary_pollers). Consolidation later merges
-# each file into its component JSON and deletes it.
-
-MOCK_PER_ENGINE_METRICS_FILE="${RUN_DIR}/mock_metrics_per_engine.prom"
-MASTER_PROMETHEUS_TS_FILE="${RUN_DIR}/master_prometheus_timeseries.prom"
-PROCESS_USAGE_TS_FILE="${RUN_DIR}/process_usage_timeseries.txt"
-# "<pid> <label>" per line; re-read by the process poller every round so
-# CLIENT_PIDS can be appended after the workers fork. Removed on stop.
-PROCESS_POLL_PID_FILE="${RUN_DIR}/process_poll_pids.txt"
 SECONDARY_POLL_INTERVAL_S="${SECONDARY_POLL_INTERVAL_S:-1}"
-# M7: A/B switch for the observation lanes (G1/G5). Default 1 (full
-# per-second collection for the unified analyzer); set
-# FLEXLB_SECONDARY_POLLERS_ENABLED=0 to skip them entirely (zero observation
-# overhead — the stability/burst baselines pin this to keep historical
-# numbers comparable). The G3 master prometheus lane is exempt: see
-# start_secondary_pollers.
-FLEXLB_SECONDARY_POLLERS_ENABLED="${FLEXLB_SECONDARY_POLLERS_ENABLED:-1}"
-# M7: the G1 per-engine poller is the volume driver (~2.2KB x N_engines per
-# sample even after the C whitelist below); a larger interval trades timeline
-# granularity for disk (e.g. 1250 engines x 120s: 1s -> ~260MB text, 5s ->
-# ~52MB) without touching the other 1s pollers.
-MOCK_PER_ENGINE_POLL_INTERVAL_S="${MOCK_PER_ENGINE_POLL_INTERVAL_S:-1}"
-# argv accumulator for the three collector lanes (G1/G3/G5). Each
-# start_*_poller below appends its lane's arguments (the
-# START_MOCK/START_FLEXLB/ps guards are unchanged); start_secondary_pollers
-# then launches ONE eval_collectors.py process with everything accumulated,
-# and the three *POLLER_PID variables all capture that single process pid
-# (stop_secondary_pollers deduplicates and stops it once — see there).
-SECONDARY_COLLECTOR_ARGS=()
 
-# G1: per-second mock per-engine Prometheus time series. The mock control
-# plane (MOCK_BASE_GRPC_PORT-1) already serves /metrics?per_engine=true
-# (~22 series per engine, engine names prefill-N/decode-N); the poller keeps
-# only the six series the analyzer consumes (C whitelist: running / waiting /
-# active_kv_tokens / available_kv_tokens / accepted_total / completed_total),
-# cutting the on-disk footprint to ~1/4 (~2.2KB x N_engines per sample;
-# 1250 engines x 120s x 1s interval ≈ 260MB raw text -> ~65MB gzipped in the
-# A-split file) — the server-side scrape cost is unchanged. Each sample is
-# appended after a "# ts=<epoch_ms>" separator comment so
-# consolidate_run_outputs.py can regroup the flat file into a [{ts, metrics}]
-# timeline.
-start_mock_per_engine_poller() {
-  if [[ "${START_MOCK}" != "1" ]]; then
-    return 0
+start_monitoring() {
+  local targets=()
+  if [[ "${START_MOCK}" == 1 ]]; then
+    targets+=(--target "mock=http://127.0.0.1:$((MOCK_BASE_GRPC_PORT - 1))/metrics?per_engine=true")
   fi
-  # G1: registers the mock lane argv (poller body: eval_collectors.py
-  # run_mock_per_engine_poller; the collector process is started by
-  # start_secondary_pollers).
-  SECONDARY_COLLECTOR_ARGS+=(
-    --mock-port "$((MOCK_BASE_GRPC_PORT - 1))"
-    --mock-out "${MOCK_PER_ENGINE_METRICS_FILE}"
-    --mock-interval "${MOCK_PER_ENGINE_POLL_INTERVAL_S}"
-  )
-}
-
-# G3: per-second master business-metric time series — the sole master-plane
-# collector since the G6/G4 collapse (the arrival/completion counters and
-# the five inflight gauges ride along, see
-# eval_collectors.MASTER_PROMETHEUS_PREFIXES). /actuator/prometheus on
-# the management port is whitelisted down to exactly the series the unified
-# analyzer consumes (C: flexlb_app_cache_* KV / hit-ratio family, the
-# batcher and routing queue gauges, inflight max age, dispatch reason
-# counters, the auto_tpm request-count / all_qps counters and the inflight
-# gauge quintet) before appending. The master-side whitelist
-# (MASTER_METRIC_WHITELIST above) already trims the exposition at
-# the source down to the same set; this collector-side whitelist re-filters
-# and stays in sync by convention.
-# Same "# ts=" grouped layout as G1.
-start_master_prometheus_poller() {
-  if [[ "${START_FLEXLB}" != "1" ]]; then
-    return 0
+  if [[ "${START_FLEXLB}" == 1 ]]; then
+    targets+=(--target "master-single=http://127.0.0.1:${FLEXLB_MANAGEMENT_PORT}/prometheus")
   fi
-  # G3: registers the prometheus lane argv (poller body: eval_collectors.py
-  # run_master_prometheus_poller; the collector process is started by
-  # start_secondary_pollers).
-  SECONDARY_COLLECTOR_ARGS+=(
-    --prometheus-port "${FLEXLB_MANAGEMENT_PORT}"
-    --prometheus-out "${MASTER_PROMETHEUS_TS_FILE}"
-  )
-}
-
-# G5: per-second CPU/RSS sampling of the three JVM groups (mock cluster,
-# flexlb master, load client workers). The pid list lives in
-# PROCESS_POLL_PID_FILE because CLIENT_PIDS is filled in only after the
-# workers fork; the poller re-reads the list every round. Exited pids are
-# tolerated (ps just omits them; a wholly dead pidlist makes ps exit non-zero
-# and the round is skipped).
-start_process_usage_poller() {
-  if ! command -v ps >/dev/null 2>&1; then
-    echo "WARNING: ps not found; process CPU/RSS sampling disabled" >&2
-    return 0
-  fi
-  # G5: registers the process-usage lane argv (poller body:
-  # eval_collectors.py run_process_usage_poller; the collector process is
-  # started by start_secondary_pollers).
-  SECONDARY_COLLECTOR_ARGS+=(
-    --pid-file "${PROCESS_POLL_PID_FILE}"
-    --process-out "${PROCESS_USAGE_TS_FILE}"
-  )
-}
-
-# Seed the poller pid list with the processes started so far; load client
-# workers are appended by the multi-worker launch loop below.
-write_process_poll_pids() {
-  : >"${PROCESS_POLL_PID_FILE}"
-  if [[ -n "${MOCK_PID}" ]]; then
-    echo "${MOCK_PID} mock" >>"${PROCESS_POLL_PID_FILE}"
-  fi
-  if [[ -n "${FLEXLB_PID}" ]]; then
-    echo "${FLEXLB_PID} master" >>"${PROCESS_POLL_PID_FILE}"
-  fi
-}
-
-append_process_poll_pid() {
-  echo "$1 $2" >>"${PROCESS_POLL_PID_FILE}"
-}
-
-start_secondary_pollers() {
-  # The start_*_poller calls below only accumulate lane argv (see
-  # SECONDARY_COLLECTOR_ARGS); re-registered from scratch here so a
-  # hypothetical second call never inherits stale arguments.
-  SECONDARY_COLLECTOR_ARGS=()
-  # G3 first — the M7 exemption (transferred from the retired G6 counter
-  # lane): the master prometheus lane is NOT covered by the M7 A/B switch
-  # below. Its counter/gauge series (flexlb_auto_tpm_request_count etc.,
-  # the consumed set since the G6/G4 collapse) feed aggregate
-  # master_arrivals_ts / inflight_ts / KPI consistency, so A/B-off
-  # baselines keep collecting them.
-  if [[ "${START_FLEXLB}" == "1" ]]; then
-    start_master_prometheus_poller
-  fi
-  # M7: FLEXLB_SECONDARY_POLLERS_ENABLED=0 skips the observation lanes
-  # (G1/G5) — zero observation overhead for A/B comparisons. G3 (when
-  # START_FLEXLB=1) still runs in the process started below.
-  if [[ "${FLEXLB_SECONDARY_POLLERS_ENABLED}" != "1" ]]; then
-    echo "Secondary pollers disabled (FLEXLB_SECONDARY_POLLERS_ENABLED=${FLEXLB_SECONDARY_POLLERS_ENABLED}); G3 prometheus lane unaffected"
-  else
-    write_process_poll_pids
-    start_mock_per_engine_poller
-    start_process_usage_poller
-  fi
-  if [[ "${#SECONDARY_COLLECTOR_ARGS[@]}" -eq 0 ]]; then
-    return 0
-  fi
-  # One process, up to three collector threads (G1/G3/G5). The three PID
-  # variables all capture this single pid; stop_secondary_pollers sends
-  # exactly ONE SIGTERM to it (a rapid same-pid SIGTERM burst deadlocked
-  # the collector's Python signal handler — see the stop function).
-  python3 "${SCRIPT_DIR}/eval_collectors.py" \
-    --secondary-interval "${SECONDARY_POLL_INTERVAL_S}" \
-    "${SECONDARY_COLLECTOR_ARGS[@]}" &
-  local group_pid="$!"
-  MOCK_PER_ENGINE_POLLER_PID="${group_pid}"
-  MASTER_PROMETHEUS_POLLER_PID="${group_pid}"
-  PROCESS_USAGE_POLLER_PID="${group_pid}"
-}
-
-stop_secondary_pollers() {
-  # All three PID variables capture the SAME unified collector pid (one
-  # process, up to 3 threads). The former loop sent one SIGTERM per
-  # variable — several rapid SIGTERMs to one process — and the collector's
-  # Python handler deadlocked when a second signal landed inside
-  # Event.set()'s non-reentrant lock window (py-spy: recursive handler
-  # frames; every run leaked one frozen process). Now: exactly ONE SIGTERM
-  # per distinct pid, wait up to ~5s for the graceful exit (in-flight round
-  # is bounded by the 2s HTTP timeout, shutdown grace 3s), then SIGKILL as
-  # the fallback. Idempotent: a gone/reaped pid is not an error. The EXIT
-  # trap cleanup path calls this too and benefits from the same fix.
-  local pid
-  local unique_pids=()
-  for pid in "${MOCK_PER_ENGINE_POLLER_PID}" \
-    "${MASTER_PROMETHEUS_POLLER_PID}" \
-    "${PROCESS_USAGE_POLLER_PID}"; do
-    if [[ -n "${pid}" ]] && [[ " ${unique_pids[*]:-} " != *" ${pid} "* ]]; then
-      unique_pids+=("${pid}")
-    fi
+  PYTHONPATH="${ONLINE_EVAL_DIR}" python3 -m online_eval.monitoring serve \
+    --run-dir "${RUN_DIR}" --interval "${SECONDARY_POLL_INTERVAL_S}" --clients "${LOAD_CLIENT_WORKERS}" "${targets[@]}" \
+    >"${RUN_DIR}/monitor.log" 2>&1 &
+  MONITOR_PID=$!
+  local count=0
+  until [[ -f "${RUN_DIR}/monitor-ready" ]]; do
+    kill -0 "${MONITOR_PID}" 2>/dev/null || { cat "${RUN_DIR}/monitor.log" >&2; return 1; }
+    sleep 0.1
+    count=$((count + 1))
+    if (( count > 300 )); then echo "monitor startup timed out" >&2; return 1; fi
   done
-  for pid in ${unique_pids[@]+"${unique_pids[@]}"}; do
-    kill "${pid}" >/dev/null 2>&1 || true
-    local waited=0
-    while kill -0 "${pid}" >/dev/null 2>&1 && (( waited < 50 )); do
-      sleep 0.1
-      waited=$((waited + 1))
-    done
-    if kill -0 "${pid}" >/dev/null 2>&1; then
-      echo "secondary collector pid=${pid} still alive after 5s; sending SIGKILL" >&2
-      kill -9 "${pid}" >/dev/null 2>&1 || true
-    fi
-  done
-  MOCK_PER_ENGINE_POLLER_PID=""
-  MASTER_PROMETHEUS_POLLER_PID=""
-  PROCESS_USAGE_POLLER_PID=""
-  rm -f "${PROCESS_POLL_PID_FILE}"
+}
+
+stop_monitoring() {
+  if [[ -z "${MONITOR_PID}" ]]; then return 0; fi
+  touch "${RUN_DIR}/monitor-stop"
+  local monitor_status=0
+  wait "${MONITOR_PID}" || monitor_status=$?
+  MONITOR_PID=""
+  if [[ "${monitor_status}" != 0 || ! -f "${RUN_DIR}/monitor-complete" ]]; then
+    echo "Prometheus collection/archive failed" >&2
+    return 1
+  fi
 }
 
 assert_mock_engine_healthy() {
@@ -940,9 +681,9 @@ if [[ "${START_MOCK}" == "1" ]]; then
     --event-loop-threads "${JAVA_MOCK_EVENT_LOOP_THREADS}" \
     --completion-threads "${JAVA_MOCK_COMPLETION_THREADS}" \
     --stats-interval-ms "${JAVA_MOCK_STATS_INTERVAL_MS}" \
-    --stats-stdout true \
+    --stats-stdout "${MOCK_STATS_STDOUT}" \
     --auto-fetch "${JAVA_MOCK_AUTO_FETCH}" \
-    --events-file "${RUN_DIR}/engine_events.jsonl" \
+    --events-file "${MOCK_EVENTS_FILE}" \
     --decode-max-concurrency "${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
     --performance "${PERFORMANCE_FILE}" \
     --master-config "${PROCESS_CONFIG_FILE}" \
@@ -1082,7 +823,7 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
   # Discovery can be healthy once and then degrade during warmup. Revalidate the
   # complete engine set immediately before applying load.
   wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
-  save_master_info "${RUN_DIR}/master_info_before.json"
+  if [[ "${COLLECTION_PROFILE}" == diagnostic ]]; then save_master_info "${RUN_DIR}/master_info_before.json"; fi
 fi
 
 CLIENT_START_EPOCH_MS="$(python3 - "${LOAD_CLIENT_START_DELAY_SECONDS}" <<'PY'
@@ -1095,14 +836,8 @@ echo "Load clients will start at epoch_ms=${CLIENT_START_EPOCH_MS}"
 echo "Send mode: ${SEND_MODE:-replay} (SEND_MODE_QPS=${SEND_MODE_QPS:-0})"
 echo "warmup(prepare)=${FLEXLB_WARMUP_SECONDS:-10}s before any traffic; ramp-up=${RAMP_UP_SECONDS}s linear QPS climb (uniform mode)"
 
-# Unified collectors (single eval_collectors.py process): the G3 master
-# prometheus lane — always on when START_FLEXLB=1, M7-exempt (it feeds
-# aggregate master_arrivals_ts / inflight_ts) — plus, unless
-# FLEXLB_SECONDARY_POLLERS_ENABLED=0, the mock per-engine prometheus (G1)
-# and process CPU/RSS (G5) observation lanes. All of them run over the
-# whole load window (stopped right after all clients finish; also killed
-# by cleanup); consolidation merges their files afterwards.
-start_secondary_pollers
+# Monitor startup must succeed before launching traffic.
+start_monitoring
 
 # JavaLoadClient reads its configuration exclusively from environment
 # variables (no CLI flags); lib_load_client.sh's run_java_load_client is
@@ -1152,7 +887,8 @@ launch_java_load_client() {
   local shard_index="$3"
   local max_concurrency="$4"
   local skip_server_latency="$5"
-  local playback_args=()
+  if [[ "${COLLECTION_PROFILE}" != diagnostic ]]; then skip_server_latency=true; fi
+  local playback_args=("COLLECTION_PROFILE=${COLLECTION_PROFILE}" "CLIENT_MONITORING=true")
   local playback_key
   for playback_key in MAX_LAPS LAP_IDENTITY LAP_RETAIN_PROBABILITY PLAYBACK_SEED \
       BURST_FACTOR BURST_PERIOD_SECONDS BURST_DUTY DIURNAL_AMPLITUDE DIURNAL_PERIOD_SECONDS; do
@@ -1243,7 +979,7 @@ if [[ "${LOAD_CLIENT_WORKERS}" -le 1 ]]; then
     | tee "${RUN_DIR}/client.stdout"
 else
   mkdir -p "${RUN_DIR}/load_client"
-  curl -fsS -X POST "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency/reset" >/dev/null
+  if [[ "${COLLECTION_PROFILE}" == diagnostic ]]; then curl -fsS -X POST "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency/reset" >/dev/null; fi
   SHARD_MAX_CONCURRENCY=$(( (MAX_CONCURRENCY + LOAD_CLIENT_WORKERS - 1) / LOAD_CLIENT_WORKERS ))
   for ((shard = 0; shard < LOAD_CLIENT_WORKERS; shard++)); do
     shard_dir="${RUN_DIR}/load_client/shard_${shard}"
@@ -1251,7 +987,6 @@ else
       "${SHARD_MAX_CONCURRENCY}" 1 \
       >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
     CLIENT_PIDS+=("$!")
-    append_process_poll_pid "$!" "client_${shard}"
   done
 
   CLIENT_EXIT=0
@@ -1260,20 +995,8 @@ else
   done
 fi
 
-# Phase B: the multi-worker merge heredoc (shard summary.json scan, validity
-# computation, priority_stats, merged summary.json + report.md) is gone —
-# aggregate_canvas_run.py, invoked after consolidation below, is now the
-# single derived-statistics source, fed by the consolidated per_request rows
-# and the terminal server_latency snapshot taken here. Fetched once after
-# ALL load clients have exited: multi-worker shards run with
-# SKIP_SERVER_LATENCY=1 so this is their only snapshot, while the
-# single-worker Java client already wrote its own (this refreshes it).
-# START_FLEXLB=0 skips the fetch (the endpoint belongs to the master this
-# script spawns); a failed fetch is a WARNING, never a run failure —
-# aggregation then reports the two master-side validity items as
-# data-missing. tmp+mv keeps a previously written client snapshot intact
-# when the fetch fails.
-if [[ "${START_FLEXLB}" == "1" ]]; then
+# Optional terminal snapshot is dedicated diagnostic evidence, never a curve source.
+if [[ "${START_FLEXLB}" == "1" && "${COLLECTION_PROFILE}" == diagnostic ]]; then
   if curl -fsS "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency" \
       >"${RUN_DIR}/load_client/server_latency.json.tmp" 2>/dev/null; then
     mv "${RUN_DIR}/load_client/server_latency.json.tmp" \
@@ -1292,7 +1015,7 @@ if [[ "${CLIENT_EXIT:-0}" -ne 0 ]]; then
   exit "${CLIENT_EXIT}"
 fi
 
-stop_secondary_pollers
+stop_monitoring
 assert_mock_engine_healthy
 
 if [[ "${SLO_BATCH_DRAIN_SECONDS}" -gt 0 ]]; then
@@ -1303,60 +1026,15 @@ fi
 assert_mock_engine_healthy
 if [[ "${START_FLEXLB}" == "1" ]]; then
   wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
-  save_master_info "${RUN_DIR}/master_info_after.json"
-  save_master_prometheus "${RUN_DIR}/master_prometheus_after.prom" || true
+  if [[ "${COLLECTION_PROFILE}" == diagnostic ]]; then save_master_info "${RUN_DIR}/master_info_after.json"; fi
 fi
-
-# Consolidate the run directory into the per-component JSON+log layout
-# (run_meta/mock/master/client .json + .log, merged client_events.jsonl[.gz],
-# run-root engine_events.jsonl[.gz];
-# see consolidate_run_outputs.py's docstring for the full keep/delete list).
-# Runs while the mock cluster and master are still alive (cleanup kills them
-# on EXIT), so the final cluster snapshot is captured from the control plane.
-# Kept in place on purpose: endpoints.json, flexlb_env.txt, flexlb_profile.jfr
-# and load_client/server_latency.json (aggregate validity input). Phase B:
-# the client no longer writes summary.json / report.md — every derived
-# statistic lives in aggregate.json, produced by the aggregate step right
-# after consolidation below.
 
 echo "aggregate=${RUN_DIR}/aggregate.json"
-echo "run_meta=${RUN_DIR}/run_meta.json"
-echo "mock=${RUN_DIR}/mock.json (${RUN_DIR}/mock.log)"
-echo "master=${RUN_DIR}/master.json (${RUN_DIR}/master.log)"
-echo "client=${RUN_DIR}/client.json (${RUN_DIR}/client.log)"
-if [[ -f "${RUN_DIR}/client_events.jsonl" ]]; then
-  echo "client_events=${RUN_DIR}/client_events.jsonl"
-else
-  echo "client_events=${RUN_DIR}/client_events.jsonl.gz"
-fi
-if [[ -f "${RUN_DIR}/engine_events.jsonl" ]]; then
-  echo "engine_events=${RUN_DIR}/engine_events.jsonl"
-else
-  echo "engine_events=${RUN_DIR}/engine_events.jsonl.gz"
-fi
-echo "jfr=${JFR_FILE}"
-
-# K1: consolidate AFTER the aggregate= / artifact echo above and BEFORE the
-# test_valid verdict below. The consolidation's per_request gzip pass can
-# take tens of seconds on large runs while the orchestrator's
-# timeout window is only DURATION+180s — printing the aggregate line first
-# guarantees the correct exit code and artifact paths are already visible
-# even if consolidation (or the aggregation below) is slow or interrupted.
+echo "monitoring=${RUN_DIR}/telemetry/0"
 consolidate_run_outputs_now
 
-# Phase B: run-level aggregation now happens inside the run itself (was the
-# orchestrator's post-hoc step). aggregate_canvas_run.py derives every statistic
-# from the consolidated rows + server_latency + client_env snapshot and
-# writes aggregate.json — the single derived-metrics source. Same
-# best-effort semantics as consolidation: a failure is a WARNING, never a
-# run failure. Must run with the run dir as CWD (the script locates all
-# inputs relative to os.getcwd()).
-if ( cd "${RUN_DIR}" && python3 "${SCRIPT_DIR}/aggregate_canvas_run.py" \
-    >"${RUN_DIR}/aggregate.json" ); then
-  :
-else
-  echo "WARNING: aggregate_canvas_run.py failed; aggregate.json not written" >&2
-fi
+# Standard monitor query archive is the only source of performance curves.
+PYTHONPATH="${ONLINE_EVAL_DIR}" python3 -m online_eval.monitoring report --run-dir "${RUN_DIR}"
 
 # TEST_VERDICT: read test_valid from the aggregate summary (the merge
 # heredoc's old summary.json verdict is gone). A missing aggregate.json or

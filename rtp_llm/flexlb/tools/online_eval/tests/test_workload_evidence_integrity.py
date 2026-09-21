@@ -101,10 +101,10 @@ class EvidenceIntegrityTest(unittest.TestCase):
                     expected_telemetry=["1/mock"],
                 ),
             )
-            self.assertEqual(result["status"], "PASS")
-            self.assertEqual(result["workload"]["runtime_validity"], "VALID")
+            self.assertEqual(result["status"], "ERROR")
+            self.assertEqual(result["workload"]["runtime_validity"], "INVALID")
             self.assertEqual(result["workload"]["collection_gaps"], {})
-            self.assertTrue(result["workload"]["telemetry_gaps"])
+            self.assertIn("1/mock", result["workload"]["missing_telemetry"])
 
     def test_invalid_evidence_cannot_pass_or_confirm_probe(self):
         for status in (
@@ -181,8 +181,31 @@ class EvidenceIntegrityTest(unittest.TestCase):
             p = Path(d)
             t = p / "telemetry/1"
             t.mkdir(parents=True)
-            for name in ["mock", "master-A"]:
-                (t / (name + ".prom")).write_text("# ts=1000\nx 1\n")
+            (t / "queries.json").write_text(
+                json.dumps(
+                    dict(
+                        backend="prometheus",
+                        start=1,
+                        end=2,
+                        step=1,
+                        targets={"mock": "http://mock", "master-A": "http://master"},
+                        errors=[],
+                        queries={
+                            name
+                            + "/up": dict(
+                                promql="up",
+                                result=[
+                                    dict(
+                                        metric={"job": name, "__name__": "up"},
+                                        values=[[1, "1"], [2, "1"]],
+                                    )
+                                ],
+                            )
+                            for name in ("mock", "master-A")
+                        },
+                    )
+                )
+            )
             r = dict(
                 id="test",
                 status="PASS",

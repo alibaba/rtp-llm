@@ -292,6 +292,11 @@ def resolve_run(path):
     else:
         raise PrecheckError(f"{path}: no such file or directory")
     aggregate = load_json(agg_path)
+    if aggregate.get("monitor_backend") == "prometheus":
+        raise PrecheckError(
+            "legacy stress gate cannot judge Prometheus archives; "
+            "use workload/cache-gate A/B comparison with explicit test contracts"
+        )
     meta = aggregate.get("meta") or {}
     run_meta = load_json(meta_path) if os.path.isfile(meta_path) else None
     label = meta.get("run_dir") or os.path.basename(

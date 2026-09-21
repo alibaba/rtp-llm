@@ -117,6 +117,8 @@ def _start(ctx, p, deadline):
         phase_id=p["phase_id"],
         poll_s=p["poll_s"],
         max_events=event_budget,
+        collection_profile=ctx.instance.get("collection_profile", "request"),
+        monitor=getattr(ctx, "monitor", None),
     )
 
     def cleanup(d):
@@ -128,7 +130,7 @@ def _start(ctx, p, deadline):
     environment = dict(
         environment, GRPC_TARGET=f"127.0.0.1:{ctx.env.master_http_port + 2}"
     )
-    state = flow.start(trace, environment, deadline)
+    flow.start(trace, environment, deadline)
     return StageOutput({"flow": handle}, artifacts=[str(directory / "flow-input.json")])
 
 

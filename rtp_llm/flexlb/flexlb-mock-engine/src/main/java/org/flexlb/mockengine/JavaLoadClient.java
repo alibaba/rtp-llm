@@ -127,6 +127,40 @@ public final class JavaLoadClient implements AutoCloseable {
     final AtomicInteger sentTotal = new AtomicInteger();
     final List<RequestResult> completedResults = Collections.synchronizedList(new ArrayList<>());
     private volatile ScheduledExecutorService pushgatewayExecutor;
+    private final boolean retainRequestEvidence = !"aggregate".equals(System.getenv("COLLECTION_PROFILE"));
+    private final io.micrometer.prometheus.PrometheusMeterRegistry monitor =
+            new io.micrometer.prometheus.PrometheusMeterRegistry(io.micrometer.prometheus.PrometheusConfig.DEFAULT);
+    private com.sun.net.httpserver.HttpServer metricsServer;
+    private final AtomicInteger monitoredCompleted = new AtomicInteger();
+
+    private void startMetricsServer() throws IOException {
+        if (!"true".equalsIgnoreCase(System.getenv("CLIENT_MONITORING"))) return;
+        metricsServer = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        io.micrometer.core.instrument.FunctionCounter.builder("flexlb_client_send", sentTotal, AtomicInteger::doubleValue).register(monitor);
+        io.micrometer.core.instrument.FunctionCounter.builder("flexlb_client_actual_send", actualSentCount, AtomicInteger::doubleValue).register(monitor);
+        io.micrometer.core.instrument.FunctionCounter.builder("flexlb_client_completed", monitoredCompleted, AtomicInteger::doubleValue).register(monitor);
+        io.micrometer.core.instrument.FunctionCounter.builder("flexlb_client_success", successCount, AtomicInteger::doubleValue).register(monitor);
+        io.micrometer.core.instrument.FunctionCounter.builder("flexlb_client_error", errorCount, AtomicInteger::doubleValue).register(monitor);
+        metricsServer.createContext("/metrics", exchange -> {
+            byte[] body = monitor.scrape().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+            exchange.sendResponseHeaders(200, body.length);
+            try (var output = exchange.getResponseBody()) { output.write(body); }
+        });
+        metricsServer.start();
+        Files.writeString(Path.of(config.outputDir, "metrics-target.json"),
+                "{\"url\":\"http://127.0.0.1:" + metricsServer.getAddress().getPort() + "/metrics\"}");
+    }
+
+    private void observeLatency(String name, double milliseconds) {
+        if (milliseconds > 0 && Double.isFinite(milliseconds)) {
+            io.micrometer.core.instrument.Timer.builder("flexlb_client_" + name)
+                    .publishPercentileHistogram().minimumExpectedValue(Duration.ofMillis(1))
+                    .maximumExpectedValue(Duration.ofMinutes(2)).register(monitor)
+                    .record((long) (milliseconds * 1_000_000), TimeUnit.NANOSECONDS);
+        }
+    }
+
     private ClientEventJournal liveJournal;
     private Playback playback;
     private long tokenStride = 1;
@@ -263,7 +297,18 @@ public final class JavaLoadClient implements AutoCloseable {
                     System.getenv().getOrDefault("FLOW_PHASE_ID", ""));
             flowControl.publish("STARTING", 0, 0, 0);
         }
-        if (flowControl != null || "true".equalsIgnoreCase(System.getenv("LIVE_CLIENT_EVENTS"))) {
+        startMetricsServer();
+        if (metricsServer != null) {
+            long monitorDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (!Files.exists(Path.of(config.outputDir, "metrics-ready"))) {
+                if (System.nanoTime() >= monitorDeadline) throw new IOException("monitor did not acknowledge initial scrape");
+                Thread.sleep(50);
+            }
+            long startAt = Long.parseLong(Files.readString(Path.of(config.outputDir, "metrics-ready")).trim());
+            long remainingMs = startAt - System.currentTimeMillis();
+            if (remainingMs > 0) Thread.sleep(remainingMs);
+        }
+        if (retainRequestEvidence && (flowControl != null || "true".equalsIgnoreCase(System.getenv("LIVE_CLIENT_EVENTS")))) {
             liveJournal = new ClientEventJournal(Path.of(config.outputDir, "client_lifecycle.jsonl"));
         }
         if (!config.skipServerLatency) {
@@ -429,7 +474,7 @@ public final class JavaLoadClient implements AutoCloseable {
                     if (future.isDone()) {
                         try {
                             RequestResult collected = future.get();
-                            if (collected != null) {
+                            if (collected != null && retainRequestEvidence) {
                                 results.add(collected);
                             }
                         } catch (Exception ignored) {
@@ -465,7 +510,8 @@ public final class JavaLoadClient implements AutoCloseable {
 
         long deadlineNanos = System.nanoTime()
                 + TimeUnit.SECONDS.toNanos(config.responseTimeoutSeconds);
-        results.addAll(collectOutstandingResults(futures, deadlineNanos));
+        List<RequestResult> tail = collectOutstandingResults(futures, deadlineNanos);
+        if (retainRequestEvidence) results.addAll(tail);
         progressMonitor.shutdownNow();
         executor.shutdownNow();
 
@@ -919,7 +965,11 @@ public final class JavaLoadClient implements AutoCloseable {
             if (flowControl != null) flowControl.identify(event);
             liveJournal.record("terminal", event);
         }
-        completedResults.add(result);
+        monitoredCompleted.incrementAndGet();
+        observeLatency("schedule", result.scheduleMs);
+        observeLatency("total", result.totalMs);
+        observeLatency("ttft", result.ttftMs);
+        if (retainRequestEvidence) completedResults.add(result);
         if ("ok".equals(result.status) || "scheduled".equals(result.status)) {
             successCount.incrementAndGet();
         } else {
@@ -1488,6 +1538,7 @@ public final class JavaLoadClient implements AutoCloseable {
     // ---- Output Writing ----
 
     private void writePerRequestResults() throws IOException {
+        if (!retainRequestEvidence) return;
         // client_events.jsonl (renamed from per_request.jsonl): the client-side
         // half of the multi-component JSONL event streams — one row per
         // request, rid-joined offline by aggregate_canvas_run.py against the
@@ -1702,7 +1753,7 @@ public final class JavaLoadClient implements AutoCloseable {
         lines.add("flexlb_client_schedule_inflight{route_path=\"master\"} " + scheduleInflightCount.get());
         lines.add("flexlb_client_send_total{route_path=\"master\"} " + sentTotal.get());
         lines.add("flexlb_client_actual_send_total{route_path=\"master\"} " + actualSentCount.get());
-        lines.add("flexlb_client_completed_total{route_path=\"master\"} " + completedResults.size());
+        lines.add("flexlb_client_completed_total{route_path=\"master\"} " + (retainRequestEvidence ? completedResults.size() : monitoredCompleted.get()));
         lines.add("flexlb_client_success_total{route_path=\"master\"} " + successCount.get());
         lines.add("flexlb_client_error_total{route_path=\"master\"} " + errorCount.get());
         lines.add("flexlb_client_inflight_count{route_path=\"master\"} " + inflight);
@@ -1850,6 +1901,16 @@ public final class JavaLoadClient implements AutoCloseable {
     // ---- Cleanup ----
 
     @Override public void close() {
+        if (metricsServer != null) {
+            try {
+                Files.writeString(Path.of(config.outputDir, "metrics-complete.json"),
+                        "{\"epoch_s\":" + System.currentTimeMillis() / 1000.0 + "}");
+            } catch (IOException error) {
+                System.err.println("monitor completion manifest failed: " + error);
+            }
+            metricsServer.stop(0);
+        }
+        monitor.close();
         if (liveJournal != null) {
             liveJournal.close();
         }

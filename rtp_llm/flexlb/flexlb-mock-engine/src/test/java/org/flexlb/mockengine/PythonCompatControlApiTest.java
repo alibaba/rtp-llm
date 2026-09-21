@@ -547,13 +547,17 @@ class PythonCompatControlApiTest {
 
         String body = httpGet("/metrics?per_engine=true");
         String expectedLabels = "engine_name=\"prefill-0\",role=\"prefill\","
-                + "grpc_port=\"" + prefill.getGrpcPort() + "\",engine_ip=\"127.0.0.1\"";
+                + "grpc_port=\"" + prefill.getGrpcPort() + "\",engine_ip=\"127.0.0.1\",engine_incarnation=\""
+                + prefill.getMetricsSnapshot().get("engine_incarnation") + "\"";
+        assertTrue(body.contains("mock_context_requests_total{" + expectedLabels + "} 1"));
+        assertTrue(body.contains("mock_hit_tokens_total{" + expectedLabels + "}"));
         assertRemovedMetricsAbsent(body);
         assertTrue(body.contains("rtp_llm_running_stream_size{" + expectedLabels + "} 0"));
         assertTrue(body.contains("mock_engine_accepted_total{" + expectedLabels + "} 1"));
         assertTrue(body.contains("mock_engine_completed_total{engine_name=\"decode-0\","
                 + "role=\"decode\",grpc_port=\"" + decodeServices.get(0).getGrpcPort()
-                + "\",engine_ip=\"127.0.0.1\"} 1"));
+                + "\",engine_ip=\"127.0.0.1\",engine_incarnation=\""
+                + decodeServices.get(0).getMetricsSnapshot().get("engine_incarnation") + "\"} 1"));
         assertFalse(body.contains("rtp_llm_generate_tps{" + expectedLabels + "}"));
         assertFalse(body.contains("mock_engine_decode_ms_avg{" + expectedLabels + "}"));
         String decodeLabels = "engine_name=\"decode-0\",role=\"decode\",grpc_port=\""

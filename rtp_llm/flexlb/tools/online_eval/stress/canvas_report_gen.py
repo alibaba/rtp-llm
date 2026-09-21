@@ -342,6 +342,21 @@ def main():
         help="代码 commit（优先取 aggregate meta.git_commit；均缺则 detail 显示 —）",
     )
     args = ap.parse_args()
+    aggregate_path = Path(args.aggregate)
+    if json.loads(aggregate_path.read_text()).get("monitor_backend") == "prometheus":
+        from online_eval.monitoring import write_monitor_report
+
+        target = Path(args.out)
+        directory = target.parent if target.suffix.lower() == ".html" else target
+        run_id = args.run_id or aggregate_path.parent.name
+        write_monitor_report(aggregate_path.parent, run_id, output=directory)
+        if target.suffix.lower() == ".html":
+            from online_eval.reporting import bundle_path
+
+            target.write_text(
+                (bundle_path(directory, "run", run_id) / "report.html").read_text()
+            )
+        return
 
     # RUNID 文件名规范化（防 ENOENT 复发）：详见 normalize_out_runid
     # 文档字符串；规范化后仍有下划线 RUNID 段则断言失败（自检）。

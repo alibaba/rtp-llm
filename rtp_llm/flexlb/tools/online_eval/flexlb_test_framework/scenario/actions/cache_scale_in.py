@@ -7,7 +7,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from ..contracts import CheckResult, StageHandler, StageOutput
-from .elastic import _snapshot, _validate, _http
+from .elastic import _validate, _http
 from ...workload.cache_gate import align_send_counters, analyze, window, write_report
 
 FIELDS = {
@@ -146,26 +146,11 @@ def observe(ctx, p, deadline):
 
     def sample():
         deadline.check()
-        fields = {
-            "grpc_addr",
-            "engine_incarnation",
-            "hit_tokens_total",
-            "context_tokens_total",
-            "context_requests_total",
-            "cache_evictions",
-            "waiting",
-            "running",
-            "prefill_ms_avg",
-            "prefill_batches",
-            "prefill_batch_requests",
-            "cache_key_hits",
-            "cache_keys_requested",
-        }
-        engines = {
-            n: {k: v for k, v in e.items() if k in fields}
-            for n, e in _snapshot(ctx, deadline).items()
-            if e["role"] == "prefill"
-        }
+        from online_eval.monitoring import engine_sample
+        engines = engine_sample(
+            f"http://127.0.0.1:{ctx.env.mock_http_port}/metrics?per_engine=true",
+            timeout=min(3, deadline.remaining()),
+        )
         state = flow.status()
         row = dict(
             t=ctx.clock() - origin,
@@ -178,8 +163,6 @@ def observe(ctx, p, deadline):
             running=sum(e["running"] for e in engines.values()),
         )
         evidence["samples"].append(row)
-        with (ctx.artifact_dir / "cache-gate-samples.jsonl").open("a") as journal:
-            journal.write(json.dumps(row) + "\n")
         if state["process_returncode"] is not None or state.get("state") != "SENDING":
             raise ValueError("Java traffic stopped before observation completed")
         return row
@@ -309,13 +292,9 @@ def check(ctx, p, deadline):
     lags = [r.get("pacing_lag_ms") for r in issued]
     if lags and all(type(v) in (int, float) and math.isfinite(v) for v in lags):
         evidence["max_pacing_lag_ms"] = max(lags)
-    from ...workload.cache_gate import completion_series
-
-    evidence["completion_series"] = completion_series(
-        snapshot["records"],
-        ctx.env.run_dir / "engine_events.jsonl",
-        evidence["samples"],
-    )
+    if getattr(ctx, "monitor", None) is not None:
+        ctx.monitor.archive()
+    evidence["curve_source"] = "prometheus"
     result = analyze(evidence)
     write_report(ctx.artifact_dir, evidence, result)
     status = {"INVALID": "ERROR", "FAIL": "FAIL", "PASS": "PASS"}[result["verdict"]]

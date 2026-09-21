@@ -5,8 +5,6 @@ resource ownership and deadline cleanup; workloads never suppress ERROR/TIMEOUT.
 """
 
 import json
-import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -17,7 +15,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class WorkloadPolicy:
     def attach(self, ctx):
-        self.options = ctx.instance["workload_runtime"]
+        self.options = dict(ctx.instance["workload_runtime"])
+        self.profile = ctx.instance.get("collection_profile", "request")
+        self.monitors = {}
         self.anchor = dict(monotonic_s=ctx.clock(), epoch_s=time.time())
         self.collectors = {}
         self.events = []
@@ -34,7 +34,11 @@ class WorkloadPolicy:
         return spec.get("purpose") == "observation"
 
     def _snapshot_servers(self, ctx, env, epoch, remaining_s):
-        if epoch in self.final_snapshots or remaining_s <= 0:
+        if (
+            self.profile != "diagnostic"
+            or epoch in self.final_snapshots
+            or remaining_s <= 0
+        ):
             return
         import urllib.request
 
@@ -70,6 +74,9 @@ class WorkloadPolicy:
         self.final_snapshots.add(epoch)
 
     def before_stage(self, ctx, spec):
+        if spec["action"] == "teardown" and ctx.env_epoch in self.monitors:
+            # Stop the monitoring interval before intentional target teardown.
+            self.monitors[ctx.env_epoch].stop(self.options["collector_shutdown_s"])
         if (
             spec["action"] == "teardown"
             and ctx.env is not None
@@ -131,34 +138,42 @@ class WorkloadPolicy:
             self.master_log_directories[str(ctx.env_epoch)]["single"] = str(
                 env.master_log_dir
             )
-        masters = [(name, value.management()) for name, value in specs.items()] or [
-            ("single", env.master_management_port)
-        ]
-        from online_eval.telemetry import SharedMetricSource
+        masters = [
+            (name, value.bind_ip, value.management()) for name, value in specs.items()
+        ] or [("single", "127.0.0.1", env.master_management_port)]
+        from online_eval.monitoring import PrometheusSession
 
-        source = SharedMetricSource(
-            f"http://127.0.0.1:{env.mock_http_port}/metrics?per_engine=true",
+        targets = {
+            "mock": f"http://127.0.0.1:{env.mock_http_port}/metrics?per_engine=true"
+        }
+        targets.update(
+            {
+                "master-" + name: f"http://{host}:{port}/prometheus"
+                for name, host, port in masters
+            }
+        )
+        source = PrometheusSession(
             ctx.artifact_dir / "telemetry" / str(ctx.env_epoch),
+            targets,
             self.options["sample_interval_s"],
-            history_limit=self.options["sample_history_limit"],
+            self.options.get("max_sample_gap_s", 5),
         )
         window = dict(started_epoch_s=time.time(), ended_epoch_s=None)
-        self.telemetry_windows[f"{ctx.env_epoch}/mock"] = window
-        source.start()
-        self.expected_telemetry.append(f"{ctx.env_epoch}/mock")
+        for name in targets:
+            self.telemetry_windows[f"{ctx.env_epoch}/{name}"] = window
+            self.expected_telemetry.append(f"{ctx.env_epoch}/{name}")
 
+        # Register cleanup before startup so a failed start cannot leak a process.
         def stop_source(deadline):
             window["ended_epoch_s"] = time.time()
             source.stop(
                 min(self.options["collector_shutdown_s"], max(0, deadline.remaining()))
             )
 
-        ctx.add_cleanup(
-            "shared-mock-telemetry-" + str(ctx.env_epoch),
-            stop_source,
-        )
-        for name, port in masters:
-            self._start_collector(ctx, name, port)
+        ctx.add_cleanup("prometheus-" + str(ctx.env_epoch), stop_source)
+        source.start()
+        self.monitors[ctx.env_epoch] = source
+        ctx.monitor = source
         epoch = ctx.env_epoch
         ctx.add_cleanup(
             "final-server-snapshot-" + str(epoch),
@@ -166,62 +181,6 @@ class WorkloadPolicy:
                 ctx, env, epoch, deadline.remaining()
             ),
         )
-
-    def _start_collector(self, ctx, name, port):
-        env = ctx.env
-        directory = ctx.artifact_dir / "telemetry" / str(ctx.env_epoch)
-        directory.mkdir(parents=True, exist_ok=True)
-        self.expected_telemetry.append(f"{ctx.env_epoch}/master-{name}")
-        window = dict(started_epoch_s=time.time(), ended_epoch_s=None)
-        self.telemetry_windows[f"{ctx.env_epoch}/master-{name}"] = window
-        log = (directory / ("collector-" + name + ".log")).open("w")
-        try:
-            child = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(ROOT / "stress/eval_collectors.py"),
-                    "--secondary-interval",
-                    str(self.options["sample_interval_s"]),
-                    "--prometheus-port",
-                    str(port),
-                    "--prometheus-out",
-                    str(directory / ("master-" + name + ".prom")),
-                ],
-                stdout=log,
-                stderr=subprocess.STDOUT,
-            )
-        except BaseException:
-            log.close()
-            raise
-        self.collectors[ctx.env_epoch].append(child)
-
-        def stop(deadline):
-            window["ended_epoch_s"] = time.time()
-            try:
-                exited_early = child.poll() is not None
-                if not exited_early:
-                    child.terminate()
-                try:
-                    child.wait(
-                        timeout=min(
-                            self.options["collector_shutdown_s"],
-                            max(0, deadline.remaining()),
-                        )
-                    )
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.wait()
-                    raise RuntimeError(
-                        "workload collector did not stop within cleanup budget"
-                    )
-                if exited_early or child.returncode not in (0, -15):
-                    raise RuntimeError(
-                        f"workload collector exited unexpectedly: {child.returncode}"
-                    )
-            finally:
-                log.close()
-
-        ctx.add_cleanup("workload-collector-" + str(ctx.env_epoch) + "-" + name, stop)
 
     def finalize(self, ctx, result):
         from .report import write_report
@@ -247,7 +206,19 @@ class WorkloadPolicy:
                 producers.setdefault(str(handle["env_epoch"]), set()).add(
                     "python" if snapshot.get("producer_kind") == "python" else id(value)
                 )
-                records.append(dict(resource=handle, **snapshot))
+                # Keep one canonical request journal, not a second full copy in workload JSON.
+                manifest = {
+                    k: v
+                    for k, v in snapshot.items()
+                    if k not in ("records", "issued", "unfinished")
+                }
+                if self.profile == "diagnostic":
+                    manifest = snapshot
+                elif hasattr(value, "directory"):
+                    manifest["request_journal"] = str(
+                        value.directory / "client_lifecycle.jsonl"
+                    )
+                records.append(dict(resource=handle, **manifest))
                 if not snapshot["complete"]:
                     incomplete.append(dict(resource=handle, errors=snapshot["errors"]))
                 continue
@@ -286,15 +257,17 @@ class WorkloadPolicy:
             master_incarnations=self.master_incarnations,
             final_server_snapshot_errors=self.snapshot_errors,
         )
-        from .evidence import join_evidence
+        joined = {"issues": [], "requests": []}
+        # Request/engine correlation is a dedicated diagnostic, never a curve source.
+        if self.profile == "diagnostic":
+            from .evidence import join_evidence
 
-        joined = join_evidence(payload, self.environments)
-        (ctx.artifact_dir / "request-engine-evidence.json").write_text(
-            json.dumps(joined, indent=2, allow_nan=False) + "\n"
-        )
-        payload["request_engine_join"] = str(
-            ctx.artifact_dir / "request-engine-evidence.json"
-        )
+            joined = join_evidence(payload, self.environments)
+            joined_path = ctx.artifact_dir / "request-engine-evidence.json"
+            joined_path.write_text(json.dumps(joined, allow_nan=False) + "\n")
+            payload["request_engine_join"] = str(joined_path)
+        payload["collection_profile"] = self.profile
+        payload["monitor_backend"] = "prometheus"
         evidence.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
         result["workload"] = dict(
             evidence=str(evidence),
@@ -311,21 +284,10 @@ class WorkloadPolicy:
             # A valid execution is not proof that a calibrated performance band passed.
             performance_verdict="NOT_EVALUATED",
         )
-        from .aggregate import aggregate_workload
-
-        result["workload"]["stress_aggregates"] = aggregate_workload(
-            ctx.artifact_dir,
-            joined,
-            self.environments,
-            self.anchor,
-            ctx.instance["execution"]["cleanup_timeout_s"],
-            master_log_directories=self.master_log_directories,
-            environment_metadata=self.environment_metadata,
-        )
-        if any(
-            row["status"] == "ERROR" for row in result["workload"]["stress_aggregates"]
-        ):
-            result["workload"]["runtime_validity"] = "INVALID"
+        # Log-derived legacy aggregates are no longer automatic, nor report curves.
+        result["workload"]["stress_aggregates"] = []
+        result["workload"]["collection_profile"] = self.profile
+        result["workload"]["monitor_backend"] = "prometheus"
         analysis = analyze_report(ctx.artifact_dir, result, payload)
         bundle = write_report(ctx.artifact_dir, analysis)
         result["workload"]["report"] = str(bundle / "report.html")

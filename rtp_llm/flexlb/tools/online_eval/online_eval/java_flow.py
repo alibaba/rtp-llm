@@ -21,11 +21,18 @@ class JavaFlowGroup:
         phase_id,
         poll_s,
         max_events=50_000,
+        collection_profile="request",
+        monitor=None,
     ):
         if not all(isinstance(x, str) and x for x in (run_id, group_id, phase_id)):
             raise ValueError("flow identities must be explicit nonempty strings")
         if poll_s <= 0:
             raise ValueError("flow polling interval must be positive")
+        if collection_profile not in {"aggregate", "request", "diagnostic"}:
+            raise ValueError("unknown collection profile")
+        self.collection_profile = collection_profile
+        self.monitor = monitor
+        self.monitor_target = "client-" + group_id
         self.client = client
         self.directory = Path(directory)
         self.identity = dict(run_id=run_id, group_id=group_id, phase_id=phase_id)
@@ -46,18 +53,24 @@ class JavaFlowGroup:
         self.directory.mkdir(parents=True)
         self.control.mkdir()
         env, playback = normalize(environment)
-        source_manifest = trace.with_suffix('.manifest.json')
-        semantics = json.loads(source_manifest.read_text()) if source_manifest.exists() else {}
+        source_manifest = trace.with_suffix(".manifest.json")
+        semantics = (
+            json.loads(source_manifest.read_text()) if source_manifest.exists() else {}
+        )
         self.trace_manifest.update(semantics)
-        self.trace_manifest['playback'] = playback
+        self.trace_manifest["playback"] = playback
         env.update(
             TRACE_FILE=str(trace),
             FLOW_CONTROL_DIR=str(self.control),
             FLOW_RUN_ID=self.identity["run_id"],
             FLOW_GROUP_ID=self.identity["group_id"],
             FLOW_PHASE_ID=self.identity["phase_id"],
-            LIVE_CLIENT_EVENTS="true",
+            LIVE_CLIENT_EVENTS=str(self.collection_profile != "aggregate").lower(),
+            COLLECTION_PROFILE=self.collection_profile,
+            CLIENT_MONITORING=str(self.monitor is not None).lower(),
         )
+        if self.collection_profile != "diagnostic":
+            env["SKIP_SERVER_LATENCY"] = "true"
         (self.directory / "flow-input.json").write_text(
             json.dumps(
                 dict(**self.identity, trace=self.trace_manifest, environment=env),
@@ -67,6 +80,19 @@ class JavaFlowGroup:
         self.proc, _ = self.client.run_async(
             env, self.directory, self.directory / "client.log"
         )
+        if self.monitor is not None:
+            target_path = self.directory / "metrics-target.json"
+            self._wait(
+                lambda state: target_path.exists(),
+                deadline,
+                "client monitor endpoint absent",
+            )
+            self.monitor.add_target(
+                self.monitor_target, json.loads(target_path.read_text())["url"]
+            )
+            (self.directory / "metrics-ready").write_text(
+                str(int(time.time() * 1000) + 500)
+            )
         return self._wait(
             lambda s: s.get("state")
             in {"SENDING", "DRAINING", "DRAINED", "INCOMPLETE"},
@@ -79,6 +105,14 @@ class JavaFlowGroup:
         state = json.loads(path.read_text()) if path.exists() else {}
         if state and any(state.get(k) != v for k, v in self.identity.items()):
             raise ValueError("flow control identity mismatch")
+        if self.collection_profile == "aggregate":
+            state["observed_started"] = state.get("started", 0)
+            state["observed_terminal"] = state.get("terminal", 0)
+            state["unfinished_ids"] = []
+            state["process_returncode"] = (
+                None if self.proc is None else self.proc.proc.poll()
+            )
+            return state
         self.journal.read()
         state["observed_started"] = len(self.journal.issued)
         state["observed_terminal"] = len(self.journal.terminal)
@@ -130,6 +164,11 @@ class JavaFlowGroup:
             deadline,
             "flow did not drain and exit",
         )
+        if getattr(self, "monitor", None) is not None:
+            self.monitor.end_target(
+                self.monitor_target,
+                state.get("recorded_epoch_ms", time.time() * 1000) / 1000,
+            )
         if state["state"] != "DRAINED" or state["process_returncode"] != 0:
             raise RuntimeError("flow drain incomplete: " + str(state))
         if state["submitted"] != state["observed_terminal"] or state["unfinished_ids"]:
@@ -152,6 +191,25 @@ class JavaFlowGroup:
         except Exception as exc:
             state = {}
             errors.append(str(exc))
+        if self.collection_profile == "aggregate":
+            complete = (
+                state.get("state") == "DRAINED"
+                and state.get("process_returncode") == 0
+                and state.get("submitted")
+                == state.get("started")
+                == state.get("terminal")
+            )
+            return dict(
+                producer_kind="java",
+                complete=complete,
+                errors=[] if complete else ["incomplete flow counters"],
+                **self.identity,
+                status=state,
+                trace=self.trace_manifest,
+                records=[],
+                issued=[],
+                unfinished=[],
+            )
         complete = (
             state.get("state") == "DRAINED"
             and state.get("process_returncode") == 0

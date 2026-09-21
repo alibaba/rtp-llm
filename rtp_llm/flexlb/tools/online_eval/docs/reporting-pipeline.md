@@ -72,3 +72,5 @@ python3 -m online_eval.reporting /path/to/report-spec.json --out /tmp/report.htm
 2026-09-21：全量 Python 回归 985 项通过；随后新增的两个 CLI 产物检查随报告专项通过。图例、多曲线交互合约检查与生成页面内联 JavaScript 语法检查通过。四组代表性报告共 40 个面板与旧路径数据一致；五组 cache gate 样本的原有分析字段与判定逐项一致，覆盖 PASS、FAIL、INVALID。
 
 本地 `file://` 页面预览被浏览器安全策略阻止，本次未作视觉验收。以上验证不代表重新执行了远端规模性能实验。
+
+监控曲线的数据来源约束见 [monitoring-pipeline.md](monitoring-pipeline.md)。新运行的曲线由 Prometheus 查询生成；专用请求/接口/日志证据与曲线分开，报告层不能据此补算曲线。

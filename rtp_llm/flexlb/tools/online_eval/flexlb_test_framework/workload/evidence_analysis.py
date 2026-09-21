@@ -6,7 +6,6 @@ import math
 from pathlib import Path
 
 from online_eval.metrics import parse_prometheus_samples
-from online_eval.playback import iteration_windows
 
 
 def journal_rows(path):
@@ -236,35 +235,18 @@ def mature_series(aggregates, workload_epoch_s):
 
 def analyze_report(directory, result, evidence):
     directory = Path(directory)
-    max_gap_s = (
-        result.get("workload", {})
-        .get("runtime_configuration", {})
-        .get("max_sample_gap_s")
-    )
-    series = read_series(directory, evidence["clock_anchor"]["epoch_s"], max_gap_s)
-    derived, statistic_sources, statistic_issues = mature_series(
-        result["workload"].get("stress_aggregates", []),
-        evidence["clock_anchor"]["epoch_s"],
-    )
-    series.update(derived)
-    from .cache_gate import report_series
+    from online_eval.monitoring import archived_series
 
-    gate_series, gate_sources = report_series(
+    series, statistic_sources, source_gaps, monitor_errors = archived_series(
         directory, evidence["clock_anchor"]["epoch_s"]
     )
-    series.update(gate_series)
-    statistic_sources.update(gate_sources)
-    if statistic_issues:
-        result["workload"]["statistics_issues"] = statistic_issues
-        result["workload"]["runtime_validity"] = "INVALID"
+    # Logs, request journals and debug API snapshots are dedicated-test evidence.
+    # They cannot silently supply a missing performance curve.
     gaps = {
         key: [t for t, value in points if value is None]
         for key, points in series.items()
         if any(value is None for _, value in points)
     }
-    source_gaps = collection_gaps(
-        directory, evidence["clock_anchor"]["epoch_s"], max_gap_s
-    )
     expected_gaps, unexpected_gaps = classify_gaps(source_gaps, evidence)
     result["workload"]["telemetry_gaps"] = gaps
     result["workload"]["collection_gaps"] = source_gaps
@@ -278,16 +260,7 @@ def analyze_report(directory, result, evidence):
     checks = [
         dict(stage=s["id"], **check) for s in result["stages"] for check in s["checks"]
     ]
-    journal_issues = (
-        audit_journals(
-            directory,
-            evidence.get("expected_telemetry", []),
-            max_gap_s,
-            evidence.get("telemetry_windows"),
-        )
-        if result.get("workload", {}).get("capture_metrics")
-        else []
-    )
+    journal_issues = monitor_errors
     result["workload"]["telemetry_integrity_errors"] = journal_issues
     if journal_issues:
         result["workload"]["runtime_validity"] = "INVALID"
@@ -319,28 +292,11 @@ def analyze_report(directory, result, evidence):
             result.get("error")
             or "workload evidence is invalid; inspect workload diagnostics"
         )
-    if gate_series:
-        # Audit every raw source above, but avoid duplicating hundreds of MB of
-        # per-engine telemetry into the gate's JSON and thousands of HTML panels.
-        # Full raw samples remain available for independent reanalysis.
-        result["workload"]["report_series_scope"] = "derived_and_cache_gate"
-        result["workload"]["raw_telemetry_sources"] = [
-            dict(path=str(path), bytes=path.stat().st_size)
-            for path in sorted(directory.glob("telemetry/*/*.prom"))
-        ]
-        series = {**derived, **gate_series}
     traffic = []
     iterations = []
     for flow_input in sorted(directory.glob("flows/*/flow-input.json")):
         flow = json.loads(flow_input.read_text())
         traffic.append(flow.get("trace", {}))
-        journal = flow_input.parent / "client_lifecycle.jsonl"
-        if journal.exists():
-            issued = (json.loads(line) for line in journal.open() if line.strip())
-            laps = iteration_windows(
-                row for row in issued if row.get("event") == "issued"
-            )
-            iterations.extend(dict(group=flow.get("group_id"), **lap) for lap in laps)
     payload = dict(
         schema_version=1,
         traffic_manifests=traffic,
