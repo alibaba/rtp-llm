@@ -174,8 +174,9 @@ def analyze(evidence):
         errors.append(
             "missing samples, insufficient prefill completions or off-target load"
         )
-    post = [r for r in rows if start <= r["t"] <= end]
-    if not post or any(r["master_p"] != len(evidence["survivors"]) for r in post):
+    post = [r for r in rows if start < r["t"] <= end]
+    survivors = set(evidence["survivors"])
+    if not post or any(set(r["engines"]) != survivors for r in post):
         errors.append("target topology not stable")
     if (
         not windows

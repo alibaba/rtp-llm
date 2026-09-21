@@ -24,7 +24,7 @@ execution:
   stage_timeout_s: 60
   cleanup_timeout_s: 420
 metadata:
-  description: 125P to 72P to 64P at 80 QPS, selected between the stable 40 QPS and overloaded 157 QPS probes; diagnostic thresholds are not the formal cache gate.
+  description: 125P to 72P to 64P at 150 QPS using the anonymized empirical Frontend prefix-lineage trace; require a warm high-hit baseline before scale-in.
   category: kv
 variants:
 - id: step
@@ -34,7 +34,7 @@ parameters:
     intermediate_p: 72
     intermediate_hold_s: 90
     target_p: 64
-    warmup_timeout_s: 180
+    warmup_timeout_s: 360
     baseline_s: 30
     observe_s: 120
     sample_s: 1
@@ -42,17 +42,17 @@ parameters:
     step_s: 1
     sustain_s: 30
     max_gap_s: 5
-    qps: 80
+    qps: 150
     qps_tolerance: 0.1
-    baseline_min_hit: 0.10
-    baseline_max_spread: 0.10
-    absolute_min_hit: 0.05
+    baseline_min_hit: 0.84
+    baseline_max_spread: 0.05
+    absolute_min_hit: 0.45
     max_drop: 0.25
     min_completed: 20
     min_waiting: 64
     max_pacing_lag_ms: 1000
     drain_timeout_ms: 30000
-    topology_timeout_s: 30
+    topology_timeout_s: 120
   flow:
     group_id: scale_in
     phase_id: continuous
@@ -60,17 +60,17 @@ parameters:
     jvm_xms: 1g
     jvm_xmx: 32g
     source:
-      kind: synthetic
-      model: realistic
-      version: '1'
+      kind: trace
+      model: prefix_lineage
+      version: '2'
       parameters:
-        seed: 91021
-        count: 120000
+        path: data/frontend_20260921_lineage.v2.xz
+        sha256: ac2f8aad472e882de2c649f5e0507d76787655a66d53e0e7285bdcb8aae87cca
+        count: 141113
         output_tokens: 420
         priority: 50
-        profile: frontend_20260921
     client:
-      DURATION_S: '500'
+      DURATION_S: '950'
       MAX_CONCURRENCY: '32768'
       TIMEOUT_MS: '300000'
       RESPONSE_TIMEOUT: '360'
@@ -82,6 +82,6 @@ parameters:
       PRIORITY: '50'
       playback:
         mode: uniform
-        qps: 80.0
+        qps: 150.0
         max_laps: 1
         identity: structural-relabel

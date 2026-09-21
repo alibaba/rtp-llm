@@ -123,7 +123,9 @@ class CacheGateTest(unittest.TestCase):
             if fault == "gap":
                 del e["samples"][40:46]
             if fault == "topology":
-                e["samples"][40]["master_p"] = 2
+                e["samples"][40]["engines"]["p1"] = copy.deepcopy(
+                    e["samples"][20]["engines"]["p1"]
+                )
             if fault == "pacing":
                 e["max_pacing_lag_ms"] = 1000
             if fault == "rate":

@@ -262,7 +262,7 @@ def observe(ctx, p, deadline):
                 while True:
                     deadline.sleep(p["sample_s"])
                     row = sample()
-                    if row["master_p"] == intermediate:
+                    if set(row["engines"]) == set(initial[:intermediate]):
                         event("intermediate_topology_observed")
                         break
                     if ctx.clock() >= topology_end:
@@ -271,7 +271,7 @@ def observe(ctx, p, deadline):
                 while row["t"] < hold_end:
                     deadline.sleep(min(p["sample_s"], hold_end - row["t"]))
                     row = sample()
-                    if row["master_p"] != intermediate:
+                    if set(row["engines"]) != set(initial[:intermediate]):
                         raise ValueError(
                             "intermediate topology changed during hold"
                         )
@@ -290,7 +290,9 @@ def observe(ctx, p, deadline):
                     not removal.get("drained", False)
                     for removal in intermediate_removals
                 ):
-                    raise ValueError("intermediate graceful drain timed out")
+                    evidence["errors"].append(
+                        "intermediate graceful drain timed out; continuing observation"
+                    )
             initial = initial[:intermediate]
 
         removed = initial[p["target_p"] :]
@@ -314,7 +316,7 @@ def observe(ctx, p, deadline):
         while True:
             deadline.sleep(p["sample_s"])
             row = sample()
-            if row["master_p"] == p["target_p"]:
+            if set(row["engines"]) == set(evidence["survivors"]):
                 evidence["post_start"] = row["t"]
                 event("target_topology_observed")
                 break
