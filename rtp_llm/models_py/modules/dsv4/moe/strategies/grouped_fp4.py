@@ -163,6 +163,9 @@ def _has_fp8_fp4_grouped_kernel() -> bool:
 @register_strategy
 class GroupedFP4Strategy(RoutedExpertsStrategy):
     name = "grouped_fp4"
+    # Grow-only workspaces shared across layers. Old entries stay so
+    # captured graphs keep valid pointers.
+    _sm120_masked_ws_cache: list = []
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
@@ -426,44 +429,57 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         self, n: int, topk: int, e: int, d: int, inter: int,
         alignment: int, device: torch.device,
     ) -> dict:
-        """Reuse static masked buffers (bench DeepGemmFp4Fp8Experts pattern)."""
-        key = (n, topk, e, d, inter, alignment, device.index)
-        ws = getattr(self, "_sm120_masked_ws", None)
-        if getattr(self, "_sm120_masked_ws_key", None) == key and ws is not None:
-            return ws
+        """One grow-only masked workspace per device/shape, shared across layers.
+
+        Capture walks 128→8 so a per-(n, alignment) cache would keep ~2 GiB.
+        Larger buffers are valid for smaller n: scatter/GEMM use the stored
+        alignment, token-indexed outputs are sliced to ``n``.
+        """
+        key = (topk, e, d, inter, device.index)
+        cache = GroupedFP4Strategy._sm120_masked_ws_cache
+        n_cap, a_cap = n, alignment
+        for cached in cache:
+            if cached["key"] != key:
+                continue
+            if cached["n"] >= n and cached["alignment"] >= alignment:
+                return cached
+            n_cap = max(n_cap, int(cached["n"]))
+            a_cap = max(a_cap, int(cached["alignment"]))
         packed = ceil_div(d // FP8_BLOCK, 4)
         ws = {
+            "key": key,
+            "n": n_cap,
+            "alignment": a_cap,
             "expert_x": torch.empty(
-                (e, alignment, d), dtype=torch.float8_e4m3fn, device=device
+                (e, a_cap, d), dtype=torch.float8_e4m3fn, device=device
             ),
             # Zero once so unused TMA scale slots stay valid UE8M0 powers of 2.
             "expert_x_scale": torch.zeros(
-                (e, packed, alignment), dtype=torch.int32, device=device
+                (e, packed, a_cap), dtype=torch.int32, device=device
             ).transpose(1, 2),
             "gate_up": torch.empty(
-                (e, alignment, 2 * inter), dtype=torch.bfloat16, device=device
+                (e, a_cap, 2 * inter), dtype=torch.bfloat16, device=device
             ),
             "down_in": torch.empty(
-                (e, alignment, inter), dtype=torch.float8_e4m3fn, device=device
+                (e, a_cap, inter), dtype=torch.float8_e4m3fn, device=device
             ),
             "down_in_scale": create_packed_scale_tensor(
                 expert_num=e,
-                token_num_padded=alignment,
+                token_num_padded=a_cap,
                 hidden_dim=2 * inter,
                 quant_group_size=FP8_BLOCK,
                 device=device,
             ),
             "down_out": torch.empty(
-                (e, alignment, d), dtype=torch.bfloat16, device=device
+                (e, a_cap, d), dtype=torch.bfloat16, device=device
             ),
             "start_loc": torch.empty((e,), dtype=torch.int32, device=device),
-            "out_index": torch.empty((n, topk), dtype=torch.int32, device=device),
-            "adjusted": torch.empty((n, topk), dtype=torch.int32, device=device),
+            "out_index": torch.empty((n_cap, topk), dtype=torch.int32, device=device),
+            "adjusted": torch.empty((n_cap, topk), dtype=torch.int32, device=device),
             "masked_m": torch.empty((e,), dtype=torch.int32, device=device),
-            "gather": torch.empty((n, d), dtype=torch.float32, device=device),
+            "gather": torch.empty((n_cap, d), dtype=torch.float32, device=device),
         }
-        self._sm120_masked_ws = ws
-        self._sm120_masked_ws_key = key
+        cache.append(ws)
         return ws
 
     def _forward_sm120_deepgemm_masked(
@@ -512,16 +528,17 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         else:
             a_fp8, a_scale = x, input_scale
         alignment = align(n_int, _GROUPED_ALIGNMENT)
-        expected_m = min(alignment, ceil_div(n_int * int(indices.size(1)), e))
         ws = self._ensure_sm120_masked_workspace(
             n_int, int(indices.size(1)), e, int(d), int(inter), alignment, device
         )
+        alignment = int(ws["alignment"])
+        expected_m = min(alignment, ceil_div(n_int * int(indices.size(1)), e))
         adjusted_ids, masked_m = recompute_topk_ids_sum_expert_count(
             indices,
             current_expert_start_id=int(expert_start_id),
             num_local_experts=e,
             weights=weights,
-            adjusted_out=ws["adjusted"],
+            adjusted_out=ws["adjusted"][:n_int],
             count_out=ws["masked_m"],
         )
         ep_scatter_v2(
@@ -532,7 +549,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             ws["start_loc"],
             ws["expert_x"].view(e * alignment, d),
             ws["expert_x_scale"],
-            ws["out_index"],
+            ws["out_index"][:n_int],
             scale_ue8m0=True,
         )
         m_grouped_fp8_fp4_gemm_nt_masked(
@@ -561,12 +578,12 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             recipe_a=(1, FP8_BLOCK),
             recipe_b=(1, FP4_BLOCK),
         )
-        gather_out = out if out is not None else ws["gather"]
+        gather_out = out if out is not None else ws["gather"][:n_int]
         ep_gather(
             ws["down_out"].view(e * alignment, d),
             adjusted_ids,
             weights,
-            ws["out_index"],
+            ws["out_index"][:n_int],
             gather_out,
         )
         return gather_out
