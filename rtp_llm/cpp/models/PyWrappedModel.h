@@ -351,7 +351,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py_model_                 = py_instance;
     sequence_parallel_padding_enabled_ = py::hasattr(py_instance, "requires_sequence_parallel_padding")
         && py_instance.attr("requires_sequence_parallel_padding").cast<bool>();
-    RTP_LLM_CHECK_WITH_INFO(!sequence_parallel_padding_enabled_ || !device_props_.enable_layer_micro_batch,
+    RTP_LLM_CHECK_WITH_INFO(!sequence_parallel_padding_enabled_
+                                || device_props_.enable_layer_micro_batch == MicroBatchType::NONE,
                             "K3 SP requires ENABLE_LAYER_MICRO_BATCH=0");
     auto py_initialize_method = py_model_.attr("initialize");
     try {
