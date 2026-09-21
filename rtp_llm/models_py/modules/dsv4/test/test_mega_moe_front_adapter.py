@@ -226,6 +226,24 @@ def _fake_adapter(dim: int = 128) -> tuple[MegaMoeFrontAdapter, _FakePlan]:
 
 
 class MegaMoeFrontAdapterTest(unittest.TestCase):
+    def test_front_rejects_non_contract_sinkhorn_iterations(self) -> None:
+        moe = SimpleNamespace(
+            strategy_name="mega_moe_se",
+            layer_id=0,
+            dim=128,
+            fused_moe=SimpleNamespace(fused_experts=object()),
+            gate=SimpleNamespace(topk=6),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "kernel contract v3 requires hc_sinkhorn_iters=20"
+        ):
+            MegaMoeFrontAdapter(
+                moe,
+                SimpleNamespace(hc_sinkhorn_iters=19),
+                SimpleNamespace(),
+            )
+
     def test_front_is_attached_when_explicitly_enabled_for_mega_se(self) -> None:
         block = SimpleNamespace(
             ffn=SimpleNamespace(

@@ -26,6 +26,7 @@ _HC_WIDTH = 24
 _ABI_VERSION = 1
 _KERNEL_CONTRACT_VERSION = 3
 _TOPK = 6
+_HC_SINKHORN_ITERS = 20
 _LEARNED_ROUTER_LOGITS_MAX_M = 9
 _TRUE_ENV_VALUES = frozenset(("1", "true", "yes", "on"))
 _FALSE_ENV_VALUES = frozenset(("0", "false", "no", "off", ""))
@@ -179,6 +180,12 @@ class MegaMoeFrontAdapter:
         if int(self.gate.topk) != _TOPK:
             raise RuntimeError(
                 f"DSV4 MoE front requires TopK-{_TOPK}, got {int(self.gate.topk)}"
+            )
+        if int(ffn_hc.hc_sinkhorn_iters) != _HC_SINKHORN_ITERS:
+            raise RuntimeError(
+                "DSV4 MoE front kernel contract v3 requires "
+                f"hc_sinkhorn_iters={_HC_SINKHORN_ITERS}, got "
+                f"{int(ffn_hc.hc_sinkhorn_iters)}"
             )
 
         device = self.gate.weight.device
