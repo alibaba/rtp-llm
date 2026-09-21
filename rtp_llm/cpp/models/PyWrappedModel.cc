@@ -117,7 +117,13 @@ GptModelInputs PyWrappedModel::padSequenceParallelInputs(const GptModelInputs& s
         if (!tensor.defined() || tensor.numel() == 0 || rows == 0) return tensor;
         auto shape = tensor.sizes().vec();
         shape[dim] = rows;
-        return torch::cat({tensor, torch::full(shape, value, tensor.options())}, dim);
+        auto padded = torch::cat({tensor, torch::full(shape, value, tensor.options())}, dim);
+        // cat does not preserve pinned host allocation. The fused H2D copier
+        // requires it and retains this allocation until the copy completes.
+        if (tensor.device().is_cpu() && tensor.is_pinned()) {
+            padded = padded.pin_memory();
+        }
+        return padded;
     };
     out.combo_tokens = append(source.combo_tokens, extra_tokens, 0);
     out.last_hidden_states = append(source.last_hidden_states, extra_tokens, 0);

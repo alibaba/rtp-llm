@@ -1,6 +1,8 @@
 """Kimi K3 text target. Cache ownership remains in RTP's tagged cache groups."""
 
 from collections.abc import Mapping
+from math import gcd
+import logging
 
 import torch
 from torch import nn
@@ -27,7 +29,7 @@ from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     prepare_causal_conv1d_metadata,
 )
-from rtp_llm.ops import HybridAttentionType
+from rtp_llm.ops import HybridAttentionType, RoleType
 from rtp_llm.ops.compute_ops import PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
@@ -51,7 +53,9 @@ class KimiK3DenseMLP(nn.Module):
 
 
 class KimiK3DecoderLayer(nn.Module):
-    def __init__(self, config, parallelism, weights, index, moe_config, hardware):
+    def __init__(
+        self, config, parallelism, weights, index, moe_config, hardware, moe_capacity
+    ):
         super().__init__()
         self.index = index
         self.block_size = config.k3_runtime_config.attn_res_block_size
@@ -75,7 +79,9 @@ class KimiK3DecoderLayer(nn.Module):
             else KimiK3MLA(config, parallelism, weights, index, hardware)
         )
         self.mlp = (
-            KimiK3LatentMoE(config, parallelism, weights, index, moe_config, hardware)
+            KimiK3LatentMoE(
+                config, parallelism, weights, index, moe_config, hardware, moe_capacity
+            )
             if index in config.moe_layer_index
             else KimiK3DenseMLP(config, parallelism, weights, hardware)
         )
@@ -146,6 +152,27 @@ class KimiK3Model(GptModelBase):
             parallelism_config.tp_size,
             parallelism_config.tp_rank,
         )
+        # The scheduler bound is global; SP routes only the local token shard.
+        global_prefill = model_config.moe_prefill_max_tokens_per_rank
+        if global_prefill is None:
+            global_prefill = model_config.max_seq_len
+        prefill_capacity = (int(global_prefill) + self.tp_size - 1) // self.tp_size
+        decode_capacity = 1
+        for width in (1, max(int(model_config.gen_num_per_cycle) + 1, 1)):
+            unit = self.tp_size // gcd(self.tp_size, width)
+            requests = (max_generate_batch_size + unit - 1) // unit * unit
+            decode_capacity = max(decode_capacity, requests * width // self.tp_size)
+        moe_capacity = (
+            decode_capacity
+            if parallelism_config.role_type == RoleType.DECODE
+            else max(prefill_capacity, decode_capacity)
+        )
+        logging.info(
+            "K3 SP MoE capacity: global_prefill=%d local_capacity=%d tp=%d",
+            global_prefill,
+            moe_capacity,
+            self.tp_size,
+        )
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
@@ -157,6 +184,7 @@ class KimiK3Model(GptModelBase):
                 i,
                 moe_config,
                 py_hw_kernel_config,
+                moe_capacity,
             )
             for i in range(self.layer_num)
         )

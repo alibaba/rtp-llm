@@ -1052,6 +1052,8 @@ class KVCacheSpecDesc:
 
 
 class ModelConfig:
+    reuse_single_mtp_module: bool
+    requires_token_position_ids: bool
     add_bias_linear: bool
     attn_config: AttentionConfigs
     ckpt_path: str

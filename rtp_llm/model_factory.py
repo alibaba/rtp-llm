@@ -507,6 +507,11 @@ class ModelFactory:
             propose_model_config, engine_config.kv_cache_config
         )
         propose_model_cls._post_build_model_config(propose_model_config)
+        if propose_model_config.reuse_single_mtp_module:
+            propose_model_config.gen_num_per_cycle = sp_config.gen_num_per_cycle
+            propose_model_config.moe_prefill_max_tokens_per_rank = (
+                model_config.moe_prefill_max_tokens_per_rank
+            )
 
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(

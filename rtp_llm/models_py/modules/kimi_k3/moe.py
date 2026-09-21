@@ -25,7 +25,14 @@ def situ(gate, up, beta, linear_beta):
 
 class KimiK3LatentMoE(nn.Module):
     def __init__(
-        self, config, parallelism, weights, layer_idx, moe_config, hardware=None
+        self,
+        config,
+        parallelism,
+        weights,
+        layer_idx,
+        moe_config,
+        hardware,
+        moe_capacity,
     ):
         super().__init__()
         runtime = config.k3_runtime_config
@@ -69,6 +76,7 @@ class KimiK3LatentMoE(nn.Module):
         if cfg.moe_strategy not in ("auto", "mega_moe"):
             raise ValueError("K3 native MXFP4 requires the MegaMoE executor")
         cfg.moe_strategy = "mega_moe"
+        cfg.max_tokens_per_rank = max(int(moe_capacity), 1)
         cfg.moe_quant_method = "FP8_FP4"
         cfg.dim = cfg.hidden_size = runtime.routed_expert_hidden_size
         cfg.layer_id = layer_idx
@@ -105,7 +113,7 @@ class KimiK3LatentMoE(nn.Module):
         routing = routing * self.route_scale
         if valid_mask is not None:
             ids = torch.where(valid_mask[:, None], ids, 0)
-            routing = routing * valid_mask[:, None]
+            routing = torch.where(valid_mask[:, None], routing, 0)
         routed = self.experts(self.down(hidden), routing, ids, activation="situ")
         if self.norm is not None:
             routed = self.norm(routed.contiguous())

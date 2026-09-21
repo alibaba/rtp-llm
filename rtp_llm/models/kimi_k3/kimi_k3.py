@@ -15,6 +15,7 @@ from rtp_llm.models.kimi_k3.kimi_k3_weight import (
     KimiK3Weight,
 )
 from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.weight_type import WEIGHT_TYPE
 from rtp_llm.ops import (
     HybridAttentionType,
     KvCacheDataType,
@@ -53,27 +54,36 @@ class KimiK3ModelConfig(ModelConfig):
     k3_runtime_config: KimiK3RuntimeConfig
 
     def init_precision_config(self, kv_cache_config, act_type):
-        # Native nextn precision is independent of the target's process settings.
-        if self.model_type == "kimi_k3_mtp":
-            kv_cache_config = None
-            act_type = "bf16"
-            self.attn_config.kv_cache_dtype = KvCacheDataType.BASE
-            self.quant_algo = QuantAlgo()
-        super().init_precision_config(kv_cache_config, act_type)
-        if self.compute_dtype != torch.bfloat16:
+        # K3's nested quantization metadata describes only routed experts.
+        # The generic loader promotes it to a model-wide scheme, which would
+        # quantize ordinary projections as well. Keep this policy model-local.
+        is_draft = self.model_type == "kimi_k3_mtp"
+        selected = self.config_dtype if is_draft else (act_type or self.config_dtype)
+        if not selected or WEIGHT_TYPE.from_str(selected) != WEIGHT_TYPE.BF16:
             raise ValueError("Kimi K3 requires BF16 compute")
-        if self.quant_config is not None:
-            raise ValueError(
-                "K3 experts use checkpoint-native MXFP4, not global quantization"
-            )
-        if self.attn_config.kv_cache_dtype != KvCacheDataType.BASE:
-            raise ValueError("K3 BF16 baseline requires BF16 KV cache")
-        if self.model_type == "kimi_k3" and any(
-            os.environ.get(name, "0") != "0" for name in ("FP8_GEMM", "FP8_MLA")
-        ):
-            raise ValueError(
-                "K3 target FP8 is unavailable until the BF16 validation gate passes"
-            )
+        if self.quantization:
+            raise ValueError("K3 uses checkpoint-native MXFP4, not global quantization")
+        if not is_draft:
+            if (
+                kv_cache_config is not None
+                and kv_cache_config.fp8_kv_cache
+                or self.attn_config.kv_cache_dtype != KvCacheDataType.BASE
+            ):
+                raise ValueError("K3 BF16 baseline requires BF16 KV cache")
+            if any(
+                os.environ.get(name, "0") != "0" for name in ("FP8_GEMM", "FP8_MLA")
+            ):
+                raise ValueError(
+                    "K3 target FP8 is unavailable until the BF16 validation gate passes"
+                )
+        self.quant_algo = QuantAlgo()
+        self.quant_config = None
+        self.data_type = WEIGHT_TYPE.BF16.to_str()
+        self.attn_config.kv_cache_dtype = KvCacheDataType.BASE
+        logging.info(
+            "K3 precision: role=%s attention=BF16 linear=BF16 cache=BF16 experts=MXFP4xFP8",
+            "draft" if is_draft else "target",
+        )
 
 
 class KimiK3(BaseModel):
@@ -364,6 +374,18 @@ class KimiK3(BaseModel):
     def _parse_kimi_runtime_config(
         cls, text_config: Dict[str, Any], config: KimiK3ModelConfig
     ) -> None:
+        quant = cls._required(text_config, "quantization_config")
+        groups = quant.get("config_groups", {})
+        if (
+            quant.get("format") != "mxfp4-pack-quantized"
+            or not groups
+            or any(
+                group.get("weights", {}).get("num_bits") != 4
+                or group.get("weights", {}).get("group_size") != 32
+                for group in groups.values()
+            )
+        ):
+            raise ValueError("K3 requires checkpoint-native group-32 MXFP4 experts")
         linear_config = cls._required(text_config, "linear_attn_config")
         attn_res_block_size = int(cls._required(text_config, "attn_res_block_size"))
         if attn_res_block_size <= 0:
@@ -374,7 +396,15 @@ class KimiK3(BaseModel):
         # ``activation_situ_linear_beta`` may still be an explicit null, which
         # legitimately disables the up-projection tanh clamp.
         linear_beta = cls._required(text_config, "activation_situ_linear_beta")
-        gate_lower_bound = linear_config.get("gate_lower_bound")
+        gate_lower_bound = cls._required(linear_config, "gate_lower_bound")
+        if gate_lower_bound is None or float(gate_lower_bound) >= 0:
+            raise ValueError("K3 requires a negative bounded-KDA gate_lower_bound")
+        if text_config.get("hidden_act") != "situ":
+            raise ValueError("K3 requires SiTU activation")
+        if float(cls._required(text_config, "activation_situ_beta")) <= 0:
+            raise ValueError("SiTU gate beta must be positive")
+        if linear_beta is not None and float(linear_beta) <= 0:
+            raise ValueError("SiTU linear beta must be positive or null")
         config.k3_runtime_config = KimiK3RuntimeConfig(
             dense_intermediate_size=int(
                 cls._required(text_config, "intermediate_size")
@@ -487,10 +517,6 @@ class KimiK3Mtp(KimiK3):
             mtp_source_layer=source_layer,
         )
         config.mm_model_config.is_multimodal = False
-        if "media_placeholder_token_id" in config_json:
-            config.mm_related_params.special_token_ids["image_token_index"] = int(
-                config_json["media_placeholder_token_id"]
-            )
         if not config.k3_runtime_config.mla_use_nope:
             raise ValueError("K3 MTP requires NoPE MLA")
         if ckpt_path:

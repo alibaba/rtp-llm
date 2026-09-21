@@ -129,3 +129,89 @@ def test_kda_fused_projection_matches_unsharded_components(tp):
 def test_kda_rejects_split_through_a_head():
     with pytest.raises(ValueError):
         layout.split_kda_input(torch.empty(16, 4 * 6 * 4 + 7 + 6), 6, 4, 4, 0)
+
+
+@pytest.fixture
+def tiny_mtp_checkpoint(tmp_path):
+    import json
+    import struct
+
+    text = dict(
+        num_hidden_layers=93,
+        num_nextn_predict_layers=1,
+        hidden_size=32,
+        vocab_size=64,
+        num_attention_heads=2,
+        q_lora_rank=32,
+        kv_lora_rank=32,
+        qk_nope_head_dim=16,
+        qk_rope_head_dim=16,
+        v_head_dim=16,
+        routed_expert_hidden_size=32,
+        moe_intermediate_size=32,
+        num_shared_experts=1,
+        num_experts=2,
+        quantization_config={
+            "format": "mxfp4-pack-quantized",
+            "config_groups": {
+                "experts": {"weights": {"group_size": 32, "num_bits": 4}}
+            },
+        },
+    )
+    header, offset = {}, 0
+    for name, (shape, dtype) in checkpoint.expected_tensors(text).items():
+        elements = 1
+        for dimension in shape:
+            elements *= dimension
+        nbytes = elements * {"U8": 1, "BF16": 2, "F32": 4}[dtype]
+        header[name] = dict(
+            shape=shape, dtype=dtype, data_offsets=[offset, offset + nbytes]
+        )
+        offset += nbytes
+
+    def write_header(entries):
+        raw = json.dumps(entries).encode()
+        raw += b" " * (-len(raw) % 8)
+        with (tmp_path / "weights.safetensors").open("wb") as output:
+            output.write(struct.pack("<Q", len(raw)))
+            output.write(raw)
+            output.truncate(8 + len(raw) + offset)
+
+    write_header(header)
+    (tmp_path / "config.json").write_text(json.dumps({"text_config": text}))
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {name: "weights.safetensors" for name in header}})
+    )
+    return tmp_path, header, write_header
+
+
+def test_mtp_checkpoint_preserves_native_dtypes(tiny_mtp_checkpoint):
+    root, header, _ = tiny_mtp_checkpoint
+    result = checkpoint.validate_checkpoint(root)
+    assert result == {
+        "shards": 1,
+        "required_tensors": len(header),
+        "ignored_attnres_tensors": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "corruption", ["dtype", "shape", "offset", "missing", "truncated"]
+)
+def test_mtp_checkpoint_rejects_corrupted_weight(tiny_mtp_checkpoint, corruption):
+    root, header, write_header = tiny_mtp_checkpoint
+    name = next(name for name in header if name.endswith("w1.weight_packed"))
+    if corruption == "dtype":
+        header[name]["dtype"] = "BF16"
+    elif corruption == "shape":
+        header[name]["shape"] = [1, 1]
+    elif corruption == "offset":
+        header[name]["data_offsets"][1] += 1
+    elif corruption == "missing":
+        del header[name]
+    write_header(header)
+    if corruption == "truncated":
+        with (root / "weights.safetensors").open("r+b") as output:
+            output.truncate((root / "weights.safetensors").stat().st_size - 1)
+    with pytest.raises(ValueError):
+        checkpoint.validate_checkpoint(root)

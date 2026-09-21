@@ -241,6 +241,12 @@ class PyAttentionInputs:
     is_prefill: bool
     is_s_padded: bool
     is_target_verify: bool
+    is_mtp_draft_update: bool
+    logical_request_count: int
+    physical_request_count: int
+    logical_token_count: int
+    physical_token_count: int
+    valid_token_mask: torch.Tensor
     padding_offset: torch.Tensor
     prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
     prefix_lengths: torch.Tensor

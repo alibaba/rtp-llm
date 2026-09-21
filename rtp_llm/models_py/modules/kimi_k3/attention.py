@@ -65,6 +65,10 @@ class KimiK3KDA(nn.Module):
         output = kernel(
             qkv.contiguous(), forget, beta, attention_inputs, cache, metadata
         )
+        valid_mask = attention_inputs.valid_token_mask
+        if valid_mask is not None:
+            # Paged KDA skips null-block rows, leaving their output unspecified.
+            output = torch.where(valid_mask[:, None], output.reshape(-1, self.width), 0)
         output = self.norm(output.reshape(-1, self.dim), gate.reshape(-1, self.dim))
         output = self.output(output.reshape(-1, self.width))
         return reduce_scatter(output, Group.TP) if self.tp_size > 1 else output
@@ -108,5 +112,8 @@ class KimiK3MLA(nn.Module):
         if output is None:
             raise RuntimeError("K3 MLA backend returned no attention output")
         output = output.reshape(-1, self.heads * self.v_dim)
+        valid_mask = attention_inputs.valid_token_mask
+        if valid_mask is not None:
+            output = torch.where(valid_mask[:, None], output, 0)
         output = self.output(output * gate.sigmoid())
         return reduce_scatter(output, Group.TP) if self.tp_size > 1 else output

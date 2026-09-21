@@ -35,23 +35,65 @@ state transfer is still unproven.
 On macOS, a separate Python 3.9 / PyTorch 2.8 CPU environment ran:
 
 ```sh
-python -m pytest -q tests/kimi_k3/test_model_math.py
+python -m pytest -q tests/kimi_k3
 ```
 
-Result: 30 passed. This checks AttnRes against a scalar float64 reference,
-unused residual-bank capacity, bank update/output normalization and MTP source
-layer validation, plus TP1/2/4/8 fused KDA projection equivalence with replicated F_a. It does not validate CUDA kernels, weight loading, full-model
-outputs, distributed execution, cache state, Graph or RDMA.
+Result: 50 passed: 36 model math/checkpoint checks and 14 smoke-harness
+contract checks. These cover AttnRes against a scalar float64 reference, unused
+residual-bank capacity, output normalization, MTP source-layer and safetensors
+shape/dtype/payload validation, and TP1/2/4/8 fused KDA projection equivalence
+with replicated F_a. Harness checks reject weakened acceptance profiles,
+require strict long-prefix JSON, preserve failed responses and verify that a
+formal HTTP failure is sent only once. These do not validate CUDA kernels,
+full weight loading, full-model outputs, distributed execution, state commit,
+Graph or RDMA.
 
 New C++ checks cover the opt-in single-module policy and TP control flags;
 they have not run yet. Python syntax and `git diff --check` passed during
-implementation and must be rerun after further edits.
+implementation and must be rerun after further edits. The generated
+`libth_transformer_config.pyi` already contains an invalid `None:` enum annotation
+in base main; it is excluded from the Python AST success count (27 files).
 
-The first B300 build was started on L20D-dev-145 inside `lhc_GPU` as
-`luohaocheng.lhc`, with `--config=cuda13 --config=sm10x --jobs=8`.
-Source and output are on local ext4 `/ssd/5`. Dependency resolution is ongoing;
-there is no successful compiler/linker result yet. A source revision must be
-frozen and synchronized again before the final build.
+A B300 build of source commit `73bfef1109228c57657e11c924345f76f3e04b6f`
+was started on L20D-dev-145 inside `lhc_GPU` as `luohaocheng.lhc`, with
+`--config=cuda13 --config=sm10x --jobs=8`. Source and output are on local ext4
+`/ssd/5`. The last observed state was downloading the NVSHMEM dependency;
+there is no successful compiler/linker result. WebTerminal authentication
+expired before the result could be read. Later changes need a fresh build.
+
+The last host probes found no eligible same-cluster pair: 142 had free GPUs
+but neither existing container could execute as the personal user; 144/145
+had external GPU work. In the other cluster only 114 was eligible. No external
+jobs or existing containers were stopped or changed. Authentication and a
+usable pair are pending; no GPU model test has run.
+
+## Text smoke entry point (not yet run against services)
+
+`text_smoke.py` ports the dev cases to an explicitly named `main-text` suite.
+It preserves answer, actual token-prefix, reuse, chunk, PD and MTP assertions.
+It reports DCP/PageRR-owner/DP-multi-owner/multimodal checks as not applicable.
+The ordinary reuse unit is the configured cache block, never `TP * block`.
+A full suite requires a 93-layer checkpoint, real MTP acceptance, at least a
+64K chunk budget and at least a 110K long prefix. It adds exact distinct input
+lengths to the 8-wide/16-request rolling case and batch shapes 1/2/3/7/8/9 with
+repeated transitions. These are request shapes, not proof of actual Graph replay.
+
+Example after both services are ready (replace paths, ports and block size with
+the verified runtime values; use a new output directory each time):
+
+```sh
+python example/k3/main_migration/text_smoke.py \
+  --suite main-text --base-url http://PREFILL_IP:HTTP_PORT \
+  --decode-health-url http://DECODE_IP:HTTP_PORT/health \
+  --decode-role-addr DECODE_IP:HTTP_PORT:GRPC_PORT --decode-dp-size 1 \
+  --long-prefix-checkpoint /local/data/kimi-k3 \
+  --block-size 4096 --chunk-tokens 65536 --require-mtp \
+  --namespace unique-bf16-run --output /local/data/new-run/result.json
+```
+
+The driver, reproducible service configurations, runtime evidence collector and
+numerical/state comparison runner remain incomplete. Passing this text runner
+alone must not unlock FP8 or be described as complete BF16 acceptance.
 
 ## Remaining gates
 
@@ -59,10 +101,9 @@ frozen and synchronized again before the final build.
    bounded KDA/SiTU/MLA against the pinned reference.
 2. Validate actual state commit for accept counts 0/1/2/3; cached decode versus
    full-prefix recomputation; batch 1/2/3/7/8/9 and consecutive Graph replay.
-3. Port the dev driver/cases into an explicit TP8/EP8/SP text profile. Preserve
-   formal requests, raw responses, exact token prefixes, reuse and checkpoint
-   assertions. Mark excluded DCP/PageRR/DP-owner/multimodal checks N/A. Do not
-   claim the dev `all` suite passed.
+3. Complete the two-host driver and reproducible TP8/EP8/SP service configuration;
+   run the ported text cases and attach separate runtime evidence. Do not claim
+   the dev `all` suite passed.
 4. Run full 93-layer BF16 two-host smoke, including >64K chunk, exact budget
    +1/+7, 8-wide rolling 16 requests, cache boundaries, A/B reuse and 110K
    retrieval. Prove RDMA handoff, real MTP acceptance and Graph replay.
