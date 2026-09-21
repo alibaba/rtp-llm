@@ -1024,6 +1024,24 @@ class CustomChatRenderer:
     ) -> bool:
         return True
 
+    def _release_think_tail(self, text: str) -> str:
+        """Drop only the tail that could still have grown into a think tag.
+
+        ``_split_reasoning_text_and_content`` parks reasoning text whose tail
+        may turn out to be the start of ``think_end_tag`` (or of a new
+        ``think_start_tag``). Once generation has stopped nothing can complete
+        that tag any more, so everything in front of the tail is ordinary
+        reasoning text and has to be released; the tail itself is a partial tag
+        and stays dropped, like the streaming reasoning parser does with its
+        own buffer.
+        """
+        if self.think_start_tag.startswith(text):
+            return ""
+        for cut in range(len(text)):
+            if self.think_end_tag.startswith(text[cut:]):
+                return text[:cut]
+        return text
+
     async def _flush_buffer(
         self,
         buffer_list: List[StreamStatus],
@@ -1043,6 +1061,15 @@ class CustomChatRenderer:
                 think_status.in_think_mode = False
                 think_status.think_buffer = ""
                 think_status.decision_token_ids = []
+            elif think_status.in_think_mode and think_status.think_buffer:
+                # This is the last chunk, so the parked tail can no longer grow
+                # into a think tag. Hand the reasoning text it holds back to the
+                # normal delta path instead of letting the state machine park it
+                # again and lose it with the buffer.
+                pending_output = self._release_think_tail(
+                    think_status.think_buffer + pending_output
+                )
+                think_status.think_buffer = ""
             trunc_string = truncate_response_with_stop_words(
                 pending_output, stop_words_str, is_streaming
             )

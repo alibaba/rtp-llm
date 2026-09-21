@@ -964,6 +964,40 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertFalse(delta.reasoning_content)
         self.assertEqual(delta.content, expected_content)
 
+    async def test_enabled_think_tail_is_released_when_generation_stops(self):
+        tokenizer, renderer, endpoint = self._create_base_thinking_endpoint("enabled")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            stream=True,
+        )
+        config = endpoint._extract_generation_config(
+            request, input_ids=[], renderer=renderer
+        )
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        # Generation stops (max_tokens / stop word / eos) while still inside the
+        # think block, on a tail that is only a prefix of "</think>". The tag can
+        # never complete now, so the reasoning in front of it must still be sent.
+        output_ids = tokenizer.encode("ratio is a/b<", add_special_tokens=False)
+        stream = renderer.render_response_stream(
+            fake_output_generator_mtp(
+                output_ids,
+                MAX_SEQ_LEN,
+                tokenizer.eos_token_id or 0,
+                10,
+                tokens_per_chunk=8,
+            ),
+            request,
+            config,
+        )
+        chunks = [
+            chunk
+            async for chunk in OpenaiEndpoint._complete_stream_response(stream, None)
+        ]
+        delta = merge_stream_responses(chunks).choices[0].delta
+
+        self.assertEqual(delta.reasoning_content, "ratio is a/b")
+        self.assertFalse(delta.content)
+
     async def test_parse_qwen_function_call(self):
         tokenizer = QwenTestTokenizer(
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
