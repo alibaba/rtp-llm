@@ -32,6 +32,7 @@ public:
     bool init();
 
     BlockCachePtr blockCache();
+    void zeroBlocks(const torch::Tensor& block_ids);
 
     MemoryType                 where() const;
     std::vector<torch::Tensor> allLayerCacheBase() const;

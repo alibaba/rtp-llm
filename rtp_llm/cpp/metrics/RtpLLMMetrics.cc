@@ -650,7 +650,7 @@ void RtpLLmEplbMetrics::report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetr
     auto ep_tag    = kmonitor::MetricsTags("ep_rank", std::to_string(collector->ep_rank));
     tags->MergeTags(&ep_tag);
     for (int i = 0; i < num_layer; ++i) {
-        auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(i));
+        auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(collector->layer_begin + i));
         ep_tag.MergeTags(&layer_tag);
         if (gpu_loads_metric) {
             gpu_loads_metric->Report(&layer_tag, collector->gpu_loads[i]);

@@ -259,15 +259,18 @@ void processLogits(const GreedyParams&  params,
             for (int64_t i = 0; i < (int64_t)decoder_batch_size; i++) {
                 output_ids_ptrs.data_ptr<int64_t>()[i] = (int64_t)(device_tokens.data_ptr<int32_t>() + i * (step + 1));
             }
-            auto output_ids_ptrs_gpu  = output_ids_ptrs.to(torch::kCUDA, use_persistent_buffers);
-            auto sequence_lengths_gpu = params.sequence_lengths.to(torch::kCUDA, true);
+            auto output_ids_ptrs_gpu = output_ids_ptrs.to(torch::kCUDA, use_persistent_buffers);
+            // SamplerInputs stores real sequence lengths, while the imported
+            // TensorRT-LLM no-repeat kernel still expects the last valid
+            // token index and adds one internally.
+            auto sequence_last_indexes_gpu = params.sequence_lengths.to(torch::kCUDA, true).sub(1);
 
             tensorrt_llm::kernels::invokeBanRepeatNgram(params.logits.data_ptr<float>(),
                                                         (int32_t const**)(output_ids_ptrs_gpu.data_ptr()),
                                                         nullptr,  // finished_buf
                                                         nullptr,  // parent_ids_buf
                                                         nullptr,  // batch_slot
-                                                        sequence_lengths_gpu.data_ptr<int32_t>(),
+                                                        sequence_last_indexes_gpu.data_ptr<int32_t>(),
                                                         decoder_batch_size,
                                                         1,  // beam_width
                                                         step + 1,
@@ -384,8 +387,10 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                             (int64_t)cur_stream);
             if (need_renorm_probs) {
                 torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
-                top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
-                top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+                // Joint sampling tests top-p against the original distribution. Applying
+                // top-p first and then top-k returns the intersection of those supports.
+                top_p_renorm_probs(probs_t, temp_t, top_p_t, 1.0, (int64_t)cur_stream);
+                top_k_renorm_probs(temp_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
             }
         }
     }

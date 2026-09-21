@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 
 namespace rtp_llm {
@@ -19,6 +20,10 @@ public:
         propose_step_(sp_config.gen_num_per_cycle),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)) {}
+
+    size_t positionIdLenFactor() const {
+        return model_input_gatherer_config_.position_id_len_factor;
+    }
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -114,7 +119,6 @@ public:
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,
                                          const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                         const size_t                                 batch_size,
                                          torch::Tensor&                               hidden_states_d_t,
                                          TensorHolder&                                host_holder);
 
@@ -147,26 +151,16 @@ protected:
                                      const MergedOutput&                          draft_prefill_output,
                                      std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
 
-    torch::Tensor compactAcceptedPositionIds(const torch::Tensor&    combo_position_ids,
-                                             const std::vector<int>& accept_lens,
-                                             size_t                  total_accept_len) const;
-
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
 protected:
-    torch::Tensor dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors);
-    torch::Tensor dsparkDraftInputLengths(int64_t batch_size);
-    torch::Tensor dsparkDraftLmIndexes(int64_t batch_size);
-
-    int propose_step_;
+    int     propose_step_;
     bool    is_dspark_            = false;
     int32_t dspark_mask_token_id_ = -1;
 
-    // Decode-round constants are grow-only device buffers.  Keeping them on
+    // DSpARK proposal constants are grow-only device buffers. Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is
     // introduced on the scheduling thread.
-    torch::Tensor dspark_combo_cache_;
-    torch::Tensor dspark_input_lengths_cache_;
-    torch::Tensor dspark_lm_indexes_cache_;
+    mtp::DSparkProposeInputBuffers dspark_propose_input_buffers_;
 };
 }  // namespace rtp_llm

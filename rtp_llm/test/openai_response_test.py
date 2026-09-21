@@ -2978,6 +2978,69 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         def _validate_merged_result(self, merged_result):
             self.parent.assertEqual(merged_result.extra_outputs, self.extra_outputs)
 
+    async def test_pp_fields_preserve_sequences_and_prefill(self):
+        tokenizer, renderer, endpoint = self._create_base_thinking_endpoint("disabled")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            n=2,
+            stream=False,
+            max_tokens=3,
+            extra_configs=GenerateConfig(
+                return_output_ids=True, return_hidden_states=True, return_logits=True,
+                return_all_hidden_states=True, return_input_ids=True,
+            ),
+        )
+        config = endpoint._extract_generation_config(request, input_ids=[1, 2], renderer=renderer)
+        self.assertTrue(config.is_streaming)
+        self.assertFalse(request.stream)
+        sequences = [[198, tokenizer.eos_token_id], [198, 84169, 25]]
+
+        async def outputs():
+            for step in range(3):
+                batch = GenerateOutputs()
+                for row, ids in enumerate(sequences):
+                    padded = step >= len(ids)
+                    value = 999.0 if padded else float(10 * row + step)
+                    batch.generate_outputs.append(GenerateOutput(
+                        output_ids=torch.tensor([[0 if padded else ids[step]]]),
+                        input_ids=torch.tensor([[1, 2]]),
+                        hidden_states=torch.tensor([[value, value + 1]]),
+                        logits=torch.tensor([[value, -value]]),
+                        all_hidden_states=torch.tensor([[1.0, 2.0], [3.0, 4.0]]) if step == 0 else None,
+                        finished=step >= len(ids) - 1,
+                        aux_info=AuxInfo(input_len=2, output_len=min(step + 1, len(ids))),
+                    ))
+                yield batch
+
+        result = await OpenaiEndpoint._collect_complete_response(
+            renderer.render_response_stream(outputs(), request, config), None, tokenizer
+        )
+        self.assertEqual(result.extra_outputs.output_ids, sequences)
+        self.assertEqual(result.extra_outputs.input_ids, [[1, 2], [1, 2]])
+        self.assertEqual(result.extra_outputs.hidden_states, [[1.0, 2.0], [12.0, 13.0]])
+        self.assertEqual(result.extra_outputs.logits, [[1.0, -1.0], [12.0, -12.0]])
+        self.assertEqual(result.extra_outputs.all_hidden_states, [[1.0, 2.0], [3.0, 4.0]])
+        self.assertEqual(len(result.choices), 2)
+
+    async def test_pp_fields_empty_text_event(self):
+        _, renderer = self._create_adaptive_qwen_renderer("disabled")
+        response = custom_renderer.StreamResponseObject(
+            choices=[], extra_outputs=ChatCompletionExtraOutputs(output_ids=[[198]])
+        )
+        self.assertTrue(renderer._should_yield_stream_response(response))
+
+    async def test_pp_fields_keep_prefill_loss_during_collection(self):
+        async def responses():
+            yield custom_renderer.StreamResponseObject(
+                extra_outputs=ChatCompletionExtraOutputs(loss=[0.25, 0.5], output_ids=[[1]])
+            )
+            yield custom_renderer.StreamResponseObject(
+                extra_outputs=ChatCompletionExtraOutputs(output_ids=[[1, 2]])
+            )
+        result = await OpenaiEndpoint._collect_complete_response(responses(), None)
+        self.assertEqual(result.extra_outputs.loss, [0.25, 0.5])
+        self.assertEqual(result.extra_outputs.output_ids, [[1, 2]])
+
     async def test_openai_extra_outputs_no_stream(self):
         """测试 Openai Endpoint 非流式场景的 extra_outputs 字段"""
 

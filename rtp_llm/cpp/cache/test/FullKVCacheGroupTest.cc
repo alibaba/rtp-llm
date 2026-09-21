@@ -149,6 +149,29 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     ASSERT_FALSE(group1.malloc(block_ids2, 180));
 }
 
+
+TEST_F(FullKVCacheGroupTest, InitializesNewBlocksWithoutClearingPrefixReferences) {
+    auto pool = createBlockPool();
+    ASSERT_TRUE(pool->init());
+    auto spec = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 4;
+    GroupBase config;
+    config.spec = spec;
+    config.seq_size_per_block = 4;
+    config.kernel_seq_size_per_block = 4;
+    config.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    FullKVCacheGroup group(config, pool, 0, nullptr, nullptr, true);
+    BlockIds original;
+    ASSERT_TRUE(group.malloc(original, 4));
+    EXPECT_EQ(original.takeBlocksToZero(), original.blocks());
+    BlockIds next;
+    group.reference(next, original.blocks());
+    ASSERT_TRUE(group.malloc(next, 8));
+    EXPECT_EQ(next.takeBlocksToZero(), (BlockIndicesType{next.blocks().back()}));
+    ASSERT_TRUE(group.malloc(next, 8));
+    EXPECT_TRUE(next.takeBlocksToZero().empty());
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

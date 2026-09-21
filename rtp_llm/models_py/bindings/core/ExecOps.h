@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 
 #if USING_ROCM
@@ -112,6 +113,40 @@ AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);
 void            execSyncCommunication(ParallelMode mode, bool timeout = true);
+
+class P2PWork {
+public:
+    virtual ~P2PWork() = default;
+
+    /**
+     * 1. CPU blocks until the local transfer completes.
+     * 2. CUDA enqueues a completion wait on the tensor device's current stream and may return before the GPU transfer
+     * completes.
+     */
+    virtual void wait() = 0;
+
+    /**
+     * Bounded wait; returns false if the timeout expires before completion.
+     * The default implementation preserves the unbounded wait() behavior.
+     */
+    virtual bool wait(std::chrono::milliseconds timeout) {
+        (void)timeout;
+        wait();
+        return true;
+    }
+};
+
+enum class P2PBackend {
+    NCCL = 0,
+    GLOO = 1,
+};
+
+/** Select a registered P2P group explicitly; send and receive must use the same backend. */
+std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int64_t global_peer, P2PBackend backend);
+std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int64_t global_peer, P2PBackend backend);
+
+// Snapshot exchange over the PP process group; returns payloads in pp_rank order. Startup-only, pp_size > 1.
+std::vector<std::string> execPPSnapshotExchange(const std::string& local_snapshot);
 
 // ===================================================================
 // MOE / EPLB

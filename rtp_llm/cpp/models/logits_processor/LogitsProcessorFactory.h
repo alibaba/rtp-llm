@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,8 @@ public:
                            int32_t                        init_batch_size,
                            int32_t                        max_batch_size,
                            int64_t                        eos_token_id);
+
+    static std::optional<ErrorInfo> validateMtpCompatibility(const std::vector<BaseLogitsProcessorPtr>& processors);
 
 private:
     static std::shared_ptr<XGrammarBackend>& grammarBackend();

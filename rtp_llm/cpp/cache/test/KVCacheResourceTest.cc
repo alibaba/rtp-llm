@@ -279,5 +279,33 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     ASSERT_EQ(batch.cacheResource(0).kernelBlocks(0), (BlockIndicesType{6, 7}));
 }
 
+
+TEST(BlockIdsInitializationTest, TracksOnlyLiveFreshAllocations) {
+    BlockIds ids(16);
+    ids.assign({1});  // An existing prefix reference is never initialized again.
+    ids.add({2, 3}, true);
+    ids.resize(2);    // Allocation rollback must discard the marker for block 3.
+    ids.add({4}, true);
+    ids.swap(1, 2);
+    ids.remove({2});
+    EXPECT_EQ(ids.takeBlocksToZero(), (BlockIndicesType{4}));
+    EXPECT_TRUE(ids.takeBlocksToZero().empty());
+    ids.add({5}, true);
+    EXPECT_EQ(ids.popBack(), 5);
+    ids.add({6}, true);
+    ids.setAt(ids.blocksNum() - 1, 7);  // Replace with an already initialized block.
+    EXPECT_TRUE(ids.takeBlocksToZero().empty());
+}
+
+TEST(BlockIdsInitializationTest, PreservesRestoredPrefixAndConsumesOnce) {
+    BlockIds ids;
+    ids.add({2, 3, 4}, true);
+    EXPECT_EQ(ids.takeBlocksToZero(2), (BlockIndicesType{4}));
+    EXPECT_TRUE(ids.takeBlocksToZero().empty());
+    ids.add({5}, true);
+    ids.assign({8});
+    EXPECT_TRUE(ids.takeBlocksToZero().empty());
+}
+
 }  // namespace test
 }  // namespace rtp_llm

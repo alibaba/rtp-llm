@@ -153,4 +153,12 @@ inline CacheGroupPolicy defaultCacheGroupPolicy(CacheGroupType group_type) {
     return policy;
 }
 
+inline size_t
+resolveKernelSeqSizePerBlock(CacheGroupType group_type, size_t physical_seq_size, size_t configured_kernel_seq_size) {
+    if (group_type != CacheGroupType::FULL || configured_kernel_seq_size == 0) {
+        return physical_seq_size;
+    }
+    return std::min(configured_kernel_seq_size, physical_seq_size);
+}
+
 }  // namespace rtp_llm

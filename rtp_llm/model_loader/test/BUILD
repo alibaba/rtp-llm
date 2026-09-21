@@ -38,6 +38,12 @@ py_test(
 )
 
 py_test(
+    name = "test_pp_layer_filter",
+    srcs = ["test_pp_layer_filter.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "test_model_weight_info",
     srcs = ["test_model_weight_info.py"],
     deps = py_test_deps + [

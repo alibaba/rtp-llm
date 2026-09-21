@@ -13,6 +13,7 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/embed.h>
+#include <pybind11/stl.h>
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
 // cuda_graph_base.h is platform-agnostic (only defines GraphParams/CudaGraphState structs),
 // safe to include unconditionally. cuda_graph_runner.h requires CUDA/ROCm runtime.
@@ -37,7 +38,7 @@ inline void syncCudaGraphCaptureRanks(const ParallelismConfig& parallelism_confi
     py::gil_scoped_acquire gil;
     try {
         auto collective = py::module_::import("rtp_llm.models_py.distributed.collective_torch");
-        auto group      = collective.attr("Group").attr("DP_AND_TP");
+        auto group      = collective.attr("Group").attr("WORLD");
         collective.attr("barrier")(group);
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("CUDA graph capture rank sync failed at %s:\n%s", phase, e.what());
@@ -59,14 +60,20 @@ public:
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
-    GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
-    void            releaseBuffers() override;
-    torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
-    torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
-    bool            hasMtpTargetHiddenBuffer() const override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
-    void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    /* Transport adapter: unpacks upstream intermediates into PyModelInputs.pp_intermediates,
+       delegates to forward() (the only compute path), and packs the model-emitted ones. */
+    GptModelOutputs       forwardPP(const GptModelInputs&        inputs,
+                                    const PPIntermediateTensors* input_tensors,
+                                    PPIntermediateTensors*       output_tensors) override;
+    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs) override;
+    GptModelOutputs       forwardMicroBatched(const GptModelInputs& inputs);
+    void                  releaseBuffers() override;
+    torch::Tensor         getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor         getMtpLastHiddenStates(int64_t num_tokens) override;
+    bool                  hasMtpTargetHiddenBuffer() const override;
+    void                  prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void                  prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void                  updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -113,6 +120,8 @@ private:
     const DSparkCallPhase                           dspark_graph_phase_;
     const rtp_llm::MlaOpsType                       mla_ops_type_;
     const size_t                                    layer_num_;
+    const int64_t                                   pp_size_;
+    const int64_t                                   hidden_size_;
     const GptModelDescription                       description_;
     std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
     std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
@@ -158,11 +167,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     dspark_graph_phase_(dspark_graph_phase),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
+    pp_size_(std::max<int64_t>(1, params.parallelism_config.pp_size)),
+    hidden_size_(params.hidden_size),
     description_(params.description),
     cache_manager_(params.cache_manager),
     // The ordinary DSpARK wrapper stays eager. Dedicated prefill-graph
     // wrappers carry an explicit proposal/commit phase and fixed width.
-    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && (!is_dspark_draft || is_prefill_cuda_graph_mode)),
+    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && pp_size_ == 1
+                       && (!is_dspark_draft || is_prefill_cuda_graph_mode)),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     use_spec_decoding_(use_spec_decoding),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),

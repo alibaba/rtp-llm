@@ -7,10 +7,6 @@ namespace rtp_llm {
 
 class NormalGenerateStream: public GenerateStream {
 public:
-    NormalGenerateStream(const GenerateStream& stream): GenerateStream(stream) {
-        CopyOnWrite(stream);
-    }
-
     NormalGenerateStream(const std::shared_ptr<GenerateInput>& query,
                          const ModelConfig&                    model_config,
                          const RuntimeConfig&                  runtime_config,

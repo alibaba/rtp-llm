@@ -3,7 +3,9 @@
 #include <atomic>
 #include <cassert>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -22,22 +24,24 @@ namespace rtp_llm {
 
 class CPSlotMapper;
 class CacheStore;
+class CacheCapacityNegotiator;
 class KVCacheConnectorCoordinator;
 class KVCacheConnectorReadWriteContext;
 class PrefillCacheHitMetricsReporter;
 
 class KVCacheManager {
 public:
-    KVCacheManager(const CacheConfig&                 config,
-                   bool                               warmup                     = false,
-                   const kmonitor::MetricsReporterPtr metrics_reporter           = nullptr,
-                   const KVCacheConfig&               kv_cache_config            = KVCacheConfig{},
-                   const ParallelismConfig&           parallelism_config         = ParallelismConfig{},
-                   const RuntimeConfig&               runtime_config             = RuntimeConfig{},
-                   const SpeculativeExecutionConfig&  sp_config                  = SpeculativeExecutionConfig{},
-                   const PDSepConfig&                 pd_sep_config              = PDSepConfig{},
-                   const CacheStoreConfig&            cache_store_config         = CacheStoreConfig{},
-                   bool                               use_cuda_malloc_block_pool = false);
+    KVCacheManager(const CacheConfig&                              config,
+                   bool                                            warmup             = false,
+                   const kmonitor::MetricsReporterPtr              metrics_reporter   = nullptr,
+                   const KVCacheConfig&                            kv_cache_config    = KVCacheConfig{},
+                   const ParallelismConfig&                        parallelism_config = ParallelismConfig{},
+                   const RuntimeConfig&                            runtime_config     = RuntimeConfig{},
+                   const SpeculativeExecutionConfig&               sp_config          = SpeculativeExecutionConfig{},
+                   const PDSepConfig&                              pd_sep_config      = PDSepConfig{},
+                   const CacheStoreConfig&                         cache_store_config = CacheStoreConfig{},
+                   bool                                            use_cuda_malloc_block_pool = false,
+                   const std::shared_ptr<CacheCapacityNegotiator>& capacity_negotiator        = nullptr);
     ~KVCacheManager();
 
     // 初始化和配置相关
@@ -63,6 +67,7 @@ public:
                                int                            target_batch_size) const;
 
     // 块操作相关
+    void zeroBlocks(const torch::Tensor& block_ids);
     void blockCopy(int src_block_index, int dest_block_index);
     void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     void blockBatchCopy(const torch::Tensor& copy_mapping);
@@ -184,6 +189,9 @@ private:
     const PDSepConfig                  pd_sep_config_;
     const CacheStoreConfig             cache_store_config_;
     const bool                         use_cuda_malloc_block_pool_;
+    // Cross-stage capacity agreement hook, required under pp_size>1; consulted
+    // in allocateAndSync after the intra-stage TP/DP alignment.
+    const std::shared_ptr<CacheCapacityNegotiator> capacity_negotiator_;
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;

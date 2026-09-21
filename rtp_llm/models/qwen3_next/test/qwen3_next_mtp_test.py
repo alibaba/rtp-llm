@@ -2,8 +2,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.model_loader.ffn_weight import FfnWeight, MoeWeight
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import (
@@ -17,8 +21,10 @@ from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_mixin import (
 from rtp_llm.ops import (
     HWKernelConfig,
     HybridAttentionType,
+    KVCacheSpecType,
     ParallelismConfig,
     RopeStyle,
+    SpeculativeType,
 )
 
 
@@ -34,12 +40,22 @@ class Qwen35DenseMTPTest(unittest.TestCase):
         self.assertTrue(config.is_mtp)
         self.assertEqual(config.moe_style, 0)
         self.assertEqual(list(config.moe_layer_index), [])
+        self.assertTrue(config.hybrid_attention_config.enable_hybrid_attention)
+        self.assertFalse(
+            config.hybrid_attention_config.enable_independent_kv_cache_pools
+        )
         self.assertEqual(
             list(config.hybrid_attention_config.hybrid_attention_types),
             [HybridAttentionType.NONE],
         )
         self.assertEqual(config.attn_config.rope_config.style, RopeStyle.Base)
         self.assertEqual(len(config.kv_cache_spec_descs), 1)
+        self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "full")
+        self.assertEqual(
+            config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MHA
+        )
+        self.assertEqual(config.attn_config.head_num, 24)
+        self.assertEqual(config.attn_config.kv_head_num, 4)
 
     def test_dense_mtp_uses_dense_ffn_checkpoint_keys(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -78,6 +94,62 @@ class Qwen35DenseMTPTest(unittest.TestCase):
         self.assertIs(
             get_multimodal_mixin_cls("qwen35_dense_mtp"), Qwen3_5MoeMixin
         )
+
+    def test_propose_config_uses_independent_full_pool_only_with_pp(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "config.json").write_text(json.dumps(self._config()))
+            engine_config = SimpleNamespace(
+                sp_config=SimpleNamespace(
+                    type=SpeculativeType.MTP,
+                    checkpoint_path=temp_dir,
+                    model_type="qwen35_dense_mtp",
+                    quantization=None,
+                ),
+                parallelism_config=SimpleNamespace(
+                    pp_size=1, pp_stage_layer_counts=[]
+                ),
+                kv_cache_config=KVCacheConfig(),
+                profiling_debug_logging_config=None,
+            )
+
+            for pp_size in (1, 2):
+                with self.subTest(pp_size=pp_size):
+                    counts = [32, 32] if pp_size > 1 else []
+                    engine_config.parallelism_config.pp_size = pp_size
+                    engine_config.parallelism_config.pp_stage_layer_counts = list(counts)
+                    with patch("rtp_llm.model_factory.build_model_config"):
+                        config = ModelFactory.create_propose_model_config(
+                            engine_config,
+                            SimpleNamespace(max_seq_len=4096),
+                            ModelArgs(),
+                        )
+
+                    self.assertIsNotNone(config)
+                    self.assertEqual(config.num_layers, 1)
+                    self.assertTrue(config.is_mtp)
+                    self.assertTrue(
+                        config.hybrid_attention_config.enable_hybrid_attention
+                    )
+                    self.assertEqual(
+                        config.hybrid_attention_config.enable_independent_kv_cache_pools,
+                        pp_size > 1,
+                    )
+                    self.assertEqual(
+                        list(config.hybrid_attention_config.hybrid_attention_types),
+                        [HybridAttentionType.NONE],
+                    )
+                    self.assertEqual(len(config.kv_cache_spec_descs), 1)
+                    self.assertEqual(len(config.kv_cache_spec_descs[0]), 1)
+                    self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "full")
+                    self.assertEqual(
+                        config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MHA
+                    )
+                    self.assertEqual(config.attn_config.head_num, 24)
+                    self.assertEqual(config.attn_config.kv_head_num, 4)
+                    self.assertEqual(
+                        engine_config.parallelism_config.pp_stage_layer_counts,
+                        counts,
+                    )
 
     @staticmethod
     def _config():

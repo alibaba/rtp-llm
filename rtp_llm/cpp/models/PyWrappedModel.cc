@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/PPTypes.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
@@ -383,24 +384,28 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
         return {};
     }
 
-    const size_t group_count = static_cast<size_t>(inputs.kv_cache_kernel_block_id.size(0));
+    const size_t col_count = static_cast<size_t>(inputs.kv_cache_kernel_block_id.size(0));
     RTP_LLM_CHECK_WITH_INFO(kv_cache_layer_layout_.has_value(),
                             "tagged attention inputs require the current model cache layout");
-    const auto& group_tags = kv_cache_layer_layout_->topology().groupTagsSnapshot();
-    RTP_LLM_CHECK_WITH_INFO(group_tags.size() == group_count,
-                            "KV block table group count=%zu does not match topology tag count=%zu",
-                            group_count,
-                            group_tags.size());
+    const auto& groups = kv_cache_layer_layout_->topology().groups();
+    RTP_LLM_CHECK_WITH_INFO(!groups.empty(), "tagged attention inputs require at least one cache group");
     RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_block_id.defined() || inputs.kv_cache_block_id.dim() == 3,
                             "physical kv_cache_block_id must be 3-D for tagged inputs");
 
+    // Plan columns are addressed by canonical index (equals the local position at pp_size=1).
     torch_ext::AttentionInputsByTag by_tag;
-    for (size_t group_id = 0; group_id < group_count; ++group_id) {
+    for (const auto& group : groups) {
+        const size_t col = group.canonical_idx;
+        RTP_LLM_CHECK_WITH_INFO(col < col_count,
+                                "KV block table has %zu columns but group [%s] needs canonical column %zu",
+                                col_count,
+                                group.tag.c_str(),
+                                col);
         auto group_inputs                            = py_attn_inputs;
-        group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[group_id];
+        group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[col];
         group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
         if (inputs.kv_cache_block_id.defined()) {
-            group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[group_id];
+            group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[col];
             group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
             if (group_inputs.cache_store_inputs.has_value()) {
                 group_inputs.cache_store_inputs->host_kv_cache_offset = group_inputs.kv_cache_block_id.is_cuda() ?
@@ -408,15 +413,15 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                                                                             group_inputs.kv_cache_block_id;
             }
         }
-        const auto [it, inserted] = by_tag.emplace(group_tags[group_id], std::move(group_inputs));
+        const auto [it, inserted] = by_tag.emplace(group.tag, std::move(group_inputs));
         (void)it;
-        RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate attention input tag=%s", group_tags[group_id].c_str());
+        RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate attention input tag=%s", group.tag.c_str());
     }
 
     // A single global group keeps the direct fast path. Multiple groups are
     // exposed only through the outer tag mapping.
-    py_attn_inputs = by_tag.at(group_tags.front());
-    if (group_count == 1) {
+    py_attn_inputs = by_tag.at(groups.front().tag);
+    if (groups.size() == 1) {
         return {};
     }
     return by_tag;
@@ -732,15 +737,15 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     fusedCopy(d2d_copies_);
 
     if (enable_cuda_graph_) {
-        auto empty           = torch::Tensor();
-        auto py_model_inputs = PyModelInputs({empty,
-                                              empty,
-                                              empty,
-                                              torch_ext::PyEmbeddingInputs(),
-                                              torch_ext::PyMultimodalInputs(),
-                                              attention_inputs_,
-                                              attention_inputs_by_tag_,
-                                              torch_ext::BertEmbeddingInputs()});
+        auto empty                        = torch::Tensor();
+        auto py_model_inputs              = PyModelInputs({empty,
+                                                           empty,
+                                                           empty,
+                                                           torch_ext::PyEmbeddingInputs(),
+                                                           torch_ext::PyMultimodalInputs(),
+                                                           attention_inputs_,
+                                                           attention_inputs_by_tag_,
+                                                           torch_ext::BertEmbeddingInputs()});
         py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
@@ -820,15 +825,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
         CacheStoreWriteCycleGuard cache_store_write_cycle(cache_store_async_writer_, has_cache_store_work);
 
-        auto           py_model_inputs = PyModelInputs({token_ids,
-                                                        input_hiddens,
-                                                        combo_position_ids,
-                                                        embedding_inputs,
-                                                        multimodal_inputs,
-                                                        attention_inputs_,
-                                                        attention_inputs_by_tag_,
-                                                        bert_embedding_inputs});
+        auto py_model_inputs              = PyModelInputs({token_ids,
+                                                           input_hiddens,
+                                                           combo_position_ids,
+                                                           embedding_inputs,
+                                                           multimodal_inputs,
+                                                           attention_inputs_,
+                                                           attention_inputs_by_tag_,
+                                                           bert_embedding_inputs});
         py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
+        // PP: stage-boundary tensors populated by forwardPP.
+        py_model_inputs.pp_intermediates = inputs.pp_intermediates;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -863,11 +870,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        // In-model DSpARK proposals leave the Python boundary on
-        // PyModelOutputs::draft_tokens; carry them through whichever
-        // post-layers path this forward takes.
-        auto attach_draft_outputs = [&py_model_outputs](GptModelOutputs outputs) {
-            outputs.draft_tokens = py_model_outputs.draft_tokens;
+        // In-model DSpARK proposals leave on draft_tokens; pp_intermediates ride along the same way.
+        auto attach_model_side_outputs = [&py_model_outputs](GptModelOutputs outputs) {
+            outputs.draft_tokens     = py_model_outputs.draft_tokens;
+            outputs.pp_intermediates = py_model_outputs.pp_intermediates;
             return outputs;
         };
         if (is_dspark_draft_) {
@@ -878,17 +884,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             GptModelOutputs outputs;
             outputs.hidden_states     = hidden_states;
             outputs.all_hidden_states = hidden_states;
-            return attach_draft_outputs(std::move(outputs));
+            return attach_model_side_outputs(std::move(outputs));
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-                return attach_draft_outputs(forwardPostLayersLastHidden(hidden_states, inputs));
+                return attach_model_side_outputs(forwardPostLayersLastHidden(hidden_states, inputs));
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return attach_draft_outputs(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens));
+            return attach_model_side_outputs(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens));
         }
-        return attach_draft_outputs(callForwardPostLayers(hidden_states, inputs, true));
+        return attach_model_side_outputs(callForwardPostLayers(hidden_states, inputs, true));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
@@ -1073,7 +1079,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor softmax_result_t;
         if (need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(need_all_logits_index)");
-            auto last_logits = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
+            auto indexes     = lm_output_indexes_device.to(torch::kLong);
+            auto last_logits = torch::index_select(logits, 0, indexes);
+            last_hidden      = torch::index_select(hidden, 0, indexes);
             return {last_logits, last_hidden, hidden, logits, softmax_result_t};
         }
 
@@ -1124,6 +1132,46 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     // 3rd field (all_hidden_states) is the small [num_lm, hidden_size] — the whole
     // point of this path is to never materialize the full [seq, hidden] sequence.
     return {logits, last_hidden, last_hidden, torch::Tensor(), torch::Tensor()};
+}
+
+/* Transport adapter around the single compute path: unpacks upstream intermediates
+   into inputs.pp_intermediates and packs the model-emitted ones for the downstream stage. */
+GptModelOutputs PyWrappedModel::forwardPP(const GptModelInputs&        inputs,
+                                          const PPIntermediateTensors* input_tensors,
+                                          PPIntermediateTensors*       output_tensors) {
+    RTP_LLM_PROFILE_SCOPE("py_model.forwardPP");
+    GptModelInputs local_inputs = inputs;
+    if (pp_size_ > 1 && input_tensors != nullptr && !input_tensors->tensors.empty()) {
+        local_inputs.pp_intermediates = input_tensors->tensors;
+    }
+    GptModelOutputs outputs = forward(local_inputs);
+    if (pp_size_ > 1 && output_tensors != nullptr) {
+        output_tensors->tensors = std::move(outputs.pp_intermediates);
+    }
+    return outputs;
+}
+
+PPIntermediateTensors PyWrappedModel::makePPWarmUpInputTensors(const GptModelInputs& inputs) {
+    const auto token_num = inputs.combo_tokens.numel();
+    auto       hidden_template =
+        torch::zeros({token_num, hidden_size_},
+                     torch::TensorOptions().dtype(dataTypeToTorchType(description_.data_type)).device(torch::kCUDA));
+
+    py::gil_scoped_acquire gil;
+    try {
+        auto tensors = py_model_.attr("make_empty_intermediate_tensors")(hidden_template)
+                           .cast<std::map<std::string, torch::Tensor>>();
+        RTP_LLM_CHECK_WITH_INFO(!tensors.empty(), "Python model returned no PP warmup intermediate tensors");
+        for (const auto& [name, tensor] : tensors) {
+            RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "PP warmup intermediate tensor [%s] is undefined", name.c_str());
+            RTP_LLM_CHECK_WITH_INFO(
+                tensor.is_cuda(), "PP warmup intermediate tensor [%s] must be on CUDA", name.c_str());
+        }
+        return PPIntermediateTensors{std::move(tensors)};
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python model failed to construct PP warmup intermediate tensors:\n%s", e.what());
+        throw;
+    }
 }
 
 MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
@@ -1213,11 +1261,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
     size_t                      prefill_batch_idx      = 0;
     // TODO(async): micro-batch token slicing still computes CPU scalar sums.
     // Convert explicitly and keep all sliced GptModelInputs device-resident.
-    const auto input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
-                                        inputs.input_lengths.cpu().pin_memory() :
-                                        inputs.input_lengths;
-    const auto* input_lengths_ptr =
-        input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
+    const auto  input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
+                                         inputs.input_lengths.cpu().pin_memory() :
+                                         inputs.input_lengths;
+    const auto* input_lengths_ptr  = input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");

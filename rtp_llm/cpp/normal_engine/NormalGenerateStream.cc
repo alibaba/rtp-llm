@@ -73,7 +73,10 @@ bool NormalGenerateStream::consumerReadyWithoutLock() const {
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
-    generate_results.request_id = request_id_;
+    const auto&     cum_log_probs_ = sampling_state_.cum_log_probs;
+    const auto&     all_probs_     = sampling_state_.all_probs;
+    const auto&     softmax_probs_ = sampling_state_.softmax_probs;
+    generate_results.request_id    = request_id_;
 
     // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
     for (int i = 0; i < currentBatchSize(); i++) {
@@ -233,6 +236,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);
     }
+    auto& cum_log_probs_ = sampling_state_.cum_log_probs;
+    auto& all_probs_     = sampling_state_.all_probs;
     if (update_info.cum_log_probs.defined()) {
         cum_log_probs_ = update_info.cum_log_probs.cpu();
     }

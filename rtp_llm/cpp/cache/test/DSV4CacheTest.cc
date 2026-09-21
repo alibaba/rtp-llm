@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
+#include <cuda_runtime.h>
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -48,7 +50,7 @@ const std::vector<std::string> kDsv4ProFirstSeenTags = {
 
 std::shared_ptr<CompressedKVCacheSpec> buildCompressedSpec(const std::string& tag,
                                                            uint32_t           entry_elems,
-                                                           uint32_t           entries_per_block,
+                                                           uint32_t           entries_per_kernel_block,
                                                            DataType           dtype,
                                                            uint32_t           compression_ratio          = 1,
                                                            size_t             block_size_bytes_alignment = 0) {
@@ -63,9 +65,10 @@ std::shared_ptr<CompressedKVCacheSpec> buildCompressedSpec(const std::string& ta
     desc.entry_count_mode             = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
     desc.is_state_cache               = false;
     SpecBuildContext ctx;
-    ctx.dtype                   = dtype;
-    ctx.seq_size_per_block      = kDsv4TokensPerBlock;
-    ctx.kernel_tokens_per_block = entries_per_block * compression_ratio;
+    ctx.dtype = dtype;
+    // This helper describes one kernel block; decoupled layouts use an explicit build context.
+    ctx.seq_size_per_block      = entries_per_kernel_block * compression_ratio;
+    ctx.kernel_tokens_per_block = ctx.seq_size_per_block;
     return std::dynamic_pointer_cast<CompressedKVCacheSpec>(SpecBuilder::build(desc, ctx));
 }
 
@@ -762,19 +765,22 @@ TEST(HybridPoolConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGrou
     ASSERT_NE(hca_kv, nullptr);
     ASSERT_NE(idx_kv, nullptr);
     ASSERT_NE(swa_kv, nullptr);
-    // Entries per kernel block: kernel_tokens / compression_ratio for compressed pools, and the
-    // state-ring window for swa_kv.
-    EXPECT_EQ(opaqueEntriesPerBlock(*csa_kv, kDsv4KvEntryBytes), 32u);
-    EXPECT_EQ(opaqueEntriesPerBlock(*hca_kv, kDsv4KvEntryBytes), 1u);
-    EXPECT_EQ(opaqueEntriesPerBlock(*idx_kv, kDsv4IndexerEntryBytes), 32u);
+    // Specs count entries in one physical block; swa_kv retains its fixed state-ring window.
+    EXPECT_EQ(opaqueEntriesPerBlock(*csa_kv, kDsv4KvEntryBytes), 4096u);
+    EXPECT_EQ(opaqueEntriesPerBlock(*hca_kv, kDsv4KvEntryBytes), 128u);
+    EXPECT_EQ(opaqueEntriesPerBlock(*idx_kv, kDsv4IndexerEntryBytes), 4096u);
     EXPECT_EQ(opaqueEntriesPerBlock(*swa_kv, kDsv4KvEntryBytes), 128u);
 
     EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(csa_kv_gid), 128u);
     EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(swa_kv_gid), 1u);
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(csa_kv_gid), csa_kv->block_size_bytes() * 128u);
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(hca_kv_gid), hca_kv->block_size_bytes() * 128u);
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(idx_kv_gid), idx_kv->block_size_bytes() * 128u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(csa_kv_gid), csa_kv->block_size_bytes());
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(hca_kv_gid), hca_kv->block_size_bytes());
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(idx_kv_gid), idx_kv->block_size_bytes());
     EXPECT_EQ(config.kvBlockStrideBytesForGroup(swa_kv_gid), swa_kv->block_size_bytes());
+
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(csa_kv_gid), 4194304u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(hca_kv_gid), 131072u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(idx_kv_gid), 1048576u);
 
     auto full_pool_bpk = BlockPoolConfigHelper::createConfigForGroup(config, csa_kv_gid);
     auto swa_pool_bpk  = BlockPoolConfigHelper::createConfigForGroup(config, swa_kv_gid);
@@ -782,6 +788,75 @@ TEST(HybridPoolConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGrou
     ASSERT_EQ(swa_pool_bpk.memory_layouts.size(), 1u);
     EXPECT_EQ(full_pool_bpk.memory_layouts[0].kernel_blocks_per_kv_block, 128u);
     EXPECT_EQ(swa_pool_bpk.memory_layouts[0].kernel_blocks_per_kv_block, 1u);
+}
+
+TEST(HybridPoolConfigCreatorTest, Fp8PhysicalStridePreservesPaddingForEachKernelSize) {
+    ParallelismConfig pc;
+    auto              mc          = makeProModelConfig();
+    mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    setDsv4KvCacheSpecs(mc, makeProLayerCompressRatios());
+    struct ExpectedLayout {
+        uint32_t kernel_tokens;
+        size_t   hca_stride;
+        size_t   csa_stride;
+    };
+    for (const auto& expected :
+         {ExpectedLayout{128, 4608, 76032}, ExpectedLayout{256, 3456, 74880}, ExpectedLayout{512, 2880, 74880}}) {
+        SCOPED_TRACE(expected.kernel_tokens);
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.seq_size_per_block        = 512;
+        kv_cache_config.kernel_seq_size_per_block = expected.kernel_tokens;
+        auto config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+
+        const auto& hca = config.specForGroup(gidForTag(config, "hca_kv"));
+        EXPECT_EQ(hca->block_payload_bytes(), 2336u);
+        EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "hca_kv")), expected.hca_stride);
+        EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "csa_kv")), expected.csa_stride);
+        EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "indexer_kv")), 16896u);
+        EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(gidForTag(config, "hca_kv")), 512u / expected.kernel_tokens);
+        EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(gidForTag(config, "swa_kv")), 1u);
+        EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "swa_kv")), 74880u);
+        for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+            EXPECT_EQ(config.kvBlockStrideBytesForGroup(gid), config.specForGroup(gid)->block_size_bytes())
+                << config.tagForGroup(gid);
+        }
+    }
+}
+
+TEST(HybridPoolConfigCreatorTest, DecoupledCompressedPhysicalBlockCopyIncludesAllKernelBlocksAndPadding) {
+    createDevice();
+    auto mc                = makeProModelConfig();
+    mc.num_layers          = 1;
+    mc.kv_cache_spec_descs = {{makeDsv4Desc("hca_kv", "compressed_kv", 584, DataType::TYPE_UINT8, 128)}};
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.seq_size_per_block        = 512;
+    kv_cache_config.kernel_seq_size_per_block = 128;
+    auto config = HybridPoolConfigCreator::createConfig(mc, ParallelismConfig{}, kv_cache_config, false, 0);
+    config.finalizeBlockNums(4, RuntimeConfig{});
+    ASSERT_EQ(config.kvBlockStrideBytesForGroup(0), 4608u);
+
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config);
+    allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
+    ASSERT_TRUE(allocator->init());
+    const auto options  = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    auto       src      = torch::from_blob(allocator->convertIndexToAddrByTag(0, "hca_kv", 1).kv_addr, {4608}, options);
+    auto       dst      = torch::from_blob(allocator->convertIndexToAddrByTag(0, "hca_kv", 2).kv_addr, {4608}, options);
+    auto       next     = torch::from_blob(allocator->convertIndexToAddrByTag(0, "hca_kv", 3).kv_addr, {4608}, options);
+    auto       expected = torch::empty({4, 1152}, torch::TensorOptions().dtype(torch::kUInt8));
+    for (int kernel_id = 0; kernel_id < 4; ++kernel_id) {
+        expected[kernel_id].fill_(0xA0 + kernel_id);
+        expected[kernel_id].narrow(0, 0, 584).fill_(kernel_id + 1);
+    }
+    expected = expected.flatten();
+    src.copy_(expected);
+    dst.zero_();
+    next.fill_(0xFF);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    allocator->blockBatchCopyByTag({{"hca_kv", 1, 2}});
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    EXPECT_TRUE(torch::equal(dst.cpu(), expected));
+    EXPECT_TRUE(torch::equal(src.cpu(), expected));
+    EXPECT_TRUE(next.eq(0xFF).all().item<bool>());
 }
 
 TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlocks) {
@@ -1034,7 +1109,7 @@ TEST(GenericOpaqueCacheSpecTest, KVSpecFromPoolSpec) {
 
     EXPECT_EQ(spec->block_size(), 64u * kDsv4Fp8KvEntryBytes);
     EXPECT_EQ(spec->block_size_bytes(), 37440u);
-    EXPECT_EQ(spec->block_size_bytes(), 37440u);
+    EXPECT_EQ(spec->block_payload_bytes(), 37376u);
     EXPECT_EQ(spec->tag, "csa_kv");
     EXPECT_EQ(spec->block_size() / kDsv4Fp8KvEntryBytes, 64u);
 
@@ -1084,6 +1159,34 @@ TEST(GenericOpaqueCacheSpecTest, OpaqueKVSpecAllowsStrideLargerThanPayload) {
     ASSERT_NE(spec, nullptr);
     EXPECT_EQ(spec->block_payload_bytes(), 2u);
     EXPECT_EQ(spec->block_size_bytes(), 3u);
+}
+
+TEST(GenericOpaqueCacheSpecTest, ExplicitKernelStrideIsNormalizedOnlyForSubdividedGroups) {
+    KVCacheSpecDesc desc;
+    desc.tag                         = "explicit_kv";
+    desc.cache_type                  = KVCacheSpecType::OpaqueKV;
+    desc.entry_elems                 = 2;
+    desc.entry_dtype                 = DataType::TYPE_FP16;
+    desc.explicit_entry_count        = 1;
+    desc.block_stride_bytes_override = 8;
+    SpecBuildContext ctx;
+    ctx.seq_size_per_block      = 512;
+    ctx.kernel_tokens_per_block = 128;
+
+    const auto full = SpecBuilder::build(desc, ctx);
+    EXPECT_EQ(full->block_size(), 8u);
+    EXPECT_EQ(full->block_payload_bytes(), 16u);
+    EXPECT_EQ(full->block_size_bytes(), 32u);
+
+    desc.group_type = CacheGroupType::SWA;
+    const auto swa  = SpecBuilder::build(desc, ctx);
+    EXPECT_EQ(swa->block_size(), 2u);
+    EXPECT_EQ(swa->block_size_bytes(), 8u);
+
+    desc.group_type.reset();
+    desc.block_stride_bytes_override = 0;
+    desc.explicit_entry_count        = std::numeric_limits<uint32_t>::max();
+    EXPECT_ANY_THROW(SpecBuilder::build(desc, ctx));
 }
 
 TEST(GenericOpaqueCacheSpecTest, FixedStateSpecCloneKeepsResolvedLayout) {
@@ -1593,7 +1696,7 @@ TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
 
     auto compressed = std::dynamic_pointer_cast<CompressedKVCacheSpec>(SpecBuilder::build(compressed_desc, ctx));
     ASSERT_NE(compressed, nullptr);
-    EXPECT_EQ(compressed->block_size() / compressed_desc.entry_elems, 32u);
+    EXPECT_EQ(compressed->block_size() / compressed_desc.entry_elems, 64u);
     EXPECT_EQ(compressed->seq_size_per_block, 256u);
     EXPECT_EQ(compressed->memoryLayoutDType(), DataType::TYPE_UINT8);
 

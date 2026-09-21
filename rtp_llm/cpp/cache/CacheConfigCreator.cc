@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
+#include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -180,21 +181,103 @@ LayerKVCacheSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCach
     return layer_specs;
 }
 
+// Enforced at both entry points because the hybrid-pool branch of createConfig bypasses createBasicConfig.
+void checkPpIndependentPools(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
+    RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size <= 1
+                                || !model_config.hybrid_attention_config.enable_hybrid_attention
+                                || model_config.hybrid_attention_config.enable_independent_kv_cache_pools,
+                            "pipeline parallelism (pp_size=%ld) requires independent kv cache pools; the hybrid "
+                            "positional grouping is no longer supported",
+                            parallelism_config.pp_size);
+}
+
+void validateStageScopedDescsForPP(const ModelConfig& stage_config) {
+    for (size_t layer_id = 0; layer_id < stage_config.kv_cache_spec_descs.size(); ++layer_id) {
+        for (const auto& desc : stage_config.kv_cache_spec_descs[layer_id]) {
+            RTP_LLM_CHECK_WITH_INFO(desc.cache_type != KVCacheSpecType::OpaqueKV
+                                        && desc.cache_type != KVCacheSpecType::OpaqueState,
+                                    "pipeline parallelism does not support opaque kv cache pools (layer %zu, "
+                                    "cache_type=%d) yet",
+                                    layer_id,
+                                    static_cast<int>(desc.cache_type));
+        }
+    }
+}
+
+ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       model_config,
+                                                       const ParallelismConfig& parallelism_config,
+                                                       bool                     is_draft_model) {
+
+    const int64_t pp_size = std::max<int64_t>(1, parallelism_config.pp_size);
+    if (pp_size <= 1 || is_draft_model) {
+        return model_config;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_rank >= 0 && parallelism_config.pp_rank < pp_size,
+                            "invalid pp_rank=%ld for pp_size=%ld",
+                            parallelism_config.pp_rank,
+                            pp_size);
+
+    RTP_LLM_CHECK_WITH_INFO(!parallelism_config.pp_stage_layer_counts.empty(),
+                            "pp_size=%ld requires a materialized layer partition "
+                            "(pp_stage_layer_counts); it must be written by the Python startup decision point",
+                            pp_size);
+
+    const auto layout       = RankLayout::fromParallelismConfig(parallelism_config);
+    const auto [begin, end] = layout.myLayerRange(model_config.num_layers);
+    RTP_LLM_CHECK_WITH_INFO(end > begin,
+                            "pp stage %ld owns no layers: num_layers=%ld pp_size=%ld",
+                            parallelism_config.pp_rank,
+                            model_config.num_layers,
+                            pp_size);
+    RTP_LLM_CHECK_WITH_INFO(model_config.kv_cache_spec_descs.size() == static_cast<size_t>(model_config.num_layers),
+                            "kv_cache_spec_descs size %zu != num_layers %ld",
+                            model_config.kv_cache_spec_descs.size(),
+                            model_config.num_layers);
+
+    ModelConfig stage_config        = model_config;
+    stage_config.num_layers         = end - begin;
+    stage_config.global_layer_begin = static_cast<uint32_t>(begin);
+    stage_config.kv_cache_spec_descs.assign(model_config.kv_cache_spec_descs.begin() + begin,
+                                            model_config.kv_cache_spec_descs.begin() + end);
+
+    auto& types = stage_config.hybrid_attention_config.hybrid_attention_types;
+    if (!types.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(types.size() == static_cast<size_t>(model_config.num_layers),
+                                "hybrid_attention_types size %zu != num_layers %ld",
+                                types.size(),
+                                model_config.num_layers);
+        types.assign(types.begin() + begin, types.begin() + end);
+    }
+    validateStageScopedDescsForPP(stage_config);
+
+    RTP_LLM_LOG_INFO("PP cache stage %ld/%ld owns global layers [%ld, %ld) of %ld",
+                     parallelism_config.pp_rank,
+                     pp_size,
+                     begin,
+                     end,
+                     model_config.num_layers);
+    return stage_config;
+}
+
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   bool                     is_mtp,
-                                                  int                      gen_num_per_cycle) {
+                                                  int                      gen_num_per_cycle,
+                                                  bool                     is_draft_model) {
+    checkPpIndependentPools(model_config, parallelism_config);
     CacheConfig config;
     if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
         KVCacheConfig no_override_config;
         no_override_config.seq_size_per_block        = 0;
         no_override_config.kernel_seq_size_per_block = 0;
         config                                       = HybridPoolConfigCreator::createConfig(
-            model_config, parallelism_config, no_override_config, is_mtp, gen_num_per_cycle);
+            model_config, parallelism_config, no_override_config, is_mtp, gen_num_per_cycle, is_draft_model);
     } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
         config = HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
     } else {
-        config = SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
+        config = SingleConfigCreator::createSingleConfig(
+            model_config, parallelism_config, is_mtp, gen_num_per_cycle, is_draft_model);
     }
 
     if (!model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
@@ -217,6 +300,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const KVCacheConfig&                             kv_cache_config,
                                              const std::optional<WarmUpResult>&               warm_up_result,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    checkPpIndependentPools(model_config, parallelism_config);
     CacheConfig config =
         model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
             HybridPoolConfigCreator::createConfig(model_config, parallelism_config, kv_cache_config, false, 0) :
@@ -255,18 +339,30 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const std::optional<WarmUpResult>& warm_up_result,
                                                bool                               is_mtp,
                                                bool                               is_eagle) {
-    CacheConfig score_config =
-        score_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
-            HybridPoolConfigCreator::createConfig(
-                score_model_config, parallelism_config, kv_cache_config, false, sp_config.gen_num_per_cycle) :
-            CacheConfigCreator::createBasicConfig(
-                score_model_config, parallelism_config, false, sp_config.gen_num_per_cycle);
-    CacheConfig propose_config =
-        propose_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
-            HybridPoolConfigCreator::createConfig(
-                propose_model_config, parallelism_config, kv_cache_config, is_mtp, sp_config.gen_num_per_cycle) :
-            CacheConfigCreator::createBasicConfig(
-                propose_model_config, parallelism_config, is_mtp, sp_config.gen_num_per_cycle);
+    CacheConfig score_config   = score_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
+                                     HybridPoolConfigCreator::createConfig(score_model_config,
+                                                                         parallelism_config,
+                                                                         kv_cache_config,
+                                                                         false,
+                                                                         sp_config.gen_num_per_cycle,
+                                                                         /*is_draft_model=*/false) :
+                                     CacheConfigCreator::createBasicConfig(score_model_config,
+                                                                         parallelism_config,
+                                                                         false,
+                                                                         sp_config.gen_num_per_cycle,
+                                                                         /*is_draft_model=*/false);
+    CacheConfig propose_config = propose_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
+                                     HybridPoolConfigCreator::createConfig(propose_model_config,
+                                                                           parallelism_config,
+                                                                           kv_cache_config,
+                                                                           is_mtp,
+                                                                           sp_config.gen_num_per_cycle,
+                                                                           /*is_draft_model=*/true) :
+                                     CacheConfigCreator::createBasicConfig(propose_model_config,
+                                                                           parallelism_config,
+                                                                           is_mtp,
+                                                                           sp_config.gen_num_per_cycle,
+                                                                           /*is_draft_model=*/true);
 
     const int joint_step       = std::max(1, kv_cache_config.linear_step);
     score_config.linear_step   = joint_step;

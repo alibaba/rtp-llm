@@ -21,6 +21,8 @@ public:
     };
     using TokenCountsByPriority = std::map<int32_t, TokenCounts>;
 
+    StreamGroups() = default;
+
     StreamGroups(const std::list<GenerateStreamPtr>& streams) {
         for (auto& stream : streams) {
             auto cur_batch_size  = stream->currentBatchSize();

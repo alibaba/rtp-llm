@@ -2,8 +2,10 @@
 
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 
@@ -77,6 +79,44 @@ TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
 
 TEST(CacheTopologyTest, RejectsInconsistentReverseMembership) {
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full", {0})}, {{0, {"full"}}, {1, {"full"}}}));
+}
+
+TEST(CacheTopologyTest, ResolvesDefaultKernelSizeFromGroupSpanAndPolicy) {
+    for (const auto& [type, configured_kernel_size, expected_kernel_size] :
+         std::vector<std::tuple<CacheGroupType, size_t, size_t>>{{CacheGroupType::FULL, 0, 8},
+                                                                 {CacheGroupType::FULL, 2, 2},
+                                                                 {CacheGroupType::FULL, 16, 8},
+                                                                 {CacheGroupType::SWA, 2, 8},
+                                                                 {CacheGroupType::LINEAR, 2, 8}}) {
+        SCOPED_TRACE(cacheGroupTypeName(type));
+        SCOPED_TRACE(configured_kernel_size);
+        CacheConfig config;
+        config.seq_size_per_block        = 64;
+        config.kernel_seq_size_per_block = configured_kernel_size;
+        auto group                       = makeGroup("cache", {0}, type);
+        group.seq_size_per_block         = 0;  // Resolve the physical span (8) from the spec.
+        group.kernel_seq_size_per_block  = 0;
+
+        config.setTopology({group}, {{0, {"cache"}}});
+
+        EXPECT_EQ(config.seqSizePerBlockForGroup(0), 8u);
+        EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(0), expected_kernel_size);
+        EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(0), 8 / expected_kernel_size);
+    }
+}
+
+TEST(CacheTopologyTest, PreservesExplicitGroupKernelSize) {
+    CacheConfig config;
+    config.seq_size_per_block        = 64;
+    config.kernel_seq_size_per_block = 2;
+    auto group                       = makeGroup("cache", {0});
+    group.kernel_seq_size_per_block  = 4;
+
+    config.setTopology({group}, {{0, {"cache"}}});
+
+    EXPECT_EQ(config.seqSizePerBlockForGroup(0), 8u);
+    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(0), 4u);
+    EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(0), 2u);
 }
 
 }  // namespace

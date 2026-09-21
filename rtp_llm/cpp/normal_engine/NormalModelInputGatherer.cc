@@ -629,6 +629,26 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     } else {
         model_input.lm_output_indexes = buildLmOutputIndexesOnHost(model_input, stream_groups);
     }
+    std::vector<int64_t> blocks_to_zero;
+    for (const auto& stream : stream_groups.allStreams()) {
+        auto& cache = *stream->kvCachePtr();
+        // Restored prefix blocks already contain cache data before the first forward.
+        const size_t initialized_prefix_blocks = config_.seq_size_per_block
+            ? (stream->prefixLength() + config_.seq_size_per_block - 1) / config_.seq_size_per_block : 0;
+        for (int batch = 0; batch < cache.batchSize(); ++batch) {
+            for (int gid = 0; gid < cache.groupNums(); ++gid) {
+                auto ids = cache.mutableBlockIds(batch, gid).takeBlocksToZero(initialized_prefix_blocks);
+                blocks_to_zero.insert(blocks_to_zero.end(), ids.begin(), ids.end());
+            }
+        }
+    }
+    if (!blocks_to_zero.empty()) {
+        std::sort(blocks_to_zero.begin(), blocks_to_zero.end());
+        blocks_to_zero.erase(std::unique(blocks_to_zero.begin(), blocks_to_zero.end()), blocks_to_zero.end());
+        model_input.kv_cache_blocks_to_zero = torch::empty(
+            {static_cast<int64_t>(blocks_to_zero.size())}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
+        std::copy(blocks_to_zero.begin(), blocks_to_zero.end(), model_input.kv_cache_blocks_to_zero.data_ptr<int64_t>());
+    }
     return model_input;
 }
 

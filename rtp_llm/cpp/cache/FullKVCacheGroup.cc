@@ -69,7 +69,7 @@ bool FullKVCacheGroup::malloc(BlockIds&            block_ids,
     if (result.empty()) {
         return false;
     }
-    block_ids.add(result);
+    block_ids.add(result, zero_new_blocks_);
     return true;
 }
 

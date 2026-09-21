@@ -433,6 +433,23 @@ std::vector<torch::Tensor> BlockPool::allLayerScaleCacheBase() const {
     return global_layer_kv_scale_tensors_;
 }
 
+void BlockPool::zeroBlocks(const torch::Tensor& block_ids) {
+    if (!block_ids.defined() || block_ids.numel() == 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(block_ids.dim() == 1 && block_ids.scalar_type() == torch::kInt64,
+                            "block IDs to zero must be a 1-D int64 tensor");
+    auto indices = block_ids.to(cache_aligned_buffer_.device(), torch::kInt64, /*non_blocking=*/true);
+    for (const auto& layout : config_.memory_layouts) {
+        // Use physical block strides, not attention's subdivided kernel-page IDs.
+        auto bytes = cache_aligned_buffer_.narrow(0, layout.kv_cache_offset_bytes, layout.kv_block_pool_size_bytes)
+                         .view({static_cast<int64_t>(layout.layer_num),
+                                static_cast<int64_t>(layout.block_num),
+                                static_cast<int64_t>(layout.kv_block_stride_bytes)});
+        bytes.index_fill_(1, indices, 0);
+    }
+}
+
 BlockIndicesType BlockPool::malloc(int num_blocks) {
     RTP_LLM_PROFILE_FUNCTION();
     if (num_blocks <= 0) {

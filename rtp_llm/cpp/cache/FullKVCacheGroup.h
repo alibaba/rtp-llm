@@ -12,8 +12,10 @@ public:
                      BlockPoolPtr                        block_pool,
                      int                                 group_id,
                      SharedBlockCache*                   shared_cache     = nullptr,
-                     const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id, shared_cache, metrics_reporter) {}
+                     const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
+                     bool                                zero_new_blocks = false):
+        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id, shared_cache, metrics_reporter),
+        zero_new_blocks_(zero_new_blocks) {}
 
     // Transition-only overload.
     FullKVCacheGroup(const LayerIdsType&                 layer_ids,
@@ -55,6 +57,7 @@ public:
     void           reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
 
 private:
+    bool zero_new_blocks_{false};
 };
 
 }  // namespace rtp_llm

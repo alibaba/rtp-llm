@@ -51,7 +51,9 @@ public:
     BlockIdxType popBack();
 
     // Append new physical block IDs to the tail.
-    void add(const BlockIndicesType& ids);
+    void add(const BlockIndicesType& ids, bool needs_zero = false);
+    // Consume fresh allocation markers; restored prefix blocks already hold valid KV.
+    BlockIndicesType takeBlocksToZero(size_t initialized_prefix_blocks = 0);
     void remove(const std::vector<size_t>& indices);
 
     // Swap the physical block IDs at positions pos_a and pos_b.
@@ -71,6 +73,7 @@ private:
     void syncKernelBlocks();
 
     BlockIndicesType block_indices;
+    std::vector<uint8_t> needs_zero_;
     // Kernel-granularity block IDs, always maintained.
     // Size is always block_indices.size() * kernel_blocks_per_kv_block_.
     // When kernel_blocks_per_kv_block_ == 1, kernel_block_indices_ mirrors block_indices.

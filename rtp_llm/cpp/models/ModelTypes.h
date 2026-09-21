@@ -17,6 +17,7 @@
 namespace rtp_llm {
 
 class KVCacheManager;  // Forward declaration
+struct PPIntermediateTensors;
 
 struct GptModelDescription {
     rtp_llm::AttentionConfigs attention_conf;
@@ -75,6 +76,7 @@ enum GptModelInputIndex : size_t {
     kvCacheLayerToGroupLen,
     kvCacheGroupTypesLen,
     kvCacheUpdateCopyNum,
+    kvCacheZeroBlockNum,
     lmOutputIndexes,
     comboPositionIds,
     textTokensMask,
@@ -97,6 +99,11 @@ enum GptModelInputIndex : size_t {
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
+    isTargetVerify,
+    // PREFILL-role flag; synced so non-root lanes of a non-first PP stage
+    // (which get an empty relayed plan) pack cache_keys like the root.
+    pdSeparation,
+    shutdownSentinel,
     gptModelInputLength,
 };
 
@@ -141,8 +148,14 @@ class ModelBase {
 public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
-    virtual void            releaseBuffers() {}
-    virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+    // First stage receives no input tensors; last stage produces none.
+    virtual GptModelOutputs forwardPP(const GptModelInputs&        inputs,
+                                      const PPIntermediateTensors* input_tensors,
+                                      PPIntermediateTensors*       output_tensors);
+    /* Builds model-defined inputs for stage-local PP warmup without upstream activations. */
+    virtual PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs);
+    virtual void                  releaseBuffers() {}
+    virtual void                  prepareAttentionInputs(const GptModelInputs& inputs) {}
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).

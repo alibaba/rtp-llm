@@ -2,6 +2,13 @@ load("@arch_config//:arch_select.bzl", "deep_ep_py_deps")
 
 deep_ep_py_deps()
 
+# Authoritative rank coordinate system: pure stdlib, zero deps.
+py_library(
+    name = "rank_layout",
+    srcs = ["rank_layout.py"],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "collective_torch",
     srcs = [
@@ -10,6 +17,7 @@ py_library(
         "symm_mem.py",
     ],
     deps = [
+        ":rank_layout",
         "//rtp_llm:torch",
     ],
     visibility = ["//visibility:public"],
@@ -19,6 +27,7 @@ py_library(
     name = "deepep_wrapper",
     srcs = ["deepep_wrapper.py"],
     deps = [
+        ":collective_torch",
         "//rtp_llm:torch",
     ] + select({
         "@//:using_cuda12":["deep_ep_py"],

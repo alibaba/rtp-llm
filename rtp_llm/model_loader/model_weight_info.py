@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
+from rtp_llm.config.pp_layout import derive_pp_rank
 from rtp_llm.config.quant_config import (
     Fp8PerTensorQuantConfig,
     ModelOptFp4Config,
@@ -213,9 +214,21 @@ class ModelDeployWeightInfo:
         self.ep_rank = parallelism_config.ep_rank
         self.dp_size = parallelism_config.dp_size
         self.dp_rank = parallelism_config.dp_rank
-        self.num_nodes: int = (
-            parallelism_config.world_size // parallelism_config.local_world_size
-        )
+        # pp_rank comes from ParallelismConfig; derive_pp_rank is the fallback for test mocks without pp fields.
+        self.pp_size = max(int(getattr(parallelism_config, "pp_size", 1)), 1)
+        pp_rank = getattr(parallelism_config, "pp_rank", None)
+        if pp_rank is None:
+            pp_rank = derive_pp_rank(
+                getattr(parallelism_config, "world_rank", 0),
+                getattr(parallelism_config, "dp_size", 1),
+                getattr(parallelism_config, "tp_size", 1),
+            )
+        self.pp_rank = int(pp_rank)
+        # Materialized layer partition from startup; absent only at pp_size=1 or in test mocks.
+        pp_counts = getattr(parallelism_config, "pp_stage_layer_counts", None)
+        self.pp_stage_layer_counts = list(pp_counts) if pp_counts else None
+        # EP ranks belong to one PP stage. Placement uses nodes in this EP group.
+        self.num_nodes = max(self.ep_size // parallelism_config.local_world_size, 1)
         self.ffn_tp_rank = parallelism_config.get_ffn_tp_rank()
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
 
@@ -786,6 +799,9 @@ class ModelDeployWeightInfo:
             ep_rank=self.ep_rank,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
+            pp_size=getattr(self, "pp_size", 1),
+            pp_rank=getattr(self, "pp_rank", 0),
+            pp_stage_layer_counts=getattr(self, "pp_stage_layer_counts", None),
             lm_head_tp_rank=self.lm_head_tp_rank,
             lm_head_tp_size=self.lm_head_tp_size,
             num_nodes=self.num_nodes,

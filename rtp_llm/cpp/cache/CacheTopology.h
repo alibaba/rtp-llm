@@ -15,6 +15,9 @@
 
 namespace rtp_llm {
 
+// Sentinel: canonical column not assigned; canonical indices default to local group order.
+inline constexpr size_t kCanonicalIdxUnset = static_cast<size_t>(-1);
+
 // Immutable cache-group configuration published by CacheConfig. The tag is
 // the semantic identity; numeric group ids are private CacheTopology indices.
 struct GroupBase {
@@ -29,6 +32,9 @@ struct GroupBase {
     size_t   kernel_seq_size_per_block = 0;
     size_t   kv_block_stride_bytes     = 0;
     size_t   kv_scale_stride_bytes     = 0;
+
+    // Column in the PP canonical group table (identical on every stage); unset keeps identity mapping.
+    size_t canonical_idx = kCanonicalIdxUnset;
 };
 
 // Order is deterministic but carries no business meaning.
@@ -67,6 +73,7 @@ public:
     const std::vector<std::string>&                groupTagsSnapshot() const;
     const std::vector<CacheGroupType>&             groupTypesSnapshot() const;
     const std::vector<KVCacheSpecType>&            groupSpecTypesSnapshot() const;
+    const std::vector<size_t>&                     canonicalIndicesSnapshot() const;
     const std::vector<std::vector<int>>&           layerGroupIdsSnapshot() const;
     const std::vector<std::map<std::string, int>>& layerTagToGroupIdSnapshot() const;
 
@@ -75,6 +82,7 @@ private:
         std::vector<std::string>                group_tags;
         std::vector<CacheGroupType>             group_types;
         std::vector<KVCacheSpecType>            group_spec_types;
+        std::vector<size_t>                     canonical_indices;
         std::vector<std::vector<int>>           layer_group_ids;
         std::vector<std::map<std::string, int>> layer_tag_to_group_id;
     };

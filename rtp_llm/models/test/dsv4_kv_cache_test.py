@@ -184,7 +184,7 @@ class Dsv4KvCacheSpecTest(TestCase):
                 tag,
             )
         # Compressed pools must keep 0 here: with 128 the 576-byte alignment
-        # above would be skipped (they hold fewer than 128 entries per block).
+        # above would be skipped (they hold fewer than 128 entries per kernel block).
         for tag in (CSA_KV_TAG, HCA_KV_TAG, INDEXER_KV_TAG):
             self.assertEqual(by_tag[tag].block_stride_alignment_min_entries, 0, tag)
 

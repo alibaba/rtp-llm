@@ -1,3 +1,9 @@
+py_test(
+    name = "eplb_control_test",
+    srcs = ["eplb_control_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
 filegroup(
     name = "testdata",
     srcs = glob([

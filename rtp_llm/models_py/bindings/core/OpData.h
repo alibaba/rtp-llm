@@ -8,6 +8,7 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/models_py/bindings/core/DSparkCallPhase.h"
 #include <cstddef>
+#include <map>
 #include <optional>
 #include <string>
 #include <memory>
@@ -19,12 +20,16 @@
 namespace rtp_llm {
 
 enum class ParallelMode {
-    TP        = 0,
-    DP        = 1,
-    DP_AND_TP = 2,
-    FFN_TP    = 3,
-    EP        = 4,
-    EPLB      = 5,
+    TP = 0,
+    DP = 1,
+    // WORLD: spans ALL ranks including every PP stage; never narrow it per
+    // stage. Formerly named DP_AND_TP (pre-PP legacy).
+    WORLD  = 2,
+    FFN_TP = 3,
+    EP     = 4,
+    EPLB   = 5,
+    // All TP/DP ranks in the current PP stage; WORLD when pp_size == 1.
+    STAGE = 6,
 };
 
 // A batch includes two parts: context batch and decoder batch.
@@ -35,15 +40,15 @@ struct GptModelInputs {
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
-    mutable torch::Tensor combo_tokens;             // [cumulated_seq_len]
-    torch::Tensor         input_lengths;            // [batch_size]
-    torch::Tensor         sequence_lengths;         // [decoder_batch_size]
-    torch::Tensor         lm_output_indexes;        // selected output rows
+    mutable torch::Tensor combo_tokens;       // [cumulated_seq_len]
+    torch::Tensor         input_lengths;      // [batch_size]
+    torch::Tensor         sequence_lengths;   // [decoder_batch_size]
+    torch::Tensor         lm_output_indexes;  // selected output rows
     // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
     // scheduling redesign no longer populates it (stays undefined).
-    torch::Tensor         lm_output_lengths;        // [total_batch_size]
-    torch::Tensor         prefix_lengths;           // [context_batch_size]
-    torch::Tensor         sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
+    torch::Tensor lm_output_lengths;        // [total_batch_size]
+    torch::Tensor prefix_lengths;           // [context_batch_size]
+    torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -60,6 +65,7 @@ struct GptModelInputs {
 
     torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 3]: group_id, src block, dst block
+    torch::Tensor kv_cache_blocks_to_zero;  // [new_block_num], int64 physical IDs in the shared pool
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
@@ -91,6 +97,7 @@ struct GptModelInputs {
     bool warmup                 = false;
     bool skip_run               = false;
     bool is_fake_stream         = false;
+    bool shutdown               = false;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.
@@ -101,6 +108,9 @@ struct GptModelInputs {
     // Only interpreted by a DSpARK draft model. All other models leave NONE.
     DSparkCallPhase dspark_call_phase = DSparkCallPhase::NONE;
 
+    // PP: boundary tensors from the upstream stage, populated by forwardPP; not part of tpSync packing.
+    std::map<std::string, torch::Tensor> pp_intermediates;
+
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
 
@@ -110,6 +120,7 @@ public:
 
 struct GptModelOutputs {
     torch::Tensor logits;
+    // Same selected LM output rows as logits, independent of need_all_logits.
     torch::Tensor hidden_states;
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
@@ -121,6 +132,9 @@ struct GptModelOutputs {
     torch::Tensor draft_tokens;
 
     std::vector<torch::Tensor> moe_gating;
+
+    // PP: boundary tensors emitted on a non-last stage; kept last so existing brace-init sites keep compiling.
+    std::map<std::string, torch::Tensor> pp_intermediates;
 };
 
 struct CopyParams {

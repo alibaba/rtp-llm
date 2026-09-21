@@ -6,6 +6,11 @@ from typing import Any, List, Optional, Union
 import torch
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from rtp_llm.config.pp_layout import (
+    stage_has_embedding,
+    stage_has_lm_head,
+    stage_layer_range,
+)
 from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.util import check_with_info
@@ -45,9 +50,14 @@ class LoadConfig(BaseModel):
     lm_head_tp_rank: int
     ffn_tp_size: int
     ffn_tp_rank: int
-    num_nodes: int
+    num_nodes: int  # Nodes in the EP group used for expert placement.
     bit: int = 16
     merge_lora: bool = False
+
+    # PP stage identity; defaults keep single-stage behavior, the partition arrives as materialized per-stage counts.
+    pp_size: int = 1
+    pp_rank: int = 0
+    pp_stage_layer_counts: Optional[List[int]] = None
 
     compute_dtype: Any = torch.float16
 
@@ -79,6 +89,29 @@ class LoadConfig(BaseModel):
                 f"Field '{field_name}' expects type {expected}, got {type(value)}"
             )
         return value
+
+    # ---- PP stage view (single source: config/pp_layout.py) ----
+
+    def pp_layer_range(self) -> range:
+        """Global layer ids this stage loads: lookup over the materialized
+        partition; pp_size=1 is trivially all layers (single-stage
+        deployments never materialize)."""
+        return stage_layer_range(
+            self.num_layers, self.pp_size, self.pp_rank, self.pp_stage_layer_counts
+        )
+
+    def is_layer_in_pp_range(self, layer_id: int) -> bool:
+        return layer_id in self.pp_layer_range()
+
+    @property
+    def has_pp_embedding(self) -> bool:
+        """First stage loads embedding / positional embedding."""
+        return stage_has_embedding(self.pp_rank)
+
+    @property
+    def has_pp_lm_head(self) -> bool:
+        """Last stage loads lm_head / final layernorm."""
+        return stage_has_lm_head(self.pp_rank, self.pp_size)
 
     @model_validator(mode="after")
     def _set_default_phy2log(self) -> "LoadConfig":
@@ -130,6 +163,7 @@ class LoadConfig(BaseModel):
         num_nodes: int,
         phy2log_path: Optional[str] = None,
     ):
+        """Build the initial expert mapping for an EP group."""
         expert_num = expert_num
         redundant_expert = phy_exp_num - expert_num
         expert_num_per_ep = expert_num // ep_size
@@ -164,6 +198,9 @@ class LoadConfig(BaseModel):
             for _ in range(layer_num):
                 layer_phy2log: List[int] = []
                 for ep_rank in range(ep_size):
+                    # rank_per_node floors to 0 when ep spans fewer ranks than nodes; the mapping is vacuous then.
+                    if rank_per_node == 0:
+                        break
                     node_id = ep_rank // rank_per_node
                     layer_phy2log.extend(
                         range(

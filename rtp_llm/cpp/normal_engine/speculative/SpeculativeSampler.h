@@ -4,7 +4,7 @@
 #include "c10/core/Event.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
-#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 
@@ -47,24 +47,25 @@ private:
     torch::Tensor d2t_map_;
 };
 
+struct SpeculativeSamplingParams {
+    torch::Tensor do_sample;  // CPU bool [B], with the same !top1() semantics as streams.
+    torch::Tensor force_accept;  // CPU bool [B].
+    std::vector<at::Generator> generators;
+};
+
 class SpeculativeSampler {
 public:
     SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step): d2t_map_(d2t_map), propose_step_(propose_step) {}
 
-    virtual SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
-                                             SamplerOutput&                      draft_sampler_output,
-                                             SamplerOutput&                      target_sampler_output);
+    virtual SpeculativeSamplerOutput forward(const SpeculativeSamplingParams& params,
+                                             SamplerOutput&                   draft_sampler_output,
+                                             SamplerOutput&                   target_sampler_output);
 
 private:
-    void batchSample(SpeculativeSamplerOutput&           sample_output,
-                     const std::list<GenerateStreamPtr>& streams,
-                     SamplerOutput&                      draft_sampler_output,
-                     SamplerOutput&                      target_sampler_output) const;
-
-    void streamSample(SpeculativeSamplerOutput&           sample_output,
-                      const std::list<GenerateStreamPtr>& streams,
-                      SamplerOutput&                      draft_sampler_output,
-                      SamplerOutput&                      target_sampler_output) const;
+    void batchSample(SpeculativeSamplerOutput&         sample_output,
+                     const SpeculativeSamplingParams& params,
+                     SamplerOutput&                   draft_sampler_output,
+                     SamplerOutput&                   target_sampler_output) const;
 
 protected:
     torch::Tensor        d2t_map_;

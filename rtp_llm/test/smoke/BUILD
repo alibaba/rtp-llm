@@ -38,6 +38,34 @@ load("//rtp_llm/test/smoke:suites_sm100.bzl", "sm100_suites")
 load("//rtp_llm/test/smoke:suites_sm120.bzl", "sm120_suites")
 load("//rtp_llm/test/smoke:suites_rocm_oss.bzl", "rocm_oss_suites")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "remote_cache_suites")
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test")
+
+# Keep the original MTP regression target and its launch defaults.
+custom_smoke_test(
+    name = "qwen35_dense_mtp_pp_test",
+    main = "pp_test.py",
+    args = ["--cases=pdfusion_mtp_regression"],
+    smoke_args = "--tp_size 2 --pp_size 2 --dp_size 1 --ep_size 1 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 2048 --ssm_state_dtype fp32 --kv_cache_mem_mb 8192 --warm_up 0 --model_warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
+    gpu_type = ["H20"],
+)
+
+# PD separation across pp x tp variants, each compared against a PDFUSION
+# baseline of matching TP. world_size only feeds the GPU reservation (max 8
+# across variants); each server sets its own parallelism.
+custom_smoke_test(
+    name = "qwen3_pd_pp_test",
+    main = "pp_test.py",
+    smoke_args = "--tp_size 1 --dp_size 1 --world_size 8 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 2048 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
+    gpu_type = ["H20"],
+)
+
+# The same entry supports model overrides and --cases / PP_TEST_CASES.
+# Keep the original target available for existing PD smoke commands.
+test_suite(
+    name = "pp_topology_test",
+    tags = ["manual"],
+    tests = [":qwen3_pd_pp_test"],
+)
 
 h20_oss_suites()
 sm8x_suites()
