@@ -448,6 +448,9 @@ def _run_decode(
     )
 
     if args.target_tpot > 0:
+        # TpsBinarySearchRunner / DistributionRunner dropped tp_size;
+        # GridRunner still records it. Do not forward the leftover kwarg.
+        kwargs.pop("tp_size", None)
         runner = TpsBinarySearchRunner(
             port,
             dp_size,
@@ -469,6 +472,7 @@ def _run_decode(
     else:
         if config.is_distribution:
             assert config.test_config is not None
+            kwargs.pop("tp_size", None)
             DistributionRunner(
                 port,
                 dp_size,
