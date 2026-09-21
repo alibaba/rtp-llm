@@ -422,7 +422,10 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
         )
         return False
 
-    return getattr(py_env_configs.model_args, "model_type", "") == "deepseek_v4"
+    return getattr(py_env_configs.model_args, "model_type", "") in (
+        "deepseek_v4",
+        "deepseek_v41",
+    )
 
 
 def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
@@ -578,10 +581,23 @@ def _get_startup_real_warmup_max_len(py_env_configs: PyEnvConfigs):
 
 def _get_startup_real_warmup_token_lens(py_env_configs: PyEnvConfigs):
     max_len = _get_startup_real_warmup_max_len(py_env_configs)
-    token_lens = _get_startup_real_warmup_pow2_lens(max_len)
+    scheduler_config = getattr(
+        py_env_configs.runtime_config, "fifo_scheduler_config", None
+    )
+    max_batch_tokens = int(getattr(scheduler_config, "max_batch_tokens_size", 0) or 0)
+    # Keep the model sequence limit separate: speculative/output reservation
+    # constrains sequence length, whereas the scheduler budget limits input.
+    max_input_len = min(max_len, max_batch_tokens) if max_batch_tokens > 0 else max_len
+    token_lens = (
+        [max_input_len]
+        if max_input_len < STARTUP_REAL_WARMUP_MIN_TOKEN_LEN
+        else _get_startup_real_warmup_pow2_lens(max_input_len)
+    )
     logging.info(
-        "DSV4 startup real warmup uses fixed pow2 token lens through max_seq_len=%d: %s",
+        "DSV4 startup real warmup token lens, max_seq_len=%d, "
+        "max_batch_tokens_size=%d: %s",
         max_len,
+        max_batch_tokens,
         token_lens,
     )
     return token_lens
@@ -748,7 +764,10 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                     top_k=1,
                     top_p=1.0,
                     temperature=0.0,
-                    do_sample=False,
+                    # top_k=1 keeps selection deterministic. do_sample=False
+                    # rewrites temperature to 1 in the sampler gatherer and
+                    # skips the temperature/penalty CUDA module entirely.
+                    do_sample=True,
                     can_use_pd_separation=False,
                     reuse_cache=False,
                     enable_device_cache=False,

@@ -28,19 +28,19 @@ def _integer_vector(value, rows, device):
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS", "REQUESTS", "COLS", "TABLE_STRIDE"])
 def _prefill_slots_kernel(
     positions,
     requests,
     table,
     seq_ends,
     out,
-    ROWS: tl.constexpr,
-    REQUESTS: tl.constexpr,
-    COLS: tl.constexpr,
+    ROWS,
+    REQUESTS,
+    COLS,
     POS_STRIDE: tl.constexpr,
     REQ_STRIDE: tl.constexpr,
-    TABLE_STRIDE: tl.constexpr,
+    TABLE_STRIDE,
     END_STRIDE: tl.constexpr,
     EB: tl.constexpr,
     TPB: tl.constexpr,
@@ -149,13 +149,13 @@ def try_slot_mapping(
     return out
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS", "WIDTH"])
 def _prefill_bounds_kernel(
     positions,
     bounds,
-    ROWS: tl.constexpr,
+    ROWS,
     STRIDE: tl.constexpr,
-    WIDTH: tl.constexpr,
+    WIDTH,
     RATIO: tl.constexpr,
     TILE: tl.constexpr,
 ):

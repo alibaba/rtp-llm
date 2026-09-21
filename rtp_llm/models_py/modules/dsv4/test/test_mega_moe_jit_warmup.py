@@ -55,9 +55,9 @@ from rtp_llm.models_py.modules.dsv4.moe.mega_jit_warmup import (
 )
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import MoeCfg
 from rtp_llm.models_py.modules.dsv4.moe.strategies.mega import (
+    _MEGA_MOE_JIT_WARMED_KEYS,
     MegaMoEStrategy,
     _activate_mega_moe_rank_nvcc_tmpdir,
-    _MEGA_MOE_JIT_WARMED_KEYS,
     _mega_moe_rank_nvcc_tmpdir,
     _restore_tmpdir,
 )
@@ -288,6 +288,61 @@ class MegaMoEJitWarmupTest(unittest.TestCase):
             tokens = parse_mega_moe_jit_warmup_tokens_override()
         self.assertEqual(tokens, [2, 4098, 999999])
         self.assertEqual(clamp_token_counts(tokens or [], 65536), [2, 4098, 65536])
+
+    def test_installed_dispatch_covers_revisited_buckets_and_prefers_cap(self):
+        # New DG policies can revisit a smaller M tile when the number of
+        # expert blocks increases. Replacing the last representative would
+        # then lose a distinct bucket; replace the matching cap bucket only.
+        def dispatch(tokens):
+            if tokens <= 2 or tokens >= 9:
+                return 16
+            return 64 if tokens <= 5 else 240
+
+        kwargs = dict(
+            num_ranks=4,
+            num_experts=384,
+            num_experts_per_rank=96,
+            num_topk=6,
+            intermediate_hidden=2304,
+            num_sms=148,
+            max_tokens_per_rank=12,
+            block_m_resolver=dispatch,
+        )
+        with mock.patch.dict(os.environ, {"DSV4_CHUNK_TOKENS": "12"}, clear=True):
+            representatives = generate_mega_moe_jit_token_counts(**kwargs)
+        self.assertEqual(representatives, [3, 6, 12])
+        self.assertEqual(
+            {dispatch(t) for t in representatives},
+            {dispatch(t) for t in range(1, 13)},
+        )
+        with mock.patch.dict(os.environ, {"DSV4_CHUNK_TOKENS": "0"}, clear=True):
+            self.assertEqual(generate_mega_moe_jit_token_counts(**kwargs), [1, 3, 6])
+
+    def test_strategy_queries_installed_dispatch_with_runtime_geometry(self):
+        strategy = object.__new__(MegaMoEStrategy)
+        strategy.cfg = types.SimpleNamespace(
+            ep_size=4,
+            n_routed_experts=384,
+            n_local_experts=96,
+            n_activated_experts=6,
+            dim=5120,
+            moe_inter_dim=2304,
+            max_tokens_per_rank=12,
+        )
+        resolver = mock.Mock(side_effect=lambda *args: 16 if args[3] <= 4 else 192)
+        installed = types.SimpleNamespace(get_block_m_for_mega_moe=resolver)
+        with mock.patch.dict(
+            os.environ, {"DSV4_CHUNK_TOKENS": "0"}, clear=True
+        ), mock.patch.object(
+            sys.modules["rtp_llm.models_py.modules.dsv4.moe.strategies.mega"],
+            "_native_mega_intermediate_supported",
+            return_value=True,
+        ):
+            counts = strategy._resolve_jit_warmup_token_counts(148, installed)
+        self.assertEqual(counts, [1, 5])
+        for call in resolver.call_args_list:
+            self.assertEqual(call.args[:3], (4, 384, 12))
+            self.assertEqual(call.args[4:], (6, "fp8xfp4"))
 
 
 if __name__ == "__main__":

@@ -343,6 +343,18 @@ py_test(
 )
 
 py_test(
+    name = "test_dsv41_kernel_jit_warmup",
+    srcs = ["test_dsv41_kernel_jit_warmup.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_v41_hc_jit_warmup",
+    srcs = ["test_v41_hc_jit_warmup.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
     name = "test_mega_moe_input_packer_perf",
     srcs = ["test_mega_moe_input_packer_perf.py"],
     deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],

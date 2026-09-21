@@ -273,6 +273,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
     init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
+    init_resources.max_batch_tokens_size  = params.runtime_config.fifo_scheduler_config.max_batch_tokens_size;
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run

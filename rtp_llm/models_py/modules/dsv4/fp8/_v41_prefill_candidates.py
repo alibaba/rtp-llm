@@ -77,16 +77,16 @@ def _max_with_nan(a, b):
     return tl.maximum(a, b, propagate_nan=tl.PropagateNan.ALL)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["WIDTH", "STRIDE", "NBLOCKS"])
 def _prefill_candidate_pool_kernel(
     logits,
     visible,
     scores,
-    WIDTH: tl.constexpr,
-    STRIDE: tl.constexpr,
+    WIDTH,
+    STRIDE,
     VISIBLE_STRIDE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    NBLOCKS: tl.constexpr,
+    NBLOCKS,
     TILE: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -109,7 +109,7 @@ def _prefill_candidate_pool_kernel(
     tl.store(scores + row * NBLOCKS + blocks, pooled, blocks < NBLOCKS)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["FLAG_WORDS", "FLAG_STRIDE"])
 def _prefill_candidate_store_bitmap_kernel(
     values,
     indices,
@@ -118,13 +118,14 @@ def _prefill_candidate_store_bitmap_kernel(
     K: tl.constexpr,
     OUT_K: tl.constexpr,
     OUT_STRIDE: tl.constexpr,
-    FLAG_WORDS: tl.constexpr,
-    FLAG_STRIDE: tl.constexpr,
+    FLAG_WORDS,
+    FLAG_STRIDE,
     WRITE_FLAGS: tl.constexpr,
+    FLAG_TILE: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     if WRITE_FLAGS:
-        word = tl.arange(0, triton.next_power_of_2(FLAG_WORDS))
+        word = tl.arange(0, FLAG_TILE)
         tl.store(flags + row * FLAG_STRIDE + word, 0, word < FLAG_WORDS)
     columns = tl.arange(0, triton.next_power_of_2(OUT_K))
     score = tl.load(values + row * K + columns, columns < K, other=-float("inf"))
@@ -144,13 +145,13 @@ def _prefill_candidate_store_bitmap_kernel(
         )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["WIDTH", "STRIDE", "FLAG_STRIDE"])
 def _prefill_candidate_mask_kernel(
     logits,
     flags,
-    WIDTH: tl.constexpr,
-    STRIDE: tl.constexpr,
-    FLAG_STRIDE: tl.constexpr,
+    WIDTH,
+    STRIDE,
+    FLAG_STRIDE,
     BLOCK_SIZE: tl.constexpr,
     TILE: tl.constexpr,
 ):
@@ -168,18 +169,19 @@ def _prefill_candidate_mask_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["NBLOCKS", "FLAG_WORDS", "FLAG_STRIDE"])
 def _prefill_candidate_build_bitmap_kernel(
     candidates,
     flags,
     K: tl.constexpr,
     IN_STRIDE: tl.constexpr,
-    NBLOCKS: tl.constexpr,
-    FLAG_WORDS: tl.constexpr,
-    FLAG_STRIDE: tl.constexpr,
+    NBLOCKS,
+    FLAG_WORDS,
+    FLAG_STRIDE,
+    FLAG_TILE: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
-    word = tl.arange(0, triton.next_power_of_2(FLAG_WORDS))
+    word = tl.arange(0, FLAG_TILE)
     tl.store(flags + row * FLAG_STRIDE + word, 0, word < FLAG_WORDS)
     columns = tl.arange(0, triton.next_power_of_2(K))
     index = tl.load(candidates + row * IN_STRIDE + columns, columns < K, other=-1)
@@ -273,6 +275,7 @@ def select_candidates(
         flags.shape[1] if flags is not None else 1,
         flags.stride(0) if flags is not None else 1,
         build_bitmap,
+        triton.next_power_of_2(flags.shape[1]) if flags is not None else 1,
     )
     return out, flags
 
@@ -319,6 +322,7 @@ def build_flags(
         triton.cdiv(width, block_size),
         flags.shape[1],
         flags.stride(0),
+        triton.next_power_of_2(flags.shape[1]),
     )
     return flags
 

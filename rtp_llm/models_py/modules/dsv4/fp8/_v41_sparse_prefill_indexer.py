@@ -180,7 +180,9 @@ def is_supported(
     )
 
 
-@triton.jit
+# Prefix reuse changes the logical key count for every request. It is only a
+# clamp bound; specializing it recompiles the expensive K2048 sorting network.
+@triton.jit(do_not_specialize=["KEY_COUNT"])
 def _prepare_sparse_prefill_plan_kernel(
     candidates,
     visible,
@@ -191,7 +193,7 @@ def _prepare_sparse_prefill_plan_kernel(
     CANDIDATE_STRIDE: tl.constexpr,
     VISIBLE_STRIDE: tl.constexpr,
     K: tl.constexpr,
-    KEY_COUNT: tl.constexpr,
+    KEY_COUNT,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)

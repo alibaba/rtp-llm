@@ -517,7 +517,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 self._mega_out_device,
             )
 
-    def _resolve_jit_warmup_token_counts(self, num_sms: int) -> list[int]:
+    def _resolve_jit_warmup_token_counts(
+        self, num_sms: int, deep_gemm=None
+    ) -> list[int]:
         cfg = self.cfg
         # Use the logical model/runtime token cap, not DeepGEMM's internally
         # aligned buffer capacity.  The JIT key is driven by request-visible T
@@ -527,6 +529,17 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         override = parse_mega_moe_jit_warmup_tokens_override()
         if override is not None:
             return clamp_token_counts(override, max_tokens_per_rank)
+        get_block_m = getattr(deep_gemm, "get_block_m_for_mega_moe", None)
+        block_m_resolver = None
+        if callable(get_block_m):
+            block_m_resolver = lambda tokens: get_block_m(
+                cfg.ep_size,
+                cfg.n_routed_experts,
+                max_tokens_per_rank,
+                tokens,
+                cfg.n_activated_experts,
+                "fp8xfp4",
+            )
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
             num_experts=cfg.n_routed_experts,
@@ -535,6 +548,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             intermediate_hidden=_mega_intermediate_size(cfg),
             num_sms=num_sms,
             max_tokens_per_rank=max_tokens_per_rank,
+            block_m_resolver=block_m_resolver,
         )
 
     def _maybe_warmup_jit_once(self) -> None:
@@ -552,7 +566,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         num_sms = resolve_mega_num_sms(
             deep_gemm, getattr(self, "_mega_runtime_device", None)
         )
-        token_counts = self._resolve_jit_warmup_token_counts(num_sms)
+        token_counts = self._resolve_jit_warmup_token_counts(num_sms, deep_gemm)
         if not token_counts:
             return
 

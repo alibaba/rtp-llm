@@ -174,7 +174,7 @@ def _torch_mean_square(x, D: tl.constexpr, WIDTH: tl.constexpr):
     return total / D
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["POOL_STRIDE", "BLOCKS"])
 def _prefill_compress_main_kernel(
     values,
     scores,
@@ -197,8 +197,8 @@ def _prefill_compress_main_kernel(
     RATIO: tl.constexpr,
     EPS: tl.constexpr,
     ENTRIES: tl.constexpr,
-    POOL_STRIDE: tl.constexpr,
-    BLOCKS: tl.constexpr,
+    POOL_STRIDE,
+    BLOCKS,
     TRAP: tl.constexpr,
     REDUCE_WIDTH: tl.constexpr,
 ):
@@ -259,7 +259,7 @@ def _prefill_compress_main_kernel(
         )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["STATE_ROWS"])
 def _prefill_state_store_kernel(
     values,
     scores,
@@ -268,7 +268,7 @@ def _prefill_state_store_kernel(
     VALUE_STRIDE: tl.constexpr,
     SCORE_STRIDE: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
-    STATE_ROWS: tl.constexpr,
+    STATE_ROWS,
     TRAP: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -287,7 +287,7 @@ def _prefill_state_store_kernel(
         )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["POOL_STRIDE", "BLOCKS"])
 def _prefill_index_store_kernel(
     projected,
     weight,
@@ -299,8 +299,8 @@ def _prefill_index_store_kernel(
     RATIO: tl.constexpr,
     EPS: tl.constexpr,
     ENTRIES: tl.constexpr,
-    POOL_STRIDE: tl.constexpr,
-    BLOCKS: tl.constexpr,
+    POOL_STRIDE,
+    BLOCKS,
     NATIVE_NORM: tl.constexpr,
     TRAP: tl.constexpr,
 ):

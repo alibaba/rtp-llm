@@ -620,8 +620,14 @@ class DeepSeekV4Model(GptModelBase):
 
         # The commit model still participates in the framework's shared
         # runtime-buffer contract (and may consume a target-owned MTP feature
-        # view), but it does not need any of the full-model JIT warmups.
+        # view). V4.1 also needs its separate target-feature FC prewarmed.
         self._bind_runtime_buffers(torch.device(device_str))
+        if self._v4_args.v41_config is not None:
+            from rtp_llm.models_py.modules.dsv4.dsv41_kernel_jit_warmup import (
+                warmup_v41_prefill_jit,
+            )
+
+            warmup_v41_prefill_jit(self, device=torch.device(device_str))
         logging.info(
             "[DeepSeekV4Model] commit-only runtime buffers bound: "
             "prefill_ws_q_tokens=%d",
@@ -685,7 +691,24 @@ class DeepSeekV4Model(GptModelBase):
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
         super().initialize(init_resource)
+        self._max_prefill_batch_tokens = int(
+            getattr(init_resource, "max_batch_tokens_size", 0)
+        )
         if self._materialized:
+            # The sizing executor initializes without pools; the real executor
+            # binds them on this second call. Compile cache-layout variants
+            # here, before the startup health gate, rather than in forward.
+            if self._v4_args.v41_config is not None:
+                from rtp_llm.models_py.modules.dsv4.dsv41_kernel_jit_warmup import (
+                    warmup_v41_prefill_jit,
+                )
+
+                warmup_device = (
+                    self.main_proj.weight.device
+                    if getattr(self._v4_args, "commit_only", False)
+                    else self.v4.embed.weight.device
+                )
+                warmup_v41_prefill_jit(self, device=warmup_device)
             return True
 
         device = (
@@ -1125,6 +1148,17 @@ class DeepSeekV4Model(GptModelBase):
                 logging.exception("[DeepSeekV4Model] kernel JIT prewarm failed")
                 raise
             _torch.cuda.synchronize()
+
+        if (
+            device_str.startswith("cuda")
+            and model_warm_up
+            and self._v4_args.v41_config is not None
+        ):
+            from rtp_llm.models_py.modules.dsv4.dsv41_kernel_jit_warmup import (
+                warmup_v41_prefill_jit,
+            )
+
+            warmup_v41_prefill_jit(self, device=torch.device(device_str))
 
         self._bind_runtime_buffers(torch.device(device_str))
         logging.info(

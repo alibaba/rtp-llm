@@ -232,6 +232,7 @@ struct PyModelInitResources {
     bool                   is_speculative         = false;
     bool                   is_decode_role         = false;
     int64_t                max_context_batch_size = 1;
+    int64_t                max_batch_tokens_size  = 0;
 };
 
 struct PyCacheStoreInputs {

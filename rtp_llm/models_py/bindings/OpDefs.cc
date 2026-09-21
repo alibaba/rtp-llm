@@ -85,7 +85,10 @@ void registerPyOpDefs(pybind11::module& m) {
                       "True when this model instance runs in decode role")
         .def_readonly("max_context_batch_size",
                       &PyModelInitResources::max_context_batch_size,
-                      "Max concurrent context (prefill) batches from FIFO scheduler");
+                      "Max concurrent context (prefill) batches from FIFO scheduler")
+        .def_readonly("max_batch_tokens_size",
+                      &PyModelInitResources::max_batch_tokens_size,
+                      "FIFO scheduler logical token budget including reused prefixes; zero means unset");
 
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 

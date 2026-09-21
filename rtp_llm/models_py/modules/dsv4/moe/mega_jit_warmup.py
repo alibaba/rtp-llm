@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 import torch
 
@@ -126,6 +126,7 @@ def generate_mega_moe_jit_token_counts(
     intermediate_hidden: int,
     num_sms: int,
     max_tokens_per_rank: int,
+    block_m_resolver: Callable[[int], int] | None = None,
 ) -> list[int]:
     """Return one token count per reachable MegaMoE heuristic bucket.
 
@@ -142,10 +143,14 @@ def generate_mega_moe_jit_token_counts(
     if max_tokens == 0:
         return []
 
-    reps: list[int] = []
-    last_signature: tuple[int, int, int] | None = None
-    for num_tokens in range(1, max_tokens + 1):
-        signature = mega_moe_config_signature(
+    def signature_for(num_tokens):
+        # DeepGEMM 2.8 derives all request-dependent template arguments from
+        # block_m (including the new 240-row tile), without experts-per-wave.
+        # Query the installed dispatch policy instead of mirroring versioned
+        # thresholds. Older wheels retain the original heuristic below.
+        if block_m_resolver is not None:
+            return (int(block_m_resolver(num_tokens)),)
+        return mega_moe_config_signature(
             num_ranks=num_ranks,
             num_experts=num_experts,
             num_experts_per_rank=num_experts_per_rank,
@@ -154,35 +159,26 @@ def generate_mega_moe_jit_token_counts(
             intermediate_hidden=intermediate_hidden,
             num_sms=num_sms,
         )
-        if signature != last_signature:
+
+    reps: list[int] = []
+    seen = set()
+    for num_tokens in range(1, max_tokens + 1):
+        signature = signature_for(num_tokens)
+        if signature not in seen:
             reps.append(num_tokens)
-            last_signature = signature
+            seen.add(signature)
 
     if dsv4_global_chunk_tokens_configured():
         prefer_cap_token = dsv4_chunk_tokens_from_env("DSV4_MOE_CHUNK_TOKENS") > 0
     else:
         prefer_cap_token = os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
     if reps and prefer_cap_token:
-        cap_signature = mega_moe_config_signature(
-            num_ranks=num_ranks,
-            num_experts=num_experts,
-            num_experts_per_rank=num_experts_per_rank,
-            num_tokens=max_tokens,
-            num_topk=num_topk,
-            intermediate_hidden=intermediate_hidden,
-            num_sms=num_sms,
-        )
-        last_rep_signature = mega_moe_config_signature(
-            num_ranks=num_ranks,
-            num_experts=num_experts,
-            num_experts_per_rank=num_experts_per_rank,
-            num_tokens=reps[-1],
-            num_topk=num_topk,
-            intermediate_hidden=intermediate_hidden,
-            num_sms=num_sms,
-        )
-        if cap_signature == last_rep_signature:
-            reps[-1] = max_tokens
+        cap_signature = signature_for(max_tokens)
+        for index, representative in enumerate(reps):
+            if signature_for(representative) == cap_signature:
+                reps[index] = max_tokens
+                break
+        reps.sort()
     return reps
 
 

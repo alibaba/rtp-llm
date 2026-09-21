@@ -41,13 +41,13 @@ def is_supported(logits: torch.Tensor, visible: torch.Tensor, topk: int = 512) -
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS", "WIDTH"])
 def _prefill_topk_bounds_kernel(
     visible,
     starts,
     ends,
-    ROWS: tl.constexpr,
-    WIDTH: tl.constexpr,
+    ROWS,
+    WIDTH,
     VISIBLE_STRIDE: tl.constexpr,
     TILE: tl.constexpr,
 ):
@@ -59,12 +59,12 @@ def _prefill_topk_bounds_kernel(
     tl.store(ends + rows, length, rows < ROWS)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["STRIDE"])
 def _prefill_topk_finite_kernel(
     logits,
     ends,
     output,
-    STRIDE: tl.constexpr,
+    STRIDE,
     K: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)

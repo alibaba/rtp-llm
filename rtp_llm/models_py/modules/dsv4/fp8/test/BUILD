@@ -229,6 +229,12 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_attention_jit_warmup",
+    srcs = ["test_v41_attention_jit_warmup.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+py_test(
     name = "test_fused_decode_meta_comprehensive",
     srcs = ["test_fused_decode_meta_comprehensive.py"],
     deps = _DSV4_FP8_TEST_DEPS,

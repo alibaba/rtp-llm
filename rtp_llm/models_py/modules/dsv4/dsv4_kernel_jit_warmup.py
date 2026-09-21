@@ -110,9 +110,7 @@ def _compute_state_ring_entries(
 def _batch_block_warmup_sizes(
     max_batch_size: int, *, max_supported_batch: int
 ) -> tuple[int, ...]:
-    max_supported_batch = min(
-        max(int(max_batch_size), 1), int(max_supported_batch)
-    )
+    max_supported_batch = min(max(int(max_batch_size), 1), int(max_supported_batch))
     max_batch_block = 1 << (max_supported_batch - 1).bit_length()
     sizes = []
     batch_block = 1
@@ -210,9 +208,7 @@ def warmup_cp_metadata_jit(
     t0 = time.time()
     batch_sizes = _cp_batch_block_warmup_sizes(max_batch_size)
     swa_slot_batch_sizes = (
-        _swa_slot_batch_block_warmup_sizes(max_batch_size)
-        if swa_slot_enabled
-        else ()
+        _swa_slot_batch_block_warmup_sizes(max_batch_size) if swa_slot_enabled else ()
     )
     for batch_size in batch_sizes:
         lengths_host = (2,) * batch_size
@@ -265,18 +261,14 @@ def warmup_cp_metadata_jit(
             dtype=torch.bfloat16,
             device=device,
         )
-        pool_cache = torch.zeros(
-            (2, 4, ENTRY_BYTES), dtype=torch.uint8, device=device
-        )
+        pool_cache = torch.zeros((2, 4, ENTRY_BYTES), dtype=torch.uint8, device=device)
         pool_block_table = torch.zeros(
             (batch_size, 1), dtype=torch.int32, device=device
         )
         pool_padded_lens = torch.full(
             (batch_size,), 2, dtype=torch.int32, device=device
         )
-        pool_actual_lens = torch.ones(
-            batch_size, dtype=torch.int32, device=device
-        )
+        pool_actual_lens = torch.ones(batch_size, dtype=torch.int32, device=device)
         pool_local_flat = torch.empty(
             (2 * batch_size, ENTRY_BYTES), dtype=torch.uint8, device=device
         )
@@ -312,6 +304,7 @@ def warmup_cp_metadata_jit(
             dtype=torch.int64,
             device=device,
         )
+
         def _launch() -> None:
             nonlocal restore, positions, forward_metadata, pool_restore
             nonlocal pool_direct_gather
@@ -429,9 +422,7 @@ def warmup_cp_metadata_jit(
             dtype=torch.int32,
             device=device,
         )
-        swa_slot_prefixes = torch.zeros(
-            batch_size, dtype=torch.int32, device=device
-        )
+        swa_slot_prefixes = torch.zeros(batch_size, dtype=torch.int32, device=device)
 
         def _launch_swa_slot() -> None:
             compute_swa_slot_in_flat_from_cu(
@@ -1603,7 +1594,10 @@ def _sm100_dense_layout_signature(
     the actual source of truth remains the real dummy DeepGEMM launch.
     """
 
-    gemm_type_key = 1 if str(kind) == "fp8_batched" else 0
+    gemm_type_key = 1 if str(kind) in ("fp8_batched", "v41_fp8_batched") else 0
+    # V41 pins DeepGEMM 2.8's single-accumulator TMEM layout. Retain V4's
+    # older two-accumulator scan for its supported dependency versions.
+    tmem_accumulators = 1 if str(kind).startswith("v41_") else 2
     num_groups = max(int(num_groups), 1)
     block_k = 128
     candidates: list[tuple[int, int, int, int, int, int]] = []
@@ -1653,7 +1647,7 @@ def _sm100_dense_layout_signature(
                         sf_block_n = _align(block_n, 128)
                         tmem_sf_cols = sf_block_m // 32 + sf_block_n // 32
                         umma_n = block_m if swap_ab else block_n
-                        if 2 * umma_n + tmem_sf_cols > 512:
+                        if tmem_accumulators * umma_n + tmem_sf_cols > 512:
                             continue
 
                         # RTP warmup tensors are K-major for A and B.  DeepGEMM
@@ -2347,13 +2341,9 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
     slot_indices = torch.tensor([0, -1], dtype=torch.long, device=device)
     out = dequantize_slots_to_bf16(full_view, slot_indices)
     if direct_scatter_enabled:
-        slot_mapping = torch.tensor(
-            [[0, 1], [1, -1]], dtype=torch.long, device=device
-        )
+        slot_mapping = torch.tensor([[0, 1], [1, -1]], dtype=torch.long, device=device)
         gather_lens = torch.tensor([2, 1], dtype=torch.int32, device=device)
-        workspace = torch.empty(
-            (2, 4, HEAD_DIM), dtype=torch.bfloat16, device=device
-        )
+        workspace = torch.empty((2, 4, HEAD_DIM), dtype=torch.bfloat16, device=device)
         direct_scatter = try_dequantize_and_gather_k_cache_slots_to_workspace(
             out=workspace,
             k_cache=full_view,
