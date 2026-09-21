@@ -7,6 +7,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/engine_base/stream/InputEmbeddingsUtils.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
 namespace rtp_llm {
@@ -430,6 +431,96 @@ void QueryConverter::stackBuffersToTensorPB(TensorPB*        target_pb,
     QueryConverter::transTensorPB(target_pb, stacked);
 }
 
+namespace {
+
+// Keep common aux fields identical between legacy and compact terminal results.
+void fillAuxMetadata(AuxInfoPB* aux_info, const AuxInfo& info, const std::string& aux_string) {
+    aux_info->set_cost_time_us(info.cost_time_us);
+    aux_info->set_first_token_cost_time_us(info.first_token_cost_time_us);
+    aux_info->set_wait_time_us(info.wait_time_us);
+    aux_info->set_iter_count(info.iter_count);
+    aux_info->set_input_len(info.input_len);
+    aux_info->set_prefix_len(info.prefix_len);
+    aux_info->set_output_len(info.output_len);
+    aux_info->set_step_output_len(info.step_output_len);
+    aux_info->set_pd_sep(info.pd_sep);
+    aux_info->set_total_reuse_len(info.reuse_len);
+    aux_info->set_local_reuse_len(info.local_reuse_len);
+    aux_info->set_remote_reuse_len(info.remote_reuse_len);
+    aux_info->set_memory_reuse_len(info.memory_reuse_len);
+    aux_info->set_prefill_total_reuse_len(info.prefill_total_reuse_len);
+    aux_info->set_prefill_local_reuse_len(info.prefill_local_reuse_len);
+    aux_info->set_prefill_remote_reuse_len(info.prefill_remote_reuse_len);
+    aux_info->set_prefill_memory_reuse_len(info.prefill_memory_reuse_len);
+    aux_info->set_decode_total_reuse_len(info.decode_total_reuse_len);
+    aux_info->set_decode_local_reuse_len(info.decode_local_reuse_len);
+    aux_info->set_decode_remote_reuse_len(info.decode_remote_reuse_len);
+    aux_info->set_decode_memory_reuse_len(info.decode_memory_reuse_len);
+    aux_info->set_aux_string(aux_string);
+    auto* mm_map = aux_info->mutable_multimodal_lengths();
+    for (const auto& [key, value] : info.multimodal_lengths) {
+        (*mm_map)[key] = value;
+    }
+}
+
+void transBatchedTerminal(GenerateOutputsPB*     outputs,
+                          const GenerateOutputs& responses,
+                          bool                   dump_aux_info,
+                          const std::string&     aux_string) {
+    const auto& batch = *responses.batched_output;
+    const auto  beams = batch.output_ids.size(0);
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("rpc.pack_terminal_result(id=%ld,beams=%ld)", responses.request_id, beams);
+    RTP_LLM_CHECK(beams > 0 && batch.output_ids.device().is_cpu() && batch.output_ids.is_contiguous()
+                  && batch.output_ids.dim() == 3 && batch.output_ids.size(1) == 1);
+    auto* flatten = outputs->mutable_flatten_output();
+    flatten->mutable_finished()->Reserve(beams);
+    if (dump_aux_info) {
+        flatten->mutable_aux_info()->Reserve(beams);
+    }
+    AuxInfoPB   common_aux;
+    const char* scores      = nullptr;
+    size_t      score_bytes = 0;
+    if (dump_aux_info) {
+        fillAuxMetadata(&common_aux, batch.aux_info, aux_string);
+        if (batch.cum_log_probs.defined()) {
+            const auto& tensor = batch.cum_log_probs;
+            RTP_LLM_CHECK(tensor.device().is_cpu() && tensor.is_contiguous() && tensor.scalar_type() == torch::kFloat32
+                          && tensor.size(0) == beams);
+            auto* pb = common_aux.mutable_cum_log_probs();
+            pb->set_data_type(TensorPB::FP32);
+            pb->add_shape(1);  // Preserve narrow(0, beam, 1), including trailing dimensions.
+            for (int dim = 1; dim < tensor.dim(); ++dim) {
+                pb->add_shape(tensor.size(dim));
+            }
+            scores      = static_cast<const char*>(tensor.data_ptr());
+            score_bytes = tensor.nbytes() / beams;
+        }
+    }
+    for (int64_t i = 0; i < beams; ++i) {
+        flatten->add_finished(true);
+        if (dump_aux_info) {
+            auto* aux = flatten->add_aux_info();
+            aux->CopyFrom(common_aux);
+            if (scores) {
+                aux->mutable_cum_log_probs()->set_fp32_data(scores + i * score_bytes, score_bytes);
+            }
+        }
+    }
+    // A single bulk write replaces 1024 small tensor constructions and a second
+    // merge/pad pass. No stream fields or KV ownership are used here.
+    QueryConverter::transTensorPB(flatten->mutable_output_ids(), batch.output_ids);
+    // Preserve legacy message presence for unsupported/absent optional tensors.
+    flatten->mutable_all_probs();
+    flatten->mutable_hidden_states();
+    if (dump_aux_info) {
+        flatten->mutable_all_softmax_probs();
+    }
+    flatten->mutable_loss();
+    flatten->mutable_logits();
+}
+
+}  // namespace
+
 void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
                                    const GenerateOutputs* responses,
                                    bool                   dump_aux_info,
@@ -437,6 +528,10 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
                                    const int32_t          eos_token_id) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     outputs->set_request_id(responses->request_id);
+    if (responses->batched_output) {
+        transBatchedTerminal(outputs, *responses, dump_aux_info, aux_string);
+        return;
+    }
     const auto& source_outputs = responses->generate_outputs;
     if (source_outputs.empty()) {
         return;
@@ -446,32 +541,7 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
         flatten_output->add_finished(response.finished);
         if (dump_aux_info) {
             auto* aux_info = flatten_output->add_aux_info();
-            aux_info->set_cost_time_us(response.aux_info.cost_time_us);
-            aux_info->set_first_token_cost_time_us(response.aux_info.first_token_cost_time_us);
-            aux_info->set_wait_time_us(response.aux_info.wait_time_us);
-            aux_info->set_iter_count(response.aux_info.iter_count);
-            aux_info->set_input_len(response.aux_info.input_len);
-            aux_info->set_prefix_len(response.aux_info.prefix_len);
-            aux_info->set_output_len(response.aux_info.output_len);
-            aux_info->set_step_output_len(response.aux_info.step_output_len);
-            aux_info->set_pd_sep(response.aux_info.pd_sep);
-            aux_info->set_total_reuse_len(response.aux_info.reuse_len);
-            aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
-            aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
-            aux_info->set_memory_reuse_len(response.aux_info.memory_reuse_len);
-            aux_info->set_prefill_total_reuse_len(response.aux_info.prefill_total_reuse_len);
-            aux_info->set_prefill_local_reuse_len(response.aux_info.prefill_local_reuse_len);
-            aux_info->set_prefill_remote_reuse_len(response.aux_info.prefill_remote_reuse_len);
-            aux_info->set_prefill_memory_reuse_len(response.aux_info.prefill_memory_reuse_len);
-            aux_info->set_decode_total_reuse_len(response.aux_info.decode_total_reuse_len);
-            aux_info->set_decode_local_reuse_len(response.aux_info.decode_local_reuse_len);
-            aux_info->set_decode_remote_reuse_len(response.aux_info.decode_remote_reuse_len);
-            aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
-            aux_info->set_aux_string(aux_string);
-            auto* mm_map = aux_info->mutable_multimodal_lengths();
-            for (const auto& [key, value] : response.aux_info.multimodal_lengths) {
-                (*mm_map)[key] = value;
-            }
+            fillAuxMetadata(aux_info, response.aux_info, aux_string);
             if (response.aux_info.cum_log_probs.has_value()) {
                 transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value());
             }

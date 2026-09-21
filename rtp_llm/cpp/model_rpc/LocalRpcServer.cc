@@ -113,7 +113,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                               std::shared_ptr<GenerateStream>& stream) {
     RTP_LLM_PROFILE_FUNCTION();
     while (true) {
-        const auto result = stream->nextOutput(kRpcOutputWaitTimeoutMs);
+        const auto result = stream->nextOutputForRpc(kRpcOutputWaitTimeoutMs);
         if (isCancelled(context)) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
@@ -137,6 +137,12 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                       stream->generateConfig()->aux_info,
                                       maga_init_params_.misc_config.aux_string,
                                       stream->specialTokens().eos_token_id);
+        // Packaging runs without the stream lock and can overlap cancellation.
+        // Recheck before handing a completed terminal response to the transport.
+        if (isCancelled(context)) {
+            stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
+            return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
+        }
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
@@ -199,7 +205,7 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
                                               const std::shared_ptr<GenerateInput>& input,
                                               GenerateOutputs&                      last_outputs) {
     while (true) {
-        const auto output_result = stream->nextOutput(kRpcOutputWaitTimeoutMs);
+        const auto output_result = stream->nextOutputForRpc(kRpcOutputWaitTimeoutMs);
         if (isCancelled(context)) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
             return ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client");
@@ -326,6 +332,13 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                                           inputs[i]->generate_config->aux_info,
                                           maga_init_params_.misc_config.aux_string,
                                           streams[i]->specialTokens().eos_token_id);
+            if (isCancelled(context)) {
+                streams[i]->reportError(ErrorCode::CANCELLED, "request cancelled by client");
+                result->clear_final_output();
+                auto* err_pb = result->mutable_error_info();
+                err_pb->set_error_code(ErrorCodePB::CANCELLED);
+                err_pb->set_error_message("request cancelled by client");
+            }
         }
     }
 

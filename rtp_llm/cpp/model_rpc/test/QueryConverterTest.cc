@@ -154,8 +154,11 @@ TEST_F(QueryConverterTest, AuxInfoRpcRoundTripPreservesOutputsAndLegacyDefault) 
                                                 .cum_log_probs = scores,
                                                 .all_probs = return_all_probs ? probs : torch::Tensor()});
                 EXPECT_TRUE(torch::equal(stream->cumLogProbs(), scores));
-                auto result = stream->nextOutput();
+                auto result = stream->nextOutputForRpc();
                 ASSERT_TRUE(result.ok());
+                if (result.value().batched_output && aux_mode == 0) {
+                    EXPECT_FALSE(result.value().batched_output->cum_log_probs.defined());
+                }
                 for (const auto& row : result.value().generate_outputs) {
                     EXPECT_EQ(row.aux_info.cum_log_probs.has_value(), aux_mode != 0);
                 }
@@ -176,7 +179,7 @@ TEST_F(QueryConverterTest, AuxInfoRpcRoundTripPreservesOutputsAndLegacyDefault) 
                     EXPECT_EQ(flat.all_probs().fp32_data(),
                               std::string(static_cast<const char*>(probs.data_ptr()), probs.nbytes()));
                 }
-                auto drained = stream->nextOutput();
+                auto drained = stream->nextOutputForRpc();
                 ASSERT_FALSE(drained.ok());
                 EXPECT_EQ(drained.status().code(), ErrorCode::FINISHED);
             }
@@ -966,6 +969,65 @@ TEST_F(QueryConverterTest, testTransInputAllowsMultimodalAlone) {
     auto generate_input = QueryConverter::transQuery(&input);
     ASSERT_TRUE(generate_input->multimodal_inputs.has_value());
     ASSERT_FALSE(generate_input->input_embeddings.has_value());
+}
+
+TEST_F(QueryConverterTest, CompactTerminalMatchesLegacyProtocolIncludingAuxAndScoreShape) {
+    for (const int width : {1, 4, 1024}) {
+        for (const bool trailing_dimension : {false, true}) {
+            auto compact           = std::make_shared<BatchedGenerateOutput>();
+            compact->output_ids    = torch::arange(width * 3, torch::kInt32).reshape({width, 1, 3});
+            compact->cum_log_probs = torch::arange(width, torch::kFloat32).mul(-0.125f);
+            if (trailing_dimension)
+                compact->cum_log_probs = compact->cum_log_probs.unsqueeze(1);
+            auto& a                    = compact->aux_info;
+            a.cost_time_us             = 1;
+            a.iter_count               = 2;
+            a.input_len                = 3;
+            a.reuse_len                = 4;
+            a.prefix_len               = 5;
+            a.output_len               = 6;
+            a.step_output_len          = 7;
+            a.pd_sep                   = false;
+            a.first_token_cost_time_us = 8;
+            a.wait_time_us             = 9;
+            a.local_reuse_len          = 10;
+            a.remote_reuse_len         = 11;
+            a.memory_reuse_len         = 12;
+            a.prefill_total_reuse_len  = 13;
+            a.prefill_local_reuse_len  = 14;
+            a.prefill_remote_reuse_len = 15;
+            a.prefill_memory_reuse_len = 16;
+            a.decode_total_reuse_len   = 17;
+            a.decode_local_reuse_len   = 18;
+            a.decode_remote_reuse_len  = 19;
+            a.decode_memory_reuse_len  = 20;
+            a.multimodal_lengths       = {{1, 21}};
+            GenerateOutputs direct, legacy;
+            direct.request_id = legacy.request_id = 789;
+            direct.batched_output                 = compact;
+            for (int beam = 0; beam < width; ++beam) {
+                GenerateOutput row;
+                row.finished               = true;
+                row.output_ids             = compact->output_ids.select(0, beam).clone();
+                row.aux_info               = a;
+                row.aux_info.cum_log_probs = compact->cum_log_probs.narrow(0, beam, 1).clone();
+                legacy.generate_outputs.push_back(std::move(row));
+            }
+            for (const bool dump_aux : {false, true}) {
+                GenerateOutputsPB actual, expected;
+                QueryConverter::transResponse(&actual, &direct, dump_aux, "aux-string", 9999);
+                QueryConverter::transResponse(&expected, &legacy, dump_aux, "aux-string", 9999);
+                EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString());
+            }
+            compact->cum_log_probs = torch::Tensor();
+            for (auto& row : legacy.generate_outputs)
+                row.aux_info.cum_log_probs.reset();
+            GenerateOutputsPB actual, expected;
+            QueryConverter::transResponse(&actual, &direct, true, "", 9999);
+            QueryConverter::transResponse(&expected, &legacy, true, "", 9999);
+            EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString());
+        }
+    }
 }
 
 }  // namespace rtp_llm

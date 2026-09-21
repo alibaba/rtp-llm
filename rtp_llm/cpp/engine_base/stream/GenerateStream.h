@@ -135,6 +135,11 @@ public:
     // wait. Zero waits without a caller interval; a request deadline, when
     // configured, remains authoritative.
     virtual ErrorResult<GenerateOutputs> nextOutput(int64_t wait_timeout_ms = 0) = 0;
+    // RPC consumers can serialize a compact terminal result without materializing
+    // per-beam tensors. Other stream implementations retain their existing path.
+    virtual ErrorResult<GenerateOutputs> nextOutputForRpc(int64_t wait_timeout_ms = 0) {
+        return nextOutput(wait_timeout_ms);
+    }
     virtual bool                         hasOutput() {
         return false;
     }
