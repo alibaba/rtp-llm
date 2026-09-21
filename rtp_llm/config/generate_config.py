@@ -656,6 +656,9 @@ class GenerateConfig(BaseModel):
                     suffix=base_format.suffix,
                     no_think_excludes=base_format.no_think_excludes,
                 )
+            reasoning_format = reasoning_format.with_end_token_ids(
+                self.end_think_token_ids
+            )
             return self.finalize_response_format(reasoning_format=reasoning_format)
 
         if enable_thinking is None:
@@ -672,10 +675,9 @@ class GenerateConfig(BaseModel):
         # Preserve the pre-adaptive fixed-mode behavior. In particular, fixed
         # ENABLED does not require the model to emit a begin tag.
         end_think_token_id = generate_env_config.think_end_token_id
-        self.end_think_token_ids = (
-            [end_think_token_id] if end_think_token_id != -1 else []
-        )
-        if enable_thinking and tokenizer is not None and end_think_token_id == -1:
+        if end_think_token_id != -1:
+            self.end_think_token_ids = [end_think_token_id]
+        if enable_thinking and tokenizer is not None and not self.end_think_token_ids:
             think_end_tag = normalize_think_tag(generate_env_config.think_end_tag)
             self.end_think_token_ids = tokenizer.encode(
                 think_end_tag, add_special_tokens=False
@@ -690,6 +692,10 @@ class GenerateConfig(BaseModel):
         if self.in_think_mode and reasoning_format is None:
             reasoning_format = ReasoningFormat.from_generate_env_config(
                 generate_env_config
+            )
+        if self.in_think_mode and reasoning_format is not None:
+            reasoning_format = reasoning_format.with_end_token_ids(
+                self.end_think_token_ids
             )
         return self.finalize_response_format(
             reasoning_format=reasoning_format if self.in_think_mode else None

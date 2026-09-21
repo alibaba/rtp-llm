@@ -300,6 +300,24 @@ def _dsv4_tokenizer() -> _FakeTokenizer:
     )
 
 
+class ThinkRuntimeBoundaryTest(unittest.TestCase):
+    def test_explicit_end_token_is_shared_with_parser_and_empty_think_prompt(self):
+        env = _GenerateEnvCfg()
+        env.think_end_token_id = 1234
+        runtime = build_think_runtime(_dsv4_tokenizer(), env, "deepseek_v4")
+        self.assertEqual(runtime.eos_tokens, (1234,))
+        self.assertEqual(runtime.close_token_id, 1234)
+        self.assertEqual(runtime.empty_tokens, (128821, 271, 1234))
+
+    def test_tokenizer_boundary_keeps_padding(self):
+        runtime = build_think_runtime(
+            _dsv4_tokenizer(), _GenerateEnvCfg(), "deepseek_v4"
+        )
+        self.assertEqual(runtime.eos_tokens, (128822, 271))
+        self.assertEqual(runtime.close_token_id, 128822)
+        self.assertEqual(runtime.empty_tokens, (128821, 271, 128822, 271))
+
+
 async def _drain(aiter):
     return [x async for x in aiter]
 
@@ -3390,8 +3408,9 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         structural_tag = config.structural_tag
         elements = structural_tag["format"]["elements"]
         self.assertEqual(elements[0]["begin"], "<think>\n")
-        self.assertEqual(elements[0]["end"], "</think>\n\n")
-        self.assertEqual(elements[1]["type"], "json_schema")
+        self.assertEqual(elements[0]["end"], {"type": "token", "token": 128822})
+        self.assertEqual(elements[1], {"type": "token", "token": 271})
+        self.assertEqual(elements[-1]["type"], "json_schema")
 
     async def test_dash_generation_omits_think_begin_when_input_already_has_it(
         self,
@@ -3421,7 +3440,10 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         structural_tag = config.structural_tag
         reasoning_tag = structural_tag["format"]["elements"][0]
         self.assertEqual(reasoning_tag["begin"], "")
-        self.assertEqual(reasoning_tag["end"], "</think>\n\n")
+        self.assertEqual(reasoning_tag["end"], {"type": "token", "token": 128822})
+        self.assertEqual(
+            structural_tag["format"]["elements"][1], {"type": "token", "token": 271}
+        )
 
     async def test_dash_grammar_request_rejects_its_own_multi_sequence(self) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -3564,8 +3586,9 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         canonical_tag = config.structural_tag
         elements = canonical_tag["format"]["elements"]
         self.assertEqual(elements[0]["begin"], "<think>\n")
-        self.assertEqual(elements[0]["end"], "</think>\n\n")
-        self.assertEqual(elements[1], tag["format"])
+        self.assertEqual(elements[0]["end"], {"type": "token", "token": 128822})
+        self.assertEqual(elements[1], {"type": "token", "token": 271})
+        self.assertEqual(elements[-1], tag["format"])
 
     async def test_dash_generation_budget_aliases_without_enable_thinking_are_enabled(
         self,
@@ -3600,7 +3623,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     think_branch["elements"][0]["content"]["max_tokens"], 10
                 )
-                self.assertEqual(think_branch["elements"][1]["type"], "json_schema")
+                self.assertEqual(think_branch["elements"][-1]["type"], "json_schema")
 
     async def test_max_completion_tokens_thinking_budget_keeps_backend_limit_repro(
         self,

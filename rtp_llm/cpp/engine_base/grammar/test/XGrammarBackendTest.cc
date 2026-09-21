@@ -713,6 +713,66 @@ TEST(XGrammarBackendTest, OversizedVerdictIsNotCachedOrAllowedToExceedSharedBudg
     EXPECT_EQ(attempts.load(std::memory_order_relaxed), 2);
 }
 
+TEST(XGrammarBackendTest, ThinkingBudgetForcesDedicatedCloseAndTrailingPadding) {
+    std::vector<std::string> vocab;
+    for (int i = 0; i < 128; ++i) {
+        vocab.emplace_back(1, static_cast<char>(i));
+    }
+    vocab.emplace_back("</think>");
+    vocab.emplace_back("\n\n");
+    xgrammar::TokenizerInfo info(vocab, xgrammar::VocabType::RAW, 130, std::vector<int32_t>{0});
+    auto                    backend = XGrammarBackend::create(info.SerializeJSON(), grammarConfig());
+    ASSERT_TRUE(backend);
+    for (int budget : {0, 10, 40, 50}) {
+        for (bool natural_close : {false, true}) {
+            SCOPED_TRACE(std::to_string(budget));
+            GrammarKeyCpp key{"structural_tag",
+                              R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
+                              R"({"type":"tag","begin":"","content":{"type":"any_tokens","max_tokens":)"
+                                  + std::to_string(budget)
+                                  + R"(},"end":{"type":"token","token":128}},{"type":"token","token":129},)"
+                                    R"({"type":"regex","pattern":"a"}]}})"};
+            auto          result = backend->createMatcherFromKey(key);
+            ASSERT_TRUE(result.ok()) << result.status();
+            auto     matcher  = result.value();
+            int32_t  mask[5]  = {};
+            int64_t  shape[2] = {1, 5};
+            DLTensor tensor{};
+            tensor.data   = mask;
+            tensor.device = {kDLCPU, 0};
+            tensor.ndim   = 2;
+            tensor.dtype  = {kDLInt, 32, 1};
+            tensor.shape  = shape;
+            auto allowed  = [&](int token) {
+                auto filled = matcher->fillBitmask(&tensor, 0);
+                EXPECT_TRUE(filled.ok());
+                return (static_cast<uint32_t>(mask[token / 32]) & (1u << (token % 32))) != 0;
+            };
+            auto accept = [&](int token) {
+                EXPECT_TRUE(allowed(token)) << token;
+                auto accepted = matcher->acceptToken(token);
+                EXPECT_TRUE(accepted.ok() && accepted.value()) << token;
+            };
+            EXPECT_FALSE(allowed(0));  // EOS cannot bypass the close boundary.
+            const int count = natural_close ? budget / 2 : budget;
+            for (int i = 0; i < count; ++i) {
+                accept('x');
+            }
+            if (!natural_close) {
+                EXPECT_FALSE(allowed('<'));  // Text spelling cannot replace the dedicated token.
+                EXPECT_FALSE(allowed('x'));
+            }
+            accept(128);
+            EXPECT_FALSE(allowed('a'));  // Padding is part of the close sequence.
+            accept(129);
+            ASSERT_TRUE(matcher->rollback(2).ok());  // Speculative rejection restores the boundary.
+            accept(128);
+            accept(129);
+            accept('a');
+        }
+    }
+}
+
 // ---- RtpGrammarMatcher rollback ----------------------------------------
 
 TEST(RtpGrammarMatcherTest, RollbackRestoresAcceptedCount) {

@@ -34,6 +34,124 @@ from rtp_llm.ops import SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
 
 
+class ReasoningTokenBoundaryTest(TestCase):
+    def test_tokenizer_and_runtime_boundaries_reach_all_response_formats(self):
+        class Tokenizer:
+            def encode(self, text, add_special_tokens=False):
+                return [128821, 198] if text.startswith("<think>") else [128822, 271]
+
+        for mode in (ThinkingMode.ENABLED, ThinkingMode.ADAPTIVE):
+            for budget in (10, 40, 50):
+                for token_ids in ([128822], [128822, 271], [80, 81, 82]):
+                    for response_format in (
+                        None,
+                        {"type": "json_object"},
+                        {
+                            "type": "structural_tag",
+                            "format": {
+                                "type": "tag",
+                                "begin": "<tool>",
+                                "content": {
+                                    "type": "json_schema",
+                                    "json_schema": {"type": "object"},
+                                },
+                                "end": "</tool>",
+                            },
+                        },
+                    ):
+                        with self.subTest(
+                            mode=mode,
+                            budget=budget,
+                            ids=token_ids,
+                            response=response_format,
+                        ):
+                            env = GenerateEnvConfig()
+                            env.think_end_token_id = -1
+                            env.think_start_tag = "<think>"
+                            env.think_end_tag = "</think>\\n\\n"
+                            config = GenerateConfig(
+                                thinking_mode=mode,
+                                max_thinking_tokens=budget,
+                                end_think_token_ids=token_ids,
+                                response_format=(
+                                    {
+                                        "type": "structural_tag",
+                                        "structural_tag": response_format,
+                                    }
+                                    if response_format
+                                    and response_format["type"] == "structural_tag"
+                                    else response_format
+                                ),
+                            )
+                            # Same frontend format override supplied by OpenAI/DashSC.
+                            boundary = ReasoningFormat(
+                                tag_begin="<think>", tag_end="</think>\n\n"
+                            )
+                            config.add_thinking_params(
+                                Tokenizer(), env, reasoning_format=boundary
+                            )
+                            envelope = config.structural_tag["format"]
+                            if mode == ThinkingMode.ADAPTIVE:
+                                if response_format is None:
+                                    self.assertIn(
+                                        "</think>\n\n",
+                                        envelope["elements"][1]["excludes"],
+                                    )
+                                envelope = envelope["elements"][0]
+                            elements = envelope["elements"]
+                            self.assertEqual(
+                                elements[0]["end"],
+                                {"type": "token", "token": token_ids[0]},
+                            )
+                            self.assertEqual(
+                                elements[0]["content"],
+                                {"type": "any_tokens", "max_tokens": budget},
+                            )
+                            self.assertEqual(
+                                elements[1 : len(token_ids)],
+                                [
+                                    {"type": "token", "token": token}
+                                    for token in token_ids[1:]
+                                ],
+                            )
+                            self.assertEqual(config.end_think_token_ids, token_ids)
+                            self.assertEqual(boundary.tag_end, "</think>\n\n")
+
+    def test_tokenizer_fallback_and_explicit_token_override(self):
+        class Tokenizer:
+            def encode(self, text, add_special_tokens=False):
+                return [128822, 271]
+
+        for token_id, expected in ((-1, [128822, 271]), (1234, [1234])):
+            env = GenerateEnvConfig()
+            env.think_mode = "enabled"
+            env.think_end_token_id = token_id
+            env.think_end_tag = "</think>\\n\\n"
+            cfg = GenerateConfig(max_thinking_tokens=10)
+            cfg.add_thinking_params(Tokenizer(), env)
+            elements = cfg.structural_tag["format"]["elements"]
+            self.assertEqual(cfg.end_think_token_ids, expected)
+            self.assertEqual(
+                elements[0]["end"], {"type": "token", "token": expected[0]}
+            )
+            self.assertEqual(
+                elements[1:-1], [{"type": "token", "token": t} for t in expected[1:]]
+            )
+
+    def test_token_padding_precedes_renderer_suffix(self):
+        boundary = ReasoningFormat("", "</think>", suffix=" ").with_end_token_ids(
+            [12, 13, 14]
+        )
+        self.assertEqual(
+            boundary.prefix_format(10)["elements"][1:],
+            [
+                {"type": "token", "token": 13},
+                {"type": "token", "token": 14},
+                {"type": "const_string", "value": " "},
+            ],
+        )
+
+
 class GenerateConfigTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
@@ -390,10 +508,13 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(structural_tag["type"], "structural_tag")
         elements = structural_tag["format"]["elements"]
         self.assertEqual(elements[0]["type"], "tag")
-        self.assertEqual(elements[0]["end"], "</think>\n\n")
-        self.assertEqual(elements[1]["type"], "json_schema")
         self.assertEqual(
-            elements[1]["json_schema"],
+            elements[0]["end"],
+            {"type": "token", "token": config.end_think_token_ids[0]},
+        )
+        self.assertEqual(elements[-1]["type"], "json_schema")
+        self.assertEqual(
+            elements[-1]["json_schema"],
             {"anyOf": [{"type": "object"}, {"type": "array"}]},
         )
 
