@@ -6,26 +6,34 @@ Whale 运行不复用开发机 runner。代码通过 CI 生成镜像，Whale 负
 
 | 目的 | CI `pre-jobs` | 镜像 | Whale 拓扑 |
 |---|---|---|---|
-| 新建或完整更新寄生部署 | `mock-bundle` | `rtp_llm_mock_bundle` | 一个 CPU Pod 内运行 Master 和多个逻辑 P/D |
-| 只更新已部署 bundle 的 Java Mock | `mock-refresh` | `rtp_llm_mock_bundle` | 保留固定基础镜像中的 legacy Master 与 Python，只替换并验证 Mock 相关文件 |
+| 构建或更新寄生部署 | `mock-bundle` | `rtp_llm_mock_bundle` | 一个 CPU Pod 内运行 Master 和多个逻辑 P/D |
 | P/D 分成独立 Pod | `mock-engine` | `flexlb-mock-engine` | 每 Pod 一个 PREFILL 或 DECODE JVM；Master/frontend 使用各自镜像 |
 
-CI 定义位于外层仓库 `.aoneci/image.yaml`。`mock-bundle` 和 `mock-refresh` 使用 Maven profile `opensource,!internal,whale-bundle`，先安装公共模块与内部 KMonitor，再构建测试 JAR。`mock-engine` 使用 internal profile，并校验产物确实含 KMonitor 类。
+CI 定义位于外层仓库 `.aoneci/image.yaml`。`mock-bundle` 使用 Maven profile `opensource,!internal,whale-bundle`，先安装公共模块与内部 KMonitor，再构建测试 JAR。`mock-engine` 使用 internal profile，并校验产物确实含 KMonitor 类。
 
 ## 构建链
 
-### 完整 bundle
+### 寄生 bundle
 
-1. 构建 `flexlb-api` 与 `flexlb-mock-engine`，执行 Whale/RemoteDecode 相关测试。
+1. 构建 `flexlb-api` 与 `flexlb-mock-engine`，执行 Whale、RemoteDecode、缓存、扩缩容和取消相关测试，并执行 `tools/whale_mock` Python 测试。
 2. 复制 `master.jar`、`mock.jar`、`tools/whale_mock`、`flexlb_cfg.py`、模式表和性能文件到镜像上下文。
-3. 若存在 legacy master spec，按 pin 构建 `legacy-master.jar`。
-4. 以标准 engine 镜像提供 Python，以标准 FlexLB 镜像提供 Java/runtime，生成 `rtp_llm_mock_bundle:<source-version>`。
+3. 按 pin 构建 `legacy-master.jar`，并生成 `tools/whale_mock/bundle-manifest.sha256` 记录完整上下文文件摘要。
+4. 直接使用固定版本的 CPU `rtp_llm_root_base`，仅安装运行时依赖 PyYAML，生成 `rtp_llm_mock_bundle:<source-version>`。
 
-### mock-refresh
+`mock-bundle` 只静态依赖 `info`，不会触发 CUDA 或 FlexLB 镜像 job。当前
+`master.jar`、`mock.jar`、legacy Master 和所有 Python/配置文件均来自本次
+checkout，不在历史 bundle 上做部分覆盖。CPU 基座通过流水线
+`vars.mock_runtime_base_image` 固定版本；升级 Python/JDK 基座必须显式修改该变量。
 
-1. 在当前源码上构建并运行更完整的 Mock 单测集合。
-2. 重新生成 Mock JAR、兼容层、bundle 入口与模式表。
-3. 以 CI 中明确 pin 的 `MOCK_BASE_IMAGE` 为基础生成新镜像。该 pin 决定保留的 Master 与运行时，不能只看当前源码 commit。
+```bash
+python3 /Users/wangziyi/.agents/skills/ci-image-build/scripts/ci_image_build.py \
+  --pipeline-branch feat/dsv4-master-bundle-codex \
+  --build-ref origin/codex/ft-case-framework \
+  --jobs mock-bundle --poll
+```
+
+旧 `mock-refresh` 已移除：它不更新当前 `master.jar`，而且白名单覆盖会让镜像
+混入旧基座内容。新构建统一使用 `mock-bundle`；历史 CI run 仍可按 run ID 查询。
 
 ### 独立 Mock Engine
 

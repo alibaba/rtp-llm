@@ -1,13 +1,19 @@
-ARG ENGINE_IMAGE
-ARG FLEXLB_IMAGE
-FROM ${ENGINE_IMAGE} AS python
-FROM ${FLEXLB_IMAGE}
+ARG BASE_IMAGE=hub.docker.alibaba-inc.com/isearch/rtp_llm_root_base:2026_04_28_16_56_6fcb8f8
+FROM ${BASE_IMAGE}
+ARG BASE_IMAGE
 ARG BUILD_SOURCE_SHA
-ENV BUILD_SOURCE_SHA=${BUILD_SOURCE_SHA}
+ENV BUILD_SOURCE_SHA=${BUILD_SOURCE_SHA} \
+    MOCK_RUNTIME_BASE_IMAGE=${BASE_IMAGE}
 USER root
-COPY --from=python /opt/conda310/ /opt/conda310/
 COPY tools /opt/whale-mock/tools
 COPY jars /opt/whale-mock/tools/whale_mock/jars
 COPY tools/whale_mock/start.sh /home/admin/whale_start.sh
-RUN chmod +x /home/admin/whale_start.sh && java -version && /opt/conda310/bin/python3 -c 'import yaml'
+RUN /opt/conda310/bin/pip install --no-cache-dir PyYAML==6.0.2 \
+      -i https://artlab.alibaba-inc.com/1/PYPI/simple/ && \
+    chmod +x /home/admin/whale_start.sh && \
+    test -s /opt/whale-mock/tools/whale_mock/jars/master.jar && \
+    test -s /opt/whale-mock/tools/whale_mock/jars/mock.jar && \
+    test -s /opt/whale-mock/tools/whale_mock/jars/legacy-master.jar && \
+    java -version && \
+    /opt/conda310/bin/python3 -c 'import sys, yaml; sys.path.insert(0, "/opt/whale-mock/tools/whale_mock"); import bundle'
 ENTRYPOINT ["/bin/bash", "/home/admin/whale_start.sh"]
