@@ -2,15 +2,13 @@
 # -*- coding: utf-8 -*-
 """FlexLB 压测报告生成器：直接吐 self-contained Chart.js 4.4.7 HTML。
 
-数据管线保持不变：aggregate JSON → 统计 → panel（LineChart / BarChart）+ KPI +
-汇总表。渲染层拆到 canvas_report_render_html.py，页面观感对齐既有
+数据管线保持不变：aggregate JSON → 统计 → panel（line / bar）+ KPI +
+元数据。渲染层拆到 canvas_report_render_html.py，页面观感对齐既有
 outputs/flexlb-run-*-chartjs.html（浅色主题 / 白卡 / 6 列 KPI / 2 列 panel /
 280px chart，legend 单击切换、tooltip x 轴 index 联动，无 zoom 插件）。
 
-内部实现：main() 用 emit_ 系列先在内存拼一份完整 tsx 字符串（保留原有全部
-41 图 / 154 组数据的正确性），末端通过 _extract_spec_from_tsx() 反抽出
-{run_id/title/subtitle/kpis/panels} spec，喂 canvas_report_render_html.render()
-写入 --out 指向的 HTML 文件；不再写 .tsx 中间产物。
+内部实现：直接构建 {run_id/title/subtitle/kpis/panels} 字典，
+交给 canvas_report_render_html.render() 输出 HTML。
 
 头部三层规范化（2026-09）：
   * subtitle（一眼看清实验条件）：拓扑 + 发送模式/倍率 + ramp/duration/
@@ -32,8 +30,8 @@ outputs/flexlb-run-*-chartjs.html（浅色主题 / 白卡 / 6 列 KPI / 2 列 pa
 报告级统一时间轴：全部时序面板（x = 压测时间）共享同一 x 轴 [0, T_END]。
 T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；min 固定 0
 （t=0 = 压测正式开始，warmup 后；warmup 负值段在渲染层被轴裁剪，数据
-保留不删）。实现：main() 里各时间轴 cats const 生成时注册到 cats_time
-（const 名 → 数值时间序列），反抽时按 x_ref 给面板附 timeX/xNums，spec
+保留不删）。时间轴标签列表在 cats_time 中按对象身份关联数值时间序列，
+构建 spec 时为对应面板附 timeX/xNums，spec
 顶层注入 timeAxis，渲染层用 linear x 轴钉 TA_MIN/TA_MAX。非时间轴面板
 （分布/排名/洛伦兹/分阶段 BarChart）不注册、保持类目轴。
 
@@ -83,61 +81,33 @@ TAG = "[canvas_report_gen]"
 
 
 # ---------------------------------------------------------------------------
-# 转义与 JS 字面量
+# 数字格式与图表数据
 # ---------------------------------------------------------------------------
 
 
-def esc_text(s):
-    """转义用于 JSX 文本节点/属性值的字符串：& < > { } 一律实体化。"""
-    return (
-        str(s)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("{", "&#123;")
-        .replace("}", "&#125;")
-    )
-
-
-def attr(s):
-    """转义用于 JSX 双引号属性值的字符串。"""
-    return esc_text(s).replace('"', "&quot;")
-
-
-def js_str(s):
-    """转义用于单引号 JS 字符串字面量的字符（JS 语法级转义，非 HTML 实体）。"""
-    return (
-        str(s)
-        .replace("\\", "\\\\")
-        .replace("'", "\\'")
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-    )
-
-
-def num(v):
-    """数字 -> 紧凑 JS 数字字面量（无千分位逗号）。"""
-    if v is None:
-        return "0"
-    if isinstance(v, bool):
-        return "1" if v else "0"
+def chart_number(value):
+    """保留既有四位小数舍入和非有限值归零规则。"""
     try:
-        f = float(v)
+        value = float(value)
     except (TypeError, ValueError):
-        return "0"
-    if math.isnan(f) or math.isinf(f):
-        return "0"
-    if f == int(f) and abs(f) < 1e15:
-        return str(int(f))
-    return repr(round(f, 4))
+        return 0
+    if not math.isfinite(value):
+        return 0
+    if value == int(value) and abs(value) < 1e15:
+        return int(value)
+    return round(value, 4)
 
 
-def num_arr(vals):
-    return "[" + ", ".join(num(v) for v in vals) + "]"
+def num(value):
+    return str(chart_number(value))
+
+
+def num_arr(values):
+    return [chart_number(value) for value in values]
 
 
 def str_arr(vals):
-    return "[" + ", ".join("'" + js_str(v) + "'" for v in vals) + "]"
+    return [str(v) for v in vals]
 
 
 # ---------------------------------------------------------------------------
@@ -283,78 +253,41 @@ def token_scale_label(max_v):
 
 
 # ---------------------------------------------------------------------------
-# JSX 生成
+# 报告 spec 构建
 # ---------------------------------------------------------------------------
 
 
-def series_obj(key, name, data_ref, tone=None):
-    parts = [
-        "key: '" + js_str(key) + "'",
-        "name: '" + js_str(name) + "'",
-        "data: " + data_ref,
-    ]
-    if tone:
-        parts.append("tone: '" + tone + "'")
-    return "{ " + ", ".join(parts) + " }"
+def chart_spec(chart_type, categories, series, suffix=None, y_max=None):
+    """直接保留列表数据；颜色顺序与渲染器一致。"""
+    from canvas_report_render_html import series_color
+
+    return {
+        "type": chart_type,
+        "x": categories,
+        "yMax": chart_number(y_max) if y_max is not None else None,
+        "unit": suffix.strip() if suffix else "",
+        "series": [
+            {
+                "name": name,
+                "data": data,
+                "color": series_color(tone, index),
+                "tone": tone or "",
+            }
+            for index, (_key, name, data, tone) in enumerate(series)
+        ],
+    }
 
 
-def emit_chart(chart, cats_ref, height, series, suffix=None, domain=None):
-    """生成 LineChart/BarChart 元素行（v4 排版）。series: [(key, name, data_ref, tone)]"""
-    props = ["categories={" + cats_ref + "}", "height={" + str(height) + "}"]
-    if suffix is not None:
-        props.append('valueSuffix="' + attr(suffix) + '"')
-    if domain is not None:
-        props.append("domain={" + domain + "}")
-    props.append("valueFormatter={fmt2}")
-    head = " ".join(props)
-    lines = ["          <" + chart + " " + head]
-    if len(series) == 1:
-        lines.append("            series={[" + series_obj(*series[0]) + "]} />")
-    else:
-        lines.append("            series={[")
-        for s in series:
-            lines.append("              " + series_obj(*s) + ",")
-        lines.append("            ]} />")
-    return lines
+def panel_spec(title, caption, chart):
+    return dict(chart, title=title, caption=caption)
 
 
-def emit_container(title, caption, inner_lines):
-    out = [
-        '        <ChartContainer title="'
-        + attr(title)
-        + '" caption="'
-        + attr(caption)
-        + '">'
-    ]
-    out.extend(inner_lines)
-    out.append("        </ChartContainer>")
-    return out
-
-
-def emit_grid(container_blocks):
-    out = ["      <ChartComparisonGrid>"]
-    for c in container_blocks:
-        out.extend(c)
-    out.append("      </ChartComparisonGrid>")
-    return out
-
-
-def emit_stat(value, label, tone=None):
-    tone_attr = ' tone="' + tone + '"' if tone else ""
-    return (
-        '        <Stat value="'
-        + attr(value)
-        + '" label="'
-        + attr(label)
-        + '"'
-        + tone_attr
-        + " />"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 主流程
-# ---------------------------------------------------------------------------
+def kpi_spec(value, label, tone=None):
+    return {
+        "label": label,
+        "value": str(value),
+        "tone": {"warning": "warn"}.get(tone, tone or ""),
+    }
 
 
 def load_json(path):
@@ -362,161 +295,10 @@ def load_json(path):
         return json.load(f)
 
 
-# ---------------------------------------------------------------------------
-# tsx → spec 反抽（末端渲染桥）
-# ---------------------------------------------------------------------------
-#
-# emit_ 系列在内存里拼一份完整 tsx（保留原 41 图/154 组数据的算法路径不动），
-# 这里从 tsx 字符串反抽出 render_html 需要的 spec dict：
-#   {run_id, title, subtitle, kpis:[{label,value,tone}], panels:[panel]}
-#   panel: {id,title,caption,type('line'|'bar'),x,yMax,unit,series:[{name,data,color,tone}]}
-# 好处：不重构那 2000 行 emit_ 逻辑（碰它风险大），只在末端做一次纯正则/JSON
-# 转换。同一套抽取器也用于 preview_gen.py 手动预览。
-#
-# 注意事项：
-#  * const 命名同时含 UPPER_CASE（X 轴）与 camelCase（Y 轴 series），正则须
-#    放宽到 [A-Za-z_]+。
-#  * ChartContainer body 里可能含多个 LineChart/BarChart（ChartComparisonGrid
-#    形态），因此按"container 开合位定位 + body 内循环抽 chart"两段处理，
-#    不用一个 regex 匹整体。
-#  * chart 属性顺序不稳定（valueSuffix 有时在 domain 前），故 attrs 用独立
-#    子正则各抽（ATTR_CATS/HEIGHT/DOMAIN/SUFFIX）。
-
-
-_TSX_CONST_RE = re.compile(
-    r"^const ([A-Za-z_][A-Za-z0-9_]*) = (\[.*?\])\s*;\s*$", re.M | re.S
-)
-_TSX_STAT_RE = re.compile(
-    r'<Stat value="([^"]*)" label="([^"]*)"(?: tone="([^"]*)")? />'
-)
-_TSX_CONTAINER_OPEN = re.compile(
-    r'<ChartContainer title="([^"]*)" caption="([^"]*)">', re.S
-)
-_TSX_CHART_TAG = re.compile(
-    r"<(LineChart|BarChart)\s+([^>]*?)\s+series=\{\[(.*?)\]\}\s*/>", re.S
-)
-_TSX_ATTR_CATS = re.compile(r"categories=\{([A-Za-z_][A-Za-z0-9_]*)\}")
-_TSX_ATTR_DOMAIN = re.compile(r"domain=\{\[([^\]]+)\]\}")
-_TSX_ATTR_SUFFIX = re.compile(r'valueSuffix="([^"]*)"')
-_TSX_SERIES_RE = re.compile(
-    r"\{\s*key:\s*'([^']*)'\s*,\s*name:\s*'([^']*)'\s*,\s*data:\s*"
-    r"([A-Za-z_][A-Za-z0-9_]*)(?:\s*,\s*tone:\s*'([^']*)')?\s*\}",
-    re.S,
-)
-
-_TSX_TONE_TO_KPI = {
-    "success": "success",
-    "danger": "danger",
-    "warning": "warn",
-    "warn": "warn",
-}
-
-
-def _extract_spec_from_tsx(tsx_src, run_id, subtitle, time_axes=None, time_axis=None):
-    """从内存 tsx 字符串反抽 render_html.render() 需要的 spec dict。
-
-    time_axes: {cats const 名: 数值时间序列}——时间轴面板注册表，
-    panel 的 x_ref 命中时附 timeX=True + xNums（与类目标签等长同序）。
-    time_axis: 报告级统一时间轴 {min, max}，写入 spec 顶层供渲染层钉轴。
-    """
-    # 惰性 import，避免测试或 --help 场景强依赖 render_html
-    import canvas_report_render_html as _rh
-
-    # 1) 抽 const NAME = [...]; → dict[str, list]
-    consts = {}
-    for m in _TSX_CONST_RE.finditer(tsx_src):
-        name, expr = m.group(1), m.group(2)
-        try:
-            consts[name] = json.loads(expr.replace("'", '"'))
-        except Exception:
-            pass
-
-    # 2) 抽 KPI（<Stat …/>）
-    kpis = []
-    for m in _TSX_STAT_RE.finditer(tsx_src):
-        val, label, tone = m.group(1), m.group(2), m.group(3)
-        kpis.append(
-            {"label": label, "value": val, "tone": _TSX_TONE_TO_KPI.get(tone or "", "")}
-        )
-
-    # 3) 抽 ChartContainer + body 内多个 chart
-    panels = []
-    pid = 0
-    for om in _TSX_CONTAINER_OPEN.finditer(tsx_src):
-        close_pos = tsx_src.find("</ChartContainer>", om.end())
-        if close_pos < 0:
-            continue
-        body = tsx_src[om.end() : close_pos]
-        title, caption = om.group(1), om.group(2)
-        for tm in _TSX_CHART_TAG.finditer(body):
-            ctype, attrs, series_body = tm.groups()
-            cats_m = _TSX_ATTR_CATS.search(attrs)
-            if not cats_m:
-                continue
-            dom_m = _TSX_ATTR_DOMAIN.search(attrs)
-            suf_m = _TSX_ATTR_SUFFIX.search(attrs)
-            x_ref = cats_m.group(1)
-            x_vals = consts.get(x_ref, [])
-            series = []
-            for i, sm in enumerate(_TSX_SERIES_RE.finditer(series_body)):
-                _key, s_name, data_ref, tone = sm.groups()
-                data = consts.get(data_ref, [])
-                series.append(
-                    {
-                        "name": s_name,
-                        "data": data,
-                        "color": _rh.series_color(tone, i),
-                        "tone": tone or "",
-                    }
-                )
-            if not series:
-                continue
-            pid += 1
-            y_max = None
-            if dom_m:
-                try:
-                    y_max = float(dom_m.group(1).split(",")[1])
-                except Exception:
-                    y_max = None
-            panel = {
-                "id": "p%d" % pid,
-                "title": title,
-                "caption": caption,
-                "type": "bar" if ctype == "BarChart" else "line",
-                "x": x_vals,
-                "yMax": y_max,
-                "unit": (suf_m.group(1).strip() if suf_m else ""),
-                "series": series,
-            }
-            t_vals = (time_axes or {}).get(x_ref)
-            if t_vals is not None:
-                panel["timeX"] = True
-                panel["xNums"] = t_vals
-            panels.append(panel)
-
-    spec = {
-        "run_id": run_id,
-        "title": "FlexLB 压测报告 · run " + run_id,
-        "subtitle": subtitle,
-        # KPI 两行：第一行五连（发送 QPS / 成功调度 QPS / 错误率 / Gini /
-        # pacing）+ 第二行结果五连（请求数量 / 成功 / 失败·cancel / 成功率 /
-        # 持续时间），共 10 chip；头部 Grid 区之外无其它 Stat 使用点。
-        "kpis": kpis[:10],
-        "panels": panels,
-    }
-    if time_axis:
-        spec["timeAxis"] = time_axis
-    return spec
-
-
 def normalize_out_runid(path):
     """--out 文件名中 RUNID 段（8 位日期_6 位时间）下划线统一转连字符。
 
-    防回归（Canvas 预览 ENOENT 历史坑已复发 4 次）：run 目录本身用
-    下划线 RUNID（如 20260828_155349），而 Canvas 预览引用的报告命名
-    规范是 flexlb-run-<RUNID>-report.canvas.tsx 且 RUNID 用连字符
-    （flexlb-run-20260828-155349-report.canvas.tsx）。生成器在输出处
-    强制规范化文件名，调用方传下划线 RUNID 也不会产出坏文件名。
+    保留既有 HTML 报告文件名约定，run 目录本身仍可使用下划线。
     只匹配 8 位日期 + "_" + 6 位时间的 RUNID 形态，不碰文件名其它
     下划线；报告内部 run_id 展示保留 meta.run_dir 原样（与远端 run
     目录名对账）。
@@ -529,9 +311,7 @@ def normalize_out_runid(path):
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="FlexLB 压测纯图表 Canvas 报告生成器（v4 骨架，数据脚本填充）"
-    )
+    ap = argparse.ArgumentParser(description="FlexLB 压测HTML 图表报告生成器")
     ap.add_argument(
         "--aggregate",
         required=True,
@@ -687,16 +467,6 @@ def main():
     cancel_ts = agg.get("cancel_qps_ts") or []
     master_arrivals_ts = agg.get("master_arrivals_ts") or []
     integrity = agg.get("integrity") or {}
-    batch_size_final = agg.get("batch_size_final") or {}
-    _meta = agg.get("meta") or {}
-    # Newer aggregates report fetch_output_stream (True = client read streams);
-    # legacy ones recorded the inverted switch as schedule_only.
-    fetch_output_stream = (
-        bool(_meta["fetch_output_stream"])
-        if "fetch_output_stream" in _meta
-        else not _meta.get("schedule_only")
-    )
-    mock_last = (agg.get("batch") or {}).get("mock_last") or {}
     validity = sm.get("validity_checks") or {}
 
     run_id = args.run_id or (agg.get("meta") or {}).get("run_dir") or "unknown"
@@ -849,13 +619,6 @@ def main():
     )
     ok_qps = (float(success_n) / duration_s) if (success_n and duration_s) else 0
 
-    # 泄漏判定：头部 KPI chip 已下线（2026-08 需求，见自检负向断言）；
-    # leak_label 仅为 tsx 汇总表行保留（反抽不抽 Table，不进 HTML）。
-    if validity:
-        all_valid = all(bool(v) for v in validity.values())
-        leak_label = "clean" if all_valid else "leak"
-    else:
-        leak_label = "—"
     pacing_ok = bool(validity.get("client_pacing_p99_within_limit"))
     pacing_label, pacing_tone = ("good", "success") if pacing_ok else ("bad", "danger")
     # Phase A：chip 附 pacing p99 数值（聚合层自算 client_pacing_lag_ms；
@@ -885,21 +648,15 @@ def main():
         gini_label = "P / D 路由 Gini（全量）" if gini_is_all else "P / D 路由 Gini"
 
     # ---- 数据常量 ----
-    consts = []  # (name, js_expr)
-
-    def const(name, expr):
-        consts.append((name, expr))
-        return name
-
-    # 报告级统一时间轴：时间轴面板的 cats const 名 → 数值 x 序列（与
+    # 报告级统一时间轴：时间轴标签列表的对象身份 → 数值 x 序列（与
     # sparse 后类目标签等长同序）。各节 cats 在生成处注册；T_END =
     # 全部注册序列的最大采样点（ceil 整秒）。非时间轴面板（分布/排名/
     # 洛伦兹/分阶段 BarChart）不注册，保持类目轴（向后兼容）。
     cats_time = {}
 
-    def reg_time(cats_name, t_vals):
-        cats_time[cats_name] = [float(v) for v in t_vals]
-        return cats_name
+    def reg_time(categories, t_vals):
+        cats_time[id(categories)] = [float(v) for v in t_vals]
+        return categories
 
     # 每秒时序（1s 粒度）
     # 发送序列双口径（20260830 修正）：master 到达差分序列为主发送线
@@ -949,64 +706,43 @@ def main():
             # arrivals 只覆盖部分窗口，master 序列补全发送全程与冻结尾巴；
             # 反向桶缺失补 0（无到达/无成功/无失败样本秒）。
             tsec_vals = sorted(set(ps_by_t) | set(m_arr_by_t))
-        TSEC = const("TSEC", str_arr(sparse_cats(tsec_vals)))
+        TSEC = str_arr(sparse_cats(tsec_vals))
         reg_time(TSEC, tsec_vals)
-        qps_arrivals = const(
-            "qpsArrivals",
-            num_arr([(ps_by_t.get(t) or {}).get("arrivals", 0) for t in tsec_vals]),
+        qps_arrivals = num_arr(
+            [(ps_by_t.get(t) or {}).get("arrivals", 0) for t in tsec_vals]
         )
-        qps_success = const(
-            "qpsSuccess",
-            num_arr([(ps_by_t.get(t) or {}).get("success", 0) for t in tsec_vals]),
+        qps_success = num_arr(
+            [(ps_by_t.get(t) or {}).get("success", 0) for t in tsec_vals]
         )
-        qps_errors = const(
-            "qpsErrors",
-            num_arr([(ps_by_t.get(t) or {}).get("errors", 0) for t in tsec_vals]),
+        qps_errors = num_arr(
+            [(ps_by_t.get(t) or {}).get("errors", 0) for t in tsec_vals]
         )
         if m_arr_by_t:
-            qps_master_arrivals = const(
-                "qpsMasterArrivals",
-                num_arr([m_arr_by_t.get(t, 0) for t in tsec_vals]),
-            )
-        sched_p50 = const(
-            "schedP50",
-            num_arr([(ps_by_t.get(t) or {}).get("sched_p50", 0) for t in tsec_vals]),
+            qps_master_arrivals = num_arr([m_arr_by_t.get(t, 0) for t in tsec_vals])
+        sched_p50 = num_arr(
+            [(ps_by_t.get(t) or {}).get("sched_p50", 0) for t in tsec_vals]
         )
-        sched_p95 = const(
-            "schedP95",
-            num_arr([(ps_by_t.get(t) or {}).get("sched_p95", 0) for t in tsec_vals]),
+        sched_p95 = num_arr(
+            [(ps_by_t.get(t) or {}).get("sched_p95", 0) for t in tsec_vals]
         )
-        sched_p99 = const(
-            "schedP99",
-            num_arr([(ps_by_t.get(t) or {}).get("sched_p99", 0) for t in tsec_vals]),
+        sched_p99 = num_arr(
+            [(ps_by_t.get(t) or {}).get("sched_p99", 0) for t in tsec_vals]
         )
         # token 长度时序常量：仅当 per_second 带 input_len_n/output_len_n
         # 且存在非零样本秒时注册（区分「旧 aggregate 无键」与「全零」）。
         if any((p.get("input_len_n") or 0) for p in per_second):
-            input_len_p50 = const(
-                "inputLenP50",
-                num_arr(
-                    [(ps_by_t.get(t) or {}).get("input_len_p50", 0) for t in tsec_vals]
-                ),
+            input_len_p50 = num_arr(
+                [(ps_by_t.get(t) or {}).get("input_len_p50", 0) for t in tsec_vals]
             )
-            input_len_p95 = const(
-                "inputLenP95",
-                num_arr(
-                    [(ps_by_t.get(t) or {}).get("input_len_p95", 0) for t in tsec_vals]
-                ),
+            input_len_p95 = num_arr(
+                [(ps_by_t.get(t) or {}).get("input_len_p95", 0) for t in tsec_vals]
             )
         if any((p.get("output_len_n") or 0) for p in per_second):
-            output_len_p50 = const(
-                "outputLenP50",
-                num_arr(
-                    [(ps_by_t.get(t) or {}).get("output_len_p50", 0) for t in tsec_vals]
-                ),
+            output_len_p50 = num_arr(
+                [(ps_by_t.get(t) or {}).get("output_len_p50", 0) for t in tsec_vals]
             )
-            output_len_p95 = const(
-                "outputLenP95",
-                num_arr(
-                    [(ps_by_t.get(t) or {}).get("output_len_p95", 0) for t in tsec_vals]
-                ),
+            output_len_p95 = num_arr(
+                [(ps_by_t.get(t) or {}).get("output_len_p95", 0) for t in tsec_vals]
             )
         # mock 自报生产口径 TPS（20260901）：rtp_llm_* 集群级行序列
         # （aggregate mock_tps_ts，P 执行时间与实际 wall 时间分开）桶化到
@@ -1027,8 +763,13 @@ def main():
                 continue
             if _t < 0:
                 continue
-            for _col in ("context_tps", "context_tps_with_cache", "context_wall_tps",
-                         "context_wall_tps_with_cache", "generate_tps"):
+            for _col in (
+                "context_tps",
+                "context_tps_with_cache",
+                "context_wall_tps",
+                "context_wall_tps_with_cache",
+                "generate_tps",
+            ):
                 _v = r.get(_col)
                 if _v is None:
                     continue
@@ -1039,21 +780,26 @@ def main():
             _b: {c: round(sum(vs) / len(vs), 1) for c, vs in _cols.items()}
             for _b, _cols in _mtps_bucket.items()
         }
-        def tps_curve(column, js_name, divisor):
+
+        def tps_curve(column, divisor):
             if not any(column in values for values in _mtps_by_t.values()):
                 return None
             # Real reporters omit long in-flight steps. A missing sample is
             # not zero; keep the gap instead of biasing charts and gate review.
-            return const(js_name, json.dumps([
-                round(_mtps_by_t[t][column] / divisor, 1)
-                if column in _mtps_by_t.get(t, {}) else None for t in tsec_vals
-            ]))
+            return [
+                (
+                    round(_mtps_by_t[t][column] / divisor, 1)
+                    if column in _mtps_by_t.get(t, {})
+                    else None
+                )
+                for t in tsec_vals
+            ]
 
-        mock_ctx_tps = tps_curve("context_tps", "mockCtxTps", tps_p_div)
-        mock_ctx_cache_tps = tps_curve("context_tps_with_cache", "mockCtxCacheTps", tps_p_div)
-        mock_ctx_wall_tps = tps_curve("context_wall_tps", "mockCtxWallTps", tps_p_div)
-        mock_ctx_wall_cache_tps = tps_curve("context_wall_tps_with_cache", "mockCtxWallCacheTps", tps_p_div)
-        mock_gen_tps = tps_curve("generate_tps", "mockGenTps", tps_d_div)
+        mock_ctx_tps = tps_curve("context_tps", tps_p_div)
+        mock_ctx_cache_tps = tps_curve("context_tps_with_cache", tps_p_div)
+        mock_ctx_wall_tps = tps_curve("context_wall_tps", tps_p_div)
+        mock_ctx_wall_cache_tps = tps_curve("context_wall_tps_with_cache", tps_p_div)
+        mock_gen_tps = tps_curve("generate_tps", tps_d_div)
         # client 侧 token 对账序列（per_second.input_tokens /
         # output_tokens / output_tokens_completed）不再构造：IO 对账
         # 面板已移除（20260901 纠偏）；聚合对账断言
@@ -1077,13 +823,11 @@ def main():
     sched_lat_count = (sm.get("schedule_latency_ms") or {}).get("count")
     stage_p50 = stage_p95 = None
     if stage_lat:
-        stage_p50 = const(
-            "stageP50",
-            num_arr([(stage_lat.get(s) or {}).get("p50", 0) for s in STAGE_KEYS]),
+        stage_p50 = num_arr(
+            [(stage_lat.get(s) or {}).get("p50", 0) for s in STAGE_KEYS]
         )
-        stage_p95 = const(
-            "stageP95",
-            num_arr([(stage_lat.get(s) or {}).get("p95", 0) for s in STAGE_KEYS]),
+        stage_p95 = num_arr(
+            [(stage_lat.get(s) or {}).get("p95", 0) for s in STAGE_KEYS]
         )
 
     # 队列时序（5s 粒度，avg/engine 口径：集群总量 ÷ 引擎数，
@@ -1094,54 +838,37 @@ def main():
     q_step = 5
     if queue_ts:
         tq_vals = [q.get("t_offset_s", i * 5) for i, q in enumerate(queue_ts)]
-        TQ = const("TQ", str_arr(sparse_cats(tq_vals)))
+        TQ = str_arr(sparse_cats(tq_vals))
         reg_time(TQ, tq_vals)
-        p_run_req = const(
-            "pRunReq",
-            num_arr(
-                [
-                    round(
-                        (q.get("prefill_running_reqs", 0) or 0) / max(1, p_engines), 2
-                    )
-                    for q in queue_ts
-                ]
-            ),
+        p_run_req = num_arr(
+            [
+                round((q.get("prefill_running_reqs", 0) or 0) / max(1, p_engines), 2)
+                for q in queue_ts
+            ]
         )
-        p_run_batch = const(
-            "pRunBatch",
-            num_arr(
-                [
-                    round((q.get("prefill_running", 0) or 0) / max(1, p_engines), 2)
-                    for q in queue_ts
-                ]
-            ),
+        p_run_batch = num_arr(
+            [
+                round((q.get("prefill_running", 0) or 0) / max(1, p_engines), 2)
+                for q in queue_ts
+            ]
         )
-        p_wait = const(
-            "pWait",
-            num_arr(
-                [
-                    round((q.get("prefill_waiting", 0) or 0) / max(1, p_engines), 2)
-                    for q in queue_ts
-                ]
-            ),
+        p_wait = num_arr(
+            [
+                round((q.get("prefill_waiting", 0) or 0) / max(1, p_engines), 2)
+                for q in queue_ts
+            ]
         )
-        d_run_req = const(
-            "dRunReq",
-            num_arr(
-                [
-                    round((q.get("decode_running", 0) or 0) / max(1, d_engines), 2)
-                    for q in queue_ts
-                ]
-            ),
+        d_run_req = num_arr(
+            [
+                round((q.get("decode_running", 0) or 0) / max(1, d_engines), 2)
+                for q in queue_ts
+            ]
         )
-        d_wait = const(
-            "dWait",
-            num_arr(
-                [
-                    round((q.get("decode_waiting", 0) or 0) / max(1, d_engines), 2)
-                    for q in queue_ts
-                ]
-            ),
+        d_wait = num_arr(
+            [
+                round((q.get("decode_waiting", 0) or 0) / max(1, d_engines), 2)
+                for q in queue_ts
+            ]
         )
         # 口径修复（Jack 诊断）：主线换区间均值 interval_avg_batch_size
         # （相邻采样间隔内 enqueued 增量 ÷ batches 增量，反映真实波动），
@@ -1149,21 +876,11 @@ def main():
         # cum 单线（向后兼容）。
         has_interval_batch = any("interval_avg_batch_size" in q for q in queue_ts)
         if has_interval_batch:
-            avg_batch = const(
-                "ivBatch",
-                num_arr([q.get("interval_avg_batch_size", 0) for q in queue_ts]),
-            )
-            cum_batch_ref = const(
-                "cumBatch",
-                num_arr([q.get("cum_avg_batch_size", 0) for q in queue_ts]),
-            )
+            avg_batch = num_arr([q.get("interval_avg_batch_size", 0) for q in queue_ts])
+            cum_batch_ref = num_arr([q.get("cum_avg_batch_size", 0) for q in queue_ts])
         else:
-            avg_batch = const(
-                "avgBatch", num_arr([q.get("cum_avg_batch_size", 0) for q in queue_ts])
-            )
-        heap_used = const(
-            "heapUsed", num_arr([q.get("heap_used_mb", 0) for q in queue_ts])
-        )
+            avg_batch = num_arr([q.get("cum_avg_batch_size", 0) for q in queue_ts])
+        heap_used = num_arr([q.get("heap_used_mb", 0) for q in queue_ts])
         deltas = [b - a for a, b in zip(tq_vals, tq_vals[1:]) if b > a]
         q_step = max(set(deltas), key=deltas.count) if deltas else 5
         if batcher_ts_by_role:
@@ -1176,14 +893,11 @@ def main():
                 (float(r.get("t", 0) or 0), r.get("prefill", 0) or 0)
                 for r in batcher_ts_by_role
             ]
-            p_master_bq = const(
-                "pMasterBq",
-                num_arr(
-                    [
-                        round(v / max(1, p_engines), 2)
-                        for v in ts_step_values(btr_pts, tq_vals)
-                    ]
-                ),
+            p_master_bq = num_arr(
+                [
+                    round(v / max(1, p_engines), 2)
+                    for v in ts_step_values(btr_pts, tq_vals)
+                ]
             )
 
     # engine_dist：窗口 Gini（按池独立，过滤 null 点）
@@ -1195,9 +909,9 @@ def main():
     def wg_axes(pts, cats_name, data_name):
         if len(pts) > 48:
             pts = [pts[i] for i in downsample_idx(len(pts), 40)]
-        cats = const(cats_name, str_arr([str(t) for t, _ in pts]))
+        cats = str_arr([str(t) for t, _ in pts])
         reg_time(cats_name, [t for t, _ in pts])
-        data = const(data_name, num_arr([v for _, v in pts]))
+        data = num_arr([v for _, v in pts])
         return cats, data, pts
 
     p_wg_cats = p_wg_data = None
@@ -1238,8 +952,8 @@ def main():
 
     def rank_axes(vals, cats_name, data_name):
         idx = downsample_idx(len(vals), 40)
-        cats = const(cats_name, str_arr([str(i + 1) for i in idx]))
-        data = const(data_name, num_arr([vals[i] for i in idx]))
+        cats = str_arr([str(i + 1) for i in idx])
+        data = num_arr([vals[i] for i in idx])
         return cats, data
 
     PRANK = p_req_curve = None
@@ -1258,28 +972,24 @@ def main():
     if p_toks:
         sc, label = token_scale_label(max(p_toks))
         p_tok_idx = downsample_idx(len(p_toks), 40)
-        PRANK_TOK = const("PRANK_TOK", str_arr([str(i + 1) for i in p_tok_idx]))
+        PRANK_TOK = str_arr([str(i + 1) for i in p_tok_idx])
         if sc != 1:
-            p_tok_curve = const(
-                "pTokCurve",
-                num_arr([round(p_toks[i] / float(sc), 4) for i in p_tok_idx]),
-            )
+            p_tok_curve = num_arr([round(p_toks[i] / float(sc), 4) for i in p_tok_idx])
         else:
-            p_tok_curve = const("pTokCurve", num_arr([p_toks[i] for i in p_tok_idx]))
+            p_tok_curve = num_arr([p_toks[i] for i in p_tok_idx])
         p_tok_series_name = "每引擎 input tokens（" + (
             "个）" if not label else "×" + label + "）"
         )
     if d_toks:
         sc_d, label_d = token_scale_label(max(d_toks))
         d_tok_idx = downsample_idx(len(d_toks), 40)
-        DRANK_TOK = const("DRANK_TOK", str_arr([str(i + 1) for i in d_tok_idx]))
+        DRANK_TOK = str_arr([str(i + 1) for i in d_tok_idx])
         if sc_d != 1:
-            d_tok_curve = const(
-                "dTokCurve",
-                num_arr([round(d_toks[i] / float(sc_d), 4) for i in d_tok_idx]),
+            d_tok_curve = num_arr(
+                [round(d_toks[i] / float(sc_d), 4) for i in d_tok_idx]
             )
         else:
-            d_tok_curve = const("dTokCurve", num_arr([d_toks[i] for i in d_tok_idx]))
+            d_tok_curve = num_arr([d_toks[i] for i in d_tok_idx])
         d_tok_series_name = "每引擎 output tokens（" + (
             "个）" if not label_d else "×" + label_d + "）"
         )
@@ -1288,21 +998,21 @@ def main():
     if d_util:
         DRANK_UTIL, d_util_curve = rank_axes(d_util, "DRANK_UTIL", "dUtilCurve")
     if p_ly or d_ly or p_ly_all or d_ly_all:
-        LORENZ_X = const("LORENZ_X", str_arr(lorenz_x))
+        LORENZ_X = str_arr(lorenz_x)
         if p_ly:
-            p_lorenz_y = const("pLorenzY", num_arr(p_ly))
+            p_lorenz_y = num_arr(p_ly)
         if d_ly:
-            d_lorenz_y = const("dLorenzY", num_arr(d_ly))
+            d_lorenz_y = num_arr(d_ly)
         if p_ly_all:
-            p_lorenz_all_y = const("pLorenzAllY", num_arr(p_ly_all))
+            p_lorenz_all_y = num_arr(p_ly_all)
         if d_ly_all:
-            d_lorenz_all_y = const("dLorenzAllY", num_arr(d_ly_all))
+            d_lorenz_all_y = num_arr(d_ly_all)
     if p_tok_ly or d_tok_ly:
-        LORENZ_TOK_X = const("LORENZ_TOK_X", str_arr(lorenz_x))
+        LORENZ_TOK_X = str_arr(lorenz_x)
         if p_tok_ly:
-            p_tok_lorenz_y = const("pTokLorenzY", num_arr(p_tok_ly))
+            p_tok_lorenz_y = num_arr(p_tok_ly)
         if d_tok_ly:
-            d_tok_lorenz_y = const("dTokLorenzY", num_arr(d_tok_ly))
+            d_tok_lorenz_y = num_arr(d_tok_ly)
 
     # engine_dist：decode KV 时序（时间轴优先对齐 queue_timeseries）
     dkv = (ed or {}).get("decode_kv") or {}
@@ -1320,9 +1030,9 @@ def main():
     kv_step = kv_util_step = 5
     if kv_used:
         kv_t_vals, kv_step = kv_time_axis(kv_used)
-        TKV = const("TKV", str_arr(sparse_cats(kv_t_vals)))
+        TKV = str_arr(sparse_cats(kv_t_vals))
         reg_time(TKV, kv_t_vals)
-        kv_avg = const("dKvAvg", num_arr(kv_used))
+        kv_avg = num_arr(kv_used)
         if not (queue_ts and len(kv_used) == len(queue_ts)):
             warnings.append(
                 "decode_kv.used_avg_series 长度与 queue_timeseries 不一致，x 轴按 5s 采样推定"
@@ -1332,13 +1042,13 @@ def main():
             TKV_UTIL, kv_util_step = TKV, kv_step
         else:
             kv_t_vals2, kv_util_step = kv_time_axis(kv_util)
-            TKV_UTIL = const("TKV_UTIL", str_arr(sparse_cats(kv_t_vals2)))
+            TKV_UTIL = str_arr(sparse_cats(kv_t_vals2))
             reg_time(TKV_UTIL, kv_t_vals2)
             if not (queue_ts and len(kv_util) == len(queue_ts)):
                 warnings.append(
                     "decode_kv.util_pct_series 长度与 queue_timeseries 不一致，x 轴按 5s 采样推定"
                 )
-        kv_util_data = const("dKvUtil", num_arr(kv_util))
+        kv_util_data = num_arr(kv_util)
 
     # ---- 身份行（subtitle 第一层：一眼看清实验条件，20260902 三层规范化）----
     # 拓扑 + 发送模式/倍率 + ramp/duration/shards。倍率取数源 =
@@ -1372,13 +1082,9 @@ def main():
     cond_parts.append(str(shards) + " shards")
     identity = " · ".join(cond_parts)
 
-    # ---- JSX 组装 ----
-    lines = []
-    lines.append("    <Stack gap={20}>")
-    lines.append("      <H1>FlexLB 压测报告 · run " + esc_text(run_id) + "</H1>")
-    lines.append('      <Text tone="secondary">')
-    lines.append("        " + esc_text(identity))
-    lines.append("      </Text>")
+    # ---- 面板与 KPI ----
+    panels = []
+    kpis = []
     # consolidate 完整性声明：final_snapshot 非 live 时在报告头显式降级
     # 声明，避免读者把田数据当作本 run 终态。（原 slo_integrity 陈旧残留
     # 检查已随 analyze_slo_batch.py 退役删除——批决策分析内嵌 aggregate 的
@@ -1401,26 +1107,17 @@ def main():
             + " 条无发送时间戳的请求行，sum(arrivals) ≠ total_requests"
         )
     if integrity_notes:
-        # Text tone accepts only primary/secondary/tertiary/quaternary
-        # ("warning" is a chart-series tone, not a Text tone).
-        lines.append('      <Text tone="secondary">')
         for _note in integrity_notes:
-            lines.append("        ⚠ 数据完整性: " + esc_text(_note))
             warnings.append("integrity: " + _note)
-        lines.append("      </Text>")
-    lines.append("")
-    lines.append("      <Grid columns={5} gap={10}>")
-    lines.append(emit_stat(fmt_int_trunc(send_qps), send_qps_label))
-    lines.append(emit_stat(fmt_int_trunc(ok_qps), "成功调度 QPS", "success"))
-    lines.append(emit_stat(fmt_pct(error_rate), "错误率", "danger"))
-    lines.append(emit_stat(gini_stat, gini_label, gini_tone))
-    lines.append(emit_stat(pacing_label, "pacing 质量", pacing_tone))
-    lines.append("      </Grid>")
-    lines.append("")
+    kpis.append(kpi_spec(fmt_int_trunc(send_qps), send_qps_label))
+    kpis.append(kpi_spec(fmt_int_trunc(ok_qps), "成功调度 QPS", "success"))
+    kpis.append(kpi_spec(fmt_pct(error_rate), "错误率", "danger"))
+    kpis.append(kpi_spec(gini_stat, gini_label, gini_tone))
+    kpis.append(kpi_spec(pacing_label, "pacing 质量", pacing_tone))
 
     # ---- KPI 第二行：结果行（三层规范化第二层，20260902）----
     # 请求数量 / 成功数量 / 失败·cancel / 成功率 / 持续时间，全部自
-    # summary 结果类字段（total_req/success_n/error_n 在上方 Stat 段已
+    # summary 结果类字段（total_req/success_n/error_n 在上方 KPI 段已
     # 取）。error_count 与 error_breakdown 同口径（全量行），err_cancelled
     # 是其具名子桶——失败 chip 主值用总数、cancel 子集数括号注记，
     # 避免两数相加造成口径重叠误导。旧 aggregate 无 summary 值时（rows
@@ -1444,34 +1141,29 @@ def main():
         if res_ok_rate is not None and res_ok_rate >= 0.99
         else ("warning" if res_ok_rate is not None and res_ok_rate >= 0.9 else "danger")
     )
-    lines.append("      <Grid columns={5} gap={10}>")
-    lines.append(
-        emit_stat(
-            fmt_int_trunc(total_req) if total_req is not None else "—", "请求数量"
-        )
+    kpis.append(
+        kpi_spec(fmt_int_trunc(total_req) if total_req is not None else "—", "请求数量")
     )
-    lines.append(
-        emit_stat(
+    kpis.append(
+        kpi_spec(
             fmt_int_trunc(success_n) if success_n is not None else "—",
             "成功数量",
             "success",
         )
     )
-    lines.append(
-        emit_stat(fail_stat, "失败 / cancel", "danger" if error_n else "success")
+    kpis.append(
+        kpi_spec(fail_stat, "失败 / cancel", "danger" if error_n else "success")
     )
-    lines.append(
-        emit_stat(
+    kpis.append(
+        kpi_spec(
             fmt_pct(res_ok_rate) if res_ok_rate is not None else "—",
             "成功率",
             ok_rate_tone,
         )
     )
-    lines.append(
-        emit_stat((str(int(duration_s)) + "s") if duration_s else "—", "持续时间")
+    kpis.append(
+        kpi_spec((str(int(duration_s)) + "s") if duration_s else "—", "持续时间")
     )
-    lines.append("      </Grid>")
-    lines.append("")
 
     # 无节标题：每秒 QPS（发送 / 成功 / 失败）+ 失败按原因
     if per_second:
@@ -1530,15 +1222,14 @@ def main():
                 ("err", "失败（errors）", qps_errors, "danger"),
             ]
             qps_caption = "x = 压测时间（s）；y = 每秒请求数"
-        qps_chart = emit_container(
+        qps_chart = panel_spec(
             "每秒 QPS：发送 / 成功 / 失败",
             qps_caption + qps_foot,
-            emit_chart(
-                "LineChart",
+            chart_spec(
+                "line",
                 TSEC,
-                230,
                 qps_series,
-                domain="[0, " + num(nice_max(qps_max * 1.05)) + "]",
+                y_max=nice_max(qps_max * 1.05),
             ),
         )
         # 失败按原因分曲线：曲线按「实际存在的桶」自适应（具名桶优先，
@@ -1575,23 +1266,22 @@ def main():
             else:
                 cname = "err" + k[4:].title().replace("_", "")
                 vals = [(ps_by_t.get(t) or {}).get(k, 0) or 0 for t in tsec_vals]
-            ref = const(cname, num_arr(vals))
+            ref = num_arr(vals)
             err_series.append((k, lb, ref, tn))
             if vals:
                 err_max = max(err_max, max(vals))
-        fail_chart = emit_container(
+        fail_chart = panel_spec(
             "每秒失败 QPS：按原因",
             "x = 压测时间（s）；y = 每秒失败请求数。桶：deadline=客户端/调度超时；"
             "backpressure=master 准入拒绝（8430/8431/8432）；queue timeout=master"
             " 排队超时（8503）；rst_stream/goaway/unavailable/cancelled/internal"
             "=gRPC 传输层错误；empty response=零输出流；duplicate rid=请求 ID"
             " 重复；other=未归类残渣。曲线按实际存在的桶自适应，小桶自动合并",
-            emit_chart(
-                "LineChart",
+            chart_spec(
+                "line",
                 TSEC,
-                230,
                 err_series,
-                domain="[0, " + num(nice_max(err_max * 1.2)) + "]",
+                y_max=nice_max(err_max * 1.2),
             ),
         )
         qps_grid = [qps_chart, fail_chart]
@@ -1608,7 +1298,7 @@ def main():
         # 旧 aggregate 无新键 -> 回退旧单 cancel 线。
         if cancel_ts:
             tcxl_t = [r.get("t", 0) for r in cancel_ts]
-            tcxl = const("TCXL", str_arr(sparse_cats(tcxl_t)))
+            tcxl = str_arr(sparse_cats(tcxl_t))
             reg_time(tcxl, tcxl_t)
             if any(
                 "master_cancel_qps" in r or "prefill_cancel_qps" in r for r in cancel_ts
@@ -1643,7 +1333,7 @@ def main():
                     (
                         "cx_" + k,
                         label,
-                        const("cx" + k, num_arr([r.get(k, 0) or 0 for r in cancel_ts])),
+                        num_arr([r.get(k, 0) or 0 for r in cancel_ts]),
                         tone,
                     )
                 )
@@ -1652,20 +1342,18 @@ def main():
                 default=0,
             )
             qps_grid.append(
-                emit_container(
+                panel_spec(
                     cancel_title,
                     cancel_caption,
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         tcxl,
-                        230,
                         cancel_series,
-                        domain="[0, " + num(nice_max(cancel_max * 1.2)) + "]",
+                        y_max=nice_max(cancel_max * 1.2),
                     ),
                 )
             )
-        lines.extend(emit_grid(qps_grid))
-        lines.append("")
+        panels.extend(qps_grid)
 
     # 1. 延迟
     latency_containers = []
@@ -1678,21 +1366,20 @@ def main():
         all_lat.sort()
         v95 = all_lat[int(len(all_lat) * 0.95)] if all_lat else 0
         latency_containers.append(
-            emit_container(
+            panel_spec(
                 "schedule 延迟 p50 / p95 / p99",
                 "x = 压测时间（s，1s 采样）；y = 延迟（ms）"
                 "；出生秒分桶（client 发出时刻，全终态含失败行）",
-                emit_chart(
-                    "LineChart",
+                chart_spec(
+                    "line",
                     TSEC,
-                    250,
                     [
                         ("p50", "p50", sched_p50, None),
                         ("p95", "p95", sched_p95, "info"),
                         ("p99", "p99", sched_p99, "warning"),
                     ],
                     suffix=" ms",
-                    domain="[0, " + num(nice_max(v95 * 2)) + "]",
+                    y_max=nice_max(v95 * 2),
                 ),
             )
         )
@@ -1702,7 +1389,7 @@ def main():
     # 「schedule 延迟 p50 / p95 / p99」单独面板覆盖）
     if stage_ts:
         stage_t_vals = [r.get("t", 0) for r in stage_ts]
-        STAGE_T = const("STAGE_T", str_arr(sparse_cats(stage_t_vals)))
+        STAGE_T = str_arr(sparse_cats(stage_t_vals))
         reg_time(STAGE_T, stage_t_vals)
         stage_series = []
         if per_second:
@@ -1727,7 +1414,7 @@ def main():
                     ]
                     win.sort()
                     vals.append(win[len(win) // 2] if win else 0)
-                return const(cname, num_arr(vals))
+                return num_arr(vals)
 
             stage_series.append(
                 (
@@ -1745,7 +1432,7 @@ def main():
             ("ack_response_p95_ms", "ack_response p95", "ackResponseP95"),
         ]
         for key, label, cname in stage_defs:
-            ref = const(cname, num_arr([r.get(key, 0) or 0 for r in stage_ts]))
+            ref = num_arr([r.get(key, 0) or 0 for r in stage_ts])
             stage_series.append((key[:4], label, ref, None))
         stage_all_max = max(
             (
@@ -1791,16 +1478,15 @@ def main():
             "；master 链路阶段 = 完成秒（10s 窗口）"
         )
         latency_containers.append(
-            emit_container(
+            panel_spec(
                 "调度延迟：schedule p95 + master 链路阶段 p95",
                 stage_ts_cap,
-                emit_chart(
-                    "LineChart",
+                chart_spec(
+                    "line",
                     STAGE_T,
-                    250,
                     stage_series,
                     suffix=" ms",
-                    domain="[0, " + num(nice_max(stage_all_max * 1.15)) + "]",
+                    y_max=nice_max(stage_all_max * 1.15),
                 ),
             )
         )
@@ -1833,14 +1519,11 @@ def main():
                     (
                         "fe",
                         "full_e2e（p95）",
-                        const(
-                            "fullE2eP95",
-                            num_arr(
-                                [
-                                    (ps_by_t.get(t) or {}).get("full_e2e_p95", 0)
-                                    for t in tsec_vals
-                                ]
-                            ),
+                        num_arr(
+                            [
+                                (ps_by_t.get(t) or {}).get("full_e2e_p95", 0)
+                                for t in tsec_vals
+                            ]
                         ),
                         "neutral",
                     )
@@ -1850,14 +1533,11 @@ def main():
                     (
                         "ttft",
                         "ttft（p95·engine）",
-                        const(
-                            "ttftP95",
-                            num_arr(
-                                [
-                                    (ps_by_t.get(t) or {}).get("ttft_p95", 0)
-                                    for t in tsec_vals
-                                ]
-                            ),
+                        num_arr(
+                            [
+                                (ps_by_t.get(t) or {}).get("ttft_p95", 0)
+                                for t in tsec_vals
+                            ]
                         ),
                         "info",
                     )
@@ -1887,7 +1567,7 @@ def main():
                     (
                         "de",
                         "decode exec（p95·出生轴）",
-                        const("decodeExecP95Birth", num_arr(de95)),
+                        num_arr(de95),
                         "success",
                     )
                 )
@@ -1901,7 +1581,7 @@ def main():
                     (
                         "de",
                         "decode exec（p95·完成轴）",
-                        const("decodeExecP95", num_arr(de95)),
+                        num_arr(de95),
                         "success",
                     )
                 )
@@ -1914,7 +1594,7 @@ def main():
                     (
                         "pe",
                         "prefill exec（p95·出生轴）",
-                        const("prefillExecP95Birth", num_arr(pe95)),
+                        num_arr(pe95),
                         "danger",
                     )
                 )
@@ -1928,7 +1608,7 @@ def main():
                     (
                         "pe",
                         "prefill exec（p95·完成轴）",
-                        const("prefillExecP95", num_arr(pe95)),
+                        num_arr(pe95),
                         "danger",
                     )
                 )
@@ -2014,16 +1694,15 @@ def main():
                 else "四延迟：ttft / schedule / prefill exec / decode exec"
             )
             latency_containers.append(
-                emit_container(
+                panel_spec(
                     _five_title,
                     five_cap,
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         TSEC,
-                        250,
                         five_series,
                         suffix=" ms",
-                        domain="[0, " + num(nice_max(five_max * 1.15)) + "]",
+                        y_max=nice_max(five_max * 1.15),
                     ),
                 )
             )
@@ -2040,14 +1719,11 @@ def main():
                     (
                         "pw95",
                         "prefill wait（p95）",
-                        const(
-                            "pwP95",
-                            num_arr(
-                                [
-                                    (ps_by_t.get(t) or {}).get("prefill_wait_p95", 0)
-                                    for t in tsec_vals
-                                ]
-                            ),
+                        num_arr(
+                            [
+                                (ps_by_t.get(t) or {}).get("prefill_wait_p95", 0)
+                                for t in tsec_vals
+                            ]
                         ),
                         "danger",
                     )
@@ -2056,14 +1732,11 @@ def main():
                     (
                         "pw50",
                         "prefill wait（p50）",
-                        const(
-                            "pwP50",
-                            num_arr(
-                                [
-                                    (ps_by_t.get(t) or {}).get("prefill_wait_p50", 0)
-                                    for t in tsec_vals
-                                ]
-                            ),
+                        num_arr(
+                            [
+                                (ps_by_t.get(t) or {}).get("prefill_wait_p50", 0)
+                                for t in tsec_vals
+                            ]
                         ),
                         "neutral",
                     )
@@ -2073,14 +1746,11 @@ def main():
                     (
                         "dw95",
                         "decode wait（p95）",
-                        const(
-                            "dwP95",
-                            num_arr(
-                                [
-                                    (ps_by_t.get(t) or {}).get("decode_wait_p95", 0)
-                                    for t in tsec_vals
-                                ]
-                            ),
+                        num_arr(
+                            [
+                                (ps_by_t.get(t) or {}).get("decode_wait_p95", 0)
+                                for t in tsec_vals
+                            ]
                         ),
                         "success",
                     )
@@ -2089,14 +1759,11 @@ def main():
                     (
                         "dw50",
                         "decode wait（p50）",
-                        const(
-                            "dwP50",
-                            num_arr(
-                                [
-                                    (ps_by_t.get(t) or {}).get("decode_wait_p50", 0)
-                                    for t in tsec_vals
-                                ]
-                            ),
+                        num_arr(
+                            [
+                                (ps_by_t.get(t) or {}).get("decode_wait_p50", 0)
+                                for t in tsec_vals
+                            ]
                         ),
                         "neutral",
                     )
@@ -2116,16 +1783,15 @@ def main():
                 "样本量见 prefill_wait_n / decode_wait_n"
             )
             latency_containers.append(
-                emit_container(
+                panel_spec(
                     "引擎内等待：prefill / decode（p50 / p95，出生轴）",
                     wait_cap,
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         TSEC,
-                        230,
                         wait_series,
                         suffix=" ms",
-                        domain="[0, " + num(nice_max(wait_max * 1.15)) + "]",
+                        y_max=nice_max(wait_max * 1.15),
                     ),
                 )
             )
@@ -2153,18 +1819,14 @@ def main():
                 + fmt_int_trunc(sched_lat_count)
                 + "，未走完链路的行不含该阶段计时）"
             )
-        # 类目轴 const 化：反抽层 _TSX_ATTR_CATS 只认 const 引用，内联
-        # str_arr(STAGE_LABELS) 会让整个面板被丢弃（历史遗留——修复后
-        # 本面板才进 HTML，各阶段样本量/幸存者标注随之可见）。
-        STAGE_CATS = const("STAGE_CATS", str_arr(STAGE_LABELS))
+        STAGE_CATS = str_arr(STAGE_LABELS)
         latency_containers.append(
-            emit_container(
+            panel_spec(
                 "master 内部分阶段延迟（p50 / p95，全程终态分位）",
                 stage_bar_cap,
-                emit_chart(
-                    "BarChart",
+                chart_spec(
+                    "bar",
                     STAGE_CATS,
-                    250,
                     [
                         ("p50", "p50", stage_p50, None),
                         ("p95", "p95", stage_p95, "info"),
@@ -2174,11 +1836,7 @@ def main():
             )
         )
     if latency_containers:
-        lines.append("      <Divider />")
-        lines.append("")
-        lines.append("      <H2>1. 延迟</H2>")
-        lines.extend(emit_grid(latency_containers))
-        lines.append("")
+        panels.extend(latency_containers)
 
     # 2. 队列（avg/engine：集群总量 ÷ 引擎数，engine_dist.engine_count 优先）
     if queue_ts:
@@ -2208,21 +1866,20 @@ def main():
                 + " 引擎）；均为引擎侧队列（无 master 侧序列）"
             )
         queue_containers = [
-            emit_container(
+            panel_spec(
                 "Prefill 队列（avg/engine）",
                 pq_cap,
-                emit_chart("LineChart", TQ, 230, pq_series),
+                chart_spec("line", TQ, pq_series),
             ),
-            emit_container(
+            panel_spec(
                 "Decode 队列（avg/engine）",
                 q_cap
                 + "；y = 请求数（avg/engine = 集群总量 ÷ "
                 + num(d_engines)
                 + " 引擎）",
-                emit_chart(
-                    "LineChart",
+                chart_spec(
+                    "line",
                     TQ,
-                    230,
                     [
                         ("r", "running 请求数", d_run_req, "success"),
                         ("w", "waiting 请求数", d_wait, "neutral"),
@@ -2254,16 +1911,15 @@ def main():
                 "的执行批口径，与旧基线不可直接对比）"
             )
         queue_containers.append(
-            emit_container(
+            panel_spec(
                 "平均 batch size",
                 batch_cap,
-                emit_chart(
-                    "LineChart",
+                chart_spec(
+                    "line",
                     TQ,
-                    230,
                     batch_series,
                     suffix=" 请求/批",
-                    domain="[0, " + num(nice_max(batch_max * 1.2)) + "]",
+                    y_max=nice_max(batch_max * 1.2),
                 ),
             )
         )
@@ -2275,27 +1931,23 @@ def main():
         # 退化画集群总量。
         if batcher_ts_by_role:
             brt_t = [r.get("t", 0) for r in batcher_ts_by_role]
-            BRT = const("BRT", str_arr(sparse_cats(brt_t)))
+            BRT = str_arr(sparse_cats(brt_t))
             reg_time(BRT, brt_t)
-            p_bq_avg = const(
-                "batcherPrefillAvg",
-                num_arr(
-                    [
-                        round((r.get("prefill", 0) or 0) / max(1, p_engines), 2)
-                        for r in batcher_ts_by_role
-                    ]
-                ),
+            p_bq_avg = num_arr(
+                [
+                    round((r.get("prefill", 0) or 0) / max(1, p_engines), 2)
+                    for r in batcher_ts_by_role
+                ]
             )
             queue_containers.append(
-                emit_container(
+                panel_spec(
                     "master 队列深度：batcher prefill（avg/engine）",
                     "x = 压测时间（s，1s 采样）；y = 队列深度 / 引擎（prefill 集群总量 ÷ "
                     + num(p_engines)
                     + "）；仅表示等待请求数量；并发上限由 dispatcher.maxInflightPerPrefillWorker 控制",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         BRT,
-                        230,
                         [
                             ("pq", "prefill（avg/engine）", p_bq_avg, "info"),
                         ],
@@ -2316,7 +1968,7 @@ def main():
                 top_engine_keys = top_engine_keys[:5]
                 if top_engine_keys:
                     tet_t = [r.get("t", 0) for r in batcher_top_engines_ts]
-                    TET = const("TET", str_arr(sparse_cats(tet_t)))
+                    TET = str_arr(sparse_cats(tet_t))
                     reg_time(TET, tet_t)
                     te_colors = ["danger", "warning", "info", "success", "neutral"]
                     top_lines = []
@@ -2325,53 +1977,45 @@ def main():
                             (
                                 "te%d" % i,
                                 ekey,
-                                const(
-                                    "teV%d" % i,
-                                    num_arr(
-                                        [
-                                            r.get(ekey, 0) or 0
-                                            for r in batcher_top_engines_ts
-                                        ]
-                                    ),
+                                num_arr(
+                                    [
+                                        r.get(ekey, 0) or 0
+                                        for r in batcher_top_engines_ts
+                                    ]
                                 ),
                                 te_colors[i % len(te_colors)],
                             )
                         )
                     queue_containers.append(
-                        emit_container(
+                        panel_spec(
                             "P master-batcher 队列深度 Top-5",
                             "master batcher 队列深度（决策时点 1s 采样近似，5s 窗口）；"
                             "数据源 master.json prometheus_timeseries per-engine；"
                             "按峰值排序；请求数量观测，不表示 token 容量上限",
-                            emit_chart("LineChart", TET, 230, top_lines),
+                            chart_spec("line", TET, top_lines),
                         )
                     )
         if batcher_ts:
             bt_t = [r.get("t", 0) for r in batcher_ts]
-            BT = const("BT", str_arr(sparse_cats(bt_t)))
+            BT = str_arr(sparse_cats(bt_t))
             reg_time(BT, bt_t)
             # routing 队列口径：与 batcher_queue_size 同源（同一 per-engine
             # batcher 队列的集群合计）。旧 priority 桶口径（routing.queue.length）
             # 尾部 stale 冻结为上报伪影，已弃用；旧 aggregate 数据仍为旧口径。
-            routing_q = const(
-                "routingQueue",
-                num_arr([r.get("routing_queue", 0) or 0 for r in batcher_ts]),
-            )
+            routing_q = num_arr([r.get("routing_queue", 0) or 0 for r in batcher_ts])
             if not batcher_ts_by_role:
                 # 旧口径：batcher_queue 是 PREFILL+DECODE 引擎合计，不除
                 # 引擎数、不画容量线（分母口径不匹配会误导）。
-                batcher_q_total = const(
-                    "batcherQueueTotal",
-                    num_arr([r.get("batcher_queue", 0) or 0 for r in batcher_ts]),
+                batcher_q_total = num_arr(
+                    [r.get("batcher_queue", 0) or 0 for r in batcher_ts]
                 )
                 queue_containers.append(
-                    emit_container(
+                    panel_spec(
                         "master 队列深度：batcher（集群总量，P+D 合计）",
                         "x = 压测时间（s，1s 采样）；y = 队列深度（请求数，PREFILL+DECODE 集群合计）",
-                        emit_chart(
-                            "LineChart",
+                        chart_spec(
+                            "line",
                             BT,
-                            230,
                             [
                                 (
                                     "bq",
@@ -2385,16 +2029,15 @@ def main():
                 )
             if any(r.get("routing_queue") for r in batcher_ts):
                 queue_containers.append(
-                    emit_container(
+                    panel_spec(
                         "master 队列深度：routing（集群总量，batcher 同源口径）",
                         "x = 压测时间（s，1s 采样）；y = 队列深度（请求数，集群总量）。"
                         "口径：与 batcher_queue_size 同源（同一 per-engine batcher 队列的集群合计，"
                         "尾部正确归零）；旧 priority 桶口径（routing.queue.length）尾部 stale 冻结"
                         "为上报伪影，已弃用；旧 aggregate 数据仍为旧口径",
-                        emit_chart(
-                            "LineChart",
+                        chart_spec(
+                            "line",
                             BT,
-                            230,
                             [
                                 (
                                     "rq",
@@ -2410,7 +2053,7 @@ def main():
         # 每秒 dispatch 速率；与 batcher 队列同 grid 便于对照）
         if dispatch_reason_ts:
             drt_t = [r.get("t", 0) for r in dispatch_reason_ts]
-            DRT = const("DRT", str_arr(sparse_cats(drt_t)))
+            DRT = str_arr(sparse_cats(drt_t))
             reg_time(DRT, drt_t)
             dr_known = (
                 ("fixed_window_timeout", "fixed_window_timeout", "warning"),
@@ -2421,10 +2064,7 @@ def main():
                 (
                     key,
                     label,
-                    const(
-                        "dr" + key,
-                        num_arr([r.get(key, 0) or 0 for r in dispatch_reason_ts]),
-                    ),
+                    num_arr([r.get(key, 0) or 0 for r in dispatch_reason_ts]),
                     color,
                 )
                 for key, label, color in dr_known
@@ -2439,28 +2079,25 @@ def main():
                     (
                         "drOther",
                         "其他 reason",
-                        const(
-                            "drOther",
-                            num_arr(
-                                [
-                                    sum((r.get(k, 0) or 0) for k in other_keys)
-                                    for r in dispatch_reason_ts
-                                ]
-                            ),
+                        num_arr(
+                            [
+                                sum((r.get(k, 0) or 0) for k in other_keys)
+                                for r in dispatch_reason_ts
+                            ]
                         ),
                         "neutral",
                     )
                 )
             queue_containers.append(
-                emit_container(
+                panel_spec(
                     "dispatch 决策原因（每秒批次数）",
                     "x = 压测时间（s，1s 采样）；y = dispatch 批次数 / 秒（按 reason）",
-                    emit_chart("LineChart", DRT, 230, dr_lines),
+                    chart_spec("line", DRT, dr_lines),
                 )
             )
         if dispatch_batch_size_ts:
             bst_t = [r.get("t", 0) for r in dispatch_batch_size_ts]
-            BST = const("BST", str_arr(sparse_cats(bst_t)))
+            BST = str_arr(sparse_cats(bst_t))
             reg_time(BST, bst_t)
             bs_known = (
                 ("fixed_window_timeout", "fixed_window_timeout", "warning"),
@@ -2476,7 +2113,7 @@ def main():
                     (
                         "bs_" + key,
                         label,
-                        const("bs" + key, num_arr(vals)),
+                        num_arr(vals),
                         color,
                     )
                 )
@@ -2523,7 +2160,7 @@ def main():
                     (
                         "bs_avg",
                         "avg（混合）",
-                        const("bsAvgMix", num_arr(bs_avg_vals)),
+                        num_arr(bs_avg_vals),
                         "primary",
                     )
                 )
@@ -2535,17 +2172,13 @@ def main():
                     "queue_timeseries 计数器口径，按采样窗 step 对齐）"
                 )
                 queue_containers.append(
-                    emit_container(
+                    panel_spec(
                         "dispatch 批大小（按 reason，引擎平均）",
                         bs_caption,
-                        emit_chart("LineChart", BST, 230, bs_lines),
+                        chart_spec("line", BST, bs_lines),
                     )
                 )
-        lines.append("      <Divider />")
-        lines.append("")
-        lines.append("      <H2>2. 队列（集群总量）</H2>")
-        lines.extend(emit_grid(queue_containers))
-        lines.append("")
+        panels.extend(queue_containers)
 
     # 2.1 队列 Top/Bottom-5 引擎同图对比（queue_top_bottom_ts；每队列
     # 一张合并图：Top-5（负载最重）与 Bottom-5（最轻）同图，图例带
@@ -2629,10 +2262,7 @@ def main():
             # bottom-only 曲线若 t 网格不同则按前向 step 对齐。
             rows_ref = top_rows or bot_rows
             t_grid = [r.get("t", 0) for r in rows_ref]
-            tb_cats = const(
-                "tbT" + tb_key,
-                str_arr(sparse_cats(t_grid)),
-            )
+            tb_cats = str_arr(sparse_cats(t_grid))
             reg_time(tb_cats, t_grid)
             tb_series = []
             for i, (ip, label, rows) in enumerate(merged):
@@ -2645,27 +2275,23 @@ def main():
                     (
                         "tb%d" % i,
                         label,
-                        const("tbV" + tb_key + str(i), num_arr(vals)),
+                        num_arr(vals),
                         None,
                     )
                 )
             tb_containers.append(
-                emit_container(
+                panel_spec(
                     tb_title + " Top-5 / Bottom-5",
                     "x = 压测时间（s，5s 窗口采样）；y = "
                     + tb_cap
                     + "；Top-5（负载最重）与 Bottom-5（最轻）同图对比，"
                     "图例 Top/Bottom 前缀区分（交集引擎仅一条线，标"
                     " Top+Bottom）",
-                    emit_chart("LineChart", tb_cats, 230, tb_series),
+                    chart_spec("line", tb_cats, tb_series),
                 )
             )
         if tb_containers:
-            lines.append("      <Divider />")
-            lines.append("")
-            lines.append("      <H2>2.1 队列 Top-5 / Bottom-5 引擎（同图对比）</H2>")
-            lines.extend(emit_grid(tb_containers))
-            lines.append("")
+            panels.extend(tb_containers)
 
     # 2.2 输入/输出 token 长度时序（出生秒分桶）：replay run 的长度
     # 组成随 trace loop 周期变化，与「平均 batch size」/队列时序上下
@@ -2676,49 +2302,43 @@ def main():
     if input_len_p50 is not None:
         il_max = max((p.get("input_len_p95", 0) or 0) for p in per_second)
         tok_containers.append(
-            emit_container(
+            panel_spec(
                 "输入 token 长度（每秒 p50 / p95）",
                 "x = 压测时间（s，1s 采样）；y = input_len（token）；"
                 "按出生秒（send_start）分桶，含全部带时间戳请求行",
-                emit_chart(
-                    "LineChart",
+                chart_spec(
+                    "line",
                     TSEC,
-                    230,
                     [
                         ("ilp50", "input p50", input_len_p50, "info"),
                         ("ilp95", "input p95", input_len_p95, "warning"),
                     ],
                     suffix=" tok",
-                    domain="[0, " + num(nice_max(il_max * 1.1)) + "]",
+                    y_max=nice_max(il_max * 1.1),
                 ),
             )
         )
     if output_len_p50 is not None:
         ol_max = max((p.get("output_len_p95", 0) or 0) for p in per_second)
         tok_containers.append(
-            emit_container(
+            panel_spec(
                 "输出 token 长度（每秒 p50 / p95）",
                 "x = 压测时间（s，1s 采样）；y = output_len（token）；"
                 "按出生秒（send_start）分桶，含全部带时间戳请求行",
-                emit_chart(
-                    "LineChart",
+                chart_spec(
+                    "line",
                     TSEC,
-                    230,
                     [
                         ("olp50", "output p50", output_len_p50, "success"),
                         ("olp95", "output p95", output_len_p95, "danger"),
                     ],
                     suffix=" tok",
-                    domain="[0, " + num(nice_max(ol_max * 1.1)) + "]",
+                    y_max=nice_max(ol_max * 1.1),
                 ),
             )
         )
     if tok_containers:
-        lines.append("      <Divider />")
-        lines.append("")
-        lines.append("      <H2>2.2 输入 / 输出 token 长度（出生秒分桶）</H2>")
-        lines.extend(emit_grid(tok_containers))
-        lines.append("")
+        panels.extend(tok_containers)
 
     # Execution TPS and wall TPS are separate charts. The context pair can
     # have different execution denominators; its difference is not cache gain.
@@ -2752,7 +2372,7 @@ def main():
             / tps_p_div
         )
         tps_containers.append(
-            emit_container(
+            panel_spec(
                 "P 角色执行 TPS：with cache vs compute",
                 "P 角色（prefill，生产大盘同款 hippo_role 切分读法）；"
                 "x = 压测时间（s，1s 窗口）；"
@@ -2766,10 +2386,9 @@ def main():
                     if sm.get("cache_saved_tokens") is not None
                     else ""
                 ),
-                emit_chart(
-                    "LineChart",
+                chart_spec(
+                    "line",
                     TSEC,
-                    230,
                     [
                         (
                             "mcc",
@@ -2780,20 +2399,32 @@ def main():
                         ("mct", _p_compute_name, mock_ctx_tps, "info"),
                     ],
                     suffix=" tok/s",
-                    domain="[0, " + num(nice_max(_ctx_cap * 1.15)) + "]",
+                    y_max=nice_max(_ctx_cap * 1.15),
                 ),
             )
         )
     if mock_ctx_wall_tps is not None and mock_ctx_wall_cache_tps is not None:
-        tps_containers.append(emit_container(
-            "P 角色 wall TPS：实际时间窗吞吐",
-            "同一 elapsed report window 内 Σtokens ÷ 墙钟秒；每引擎平均（集群和 ÷ P 数）。"
-            "with cache 与 compute 共享分母，可用于吞吐/缓存复用分析；长批次完成前不补零。",
-            emit_chart("LineChart", TSEC, 230, [
-                ("mcw", "compute wall TPS", mock_ctx_wall_tps, "info"),
-                ("mcwc", "with cache wall TPS", mock_ctx_wall_cache_tps, "success"),
-            ], suffix=" tok/s"),
-        ))
+        tps_containers.append(
+            panel_spec(
+                "P 角色 wall TPS：实际时间窗吞吐",
+                "同一 elapsed report window 内 Σtokens ÷ 墙钟秒；每引擎平均（集群和 ÷ P 数）。"
+                "with cache 与 compute 共享分母，可用于吞吐/缓存复用分析；长批次完成前不补零。",
+                chart_spec(
+                    "line",
+                    TSEC,
+                    [
+                        ("mcw", "compute wall TPS", mock_ctx_wall_tps, "info"),
+                        (
+                            "mcwc",
+                            "with cache wall TPS",
+                            mock_ctx_wall_cache_tps,
+                            "success",
+                        ),
+                    ],
+                    suffix=" tok/s",
+                ),
+            )
+        )
     if mock_gen_tps is not None:
         if tps_d_engines:
             _d_y_scope = (
@@ -2820,28 +2451,23 @@ def main():
             max((p.get("generate_tps", 0) or 0) for p in mock_tps_rows) / tps_d_div
         )
         tps_containers.append(
-            emit_container(
+            panel_spec(
                 "D 角色 generate TPS（rtp_llm_generate_tps）",
                 "D 角色（decode，生产大盘同款 hippo_role 切分读法）；"
                 "x = 压测时间（s，1s 窗口）；" + _d_y_scope + "，完成事件记账：Σol",
-                emit_chart(
-                    "LineChart",
+                chart_spec(
+                    "line",
                     TSEC,
-                    230,
                     [
                         ("mgt", _d_series_name, mock_gen_tps, "success"),
                     ],
                     suffix=" tok/s",
-                    domain="[0, " + num(nice_max(_gen_cap * 1.15)) + "]",
+                    y_max=nice_max(_gen_cap * 1.15),
                 ),
             )
         )
     if tps_containers:
-        lines.append("      <Divider />")
-        lines.append("")
-        lines.append("      <H2>2.3 TPS（生产同构，P/D 角色切分）</H2>")
-        lines.extend(emit_grid(tps_containers))
-        lines.append("")
+        panels.extend(tps_containers)
 
     # 3. 调度均衡性（窗口 Gini，仅当 engine_dist 有数据）
     if p_wg_pts or d_wg_pts:
@@ -2850,15 +2476,14 @@ def main():
             p_gini_max = max(v for _, v in p_wg_pts)
             p_cap = 0.5 if p_gini_max <= 0.5 else nice_max(p_gini_max)
             gini_containers.append(
-                emit_container(
+                panel_spec(
                     "Prefill 路由均衡（窗口 Gini）",
                     "x = 压测时间（s）；y = 窗口内各引擎请求数的 Gini（0-1）",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         p_wg_cats,
-                        230,
                         [("pg", "prefill 窗口 Gini", p_wg_data, "info")],
-                        domain="[0, " + num(p_cap) + "]",
+                        y_max=p_cap,
                     ),
                 )
             )
@@ -2866,23 +2491,18 @@ def main():
             d_gini_max = max(v for _, v in d_wg_pts)
             d_cap = 0.5 if d_gini_max <= 0.5 else nice_max(d_gini_max)
             gini_containers.append(
-                emit_container(
+                panel_spec(
                     "Decode 路由均衡（窗口 Gini）",
                     "x = 压测时间（s）；y = 窗口内各 decode 引擎请求数的 Gini（0-1）",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         d_wg_cats,
-                        230,
                         [("dg", "decode 窗口 Gini", d_wg_data, "success")],
-                        domain="[0, " + num(d_cap) + "]",
+                        y_max=d_cap,
                     ),
                 )
             )
-        lines.append("      <Divider />")
-        lines.append("")
-        lines.append("      <H2>3. 调度均衡性（P / D 分开）</H2>")
-        lines.extend(emit_grid(gini_containers))
-        lines.append("")
+        panels.extend(gini_containers)
 
     # 3.1 引擎维度分布（x = 池内引擎排名，按指标值降序；三口径各自独立图）
     has_31 = bool(
@@ -2898,52 +2518,46 @@ def main():
         or d_tok_ly
     )
     if has_31:
-        if not (p_wg_pts or d_wg_pts):
-            lines.append("      <Divider />")
-            lines.append("")
         dist_containers = []
         if p_reqs:
             dist_containers.append(
-                emit_container(
+                panel_spec(
                     "Prefill 引擎请求数分布",
                     "x = prefill 引擎排名（1.."
                     + str(len(p_reqs))
                     + "，左端请求数最多）；y = 每引擎请求数（个）",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         PRANK,
-                        230,
                         [("req", "每引擎请求数（个）", p_req_curve, "info")],
                     ),
                 )
             )
         if p_toks:
             dist_containers.append(
-                emit_container(
+                panel_spec(
                     "Prefill 引擎 input tokens 分布",
                     "x = prefill 引擎排名（1.."
                     + str(len(p_toks))
                     + "，左端 tokens 最多）；y = "
                     + p_tok_series_name,
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         PRANK_TOK,
-                        230,
                         [("tok", p_tok_series_name, p_tok_curve, "neutral")],
                     ),
                 )
             )
         if p_util:
             dist_containers.append(
-                emit_container(
+                panel_spec(
                     "Prefill 引擎利用率分布",
                     "x = prefill 引擎排名（1.."
                     + str(len(p_util))
                     + "）；y = busy/elapsed 利用率 %（并发 1，≤100%）",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         PRANK_UTIL,
-                        230,
                         [("util", "prefill 利用率（%）", p_util_curve, "warning")],
                         suffix="%",
                     ),
@@ -2951,46 +2565,43 @@ def main():
             )
         if d_reqs:
             dist_containers.append(
-                emit_container(
+                panel_spec(
                     "Decode 引擎请求数分布",
                     "x = decode 引擎排名（1.."
                     + str(len(d_reqs))
                     + "，左端请求数最多）；y = 每引擎请求数（个）",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         DRANK,
-                        230,
                         [("req", "每引擎请求数（个）", d_req_curve, "success")],
                     ),
                 )
             )
         if d_toks:
             dist_containers.append(
-                emit_container(
+                panel_spec(
                     "Decode 引擎 output tokens 分布",
                     "x = decode 引擎排名（1.."
                     + str(len(d_toks))
                     + "，左端 tokens 最多）；y = "
                     + d_tok_series_name,
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         DRANK_TOK,
-                        230,
                         [("tok", d_tok_series_name, d_tok_curve, "neutral")],
                     ),
                 )
             )
         if d_util:
             dist_containers.append(
-                emit_container(
+                panel_spec(
                     "Decode 引擎利用率分布",
                     "x = decode 引擎排名（1.."
                     + str(len(d_util))
                     + "）；y = busy/elapsed = 平均并发请求数（软并发，可超 100%）",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         DRANK_UTIL,
-                        230,
                         [("util", "decode 利用率（%）", d_util_curve, "warning")],
                         suffix="%",
                     ),
@@ -3019,10 +2630,10 @@ def main():
                     "决策行（含失败/超时，高错误率 run 下二者差距即幸存者偏差）"
                 )
             dist_containers.append(
-                emit_container(
+                panel_spec(
                     "洛伦兹曲线：请求数（P / D）",
                     lz_cap,
-                    emit_chart("LineChart", LORENZ_X, 230, lz_series, suffix="%"),
+                    chart_spec("line", LORENZ_X, lz_series, suffix="%"),
                 )
             )
         if p_tok_ly or d_tok_ly:
@@ -3032,62 +2643,42 @@ def main():
             if d_tok_ly:
                 lzt_series.append(("d", "decode 洛伦兹", d_tok_lorenz_y, "success"))
             dist_containers.append(
-                emit_container(
+                panel_spec(
                     "洛伦兹曲线：tokens（P / D）",
                     "x = 引擎累计占比 %（从最轻到最重）；y = tokens 累计占比 %",
-                    emit_chart("LineChart", LORENZ_TOK_X, 230, lzt_series, suffix="%"),
+                    chart_spec("line", LORENZ_TOK_X, lzt_series, suffix="%"),
                 )
             )
-        lines.append(
-            "      <H2>3.1 引擎维度分布（x = 池内引擎排名，按指标值降序）</H2>"
-        )
-        lines.extend(emit_grid(dist_containers))
-        lines.append("")
+        panels.extend(dist_containers)
 
     # 4. In-flight（master scheduler + P/D 引擎侧，master G4 快照）
     if inflight_ts or inflight_age or inflight_age_by_role:
         inf_containers = []
         if inflight_ts:
             ift_t = [r.get("t", 0) for r in inflight_ts]
-            IFT = const("IFT", str_arr(sparse_cats(ift_t)))
+            IFT = str_arr(sparse_cats(ift_t))
             reg_time(IFT, ift_t)
-            inf_sched = const(
-                "infSched",
-                num_arr([r.get("scheduler", 0) or 0 for r in inflight_ts]),
-            )
-            inf_pb = const(
-                "infPB",
-                num_arr([r.get("prefill_batches", 0) or 0 for r in inflight_ts]),
-            )
-            inf_pr = const(
-                "infPR",
-                num_arr([r.get("prefill_requests", 0) or 0 for r in inflight_ts]),
-            )
-            inf_dres = const(
-                "infDRes",
-                num_arr([r.get("decode_reserved", 0) or 0 for r in inflight_ts]),
-            )
-            inf_drun = const(
-                "infDRun",
-                num_arr(
-                    [r.get("decode_confirmed_running", 0) or 0 for r in inflight_ts]
-                ),
+            inf_sched = num_arr([r.get("scheduler", 0) or 0 for r in inflight_ts])
+            inf_pb = num_arr([r.get("prefill_batches", 0) or 0 for r in inflight_ts])
+            inf_pr = num_arr([r.get("prefill_requests", 0) or 0 for r in inflight_ts])
+            inf_dres = num_arr([r.get("decode_reserved", 0) or 0 for r in inflight_ts])
+            inf_drun = num_arr(
+                [r.get("decode_confirmed_running", 0) or 0 for r in inflight_ts]
             )
             # 拆双面板（20260831）：scheduler/decode 侧量级 0~5500，prefill
             # 请求/批 0~600，单 y 轴会把 prefill 批（~24）压成直线。
             # 面板 A：scheduler（master 账本请求数）+ decode reserved（master
             # 预约未确认）+ decode confirmed running（引擎确认运行）。
             inf_containers.append(
-                emit_container(
+                panel_spec(
                     "In-flight：scheduler / decode",
                     "x = 压测时间（s，快照采样）；y = in-flight 请求数（集群总量）。"
                     "scheduler = master 账本请求数；decode reserved = master 预约"
                     "未确认（G4 reserved_total，含尚未被引擎确认的预约）；"
                     "decode confirmed running = 引擎确认运行中（confirmed_running）",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         IFT,
-                        230,
                         [
                             ("sch", "scheduler in-flight", inf_sched, "warning"),
                             (
@@ -3109,15 +2700,14 @@ def main():
             # 面板 B：prefill 请求（master 账本请求数）与 prefill 批
             # （引擎侧 in-flight 批）同轴，量级 0~600 两条均可见。
             inf_containers.append(
-                emit_container(
+                panel_spec(
                     "Prefill in-flight：请求 / 批",
                     "x = 压测时间（s，快照采样）；y = in-flight 数（集群总量）。"
                     "请求数 = prefill_endpoints[].inflight_requests（master "
                     "账本口径）；批数 = inflight_batches（引擎侧 in-flight 批）",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         IFT,
-                        230,
                         [
                             ("pr", "prefill in-flight 请求数", inf_pr, "info"),
                             ("pb", "prefill in-flight 批数", inf_pb, "warning"),
@@ -3139,7 +2729,7 @@ def main():
                         for row in rows
                     }
                 )
-                IAT = const("IAT", str_arr(sparse_cats(t_grid)))
+                IAT = str_arr(sparse_cats(t_grid))
                 reg_time(IAT, t_grid)
                 age_role_known = (
                     ("scheduler", "scheduler ledger", "danger"),
@@ -3157,11 +2747,8 @@ def main():
                         (
                             key,
                             label,
-                            const(
-                                "age" + key.capitalize(),
-                                num_arr(
-                                    [round(role_maps[key].get(t, 0), 1) for t in t_grid]
-                                ),
+                            num_arr(
+                                [round(role_maps[key].get(t, 0), 1) for t in t_grid]
                             ),
                             color,
                         )
@@ -3174,11 +2761,8 @@ def main():
                         (
                             key,
                             key + "（max）",
-                            const(
-                                "age" + key.capitalize(),
-                                num_arr(
-                                    [round(role_maps[key].get(t, 0), 1) for t in t_grid]
-                                ),
+                            num_arr(
+                                [round(role_maps[key].get(t, 0), 1) for t in t_grid]
                             ),
                             "neutral",
                         )
@@ -3199,11 +2783,9 @@ def main():
                 )
             else:
                 iat_t = [r.get("t", 0) for r in inflight_age]
-                IAT = const("IAT", str_arr(sparse_cats(iat_t)))
+                IAT = str_arr(sparse_cats(iat_t))
                 reg_time(IAT, iat_t)
-                inf_age = const(
-                    "infAge", num_arr([r.get("age_ms", 0) or 0 for r in inflight_age])
-                )
+                inf_age = num_arr([r.get("age_ms", 0) or 0 for r in inflight_age])
                 age_series = [("age", "max age（ms）", inf_age, "danger")]
                 age_max = max((r.get("age_ms", 0) or 0) for r in inflight_age)
                 age_caption = (
@@ -3211,24 +2793,19 @@ def main():
                     "集群 max，未按 role 拆分——旧 aggregate 无 role 维度）"
                 )
             inf_containers.append(
-                emit_container(
+                panel_spec(
                     "In-flight 最长滞留时间（按 role）",
                     age_caption,
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         IAT,
-                        230,
                         age_series,
                         suffix=" ms",
-                        domain="[0, " + num(nice_max(age_max * 1.15)) + "]",
+                        y_max=nice_max(age_max * 1.15),
                     ),
                 )
             )
-        lines.append("      <Divider />")
-        lines.append("")
-        lines.append("      <H2>4. In-flight</H2>")
-        lines.extend(emit_grid(inf_containers))
-        lines.append("")
+        panels.extend(inf_containers)
 
     # 5. KV（kv_ts 集群口径优先；旧 engine_dist decode_kv 每引擎均值回退）
     # 上方 master 侧面板 + 下方 5b 引擎侧块池面板（两种视角同节并存，
@@ -3236,17 +2813,12 @@ def main():
     kv_containers = []
     if kv_ts:
         kvt_t = [r.get("t", 0) for r in kv_ts]
-        KVT = const("KVT", str_arr(sparse_cats(kvt_t)))
+        KVT = str_arr(sparse_cats(kvt_t))
         reg_time(KVT, kvt_t)
-        kv_used_tok = const(
-            "kvUsedTokens",
-            num_arr([r.get("used_tokens", 0) or 0 for r in kv_ts]),
-        )
+        kv_used_tok = num_arr([r.get("used_tokens", 0) or 0 for r in kv_ts])
         kv_cap_vals = [r.get("capacity_tokens", 0) or 0 for r in kv_ts]
         kv_cap_max = max(kv_cap_vals) if kv_cap_vals else 0
-        kv_used_pct = const(
-            "kvUsedPct", num_arr([r.get("used_pct", 0) or 0 for r in kv_ts])
-        )
+        kv_used_pct = num_arr([r.get("used_pct", 0) or 0 for r in kv_ts])
         kv_used_lines = [("used", "KV 已用 tokens", kv_used_tok, "info")]
         if kv_cap_max > 0:
             # 总容量参考线（used+available 之和，有限容量才画；旧 aggregate
@@ -3255,12 +2827,12 @@ def main():
                 (
                     "cap",
                     "集群总容量",
-                    const("kvCapTokens", num_arr(kv_cap_vals)),
+                    num_arr(kv_cap_vals),
                     "danger",
                 )
             )
         kv_containers.append(
-            emit_container(
+            panel_spec(
                 "KV cache 已用（集群总量）",
                 "x = 压测时间（s，1s 采样）；y = 已用 KV tokens（集群总量）"
                 + (
@@ -3268,17 +2840,16 @@ def main():
                     if kv_cap_max > 0
                     else "（aggregate 无 capacity_tokens，不画容量线）"
                 ),
-                emit_chart("LineChart", KVT, 230, kv_used_lines),
+                chart_spec("line", KVT, kv_used_lines),
             )
         )
         kv_containers.append(
-            emit_container(
+            panel_spec(
                 "KV cache 利用率（集群）",
                 "x = 压测时间（s，1s 采样）；y = 已用 /（已用 + 可用）%",
-                emit_chart(
-                    "LineChart",
+                chart_spec(
+                    "line",
                     KVT,
-                    230,
                     [("pct", "KV 利用率（%）", kv_used_pct, "warning")],
                     suffix="%",
                 ),
@@ -3287,28 +2858,26 @@ def main():
     else:
         if kv_used:
             kv_containers.append(
-                emit_container(
+                panel_spec(
                     "Decode KV 已用量",
                     "x = 压测时间（s，"
                     + str(kv_step)
                     + "s 采样）；y = 每引擎平均已用 KV tokens",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         TKV,
-                        230,
                         [("avg", "decode KV 已用（每引擎均值）", kv_avg, "info")],
                     ),
                 )
             )
         if kv_util:
             kv_containers.append(
-                emit_container(
+                panel_spec(
                     "Decode KV 利用率",
                     "x = 压测时间（s，" + str(kv_util_step) + "s 采样）；y = 利用率 %",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         TKV_UTIL,
-                        230,
                         [("util", "decode KV 利用率（%）", kv_util_data, "warning")],
                         suffix="%",
                     ),
@@ -3395,7 +2964,7 @@ def main():
         if not _mean:
             continue
         _grid = sorted(_mean)
-        _AXIS = const(_axis_name, str_arr(sparse_cats(_grid)))
+        _AXIS = str_arr(sparse_cats(_grid))
         reg_time(_AXIS, _grid)
         if _engines:
             _y_scope = (
@@ -3420,11 +2989,8 @@ def main():
                 (
                     _short.lower(),
                     _label + _per,
-                    const(
-                        _val_prefix + _short,
-                        num_arr(
-                            [round((_mean[t].get(_col) or 0) / _div, 1) for t in _grid]
-                        ),
+                    num_arr(
+                        [round((_mean[t].get(_col) or 0) / _div, 1) for t in _grid]
                     ),
                     _color,
                 )
@@ -3436,12 +3002,12 @@ def main():
             (
                 "tot",
                 "池大小 total" + _per,
-                const(_val_prefix + "Tot", num_arr(_tot_vals)),
+                num_arr(_tot_vals),
                 "info",
             )
         )
         kv_pool_containers.append(
-            emit_container(
+            panel_spec(
                 _tag + " 角色块池三态分解（引擎侧）",
                 _tag
                 + " 角色（"
@@ -3454,12 +3020,11 @@ def main():
                 "恒等式 available = 池大小 − held − referenced，完成移交 LRU 后"
                 "恢复可用（释放 ≠ 删除）；引擎侧口径（引擎 /metrics 自报），"
                 "与上方 master 侧 KV tokens 面板（调度器聚合视角）口径不同",
-                emit_chart(
-                    "LineChart",
+                chart_spec(
+                    "line",
                     _AXIS,
-                    230,
                     _lines,
-                    domain="[0, " + num(nice_max(max(_tot_vals) * 1.15)) + "]",
+                    y_max=nice_max(max(_tot_vals) * 1.15),
                 ),
             )
         )
@@ -3472,7 +3037,7 @@ def main():
             _rm = (_kvp_rate.get(role) or {}).get(col) or {}
             return [round(_rm.get(t, 0) / div, 2) for t in _kvp_union]
 
-        _RAXIS = const("kvPoolRT", str_arr(sparse_cats(_kvp_union)))
+        _RAXIS = str_arr(sparse_cats(_kvp_union))
         reg_time(_RAXIS, _kvp_union)
         # 准入失败面板：prefill 同步 602 拒绝与 decode 侧准入/增长终态拒绝分线记账
         # （正常健康档全零——过载档才非零）。
@@ -3487,7 +3052,7 @@ def main():
                     "pRej",
                     "P·LACK_MEM 602 同步拒绝"
                     + ("（÷N）" if tps_p_engines else "（集群和）"),
-                    const("kvPoolRejP", num_arr(_vals)),
+                    num_arr(_vals),
                     "danger",
                 )
             )
@@ -3504,7 +3069,7 @@ def main():
                     "dKvFail",
                     "D·decode KV 拒绝（终态 LACK_MEM）"
                     + ("（÷N）" if tps_d_engines else "（集群和）"),
-                    const("kvPoolDegD", num_arr(_vals)),
+                    num_arr(_vals),
                     "warning",
                 )
             )
@@ -3515,7 +3080,7 @@ def main():
             )
         if _adm_lines:
             kv_pool_containers.append(
-                emit_container(
+                panel_spec(
                     "KV 准入失败速率（引擎侧）",
                     "x = 压测时间（s，1s 采样）；y = 次/s，相邻有效桶累计差分 ÷ 桶间隔；"
                     + "；".join(_adm_scopes)
@@ -3523,12 +3088,11 @@ def main():
                     " decode 侧 KV 准入/增长拒绝（终态 LACK_MEM，请求终止 + "
                     "kv_admission_fails 计数，含 P 入队预租被拒）分线"
                     "记账互不混线；正常健康档全零——非零即 KV 池过载信号",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         _RAXIS,
-                        230,
                         _adm_lines,
-                        domain="[0, " + num(nice_max(_adm_max * 1.15)) + "]",
+                        y_max=nice_max(_adm_max * 1.15),
                     ),
                 )
             )
@@ -3550,7 +3114,7 @@ def main():
                 (
                     "ev" + _tag,
                     _tag + "·LRU evictions" + ("（÷N）" if _engines else "（集群和）"),
-                    const("kvPoolEv" + _tag, num_arr(_vals)),
+                    num_arr(_vals),
                     "info" if _tag == "P" else "warning",
                 )
             )
@@ -3561,19 +3125,18 @@ def main():
             )
         if _ev_lines:
             kv_pool_containers.append(
-                emit_container(
+                panel_spec(
                     "LRU evictions 速率（引擎侧）",
                     "x = 压测时间（s，1s 采样）；y = 块/s，相邻有效桶累计差分 ÷ 桶间隔；"
                     + "；".join(_ev_scopes)
                     + "；LRU 淘汰与分配耦合：池余量不足时先淘汰纯 LRU 块再分配"
                     "（mock_engine_cache_evictions_total 累计 counter 差分，"
                     "引擎 /metrics 自报）",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         _RAXIS,
-                        230,
                         _ev_lines,
-                        domain="[0, " + num(nice_max(_ev_max * 1.15)) + "]",
+                        y_max=nice_max(_ev_max * 1.15),
                     ),
                 )
             )
@@ -3588,7 +3151,7 @@ def main():
                 else "y = 块/s 集群和（引擎数未知）"
             )
             kv_pool_containers.append(
-                emit_container(
+                panel_spec(
                     "decode 复用块速率（引擎侧）",
                     "D 角色（decode）；x = 压测时间（s，1s 采样）；"
                     + _reuse_scope
@@ -3598,20 +3161,19 @@ def main():
                     " 「decode 越用省越多」正反馈"
                     "（mock_engine_decode_reuse_blocks_total 累计 counter 差分，"
                     "never drained）",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         _RAXIS,
-                        230,
                         [
                             (
                                 "reuse",
                                 "decode 命中块"
                                 + ("（÷N）" if tps_d_engines else "（集群和）"),
-                                const("kvPoolReuseD", num_arr(_vals)),
+                                num_arr(_vals),
                                 "success",
                             )
                         ],
-                        domain="[0, " + num(nice_max(_reuse_max * 1.15)) + "]",
+                        y_max=nice_max(_reuse_max * 1.15),
                     ),
                 )
             )
@@ -3635,9 +3197,8 @@ def main():
     cache_hit_route_present = False
     cache_hit_depth_present = False
     cache_hit_kpi_present = False
-    # 三口径 run 级读数柱状图（「KPI/读数行」的 canvas 呈现形态：反抽
-    # KPI 通道 kpis[:5] 属头部紧凑行，三口径读数以 BarChart 呈现进
-    # HTML——categories 即口径名（含语义标注串），caption 注明与生产
+    # 三口径 run 级读数以柱状图呈现；头部 KPI 仅保留两行结果。
+    # categories 即口径名（含语义标注串），caption 注明与生产
     # 对齐关系与差值读法；各口径独立缺省（缺的口径不画柱）。
     _ch_bar_cats = []
     _ch_bar_vals = []
@@ -3652,7 +3213,7 @@ def main():
         _ch_bar_vals.append(cache_hit_sm["engine_token_hit_pct"])
     if _ch_bar_vals:
         cache_hit_containers.append(
-            emit_container(
+            panel_spec(
                 "cache 命中率三口径：run 级汇总",
                 "三口径 run 级命中率（各口径独立缺省）：master 路由口径"
                 "（master 选引擎时 GlobalCacheIndex 前缀匹配，master 以为能"
@@ -3663,20 +3224,19 @@ def main():
                 "master 路由 − token 级实际 = 调度损耗，key 级理论 − "
                 "token 级实际 = 命中深度覆盖（部分前缀命中：命中 key 但"
                 "前缀在第 N 块断掉）",
-                emit_chart(
-                    "BarChart",
-                    const("cacheHitKpiCats", str_arr(_ch_bar_cats)),
-                    230,
+                chart_spec(
+                    "bar",
+                    str_arr(_ch_bar_cats),
                     [
                         (
                             "hit",
                             "run 级命中率",
-                            const("cacheHitKpiVals", num_arr(_ch_bar_vals)),
+                            num_arr(_ch_bar_vals),
                             "info",
                         )
                     ],
                     suffix="%",
-                    domain="[0, 100]",
+                    y_max=100,
                 ),
             )
         )
@@ -3718,17 +3278,16 @@ def main():
                     vals.append(round(_v * 100.0, 1))
             return vals
 
-        _CH_AXIS = const("cacheHitT", str_arr(sparse_cats(_ch_grid)))
+        _CH_AXIS = str_arr(sparse_cats(_ch_grid))
         reg_time(_CH_AXIS, _ch_grid)
-        # engine_token 数据 const 只建一次，两图共用（同名 const 重复
-        # 定义会产出非法 JS）。
-        _ch_tok_const = None
+        # engine_token 数据只计算一次，两图共用。
+        _ch_tok_data = None
         if _ch_has("engine_token"):
-            _ch_tok_const = const("cacheHitTok", num_arr(_ch_series("engine_token")))
+            _ch_tok_data = num_arr(_ch_series("engine_token"))
         # 图 1：master 路由 vs engine 执行（差值 = 调度损耗）
-        if _ch_has("master_routing") and _ch_tok_const is not None:
+        if _ch_has("master_routing") and _ch_tok_data is not None:
             cache_hit_containers.append(
-                emit_container(
+                panel_spec(
                     "cache 命中率：master 路由 vs engine 执行（差值 = 调度损耗）",
                     "master 路由口径（master 选引擎时 GlobalCacheIndex 前缀"
                     "匹配，master 以为能复用多少 tokens；对齐生产 whale-lb "
@@ -3738,37 +3297,33 @@ def main():
                     "差分）；y = 命中率 %；双曲线差值 = 调度损耗（master "
                     "匹配到却未复用上：路由到非持有引擎/affinity 未采纳/"
                     "路由到执行窗口内 LRU 淘汰）",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         _CH_AXIS,
-                        230,
                         [
                             (
                                 "mRoute",
                                 "master 路由口径（以为能复用）",
-                                const(
-                                    "cacheHitRoute",
-                                    num_arr(_ch_series("master_routing")),
-                                ),
+                                num_arr(_ch_series("master_routing")),
                                 "warning",
                             ),
                             (
                                 "eTok",
                                 "engine 执行口径（实际复用）",
-                                _ch_tok_const,
+                                _ch_tok_data,
                                 "success",
                             ),
                         ],
                         suffix="%",
-                        domain="[0, 100]",
+                        y_max=100,
                     ),
                 )
             )
             cache_hit_route_present = True
         # 图 2：key 级（理论）vs token 级（实际）（差值 = 命中深度覆盖）
-        if _ch_has("engine_key") and _ch_tok_const is not None:
+        if _ch_has("engine_key") and _ch_tok_data is not None:
             cache_hit_containers.append(
-                emit_container(
+                panel_spec(
                     "engine 命中率：key 级（理论）vs token 级（实际）"
                     "（差值 = 命中深度覆盖）",
                     "key 级理论口径（命中 key 数/请求 key 数，prefill 准入"
@@ -3778,39 +3333,32 @@ def main():
                     "前缀命中：命中 key 但前缀在第 N 块断掉，复用 tokens "
                     "不足整 key 数）——key 级 ≥ token 级为常态，差值越大"
                     "说明命中越浅",
-                    emit_chart(
-                        "LineChart",
+                    chart_spec(
+                        "line",
                         _CH_AXIS,
-                        230,
                         [
                             (
                                 "eKey",
                                 "key 级·理论（命中 key 数/请求 key 数）",
-                                const("cacheHitKey", num_arr(_ch_series("engine_key"))),
+                                num_arr(_ch_series("engine_key")),
                                 "info",
                             ),
                             (
                                 "eTok",
                                 "token 级·实际（ΣhitTokens/Σil）",
-                                _ch_tok_const,
+                                _ch_tok_data,
                                 "success",
                             ),
                         ],
                         suffix="%",
-                        domain="[0, 100]",
+                        y_max=100,
                     ),
                 )
             )
             cache_hit_depth_present = True
     if kv_containers or kv_pool_containers or cache_hit_containers:
-        lines.append("      <Divider />")
-        lines.append("")
-        lines.append("      <H2>5. KV</H2>")
         if kv_containers or kv_pool_containers or cache_hit_containers:
-            lines.extend(
-                emit_grid(kv_containers + kv_pool_containers + cache_hit_containers)
-            )
-        lines.append("")
+            panels.extend(kv_containers + kv_pool_containers + cache_hit_containers)
 
     # 6. 资源（mock heap + 进程 CPU/RSS，run_meta process_usage）
     has_heap = bool(queue_ts) and any("heap_used_mb" in q for q in queue_ts)
@@ -3818,22 +3366,21 @@ def main():
     res_containers = []
     if has_heap:
         res_containers.append(
-            emit_container(
+            panel_spec(
                 "mock engine heap（MB）",
                 "x = 压测时间（s，"
                 + str(q_step)
                 + "s 采样）；y = mock engine JVM 堆已用（MB）",
-                emit_chart(
-                    "LineChart",
+                chart_spec(
+                    "line",
                     TQ,
-                    230,
                     [("heap", "heap used（MB）", heap_used, "info")],
                 ),
             )
         )
     if has_proc:
         pt_t = [r.get("t", 0) for r in process_ts]
-        PT = const("PT", str_arr(sparse_cats(pt_t)))
+        PT = str_arr(sparse_cats(pt_t))
         reg_time(PT, pt_t)
         proc_cpu_series = []
         proc_rss_series = []
@@ -3842,10 +3389,7 @@ def main():
                 (
                     "mc",
                     "mock engine",
-                    const(
-                        "cpuMock",
-                        num_arr([r.get("mock_cpu_pct", 0) or 0 for r in process_ts]),
-                    ),
+                    num_arr([r.get("mock_cpu_pct", 0) or 0 for r in process_ts]),
                     "info",
                 )
             )
@@ -3853,10 +3397,7 @@ def main():
                 (
                     "mr",
                     "mock engine",
-                    const(
-                        "rssMock",
-                        num_arr([r.get("mock_rss_mb", 0) or 0 for r in process_ts]),
-                    ),
+                    num_arr([r.get("mock_rss_mb", 0) or 0 for r in process_ts]),
                     "info",
                 )
             )
@@ -3865,10 +3406,7 @@ def main():
                 (
                     "ma",
                     "master",
-                    const(
-                        "cpuMaster",
-                        num_arr([r.get("master_cpu_pct", 0) or 0 for r in process_ts]),
-                    ),
+                    num_arr([r.get("master_cpu_pct", 0) or 0 for r in process_ts]),
                     "warning",
                 )
             )
@@ -3876,10 +3414,7 @@ def main():
                 (
                     "mar",
                     "master",
-                    const(
-                        "rssMaster",
-                        num_arr([r.get("master_rss_mb", 0) or 0 for r in process_ts]),
-                    ),
+                    num_arr([r.get("master_rss_mb", 0) or 0 for r in process_ts]),
                     "warning",
                 )
             )
@@ -3888,10 +3423,7 @@ def main():
                 (
                     "cl",
                     "load client（分片均值）",
-                    const(
-                        "cpuClient",
-                        num_arr([r.get("client_cpu_pct", 0) or 0 for r in process_ts]),
-                    ),
+                    num_arr([r.get("client_cpu_pct", 0) or 0 for r in process_ts]),
                     "success",
                 )
             )
@@ -3899,339 +3431,28 @@ def main():
                 (
                     "clr",
                     "load client（分片均值）",
-                    const(
-                        "rssClient",
-                        num_arr([r.get("client_rss_mb", 0) or 0 for r in process_ts]),
-                    ),
+                    num_arr([r.get("client_rss_mb", 0) or 0 for r in process_ts]),
                     "success",
                 )
             )
         if proc_cpu_series:
             res_containers.append(
-                emit_container(
+                panel_spec(
                     "进程 CPU 使用率",
                     "x = 压测时间（s，1s 采样）；y = CPU 使用率（%）",
-                    emit_chart("LineChart", PT, 230, proc_cpu_series, suffix="%"),
+                    chart_spec("line", PT, proc_cpu_series, suffix="%"),
                 )
             )
         if proc_rss_series:
             res_containers.append(
-                emit_container(
+                panel_spec(
                     "进程 RSS（MB）",
                     "x = 压测时间（s，1s 采样）；y = 常驻内存（MB）",
-                    emit_chart("LineChart", PT, 230, proc_rss_series),
+                    chart_spec("line", PT, proc_rss_series),
                 )
             )
     if res_containers:
-        lines.append("      <Divider />")
-        lines.append("")
-        lines.append("      <H2>6. 资源</H2>")
-        lines.extend(emit_grid(res_containers))
-        lines.append("")
-
-    # 汇总表（两列；tsx 层保留，反抽不抽 Table 不进 HTML）
-    lat_summary = sm.get("schedule_latency_ms") or {}
-    rows = []
-    if send_qps_master:
-        thr_cell = "发送 " + fmt_int_trunc(send_qps_master) + "（master）"
-        if send_qps_client:
-            thr_cell += " · client 自估 " + fmt_int_trunc(send_qps_client)
-    else:
-        thr_cell = "发送 " + fmt_int_trunc(send_qps_client) + "（client 自估）"
-    thr_cell += " / 成功 " + fmt_int_trunc(ok_qps) + " QPS"
-    rows.append(["吞吐", thr_cell])
-    err_disp = (
-        num(error_n) + " · " + fmt_pct(error_rate) if error_n is not None else "—"
-    )
-    rows.append(["错误", err_disp])
-    # 错误构成（top 子桶）：优先 summary.error_breakdown（含无时间戳行，
-    # 与 error_count 同口径）；旧 aggregate 无此键时退化为 per_second
-    # 汇总口径（仅带时间戳行）。
-    err_breakdown = dict(sm.get("error_breakdown") or {})
-    if not err_breakdown and per_second:
-        err_breakdown = {k: v for k, v in err_totals.items() if v}
-    if err_breakdown:
-        _eb_label = {k: lb for k, lb, _ in ERR_DEFS}
-        _eb_items = sorted(err_breakdown.items(), key=lambda kv: -kv[1])
-        eb_parts = []
-        for k, v in _eb_items[:6]:
-            if not v:
-                continue
-            eb_parts.append((_eb_label.get(k) or k) + " " + fmt_int_trunc(v))
-        if len(_eb_items) > 6:
-            eb_parts.append("+" + str(len(_eb_items) - 6) + " 桶")
-        if eb_parts:
-            rows.append(["错误构成（top 子桶）", " · ".join(eb_parts)])
-    if lat_summary:
-        _lat_cell = (
-            "p50 "
-            + fmt_ms(lat_summary.get("p50"))
-            + " / p99 "
-            + fmt_ms(lat_summary.get("p99"))
-            + " ms"
-        )
-        if lat_summary.get("count"):
-            _lat_cell += (
-                " · n=" + fmt_int_trunc(lat_summary.get("count")) + "（全终态）"
-            )
-        # Phase A：schedule 双源口径标注（server=master 侧 / client=client
-        # 行；旧 aggregate 无 schedule_latency_source 键时省略）。
-        _sched_src = sm.get("schedule_latency_source")
-        if _sched_src:
-            _lat_cell += " · 口径 " + str(_sched_src)
-        rows.append(["调度延迟", _lat_cell])
-    else:
-        rows.append(["调度延迟", "—"])
-    # ttft/e2e 全程分位（聚合层自算，幸存者口径 = ok 行带值样本；
-    # 与 per_second 图的每秒分位互补）：单键直读，缺失整行不显示
-    # （full_e2e 行同例；no-backward-compat：ttft_ms / total_ms 旧键回退已删）。
-    # ttft（20260903 换血 engine 口径）：发出 → prefill 批完成（rid
-    # join）；ttft_latency_source 标记口径（新 aggregate 恒 "engine"，
-    # 照 schedule 双源标记模式）；无样本 None 或旧 client 口径全零
-    # dict（FETCH=0 下 latency_summary([]) 陷阱）均显示 "——零样本
-    # ≠ 真实 0；与历史 client 口径 ttft 断代不可比。
-    ttft_sum = sm.get("ttft_latency_ms")
-    if ttft_sum and ttft_sum.get("count"):
-        _ttft_cell = (
-            "p50 "
-            + fmt_ms(ttft_sum.get("p50"))
-            + " / p99 "
-            + fmt_ms(ttft_sum.get("p99"))
-            + " ms"
-        )
-        _ttft_cell += " · n=" + fmt_int_trunc(ttft_sum.get("count"))
-        _ttft_src = sm.get("ttft_latency_source")
-        if _ttft_src:
-            _ttft_cell += " · 口径 " + str(_ttft_src)
-        rows.append(["TTFT（全程）", _ttft_cell])
-    else:
-        rows.append(["TTFT（全程）", "—"])
-    e2e_sum = sm.get("e2e_latency_ms")
-    if e2e_sum:
-        _e2e_cell = (
-            "p50 "
-            + fmt_ms(e2e_sum.get("p50"))
-            + " / p99 "
-            + fmt_ms(e2e_sum.get("p99"))
-            + " ms"
-        )
-        if e2e_sum.get("count"):
-            _e2e_cell += " · n=" + fmt_int_trunc(e2e_sum.get("count"))
-        rows.append(["端到端延迟（全程）", _e2e_cell])
-    # full_e2e（跨两侧全链路）：旧 aggregate 无 full_e2e_latency_ms 键时
-    # 整行不显示（回退），不显示 "—" 占位——该指标依赖新引擎日志行，
-    # 旧数据本来就没有。
-    full_e2e_sum = sm.get("full_e2e_latency_ms") or {}
-    if full_e2e_sum:
-        _fe_cell = (
-            "p50 "
-            + fmt_ms(full_e2e_sum.get("p50"))
-            + " / p99 "
-            + fmt_ms(full_e2e_sum.get("p99"))
-            + " ms"
-        )
-        if full_e2e_sum.get("count"):
-            _fe_cell += (
-                " · n=" + fmt_int_trunc(full_e2e_sum.get("count")) + "（按 rid 关联）"
-            )
-        rows.append(["全链路延迟（发出→decode 结束）", _fe_cell])
-    # P/D 引擎内等待全程分位（20260903）：prefill_wait = prefill_start
-    # − engine_arrival / decode_wait = decode_start − engine_arrival
-    # （rid join 派生，负值样本已跳过）。新 aggregate 才有；无样本
-    # /无键整行不显示（照 full_e2e 模式，不占位）。
-    pw_sum = sm.get("prefill_wait_latency_ms")
-    if pw_sum and pw_sum.get("count"):
-        rows.append(
-            [
-                "prefill 引擎内等待（全程）",
-                "p50 "
-                + fmt_ms(pw_sum.get("p50"))
-                + " / p99 "
-                + fmt_ms(pw_sum.get("p99"))
-                + " ms · n="
-                + fmt_int_trunc(pw_sum.get("count")),
-            ]
-        )
-    dw_sum = sm.get("decode_wait_latency_ms")
-    if dw_sum and dw_sum.get("count"):
-        rows.append(
-            [
-                "decode 引擎内等待（全程）",
-                "p50 "
-                + fmt_ms(dw_sum.get("p50"))
-                + " / p99 "
-                + fmt_ms(dw_sum.get("p99"))
-                + " ms · n="
-                + fmt_int_trunc(dw_sum.get("count")),
-            ]
-        )
-    pcv = (ed.get("prefill") or {}).get("cv") if ed else None
-    dcv = (ed.get("decode") or {}).get("cv") if ed else None
-    p_tg = ed_p.get("tokens_gini_cum")
-    d_tg = ed_d.get("tokens_gini_cum")
-    p_ug = (util_block.get("prefill") or {}).get("gini_cum")
-    d_ug = (util_block.get("decode") or {}).get("gini_cum")
-    bal_parts = []
-    if pg is not None or dg is not None:
-        _gini_cell = "请求 Gini " + fmt_g3(pg) + " / " + fmt_g3(dg) + "（成功行）"
-        if pg_all is not None or dg_all is not None:
-            _gini_cell += " · 全量 " + fmt_g3(pg_all) + " / " + fmt_g3(dg_all)
-        bal_parts.append(_gini_cell)
-    if p_tg is not None or d_tg is not None:
-        bal_parts.append("token Gini " + fmt_g3(p_tg) + " / " + fmt_g3(d_tg))
-    if p_ug is not None or d_ug is not None:
-        bal_parts.append("利用率 Gini " + fmt_g3(p_ug) + " / " + fmt_g3(d_ug))
-    if pcv is not None or dcv is not None:
-        bal_parts.append("CV " + fmt_g3(pcv) + " / " + fmt_g3(dcv))
-    rows.append(["P/D 均衡", " · ".join(bal_parts) if bal_parts else "—"])
-    if queue_ts:
-        rows.append(
-            [
-                "队列（P/D waiting 峰值，集群）",
-                "P "
-                + num(max((q.get("prefill_waiting", 0) or 0) for q in queue_ts))
-                + " / D "
-                + num(max((q.get("decode_waiting", 0) or 0) for q in queue_ts)),
-            ]
-        )
-    else:
-        rows.append(["队列（P/D waiting 峰值，集群）", "—"])
-    if kv_ts:
-        rows.append(
-            [
-                "KV 峰值利用率（集群）",
-                fmt_ms(max((r.get("used_pct", 0) or 0) for r in kv_ts)) + "%",
-            ]
-        )
-    if batcher_ts_by_role:
-        b_parts = []
-        p_vals = [
-            r.get("prefill", 0) or 0 for r in batcher_ts_by_role if "prefill" in r
-        ]
-        d_vals = [r.get("decode", 0) or 0 for r in batcher_ts_by_role if "decode" in r]
-        if p_vals:
-            b_parts.append(
-                "prefill " + num(round(max(p_vals) / p_engines, 2)) + "/引擎"
-            )
-        if d_vals:
-            if d_engines:
-                b_parts.append(
-                    "decode " + num(round(max(d_vals) / d_engines, 2)) + "/引擎"
-                )
-            else:
-                b_parts.append("decode " + num(max(d_vals)) + "（集群）")
-        if b_parts:
-            rows.append(["master 队列深度峰值（by role）", " / ".join(b_parts)])
-    elif batcher_ts:
-        bq_vals = [
-            r.get("batcher_queue", 0) or 0 for r in batcher_ts if "batcher_queue" in r
-        ]
-        rq_vals = [
-            r.get("routing_queue", 0) or 0 for r in batcher_ts if "routing_queue" in r
-        ]
-        b_parts = []
-        if bq_vals:
-            b_parts.append("batcher " + num(max(bq_vals)) + "（P+D 集群）")
-        if rq_vals:
-            b_parts.append("routing " + num(max(rq_vals)) + "（集群）")
-        if b_parts:
-            rows.append(["master 队列深度峰值", " / ".join(b_parts)])
-    if dispatch_reason_ts:
-        dr_sums = {}
-        for r in dispatch_reason_ts:
-            for k, v in r.items():
-                if k != "t" and v:
-                    dr_sums[k] = dr_sums.get(k, 0.0) + v
-        dr_order = [
-            "fixed_window_timeout",
-            "batch_full",
-            "predicted_execution_cap",
-        ]
-        dr_order += sorted(k for k in dr_sums if k not in dr_order)
-        dr_parts = [
-            k + " " + num(round(dr_sums[k], 1)) for k in dr_order if dr_sums.get(k)
-        ]
-        if dr_parts:
-            rows.append(["dispatch reason 批次数", " / ".join(dr_parts)])
-    if batch_size_final:
-        bs_order = [
-            "fixed_window_timeout",
-            "batch_full",
-            "predicted_execution_cap",
-        ]
-        bs_order += sorted(k for k in batch_size_final if k not in bs_order)
-        bs_parts = []
-        for k in bs_order:
-            e = batch_size_final.get(k) or {}
-            if not e:
-                continue
-            bs_parts.append(
-                k
-                + " p50 "
-                + num(e.get("p50"))
-                + " / max "
-                + num(e.get("max"))
-                + "（"
-                + num(e.get("engines"))
-                + " 引擎终值）"
-            )
-        if bs_parts:
-            rows.append(["dispatch 批大小分布（终值）", " / ".join(bs_parts)])
-    if mock_last:
-        rows.append(
-            [
-                "batch",
-                "avg size "
-                + num(mock_last.get("avg_batch_size"))
-                + " / avg ms "
-                + num(mock_last.get("avg_batch_ms")),
-            ]
-        )
-    else:
-        rows.append(["batch", "—"])
-    # Phase A quick-stats：sent/started/recorded/completed 四计数
-    # （validity 六项的原始量；旧 aggregate 无这些键时整行跳过）。
-    _cnt_parts = []
-    if sm.get("sent_task_count") is not None:
-        _cnt_parts.append("sent " + fmt_int_trunc(sm.get("sent_task_count")))
-    if sm.get("actual_rpc_start_count") is not None:
-        _cnt_parts.append("started " + fmt_int_trunc(sm.get("actual_rpc_start_count")))
-    if sm.get("recorded_result_count") is not None:
-        _cnt_parts.append("recorded " + fmt_int_trunc(sm.get("recorded_result_count")))
-    if sm.get("completed_count") is not None:
-        _cnt_parts.append("completed " + fmt_int_trunc(sm.get("completed_count")))
-    if _cnt_parts:
-        rows.append(
-            ["请求计数（sent/started/recorded/completed）", " / ".join(_cnt_parts)]
-        )
-    rows.append(["泄漏判定", leak_label])
-
-    table_lines = ["      <Table"]
-    table_lines.append("        headers={['指标', '数值']}")
-    table_lines.append("        rows={[")
-    for r in rows:
-        table_lines.append(
-            "          ['" + js_str(r[0]) + "', '" + js_str(r[1]) + "'],"
-        )
-    table_lines.append("        ]}")
-    table_lines.append("      />")
-
-    lines.append("      <Divider />")
-    lines.append("")
-    lines.append("      <H2>汇总</H2>")
-    lines.extend(table_lines)
-
-    src_names = [os.path.basename(args.aggregate)]
-    if ed is not None:
-        embedded = args.engine_dist is None and isinstance(agg.get("engine_dist"), dict)
-        src_names.append(
-            "(aggregate 内嵌 engine_dist)" if embedded else os.path.basename(ed_path)
-        )
-    sources = "数据源：" + " · ".join(src_names) + " · run 目录 " + str(run_id)
-    lines.append('      <Text tone="secondary" size="small">')
-    lines.append("        " + esc_text(sources))
-    lines.append("      </Text>")
-    lines.append("    </Stack>")
+        panels.extend(res_containers)
 
     # ---- 报告级统一时间轴 ----
     # T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；min 固定 0
@@ -4298,27 +3519,8 @@ def main():
             "flexlbEnv": _rm_flexlb_env or None,
         },
     }
-    subtitle_html = identity
 
-    # ---- 拼 in-memory tsx（供末端反抽 spec，不写盘）----
-    header = []
-    header.append(
-        "import { BarChart, ChartComparisonGrid, ChartContainer, Divider, Grid, H1, H2, "
-        "LineChart, Stack, Stat, Table, Text } from 'qoder/canvas';"
-    )
-    header.append("")
-    for name, expr in consts:
-        header.append("const " + name + " = " + expr + ";")
-    header.append("")
-    header.append("const fmt2 = (v: number) => v.toFixed(2);")
-    header.append("")
-    header.append("export default function FlexlbRunReport() {")
-    header.append("  return (")
-
-    footer = ["  );", "}"]
-    tsx_src = "\n".join(header + lines + footer) + "\n"
-
-    # ---- 反抽 spec → 渲染 Chart.js HTML ----
+    # ---- 直接渲染报告 spec ----
     # canvas_report_render_html.py 是同目录的 sibling 模块；作为脚本运行时
     # 脚本目录自动在 sys.path 中，作为库被 import 时也依赖同目录可达。
     _this_dir = os.path.dirname(os.path.abspath(__file__))
@@ -4326,13 +3528,20 @@ def main():
         sys.path.insert(0, _this_dir)
     import canvas_report_render_html  # noqa: E402
 
-    spec = _extract_spec_from_tsx(
-        tsx_src,
-        run_id=str(run_id),
-        subtitle=subtitle_html,
-        time_axes=cats_time,
-        time_axis=time_axis,
-    )
+    for index, panel in enumerate(panels, 1):
+        panel["id"] = f"p{index}"
+        time_values = cats_time.get(id(panel["x"]))
+        if time_values is not None:
+            panel.update(timeX=True, xNums=time_values)
+    spec = {
+        "run_id": str(run_id),
+        "title": "FlexLB 压测报告 · run " + str(run_id),
+        "subtitle": identity,
+        "kpis": kpis,
+        "panels": panels,
+    }
+    if time_axis:
+        spec["timeAxis"] = time_axis
     spec["meta"] = meta_spec
     if send_mode == "case program":
         spec["timeOriginLabel"] = "t=0 = 首个请求发出"
@@ -4368,8 +3577,6 @@ def main():
     #    params/env），渲染输出含数据源绝对路径与 T_END 时间轴口径字样
     #    （有时间轴时）；
     # 2) leak chip 负向：头部 KPI 无「泄漏判定」且渲染 HTML 全文无该字样
-    #    （tsx 汇总表行保留但不进 HTML，见 leak_label 计算处注释——若未来
-    #    汇总表进 HTML，此断言会拦下，需同步重新评审 leak 展示面）；
     # 3) 三层规范化（20260902）：detail 折叠块存在且默认收起；replay 模式
     #    且倍率可得时 subtitle 必含 replay@<speed>x（倍率取自动校准值，
     #    非 CLI 缺省）；KPI 含结果行五连。
@@ -4731,16 +3938,36 @@ def main():
             + "production-alignment annotation missing"
         )
 
-    if (agg.get('meta') or {}).get('traffic_manifests'):
-        semantics = html_escape.escape(json.dumps(agg['meta']['traffic_manifests'],ensure_ascii=False,indent=2))
-        html_out=html_out.replace('</body>', '<details><summary>流量来源、长度与播放口径</summary><pre>'+semantics+'</pre></details></body>')
-    if agg.get('iterations'):
-        columns=('iteration','requests','input_tokens','start_epoch_ms','end_epoch_ms')
-        table='<section><h2>播放轮次 / Playback iterations</h2><table><tr>'
-        table+=''.join('<th>'+column+'</th>' for column in columns)+'</tr>'
-        for row in agg['iterations']:
-            table+='<tr>'+''.join('<td>'+html_escape.escape(str(row.get(column,'')))+'</td>' for column in columns)+'</tr>'
-        html_out=html_out.replace('</body>',table+'</table></section></body>')
+    if (agg.get("meta") or {}).get("traffic_manifests"):
+        semantics = html_escape.escape(
+            json.dumps(agg["meta"]["traffic_manifests"], ensure_ascii=False, indent=2)
+        )
+        html_out = html_out.replace(
+            "</body>",
+            "<details><summary>流量来源、长度与播放口径</summary><pre>"
+            + semantics
+            + "</pre></details></body>",
+        )
+    if agg.get("iterations"):
+        columns = (
+            "iteration",
+            "requests",
+            "input_tokens",
+            "start_epoch_ms",
+            "end_epoch_ms",
+        )
+        table = "<section><h2>播放轮次 / Playback iterations</h2><table><tr>"
+        table += "".join("<th>" + column + "</th>" for column in columns) + "</tr>"
+        for row in agg["iterations"]:
+            table += (
+                "<tr>"
+                + "".join(
+                    "<td>" + html_escape.escape(str(row.get(column, ""))) + "</td>"
+                    for column in columns
+                )
+                + "</tr>"
+            )
+        html_out = html_out.replace("</body>", table + "</table></section></body>")
     out_dir = os.path.dirname(os.path.abspath(args.out))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
@@ -4776,7 +4003,7 @@ def main():
         sections.append("cache-hit")
     if res_containers:
         sections.append("resource")
-    sections.append("summary")
+    sections.append("metadata")
     print(TAG + " run_id=" + str(run_id))
     print(
         TAG
@@ -4851,6 +4078,7 @@ def main():
                 else "cluster-sum"
             )
         )
+    full_e2e_sum = sm.get("full_e2e_latency_ms") or {}
     if full_e2e_sum:
         print(
             TAG

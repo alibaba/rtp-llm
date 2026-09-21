@@ -173,7 +173,7 @@ def render(spec):
     overlay = (resource_dir / "multi_curve.js").read_text(encoding="utf-8")
     interaction = (resource_dir / "legend_interaction.js").read_text(encoding="utf-8")
     return (_TEMPLATE.replace("__PAGE_TITLE__", page_title)
-            .replace("__SPEC_JSON__", json.dumps(payload, ensure_ascii=False))
+            .replace("__SPEC_JSON__", json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c"))
             .replace("__CHARTJS_JS__", chartjs)
             .replace("__LEGEND_INTERACTION_JS__", interaction)
             .replace("__MULTI_CURVE_JS__", overlay))
@@ -272,7 +272,9 @@ if (SPEC.summary.kpis.length)
     row.style.gridTemplateColumns = 'repeat(' + seg.length + ',1fr)';
     seg.forEach(k=>{
       const d=document.createElement('div'); d.className='kpi '+(k.tone||'');
-      d.innerHTML=`<div class="v">${k.value}</div><div class="l">${k.label}</div>`;
+      d.innerHTML='<div class="v"></div><div class="l"></div>';
+      d.querySelector('.v').textContent=k.value;
+      d.querySelector('.l').textContent=k.label;
       row.appendChild(d);
     });
     kb.appendChild(row);
@@ -417,7 +419,10 @@ const TA_MAX = TIME_AXIS ? TIME_AXIS.max : undefined;
 SPEC.panels.forEach(p=>{
   if (p.overlay) { FlexMultiCurve.mount(grid, p, {timeAxis:TIME_AXIS, events:SPEC.events || []}); return; }
   const wrap=document.createElement('div'); wrap.className='panel';
-  wrap.innerHTML=`<h3>${p.title}</h3><div class="cap">${p.caption}</div><div class="box"><canvas id="c-${p.id}"></canvas></div>`;
+  wrap.innerHTML='<h3></h3><div class="cap"></div><div class="box"><canvas></canvas></div>';
+  wrap.querySelector('h3').textContent=p.title;
+  wrap.querySelector('.cap').textContent=p.caption;
+  wrap.querySelector('canvas').id='c-'+p.id;
   grid.appendChild(wrap);
   const ctx=wrap.querySelector('canvas').getContext('2d');
   // 时间轴面板：数据点转 {x, y}，linear x 轴钉 [TA_MIN, TA_MAX]（warmup
