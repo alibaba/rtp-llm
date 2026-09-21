@@ -105,7 +105,7 @@ class FeClientTest {
                     .thenCancel().verify();
             second.release();
         } else {
-            read.expectError(AggregateResponseTooLargeException.class).verify();
+            read.expectError(ResponseTooLargeException.class).verify();
             assertEquals(0, second.getNativeBuffer().refCnt());
         }
         assertEquals(0, first.getNativeBuffer().refCnt());

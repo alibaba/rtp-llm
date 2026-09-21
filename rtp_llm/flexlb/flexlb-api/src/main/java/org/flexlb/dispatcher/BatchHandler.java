@@ -9,6 +9,7 @@ import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.enums.EngineType;
 import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.service.BatchScheduleCoordinator;
 import org.flexlb.util.Logger;
@@ -73,9 +74,9 @@ public class BatchHandler {
                         return DispatcherResponses.error(413, "request_body_too_large",
                                 "batch body exceeds the server limit; see MAX_IN_MEMORY_SIZE");
                     }
-                    if (e instanceof AggregateResponseTooLargeException) {
+                    if (e instanceof ResponseTooLargeException) {
                         return DispatcherResponses.error(413, "batch_response_too_large",
-                                "aggregate sub-batch response exceeds the dispatcher limit");
+                                "sub-batch responses exceed the dispatcher byte limit");
                     }
                     if (e instanceof AggregateRequestTooLargeException) {
                         return DispatcherResponses.error(413, "batch_request_too_large",
@@ -137,7 +138,8 @@ public class BatchHandler {
             return preview("split", batch.chunks(List.of()));
         }
 
-        boolean assignBe = cfg.isPreAssignBe() && spec.isPreAssignable() && preAssignmentAllowed;
+        boolean assignBe = cfg.isPreAssignBe() && spec.isPreAssignable() && preAssignmentAllowed
+                && loadBalanceConfig.getWorkerRegistry().getEngineType() == EngineType.LLM;
         return resolveTargets(chunkCount, assignBe)
                 .publishOn(cpuScheduler)
                 .flatMap(allocation -> {

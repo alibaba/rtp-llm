@@ -662,6 +662,11 @@ class Pipeline(object):
         headers: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> List[GenerateResponse]:
+        """Run one atomic batch on a single PDFUSION backend.
+
+        With Master routing, role_addrs must already select that backend. Use the
+        frontend /batch_infer endpoint for batches that need per-request routing.
+        """
         generate_config = self.create_generate_config(
             generate_config_json,
             len(self.tokenizer),
@@ -694,7 +699,11 @@ class Pipeline(object):
         group_id: Optional[int] = None,
         **kwargs: Any,
     ) -> List[GenerateResponse]:
-        """Submit independently prepared prompts as one atomic backend batch RPC."""
+        """Submit request-owned configs as one atomic batch on a PDFUSION backend.
+
+        Configs must be independent per prompt: preparation updates them in place.
+        Master routing requires the same preassigned backend for every prompt.
+        """
         item_count = len(prompts)
         if len(request_ids) != item_count or len(generate_configs) != item_count:
             raise FtRuntimeException(

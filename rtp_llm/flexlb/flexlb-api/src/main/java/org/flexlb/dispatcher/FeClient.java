@@ -4,7 +4,6 @@ import io.netty.channel.ChannelOption;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.buffer.DataBuffer;
-import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -106,12 +105,11 @@ public class FeClient {
                     try {
                         int readable = buffer.readableByteCount();
                         if (readable > MAX_RESPONSE_BYTES - output.size()) {
-                            sink.error(new DataBufferLimitException(
-                                    "FE response exceeds " + MAX_RESPONSE_BYTES + " bytes"));
+                            sink.error(new ResponseTooLargeException(MAX_RESPONSE_BYTES));
                             return;
                         }
                         if (!reservation.tryReserve(readable)) {
-                            sink.error(new AggregateResponseTooLargeException(
+                            sink.error(new ResponseTooLargeException(
                                     reservation.limit()));
                             return;
                         }

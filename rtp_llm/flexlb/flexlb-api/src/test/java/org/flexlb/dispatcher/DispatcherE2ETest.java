@@ -157,10 +157,12 @@ class DispatcherE2ETest {
     }
 
     @ParameterizedTest
-    @CsvSource({"true,false,generate_config", "false,false,generate_config", "true,true,generate_config",
-            "true,false,generation_config"})
-    void masterAllocationAndOptionalBeAssignmentAppearOnTheFeWire(boolean preassign, boolean groupPolicy, String configKey) throws Exception {
+    @CsvSource({"true,false,generate_config,LLM", "false,false,generate_config,LLM", "true,true,generate_config,LLM",
+            "true,false,generation_config,LLM", "true,false,generate_config,EMBEDDING"})
+    void masterAllocationAndOptionalBeAssignmentAppearOnTheFeWire(boolean preassign, boolean groupPolicy, String configKey, EngineType engineType) throws Exception {
         cfg.setPreAssignBe(preassign);
+        lb.getWorkerRegistry().setEngineType(engineType);
+        boolean expectBeAssignment = preassign && !groupPolicy && engineType == EngineType.LLM;
         if (groupPolicy) {
             TrafficPolicyConfig.Target target = new TrafficPolicyConfig.Target();
             target.setGroup("tenant");
@@ -182,12 +184,12 @@ class DispatcherE2ETest {
             JSONObject chunk = takeChunk(i, "/batch_infer", "prompt_batch", 1);
             assertEquals(String.valueOf((char) ('a' + i)), chunk.getJSONArray("prompt_batch").getString(0));
             assertFalse(chunk.containsKey("pre_assigned_be"));
-            Object expected = preassign && !groupPolicy ? JSONArray.of(JSONObject.of("role", "PDFUSION", "ip", "10.0.0." + (i + 1),
+            Object expected = expectBeAssignment ? JSONArray.of(JSONObject.of("role", "PDFUSION", "ip", "10.0.0." + (i + 1),
                     "http_port", 23840, "grpc_port", 23841)) : null;
             JSONObject config = chunk.getJSONObject(configKey);
             assertEquals(expected, config == null ? null : config.get("role_addrs"));
         }
-        verify(coordinator).schedule(argThat(r -> r.isAssignBe() == (preassign && !groupPolicy) && r.isAssignFe()));
+        verify(coordinator).schedule(argThat(r -> r.isAssignBe() == expectBeAssignment && r.isAssignFe()));
     }
 
     @ParameterizedTest
@@ -223,6 +225,15 @@ class DispatcherE2ETest {
         post("/batch_infer", input, 413);
         verifyNoInteractions(coordinator);
         assertNoFeTraffic();
+    }
+
+    @Test
+    void oversizedFeResponseReturns413EvenWhenAnotherChunkSucceeds() {
+        cfg.setPreAssignBe(false);
+        reply(0, 200, "{\"response_batch\":[\"" + "x".repeat(FeClient.MAX_RESPONSE_BYTES) + "\"]}");
+        reply(1, 200, "{\"response_batch\":[1]}");
+        startDispatcher(1);
+        assertEquals("batch_response_too_large", post("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", 413).getString("error"));
     }
 
     @Test
@@ -286,7 +297,7 @@ class DispatcherE2ETest {
             int count = ((BatchScheduleRequest) call.getArgument(0)).getBatchCount();
             List<BatchScheduleTarget> targets = new ArrayList<>();
             for (int i = 0; i < count; i++) {
-                BatchScheduleTarget target = BatchScheduleTarget.of(new WorkerHost("10.0.0." + (i + 1), 23840), RoleType.PDFUSION, EngineType.LLM);
+                BatchScheduleTarget target = BatchScheduleTarget.of(new WorkerHost("10.0.0." + (i + 1), 23840), RoleType.PDFUSION, lb.getWorkerRegistry().getEngineType());
                 target.setFeUrl(((BatchScheduleRequest) call.getArgument(0)).isAssignFe() ? urls.get(i % urls.size()) : "http://must-not-use");
                 targets.add(target);
             }

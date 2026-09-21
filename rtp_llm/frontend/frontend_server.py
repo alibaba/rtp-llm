@@ -5,7 +5,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, Union
 
 from fastapi import Request
 from fastapi import Request as RawRequest

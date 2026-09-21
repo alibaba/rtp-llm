@@ -20,13 +20,11 @@ public class DispatchConfig {
 
     /**
      * Required on dispatcher and receiving FEs for BE preassignment; loaded only from DISPATCH_ROUTING_TOKEN.
-     * Jackson merges the field and Lombok accessors into one property, so JsonIgnore also excludes the getter
-     * from the serialized startup configuration; DispatcherStartupTest checks the actual application log.
      */
-    @JsonIgnore
+    @Getter(onMethod_ = @JsonIgnore)
     private String trustedRoutingToken = "";
 
-    /** Derived at startup; excluded from JSON binding despite Lombok's generated accessors. */
-    @JsonIgnore
+    /** Derived at startup, not a configuration property. */
+    @Getter(onMethod_ = @JsonIgnore)
     private SubBatchSpec subBatchSpec;
 }

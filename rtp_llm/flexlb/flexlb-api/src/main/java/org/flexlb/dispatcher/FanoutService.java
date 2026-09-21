@@ -101,7 +101,7 @@ public class FanoutService {
     }
 
     private Mono<SubBatchResult> failedChunk(ChunkPlan plan, String path, long start, Throwable error) {
-        if (error instanceof AggregateResponseTooLargeException) {
+        if (error instanceof ResponseTooLargeException) {
             return Mono.error(error);
         }
         String reason = error.toString();
