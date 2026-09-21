@@ -62,7 +62,7 @@ class SharedRuntimeTests(unittest.TestCase):
 
     def test_shell_and_python_use_identical_contract_through_both_entries(self):
         env = dict(os.environ, FLEXLB_DIR=str(ROOT.parents[1]))
-        for entry in ("lib_load_client.sh", "stress/lib_load_client.sh"):
+        for entry in ("stress/lib/load_client.sh",):
             result = subprocess.run(
                 [
                     "bash",

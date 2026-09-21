@@ -189,7 +189,7 @@ def main(argv=None):
         for sig, handler in previous.items():
             signal.signal(sig, handler)
         if args.archive:
-            from experiment_archive import create_archive
+            from online_eval.archive import create_archive
 
             create_archive(
                 args.archive, {"run": args.out_dir}, kind="scenario",

@@ -18,4 +18,4 @@ result/report          原始证据、分析 JSON 和 HTML
 
 资源句柄包含环境代次。环境重建后，旧句柄只能作为历史证据读取，不能继续操作新进程。Schedule、流消费、业务 FINISHED 和资源释放是不同事实，测试必须分别取证。
 
-扩展方式见[新增 case](adding-cases.md)。历史完整设计稿位于 `archive/legacy-20260921/`，只用于追溯。
+扩展方式见[新增 case](adding-cases.md)。历史设计和阶段验证不随源码发布，需要时从 Git 历史读取。

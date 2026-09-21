@@ -5,9 +5,9 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "stress"))
-import canvas_report_gen as generator
-import canvas_report_render_html as renderer
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from stress.reporting import report as generator
+from stress.reporting import renderer
 
 
 class ReportSpecTest(unittest.TestCase):

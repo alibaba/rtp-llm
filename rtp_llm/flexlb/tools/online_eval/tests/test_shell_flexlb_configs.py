@@ -45,7 +45,7 @@ class ShellFlexlbConfigTest(unittest.TestCase):
             self.assertNotIn(key, config["router"]["roles"]["decode"])
 
     def test_shell_and_shipped_master_use_complete_v3_contract(self):
-        script = (SCRIPT_DIR / "run_online_eval.sh").read_text()
+        script = (SCRIPT_DIR / "stress/run_online_eval.sh").read_text()
         self.assertNotIn("DEFAULT_FLEXLB_CONFIG=", script)
         from flexlb_cfg import STRESS_PROFILE, render_env, render_process_config
 

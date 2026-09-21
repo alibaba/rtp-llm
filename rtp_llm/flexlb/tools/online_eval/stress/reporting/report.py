@@ -3,7 +3,7 @@
 """FlexLB 压测报告生成器：直接吐 self-contained Chart.js 4.4.7 HTML。
 
 数据管线保持不变：aggregate JSON → 统计 → panel（line / bar）+ KPI +
-元数据。渲染层拆到 canvas_report_render_html.py，页面观感对齐既有
+元数据。渲染层拆到 reporting/renderer.py，页面观感对齐既有
 outputs/flexlb-run-*-chartjs.html（浅色主题 / 白卡 / 6 列 KPI / 2 列 panel /
 280px chart，legend 单击切换、tooltip x 轴 index 联动，无 zoom 插件）。
 
@@ -36,7 +36,7 @@ T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；m
 （分布/排名/洛伦兹/分阶段 BarChart）不注册、保持类目轴。
 
 用法：
-  python3 canvas_report_gen.py --aggregate <agg.json> \
+  python3 reporting/report.py --aggregate <agg.json> \
       [--engine-dist <engine_dist.json>] \
       --out <out.html> [--run-id <id>] \
       [--p-engines 750] [--d-engines 500] [--shards 8] \
@@ -45,13 +45,13 @@ T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；m
 
 缺省规则：
   * engine_dist 来源优先级：--engine-dist 显式指定 > aggregate 顶层内嵌键
-    （aggregate_canvas_run.py 已把 engine_dist 计算进 aggregate，一个脚本
+    （analysis/aggregate.py 已把 engine_dist 计算进 aggregate，一个脚本
     出全部数据）> aggregate 同目录 engine_dist.json；
   * --run-id 未指定时取 aggregate 的 meta.run_dir；
   * P/D 引擎数优先取 engine_dist 的 engine_count，其次 --p-engines/--d-engines；
   * shards 优先取 aggregate.summary 的 load_client_workers，其次 --shards，再缺省 8；
   * 实验条件（send_mode/replay_speed/名义 QPS/ramp/数据集/配置）优先取
-    aggregate meta（aggregate_canvas_run.py 20260902+ 写入），其次同目录
+    aggregate meta（analysis/aggregate.py 20260902+ 写入），其次同目录
     run_meta.json params，最后 CLI 显式参数；均缺则 subtitle 对应段省略
     （fail-closed，不再回退硬编码缺省倍率）；
   * git branch/commit 优先取 aggregate meta（远端重聚合时经
@@ -79,7 +79,7 @@ import sys
 # Both script and package invocation resolve the same reporting API.
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from online_eval.reporting import render, write_bundle, details, table
 from online_eval.reporting.components import chart_spec, panel_spec, kpi_spec
 
@@ -288,7 +288,7 @@ def main():
     ap.add_argument(
         "--aggregate",
         required=True,
-        help="aggregate_canvas_run.py 输出的 aggregate JSON",
+        help="analysis/aggregate.py 输出的 aggregate JSON",
     )
     ap.add_argument(
         "--engine-dist",
@@ -388,7 +388,7 @@ def main():
     # （旧 run 不再支持）；summary 仅从 aggregate.summary 单键直读，
     # 缺失即无数据按可选逻辑省略。
     # engine_dist 来源优先级：显式 --engine-dist > aggregate 顶层内嵌键
-    # （aggregate_canvas_run.py 一个脚本出全部数据）> 同目录独立文件。
+    # （analysis/aggregate.py 一个脚本出全部数据）> 同目录独立文件。
     if args.engine_dist:
         if not os.path.isfile(ed_path):
             sys.exit("%s --engine-dist 文件不存在: %s" % (TAG, ed_path))
@@ -430,7 +430,7 @@ def main():
         for k, _, _ in ERR_DEFS:
             err_totals[k] += p.get(k, 0) or 0
     queue_ts = agg.get("queue_timeseries") or []
-    # compact time series (aggregate_canvas_run.py 861f3a9+；旧 aggregate 无这些键 ->
+    # compact time series (analysis/aggregate.py 861f3a9+；旧 aggregate 无这些键 ->
     # 空 list，对应图条件渲染)
     stage_ts = agg.get("stage_latency_ts") or []
     engine_exec = agg.get("engine_exec_ts") or []
@@ -502,7 +502,7 @@ def main():
     )
 
     # ---- 实验条件取数（subtitle 条件行 + detail 层，20260902 三层重构）----
-    # 优先级：aggregate meta（aggregate_canvas_run.py 20260902+ 写入）>
+    # 优先级：aggregate meta（analysis/aggregate.py 20260902+ 写入）>
     # 同目录 run_meta.json params > CLI 显式参数。全链 fail-closed：皆缺
     # 则对应段省略（replay 速度绝不回退硬编码缺省 —— replay@1000x bug
     # 根因即旧版 argparse default=1000 被直接当倍率显示）。
@@ -3462,7 +3462,7 @@ def main():
     # 直观可读）。detail 层（<details> 折叠，默认收起）：代码版本 /
     # 数据集 / 实验参数 / 环境变量 / 数据源——旧三分区中的数据源从可见
     # 面板移入 detail；规模不设分区（与 subtitle 实验条件重复，已删）。
-    # detail 取数链：aggregate meta（aggregate_canvas_run.py 20260902+
+    # detail 取数链：aggregate meta（analysis/aggregate.py 20260902+
     # 写入）> 同目录 run_meta.json；均缺则对应分区显示 —（未提供）。
     ed_embedded = (
         ed is not None
@@ -3512,12 +3512,6 @@ def main():
     }
 
     # ---- 直接渲染报告 spec ----
-    # canvas_report_render_html.py 是同目录的 sibling 模块；作为脚本运行时
-    # 脚本目录自动在 sys.path 中，作为库被 import 时也依赖同目录可达。
-    _this_dir = os.path.dirname(os.path.abspath(__file__))
-    if _this_dir not in sys.path:
-        sys.path.insert(0, _this_dir)
-
     for index, panel in enumerate(panels, 1):
         panel["id"] = f"p{index}"
         time_values = cats_time.get(id(panel["x"]))

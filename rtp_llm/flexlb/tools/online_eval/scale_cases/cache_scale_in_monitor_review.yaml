@@ -64,7 +64,7 @@ parameters:
       model: prefix_lineage
       version: '2'
       parameters:
-        path: data/frontend_20260921_lineage.v2.xz
+        path: ../traffic_models/frontend_20260921.xz
         sha256: ac2f8aad472e882de2c649f5e0507d76787655a66d53e0e7285bdcb8aae87cca
         count: 141113
         output_tokens: 420

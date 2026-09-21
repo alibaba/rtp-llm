@@ -53,7 +53,7 @@ find "$RUN_ROOT/$RUN_ID" -name aggregate.json -print
 重新生成 HTML：
 
 ```bash
-python3 tools/online_eval/stress/canvas_report_gen.py \
+python3 tools/online_eval/stress/reporting/report.py \
   --aggregate /path/to/aggregate.json \
   --out /path/to/report.html
 ```
@@ -63,7 +63,7 @@ python3 tools/online_eval/stress/canvas_report_gen.py \
 基线与候选必须使用同一 trace、拓扑、Master 配置、时长、Fetch 模式和稳态窗口，且两边都有效：
 
 ```bash
-python3 tools/online_eval/stress/compare_ab.py \
+python3 tools/online_eval/stress/reporting/compare_ab.py \
   --run-a /path/to/A/aggregate.json \
   --run-b /path/to/B/aggregate.json \
   --out /path/to/comparison.json --html

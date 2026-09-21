@@ -2,7 +2,7 @@
 """Aggregate one online_eval run dir into Sarah-format canvas JSON (stdout).
 
 Run inside a run dir on the remote host:
-  cd <run_dir> && python3 aggregate_canvas_run.py
+  cd <run_dir> && python3 analysis/aggregate.py
 Reads (consolidated run-root layout, the only supported form):
   client.json (summary source: sh-merged scalar keys + embedded
   server_latency)
@@ -73,7 +73,7 @@ from bisect import bisect_right
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from online_eval.playback import iteration_windows
 
 run_dir = os.getcwd()
@@ -90,9 +90,9 @@ def load_json(path):
         return None
 
 
-# ---- shared-impl-begin: consolidate_run_outputs.py 经 exec 切块复用本段 ----
+# ---- shared-impl-begin: analysis/consolidate.py 经 exec 切块复用本段 ----
 # （is_ok / 17 桶 classify_error / Phase A 统计原语；修改本段时同步检查
-# consolidate_run_outputs.py 的 load_shared_impl 切块边界：本段只能依赖
+# analysis/consolidate.py 的 load_shared_impl 切块边界：本段只能依赖
 # re / Counter 与内置函数，不得引用本文件其它名字）。
 
 
@@ -205,7 +205,7 @@ def classify_error(status, err):
     return "err_other"
 
 
-# ---- Phase A 共享统计原语（consolidate_run_outputs.py 经 sentinel 受限 ----
+# ---- Phase A 共享统计原语（analysis/consolidate.py 经 sentinel 受限 ----
 # ---- exec 复用同一份实现；本块只能依赖其上方定义，不得引用其后名字） ----
 # percentile/rate/peak/summary 四族在全仓库统一为 nearest-rank 口径，
 # 公式逐字搬 run_online_eval.sh 多 worker 合并段（L1397-1448）与
@@ -2812,7 +2812,7 @@ batch_decisions = {
     },
 }
 
-# consolidate integrity markers (consolidate_run_outputs.py): how the
+# consolidate integrity markers (analysis/consolidate.py): how the
 # final_snapshot was obtained (live HTTP fetch vs stale fallback). Empty
 # for pre-integrity consolidations; the generator then stays silent.
 integrity = {}
@@ -2862,7 +2862,7 @@ else:
 # ---- meta 补充：报告头部三层取数源（20260902 条件/结果/详情重构）----
 # subtitle 实验条件（send_mode / replay_speed / 名义 QPS / ramp / duration）
 # 与 detail 层（数据集 / 配置 / 代码版本）从 run_meta.params 提升进
-# aggregate meta；canvas_report_gen.py 优先读这里，旧 aggregate 无键时
+# aggregate meta；reporting/report.py 优先读这里，旧 aggregate 无键时
 # 回退同目录 run_meta.json。值缺失（None / 空串）不写键——fail-closed
 # 留空，不硬错。远端 rsync 树无 .git：git_branch / git_commit 由调用方
 # （重聚合命令）经 FLEXLB_GIT_BRANCH / FLEXLB_GIT_COMMIT 注入。

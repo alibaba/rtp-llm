@@ -118,69 +118,6 @@ class ReportBundleTest(unittest.TestCase):
             self.assertEqual(load_analysis(result)["status"], "ERROR")
             self.assertEqual(payload, original)
 
-    def test_remote_cli_writes_one_comparison_bundle(self):
-        from test_remote_compare import fixture
-        from remote_compare import main
-
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            for name in ("a", "b"):
-                (root / (name + ".json")).write_text(
-                    json.dumps(fixture([(1000, 10), (2000, 20), (3000, 30)]))
-                )
-            self.assertEqual(
-                main(
-                    [
-                        "--real",
-                        str(root / "a.json"),
-                        "--mock",
-                        str(root / "b.json"),
-                        "--steady-lo-ms",
-                        "1000",
-                        "--steady-hi-ms",
-                        "3000",
-                        "--out-dir",
-                        str(root / "out"),
-                    ]
-                ),
-                0,
-            )
-            bundle = read_bundle(root / "out/reports/comparison/remote")
-            self.assertEqual(
-                load_analysis(bundle)["classification"], "descriptive_only"
-            )
-            self.assertFalse((root / "out/remote_comparison.html").exists())
-            self.assertEqual(len(list((root / "out").rglob("*.html"))), 1)
-
-    def test_case_cli_combines_table_and_duration_chart(self):
-        from test_compare_case_runs import case
-        from compare_case_runs import main
-
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            for name in ("a", "b"):
-                (root / (name + ".json")).write_text(
-                    json.dumps({"schema_version": 1, "instances": [case("PASS")]})
-                )
-            self.assertEqual(
-                main(
-                    [
-                        "--run-a",
-                        str(root / "a.json"),
-                        "--run-b",
-                        str(root / "b.json"),
-                        "--out-dir",
-                        str(root / "out"),
-                    ]
-                ),
-                0,
-            )
-            bundle = read_bundle(root / "out/reports/comparison/case-ab")
-            spec = json.loads((bundle / "report-spec.json").read_text())
-            self.assertTrue(spec["panels"])
-            self.assertEqual(spec["sections"][0]["type"], "table")
-            self.assertEqual(len(list((root / "out").rglob("*.html"))), 1)
-
     def test_unsafe_report_identity_stays_inside_artifact_root(self):
         with tempfile.TemporaryDirectory() as d:
             result = write_bundle(d, "run", "../../other", {}, dict(panels=[]))

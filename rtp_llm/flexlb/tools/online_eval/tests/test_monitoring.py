@@ -62,7 +62,7 @@ class ContractTest(unittest.TestCase):
             }])
 
     def test_legacy_gate_rejects_monitor_contract(self):
-        from stress.compare_ab import PrecheckError, resolve_run
+        from stress.reporting.compare_ab import PrecheckError, resolve_run
 
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "aggregate.json").write_text(

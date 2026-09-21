@@ -25,8 +25,8 @@ import unittest
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
-AGGREGATE = TOOLS_DIR / "aggregate_canvas_run.py"
-CANVAS = TOOLS_DIR / "canvas_report_gen.py"
+AGGREGATE = TOOLS_DIR / "stress/analysis/aggregate.py"
+CANVAS = TOOLS_DIR / "stress/reporting/report.py"
 T0 = 1_788_283_848_000  # epoch ms 锚点（与 client_events 首发送同拍）
 
 _P1 = 'role="prefill",engine_ip="10.1.1.1",engine_name="p1"'

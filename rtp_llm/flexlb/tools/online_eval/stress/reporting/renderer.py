@@ -222,8 +222,8 @@ def render(spec):
             dict(type="details", title="Run provenance", value=spec["run_meta"])
         )
     page_title = html.escape(title)
-    resource_dir = Path(__file__).resolve().parent
-    chartjs = (resource_dir / "vendor" / "chart.umd.min.js").read_text(encoding="utf-8")
+    resource_dir = Path(__file__).resolve().parent / "assets"
+    chartjs = (resource_dir / "chart.umd.min.js").read_text(encoding="utf-8")
     overlay = (resource_dir / "multi_curve.js").read_text(encoding="utf-8")
     interaction = (resource_dir / "legend_interaction.js").read_text(encoding="utf-8")
     return (

@@ -35,7 +35,7 @@ Tier assignment:
 Exit codes: 0 = gate passed (Tier 1 empty); 1 = gate tripped; 2 = precheck
 failure (not the same experiment — trace/params mismatch, unreadable inputs).
 
-Metric paths consume the aggregate.json produced by aggregate_canvas_run.py
+Metric paths consume the aggregate.json produced by analysis/aggregate.py
 (the 51 field paths were validated against current aggregates; the e2e/ttft
 percentile families from the same summary section are additionally included
 — they are all-zero in mock-engine runs and safe).
@@ -58,14 +58,13 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from online_eval.playback import comparison_notice
 
 from online_eval.reporting import render, write_bundle, table, details, run_meta
 from online_eval.reporting.statistics import select_window
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-from experiment_archive import create_archive
+from online_eval.archive import create_archive
 
 # ---------------------------------------------------------------------------
 # Significance thresholds per metric category.

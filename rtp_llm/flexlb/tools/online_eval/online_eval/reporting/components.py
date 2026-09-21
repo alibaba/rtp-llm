@@ -3,7 +3,7 @@
 
 def chart_spec(chart_type, categories, series, suffix=None, y_max=None):
     """直接保留列表数据；颜色顺序与渲染器一致。"""
-    from stress.canvas_report_render_html import series_color
+    from stress.reporting.renderer import series_color
 
     return {
         "type": chart_type,

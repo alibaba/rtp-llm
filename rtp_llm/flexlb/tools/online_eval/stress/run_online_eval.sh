@@ -16,7 +16,7 @@ REPO_ROOT="$(cd "${FLEXLB_DIR}/../.." && pwd)"
 # export either JAVA_LOAD_CLIENT_HEAP_SIZE or JAVA_LOAD_CLIENT_JVM_XMX/XMS
 # before this script runs to override the load client JVM sizing.
 JAVA_LOAD_CLIENT_JVM_XMX="${JAVA_LOAD_CLIENT_JVM_XMX:-${JAVA_LOAD_CLIENT_HEAP_SIZE:-16g}}"
-source "${SCRIPT_DIR}/lib_load_client.sh"
+source "${SCRIPT_DIR}/lib/load_client.sh"
 
 FLEXLB_NETWORK_ISOLATED="${FLEXLB_NETWORK_ISOLATED:-0}"
 if [[ "${FLEXLB_NETWORK_ISOLATED}" == "1" \
@@ -99,7 +99,7 @@ N_PREFILL="${N_PREFILL:-12}"
 N_DECODE="${N_DECODE:-40}"
 MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-61000}"
 # NOTE: the three assignments below (JAVA_MOCK_ENGINE_JAR, JAVA_LOAD_CLIENT_JAR,
-# MAVEN_PROFILES) duplicate defaults already applied by lib_load_client.sh at
+# MAVEN_PROFILES) duplicate defaults already applied by lib/load_client.sh at
 # source time (same values), so they are no-ops here. They are kept as
 # self-documentation of this script's tunable knobs; the effective defaults
 # live in the lib.
@@ -219,7 +219,7 @@ SLO_BATCH_DRAIN_SECONDS="${SLO_BATCH_DRAIN_SECONDS:-0}"
 # code change. FLEXLB_START_CMD mode is not covered: a user-supplied start
 # command does not get the property injected. Set FLEXLB_PV_LOG=on to keep
 # the full pv log; the file then survives consolidation untouched (see
-# consolidate_run_outputs.py).
+# analysis/consolidate.py).
 FLEXLB_PV_LOG="${FLEXLB_PV_LOG:-off}"
 JFR_FILE="${JFR_FILE:-${RUN_DIR}/flexlb_profile.jfr}"
 JFR_DURATION="${JFR_DURATION:-300s}"
@@ -276,7 +276,7 @@ JAVA_MODULE_OPTS=(
 # Limit Reactor boundedElastic scheduler threads to prevent thread explosion
 JVM_SYSTEM_PROPS=(-Dreactor.schedulers.defaultBoundedElasticSize=64)
 
-# java_major / detect_java21_home are provided by lib_load_client.sh (sourced
+# java_major / detect_java21_home are provided by lib/load_client.sh (sourced
 # above); do not redefine them here.
 
 JAVA21_HOME_DETECTED="$(detect_java21_home || true)"
@@ -308,7 +308,7 @@ cleanup() {
   if [[ -n "${EXPERIMENT_ARCHIVE_PATH}" && -d "${RUN_DIR}" ]]; then
     local archive_status=incomplete
     [[ "${run_exit_status}" -eq 0 && -s "${RUN_DIR}/aggregate.json" ]] && archive_status=complete
-    if python3 "${ONLINE_EVAL_DIR}/experiment_archive.py" create \
+    if PYTHONPATH="${ONLINE_EVAL_DIR}${PYTHONPATH:+:${PYTHONPATH}}" python3 -m online_eval.archive create \
       --kind stress --status "${archive_status}" \
       --source "run=${RUN_DIR}" --out "${EXPERIMENT_ARCHIVE_PATH}" \
       >/dev/null; then
@@ -570,7 +570,7 @@ with open(sys.argv[5], "w", encoding="utf-8") as stream:
 PY
 mkdir -p "${FLEXLB_LOG_PATH}"
 echo "run_dir=${RUN_DIR}"
-echo "load client: JavaLoadClient (trace priority passthrough via lib_load_client.sh)"
+echo "load client: JavaLoadClient (trace priority passthrough via lib/load_client.sh)"
 if [[ "$(java_major java)" -lt 21 ]]; then
   echo "Java 21 is required to run JavaLoadClient. Set JAVA21_HOME or JAVA_HOME." >&2
   exit 1
@@ -840,7 +840,7 @@ echo "warmup(prepare)=${FLEXLB_WARMUP_SECONDS:-10}s before any traffic; ramp-up=
 start_monitoring
 
 # JavaLoadClient reads its configuration exclusively from environment
-# variables (no CLI flags); lib_load_client.sh's run_java_load_client is
+# variables (no CLI flags); lib/load_client.sh's run_java_load_client is
 # the single source of truth for that mapping — every JavaLoadClient env
 # var is exported explicitly there (unpassed ones blanked), so no ambient
 # environment can leak in. PRIORITY is deliberately not passed: priority
@@ -859,10 +859,10 @@ start_monitoring
 # writes run_root/client_env.json once (first shard wins: the values are
 # identical across shards except OUTPUT_DIR / SHARD_INDEX /
 # SKIP_SERVER_LATENCY, and the worker layout itself is captured by
-# LOAD_CLIENT_WORKERS). consolidate_run_outputs.py embeds it into
+# LOAD_CLIENT_WORKERS). analysis/consolidate.py embeds it into
 # run_meta.json as client_env, sibling of flexlb_env. Phase B also records
 # CLIENT_PACING_LAG_P99_LIMIT_MS here: not a Java env (the client never
-# reads it) but the pacing validity limit aggregate_canvas_run.py reads
+# reads it) but the pacing validity limit analysis/aggregate.py reads
 # from run_meta.client_env — the merge heredoc that used to take it as
 # argv is gone, so this snapshot is its only path into the aggregate.
 write_client_env_snapshot() {

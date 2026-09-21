@@ -685,7 +685,7 @@ orchestration switches and their Python branches are gone as well, so the
 Java stack described in this README is the only implementation.
 
 `run_online_eval.sh` drives JavaLoadClient through the shared
-`tools/online_eval/lib_load_client.sh` helper `run_java_load_client`
+`tools/online_eval/stress/lib/load_client.sh` helper `run_java_load_client`
 (the single source of truth for the JavaLoadClient env-var mapping).
 
 The Python **smoke client family** has been retired and removed (it was

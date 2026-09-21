@@ -30,7 +30,7 @@ Target layout (run root), one JSON + one log per component:
   client.json                server_latency.json embedded, plus
                              per_request_source metadata
                              (Phase B: no summary base — the load client
-                             records raw rows only and aggregate_canvas_run.py
+                             records raw rows only and analysis/aggregate.py
                              is the single derived-statistics source)
   client.log                 client_shard_*.stdout merged with shard headers
   client_events.jsonl(.gz)   merged client-side per-request event stream
@@ -391,7 +391,7 @@ def count_jsonl_rows(paths: list[Path]) -> int:
     """Non-blank line count across JSONL sources (per_request_source metadata).
 
     Phase B: replaces the streaming PerSecondAggregator — client.json's
-    per_second timeline had no consumers left (aggregate_canvas_run.py
+    per_second timeline had no consumers left (analysis/aggregate.py
     recomputes per_second from the run-root client_events.jsonl itself, and
     the canvas report reads the aggregate), so
     only the cheap row-count metadata survives. Counts lines without
@@ -740,7 +740,7 @@ def consolidate(
 
     # ---- client.json / client.log -------------------------------------------
     # Phase B: load_client/summary.json no longer exists (the Java client
-    # records raw rows only; aggregate_canvas_run.py is the single derived-
+    # records raw rows only; analysis/aggregate.py is the single derived-
     # statistics source). client.json is now a small embedding document —
     # server_latency + per_request_source — seeded from the existing
     # client.json (re-run case) so merged-away sources survive.
@@ -811,7 +811,7 @@ def consolidate(
         if path.is_file():
             deleted.append(path)
     # Pre-refactor leftovers: the standalone SLO analysis script is gone
-    # (merged into aggregate_canvas_run.py's batch_decisions section), so its
+    # (merged into analysis/aggregate.py's batch_decisions section), so its
     # output files are stale by definition and get swept.
     for name in ("slo_batch_analysis.json", "slo_batch_analysis.stdout"):
         stale_path = run_dir / name

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# lib_load_client.sh — shared helpers for the JavaLoadClient and the
+# lib/load_client.sh — shared helpers for the JavaLoadClient and the
 # JDK 21 runtime it needs.
 #
 # Sourced by orchestration scripts (run_online_eval.sh) so that the

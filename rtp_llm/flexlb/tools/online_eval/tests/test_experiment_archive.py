@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from experiment_archive import create_archive
+from online_eval.archive import create_archive
 
 
 class ArchiveTest(unittest.TestCase):

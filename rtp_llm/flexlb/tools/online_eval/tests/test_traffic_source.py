@@ -94,7 +94,7 @@ class PlaybackReportTest(unittest.TestCase):
         self.assertEqual(windows[1]['input_tokens'],1024)
 
     def test_ab_precheck_includes_source_notice_even_when_trace_differs(self):
-        from stress.compare_ab import precheck,PrecheckError
+        from stress.reporting.compare_ab import precheck,PrecheckError
         def run(sha,realism):
             return dict(meta=dict(trace_file_sha256=sha,traffic_manifests=[dict(realism=realism)]),run_meta=None)
         with self.assertRaisesRegex(PrecheckError,'不可直比'):

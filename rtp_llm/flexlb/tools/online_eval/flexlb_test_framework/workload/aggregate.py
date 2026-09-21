@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from online_eval.requests import request_success
-from stress.consolidate_run_outputs import parse_grouped_prometheus_timeseries
+from stress.analysis.consolidate import parse_grouped_prometheus_timeseries
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -72,7 +72,7 @@ def run_canvas(out, timeout_s):
         "w"
     ) as errors:
         run = subprocess.run(
-            [sys.executable, str(ROOT / "stress/aggregate_canvas_run.py")],
+            [sys.executable, str(ROOT / "stress/analysis/aggregate.py")],
             cwd=out,
             stdout=output,
             stderr=errors,
@@ -97,7 +97,7 @@ def run_canvas(out, timeout_s):
         render = subprocess.run(
             [
                 sys.executable,
-                str(ROOT / "stress/canvas_report_gen.py"),
+                str(ROOT / "stress/reporting/report.py"),
                 "--aggregate",
                 str(out / "canvas.json"),
                 "--out",

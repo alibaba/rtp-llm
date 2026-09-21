@@ -108,7 +108,7 @@ cd "$RTP_LLM_OPEN_SOURCE/rtp_llm/flexlb"
 
 test -s flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar
 test -s flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar
-bash -n tools/online_eval/run_online_eval.sh
+bash -n tools/online_eval/stress/run_online_eval.sh
 ```
 
 重新编译后再压测，避免代码和旧 jar 不一致。功能测试和两组性能门禁使用独立 Maven invocation：

@@ -1,1 +1,0 @@
-stress/aggregate_canvas_run.py

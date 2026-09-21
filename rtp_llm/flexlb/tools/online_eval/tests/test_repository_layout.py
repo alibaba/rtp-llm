@@ -42,28 +42,24 @@ class RepositoryLayoutTest(unittest.TestCase):
             parallel_runner.main()
         self.assertEqual(error.exception.code, 2)
 
-    def test_canonical_and_compatibility_commands_work_outside_repository(self):
-        pairs = [
-            ("stress/compare_ab.py", "compare_ab.py", ["--help"]),
-            ("stress/compare_twin.py", "compare_twin.py", ["--help"]),
-            ("stress/canvas_report_gen.py", "canvas_report_gen.py", ["--help"]),
+    def test_commands_work_outside_repository(self):
+        commands = [
+            ("stress/reporting/compare_ab.py", ["--help"]),
+            ("stress/analysis/compare_twin.py", ["--help"]),
+            ("stress/reporting/report.py", ["--help"]),
         ]
         with tempfile.TemporaryDirectory() as cwd:
-            for canonical, alias, arguments in pairs:
-                with self.subTest(command=canonical):
-                    target = ROOT / alias
-                    self.assertTrue(target.is_symlink())
-                    self.assertEqual(target.resolve(), ROOT / canonical)
-                    for name in (canonical, alias):
-                        result = subprocess.run(
-                            [sys.executable, str(ROOT / name), *arguments],
-                            cwd=cwd,
-                            text=True,
-                            capture_output=True,
-                            timeout=30,
-                        )
-                        self.assertEqual(result.returncode, 0, result.stderr)
-                        self.assertTrue(result.stdout.strip())
+            for command, arguments in commands:
+                with self.subTest(command=command):
+                    result = subprocess.run(
+                        [sys.executable, str(ROOT / command), *arguments],
+                        cwd=cwd,
+                        text=True,
+                        capture_output=True,
+                        timeout=30,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(result.stdout.strip())
 
     def test_inventory_stays_complete_without_retired_modules(self):
         from flexlb_test_framework.scenario import compile_scenarios, load_scenarios
@@ -93,14 +89,14 @@ class RepositoryLayoutTest(unittest.TestCase):
         # Stop before sourcing the Java helper, after the real path assignments.
         script = r"""
 set -T
-trap 'if [[ "$BASH_COMMAND" == source\ *lib_load_client.sh* ]]; then
+trap 'if [[ "$BASH_COMMAND" == source\ *load_client.sh* ]]; then
   printf "%s\n" "$SCRIPT_DIR" "$ONLINE_EVAL_DIR" "$FLEXLB_DIR" "$REPO_ROOT"
   exit 0
 fi' DEBUG
 source "$1"
 """
         with tempfile.TemporaryDirectory() as cwd:
-            for entry in ("run_online_eval.sh", "stress/run_online_eval.sh"):
+            for entry in ("stress/run_online_eval.sh",):
                 result = subprocess.run(
                     ["bash", "-c", script, "layout-check", str(ROOT / entry)],
                     cwd=cwd,

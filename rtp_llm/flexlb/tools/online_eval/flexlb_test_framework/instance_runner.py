@@ -536,7 +536,7 @@ def run_structured(args: argparse.Namespace, ports) -> int:
     target = Path(args.json).resolve() if args.json else out / "aggregate.json"
     _write_json(target, payload)
     if getattr(args, "archive", None):
-        from experiment_archive import create_archive
+        from online_eval.archive import create_archive
 
         sources = {"run": out}
         if target.parent != out:

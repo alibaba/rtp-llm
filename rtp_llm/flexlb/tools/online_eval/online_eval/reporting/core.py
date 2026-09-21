@@ -120,7 +120,7 @@ def render(spec):
         if panel["id"] in ids:
             raise ValueError("duplicate panel id: " + panel["id"])
         ids.add(panel["id"])
-    from stress.canvas_report_render_html import render as render_html
+    from stress.reporting.renderer import render as render_html
 
     return render_html(spec)
 

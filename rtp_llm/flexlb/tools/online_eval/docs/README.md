@@ -13,7 +13,7 @@
 
 ### Whale
 
-1. [CI 与部署](whale/README.md)：完整 bundle、mock-refresh、独立引擎镜像及验收链路。
+1. [CI 与部署](whale/README.md)：完整 CPU bundle、独立引擎镜像及验收链路。
 2. [配置与环境变量](whale/configuration.md)：两种拓扑和运行时配置。
 
 ### 参考
@@ -25,8 +25,4 @@
 - `reference/cases/`：少数需要单独解释的场景合同。
 - `reference/concepts/`：P/D 生命周期与流量源等底层语义。
 
-## 历史资料
-
-`archive/legacy-20260921/` 保存重组前的长文、阶段性设计和验证记录。它们可能含已删除入口、旧默认值和特定机器操作，只能用于追溯。旧路径到新位置的逐项映射见[迁移映射](migration-map.md)。
-
-代码、当前 runbook 与历史资料冲突时，以当前分支代码和当前 runbook 为准。
+阶段设计、验证快照和旧操作说明不进入源码树；需要时从 Git 历史读取。代码与当前 runbook 是唯一现行依据。

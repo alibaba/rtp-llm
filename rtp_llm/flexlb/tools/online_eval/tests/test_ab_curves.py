@@ -2,10 +2,10 @@ import sys
 import unittest
 from pathlib import Path
 
-STRESS = Path(__file__).resolve().parents[1] / "stress"
-sys.path.insert(0, str(STRESS))
-from compare_ab import build_curve_spec
-from canvas_report_render_html import render
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from stress.reporting.compare_ab import build_curve_spec
+from stress.reporting.renderer import render
 
 
 class AbCurvesTest(unittest.TestCase):

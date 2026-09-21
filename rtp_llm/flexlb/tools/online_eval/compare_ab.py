@@ -1,1 +1,0 @@
-stress/compare_ab.py

@@ -20,7 +20,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
-import compare_twin as ct  # noqa: E402
+from stress.analysis import compare_twin as ct  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # fixture builder — a self-contained mini aggregate (2P2D, 100s)
@@ -148,7 +148,7 @@ def write_run(root, name, aggregate, n_prefill=2, n_decode=2):
 
 def run_cli(*argv):
     return subprocess.run(
-        [sys.executable, str(SCRIPT_DIR / "compare_twin.py")] + list(argv),
+        [sys.executable, str(SCRIPT_DIR / "stress/analysis/compare_twin.py")] + list(argv),
         capture_output=True,
         text=True,
     )

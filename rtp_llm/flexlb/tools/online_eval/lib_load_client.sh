@@ -1,1 +1,0 @@
-stress/lib_load_client.sh

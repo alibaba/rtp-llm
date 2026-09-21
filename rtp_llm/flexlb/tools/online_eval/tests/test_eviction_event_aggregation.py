@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 class EvictionEventAggregationTest(unittest.TestCase):
     def load(self, events):
-        source = Path(__file__).resolve().parents[1] / "stress/aggregate_canvas_run.py"
+        source = Path(__file__).resolve().parents[1] / "stress/analysis/aggregate.py"
         text = source.read_text()
         block = text[
             text.index("def validate_eviction_event(") : text.index(

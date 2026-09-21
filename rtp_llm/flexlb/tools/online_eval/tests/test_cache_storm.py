@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from calibrate_cache_storm import calibrate, poisson_upper, wilson_lower
+from online_eval.calibrate_cache_storm import calibrate, poisson_upper, wilson_lower
 from flexlb_test_framework.scenario import compile_scenarios, load_scenarios
 from flexlb_test_framework.scenario.actions.cache_storm import (
     HANDLERS,

@@ -43,7 +43,7 @@
 
 ## Band 校准与探针裁决
 
-`calibrate_cache_storm.py` 接收独立运行的 `cache-storm-summary.json`，每个拓扑至少 3 次，拒绝重复样本、不同节奏参数、基线/注入/恢复未成立、请求或清理失败的样本。**仅用基线窗口确定健康 band，饱和数据不参与调整阈值。**
+`python3 -m online_eval.calibrate_cache_storm` 接收独立运行的 `cache-storm-summary.json`，每个拓扑至少 3 次，拒绝重复样本、不同节奏参数、基线/注入/恢复未成立、请求或清理失败的样本。**仅用基线窗口确定健康 band，饱和数据不参与调整阈值。**
 
 - 命中率：基线命中分母上的 Wilson 下界，strict/normal/loose 分别使用单侧 90%/95%/99% 参数。
 - 驱逐率：基线总驱逐数和实际观测秒数上的 Poisson 上界，同样使用三个参数。
@@ -61,7 +61,7 @@ P 系列对比必须同时报告命中率最低值、扩散引擎数、复制份
 
 ## 已登记的校准与运行方式
 
-[2026-09-08 校准记录](../../calibration/cache-storm-2026-09-08.json) 保存每个拓扑的三个独立有效样本；每组共 9 个基线窗口、42 个热点请求，全部命中、没有驱逐，基线持有引擎数为 1。命中率和持有量 band 数值相同，是各自样本计算结果相同，不是跨拓扑复制阈值。
+阈值需要用 `python3 -m online_eval.calibrate_cache_storm` 在目标环境重新校准；原始运行结果属于实验产物，不提交到源码树。校准时每个拓扑至少保留三个独立有效样本，并在外部实验归档中记录输入、环境和 commit。
 
 | P | normal 命中率下界 | normal 驱逐率上界（块/秒） | normal 持有引擎数上界 |
 |---|---:|---:|---:|
@@ -79,7 +79,7 @@ python3 parallel_runner.py --parallel 1 --profile single-batch \
 
 节奏敏感的校准在同一台机器串行执行，且不与构建或其他压测重叠。每次使用新的产物目录和独立环境。正式结果目录包含 `result.json`、`cache-storm-summary.json`、`cache-storm-raw.json`、`cache-storm-engine-events.jsonl` 和探针裁决文件。
 
-新增 P 变体时，复制 YAML 数据项，调整 `n_prefill`，保持 `use: leader_spill_multi`。先设置 `calibration_runs: 0`，收集至少三次只有 `validity.calibrated` 未通过的有效构造运行，再用 `calibrate_cache_storm.py` 计算新 band。修改慢速、容量或发射节奏后也要重新校准，不能只把校准次数改成 3。
+新增 P 变体时，复制 YAML 数据项，调整 `n_prefill`，保持 `use: leader_spill_multi`。先设置 `calibration_runs: 0`，收集至少三次只有 `validity.calibrated` 未通过的有效构造运行，再用 `python3 -m online_eval.calibrate_cache_storm` 计算新 band。修改慢速、容量或发射节奏后也要重新校准，不能只把校准次数改成 3。
 
 解除保留限制的对照只需在独立 YAML 文件中覆盖 `receiver_retention_blocks: 64` 和 `require_insufficient_retention: 0`，用 `--case-dir` 选择该文件。主探针的 band 用于诊断比较，对照结果不加入主探针的校准样本。
 
