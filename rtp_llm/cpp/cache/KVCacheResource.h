@@ -99,7 +99,7 @@ using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 
 class KVCacheResource {
 public:
-    void initGroups(std::shared_ptr<const CacheTopology> topology);
+    void initGroups(std::shared_ptr<const CacheTopology> topology, bool materialize_layer_views = true);
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int                     blocksNum(std::string_view tag) const;
@@ -184,6 +184,8 @@ private:
     void checkLayerTag(int layer_id, std::string_view tag) const;
     bool hasOneGroupPerLayer() const;
 
+    // Beam forks share immutable layer membership; default resources keep owning views.
+    std::shared_ptr<const CacheTopology>  topology_;
     std::vector<std::vector<std::string>> layer_group_tags_;
     GroupBlockIds         group_block_ids;
     CacheKeysType         cache_keys;
