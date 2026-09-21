@@ -205,7 +205,7 @@ class StormTest(unittest.TestCase):
 
     def test_topologies_share_one_python_program_with_distinct_environments(self):
         plans = compile_scenarios(
-            load_scenarios(ROOT / "scenarios/kv/cache_affinity.yaml"),
+            load_scenarios(ROOT / "config/scenarios/kv/cache_affinity.yaml"),
             handlers=handlers(),
         )
         selected = [

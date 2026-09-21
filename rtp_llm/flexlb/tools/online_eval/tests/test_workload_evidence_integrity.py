@@ -297,7 +297,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
     def test_stress_aggregator_never_promotes_unknown_terminal_status(self):
         import ast
 
-        source = Path(__file__).resolve().parents[1] / "stress/analysis/aggregate.py"
+        source = Path(__file__).resolve().parents[1] / "src/stress/analysis/aggregate.py"
         tree = ast.parse(source.read_text())
         fn = next(
             n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "is_ok"

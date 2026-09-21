@@ -26,8 +26,8 @@ from flexlb_test_framework.scenario import load_scenarios
 from flexlb_test_framework.scenario.compiler import compile_scenarios
 from flexlb_test_framework.scenario.catalog import handlers
 import flexlb_test_framework.resource_plan as resource_plan
-root=Path(resource_plan.__file__).resolve().parent.parent
-plans=compile_scenarios(load_scenarios(root/'scale_cases/cache_scale_in_online.yaml'), handlers=handlers())
+root=Path(resource_plan.__file__).resolve().parents[2]
+plans=compile_scenarios(load_scenarios(root/'config/scale_cases/cache_scale_in_online.yaml'), handlers=handlers())
 assert plans[0]['environment']['n_prefill']==125
 assert plans[0]['environment']['n_decode']==536
 source=plans[0]['stages'][1]['params']['source']['parameters']
@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory() as d:
         env = dict(
             os.environ,
             FLEXLB_FT_WORKER_PORT_CAPACITY="700",
-            PYTHONPATH=str(Path(__file__).resolve().parents[1]),
+            PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"),
         )
         subprocess.run([sys.executable, "-c", script], env=env, check=True)
 

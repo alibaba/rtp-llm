@@ -23,7 +23,7 @@ def catalog():
                 "variant_id": "default",
                 "profile": "batch-window",
                 "category": "cancel" if i % 2 else "kv",
-                "source_path": f"scenarios/scenario{i}.yaml",
+                "source_path": f"config/scenarios/scenario{i}.yaml",
                 "source": "yaml",
                 "tags": [],
                 "requires": [],

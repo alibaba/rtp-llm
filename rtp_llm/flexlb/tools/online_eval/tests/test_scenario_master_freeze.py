@@ -111,7 +111,7 @@ class FreezeTests(unittest.TestCase):
                 self.assertEqual(expected, result.checks[0].status)
 
     def test_formal_program_places_three_observations_on_old_boundaries(self):
-        path = Path(__file__).resolve().parents[1] / "scenarios/master"
+        path = Path(__file__).resolve().parents[1] / "config/scenarios/master"
         plans = compile_scenarios(load_scenarios(path), handlers=handlers())
         selected = [p for p in plans if p["variant_id"] == "freeze_short_long"]
         self.assertEqual(4, len(selected))

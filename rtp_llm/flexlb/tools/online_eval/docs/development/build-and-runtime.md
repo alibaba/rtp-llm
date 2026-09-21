@@ -38,7 +38,7 @@ flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar
 2. **拓扑与资源**：P/D 数量、端口基址、JVM heap、KV block 容量。
 3. **负载与证据**：请求数量或时长、replay/uniform、采集档位、输出目录。
 
-四种形态由 `mode_profiles.yaml` 解释：
+四种形态由 `config/mode_profiles.yaml` 解释：
 
 | 简写 | decision | dispatcher | profile |
 |---|---|---|---|
@@ -55,8 +55,8 @@ flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar
 test -f flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar
 test -f flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar
 test -x "${PROMETHEUS_BIN:-$(command -v prometheus)}"
-python3 tools/online_eval/scenario_runner.py \
-  --source tools/online_eval/scenarios --list-json >/tmp/flexlb-case-catalog.json
+python3 tools/online_eval/scripts/scenario_runner.py \
+  --source tools/online_eval/config/scenarios --list-json >/tmp/flexlb-case-catalog.json
 ```
 
 最后一条只编译 case 计划，不启动服务。若这里失败，应先修复配置或 Python 依赖，再运行测试。

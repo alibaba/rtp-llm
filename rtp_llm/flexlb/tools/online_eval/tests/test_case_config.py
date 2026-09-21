@@ -25,7 +25,7 @@ class CaseConfigTest(unittest.TestCase):
         from flexlb_cfg import ConfigOverride, render_env
 
         plans = compile_scenarios(
-            load_scenarios(ROOT / "scenarios/core/request_completion.yaml"),
+            load_scenarios(ROOT / "config/scenarios/core/request_completion.yaml"),
             handlers=handlers(),
         )
         self.assertEqual(len(plans), 4)
@@ -42,7 +42,7 @@ class CaseConfigTest(unittest.TestCase):
             )
 
     def config(self):
-        config = load_document(ROOT / "scenarios/core/request_completion.yaml")
+        config = load_document(ROOT / "config/scenarios/core/request_completion.yaml")
         return config
 
     def compile(self, config):
@@ -245,7 +245,7 @@ class CaseConfigTest(unittest.TestCase):
                         self.assertEqual(node.keywords, [], str(path))
 
     def test_shipped_inventory_is_data_only_and_keeps_all_checks(self):
-        documents = load_scenarios(ROOT / "scenarios")
+        documents = load_scenarios(ROOT / "config/scenarios")
         plans = compile_scenarios(documents, handlers=handlers())
         expected = json.loads((ROOT / "tests/fixtures/instance_ids.json").read_text())
         self.assertEqual(sorted(p["id"] for p in plans), expected)

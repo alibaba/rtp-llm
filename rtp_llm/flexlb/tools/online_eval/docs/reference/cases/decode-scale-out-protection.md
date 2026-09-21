@@ -1,6 +1,6 @@
 # Decode 扩容保护
 
-实例名为 `elastic_lifecycle::decode_scale_out_protection::<profile>`，覆盖四种 profile。流程在 `case_programs/elastic_lifecycle.py`，参数在 `scenarios/elastic/lifecycle.yaml`，沿用已有弹性程序，没有新增单 case Python 程序。
+实例名为 `elastic_lifecycle::decode_scale_out_protection::<profile>`，覆盖四种 profile。流程在 `case_programs/elastic_lifecycle.py`，参数在 `config/scenarios/elastic/lifecycle.yaml`，沿用已有弹性程序，没有新增单 case Python 程序。
 
 默认从 2P/2D 扩到 2P/3D，每个 Decode 的 `decode_max_engine_requests` 为 8。客户端保持最多 24 个未结束请求，输入 512 tokens、输出 128 tokens；每次请求使用独立 KV key。先确认每个旧 Decode 已完成请求且当前负载至少为容量的一半，再添加新 Decode。
 

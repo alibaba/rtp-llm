@@ -155,7 +155,7 @@ overloaded scenario, not a historical known-bad/known-good regression control.
 
 ## Production-scale candidate and shared overlay component
 
-`scale_cases/cache_scale_in_online.yaml` uses 125P/536D, fixed 240 QPS and one-step
+`config/scale_cases/cache_scale_in_online.yaml` uses 125P/536D, fixed 240 QPS and one-step
 125P -> 24P. Historical real traffic in the old-master comparison had median
 235.79 QPS (range 207.38–282.09 QPS across 231 buckets); 240 is a fixed reference,
 not a live reading. Decode remains at 536 throughout. The original small case
@@ -218,7 +218,7 @@ and faster preparation/reporting remain pending before enforcing this in CI.
 
 ## Historical Whale Master controls
 
-`scale_cases/cache_scale_in_whale_ab.yaml` reproduces the archived configuration
+`config/scale_cases/cache_scale_in_whale_ab.yaml` reproduces the archived configuration
 with 125P/536D -> 8P/536D, 240 QPS, NON_BATCH, flat Device / flat Memory eviction
 and consume-on-H2D. This intentionally differs from the current production-scale
 candidate's Device tree setting. It is the historical mock configuration, not a

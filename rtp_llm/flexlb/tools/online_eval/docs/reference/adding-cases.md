@@ -2,7 +2,7 @@
 
 ## 只改变数据或阈值
 
-在 `scenarios/` 对应 category 中新增或修改 schema v2 YAML。YAML 保存拓扑、profile、请求数据、时间预算、阈值和参数约束，不写步骤或条件分支。
+在 `config/scenarios/` 对应 category 中新增或修改 schema v2 YAML。YAML 保存拓扑、profile、请求数据、时间预算、阈值和参数约束，不写步骤或条件分支。
 
 ## 新增业务流程
 
@@ -13,15 +13,15 @@
 - 少量确定请求验证返回码、状态或边界：`functional`。
 - 持续负载、故障、扩缩容、恢复或阶段曲线：`workload`。
 
-在 `suites.yaml` 中登记分类和采集档位。分类不改变业务 category，也不改变 Master profile。
+在 `config/suites.yaml` 中登记分类和采集档位。分类不改变业务 category，也不改变 Master profile。
 
 ## 验证
 
 ```bash
-python3 tools/online_eval/scenario_runner.py \
-  --source tools/online_eval/scenarios --list-json
+python3 tools/online_eval/scripts/scenario_runner.py \
+  --source tools/online_eval/config/scenarios --list-json
 
-python3 tools/online_eval/parallel_runner.py \
+python3 tools/online_eval/scripts/parallel_runner.py \
   --instances '<exact-instance-id>' --parallel 1 --dry-run
 
 python3 -m unittest discover -s tools/online_eval/tests -p 'test_*.py'

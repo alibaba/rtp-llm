@@ -221,7 +221,7 @@ class CompileTest(unittest.TestCase):
 
 class LoaderTest(unittest.TestCase):
     def config(self):
-        config = load_document(TOOLS / "scenarios/core/request_completion.yaml")
+        config = load_document(TOOLS / "config/scenarios/core/request_completion.yaml")
         config["environment"].update(n_prefill=1, n_decode=1)
         config["profiles"] = ["batch-window", "single-batch"]
         config["variants"] = [{"id": "immediate", "program": "immediate"}]

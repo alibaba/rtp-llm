@@ -94,7 +94,7 @@ class ConvergenceTest(unittest.TestCase):
 
         workers = load_document(
             Path(__file__).resolve().parents[1]
-            / "scenarios/elastic/concurrent_mutation.yaml"
+            / "config/scenarios/elastic/concurrent_mutation.yaml"
         )["parameters"]["default"]["crossfire"]["workers"]
         config = dict(
             margin_s=2,

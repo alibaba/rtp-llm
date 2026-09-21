@@ -596,7 +596,7 @@ class WindowLockTest(unittest.TestCase):
     def test_simultaneous_cold_start_with_different_lane_counts(self):
         code = (
             "import sys\nfrom pathlib import Path\n"
-            f"sys.path.insert(0, {str(TOOLS_DIR)!r})\n"
+            f"sys.path.insert(0, {str(TOOLS_DIR / 'src')!r})\n"
             "import parallel_runner as p\n"
             f"p.PORT_WINDOW_LOCK_DIR = Path({str(self.lockdir)!r})\n"
             "print('READY', flush=True)\nsys.stdin.readline()\n"

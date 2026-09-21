@@ -476,7 +476,7 @@ class MasterActionsTest(unittest.TestCase):
             HANDLERS as observations,
         )
 
-        root = Path(__file__).resolve().parents[1] / "scenarios/master"
+        root = Path(__file__).resolve().parents[1] / "config/scenarios/master"
         plans = compile_scenarios(
             load_scenarios(root),
             handlers={

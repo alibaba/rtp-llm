@@ -13,7 +13,7 @@ class MasterConfigTests(unittest.TestCase):
     def test_all_lifecycle_variants_match_expected_rendered_configuration(self):
         path = (
             Path(__file__).resolve().parents[1]
-            / "scenarios/master/master_lifecycle.yaml"
+            / "config/scenarios/master/master_lifecycle.yaml"
         )
         plans = compile_scenarios(load_scenarios(path), handlers=handlers())
         self.assertEqual(9, len(plans))
@@ -31,7 +31,7 @@ class MasterConfigTests(unittest.TestCase):
     def test_single_nonbatch_freeze_retains_fifo_and_queue_deadline(self):
         path = (
             Path(__file__).resolve().parents[1]
-            / "scenarios/master/master_lifecycle.yaml"
+            / "config/scenarios/master/master_lifecycle.yaml"
         )
         plans = compile_scenarios(load_scenarios(path), handlers=handlers())
         freeze = next(

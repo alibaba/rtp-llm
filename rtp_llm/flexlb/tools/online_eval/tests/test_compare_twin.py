@@ -148,7 +148,7 @@ def write_run(root, name, aggregate, n_prefill=2, n_decode=2):
 
 def run_cli(*argv):
     return subprocess.run(
-        [sys.executable, str(SCRIPT_DIR / "stress/analysis/compare_twin.py")] + list(argv),
+        [sys.executable, str(SCRIPT_DIR / "src/stress/analysis/compare_twin.py")] + list(argv),
         capture_output=True,
         text=True,
     )

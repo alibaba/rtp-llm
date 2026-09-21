@@ -17,7 +17,7 @@ export REPLAY_SPEED=82
 export FLEXLB_WARMUP_SECONDS=10
 export FETCH_OUTPUT_STREAM=1
 
-bash tools/online_eval/stress/run_online_eval.sh
+bash tools/online_eval/scripts/stress/run_online_eval.sh
 ```
 
 `REPLAY_SPEED=82` 只对应仓库当前 `trace_30min.jsonl` 的约 650 名义 QPS 标定。替换 trace 或目标 QPS 时按下式重算：
@@ -53,7 +53,7 @@ find "$RUN_ROOT/$RUN_ID" -name aggregate.json -print
 重新生成 HTML：
 
 ```bash
-python3 tools/online_eval/stress/reporting/report.py \
+python3 tools/online_eval/scripts/render_report.py \
   --aggregate /path/to/aggregate.json \
   --out /path/to/report.html
 ```
@@ -63,7 +63,7 @@ python3 tools/online_eval/stress/reporting/report.py \
 基线与候选必须使用同一 trace、拓扑、Master 配置、时长、Fetch 模式和稳态窗口，且两边都有效：
 
 ```bash
-python3 tools/online_eval/stress/reporting/compare_ab.py \
+python3 tools/online_eval/scripts/compare_ab.py \
   --run-a /path/to/A/aggregate.json \
   --run-b /path/to/B/aggregate.json \
   --out /path/to/comparison.json --html

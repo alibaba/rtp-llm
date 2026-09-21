@@ -1,13 +1,13 @@
 # 参数参考
 
-本页集中解释三个开发机 runbook 共用的公开参数。更细的 case 数据以 `scenarios/*.yaml` 和命令 `--help` 为准。
+本页集中解释三个开发机 runbook 共用的公开参数。更细的 case 数据以 `config/scenarios/*.yaml` 和命令 `--help` 为准。
 
 ## Master 形态
 
 | 参数 | 含义 |
 |---|---|
 | `--profile` / `FLEXLB_PROFILE` | 完整 Master 配置名称 |
-| `--master-mode` / `FLEXLB_MASTER_MODE` | `sb/sn/wb/wn` 简写；映射见 `mode_profiles.yaml` |
+| `--master-mode` / `FLEXLB_MASTER_MODE` | `sb/sn/wb/wn` 简写；映射见 `config/mode_profiles.yaml` |
 | `FLEXLB_CONFIG_OVERRIDE` | 对 profile 的受校验字段覆盖，格式为 `k=v,...` |
 | `FLEXLB_CONFIG` | 完整配置逃生口；设置后必须保存并审查最终值 |
 

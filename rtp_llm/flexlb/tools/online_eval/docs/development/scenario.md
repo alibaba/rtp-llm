@@ -7,11 +7,11 @@
 ## 选择与预览
 
 ```bash
-python3 tools/online_eval/scenario_runner.py \
-  --source tools/online_eval/scenarios \
+python3 tools/online_eval/scripts/scenario_runner.py \
+  --source tools/online_eval/config/scenarios \
   --suite workload --list-json > /tmp/flexlb-workloads.json
 
-python3 tools/online_eval/parallel_runner.py \
+python3 tools/online_eval/scripts/parallel_runner.py \
   --suite workload \
   --instances 'balance_distribution::sustained_mix::batch-window' \
   --parallel 1 --dry-run
@@ -25,7 +25,7 @@ python3 tools/online_eval/parallel_runner.py \
 export PROMETHEUS_BIN=/path/to/prometheus
 OUT=/path/to/new-output/scenario
 
-python3 tools/online_eval/parallel_runner.py \
+python3 tools/online_eval/scripts/parallel_runner.py \
   --suite workload \
   --profile batch-window \
   --parallel 1 \

@@ -30,23 +30,23 @@ class RepositoryLayoutTest(unittest.TestCase):
                 self.assertEqual(parallel_runner.main(), 0)
             args, _ = run.call_args.args
             self.assertEqual(args.source, "yaml")
-            self.assertEqual(Path(args.case_dir), ROOT / "scenarios")
+            self.assertEqual(Path(args.case_dir), ROOT / "config/scenarios")
             self.assertEqual(args.shard, "case")
 
     def test_removed_source_is_rejected(self):
         with mock.patch.object(
             sys,
             "argv",
-            ["parallel_runner.py", "--source", "legacy", "--case-dir", "scenarios"],
+            ["parallel_runner.py", "--source", "legacy", "--case-dir", "config/scenarios"],
         ), self.assertRaises(SystemExit) as error:
             parallel_runner.main()
         self.assertEqual(error.exception.code, 2)
 
     def test_commands_work_outside_repository(self):
         commands = [
-            ("stress/reporting/compare_ab.py", ["--help"]),
-            ("stress/analysis/compare_twin.py", ["--help"]),
-            ("stress/reporting/report.py", ["--help"]),
+            ("scripts/compare_ab.py", ["--help"]),
+            ("scripts/compare_twin.py", ["--help"]),
+            ("scripts/render_report.py", ["--help"]),
         ]
         with tempfile.TemporaryDirectory() as cwd:
             for command, arguments in commands:
@@ -66,7 +66,7 @@ class RepositoryLayoutTest(unittest.TestCase):
         from flexlb_test_framework.scenario.catalog import handlers
 
         plans = compile_scenarios(
-            load_scenarios(ROOT / "scenarios"), handlers=handlers()
+            load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
         )
         expected = json.loads((ROOT / "tests/fixtures/instance_ids.json").read_text())
         self.assertEqual(expected, sorted(p["id"] for p in plans))
@@ -96,7 +96,7 @@ fi' DEBUG
 source "$1"
 """
         with tempfile.TemporaryDirectory() as cwd:
-            for entry in ("stress/run_online_eval.sh",):
+            for entry in ("scripts/stress/run_online_eval.sh",):
                 result = subprocess.run(
                     ["bash", "-c", script, "layout-check", str(ROOT / entry)],
                     cwd=cwd,
@@ -108,7 +108,7 @@ source "$1"
                 self.assertEqual(
                     result.stdout.splitlines(),
                     [
-                        str(ROOT / "stress"),
+                        str(ROOT / "scripts/stress"),
                         str(ROOT),
                         str(ROOT.parents[1]),
                         str(ROOT.parents[3]),

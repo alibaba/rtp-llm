@@ -79,7 +79,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
 
     def test_catalog_is_disjoint_and_complete(self):
         plans = compile_scenarios(
-            load_scenarios(ROOT / "scenarios"), handlers=handlers()
+            load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
         )
         f = {p["id"] for p in classify(plans, "functional")}
         w = {p["id"] for p in classify(plans, "workload")}
@@ -105,7 +105,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
 
     def test_core_suite_is_five_stable_contracts_for_every_master_profile(self):
         plans = compile_scenarios(
-            load_scenarios(ROOT / "scenarios"), handlers=handlers()
+            load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
         )
         expected = {
             "request_completion::immediate",

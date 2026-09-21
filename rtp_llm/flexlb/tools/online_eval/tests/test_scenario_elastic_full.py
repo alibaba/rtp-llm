@@ -223,7 +223,7 @@ class FullTests(unittest.TestCase):
         plan = next(
             p
             for p in compile_scenarios(
-                load_scenarios(ROOT / "scenarios/elastic/lifecycle.yaml"),
+                load_scenarios(ROOT / "config/scenarios/elastic/lifecycle.yaml"),
                 handlers=handlers,
             )
             if p["variant_id"] == "kv_full_shrink"

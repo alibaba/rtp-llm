@@ -55,7 +55,7 @@ class InstanceRunnerTest(unittest.TestCase):
     def args(self, **kwargs):
         values = dict(
             source="yaml",
-            case_dir=str(self.root / "scenarios"),
+            case_dir=str(self.root / "config/scenarios"),
             instances=None,
             categories=None,
             profile="batch-window",
@@ -169,8 +169,8 @@ PROGRAMS['grade_protocol'] = fixture.__name__
 raise SystemExit(child.main())
 """
         )
-        source = self.root / "scenarios"
-        source.mkdir()
+        source = self.root / "config/scenarios"
+        source.mkdir(parents=True)
         (source / "grade.yaml").write_text(
             """
 schema_version: 2
@@ -248,7 +248,7 @@ variants: [{id: default}]
         command = listing.call_args.args[0]
         self.assertIn("--list-json", command)
         self.assertEqual(
-            str((self.root / "scenarios").resolve()),
+            str((self.root / "config/scenarios").resolve()),
             command[command.index("--source") + 1],
         )
         doc = json.loads((self.root / "output/manifest.json").read_text())

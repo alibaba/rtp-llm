@@ -16,7 +16,13 @@ import yaml
 
 from flexlb_cfg import PROFILE_SPECS, STRESS_PROFILE
 
-TABLE_PATH = Path(__file__).with_name("mode_profiles.yaml")
+_ROOT = Path(__file__).resolve().parent
+# The Whale bundle copies these two files without the source-tree config directory.
+TABLE_PATH = (
+    _ROOT / "config/mode_profiles.yaml"
+    if (_ROOT / "config/mode_profiles.yaml").is_file()
+    else _ROOT / "mode_profiles.yaml"
+)
 
 
 def load_mode_tables(path: Path = TABLE_PATH) -> dict:

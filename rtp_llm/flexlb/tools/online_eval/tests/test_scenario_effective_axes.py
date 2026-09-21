@@ -13,7 +13,7 @@ from flexlb_test_framework.scenario.backend import make_env_spec
 
 class EffectiveAxesTests(unittest.TestCase):
     def source(self, overrides):
-        source = copy.deepcopy(load_scenarios(ROOT / "scenarios/core")[0][1])
+        source = copy.deepcopy(load_scenarios(ROOT / "config/scenarios/core")[0][1])
         source["stages"] = source.pop("variants")[0]["stages"]
         source["environment"]["config_overrides"] = overrides
         return source

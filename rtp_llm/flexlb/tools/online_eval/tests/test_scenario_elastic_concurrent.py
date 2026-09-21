@@ -35,7 +35,7 @@ class ConcurrentTests(unittest.TestCase):
     ):
         handlers = {h.name: h for h in e.HANDLERS}
         plans = compile_scenarios(
-            load_scenarios(ROOT / "scenarios/elastic/concurrent_mutation.yaml"),
+            load_scenarios(ROOT / "config/scenarios/elastic/concurrent_mutation.yaml"),
             handlers=handlers,
         )
         plan = next(p for p in plans if p["profile"] == profile)

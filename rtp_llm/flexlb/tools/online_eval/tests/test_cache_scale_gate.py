@@ -254,7 +254,7 @@ class CacheGateTest(unittest.TestCase):
 
     def test_real_scenario_compiles_and_preserves_cache_policy(self):
         plans = compile_scenarios(
-            load_scenarios(ROOT / "scenarios/workload/cache_scale_in.yaml"),
+            load_scenarios(ROOT / "config/scenarios/workload/cache_scale_in.yaml"),
             handlers=handlers(),
         )
         self.assertEqual(len(plans), 1)
@@ -267,7 +267,7 @@ class CacheGateTest(unittest.TestCase):
         import yaml
 
         case = yaml.safe_load(
-            (ROOT / "scenarios/workload/cache_scale_in.yaml").read_text()
+            (ROOT / "config/scenarios/workload/cache_scale_in.yaml").read_text()
         )
         gate = case["parameters"]["gate"]
         gate.update(intermediate_p=6, intermediate_hold_s=30)
