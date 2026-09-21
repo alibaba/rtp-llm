@@ -39,6 +39,10 @@ public:
 protected:
     py::object mm_process_engine_;
 
+    virtual ErrorResult<MultimodalOutput> V41MultimodalEmbedding(const V41RequestInputs& inputs,
+                                                               const std::string& ip_port,
+                                                               grpc::ClientContext* rpc_context);
+
 private:
     std::vector<std::vector<int64_t>> sep_token_ids_;
     bool                              include_sep_tokens_;

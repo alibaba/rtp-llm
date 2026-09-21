@@ -812,7 +812,9 @@ class DeepSeekV4Model(GptModelBase):
         del self.weight
 
         if torch.cuda.is_available() and device_str.startswith("cuda"):
-            gpu_mem_gb = torch.cuda.memory_allocated(torch.device(device_str)) / 1024**3
+            gpu_mem_gb = (
+                torch.cuda.memory_allocated(torch.device(device_str)) / 1024**3
+            )
             logging.info("[DeepSeekV4Model] GPU mem after load: %.1f GB", gpu_mem_gb)
 
         # Pre-warm the TileLang sparse_attn kernel before the C++ engine

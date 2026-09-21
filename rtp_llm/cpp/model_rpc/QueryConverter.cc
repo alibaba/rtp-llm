@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 
 #include <optional>
+#include <stdexcept>
 
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -197,12 +198,15 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             .clone();
     if (input->has_v41_inputs()) {
         const auto& typed = input->v41_inputs();
-        auto prepared = std::make_shared<V41RequestInputs>();
-        prepared->token_types =
-            torch::from_blob(const_cast<int32_t*>(typed.token_types().data()),
-                             {typed.token_types_size()},
-                             torch::kInt32)
-                .clone();
+        if (typed.schema_version() != 1) {
+            throw std::invalid_argument("unsupported V4.1 input schema version: "
+                                        + std::to_string(typed.schema_version()));
+        }
+        auto prepared         = std::make_shared<V41RequestInputs>();
+        prepared->token_types = torch::from_blob(const_cast<int32_t*>(typed.token_types().data()),
+                                                 {typed.token_types_size()},
+                                                 torch::kInt32)
+                                    .clone();
         prepared->image_mask = torch::empty({typed.image_mask_size()}, torch::kBool);
         for (int index = 0; index < typed.image_mask_size(); ++index) {
             prepared->image_mask.data_ptr<bool>()[index] = typed.image_mask(index);

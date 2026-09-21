@@ -384,6 +384,11 @@ public class DefaultBatchDispatcher {
         EngineRpcService.EnqueueBatchRequestPB request;
         try {
             request = buildBatchRequest(batchId, items);
+            int serializedSize = request.getSerializedSize();
+            if (serializedSize < 0 || serializedSize > org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE) {
+                throw new IllegalArgumentException(
+                        "EnqueueBatch payload exceeds 256 MiB gRPC limit: " + serializedSize + " bytes");
+            }
         } catch (Exception e) {
             Logger.error("Failed to build FlexLB batch request batchId: {}", batchId, e);
             failItems(items, batchId,
@@ -711,7 +716,11 @@ public class DefaultBatchDispatcher {
             throw new IllegalArgumentException("request_id mismatch between schedule request and GenerateInputPB");
         }
         EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
+        List<EngineRpcService.RoleAddrPB> visionAddrs = config.getRoleAddrsList().stream()
+                .filter(addr -> RoleTypeProtoConverter.fromRoleAddr(addr) == RoleType.VIT)
+                .toList();
         config.clearRoleAddrs();
+        config.addAllRoleAddrs(visionAddrs);
         addRoleAddr(config, roleAddresses.prefill(item.prefill()));
         addRoleAddr(config, roleAddresses.decode(item.decode()));
         // Pass the normalized Auto-TPM priority through to the engine

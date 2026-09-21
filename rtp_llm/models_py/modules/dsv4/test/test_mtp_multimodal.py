@@ -85,6 +85,7 @@ class MtpMultimodalTest(unittest.TestCase):
         model = HiddenOnlyDraft.__new__(HiddenOnlyDraft)
         torch.nn.Module.__init__(model)
         model.v4 = SimpleNamespace(layers=[])
+        model._v4_args = SimpleNamespace()
         model.kv_cache = object()
         inputs = SimpleNamespace(
             multimodal_features=[torch.ones(1, 4)],

@@ -1,5 +1,8 @@
+import asyncio
 import unittest
+import grpc
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -11,6 +14,7 @@ from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     RESOURCE_EXHAUSTED,
     SAME_PRIORITY_AHEAD,
     SCHEDULE_FAILURE_REASON_UNSPECIFIED,
+    FlexlbScheduleRequestPB,
     FlexlbScheduleResponsePB,
     FlexlbServerStatusPB,
 )
@@ -127,6 +131,146 @@ class _FakeInputPB:
 
 
 class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
+    async def test_large_image_payload_is_not_limited_to_16_mib(self):
+        payload = b"x" * (20 * 1024 * 1024)
+        client = _CaptureMasterClient()
+        await client.get_backend_role_addrs(
+            [],
+            512,
+            _FakeInput(),
+            100,
+            input_pb=SimpleNamespace(SerializeToString=lambda: payload),
+        )
+        self.assertEqual(client.calls[0]["request_pb"].generate_input, payload)
+
+    async def test_oversized_payload_is_rejected_before_rpc(self):
+        client = _CaptureMasterClient()
+        with patch("rtp_llm.server.master_client.FLEXLB_MAX_MESSAGE_BYTES", 4):
+            with self.assertRaises(FtRuntimeException) as error:
+                await client.get_backend_role_addrs(
+                    [],
+                    512,
+                    _FakeInput(),
+                    100,
+                    input_pb=_FakeInputPB(),
+                )
+        self.assertEqual(error.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertEqual(client.calls, [])
+
+    async def test_message_limit_reserves_actual_follower_forwarding_overhead(self):
+        with patch("rtp_llm.server.master_client.time.time", return_value=1234567890):
+            client = _CaptureMasterClient()
+            await client.get_backend_role_addrs(
+                [], 512, _FakeInput(), 100, input_pb=_FakeInputPB()
+            )
+            request = client.calls[0]["request_pb"]
+            request.forward_hop = 1
+            forwarded_size = request.ByteSize()
+            for limit in (forwarded_size, forwarded_size - 1):
+                with self.subTest(limit=limit), patch(
+                    "rtp_llm.server.master_client.FLEXLB_MAX_MESSAGE_BYTES", limit
+                ):
+                    candidate = _CaptureMasterClient()
+                    if limit == forwarded_size:
+                        await candidate.get_backend_role_addrs(
+                            [], 512, _FakeInput(), 100, input_pb=_FakeInputPB()
+                        )
+                        self.assertEqual(len(candidate.calls), 1)
+                    else:
+                        with self.assertRaises(FtRuntimeException):
+                            await candidate.get_backend_role_addrs(
+                                [], 512, _FakeInput(), 100, input_pb=_FakeInputPB()
+                            )
+                        self.assertEqual(candidate.calls, [])
+
+    async def test_resource_exhausted_does_not_enable_domain_fallback(self):
+        client = _CaptureMasterClient()
+        client._get_channel = Mock()
+        stub = SimpleNamespace(
+            Schedule=AsyncMock(
+                side_effect=grpc.aio.AioRpcError(
+                    grpc.StatusCode.RESOURCE_EXHAUSTED,
+                    grpc.aio.Metadata(),
+                    grpc.aio.Metadata(),
+                    "message too large",
+                )
+            )
+        )
+        with patch("rtp_llm.server.master_client.FlexlbServiceStub", return_value=stub):
+            with self.assertRaises(FtRuntimeException) as error:
+                await MasterClient._send_schedule_request(
+                    client,
+                    "master:1234",
+                    FlexlbScheduleRequestPB(request_id=100),
+                    1.0,
+                    100,
+                )
+        self.assertEqual(
+            error.exception.exception_type, ExceptionType.TRAFFIC_LIMIT_ERROR
+        )
+
+    async def test_vit_selection_has_no_enqueue_payload_or_pd_queue_state(self):
+        client = _CaptureMasterClient()
+        client.latest_queue_length = 9
+        client._send_schedule_request = AsyncMock(
+            return_value=FlexlbScheduleResponsePB(
+                code=200,
+                server_status=[
+                    FlexlbServerStatusPB(role="VIT", server_ip="vit", grpc_port=8011)
+                ],
+            )
+        )
+        response = await client.get_backend_role_addrs(
+            [],
+            256,
+            _FakeInput(),
+            101,
+            input_pb=_FakeInputPB(),
+            vit_only=True,
+            timeout_s=0.25,
+        )
+        self.assertTrue(response.is_ok)
+        request = client._send_schedule_request.await_args.args[1]
+        self.assertTrue(request.vit_only)
+        self.assertFalse(request.generate_input)
+        self.assertEqual(request.request_id, 101)
+        self.assertEqual(request.generate_timeout, 250)
+        self.assertEqual(client.latest_queue_length, 9)
+
+    async def test_vit_cancellation_does_not_cancel_later_pd_schedule(self):
+        client = _CaptureMasterClient()
+        stub = SimpleNamespace(
+            Schedule=AsyncMock(side_effect=asyncio.CancelledError()),
+            Cancel=AsyncMock(),
+        )
+        client._get_channel = Mock()
+        with patch("rtp_llm.server.master_client.FlexlbServiceStub", return_value=stub):
+            with self.assertRaises(asyncio.CancelledError):
+                await MasterClient._send_schedule_request(
+                    client,
+                    "master:1234",
+                    FlexlbScheduleRequestPB(request_id=101, vit_only=True),
+                    1.0,
+                    101,
+                )
+            stub.Cancel.assert_not_awaited()
+            with self.assertRaises(asyncio.CancelledError):
+                await MasterClient._send_schedule_request(
+                    client,
+                    "master:1234",
+                    FlexlbScheduleRequestPB(request_id=101),
+                    1.0,
+                    101,
+                )
+            stub.Cancel.assert_awaited_once()
+
+    async def test_vit_selection_rejects_master_enqueue_response(self):
+        client = _CaptureMasterClient()
+        with self.assertRaises(FtRuntimeException):
+            await client.get_backend_role_addrs(
+                [], 256, _FakeInput(), 101, vit_only=True
+            )
+
     def test_python_reason_enum_matches_schedule_wire_values(self):
         self.assertEqual(
             int(AdmissionRejectReason.UNSPECIFIED),

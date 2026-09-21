@@ -471,6 +471,10 @@ def main():
 
 
 def start_server(py_env_configs: PyEnvConfigs):
+    if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
+        from rtp_llm.server.vit_rpc_server import vit_start_server
+
+        return vit_start_server(py_env_configs)
     logging.info(f"[PROCESS_START]Start server")
     configure_warmup(
         py_env_configs.runtime_config.warm_up,

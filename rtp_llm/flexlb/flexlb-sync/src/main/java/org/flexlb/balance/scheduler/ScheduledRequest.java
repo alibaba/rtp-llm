@@ -99,6 +99,27 @@ public final class ScheduledRequest implements Prioritized {
     // -- accessors --
 
     public BalanceContext ctx() { return ctx; }
+
+    /** O(1) wire-size bound; grouping must not parse or copy GenerateInput payloads. */
+    public long batchPayloadSizeUpperBound() {
+        var input = ctx().getGenerateInputPb();
+        // Input/external-input/DP-slot envelopes, priority and config length growth.
+        // Charge a separate DP envelope per item, which also bounds mixed-DP batches.
+        return (input == null ? 0L : input.size()) + 64L
+                + roleAddressSizeUpperBound(prefill())
+                + roleAddressSizeUpperBound(decode());
+    }
+
+    private static long roleAddressSizeUpperBound(ServerStatus status) {
+        if (status == null) {
+            return 0L;
+        }
+        // Tags, lengths, enum, role name and two int32 ports fit in 64 bytes.
+        // UTF-8 requires at most three bytes per Java UTF-16 code unit.
+        String ip = status.getServerIp();
+        return 64L + (ip == null ? 0L : 3L * ip.length());
+    }
+
     public CompletableFuture<Response> future() { return future; }
     public Response routeResponse() { return routeResponse; }
     public ServerStatus prefill() { return prefill; }

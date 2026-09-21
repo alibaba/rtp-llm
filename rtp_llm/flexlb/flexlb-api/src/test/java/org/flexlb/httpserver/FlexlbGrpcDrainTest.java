@@ -22,6 +22,8 @@ import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleResponsePB;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.mock.env.MockEnvironment;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -39,8 +41,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.ArgumentMatchers.any;
 
 class FlexlbGrpcDrainTest {
-    @Test
-    void acceptedRpcCanEnterServiceAndFinishAfterQuietPeriod() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void acceptedRpcCanEnterServiceAndFinishAfterQuietPeriod(boolean vitOnly) throws Exception {
         var accepted = new CountDownLatch(1);
         var resume = new CountDownLatch(1);
         var timing = new GrpcServerTimingInterceptor();
@@ -87,7 +90,7 @@ class FlexlbGrpcDrainTest {
         var drainer = new Thread(grpc::drain);
         try {
             var pending = FlexlbServiceGrpc.newFutureStub(channel).withDeadlineAfter(8, TimeUnit.SECONDS)
-                    .schedule(FlexlbScheduleRequestPB.newBuilder().setRequestId(101).build());
+                    .schedule(FlexlbScheduleRequestPB.newBuilder().setRequestId(101).setVitOnly(vitOnly).build());
             assertTrue(accepted.await(3, TimeUnit.SECONDS));
             drainer.start();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);

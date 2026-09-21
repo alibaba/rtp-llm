@@ -169,7 +169,9 @@ class DeepSeekV41Model(DeepSeekV4Model):
         # actual length are CP padding. They must stay text rows, or the
         # gather below would read out of bounds on the last request and
         # silently cross into the next request's span otherwise.
-        request_lengths = torch.tensor(prefill_lengths, device=device, dtype=torch.int64)
+        request_lengths = torch.tensor(
+            prefill_lengths, device=device, dtype=torch.int64
+        )
         padding = (shuffle < 0) | (shuffle >= request_lengths[request])
         local_rows = torch.where(
             padding,

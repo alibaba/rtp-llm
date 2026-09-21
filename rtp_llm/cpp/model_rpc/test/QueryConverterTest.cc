@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include <memory>
 #include <optional>
+#include <stdexcept>
 
 #define private public
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
@@ -298,6 +299,16 @@ GenerateInputPB v41ImageRequest() {
 }
 
 }  // namespace
+
+TEST_F(QueryConverterTest, RejectUnsupportedV41SchemaBeforeConvertingImages) {
+    for (int version : {0, -1, 2}) {
+        auto wire = v41ImageRequest();
+        wire.mutable_v41_inputs()->set_schema_version(version);
+        EXPECT_THROW(QueryConverter::transQuery(&wire), std::invalid_argument);
+    }
+    auto wire = v41ImageRequest();
+    EXPECT_NO_THROW(QueryConverter::transQuery(&wire));
+}
 
 TEST_F(QueryConverterTest, CacheImageIdentityIsSeparateFromCanonicalModelTokens) {
     auto first_wire  = v41ImageRequest();

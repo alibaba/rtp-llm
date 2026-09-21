@@ -37,6 +37,9 @@ SUCCESS_CODE = 200
 # gRPC = HTTP + 2 for FlexLB's own servers (consistent with FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET).
 # This is NOT the same as the backend engine offset (HTTP+1)—see CommonConstants.GRPC_PORT_OFFSET.
 FLEXLB_GRPC_PORT_OFFSET = 2
+FLEXLB_MAX_MESSAGE_BYTES = 256 * 1024 * 1024
+# A follower adds the field tag and value for forward_hop=1.
+FLEXLB_FORWARD_HOP_BYTES = 2
 BEARER_PREFIX = "Bearer "
 
 
@@ -163,8 +166,8 @@ class MasterClient:
             self._channels[target] = grpc.aio.insecure_channel(
                 target,
                 options=[
-                    ("grpc.max_receive_message_length", 16 * 1024 * 1024),
-                    ("grpc.max_send_message_length", 16 * 1024 * 1024),
+                    ("grpc.max_receive_message_length", FLEXLB_MAX_MESSAGE_BYTES),
+                    ("grpc.max_send_message_length", FLEXLB_MAX_MESSAGE_BYTES),
                     ("grpc.keepalive_time_ms", 30000),
                     ("grpc.keepalive_timeout_ms", 10000),
                 ],
@@ -215,18 +218,24 @@ class MasterClient:
                 elapsed,
             )
             if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
-                await self._best_effort_cancel(
-                    stub, request_id, CANCEL_REASON_DEADLINE_EXCEEDED
-                )
+                if not request_pb.vit_only:
+                    await self._best_effort_cancel(
+                        stub, request_id, CANCEL_REASON_DEADLINE_EXCEEDED
+                    )
                 await self._close_channel(target)
                 raise FtRuntimeException(
                     exception_type=ExceptionType.DEADLINE_EXCEEDED,
                     message=f"FlexLB schedule deadline exceeded for request {request_id}",
                 ) from e
+            if e.code() == grpc.StatusCode.RESOURCE_EXHAUSTED:
+                raise FtRuntimeException(
+                    ExceptionType.TRAFFIC_LIMIT_ERROR,
+                    f"FlexLB rejected request {request_id}: {e.details()}",
+                ) from e
             await self._close_channel(target)
             return None
         except asyncio.CancelledError:
-            if "stub" in locals():
+            if "stub" in locals() and not request_pb.vit_only:
                 await self._best_effort_cancel(
                     stub, request_id, CANCEL_REASON_CLIENT_CANCELLED
                 )
@@ -264,6 +273,8 @@ class MasterClient:
         input: GenerateInput,
         request_id: int,
         input_pb: Optional["GenerateInputPB"] = None,
+        vit_only: bool = False,
+        timeout_s: Optional[float] = None,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -284,7 +295,10 @@ class MasterClient:
         ) or getattr(input.generate_config, "timeout_ms", None)
         if ttft_timeout_ms is None or ttft_timeout_ms <= 0:
             ttft_timeout_ms = self.master_config.master_default_timeout_ms
-        timeout_s = ttft_timeout_ms / 1000.0 if ttft_timeout_ms > 0 else None
+        if timeout_s is None:
+            timeout_s = ttft_timeout_ms / 1000.0 if ttft_timeout_ms > 0 else None
+        else:
+            ttft_timeout_ms = max(1, int(timeout_s * 1000))
 
         gc = input.generate_config
         api_key = self._extract_api_key(input)
@@ -302,9 +316,16 @@ class MasterClient:
             api_key=api_key,
             cache_key_block_size=cache_key_block_size,
             priority=priority,
+            vit_only=vit_only,
         )
-        if input_pb is not None:
+        if input_pb is not None and not vit_only:
             request_pb.generate_input = input_pb.SerializeToString()
+
+        if request_pb.ByteSize() + FLEXLB_FORWARD_HOP_BYTES > FLEXLB_MAX_MESSAGE_BYTES:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "FlexLB request exceeds the 256 MiB RPC message limit",
+            )
 
         response = await self._send_schedule_request(
             master_addr, request_pb, timeout_s, request_id
@@ -323,7 +344,8 @@ class MasterClient:
         if response is None:
             return FlexlbResponse.connection_failed_response()
 
-        self.latest_queue_length = response.queue_length
+        if not vit_only:
+            self.latest_queue_length = response.queue_length
 
         if response.code != SUCCESS_CODE:
             admission_reject_reason = _admission_reject_reason_from_response(response)
@@ -355,6 +377,15 @@ class MasterClient:
             )
             for s in response.server_status
         ]
+        if vit_only and (
+            len(role_addrs) != 1
+            or role_addrs[0].role != RoleType.VIT
+            or response.enqueued_by_master
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR,
+                "ViT-only Schedule must return one VIT worker without enqueue",
+            )
         return FlexlbResponse.ok(
             role_addrs,
             enqueued_by_master=response.enqueued_by_master,

@@ -56,6 +56,55 @@ import static org.mockito.Mockito.when;
 
 class RequestSchedulerTest {
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void vitOnlyDoesNotRegisterOrQueueAndSameIdCanLaterSchedulePd(boolean queue) {
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        if (!queue) {
+            config.setScheduler(org.flexlb.config.SchedulerConfig.direct());
+        }
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        DefaultRouter router = mockRouter();
+        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        EndpointRegistry endpoints = mock(EndpointRegistry.class);
+        BalanceContext vision = RequestLifecycleTestSupport.context(config, 918L);
+        vision.getRequest().setVitOnly(true);
+        Response selected = new Response();
+        selected.setSuccess(true);
+        when(router.selectVitOnly(vision)).thenReturn(selected);
+        RequestScheduler scheduler = new RequestScheduler(service, router, endpoints,
+                mock(BatchSchedulerReporter.class), mock(EvictionManager.class),
+                lifecycle, new PlacementAvailability());
+        try {
+            if (queue) {
+                verify(lifecycle).attachGlobalQueue(any());
+            }
+            assertSame(selected, scheduler.submit(vision).join());
+            org.mockito.Mockito.verifyNoMoreInteractions(lifecycle);
+            org.mockito.Mockito.verifyNoInteractions(endpoints);
+            verify(router, never()).select(any());
+            verify(router, never()).select(any(), any());
+
+            BalanceContext pd = RequestLifecycleTestSupport.context(config, 918L);
+            CompletableFuture<Response> pdFuture = new CompletableFuture<>();
+            when(lifecycle.register(pd)).thenReturn(pdFuture);
+            when(lifecycle.claimAdmissionHandle(918L, pdFuture)).thenReturn(mock(AdmissionHandle.class));
+            when(router.select(pd)).thenReturn(PlacementResult.blocked(new PlacementKey(RoleType.PREFILL, null)));
+            when(router.select(pd, null)).thenReturn(PlacementResult.blocked(new PlacementKey(RoleType.PREFILL, null)));
+            assertSame(pdFuture, scheduler.submit(pd));
+            verify(lifecycle).register(pd);
+            if (queue) {
+                verify(router, timeout(500)).select(pd, null);
+            } else {
+                verify(router).select(pd);
+            }
+            pdFuture.complete(new Response());
+        } finally {
+            scheduler.closePlacement();
+        }
+    }
+
     private static DefaultRouter mockRouter() {
         DefaultRouter router = mock(DefaultRouter.class);
         return router;

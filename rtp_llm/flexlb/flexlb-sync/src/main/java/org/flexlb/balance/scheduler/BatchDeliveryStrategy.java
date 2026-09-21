@@ -13,6 +13,7 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
+import org.flexlb.constant.GrpcConstants;
 
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -87,13 +88,22 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         List<ScheduledRequest> admitted = new ArrayList<>(candidates.size());
         ScheduledRequest blockedItem = null;
         CapacityBoundary blockedResult = null;
+        long payloadBytes = 16L; // EnqueueBatch batch_id and outer framing.
         try {
             for (int index = 0; index < candidates.size(); index++) {
                 ScheduledRequest item = candidates.get(index);
+                long itemBytes = item.batchPayloadSizeUpperBound();
+                if (!admitted.isEmpty()
+                        && itemBytes > GrpcConstants.MAX_MESSAGE_SIZE - payloadBytes) {
+                    // Leave the suffix queued for a new batch ID and capacity permit.
+                    // A singleton still reaches the dispatcher's exact size validation.
+                    break;
+                }
                 CapacityBoundary.Attempt<ScheduledRequest> attempt =
                         requests.prepareBatchMember(item, transaction);
                 if (attempt.accepted()) {
                     admitted.add(item);
+                    payloadBytes += itemBytes;
                 } else {
                     blockedItem = item;
                     blockedResult = attempt.boundary();

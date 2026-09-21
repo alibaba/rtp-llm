@@ -95,6 +95,40 @@ class DefaultRouterTest {
     }
 
     @Test
+    void vitOnlySelectsOneVisionWorkerAndClosesItsPinWithoutPdAdmission() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
+        BalanceContext context = context(918L);
+        context.getRequest().setVitOnly(true);
+        TrafficPolicyConfig policy = mock(TrafficPolicyConfig.class);
+        context.getConfig().getRouter().setGroupSelector(policy);
+        when(policy.resolveTargetGroup(context.getRequest())).thenReturn(Optional.of("vision"));
+        SelectionFixture vit = selection(RoleType.VIT, 918L, "v", 8002, "vision");
+        when(vitSelector.select(context, RoleType.VIT, "vision")).thenReturn(vit.selection);
+
+        Response response = router().selectVitOnly(context);
+
+        assertTrue(response.isSuccess());
+        assertFalse(response.isEnqueuedByMaster());
+        assertEquals(List.of(vit.status), response.getServerStatus());
+        verify(vit.selection).close();
+        verify(vit.selection, never()).takeGenerationPin();
+        verifyNoInteractions(prefillSelector, decodeSelector, requests);
+    }
+
+    @Test
+    void vitOnlyMissingWorkerFailsWithoutPdFallback() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
+        BalanceContext context = context(919L);
+        context.getRequest().setVitOnly(true);
+
+        Response response = router().selectVitOnly(context);
+
+        assertFalse(response.isSuccess());
+        assertEquals(RoleType.VIT.getErrorType().getErrorCode(), response.getCode());
+        verifyNoInteractions(prefillSelector, decodeSelector, requests);
+    }
+
+    @Test
     void invalidRequestFailsBeforePolicyOrEndpointSelection() {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
         DefaultRouter router = router();
@@ -201,8 +235,10 @@ class DefaultRouterTest {
         verify(registration).close();
     }
 
-    @Test
-    void directRequestRemainsInCanonicalLifecycleAfterResponseAndReconcilesEarlyDecodeEvidence() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void directRequestRemainsInCanonicalLifecycleAfterResponseAndReconcilesEarlyDecodeEvidence(
+            boolean visionFirst) throws Exception {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
         BalanceContext context = context(9L);
         context.getConfig().setScheduler(org.flexlb.config.SchedulerConfig.direct());
@@ -212,6 +248,20 @@ class DefaultRouterTest {
                 mock(org.flexlb.service.monitor.BatchSchedulerReporter.class),
                 mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
         try {
+            RequestScheduler scheduler = scheduler(router(), context);
+            if (visionFirst) {
+                BalanceContext vision = new BalanceContext(context.getConfig());
+                Request request = new Request();
+                request.setRequestId(9L);
+                request.setVitOnly(true);
+                vision.setRequest(request);
+                SelectionFixture vit = selection(RoleType.VIT, 9L, "v", 8003, "g1");
+                when(vitSelector.select(vision, RoleType.VIT, null)).thenReturn(vit.selection);
+                assertTrue(scheduler.submit(vision).join().isSuccess());
+                assertEquals(0, requests.liveRequestCount());
+                org.junit.jupiter.api.Assertions.assertNull(requests.getRequestState(9L, 0L));
+                verify(vit.selection).close();
+            }
             SelectionFixture prefill = selection(RoleType.PREFILL, 9L, "p", 8001, "g1");
             SelectionFixture decode = selection(RoleType.DECODE, 9L, "d", 8002, "g1");
             var reservation = new DecodeEndpoint.ReservationHandle(1L, 9L, 2L);
@@ -227,7 +277,7 @@ class DefaultRouterTest {
             stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
             when(((DecodeEndpoint) decode.endpoint).isAcceptedByEngine(reservation)).thenReturn(true);
 
-            assertTrue(scheduler(router(), context).submit(context).get(2L, TimeUnit.SECONDS).isSuccess());
+            assertTrue(scheduler.submit(context).get(2L, TimeUnit.SECONDS).isSuccess());
             assertTrue(context.getFuture().get(2L, TimeUnit.SECONDS).isSuccess());
             RequestSlot slot = requests.requestSlot(9L);
             synchronized (slot) {

@@ -66,6 +66,13 @@ public final class RequestScheduler {
             return CompletableFuture.completedFuture(error(
                     StrategyErrorType.INVALID_REQUEST, null));
         }
+        // Vision lookup owns no request generation, admission, queue or KV reservation.
+        if (context.getRequest().isVitOnly()) {
+            CompletableFuture<Response> future =
+                    CompletableFuture.completedFuture(router.selectVitOnly(context));
+            context.setFuture(future);
+            return future;
+        }
         FlexlbConfig requestConfig = context.getConfig();
         if (requestConfig.isQueue() && globalQueue == null) {
             return CompletableFuture.completedFuture(error(StrategyErrorType.DISPATCH_FAILED,

@@ -327,6 +327,14 @@ std::string VitConfig::to_string() const {
             break;
     }
     oss << "vit_separation: " << vit_sep_str;
+    oss << ", mm_transport_mode: " << mm_transport_mode;
+    oss << ", mm_rdma_bind_ip: " << mm_rdma_bind_ip;
+    oss << ", mm_rdma_port: " << mm_rdma_port;
+    oss << ", mm_rdma_connect_timeout_ms: " << mm_rdma_connect_timeout_ms;
+    oss << ", mm_rdma_read_timeout_ms: " << mm_rdma_read_timeout_ms;
+    oss << ", mm_rdma_release_timeout_ms: " << mm_rdma_release_timeout_ms;
+    oss << ", mm_rdma_max_inflight_bytes: " << mm_rdma_max_inflight_bytes;
+    oss << ", mm_rdma_max_slot_bytes: " << mm_rdma_max_slot_bytes;
     return oss.str();
 }
 

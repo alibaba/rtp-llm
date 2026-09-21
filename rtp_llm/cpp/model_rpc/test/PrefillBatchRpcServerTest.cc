@@ -1139,6 +1139,7 @@ TEST(PrefillBatchRpcServerTest, MultimodalPreparationSurvivesAllocateRetry) {
     deferred->input->add_token_ids(0);
     deferred->input->add_token_ids(1);
     deferred->input->add_token_ids(2);
+    deferred->input->add_multimodal_inputs()->set_multimodal_url("image");
     auto  original                                       = deferred->input->SerializeAsString();
     auto& context                                        = *deferred->context;
     context.generate_input                               = makeGenerateInput(4001);
@@ -1149,6 +1150,8 @@ TEST(PrefillBatchRpcServerTest, MultimodalPreparationSurvivesAllocateRetry) {
     ASSERT_FALSE(context.hasError());
     ASSERT_NE(context.prepared_request, nullptr);
     EXPECT_EQ(context.prepared_request->token_ids_size(), 5);
+    EXPECT_EQ(context.prepared_request->multimodal_inputs_size(), 0);
+    EXPECT_EQ(deferred->input->multimodal_inputs_size(), 1);
     EXPECT_EQ(deferred->input->SerializeAsString(), original);
     auto input    = context.generate_input;
     auto feature  = input->multimodal_features.value()[0].data_ptr();

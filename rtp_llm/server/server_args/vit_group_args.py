@@ -63,12 +63,53 @@ def init_vit_group_args(parser, vit_config):
             32,
             "Maximum in-flight requests per ViT worker",
         ),
+        (
+            "vit_token_cache_item_num",
+            10000,
+            "Maximum images in the independent CPU token-ID cache; 0 disables it",
+        ),
+        (
+            "vit_token_cache_time_window_ms",
+            30 * 60 * 1000,
+            "Token-ID cache idle expiration in milliseconds; 0 disables it",
+        ),
     ):
         vit_group.add_argument(
             "--" + name,
             env_name=name.upper(),
             bind_to=(vit_config, name),
             type=int,
+            default=default,
+            help=description,
+        )
+    for name, description in (
+        (
+            "mm_transport_mode",
+            "ViT embedding transport: grpc (default), auto, or rdma (requires provider)",
+        ),
+        (
+            "mm_rdma_bind_ip",
+            "Routable ViT RDMA address; empty uses the host bind address",
+        ),
+        ("mm_rdma_port", "ViT RDMA listen port; 0 selects a port"),
+        ("mm_rdma_connect_timeout_ms", "RDMA connection timeout in milliseconds"),
+        (
+            "mm_rdma_read_timeout_ms",
+            "RDMA READ timeout, also capped by the RPC deadline",
+        ),
+        ("mm_rdma_release_timeout_ms", "Best-effort slot release RPC timeout"),
+        (
+            "mm_rdma_max_inflight_bytes",
+            "Hard per-process registered GPU or pinned CPU pool cap",
+        ),
+        ("mm_rdma_max_slot_bytes", "Maximum bytes per image RDMA slot"),
+    ):
+        default = getattr(vit_config, name)
+        vit_group.add_argument(
+            "--" + name,
+            env_name=name.upper(),
+            bind_to=(vit_config, name),
+            type=type(default),
             default=default,
             help=description,
         )

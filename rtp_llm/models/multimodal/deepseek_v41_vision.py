@@ -12,6 +12,7 @@ from rtp_llm.models.multimodal.deepseek_v41_processor import (
     V41ImageProcessorConfig,
     V41PreparedInputs,
     image_token_types,
+    num_image_tokens,
 )
 from rtp_llm.models.multimodal.deepseek_vision import Aligner, Attention, RMSNorm, ViT
 
@@ -102,19 +103,57 @@ class DeepSeekV41VisionEmbedding(nn.Module):
 
     @torch.inference_mode()
     def encode_prepared_images(self, images) -> list[torch.Tensor]:
-        result = []
+        validated = []
+        previous_end = 0
+        processor = self.processor_config
         for record in images:
+            height, width = record["n_vit_h"], record["n_vit_w"]
+            if (
+                type(height) is not int
+                or type(width) is not int
+                or min(height, width) <= 0
+            ):
+                raise ValueError("V4.1 image grid must contain positive integers")
+            ratio = processor.vision_downsample_ratio
+            llm_h, llm_w = (height + ratio - 1) // ratio, (width + ratio - 1) // ratio
+            if num_image_tokens(llm_h, llm_w) > processor.vision_max_n_token:
+                raise ValueError("V4.1 image exceeds the configured token limit")
+            patches = record["patches"]
+            patch_size = processor.vision_patch_size
+            if (
+                not isinstance(patches, torch.Tensor)
+                or patches.dtype != torch.bfloat16
+                or tuple(patches.shape) != (height * width, 3, patch_size, patch_size)
+                or record["processor_identity"] != processor.identity
+            ):
+                raise ValueError("Invalid V4.1 prepared patches or processor identity")
+            types = record["types"]
+            expected_types = image_token_types(llm_h, llm_w)
+            if (
+                not isinstance(types, torch.Tensor)
+                or types.device.type != "cpu"
+                or types.dtype not in (torch.int32, torch.int64)
+                or not torch.equal(types, expected_types)
+            ):
+                raise ValueError("Invalid V4.1 prepared image token types")
+            start = record["start"]
+            if type(start) is not int or start < previous_end:
+                raise ValueError(
+                    "V4.1 image spans must be nonnegative and non-overlapping"
+                )
+            previous_end = start + expected_types.numel()
             image = V41ImageInput(
-                record["start"],
-                record["patches"],
-                record["n_vit_h"],
-                record["n_vit_w"],
-                record["types"].to(dtype=torch.int64),
+                start,
+                patches,
+                height,
+                width,
+                types.to(dtype=torch.int64),
                 record["content_sha256"],
                 record["processor_identity"],
             )
-            result.append(self.encode_image(image))
-        return result
+            validated.append(image)
+        # Validate the whole request before any image is copied to the GPU.
+        return [self.encode_image(image) for image in validated]
 
     @torch.inference_mode()
     def inject_embeddings(

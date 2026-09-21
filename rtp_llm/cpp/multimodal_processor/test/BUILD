@@ -31,6 +31,9 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
+        "//rtp_llm/cpp/model_rpc:model_rpc_server",
+        "@havenask//aios/autil:base64",
+        "@havenask//aios/autil:zlib",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ] + cuda13_torch_link_deps,
@@ -38,4 +41,33 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
     exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "mm_rdma_transport_test",
+    srcs = ["MMRdmaTransportTest.cc"],
+    copts = test_copts,
+    deps = torch_deps() + [
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "//rtp_llm/cpp/multimodal_processor:mm_rdma_transport",
+    ] + cuda13_torch_link_deps,
+)
+
+cc_test(
+    name = "v41_remote_multimodal_processor_test",
+    srcs = [
+        "V41RemoteMultimodalProcessorTest.cc",
+        "MMRdmaRemoteCleanupTest.cc",
+        "FakeMultimodalProcessor.h",
+    ],
+    copts = test_copts,
+    deps = torch_deps() + [
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
+        "//rtp_llm/cpp/model_rpc:model_rpc_server",
+        "@havenask//aios/autil:base64",
+        "@havenask//aios/autil:zlib",
+    ] + cuda13_torch_link_deps,
 )

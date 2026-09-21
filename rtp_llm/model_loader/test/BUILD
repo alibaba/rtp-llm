@@ -3,6 +3,13 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "deepseek_v41_vit_weight_test",
+    srcs = ["deepseek_v41_vit_weight_test.py"],
+    deps = py_test_deps + ["//rtp_llm:models"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_host_weight_filter",
     srcs = ["test_host_weight_filter.py"],
     deps = py_test_deps,
@@ -84,7 +91,7 @@ py_test(
 py_test(
     name = "test_model_weight_info",
     srcs = ["test_model_weight_info.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + ["//rtp_llm:models"],
     tags = ["H20"],
     exec_properties = {
         'gpu': 'H20',

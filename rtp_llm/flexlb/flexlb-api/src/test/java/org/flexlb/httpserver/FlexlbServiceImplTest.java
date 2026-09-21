@@ -27,6 +27,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
 
@@ -106,6 +108,107 @@ class FlexlbServiceImplTest {
         deadlineTimer.shutdownNow();
         pvLogger.detachAppender(pvAppender);
         pvAppender.stop();
+    }
+
+    @Test
+    void vitOnlyIsForwardedToRoutingWithoutPdLifecycleLookup() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response result = new Response();
+        result.setSuccess(true);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(result));
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(918L).setVitOnly(true).build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        service.schedule(request, observer);
+
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(context.capture());
+        assertTrue(context.getValue().getRequest().isVitOnly());
+        verify(routeService, never()).getRequestState(anyLong(), anyLong());
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(response.capture());
+        assertFalse(response.getValue().hasLifecycle());
+        assertFalse(response.getValue().getEnqueuedByMaster());
+    }
+
+    @Test
+    void forwardedVitOnlyOnNonMasterDoesNotExposeSameIdPdLifecycle() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(918L).setVitOnly(true).setForwardHop(1).build(), observer);
+
+        var response = ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(response.capture());
+        verify(observer).onCompleted();
+        assertEquals(StrategyErrorType.NOT_MASTER.getErrorCode(), response.getValue().getCode());
+        assertFalse(response.getValue().hasLifecycle());
+        verifyNoInteractions(routeService, grpcForwarder);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void vitOnlyCancellationCannotCancelSameIdPd(boolean alreadyCancelled, boolean timeout) {
+        CompletableFuture<Response> pending = new CompletableFuture<>();
+        when(routeService.route(any())).thenReturn(pending);
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(918L).setVitOnly(true).build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        Context.CancellableContext inbound = Context.current().withCancellation();
+        Throwable cause = timeout ? new java.util.concurrent.TimeoutException("vision deadline") : null;
+        try {
+            if (alreadyCancelled) {
+                inbound.cancel(cause);
+            }
+            inbound.run(() -> service.schedule(request, observer));
+            inbound.cancel(cause);
+            Response selected = new Response();
+            selected.setSuccess(true);
+            pending.complete(selected);
+
+            verify(routeService, never()).cancelRequest(anyLong(), anyLong(), any());
+            verify(routeService, never()).getRequestState(anyLong(), anyLong());
+            verify(observer, never()).onNext(any());
+        } finally {
+            inbound.close();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CANCELLED", "DEADLINE_EXCEEDED", "UNAVAILABLE"})
+    void vitOnlyAmbiguousForwardDoesNotCancelSameIdPd(String failure) {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
+                CompletableFuture.completedFuture(
+                        FlexlbGrpcForwarder.MasterForwardResult.failed(failure, "10.0.0.2:7001")));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(918L).setVitOnly(true).build(), observer);
+
+        verify(grpcForwarder, never()).forwardCancelToMaster(any());
+        verifyNoInteractions(routeService);
+        verify(observer).onCompleted();
+    }
+
+    @Test
+    void vitOnlyResponseDeliveryFailureCannotCancelSameIdPd() {
+        Response selected = new Response();
+        selected.setSuccess(true);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(selected));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        doThrow(new RuntimeException("client disconnected")).when(observer).onNext(any());
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(918L).setVitOnly(true).build(), observer);
+
+        verify(routeService, never()).cancelRequest(anyLong(), anyLong(), any());
+        verify(routeService, never()).getRequestState(anyLong(), anyLong());
     }
 
     @Test

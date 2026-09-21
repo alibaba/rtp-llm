@@ -7,6 +7,7 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
+from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight, MMAtomicWeight
 from rtp_llm.models.deepseek_v4 import (
     DeepSeekV4,
@@ -14,10 +15,17 @@ from rtp_llm.models.deepseek_v4 import (
     DeepSeekV4DSparkWeight,
     DeepSeekV4Weight,
 )
+from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, sp_id
 
 
 class DeepSeekV41Weight(DeepSeekV4Weight):
+    def get_weight_info(self):
+        # V41 declares its descriptors directly, without a BaseVitWeights module.
+        if self.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
+            return ModelWeightInfo(self._build_vision_weights(), [])
+        return super().get_weight_info()
+
     def _build_vision_weights(self):
         """Declare the checkpoint's vision/aligner/delimiter tensors.
 
@@ -110,7 +118,8 @@ class DeepSeekV41Weight(DeepSeekV4Weight):
         info = super()._get_weight_info()
         obsolete_head = {W.v4_hc_head_base, W.v4_hc_head_fn, W.v4_hc_head_scale}
         info.weights = [w for w in info.weights if w.name not in obsolete_head]
-        info.weights.extend(self._build_vision_weights())
+        if self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE:
+            info.weights.extend(self._build_vision_weights())
         return info
 
 
@@ -131,6 +140,7 @@ class DeepSeekV41(DeepSeekV4):
         config.activation_type = "SiGLU"
         DeepSeekV4._from_hf(config, ckpt_path, config_json=text)
         config.is_deepseek_v41 = True
+        config.mm_model_config.is_multimodal = True
         config.deepseek_v41_config = text
         config.max_seq_len = int(text["max_position_embeddings"])
         config.config_dtype = text.get("dtype", text.get("torch_dtype", "bfloat16"))
@@ -207,6 +217,7 @@ class DeepSeekV41DSpark(DeepSeekV41, DeepSeekV4DSpark):
     @classmethod
     def _create_config(cls, ckpt_path):
         config = DeepSeekV41._create_config(ckpt_path)
+        config.mm_model_config.is_multimodal = False
         text = dict(config.deepseek_v41_config)
         layers = int(text["num_nextn_predict_layers"])
         ratios = text["compress_ratios"][config.num_layers :]

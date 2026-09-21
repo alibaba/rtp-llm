@@ -176,14 +176,35 @@ except BaseException as e:
     raise e
 
 
-def get_block_cache_keys(token_ids: List[int], block_size: int) -> List[int]:
+def get_block_cache_keys(
+    token_ids: List[int], block_size: int, v41_inputs=None
+) -> List[int]:
     try:
+        identities = []
+        if v41_inputs is not None:
+            for image in v41_inputs.images:
+                start = image.start
+                end = start + image.types.numel()
+                words = [-41, start, end, image.n_vit_h, image.n_vit_w]
+                for digest in (image.content_sha256, image.processor_identity):
+                    words.extend(
+                        int(digest[offset : offset + 8], 16)
+                        for offset in range(0, len(digest) - 7, 8)
+                    )
+                identities.append((start, end, words))
         # split token_ids into chunks of size block_size, dropping the last chunk if it is smaller than block_size
         token_ids_list: List[List[int]] = []
         for i in range(0, len(token_ids), block_size):
             chunk = token_ids[i : i + block_size]
             if len(chunk) == block_size:
                 token_ids_list.append(chunk)
+        if identities:
+            # Match KVCacheHashUtil without adding work per block to text requests.
+            for block_index, chunk in enumerate(token_ids_list):
+                i = block_index * block_size
+                for start, end, words in identities:
+                    if end > i and start < i + block_size:
+                        chunk.extend(words)
         return cpp_get_block_cache_keys(token_ids_list)  # type: ignore
     except Exception as e:
         logging.error(f"get block ids error: {e}")
@@ -212,6 +233,7 @@ _ENGINE_SYMBOLS = {
     "EmbeddingCppOutput",
     "MultimodalInputCpp",
     "get_multimodal_feature_hash",
+    "MMRdmaEncoderOp",
     "RtpEmbeddingOp",
     "RtpLLMOp",
     "build_xgrammar_tokenizer_info_json",
@@ -272,6 +294,7 @@ def _load_compute_ops(required: bool = False) -> None:
 
 def _set_engine_fallbacks() -> None:
     globals()["get_multimodal_feature_hash"] = EmptyClass
+    globals()["MMRdmaEncoderOp"] = EmptyClass
     globals()["MultimodalInputCpp"] = EmptyClass
     globals()["EmbeddingCppOutput"] = EmptyClass
     globals()["build_xgrammar_tokenizer_info_json"] = EmptyClass
@@ -291,7 +314,7 @@ def _load_engine_ops(required: bool = False) -> None:
         # process teardown in the current binary build.
         _load_compute_ops(required=required)
         try:
-            from libth_transformer import EmbeddingCppOutput
+            from libth_transformer import EmbeddingCppOutput, MMRdmaEncoderOp
             from libth_transformer import MultimodalInput as MultimodalInputCpp
             from libth_transformer import (
                 RtpEmbeddingOp,
@@ -301,6 +324,7 @@ def _load_engine_ops(required: bool = False) -> None:
             )
 
             globals()["get_multimodal_feature_hash"] = get_multimodal_feature_hash
+            globals()["MMRdmaEncoderOp"] = MMRdmaEncoderOp
             globals()["EmbeddingCppOutput"] = EmbeddingCppOutput
             globals()["MultimodalInputCpp"] = MultimodalInputCpp
             globals()["RtpEmbeddingOp"] = RtpEmbeddingOp

@@ -2,12 +2,169 @@
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/multimodal_processor/test/FakeMultimodalProcessor.h"
+#include "rtp_llm/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
 
 using namespace std;
 
 namespace rtp_llm {
 
 class MultimodalProcessorTest: public DeviceTestBase {};
+
+namespace {
+class PreparedV41Processor: public FakeMultimodalProcessor {
+public:
+    PreparedV41Processor(): FakeMultimodalProcessor(py::none(), {}, false, 32) {}
+    int calls = 0;
+
+protected:
+    ErrorResult<MultimodalOutput>
+    V41MultimodalEmbedding(const V41RequestInputs& inputs, const std::string&, grpc::ClientContext*) override {
+        ++calls;
+        MultimodalOutput output;
+        for (const auto& image : inputs.images) {
+            output.mm_features.push_back(torch::ones({image.types.numel(), 4}));
+        }
+        return output;
+    }
+};
+
+std::shared_ptr<GenerateInput> preparedV41Input() {
+    auto input           = std::make_shared<GenerateInput>();
+    input->input_ids     = torch::zeros({11}, torch::kInt32);
+    auto prepared_ptr    = std::make_shared<V41RequestInputs>();
+    input->v41_inputs    = prepared_ptr;
+    auto& prepared       = *prepared_ptr;
+    prepared.token_types = torch::tensor({-1, 0, 1, 2, 3, -1, 0, 1, 2, 3, -1}, torch::kInt32);
+    prepared.image_mask  = prepared.token_types.ne(-1);
+    for (int32_t start : {1, 6}) {
+        V41ImageInput image;
+        image.start = start;
+        image.types = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+        prepared.images.push_back(std::move(image));
+    }
+    return input;
+}
+}  // namespace
+
+TEST_F(MultimodalProcessorTest, V41PreparedMetadataPreservesImagesAndTextOnlyRequests) {
+    PreparedV41Processor processor;
+    auto                 input = preparedV41Input();
+    ASSERT_TRUE(processor.updateMultimodalFeatures(input).ok());
+    EXPECT_EQ(processor.calls, 1);
+    EXPECT_TRUE(torch::equal(input->mm_locs.value(), torch::tensor({1, 6}, torch::kInt32)));
+    EXPECT_TRUE(
+        torch::equal(input->text_tokens_mask.value(), input->v41_inputs->image_mask.logical_not().to(torch::kInt32)));
+    EXPECT_EQ(input->multimodal_features->size(), 2);
+    input     = preparedV41Input();
+    auto text = std::make_shared<V41RequestInputs>(*input->v41_inputs);
+    text->images.clear();
+    text->token_types.fill_(-1);
+    text->image_mask.fill_(false);
+    input->v41_inputs = text;
+    ASSERT_TRUE(processor.updateMultimodalFeatures(input).ok());
+    EXPECT_EQ(processor.calls, 1);
+    EXPECT_TRUE(input->multimodal_features->empty());
+}
+
+TEST_F(MultimodalProcessorTest, V41MalformedMetadataNeverReachesEmbedding) {
+    for (const std::string invalid : {"token_shape",
+                                      "token_dtype",
+                                      "mask_length",
+                                      "mask_dtype",
+                                      "mask_value",
+                                      "invalid_kind",
+                                      "negative_start",
+                                      "overlap",
+                                      "past_end",
+                                      "empty_types",
+                                      "types_dtype",
+                                      "types_mismatch",
+                                      "missing_image",
+                                      "uncovered_gap"}) {
+        SCOPED_TRACE(invalid);
+        PreparedV41Processor processor;
+        auto                 input        = preparedV41Input();
+        auto                 prepared_ptr = std::make_shared<V41RequestInputs>(*input->v41_inputs);
+        input->v41_inputs                 = prepared_ptr;
+        auto& prepared                    = *prepared_ptr;
+        if (invalid == "token_shape")
+            prepared.token_types = prepared.token_types.unsqueeze(0);
+        if (invalid == "token_dtype")
+            prepared.token_types = prepared.token_types.to(torch::kFloat32);
+        if (invalid == "mask_length")
+            prepared.image_mask = prepared.image_mask.slice(0, 0, 10);
+        if (invalid == "mask_dtype")
+            prepared.image_mask = prepared.image_mask.to(torch::kInt32);
+        if (invalid == "mask_value")
+            prepared.image_mask.index_put_({1}, false);
+        if (invalid == "invalid_kind")
+            prepared.token_types.index_put_({1}, 4);
+        if (invalid == "negative_start")
+            prepared.images[0].start = -1;
+        if (invalid == "overlap")
+            prepared.images[1].start = 3;
+        if (invalid == "past_end")
+            prepared.images[1].start = 10;
+        if (invalid == "empty_types")
+            prepared.images[1].types = torch::empty({0}, torch::kInt32);
+        if (invalid == "types_dtype")
+            prepared.images[1].types = prepared.images[1].types.to(torch::kFloat32);
+        if (invalid == "types_mismatch")
+            prepared.images[1].types.index_put_({1}, 2);
+        if (invalid == "missing_image")
+            prepared.images.pop_back();
+        if (invalid == "uncovered_gap") {
+            prepared.token_types.index_put_({5}, 1);
+            prepared.image_mask.index_put_({5}, true);
+        }
+        EXPECT_FALSE(processor.updateMultimodalFeatures(input).ok());
+        EXPECT_EQ(processor.calls, 0);
+        EXPECT_FALSE(input->multimodal_features.has_value());
+    }
+}
+
+TEST_F(MultimodalProcessorTest, StrictRemoteRejectsInlineAndReleasesMixedOutputs) {
+    class FakeService: public MultimodalRpcService::Service {
+    public:
+        MultimodalOutputsPB      outputs;
+        std::vector<std::string> released;
+        grpc::Status             RemoteMultimodalEmbedding(grpc::ServerContext*,
+                                                           const MultimodalInputsPB*,
+                                                           MultimodalOutputsPB* response) override {
+            response->CopyFrom(outputs);
+            return grpc::Status::OK;
+        }
+        grpc::Status ReleaseEmbedding(grpc::ServerContext*, const ReleaseEmbeddingPB* request, EmptyPB*) override {
+            released.assign(request->handle().begin(), request->handle().end());
+            return grpc::Status::OK;
+        }
+    } service;
+    QueryConverter::transTensorPB(service.outputs.add_multimodal_outputs()->mutable_multimodal_embedding(),
+                                  torch::ones({2, 4}));
+    grpc::ServerBuilder builder;
+    int                 port = 0;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&service);
+    auto server = builder.BuildAndStart();
+    ASSERT_NE(server, nullptr);
+    RemoteMultimodalProcessor processor(py::none(), MMModelConfig{}, 32);
+    auto                      call = [&](const std::vector<MultimodalInput>& inputs) {
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        return processor.MultimodalEmbedding(inputs, "127.0.0.1:" + std::to_string(port), &context);
+    };
+    // Simulate an auto client without a usable provider; inline features remain supported.
+    processor.vit_config_.mm_transport_mode = "auto";
+    EXPECT_TRUE(call({MultimodalInput("a")}).ok());
+    processor.vit_config_.mm_transport_mode = "rdma";
+    EXPECT_FALSE(call({MultimodalInput("a")}).ok());
+    EXPECT_TRUE(service.released.empty());
+    service.outputs.add_multimodal_outputs()->mutable_output_rdma()->set_handle("unread-slot");
+    EXPECT_FALSE(call({MultimodalInput("a"), MultimodalInput("b")}).ok());
+    EXPECT_EQ(service.released, std::vector<std::string>({"unread-slot"}));
+    server->Shutdown();
+    server->Wait();
+}
 
 TEST_F(MultimodalProcessorTest, SameUrlDifferentImageFeaturesHaveDifferentCacheTokens) {
     auto processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 32);

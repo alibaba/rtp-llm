@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import com.google.protobuf.ByteString;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.projection.WorkSnapshot;
@@ -8,22 +9,146 @@ import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestContext;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestEndpointCapabilities;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestRequestRegistry;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestTelemetry;
+import org.flexlb.config.ConfigService;
+import org.flexlb.constant.GrpcConstants;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.unavailable;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.mock;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 
 /** Final batch admission, transport handoff, and completion-correlation contract. */
 class BatchDeliveryStrategyTest {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void byteBudgetSplitsLargeImageRequestsButPreservesTextBatchCount(boolean images) throws Exception {
+        Fixture fixture = new Fixture(701L);
+        var config = SchedulingTestConfig.batchConfig();
+        ConfigService configs = mock(ConfigService.class);
+        when(configs.loadBalanceConfig()).thenReturn(config);
+        EngineGrpcClient client = mock(EngineGrpcClient.class);
+        DefaultBatchDispatcher dispatcher = new DefaultBatchDispatcher(client, configs, null, 1, 1);
+        when(fixture.capabilities.prefill().getIp()).thenReturn("127.0.0.1");
+        when(fixture.capabilities.prefill().getGrpcPort()).thenReturn(8090);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("127.0.0.1");
+        prefill.setHttpPort(8080);
+        prefill.setGrpcPort(8090);
+        var template = EngineRpcService.GenerateInputPB.newBuilder().addTokenIds(129264);
+        if (images) {
+            template.addMultimodalInputs(EngineRpcService.MultimodalInputPB.newBuilder()
+                    .setMultimodalTensor(EngineRpcService.TensorPB.newBuilder()
+                            .setBf16Data(ByteString.copyFrom(new byte[20 * 1024 * 1024]))));
+        }
+        ByteString sharedBody = template.build().toByteString();
+        List<ScheduledRequest> remaining = new ArrayList<>();
+        for (long id = 1; id <= 64; id++) {
+            ScheduledRequest item = fixture.item(id);
+            BalanceContext context = new BalanceContext(config);
+            Request request = new Request();
+            request.setRequestId(id);
+            context.setRequest(request);
+            // Rope concatenation shares the large immutable payload across all 64 inputs.
+            context.setGenerateInputPb(EngineRpcService.GenerateInputPB.newBuilder()
+                    .setRequestId(id).build().toByteString().concat(sharedBody));
+            when(item.ctx()).thenReturn(context);
+            when(item.prefill()).thenReturn(prefill);
+            when(item.batchPayloadSizeUpperBound()).thenCallRealMethod();
+            remaining.add(item);
+        }
+        List<Integer> rpcCounts = new CopyOnWriteArrayList<>();
+        List<Long> rpcBatchIds = new CopyOnWriteArrayList<>();
+        List<Long> sentIds = new CopyOnWriteArrayList<>();
+        when(client.batchEnqueueAsync(anyString(), anyInt(), any())).thenAnswer(call -> {
+            EngineRpcService.EnqueueBatchRequestPB batch = call.getArgument(2);
+            assertTrue(batch.getSerializedSize() <= GrpcConstants.MAX_MESSAGE_SIZE);
+            var response = EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(batch.getBatchId());
+            int count = 0;
+            for (var slot : batch.getDpSlotsList()) {
+                for (var external : slot.getRequestsList()) {
+                    var input = external.getInput();
+                    sentIds.add(input.getRequestId());
+                    assertEquals(images ? 1 : 0, input.getMultimodalInputsCount());
+                    if (images) {
+                        assertEquals(20 * 1024 * 1024,
+                                input.getMultimodalInputs(0).getMultimodalTensor().getBf16Data().size());
+                    }
+                    response.addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
+                            .setRequestId(input.getRequestId()));
+                    count++;
+                }
+            }
+            rpcCounts.add(count);
+            rpcBatchIds.add(batch.getBatchId());
+            return CompletableFuture.completedFuture(response.build());
+        });
+        try {
+            while (!remaining.isEmpty()) {
+                assertEquals("COMMITTED", fixture.context.deliver(fixture.strategy, remaining,
+                        "payload_budget", 0, OptionalLong.of(9999L)));
+                var batch = fixture.submission.command();
+                int count = batch.exactItems().size();
+                assertEquals(images ? Math.min(12, remaining.size()) : 64, count);
+                assertNull(fixture.context.committedBoundary(), "size boundary must leave suffix queued");
+                if (count < remaining.size()) {
+                    assertEquals(count * 100L, batch.predictedMs(), "repredict the admitted prefix");
+                }
+                CountDownLatch completed = new CountDownLatch(count);
+                var permit = dispatcher.tryPrepareSubmission();
+                assertTrue(permit.accepted());
+                permit.value().submit(sender -> sender.sendBatch(batch.exactItems(), batch.batchId(), batch.predictedMs(),
+                        batch.decisionReason(), (item, result) -> {
+                            try {
+                                fixture.submission.complete(item, result);
+                            } finally {
+                                completed.countDown();
+                            }
+                        }));
+                assertTrue(completed.await(10, TimeUnit.SECONDS));
+                remaining = new ArrayList<>(remaining.subList(count, remaining.size()));
+                fixture.correlationId++;
+            }
+            assertEquals(images ? List.of(12, 12, 12, 12, 12, 4) : List.of(64), rpcCounts);
+            assertEquals(rpcCounts.size(), new HashSet<>(rpcBatchIds).size());
+            assertEquals(64, sentIds.size());
+            assertEquals(64, new HashSet<>(sentIds).size());
+            assertEquals(64, fixture.slots.completions().size());
+            assertTrue(fixture.slots.completions().stream()
+                    .allMatch(event -> event.completion().status() == DeliveryResult.Status.DELIVERED));
+        } finally {
+            dispatcher.shutdown();
+        }
+    }
 
     @Test
     void preparedPredictionAndExactBatchReachTransportOnce() {
@@ -300,7 +425,7 @@ class BatchDeliveryStrategyTest {
         private final TestRequestRegistry slots = new TestRequestRegistry();
         private final TestTelemetry telemetry = new TestTelemetry();
         private final TestContext context = new TestContext();
-        private final long correlationId;
+        private long correlationId;
         private final BatchDeliveryStrategy strategy;
 
         private Fixture(long correlationId) {

@@ -29,6 +29,29 @@ class ConfigServiceTest {
     }
 
     @Test
+    void minimalSchema3SmokeConfigsAreAcceptedWithoutFixtureDefaults() {
+        FlexlbConfig direct = ConfigService.parse("""
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":3600000}},
+                 "scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH"}}
+                """);
+        assertTrue(direct.isDirect());
+        assertEquals(DispatcherConfig.Type.NON_BATCH, direct.getDispatcher().getType());
+        assertEquals(3600000L, direct.getRequestLifecycle().getRequest().getTimeoutMs());
+
+        FlexlbConfig batch = ConfigService.parse("""
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":3600000}},
+                 "scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},
+                 "decision":{"type":"FIXED_WINDOW","maxRequests":1,"maxCollectionWaitMs":1}},
+                 "dispatcher":{"type":"BATCH"}}
+                """);
+        assertTrue(batch.isQueue());
+        assertEquals(DispatcherConfig.Type.BATCH, batch.getDispatcher().getType());
+        assertEquals(1, batch.getScheduler().getDecision().getMaxRequests());
+        assertEquals(1L, batch.getScheduler().getDecision().getMaxCollectionWaitMs());
+        assertEquals(3600000L, batch.getRequestLifecycle().getRequest().getTimeoutMs());
+    }
+
+    @Test
     void grpcExecutorDefaultsAndOverridesAreValidated() {
         FlexlbConfig.GrpcServerConfig defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
         assertEquals(1000, defaults.getExecutorCoreSize());

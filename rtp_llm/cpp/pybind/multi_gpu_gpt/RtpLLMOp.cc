@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/multimodal_processor/MMRdmaVitConfig.h"
 #include <cstddef>
 #include <memory>
 #include <tuple>
@@ -196,6 +197,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         VitConfig vit_config_cpp;
         if (!vit_config.is_none()) {
             vit_config_cpp.vit_separation = vit_config.attr("vit_separation").cast<VitSeparation>();
+            extractMMRdmaVitConfig(vit_config, vit_config_cpp);
         }
 
         py::object py_layers_weights = model.attr("weight").attr("weights");

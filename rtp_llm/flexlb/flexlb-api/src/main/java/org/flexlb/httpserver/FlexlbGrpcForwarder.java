@@ -492,7 +492,7 @@ public class FlexlbGrpcForwarder {
                 .disableRetry()
                 .keepAliveTime(30, TimeUnit.SECONDS)
                 .keepAliveTimeout(10, TimeUnit.SECONDS)
-                .maxInboundMessageSize(16 * 1024 * 1024)
+                .maxInboundMessageSize(org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE)
                 .build();
     }
 
