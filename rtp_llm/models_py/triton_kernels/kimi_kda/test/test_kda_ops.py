@@ -141,6 +141,74 @@ def naive_recurrent_kda(
 
 class TestKdaOps(unittest.TestCase):
 
+    def test_k3_paged_verify_candidate_states(self):
+        # Verify candidate storage, independently of the engine's later commit.
+        # Four target queries mean the current token plus three draft tokens.
+        batch, width, heads, block_size = 5, 4, 12, 4096
+        q, k, v, g, beta, alog, bias, initial = make_kda_inputs(
+            batch, width, heads=heads
+        )
+        initial.normal_(mean=0, std=0.02)
+        prefixes = (4095, 4096, 8191, 8192, 4096)
+        table = torch.arange(1, 1 + batch * 7, device=DEVICE, dtype=torch.int32)
+        table = table.reshape(batch, 7)
+        table[-1].zero_()  # SP dummy request must not touch the null block.
+        pool = torch.randn(
+            1 + batch * 7, heads, K, V, device=DEVICE, dtype=torch.float32
+        )
+        for row, prefix in enumerate(prefixes[:-1]):
+            pool[table[row, (prefix - 1) // block_size]] = initial[row]
+        before = pool.clone()
+        output, _ = fused_recurrent_kda(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=pool,
+            A_log=alog,
+            dt_bias=bias,
+            inplace_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            lower_bound=-5.0,
+            block_map=table,
+            seq_size_per_block=block_size,
+            sequence_lengths=torch.tensor(
+                [prefix + 1 for prefix in prefixes], device=DEVICE, dtype=torch.int32
+            ),
+        )
+        written = set()
+        for accepted in range(4):
+            count = accepted + 1
+            expected_output, expected_state = naive_recurrent_kda(
+                q[:-1, :count],
+                k[:-1, :count],
+                v[:-1, :count],
+                g[:-1, :count],
+                beta[:-1, :count],
+                K**-0.5,
+                initial[:-1].clone(),
+                alog,
+                bias,
+                lower_bound=-5.0,
+            )
+            for row, prefix in enumerate(prefixes[:-1]):
+                slot = int(table[row, prefix // block_size + accepted])
+                written.add(slot)
+                torch.testing.assert_close(
+                    pool[slot], expected_state[row], rtol=0.03, atol=0.003
+                )
+            torch.testing.assert_close(
+                output[:-1, accepted].float(),
+                expected_output[:, -1].float(),
+                rtol=0.03,
+                atol=0.003,
+            )
+        untouched = [index for index in range(pool.shape[0]) if index not in written]
+        torch.testing.assert_close(pool[untouched], before[untouched], rtol=0, atol=0)
+        self.assertEqual(pool.dtype, torch.float32)
+
     def test_k3_bounded_gate_extremes(self):
         g = torch.linspace(-80, 80, 12 * K, device=DEVICE).reshape(1, 12, K)
         alog = torch.linspace(-1, 1, 12, device=DEVICE)
