@@ -130,6 +130,14 @@ class CPContext:
     _full_prefill_positions_cache: Optional[
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
     ] = field(default=None, init=False, repr=False, compare=False)
+    # V4.1 sync varlen gather scratch, allocated lazily on first use and
+    # reused by every layer of THIS forward (the context dies with the
+    # forward). Keys are (role, rows, cols, dtype); values are the
+    # pre-allocated NCCL output / restore destination buffers. See
+    # ``cp_all_gather_full_varlen(forward_scratch=True)``.
+    _sync_varlen_scratch: Optional[dict] = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
 
 @dataclass
@@ -810,11 +818,68 @@ def _cp_all_gather_into_empty(tensor: torch.Tensor, group: Group) -> torch.Tenso
     return gathered
 
 
+def _cp_sync_varlen_scratch(
+    cp_ctx: CPContext,
+    role: str,
+    rows: int,
+    cols: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    """Return (allocating once) a per-forward scratch buffer for a sync varlen
+    gather role.
+
+    The sync varlen path runs on the default stream and its per-role buffer is
+    consumed (gathered: by the restore ``index_select``; restored: by the
+    layer's SWA write / chunk assembly) before the next layer's gather of the
+    same role reuses it, so one buffer per (shape, dtype) per forward is safe.
+    The restored-role buffer is a plain allocation (NOT part of any
+    ``PrefillWorkspace`` union), so it can never alias the Q region even
+    though the V4.1 ``kv_full`` result intentionally stays live across Q
+    materialization.
+    """
+    cache = cp_ctx._sync_varlen_scratch
+    if cache is None:
+        cache = {}
+        cp_ctx._sync_varlen_scratch = cache
+    key = (role, int(rows), int(cols), dtype)
+    buf = cache.get(key)
+    if buf is None or buf.device != device:
+        buf = torch.empty((int(rows), int(cols)), device=device, dtype=dtype)
+        cache[key] = buf
+    return buf
+
+
+def _cp_all_gather_into_scratch(
+    local_2d: torch.Tensor, cp_ctx: CPContext
+) -> torch.Tensor:
+    """DSV4-local all-gather into the per-forward scratch buffer.
+
+    Same semantics as :func:`_cp_all_gather_into_empty` (the collective writes
+    every output element), but the destination is the CPContext-cached buffer
+    reused by every layer of the forward instead of a fresh ``torch.empty``
+    per call.
+    """
+    process_group = collective_torch._get_group(Group.TP)
+    world_size = torch.distributed.get_world_size(process_group)
+    gathered = _cp_sync_varlen_scratch(
+        cp_ctx,
+        "gathered",
+        world_size * local_2d.size(0),
+        local_2d.size(1),
+        local_2d.dtype,
+        local_2d.device,
+    )
+    torch.distributed.all_gather_into_tensor(gathered, local_2d, group=process_group)
+    return gathered
+
+
 def cp_all_gather_full_varlen(
     local_flat: torch.Tensor,
     cp_ctx: CPContext,
     *,
     profile_name: Optional[str] = None,
+    forward_scratch: bool = False,
 ) -> torch.Tensor:
     """**Varlen B>=1 path**:
     all-gather a flat ``[chunk_length, *F]`` rank-local tensor across the
@@ -829,14 +894,37 @@ def cp_all_gather_full_varlen(
     treats this as a single virtual sequence (matching the existing
     non-CP B>1 behaviour documented in
     ``prefill/forward.py::forward_layers``).
+
+    ``forward_scratch=True`` (V4.1 hot path only) routes both the NCCL
+    destination and the non-prefix restore ``index_select`` output into
+    per-forward CPContext scratch buffers, removing the two fresh
+    ``torch.empty`` allocations per call. Outputs are bit-identical to
+    the default path; the restored buffer intentionally stays a plain
+    allocation so it can never alias a ``PrefillWorkspace`` Q region
+    (the V4.1 ``kv_full`` result is live across Q materialization).
     """
     profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.varlen"
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
-    with record_function_range(f"{profile_name}.launch"):
-        gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
+    use_scratch = forward_scratch and torch.distributed.is_initialized()
+    if use_scratch:
+        with record_function_range(f"{profile_name}.launch"):
+            gathered = _cp_all_gather_into_scratch(local_2d, cp_ctx)
+    else:
+        with record_function_range(f"{profile_name}.launch"):
+            gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
+    out_buf = None
+    if use_scratch and not cp_ctx.unpad_restore_is_prefix:
+        out_buf = _cp_sync_varlen_scratch(
+            cp_ctx,
+            "restored",
+            cp_ctx.seq_len_full,
+            gathered.size(1),
+            gathered.dtype,
+            gathered.device,
+        )
     with record_function_range(f"{profile_name}.restore"):
-        full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
+        full = _cp_restore_gathered_full_2d(gathered, cp_ctx, out=out_buf)
     return full.view((cp_ctx.seq_len_full,) + trailing)
 
 

@@ -242,6 +242,15 @@ py_test(
 )
 
 py_test(
+    name = "test_cp_sync_varlen_scratch",
+    srcs = ["test_cp_sync_varlen_scratch.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_prefill_workspace",
     srcs = ["test_prefill_workspace.py"],
     deps = [

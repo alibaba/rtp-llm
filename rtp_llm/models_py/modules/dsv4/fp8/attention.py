@@ -5191,6 +5191,13 @@ class AttentionFP8(nn.Module):
                             f"dsv4.cp.all_gather.L{self.layer_id:02d}."
                             "swa_kv_full.varlen"
                         ),
+                        # V4.1-only: route the NCCL destination and the restore
+                        # output into the per-forward CPContext scratch so the
+                        # 40 per-layer gathers stop paying two fresh
+                        # ``torch.empty`` dispatches each. V4 keeps the original
+                        # allocation path (explicit v41_config gate).
+                        forward_scratch=getattr(self, "v41_config", None)
+                        is not None,
                     )
                     kv_full = kv_full_flat.unsqueeze(0)
         else:

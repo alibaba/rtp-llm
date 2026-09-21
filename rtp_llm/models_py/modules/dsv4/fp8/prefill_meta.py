@@ -89,6 +89,16 @@ def build_and_propagate_prefill_meta_fp8(
     meta_by_ratio: Dict[int, "PrefillMeta"] = {}
     reusable_common: Optional["PrefillMeta"] = None
     reusable_freqs_by_rope_kind: Dict[bool, "PrefillMeta"] = {}
+    # V4.1 buckets (ratios 0/2/1) build through ``AttentionV41FP8``'s SWA
+    # planner override, which caches the built meta per (rope kind, input
+    # identity) in the shared per-forward state. Drop that cache HERE, at the
+    # top of every forward's build, so a stale entry from a previous (or
+    # failed) forward can never be observed — the input-tensor identities in
+    # the key are only unique while the cached meta pins them alive.
+    first_attn = getattr(next(iter(v4.layers), None), "attn", None)
+    first_shared = getattr(first_attn, "_shared_attention", None)
+    if isinstance(first_shared, dict):
+        first_shared.pop("prefill_meta_common", None)
     with record_function_range("dsv4.fp8.prefill_meta.build_all_ratios"):
         for r in ordered_ratios:
             attn = representatives[r]

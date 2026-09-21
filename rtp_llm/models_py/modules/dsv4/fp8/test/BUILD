@@ -66,6 +66,7 @@ _DSV4_FP8_CPU_TESTS = [
     "test_attention_v41_sparse_selection",
     "test_attention_v41_prefill_producer",
     "test_v41_prefill_indexer",
+    "test_v41_prefill_meta_cache",
     "test_attention_cp_prefill_paths",
     "test_attention_csa_overlap",
     "test_attention_hca_overlap",

@@ -517,6 +517,76 @@ class AttentionV41FP8(AttentionFP8):
             if pool is not None:
                 swa_codec.quantize_and_insert_swa_k_cache(kv, pool, meta.slot_mapping)
 
+    def _v41_prefill_meta_cache_key(self, ratio: int, args, kwargs):
+        """Per-forward cache key for the broadcast V4.1 prefill meta build.
+
+        ``build_and_propagate_prefill_meta_fp8`` builds one meta per
+        compress-ratio bucket (V4.1 buckets: 0 / 2 / 1). The bucket builds
+        receive identical inputs; only the RoPE kind differs (base for ratio 0,
+        compressed for ratio 1/2 — every compressed layer's table is built from
+        the same model-level rope parameters, so value-identical). Keying on the
+        rope parameters plus the per-forward input identities lets the second
+        and third bucket builds return the first build's result instead of
+        re-running the SWA planner chain (whose byte-sliced slot compaction
+        synchronizes via ``nonzero``/``unique``).
+
+        The cache entry pins the input tensors, so ``id()`` recycling cannot
+        alias a live key; the entry is dropped by
+        ``build_and_propagate_prefill_meta_fp8`` at the start of every forward
+        and by ``_begin_forward`` before the layer loop runs.
+        """
+        def opt(name, index):
+            if name in kwargs:
+                return kwargs[name]
+            if index < len(args):
+                return args[index]
+            return None
+
+        x = args[0] if args else kwargs.get("x")
+        positions = args[1] if len(args) > 1 else kwargs.get("positions")
+        if ratio:
+            rope_key = (
+                "cmp",
+                self._rope_base,
+                self._rope_max_seq_len,
+                self._rope_o_seq_len,
+                self._rope_factor,
+                self._rope_beta_fast,
+                self._rope_beta_slow,
+            )
+        else:
+            rope_key = (
+                "base",
+                self._rope_dim,
+                self._rope_max_seq_len,
+                self._rope_factor,
+                self._rope_beta_fast,
+                self._rope_beta_slow,
+            )
+        tensors = (
+            opt("sp_per_req", 2),
+            opt("cu_seqlens", 3),
+            opt("input_lengths", 5),
+            opt("prefix_lengths", 6),
+            opt("position_ids", 7),
+            opt("req_id_per_token", 8),
+        )
+        cp_ctx = getattr(self, "_cp_ctx", None)
+        kv_cache = getattr(self, "_kv_cache", None)
+        block_tables = getattr(self, "_block_tables_by_type", None)
+        return (
+            rope_key,
+            int(x.shape[0]) if x is not None else -1,
+            str(x.device) if x is not None else "",
+            int(positions) if isinstance(positions, int) else id(positions),
+            opt("batch_size", 4) or 1,
+            opt("max_seqlen_q", 9) or 0,
+            tuple(None if t is None else id(t) for t in tensors),
+            0 if cp_ctx is None else id(cp_ctx),
+            0 if kv_cache is None else id(kv_cache),
+            0 if block_tables is None else id(block_tables),
+        )
+
     def _build_shared_prefill_meta(self, *args, **kwargs):
         # Every V4.1 layer needs the full SWA prefix metadata, including global
         # layers. Build through the mature SWA planner with this layer's RoPE.
@@ -524,11 +594,16 @@ class AttentionV41FP8(AttentionFP8):
         self.compress_ratio = 0
         kwargs["reuse_common_meta"] = None
         try:
+            cache = self._shared_attention.setdefault("prefill_meta_common", {})
+            key = self._v41_prefill_meta_cache_key(ratio, args, kwargs)
+            if key in cache:
+                return cache[key]
             common = super()._build_shared_prefill_meta(*args, **kwargs)
             if os.environ.get("DSV41_PREFILL_REQUEST_SLICES", "1") != "0":
                 common = common._replace(
                     request_row_slices=_prefill_request_row_slices(common)
                 )
+            cache[key] = common
             return common
         finally:
             self.compress_ratio = ratio
@@ -563,6 +638,11 @@ class AttentionV41FP8(AttentionFP8):
             # + per-row lengths) is cached per index-source group and dropped
             # with the rest of the per-forward shared state.
             self._shared_attention.pop("prefill_index_plan", None)
+            # Per-forward broadcast prefill-meta cache (see
+            # ``_build_shared_prefill_meta``): dropped with the rest of the
+            # per-forward shared state so a later forward can never observe a
+            # stale entry.
+            self._shared_attention.pop("prefill_meta_common", None)
 
     def _owner(self):
         return self._shared_attention["layers"][self.kv_source_layer_id]
