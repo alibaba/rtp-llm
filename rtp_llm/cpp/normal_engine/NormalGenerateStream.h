@@ -31,8 +31,12 @@ public:
     ErrorResult<GenerateOutputs>     nextOutput(int64_t wait_timeout_ms = 0) override;
     void                             updateOutput(const StreamUpdateInfo& update_info) override;
     GenerationPrefillCudaGraphStatus generationPrefillCudaGraphStatus() const override;
+    ErrorResult<GenerateOutputs> nextOutputForRpc(int64_t wait_timeout_ms = 0) override;
 
 private:
+    bool                   canDeferTerminalOutput(const StreamUpdateInfo& update_info) const;
+    GenerateOutputs        snapshotTerminalOutput(const StreamUpdateInfo& update_info);
+    static GenerateOutputs materializeTerminalOutput(GenerateOutputs output);
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
     void            enqueueGenerateOutput(GenerateOutputs&& generate_results);
     bool            consumerReadyWithoutLock() const override;
