@@ -15,8 +15,11 @@ from rtp_llm.config.quant_config import (
 from rtp_llm.model_loader.compressed_w8a8_int8_per_channel_weight import (
     CompressedW8A8Int8PerChannelWeight,
 )
+from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.per_channel_fp8_quant_weight import PerChannelFp8Weight
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models_py.distributed.deepep_wrapper import DeepepWrapperConfig
 from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import (
@@ -25,7 +28,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import (
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 from rtp_llm.ops import QuantAlgo
 from rtp_llm.utils.database import BaseDatabase
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
+from rtp_llm.utils.model_weight import (
+    CkptWeightInfo,
+    W,
+    identity,
+    stack_,
+    stack_moe_w1,
+    transpose_stack_moe_w1,
+)
 
 
 def _compressed_group(weight_type="int", symmetric=True):
@@ -68,6 +78,29 @@ class _RecordingDevice:
     def convert_fp8_weight_params(self, kernel, scale):
         self.convert_calls += 1
         return self.sentinel_kernel, self.sentinel_scale
+
+
+class _MoeRecordingDevice(_RecordingDevice):
+    def shuffle_moe_weight(self, tensor, compute_dtype, name):
+        del compute_dtype, name
+        return tensor
+
+
+class _MemoryTensorSource(TensorSource):
+    """CPU tensor source that exercises the real MoE stacked-load path."""
+
+    def __init__(self, tensors):
+        self._tensors = tensors
+        self._database = BaseDatabase()
+
+    def load_tensor(self, name, data_type=torch.float16):
+        return [self._tensors[name].to(data_type)]
+
+    def has_tensor(self, name):
+        return name in self._tensors
+
+    def get_database(self):
+        return self._database
 
 
 def _load_config(exported_device):
@@ -284,15 +317,15 @@ class CompressedW8A8ConfigTest(unittest.TestCase):
 
     def test_accepts_regex_ignore_patterns(self):
         pattern = r"re:.*\.mlp\..*"
-        config = CompressedW8A8Int8PerChannelQuantConfig(
-            ignore_patterns=[pattern]
-        )
+        config = CompressedW8A8Int8PerChannelQuantConfig(ignore_patterns=[pattern])
         self.assertIn(pattern, config.exclude_modules)
 
     def test_missing_w8a8_activation_strategy_reports_unsupported_scheme(self):
         group = _compressed_group()
         group["input_activations"].pop("strategy")
-        with self.assertRaisesRegex(ValueError, "unsupported compressed-tensors scheme"):
+        with self.assertRaisesRegex(
+            ValueError, "unsupported compressed-tensors scheme"
+        ):
             self._load(
                 {
                     "quant_method": "compressed-tensors",
@@ -307,9 +340,7 @@ class CompressedW8A8ConfigTest(unittest.TestCase):
             "model.language_model.layers.8.linear_attn.conv1d",
             "mtp.layers.0.mlp.shared_expert_gate",
         ]
-        config = CompressedW8A8Int8PerChannelQuantConfig(
-            ignore_patterns=patterns
-        )
+        config = CompressedW8A8Int8PerChannelQuantConfig(ignore_patterns=patterns)
         self.assertEqual(config.exclude_modules, set(patterns))
 
     def test_precision_validation_rejects_fp8_kv_cache(self):
@@ -321,9 +352,7 @@ class CompressedW8A8ConfigTest(unittest.TestCase):
 
     def test_precision_validation_accepts_bf16_kv_cache(self):
         config = CompressedW8A8Int8PerChannelQuantConfig()
-        config.verify_compute_dtype_and_kv_cache_dtype(
-            torch.bfloat16, torch.bfloat16
-        )
+        config.verify_compute_dtype_and_kv_cache_dtype(torch.bfloat16, torch.bfloat16)
 
     def test_low_latency_bucket_uses_per_token_quantization_sizes(self):
         config = CompressedW8A8Int8PerChannelQuantConfig()
@@ -440,12 +469,199 @@ class CompressedW8A8WeightTest(unittest.TestCase):
         )
 
     def test_non_matching_literal_ignore_keeps_the_quantized_loader(self):
-        config = CompressedW8A8Int8PerChannelQuantConfig(
-            ignore_patterns=["lm_head"]
-        )
+        config = CompressedW8A8Int8PerChannelQuantConfig(ignore_patterns=["lm_head"])
         self.assertTrue(
             CompressedW8A8Int8PerChannelWeight.support(config, self._source())
         )
+
+
+class StackedMoePerChannelWeightTest(unittest.TestCase):
+    _fused_key = "model.language_model.layers.{i}.mlp.experts.gate_up_proj"
+
+    def _load_config(self):
+        return _load_config(_MoeRecordingDevice())
+
+    def _fused_source(self):
+        return MoeAtomicWeight(
+            W.moe_w1,
+            [CkptWeightInfo(self._fused_key, identity)],
+            process_fun=transpose_stack_moe_w1,
+            config=MoeConfig(expert_num=2),
+            stacked_ckpt_keys=True,
+            enable_pure_tp_preshard=True,
+        )
+
+    def test_qwen35_fused_keys_keep_stack_metadata_and_mapping(self):
+        source = self._fused_source()
+        weight = WeightModule.create(source, CompressedW8A8Int8PerChannelQuantConfig())
+
+        self.assertTrue(weight.kernel.stacked_ckpt_keys)
+        self.assertTrue(weight.scale.stacked_ckpt_keys)
+        self.assertTrue(weight.kernel.enable_pure_tp_preshard)
+        self.assertTrue(weight.scale.enable_pure_tp_preshard)
+        self.assertIs(weight.kernel.process_fun, transpose_stack_moe_w1)
+        self.assertIs(weight.scale.process_fun, transpose_stack_moe_w1)
+        self.assertEqual(weight.kernel.weights[0].name, self._fused_key)
+        self.assertEqual(
+            weight.scale.weights[0].name, self._fused_key + ".weight_scale"
+        )
+
+        stacked_keys = ModelLoader._build_stacked_key_config(
+            [SimpleNamespace(weight=weight, layer_id=0)]
+        )
+        self.assertEqual(
+            stacked_keys[self._fused_key.format(i="0")],
+            f"layers.0.moe.{W.moe_w1}.{{expert_id}}.0",
+        )
+        self.assertEqual(
+            stacked_keys[(self._fused_key + ".weight_scale").format(i="0")],
+            f"layers.0.moe.{W.moe_s1}.{{expert_id}}.0",
+        )
+
+    def test_qwen35_fused_kernel_and_scale_use_identical_gate_up_order(self):
+        source = self._fused_source()
+        weight = WeightModule.create(source, CompressedW8A8Int8PerChannelQuantConfig())
+        kernel = torch.arange(16, dtype=torch.int8).reshape(2, 4, 2)
+        scale = torch.arange(8, dtype=torch.float32).reshape(2, 4, 1)
+        tensors = {
+            self._fused_key.format(i="0"): kernel,
+            (self._fused_key + ".weight_scale").format(i="0"): scale,
+        }
+
+        loaded = weight.load(
+            _MemoryTensorSource(tensors), 0, "cpu", self._load_config()
+        )
+        expected_kernel = torch.cat([kernel[:, 2:, :], kernel[:, :2, :]], dim=1)
+        expected_scale = torch.cat([scale[:, 2:, :], scale[:, :2, :]], dim=1)
+        self.assertEqual(loaded[W.moe_w1].dtype, torch.int8)
+        self.assertEqual(loaded[W.moe_s1].dtype, torch.float32)
+        torch.testing.assert_close(loaded[W.moe_w1], expected_kernel, rtol=0, atol=0)
+        torch.testing.assert_close(loaded[W.moe_s1], expected_scale, rtol=0, atol=0)
+
+    def test_qwen35_fused_fp8_preserves_stacked_mapping_and_dtypes(self):
+        weight = WeightModule.create(
+            self._fused_source(),
+            Fp8PerChannelCompressedQuantConfig(bits=8, is_quanted=True),
+        )
+        self.assertEqual(weight.kernel.data_type, torch.float8_e4m3fn)
+        self.assertEqual(weight.scale.data_type, torch.float32)
+        self.assertIs(weight.scale.weights[0].merge_fun, identity)
+
+        stacked_keys = ModelLoader._build_stacked_key_config(
+            [SimpleNamespace(weight=weight, layer_id=0)]
+        )
+        self.assertIn(self._fused_key.format(i="0"), stacked_keys)
+        self.assertIn((self._fused_key + ".weight_scale").format(i="0"), stacked_keys)
+
+    def test_qwen35_stacked_down_proj_uses_no_suffix_kernel_and_scale_keys(self):
+        fused_key = "model.language_model.layers.{i}.mlp.experts.down_proj"
+        source = MoeAtomicWeight(
+            W.moe_w2,
+            [CkptWeightInfo(fused_key, identity)],
+            process_fun=stack_,
+            config=MoeConfig(expert_num=2),
+            stacked_ckpt_keys=True,
+            enable_pure_tp_preshard=True,
+        )
+        weight = WeightModule.create(source, CompressedW8A8Int8PerChannelQuantConfig())
+        self.assertTrue(weight.kernel.stacked_ckpt_keys)
+        self.assertTrue(weight.scale.stacked_ckpt_keys)
+        self.assertEqual(weight.kernel.weights[0].name, fused_key)
+        self.assertEqual(weight.scale.weights[0].name, fused_key + ".weight_scale")
+
+        kernel = torch.arange(12, dtype=torch.int8).reshape(2, 3, 2)
+        scale = torch.arange(6, dtype=torch.float32).reshape(2, 3, 1)
+        loaded = weight.load(
+            _MemoryTensorSource(
+                {
+                    fused_key.format(i="0"): kernel,
+                    (fused_key + ".weight_scale").format(i="0"): scale,
+                }
+            ),
+            0,
+            "cpu",
+            self._load_config(),
+        )
+        torch.testing.assert_close(loaded[W.moe_w2], kernel, rtol=0, atol=0)
+        torch.testing.assert_close(loaded[W.moe_s2], scale, rtol=0, atol=0)
+
+        stacked_keys = ModelLoader._build_stacked_key_config(
+            [SimpleNamespace(weight=weight, layer_id=0)]
+        )
+        self.assertIn(fused_key.format(i="0"), stacked_keys)
+        self.assertIn((fused_key + ".weight_scale").format(i="0"), stacked_keys)
+
+    def test_split_experts_keep_weight_suffix_and_existing_order(self):
+        source = MoeAtomicWeight(
+            W.moe_w1,
+            [
+                CkptWeightInfo("model.layers.{i}.mlp.experts.{expert_id}.gate.weight"),
+                CkptWeightInfo("model.layers.{i}.mlp.experts.{expert_id}.up.weight"),
+            ],
+            process_fun=stack_moe_w1,
+            config=MoeConfig(expert_num=2),
+        )
+        weight = WeightModule.create(source, CompressedW8A8Int8PerChannelQuantConfig())
+        self.assertFalse(weight.kernel.stacked_ckpt_keys)
+        self.assertIs(weight.kernel.process_fun, stack_moe_w1)
+        self.assertIs(weight.scale.process_fun, stack_moe_w1)
+        self.assertEqual(
+            [ckpt.name for ckpt in weight.kernel.weights],
+            [ckpt.name for ckpt in source.weights],
+        )
+        self.assertEqual(
+            [ckpt.name for ckpt in weight.scale.weights],
+            [
+                "model.layers.{i}.mlp.experts.{expert_id}.gate.weight_scale",
+                "model.layers.{i}.mlp.experts.{expert_id}.up.weight_scale",
+            ],
+        )
+        gate = [
+            torch.tensor([[1, 2], [3, 4]], dtype=torch.int8),
+            torch.tensor([[5, 6], [7, 8]], dtype=torch.int8),
+        ]
+        up = [
+            torch.tensor([[9, 10], [11, 12]], dtype=torch.int8),
+            torch.tensor([[13, 14], [15, 16]], dtype=torch.int8),
+        ]
+        # Legacy split checkpoints may mix 1D [N] and 2D [N, 1] scale storage.
+        gate_scale = [
+            torch.tensor([0.1, 0.2], dtype=torch.float32),
+            torch.tensor([0.3, 0.4], dtype=torch.float32),
+        ]
+        up_scale = [
+            torch.tensor([[0.5], [0.6]], dtype=torch.float32),
+            torch.tensor([[0.7], [0.8]], dtype=torch.float32),
+        ]
+        tensors = {}
+        for expert_id in range(2):
+            prefix = f"model.layers.0.mlp.experts.{expert_id}"
+            tensors[f"{prefix}.gate.weight"] = gate[expert_id]
+            tensors[f"{prefix}.up.weight"] = up[expert_id]
+            tensors[f"{prefix}.gate.weight_scale"] = gate_scale[expert_id]
+            tensors[f"{prefix}.up.weight_scale"] = up_scale[expert_id]
+
+        loaded = weight.load(
+            _MemoryTensorSource(tensors), 0, "cpu", self._load_config()
+        )
+        expected_kernel = torch.cat([torch.stack(gate), torch.stack(up)], dim=1)
+        expected_scale = torch.cat(
+            [
+                torch.stack([scale.unsqueeze(-1) for scale in gate_scale]),
+                torch.stack(up_scale),
+            ],
+            dim=1,
+        )
+        torch.testing.assert_close(loaded[W.moe_w1], expected_kernel, rtol=0, atol=0)
+        self.assertEqual(loaded[W.moe_s1].shape, (2, 4, 1))
+        torch.testing.assert_close(loaded[W.moe_s1], expected_scale, rtol=0, atol=0)
+
+    def test_fused_key_exclude_matches_the_full_module_name(self):
+        source = self._fused_source()
+        config = CompressedW8A8Int8PerChannelQuantConfig(
+            ignore_patterns=[self._fused_key],
+        )
+        self.assertFalse(CompressedW8A8Int8PerChannelWeight.support(config, source))
 
 
 class PerChannelFp8PostprocessTest(unittest.TestCase):
