@@ -20,6 +20,25 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_linear_cache_average_query_length_round_trip(self):
+        from rtp_llm.ops import KVCacheConfig
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        os.environ["LINEAR_ATTN_REQUEST_CACHE_AVG_QUERY_LENGTH"] = "100000"
+        sys.argv = ["prog"]
+        config = setup_args().kv_cache_config
+        self.assertEqual(config.linear_request_cache_avg_query_length, 100000)
+        self.assertEqual(
+            pickle.loads(pickle.dumps(config)).linear_request_cache_avg_query_length,
+            100000,
+        )
+        # Old serialized block-count overrides must never become token lengths.
+        old_state = list(config.__getstate__()[:-1])
+        old_state[-2] = 384
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(tuple(old_state))
+        self.assertEqual(restored.linear_request_cache_avg_query_length, 0)
+
     def test_cp_rotate_method_accepts_explicit_disabled_for_tp_prefill(self):
         from rtp_llm.ops import CPRotateMethod
         from rtp_llm.server.server_args.util import str2_cp_rotate_method

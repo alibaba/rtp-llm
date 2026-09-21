@@ -102,12 +102,14 @@ TEST(GLM53CacheConfigTest, PinnedMlaLeavesKdaAndKPoolOnDeviceAndBudgetsExpandedT
     model.data_type        = DataType::TYPE_BF16;
     auto options           = makeKvConfig();
     options.test_block_num = 256;
+    options.linear_request_cache_avg_query_length = 128;
     RuntimeConfig runtime;
     runtime.max_generate_batch_size                      = 3;
     runtime.fifo_scheduler_config.max_context_batch_size = 1;
     const auto config = CacheConfigCreator::createConfig(model, ParallelismConfig(), runtime, options, std::nullopt);
     EXPECT_EQ(config.dsa_mla_resident_tokens, 6272u);  // ceil(3 * 2051 / 128) * 128
     EXPECT_GT(config.block_num, config.dsa_mla_hbm_blocks);
+    EXPECT_EQ(config.group_block_nums[1], 256u);  // Host overflow cannot grow the reserved HBM state pool.
     size_t host_bytes = 0;
     for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
         const auto  pool   = BlockPoolConfigHelper::createConfigForGroup(config, gid);
@@ -531,7 +533,7 @@ TEST(GLM53CacheConfigTest, LinearPoolIsTokenIndependentAndRoleSized) {
     EXPECT_EQ(decode_config.group_block_nums[1], 8u * 6u + 1u);
 }
 
-TEST(GLM53CacheConfigTest, LinearRequestPoolBlockOverrideIsAppliedWithLiveRequestFloor) {
+TEST(GLM53CacheConfigTest, LinearRequestAverageLengthIsAppliedWithLiveRequestFloor) {
     ScopedEnvVar request_cache_mode("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
 
     ParallelismConfig pc;
@@ -540,15 +542,85 @@ TEST(GLM53CacheConfigTest, LinearRequestPoolBlockOverrideIsAppliedWithLiveReques
     runtime.max_generate_batch_size = 64;
 
     auto kv_config = makeKvConfig();
-    kv_config.linear_request_cache_pool_blocks = 384;
+    kv_config.linear_request_cache_avg_query_length = 128 * 16;
     auto config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 3);
     config.finalizeBlockNums(10000, runtime);
-    EXPECT_EQ(config.group_block_nums[1], 384u);
+    EXPECT_EQ(config.group_block_nums[1], 626u);
 
-    kv_config.linear_request_cache_pool_blocks = 32;
+    kv_config.linear_request_cache_avg_query_length = 100000;
     config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 3);
     config.finalizeBlockNums(10000, runtime);
     EXPECT_EQ(config.group_block_nums[1], 193u);
+}
+
+TEST(GLM53CacheConfigTest, AdaptivePoolsRespectMemoryBudgetAndAverageQueryLength) {
+    ScopedEnvVar request_cache_mode("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
+    for (uint32_t average_tokens : {128u, 2049u, 100000u}) {
+        for (int cp : {1, 4}) {
+            auto model                               = makeGlm53Config();
+            model.data_type                          = DataType::TYPE_BF16;
+            model.max_seq_len                        = 4096;
+            auto kv                                  = makeKvConfig();
+            kv.kv_cache_mem_mb                       = 64;
+            kv.dsv4_fixed_pool_blocks                = 0;
+            kv.linear_request_cache_avg_query_length = average_tokens;
+            ParallelismConfig pc;
+            pc.role_type = RoleType::PREFILL;
+            pc.tp_size = pc.ep_size = pc.world_size = cp;
+            pc.prefill_cp_config.kv_cache_sharded   = cp > 1;
+            RuntimeConfig runtime;
+            runtime.max_generate_batch_size = 1;
+            auto   config                   = CacheConfigCreator::createConfig(model, pc, runtime, kv, std::nullopt);
+            size_t bytes                    = 0;
+            for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
+                bytes += static_cast<size_t>(config.group_block_nums[gid]) * config.group_block_size_bytes[gid];
+            }
+            EXPECT_LE(bytes, 64u * 1024u * 1024u);
+            const size_t pages_per_query = (average_tokens + 128u * cp - 1) / (128u * cp);
+            EXPECT_EQ(config.linearRequestCachePagesPerQuery(), pages_per_query);
+            const size_t cached_queries = (config.block_num - 1 + pages_per_query - 1) / pages_per_query;
+            EXPECT_EQ(config.group_block_nums[1], std::max<size_t>(cp > 1 ? 5 : 4, cached_queries + 1));
+            // The chosen capacity is maximal: adding a page (and any new
+            // required state) must exceed the same physical byte budget.
+            config.finalizeBlockNums(config.block_num + 1, runtime);
+            size_t next_bytes = 0;
+            for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
+                next_bytes += static_cast<size_t>(config.group_block_nums[gid]) * config.group_block_size_bytes[gid];
+            }
+            EXPECT_GT(next_bytes, 64u * 1024u * 1024u);
+        }
+    }
+}
+
+TEST(GLM53CacheConfigTest, AdaptiveEaglePoolsShareOneByteBudget) {
+    ScopedEnvVar request_cache_mode("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
+    auto         score                                     = makeGlm53Config();
+    score.data_type                                        = DataType::TYPE_BF16;
+    score.max_seq_len                                      = 4096;
+    auto propose                                           = score;
+    propose.num_layers                                     = 1;
+    propose.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
+    propose.attn_config.indexer_layer_ids                  = {0};
+    propose.linear_attention_config                        = {};
+    auto kv                                                = makeKvConfig();
+    kv.kv_cache_mem_mb                                     = 64;
+    kv.linear_request_cache_avg_query_length               = 2049;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size = 1;
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_EAGLE;
+    sp.gen_num_per_cycle = 3;
+    auto config          = CacheConfigCreator::createSpConfig(
+        score, propose, ParallelismConfig(), runtime, kv, sp, std::nullopt, true, true);
+    size_t bytes = 0;
+    for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
+        bytes += static_cast<size_t>(config.group_block_nums[gid]) * config.group_block_size_bytes[gid];
+    }
+    EXPECT_LE(bytes, 64u * 1024u * 1024u);
+    EXPECT_GE(config.group_block_nums[1], 7u);  // live + speculative + sentinel
+    EXPECT_EQ(config.group_block_nums[1], std::max(7u, 1u + (config.block_num - 1u + 16u) / 17u));
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    EXPECT_EQ(config.mtp_sub_configs[0]->block_num, config.block_num);
 }
 
 TEST(GLM53CacheConfigTest, CompactStateCapacityAndBudgetUseLocalPageCoordinates) {
@@ -607,7 +679,7 @@ TEST(GLM53CacheConfigTest, CompactStateCapacityAndBudgetUseLocalPageCoordinates)
     }
 }
 
-TEST(GLM53CacheConfigTest, DiskCheckpointsReserveTransientBatchesEvenWithSmallPoolOverride) {
+TEST(GLM53CacheConfigTest, DiskCheckpointsReserveTransientBatchesWithAverageLength) {
     ScopedEnvVar      request_cache_mode("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
     ParallelismConfig pc;
     pc.role_type = RoleType::PREFILL;
@@ -622,13 +694,13 @@ TEST(GLM53CacheConfigTest, DiskCheckpointsReserveTransientBatchesEvenWithSmallPo
     kv_config.enable_memory_cache_disk                   = true;
     for (int step : {1, 3, 4}) {
         kv_config.linear_step                      = step;
-        kv_config.linear_request_cache_pool_blocks = 0;
+        kv_config.linear_request_cache_avg_query_length = 0;
         auto           config      = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
         const uint32_t checkpoints = 1024 / (128 * step);
         EXPECT_EQ(config.linear_disk_checkpoint_blocks, checkpoints);
         config.finalizeBlockNums(10000, runtime);
         EXPECT_EQ(config.group_block_nums[1], 13u + 4u * checkpoints);
-        kv_config.linear_request_cache_pool_blocks = 1;
+        kv_config.linear_request_cache_avg_query_length = 1000000;
         config = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
         config.finalizeBlockNums(10000, runtime);
         EXPECT_EQ(config.group_block_nums[1], 13u + 4u * checkpoints);

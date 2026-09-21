@@ -97,7 +97,7 @@ struct CacheConfig {
     int      linear_speculative_reserve_step       = 0;
     RoleType role_type                             = RoleType::PDFUSION;
     bool     enable_linear_attention_request_cache = false;
-    uint32_t linear_request_cache_pool_blocks      = 0;
+    uint32_t linear_request_cache_avg_query_length = 0;
     uint32_t linear_request_cache_alignment_blocks = 1;
     // Transient output checkpoints are connector-owned until offload completes;
     // only the request tail is inserted into the persistent device cache.
@@ -148,7 +148,19 @@ struct CacheConfig {
         return std::max<size_t>(1, checkpoint_tokens / local_page_tokens);
     }
 
-    void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
+    // FULL pages are rank-local under CP; an average logical query spans
+    // fewer pages on each rank. A cached Linear state summarizes that query.
+    size_t linearRequestCachePagesPerQuery() const {
+        const size_t page_tokens = seq_size_per_block * std::max(1u, linear_request_cache_alignment_blocks);
+        RTP_LLM_CHECK_WITH_INFO(page_tokens > 0, "Linear request cache page size must be positive");
+        return std::max<size_t>(1,
+                                linear_request_cache_avg_query_length / page_tokens
+                                    + (linear_request_cache_avg_query_length % page_tokens != 0));
+    }
+
+    void finalizeBlockNums(uint32_t             global_block_num,
+                           const RuntimeConfig& runtime_config,
+                           bool                 preserve_linear_capacity = false) {
         if (!use_independent_block_pools || group_block_nums.empty()) {
             fixed_pool_reserve_bytes = 0;
             return;
@@ -186,11 +198,16 @@ struct CacheConfig {
                     role_type == RoleType::DECODE ? 0u : 2u * prefill_concurrency * linear_disk_checkpoint_blocks;
                 // BlockPool reserves physical block zero for internal use.
                 const uint32_t minimum_blocks = 1u + live_blocks + checkpoint_blocks;
-                // A tail-only override must leave room for checkpoints held
-                // by the asynchronous disk writer.
-                rule_blocks = linear_request_cache_pool_blocks == 0 ?
-                                  minimum_blocks :
-                                  std::max(linear_request_cache_pool_blocks, minimum_blocks);
+                // One reusable state per average query, with a floor for all
+                // live requests and checkpoints retained by asynchronous IO.
+                const size_t   pages        = linearRequestCachePagesPerQuery();
+                const size_t   usable_pages = global_block_num > 0 ? global_block_num - 1 : 0;
+                const uint32_t average_blocks =
+                    linear_request_cache_avg_query_length == 0 ?
+                        0u :
+                        static_cast<uint32_t>(1 + usable_pages / pages + (usable_pages % pages != 0));
+                rule_blocks =
+                    preserve_linear_capacity ? group_block_nums[gid] : std::max(average_blocks, minimum_blocks);
             } else if (use_explicit_hca_blocks) {
                 rule_blocks = dsv4_hca_state_pool_blocks;
             } else if (use_explicit_fixed_blocks) {
@@ -260,7 +277,7 @@ struct CacheConfig {
         OUTPUT_FIELD(linear_fixed_cap);
         OUTPUT_FIELD(linear_speculative_reserve_step);
         OUTPUT_FIELD(enable_linear_attention_request_cache);
-        OUTPUT_FIELD(linear_request_cache_pool_blocks);
+        OUTPUT_FIELD(linear_request_cache_avg_query_length);
         OUTPUT_FIELD(linear_request_cache_alignment_blocks);
         OUTPUT_FIELD(linear_disk_checkpoint_blocks);
         OUTPUT_FIELD_EXPR("role_type", roleTypeToString(role_type));

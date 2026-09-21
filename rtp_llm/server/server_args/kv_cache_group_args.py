@@ -118,12 +118,12 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="线性注意力每个请求最多保留的序列 block 数；0 表示不限制。正确性必需的尾块不受小于 2 的配置影响。",
     )
     kv_cache_group.add_argument(
-        "--linear_attn_request_cache_pool_blocks",
-        env_name="LINEAR_ATTN_REQUEST_CACHE_POOL_BLOCKS",
-        bind_to=(kv_cache_config, "linear_request_cache_pool_blocks"),
+        "--linear_attn_request_cache_avg_query_length",
+        env_name="LINEAR_ATTN_REQUEST_CACHE_AVG_QUERY_LENGTH",
+        bind_to=(kv_cache_config, "linear_request_cache_avg_query_length"),
         type=int,
         default=0,
-        help="整请求 Linear Attention device cache 每个 group 的总 block 数；0 表示按并发自动计算。",
+        help="平均每条 query 的 token 数，用于按一份 Linear 尾状态与对应分页 KV 的字节成本分配 HBM/host cache；0 沿用按并发计算。",
     )
 
     kv_cache_group.add_argument(
@@ -190,7 +190,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "prefix_tree_memory_state_swa_pool_ratio"),
         type=int,
         default=0,
-        help="新 prefix-tree memory cache 中 state/SWA pool 占总 memory cache 字节数的百分比。0 表示沿用按 key 等容量切分。",
+        help="新 prefix-tree memory cache 中 state/SWA pool 的字节百分比；0 自动分配。Linear 平均 query 长度配置优先。",
     )
     kv_cache_group.add_argument(
         "--enable_dsv4_state_block_independent_eviction",

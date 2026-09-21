@@ -529,7 +529,7 @@ TEST_F(LinearKVCacheGroupTest, RequestPoolHoldsFullBatchAndReservedZeroBlock) {
                 if (role == RoleType::DECODE && alignment != 1) {
                     continue;
                 }
-                for (uint32_t override_blocks : {0u, 1u}) {
+                for (uint32_t average_tokens : {0u, 100000u}) {
                     CacheConfig cache;
                     cache.use_independent_block_pools           = true;
                     cache.enable_linear_attention_request_cache = true;
@@ -537,7 +537,7 @@ TEST_F(LinearKVCacheGroupTest, RequestPoolHoldsFullBatchAndReservedZeroBlock) {
                     cache.group_block_nums                      = {0};
                     cache.role_type                             = role;
                     cache.linear_request_cache_alignment_blocks = alignment;
-                    cache.linear_request_cache_pool_blocks      = override_blocks;
+                    cache.linear_request_cache_avg_query_length = average_tokens;
                     cache.linear_speculative_reserve_step       = 4;
                     RuntimeConfig runtime;
                     runtime.max_generate_batch_size = concurrency;

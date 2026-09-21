@@ -1065,8 +1065,36 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_CompactRequestPoolsScaleFromDev
     // Device pools use 6,400 bytes for FULL and 1,920 bytes for Linear.
     // The 1 MiB host cache keeps the same byte ratio instead of assigning an
     // equal block count to the differently-sized pools.
-    EXPECT_EQ(conn->compressed_pool_->totalBlocksNum(), 12603u);
-    EXPECT_EQ(conn->state_swa_pool_->totalBlocksNum(), 1260u);
+    // totalBlocksNum() excludes each pool's reserved physical block zero.
+    EXPECT_EQ(conn->compressed_pool_->totalBlocksNum(), 12602u);
+    EXPECT_EQ(conn->state_swa_pool_->totalBlocksNum(), 1259u);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, initBlockPool_AverageLengthSizesHostPoolsIndependentlyOfDevice) {
+    for (uint32_t average : {128u, 2049u, 100000u}) {
+        for (uint32_t alignment : {1u, 4u}) {
+            auto cfg                                  = createCompactRequestConnectorConfig();
+            cfg.linear_request_cache_avg_query_length = average;
+            cfg.linear_request_cache_alignment_blocks = alignment;
+            // Deliberately distort the device pool ratio. Host sizing must use
+            // average query length and its own physical block strides.
+            cfg.group_block_nums                       = {100, 900};
+            auto kv                                    = kv_cache_config_;
+            kv.memory_cache_size_mb                    = 1;
+            kv.enable_memory_cache_disk                = false;
+            kv.prefix_tree_memory_state_swa_pool_ratio = 99;
+            auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv, allocator_, server_addrs_);
+            ASSERT_NO_THROW(conn->initBlockPool());
+            const size_t pages           = conn->compressed_pool_->totalBlocksNum();
+            const size_t states          = conn->state_swa_pool_->totalBlocksNum();
+            const size_t pages_per_query = (average + 128u * alignment - 1) / (128u * alignment);
+            EXPECT_EQ(states, (pages + pages_per_query - 1) / pages_per_query);
+            EXPECT_LE((pages + 1) * 64 + (states + 1) * 192, 1024u * 1024u);
+            // No additional paged block and its required state fit the budget.
+            const size_t next_states = (pages + 1 + pages_per_query - 1) / pages_per_query;
+            EXPECT_GT((pages + 2) * 64 + (next_states + 1) * 192, 1024u * 1024u);
+        }
+    }
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_PrefixPoolRatioChangesStateCapacity) {

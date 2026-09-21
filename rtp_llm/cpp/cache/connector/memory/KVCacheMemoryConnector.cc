@@ -335,7 +335,31 @@ void KVCacheMemoryConnector::initBlockPool() {
         size_t       compressed_capacity = 0;
         size_t       state_swa_capacity  = 0;
         bool         device_scaled       = false;
-        if (kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio > 0) {
+        const bool   average_scaled = whole_request_cache && !diskCacheEnabled() && cache_config_.linear_request_cache_avg_query_length > 0;
+        if (average_scaled) {
+            // Both pools reserve block zero. Cover each average query with
+            // one state and pages_per_query paged blocks, using host strides
+            // (including any checkpoint quantization), not device byte ratios.
+            const size_t pages_per_query = cache_config_.linearRequestCachePagesPerQuery();
+            const size_t sentinel_bytes  = compressed_block_size_ + state_swa_block_size_;
+            RTP_LLM_CHECK_WITH_INFO(total_bytes > sentinel_bytes,
+                                    "memory cache budget cannot hold both pool sentinels");
+            const size_t budget = total_bytes - sentinel_bytes;
+            size_t       low    = 0;
+            size_t       high   = std::min<size_t>(budget / compressed_block_size_, INT_MAX - 1);
+            while (low < high) {
+                const size_t pages     = low + (high - low + 1) / 2;
+                const size_t states    = pages / pages_per_query + (pages % pages_per_query != 0);
+                const size_t remaining = budget - pages * compressed_block_size_;
+                if (states <= remaining / state_swa_block_size_) {
+                    low = pages;
+                } else {
+                    high = pages - 1;
+                }
+            }
+            compressed_capacity = 1 + low;
+            state_swa_capacity  = 1 + low / pages_per_query + (low % pages_per_query != 0);
+        } else if (kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio < 100,
                                     "prefix_tree_memory_state_swa_pool_ratio must be in [1, 99], got %ld",
                                     kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio);
@@ -409,13 +433,18 @@ void KVCacheMemoryConnector::initBlockPool() {
         compressed_pool_ = make_pool(compressed_block_size_, compressed_capacity);
         state_swa_pool_  = make_pool(state_swa_block_size_, state_swa_capacity);
         RTP_LLM_LOG_INFO("prefix-tree memory pool init: compressed_size=%zu state_swa_size=%zu "
-                         "compressed_capacity=%zu state_swa_capacity=%zu ratio=%ld device_scaled=%d",
+                         "compressed_capacity=%zu state_swa_capacity=%zu ratio=%ld device_scaled=%d "
+                         "avg_query_length=%u pages_per_query=%zu average_scaled=%d disk_checkpoints=%d",
                          compressed_block_size_,
                          state_swa_block_size_,
                          compressed_capacity,
                          state_swa_capacity,
                          kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio,
-                         device_scaled);
+                         device_scaled,
+                         cache_config_.linear_request_cache_avg_query_length,
+                         cache_config_.linearRequestCachePagesPerQuery(),
+                         average_scaled,
+                         whole_request_cache && diskCacheEnabled());
         return;
     }
 

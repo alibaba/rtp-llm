@@ -165,7 +165,7 @@ struct KVCacheConfig {
     int64_t                                 memory_cache_disk_sync_timeout_ms = 30000;
     int                                     linear_step                       = 1;  // for linear attention cache reuse
     int                                     linear_fixed_cap                  = 0;  // 0 = unlimited reuse snapshots
-    uint32_t                                linear_request_cache_pool_blocks  = 0;  // 0 = size from concurrency
+    uint32_t linear_request_cache_avg_query_length = 0;  // Average query tokens; 0 = legacy concurrency sizing
     // Fields merged from PyKvCacheConfig
     int         int8_kv_cache             = 0;
     int         fp8_kv_cache              = 0;

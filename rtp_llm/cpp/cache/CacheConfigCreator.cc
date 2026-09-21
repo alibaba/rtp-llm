@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
+#include <functional>
 
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
@@ -57,6 +58,45 @@ size_t fallbackFixedPoolHbmBytes(const CacheConfig& config, int step) {
 
 size_t effectivePagedBlockBytes(const CacheConfig& config, int step) {
     return config.block_size_bytes + fallbackFixedPoolHbmBytes(config, step);
+}
+
+// Use actual group capacities, including small pools whose mandatory first
+// state cannot be represented by an amortized per-page byte cost.
+size_t allocatedHbmBytes(const CacheConfig& config, uint32_t blocks, int step) {
+    if (!config.use_independent_block_pools) {
+        return static_cast<size_t>(blocks) * effectivePagedBlockBytes(config, step) + config.fixed_pool_reserve_bytes;
+    }
+    size_t bytes = 0;
+    for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
+        if (config.fixed_pool_uses_pinned_cpu && gid < config.group_region_names.size()
+            && isDsv4FixedRegion(config.group_region_names[gid])) {
+            continue;
+        }
+        bytes += static_cast<size_t>(config.group_block_nums[gid]) * config.group_block_size_bytes[gid];
+    }
+    return bytes;
+}
+
+// Linear capacity depends on paged capacity. Solve all groups against the
+// same byte budget, including the live-request/checkpoint floor.
+uint32_t fitAdaptivePagedBlocks(size_t                                 budget,
+                                size_t                                 paged_block_bytes,
+                                const std::function<size_t(uint32_t)>& allocated_bytes) {
+    RTP_LLM_CHECK_WITH_INFO(paged_block_bytes > 0, "paged cache block size must be positive");
+    uint32_t low = 0;
+    uint32_t high =
+        static_cast<uint32_t>(std::min<size_t>(budget / paged_block_bytes, std::numeric_limits<int32_t>::max()));
+    while (low < high) {
+        const uint32_t candidate = low + (high - low + 1) / 2;
+        if (allocated_bytes(candidate) <= budget) {
+            low = candidate;
+        } else {
+            high = candidate - 1;
+        }
+    }
+    const size_t used = allocated_bytes(low);
+    RTP_LLM_LOG_INFO("adaptive cache budget: budget_bytes=%zu allocated_bytes=%zu paged_blocks=%u", budget, used, low);
+    return low;
 }
 
 bool hasDsv4FixedPoolBytes(const CacheConfig& config) {
@@ -188,12 +228,14 @@ void configurePinnedMla(CacheConfig& config, const RuntimeConfig& runtime, size_
     config.dsa_mla_resident_tokens = minimum;
     config.dsa_mla_hbm_blocks      = hbm_blocks;
     config.block_num               = static_cast<uint32_t>(blocks);
-    config.finalizeBlockNums(config.block_num, runtime);
+    // The fixed Linear reservation was charged before this HBM budget. Host
+    // overflow increases logical MLA capacity without growing that reservation.
+    config.finalizeBlockNums(config.block_num, runtime, /*preserve_linear_capacity=*/true);
     for (auto& sub : config.mtp_sub_configs) {
         sub->block_num               = config.block_num;
         sub->dsa_mla_resident_tokens = minimum;
         sub->dsa_mla_hbm_blocks      = hbm_blocks;
-        sub->finalizeBlockNums(config.block_num, runtime);
+        sub->finalizeBlockNums(config.block_num, runtime, /*preserve_linear_capacity=*/true);
     }
     RTP_LLM_LOG_INFO("DSA MLA tiered cache: hbm_blocks=%zu pinned_blocks=%zu logical_tokens=%zu "
                      "resident_tokens=%zu pinned_bytes=%zu indexer_hbm_bytes=%zu "
@@ -287,7 +329,15 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                              paged_budget / 1024 / 1024);
         }
         const int joint_step = std::max(1, config.linear_step);
-        block_num            = paged_budget / effectivePagedBlockBytes(config, joint_step);
+        const size_t paged_block_bytes = effectivePagedBlockBytes(config, joint_step);
+        block_num = config.enable_linear_attention_request_cache && config.linear_request_cache_avg_query_length > 0 ?
+                        fitAdaptivePagedBlocks(kv_cache_mem_size,
+                                               config.block_size_bytes,
+                                               [&](uint32_t blocks) {
+                                                   config.finalizeBlockNums(blocks, runtime_config);
+                                                   return allocatedHbmBytes(config, blocks, joint_step);
+                                               }) :
+                        paged_budget / paged_block_bytes;
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
@@ -396,8 +446,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         total_block_size_bytes += propose_config.block_size_bytes;
     }
 
-    const size_t fixed_reserve = score_config.fixed_pool_reserve_bytes
-                                 + propose_config.fixed_pool_reserve_bytes * static_cast<size_t>(num_mtp_modules);
+    size_t fixed_reserve = score_config.fixed_pool_reserve_bytes
+                           + propose_config.fixed_pool_reserve_bytes * static_cast<size_t>(num_mtp_modules);
 
     size_t block_num = 0;
     if (kv_cache_config.test_block_num > 0) {
@@ -428,12 +478,29 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         auto      effective_size = [&](const CacheConfig& cfg) -> size_t {
             return effectivePagedBlockBytes(cfg, joint_step);
         };
-        block_num =
-            paged_budget
-            / (effective_size(score_config) + effective_size(propose_config) * static_cast<size_t>(num_mtp_modules));
+        const size_t paged_block_bytes =
+            effective_size(score_config) + effective_size(propose_config) * static_cast<size_t>(num_mtp_modules);
+        if ((score_config.enable_linear_attention_request_cache
+             && score_config.linear_request_cache_avg_query_length > 0)
+            || (propose_config.enable_linear_attention_request_cache
+                && propose_config.linear_request_cache_avg_query_length > 0)) {
+            block_num = fitAdaptivePagedBlocks(kv_cache_mem_size, total_block_size_bytes, [&](uint32_t blocks) {
+                score_config.finalizeBlockNums(blocks, runtime_config);
+                propose_config.finalizeBlockNums(blocks, runtime_config);
+                return allocatedHbmBytes(score_config, blocks, joint_step)
+                       + allocatedHbmBytes(propose_config, blocks, joint_step) * static_cast<size_t>(num_mtp_modules);
+            });
+        } else {
+            block_num = paged_budget / paged_block_bytes;
+        }
     }
 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
+
+    score_config.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
+    propose_config.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
+    fixed_reserve = score_config.fixed_pool_reserve_bytes
+                    + propose_config.fixed_pool_reserve_bytes * static_cast<size_t>(num_mtp_modules);
 
     CacheConfig config      = score_config;
     config.linear_step      = std::max(1, kv_cache_config.linear_step);

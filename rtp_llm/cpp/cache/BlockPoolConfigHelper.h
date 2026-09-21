@@ -128,6 +128,18 @@ public:
                          cache_config.group_block_nums.size(),
                          cache_config.block_num);
 
+        if (group_id < cache_config.group_types.size() && cache_config.group_types[group_id] == CacheGroupType::LINEAR
+            && cache_config.enable_linear_attention_request_cache) {
+            RTP_LLM_LOG_INFO("Linear request cache pool: gid=%zu block_num=%u avg_query_length=%u "
+                             "pages_per_query=%zu block_bytes=%zu",
+                             group_id,
+                             config.block_num,
+                             cache_config.linear_request_cache_avg_query_length,
+                             cache_config.linearRequestCachePagesPerQuery(),
+                             group_id < cache_config.group_block_size_bytes.size() ?
+                                 cache_config.group_block_size_bytes[group_id] :
+                                 0);
+        }
         const uint32_t layer_num = static_cast<uint32_t>(cache_config.global_layer_ids[group_id].size());
         RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "group %zu has no layers", group_id);
 
