@@ -205,6 +205,40 @@ class PackSlotsToPagedPrecisionTest(unittest.TestCase):
             slots=slots,
         )
 
+    def test_row_lens_skips_capture_tail(self) -> None:
+        src_page, dst_page, num_blocks = 2, 2, 16
+        rows, width, used = 4, 32, 5
+        slots = torch.full((rows, width), -1, dtype=torch.int32, device=self.device)
+        slots[:, :used] = torch.arange(
+            rows * used, device=self.device, dtype=torch.int32
+        ).view(rows, used)
+        cache = _make_padded_cache(num_blocks, src_page, self.device)
+        _fill_unique_footer(cache)
+        lens = torch.full((rows,), used, dtype=torch.int32, device=self.device)
+        paged, remapped = pack_slots_to_paged(
+            cache, slots, dst_page, row_lens=lens
+        )
+        ref_paged, ref_remap = _pack_slots_to_paged_torch(cache, slots, dst_page)
+        self.assertTrue(torch.equal(remapped[:, :used], ref_remap[:, :used]))
+        self.assertTrue(
+            torch.equal(remapped[:, used:], torch.zeros_like(remapped[:, used:]))
+        )
+        idx = (
+            torch.arange(rows, device=self.device)[:, None] * width
+            + torch.arange(used, device=self.device)
+        ).reshape(-1)
+        got = _as_block_bytes(paged)
+        ref = _as_block_bytes(ref_paged)
+        blocks = idx // dst_page
+        pos = idx - blocks * dst_page
+        data_off = torch.arange(TOKEN_DATA_SIZE, device=self.device)
+        self.assertTrue(
+            torch.equal(
+                got[blocks.unsqueeze(1), pos.unsqueeze(1) * TOKEN_DATA_SIZE + data_off],
+                ref[blocks.unsqueeze(1), pos.unsqueeze(1) * TOKEN_DATA_SIZE + data_off],
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
