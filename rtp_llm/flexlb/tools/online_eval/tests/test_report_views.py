@@ -1,7 +1,7 @@
 import copy
 import unittest
 
-from flexlb_test_framework.workload.view_render import render
+from flexlb_test_framework.workload.view_render import render, build_spec
 from flexlb_test_framework.workload.views import build, digest, metric
 
 
@@ -100,7 +100,16 @@ class ReportViewsTest(unittest.TestCase):
         self.assertEqual(
             result["runs"][1]["panels"][0]["series"]["qps"], [[0, 1], [20, 2]]
         )
-        self.assertNotIn("<script>", render(result))
+        self.assertNotIn("<script>x</script>", render(result))
+        display = build_spec(result)
+        self.assertEqual(
+            display["panels"][0]["bounds"]["y"], display["panels"][1]["bounds"]["y"]
+        )
+        self.assertEqual(
+            display["panels"][1]["series"][0]["points"],
+            [{"x": 0, "y": 1}, {"x": 20, "y": 2}],
+        )
+        self.assertEqual(display["panels"][1]["events"][0]["t"], 20)
         b["stages"][0]["status"] = "BLOCKED"
         self.assertEqual(
             build([a, b], spec)["runs"][1]["validity"], "MISSING_ALIGNMENT"

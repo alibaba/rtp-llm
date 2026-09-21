@@ -69,13 +69,13 @@ case.step("cleanup", "teardown")
 
 - `telemetry/<env_epoch>/`：直接复用压测采集格式的 mock、各 master 原始指标及采集日志。
 - `workload-evidence.json`：时钟锚点、步骤事件、master 代数、资源身份与客户端记录。
-- `workload-report.json`：全部独立检查、阶段与完整指标序列，供离线复算。
-- `workload-report.html`：复用现有 Chart.js 渲染器的全指标曲线及逐项检查证据。
+- `reports/run/<instance-id>/analysis.json`（分析结果位于 `result`）：全部独立检查、阶段与完整指标序列，供离线复算。
+- `reports/run/<instance-id>/report.html`：复用现有 Chart.js 渲染器的全指标曲线及逐项检查证据。
 
 ```bash
 python3 -m flexlb_test_framework.workload.compare \
-  --baseline /path/to/old/workload-report.json \
-  --candidate /path/to/new/workload-report.json \
+  --baseline /path/to/old/reports/run/<instance-id>/analysis.json \
+  --candidate /path/to/new/reports/run/<instance-id>/analysis.json \
   --out /path/to/comparison
 ```
 

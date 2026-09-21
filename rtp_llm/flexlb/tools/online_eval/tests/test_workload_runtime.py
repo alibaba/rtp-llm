@@ -41,8 +41,12 @@ class WorkloadRuntimeTests(unittest.TestCase):
                 plan, backend, artifact_dir=out, clock=clock, sleeper=clock.sleep
             )
             if workload:
-                self.assertTrue((Path(out) / "workload-report.html").is_file())
-                report = json.loads((Path(out) / "workload-report.json").read_text())
+                self.assertTrue(Path(result["workload"]["report"]).is_file())
+                report = json.loads(
+                    Path(result["workload"]["report"])
+                    .with_name("analysis.json")
+                    .read_text()
+                )["result"]
                 self.assertEqual(result["status"], report["status"])
             return result
 

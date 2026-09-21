@@ -5,12 +5,21 @@ both CI checks and the existing Chart.js renderer. Queues are diagnostic only.
 """
 
 import argparse
+import hashlib
 from bisect import bisect_right
 import json
 import math
 from pathlib import Path
 
-from stress.canvas_report_render_html import render
+from online_eval.reporting import (
+    details,
+    run_meta,
+    write_bundle,
+    bundle_path,
+    load_analysis,
+)
+from online_eval.reporting.components import chart_spec, panel_spec
+from online_eval.reporting.statistics import select_window, counter_delta
 
 COUNTERS = (
     "hit_tokens_total",
@@ -27,8 +36,9 @@ def align_send_counters(evidence, issued):
     observed counts so delayed journal consumption remains independently visible.
     """
     times = [row.get("send_start_epoch_ms") for row in issued]
-    if not times or any(type(t) not in (int, float) or not math.isfinite(t) or t < 0
-                        for t in times):
+    if not times or any(
+        type(t) not in (int, float) or not math.isfinite(t) or t < 0 for t in times
+    ):
         raise ValueError("complete finite issued timestamps are required")
     times.sort()
     for row in evidence["samples"]:
@@ -39,11 +49,14 @@ def align_send_counters(evidence, issued):
         row["started"] = bisect_right(times, epoch * 1000)
     evidence["send_counter_alignment"] = dict(
         method="issued send_start_epoch_ms at each sample epoch",
-        issued_count=len(times), first_send_epoch_ms=times[0], last_send_epoch_ms=times[-1])
+        issued_count=len(times),
+        first_send_epoch_ms=times[0],
+        last_send_epoch_ms=times[-1],
+    )
 
 
 def window(rows, start, end, names, max_gap_s):
-    selected = [r for r in rows if start <= r["t"] <= end]
+    selected = select_window(rows, start, end, time=lambda r: r["t"], include_end=True)
     result = dict(
         start=start,
         end=end,
@@ -82,15 +95,13 @@ def window(rows, start, end, names, max_gap_s):
             continue
         for field in COUNTERS:
             counter = [v.get(field) for v in values]
-            if any(
-                type(v) not in (int, float) or not math.isfinite(v) or v < 0
-                for v in counter
-            ):
+            delta, state = counter_delta(counter)
+            if state == "MISSING_COUNTER":
                 result["errors"].append("missing counter " + name + "/" + field)
-            elif any(b < a for a, b in zip(counter, counter[1:])):
+            elif state == "COUNTER_RESET":
                 result["errors"].append("counter reset " + name + "/" + field)
             else:
-                totals[field] += counter[-1] - counter[0]
+                totals[field] += delta
     for field, target in (("started", "sent_qps"), ("terminal", "terminal_qps")):
         counts = [r[field] for r in selected]
         if any(b < a for a, b in zip(counts, counts[1:])):
@@ -200,6 +211,7 @@ def analyze(evidence):
         verdict=verdict,
         errors=sorted(set(errors)),
         threshold=threshold,
+        display=analyze_curves(evidence, threshold),
         baseline=baseline,
         windows=windows,
         longest_low_s=longest,
@@ -212,37 +224,13 @@ def analyze(evidence):
     )
 
 
-def write_report(directory, evidence, result):
-    directory = Path(directory)
-    (directory / "cache-gate-evidence.json").write_text(
-        json.dumps(evidence, indent=2, allow_nan=False)
-    )
-    (directory / "cache-gate-result.json").write_text(
-        json.dumps(result, indent=2, allow_nan=False)
-    )
-    rows, windows = evidence["samples"], result["windows"]
-    panels = []
-
-    def panel(title, points, fields, caption):
-        panels.append(
-            dict(
-                id="gate-" + str(len(panels)),
-                title=title,
-                caption=caption,
-                type="line",
-                timeX=True,
-                x=[str(r["t"]) for r in points],
-                xNums=[r["t"] for r in points],
-                series=[
-                    dict(name=label, data=[r.get(key) for r in points], color=color)
-                    for key, label, color in fields
-                ],
-            )
-        )
-
+def analyze_curves(evidence, threshold):
+    rows = evidence["samples"]
     hit_points = []
     timeline_windows = []
-    withdrew = evidence["post_start"] > 0 or any(event["name"] == "withdraw_start" for event in evidence["events"])
+    withdrew = evidence["post_start"] > 0 or any(
+        event["name"] == "withdraw_start" for event in evidence["events"]
+    )
     t = evidence["criteria"]["step_s"]
     while rows and t <= rows[-1]["t"]:
         start = max(0, t - evidence["criteria"]["window_s"])
@@ -254,20 +242,53 @@ def write_report(directory, evidence, result):
         crossing = start < evidence["post_start"] and t > evidence["baseline_end"]
         w = window(rows, start, t, names, evidence["criteria"]["max_gap_s"])
         timeline_windows.append(w)
-        survivor = window(rows, start, t, evidence["survivors"], evidence["criteria"]["max_gap_s"])
+        survivor = window(
+            rows, start, t, evidence["survivors"], evidence["criteria"]["max_gap_s"]
+        )
         hit_points.append(
             dict(
                 t=t,
                 hit=None if crossing or w["errors"] else w["hit"],
                 survivor_hit=None if survivor["errors"] else survivor["hit"],
-                floor=result["threshold"],
+                floor=threshold,
             )
         )
         t += evidence["criteria"]["step_s"]
+    return dict(hit_points=hit_points, timeline_windows=timeline_windows)
+
+
+def build_spec(directory, evidence, result):
+    directory = Path(directory)
+    rows = evidence["samples"]
+    panels = []
+
+    def panel(title, points, fields, caption):
+        chart = chart_spec(
+            "line",
+            [str(r["t"]) for r in points],
+            [
+                (key, label, [r.get(key) for r in points], None)
+                for key, label, color in fields
+            ],
+        )
+        for series, (_, _, color) in zip(chart["series"], fields):
+            series["color"] = color
+        item = panel_spec(title, caption, chart)
+        item.update(
+            id="gate-" + str(len(panels)), timeX=True, xNums=[r["t"] for r in points]
+        )
+        panels.append(item)
+
+    hit_points = result["display"]["hit_points"]
+    timeline_windows = result["display"]["timeline_windows"]
     panel(
         "Token cache hit rate",
         hit_points,
-        [("hit", "rolling token hit", "#2563eb"), ("survivor_hit", "survivor token hit", "#0d9488"), ("floor", "gate floor", "#dc2626")],
+        [
+            ("hit", "rolling token hit", "#2563eb"),
+            ("survivor_hit", "survivor token hit", "#0d9488"),
+            ("floor", "gate floor", "#dc2626"),
+        ],
         result["semantics"],
     )
     panel(
@@ -483,7 +504,6 @@ def write_report(directory, evidence, result):
             },
         )
     ]
-    import html
 
     decode_count = evidence.get("provenance", {}).get("topology", {}).get("decode")
     decode_label = f"{decode_count}D · " if decode_count is not None else ""
@@ -499,7 +519,9 @@ def write_report(directory, evidence, result):
             sampling="Token hit uses pooled completion-counter deltas; traffic curves use completion-time cohorts.",
             sources=dict(
                 runDir=str(directory),
-                aggregate=str(directory / "cache-gate-result.json"),
+                aggregate=str(
+                    bundle_path(directory, "run", "cache-scale-in") / "analysis.json"
+                ),
             ),
         ),
         timeOriginLabel="Seconds since observation began",
@@ -511,13 +533,46 @@ def write_report(directory, evidence, result):
         panels=panels,
         timeAxis=dict(min=0, max=max((r["t"] for r in rows), default=1)),
     )
-    detail = (
-        "<details><summary>判据明细与事件</summary><pre>"
-        + html.escape(json.dumps(result, indent=2))
-        + "</pre></details>"
+    spec["sections"] = [details("判据明细与事件", result)]
+    return spec
+
+
+def write_report(directory, evidence, result):
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "cache-gate-evidence.json").write_text(
+        json.dumps(evidence, indent=2, allow_nan=False)
     )
-    (directory / "cache-gate.html").write_text(
-        render(spec).replace("</body>", detail + "</body>")
+    spec = build_spec(directory, evidence, result)
+    provenance = evidence.get("provenance", {})
+    meta = run_meta(
+        dict(id="cache-scale-in", instance=provenance.get("instance")),
+        implementation=dict(
+            files=provenance.get("files"), master=provenance.get("historical_master")
+        ),
+        workload=provenance.get("trace"),
+        configuration={
+            k: provenance.get(k)
+            for k in ("topology", "performance", "master_config", "mock_formula_config")
+        },
+        environment=provenance.get("client_environment"),
+        evidence=[
+            dict(
+                path="../../../cache-gate-evidence.json",
+                sha256=hashlib.sha256(
+                    (directory / "cache-gate-evidence.json").read_bytes()
+                ).hexdigest(),
+            )
+        ],
+    )
+    write_bundle(
+        directory,
+        "run",
+        "cache-scale-in",
+        result,
+        spec,
+        meta=meta,
+        producer="cache-gate",
     )
     return spec
 
@@ -599,11 +654,15 @@ def report_series(directory, anchor_epoch_s):
     """Expose gate curves through the common offline timeline/sweep interface."""
     directory = Path(directory)
     path = directory / "cache-gate-evidence.json"
-    result_path = directory / "cache-gate-result.json"
+    result_path = bundle_path(directory, "run", "cache-scale-in") / "analysis.json"
+    if not result_path.exists():
+        result_path = (
+            directory / "cache-gate-result.json"
+        )  # archived pre-bundle evidence
     if not path.is_file() or not result_path.is_file():
         return {}, {}
     e = json.loads(path.read_text())
-    r = json.loads(result_path.read_text())
+    r = load_analysis(result_path)
     rows = e["samples"]
     if not rows:
         return {}, {}

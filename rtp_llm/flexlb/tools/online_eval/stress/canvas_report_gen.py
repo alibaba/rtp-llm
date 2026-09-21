@@ -69,13 +69,19 @@ T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；m
 from __future__ import annotations
 
 import argparse
-import html as html_escape
 import bisect
 import json
 import math
 import os
 import re
 import sys
+
+# Both script and package invocation resolve the same reporting API.
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from online_eval.reporting import render, write_bundle, details, table
+from online_eval.reporting.components import chart_spec, panel_spec, kpi_spec
 
 TAG = "[canvas_report_gen]"
 
@@ -257,39 +263,6 @@ def token_scale_label(max_v):
 # ---------------------------------------------------------------------------
 
 
-def chart_spec(chart_type, categories, series, suffix=None, y_max=None):
-    """直接保留列表数据；颜色顺序与渲染器一致。"""
-    from canvas_report_render_html import series_color
-
-    return {
-        "type": chart_type,
-        "x": categories,
-        "yMax": chart_number(y_max) if y_max is not None else None,
-        "unit": suffix.strip() if suffix else "",
-        "series": [
-            {
-                "name": name,
-                "data": data,
-                "color": series_color(tone, index),
-                "tone": tone or "",
-            }
-            for index, (_key, name, data, tone) in enumerate(series)
-        ],
-    }
-
-
-def panel_spec(title, caption, chart):
-    return dict(chart, title=title, caption=caption)
-
-
-def kpi_spec(value, label, tone=None):
-    return {
-        "label": label,
-        "value": str(value),
-        "tone": {"warning": "warn"}.get(tone, tone or ""),
-    }
-
-
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -322,7 +295,7 @@ def main():
         help="引擎维度分布 JSON（缺省取 aggregate 同目录 engine_dist.json，存在才读）",
     )
     ap.add_argument(
-        "--out", required=True, help="输出 .html 路径（self-contained Chart.js HTML）"
+        "--out", required=True, help="报告产物目录；显式 .html 路径另导出独立页面"
     )
     ap.add_argument("--run-id", help="run 标识（缺省取 aggregate meta.run_dir）")
     ap.add_argument(
@@ -372,7 +345,8 @@ def main():
 
     # RUNID 文件名规范化（防 ENOENT 复发）：详见 normalize_out_runid
     # 文档字符串；规范化后仍有下划线 RUNID 段则断言失败（自检）。
-    out_normalized = normalize_out_runid(args.out)
+    export_html = Path(args.out).suffix.lower() == ".html"
+    out_normalized = normalize_out_runid(args.out) if export_html else args.out
     if out_normalized != args.out:
         print(
             TAG
@@ -382,7 +356,9 @@ def main():
             + os.path.basename(out_normalized)
         )
         args.out = out_normalized
-    assert not re.search(r"(?<!\d)\d{8}_\d{6}(?!\d)", os.path.basename(args.out)), (
+    assert not export_html or not re.search(
+        r"(?<!\d)\d{8}_\d{6}(?!\d)", os.path.basename(args.out)
+    ), (
         "--out filename RUNID segment must use hyphen "
         "(flexlb-run-YYYYMMDD-HHMMSS-report.html), got: " + args.out
     )
@@ -3526,7 +3502,6 @@ def main():
     _this_dir = os.path.dirname(os.path.abspath(__file__))
     if _this_dir not in sys.path:
         sys.path.insert(0, _this_dir)
-    import canvas_report_render_html  # noqa: E402
 
     for index, panel in enumerate(panels, 1):
         panel["id"] = f"p{index}"
@@ -3545,7 +3520,27 @@ def main():
     spec["meta"] = meta_spec
     if send_mode == "case program":
         spec["timeOriginLabel"] = "t=0 = 首个请求发出"
-    html_out = canvas_report_render_html.render(spec)
+    spec["sections"] = []
+    if (agg.get("meta") or {}).get("traffic_manifests"):
+        spec["sections"].append(
+            details("流量来源、长度与播放口径", agg["meta"]["traffic_manifests"])
+        )
+    if agg.get("iterations"):
+        columns = (
+            "iteration",
+            "requests",
+            "input_tokens",
+            "start_epoch_ms",
+            "end_epoch_ms",
+        )
+        spec["sections"].append(
+            table(
+                "播放轮次 / Playback iterations",
+                columns,
+                [[row.get(c, "") for c in columns] for row in agg["iterations"]],
+            )
+        )
+    html_out = render(spec)
 
     # ---- 时间轴自检（fail-closed）----
     # 1) 合法性：min=0、max>0、min<max；2) 渲染输出含 TA_MIN/TA_MAX 钉轴
@@ -3938,41 +3933,20 @@ def main():
             + "production-alignment annotation missing"
         )
 
-    if (agg.get("meta") or {}).get("traffic_manifests"):
-        semantics = html_escape.escape(
-            json.dumps(agg["meta"]["traffic_manifests"], ensure_ascii=False, indent=2)
-        )
-        html_out = html_out.replace(
-            "</body>",
-            "<details><summary>流量来源、长度与播放口径</summary><pre>"
-            + semantics
-            + "</pre></details></body>",
-        )
-    if agg.get("iterations"):
-        columns = (
-            "iteration",
-            "requests",
-            "input_tokens",
-            "start_epoch_ms",
-            "end_epoch_ms",
-        )
-        table = "<section><h2>播放轮次 / Playback iterations</h2><table><tr>"
-        table += "".join("<th>" + column + "</th>" for column in columns) + "</tr>"
-        for row in agg["iterations"]:
-            table += (
-                "<tr>"
-                + "".join(
-                    "<td>" + html_escape.escape(str(row.get(column, ""))) + "</td>"
-                    for column in columns
-                )
-                + "</tr>"
-            )
-        html_out = html_out.replace("</body>", table + "</table></section></body>")
-    out_dir = os.path.dirname(os.path.abspath(args.out))
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as f:
-        f.write(html_out)
+    # --out is an explicit standalone HTML export; the canonical bundle carries
+    # the analyzed input and the complete render specification alongside it.
+    output = Path(args.out)
+    bundle = write_bundle(
+        output.parent if export_html else output,
+        "run",
+        str(run_id),
+        agg,
+        spec,
+        producer="stress",
+    )
+    if export_html:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text((bundle / "report.html").read_text(), encoding="utf-8")
 
     # ---- stdout 摘要 ----
     sections = ["qps"] if per_second else []

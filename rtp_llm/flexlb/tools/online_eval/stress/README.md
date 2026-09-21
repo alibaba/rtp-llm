@@ -8,9 +8,8 @@
 仍选择原有 `stress-na130` 完整配置；`sb/sn/wn` 可显式选择对应配置，
 显式 `FLEXLB_PROFILE` 保持原用法。输出目录包含 `mode_plan.json` 记录最终选择。
 需要一个便于交接的压缩档案时设置 `EXPERIMENT_ARCHIVE_PATH=/path/to/run.exp.zip`；
-默认不额外压缩，以免增加压测收尾耗时。`compare_ab.py --html` 同时写指标表与
-`ab_curves.html`，图表所需 Chart.js 已固定并内嵌，离线可打开；`--archive`
-可把 A、B、比较 JSON 和两页报告装进一个档案。
+默认不额外压缩，以免增加压测收尾耗时。`compare_ab.py --html` 输出 `reports/comparison/stress-ab/report.html`，同页包含指标表与时序曲线，图表所需 Chart.js 已固定并内嵌，离线可打开；`--archive`
+可把 A、B、比较 JSON 和报告包装进一个档案。
 
 **Python case + YAML 配置入口：** 配置在 [`scenarios/`](../scenarios/README.md)，编译与列举走 `scenario_runner.py --source scenarios --list-json`；真实执行走 `parallel_runner.py --source yaml --case-dir scenarios`。以下性能压测入口与 case 测试不同。
 

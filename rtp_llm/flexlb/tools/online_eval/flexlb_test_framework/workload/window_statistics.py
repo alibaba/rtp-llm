@@ -2,7 +2,7 @@
 
 import math
 
-from stress.compare_twin import percentile_nr
+from online_eval.reporting.statistics import percentile_nr
 
 FIELDS = {
     "ttft_ms": "ms",
@@ -78,5 +78,5 @@ def measure(report, selection, lower, upper):
         status="AVAILABLE",
         value=value,
         samples=len(selected),
-        semantics="half-open window; explicit send/completion cohort; pooled nearest-rank percentile (stress.compare_twin.percentile_nr)",
+        semantics="half-open window; explicit send/completion cohort; pooled nearest-rank percentile (online_eval.reporting.statistics.percentile_nr)",
     )

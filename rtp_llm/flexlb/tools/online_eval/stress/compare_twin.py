@@ -51,15 +51,21 @@ Usage:
 
 Outputs (prefix defaults to "twin"):
   <prefix>_summary.json — full raw numbers
-  <prefix>_report.html  — self-contained colored table
+  reports/comparison/twin/report.html  — self-contained colored table
   stdout               — aligned verdict table
 """
 from __future__ import annotations
 
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from online_eval.reporting import render, write_bundle, table, details, run_meta
+from online_eval.reporting.statistics import percentile_nr
+
 import argparse
 import gzip
 import json
-import math
 import os
 import sys
 
@@ -189,15 +195,6 @@ class InputError(Exception):
 
 def _num(v):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
-
-
-def percentile_nr(values, p, nd=1):
-    """Nearest-rank percentile, same rule as aggregate_canvas_run.latency_summary."""
-    if not values:
-        return 0.0
-    s = sorted(values)
-    k = max(0, min(len(s) - 1, math.ceil(p * len(s)) - 1))
-    return round(float(s[k]), nd)
 
 
 def wasserstein_1d(a, b):
@@ -1995,50 +1992,7 @@ def render_stdout(payload):
     return "\n".join(lines)
 
 
-_HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<title>L3 twin 对比 — {label_m} vs {label_r}</title>
-<style>
-body {{ font-family: 'SF Mono', Menlo, Consolas, monospace; margin: 24px auto;
-       max-width: 1180px; color: #1a1a1a; background: #fafafa; }}
-h1 {{ font-size: 18px; }}
-.meta {{ color: #666; font-size: 13px; margin-bottom: 12px; }}
-table {{ border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 24px; }}
-th, td {{ border: 1px solid #ddd; padding: 5px 10px; text-align: right; }}
-th {{ background: #f0f0f0; }}
-td.name {{ text-align: left; }}
-td.note {{ text-align: left; color: #555; }}
-.v-ALIGNED {{ color: #1e7e34; font-weight: bold; }}
-.v-DEVIATED {{ color: #b8860b; font-weight: bold; }}
-.v-DIVERGED {{ color: #c0392b; font-weight: bold; }}
-.v-SKIP {{ color: #888; }}
-.v-N/A {{ color: #888; }}
-.hints li {{ margin-bottom: 4px; }}
-.gate-pass {{ color: #1e7e34; font-weight: bold; }}
-.gate-fail {{ color: #c0392b; font-weight: bold; }}
-</style>
-</head>
-<body>
-<h1>L3 twin 分布对比（mock vs real）</h1>
-<div class="meta">mock = {label_m} &nbsp;|&nbsp; real = {label_r} &nbsp;|&nbsp;
-稳态窗口 [{lo:.1f}s, {hi:.1f}s] &nbsp;|&nbsp; 噪声地板: {floor_source}</div>
-{warnings}
-<table>
-<tr><th class="name">指标</th><th>mock</th><th>real</th><th>距离</th>
-<th>floor</th><th>判定</th><th class="name">归因提示 / 说明</th></tr>
-{rows}
-</table>
-<h3>归因提示</h3>
-<ul class="hints">{hint_items}</ul>
-<p>结论: <span class="{gate_cls}">{gate_text}</span></p>
-</body>
-</html>
-"""
-
-
-def render_html(payload):
+def report_spec(payload):
     rows = []
     for m in sorted(
         payload["metrics"],
@@ -2058,45 +2012,35 @@ def render_html(payload):
             floor_s = f"{fl:.2f}{unit}" if fl is not None else "—"
             note = m.get("attribution") or ""
         rows.append(
-            '<tr><td class="name">%s</td><td>%s</td><td>%s</td><td>%s</td>'
-            '<td>%s</td><td class="v-%s">%s</td><td class="note">%s</td></tr>'
-            % (
+            [
                 m["name"],
                 _fmt_side_value(m, "mock_value"),
                 _fmt_side_value(m, "real_value"),
                 dist_s,
                 floor_s,
                 m["verdict"],
-                m["verdict"],
                 note,
-            )
+            ]
         )
-    hint_items = (
-        "".join(
-            f"<li>[{', '.join(h['metrics'])}] {h['hint']}</li>"
-            for h in payload["hints"]
-        )
-        or "<li>（无）</li>"
+    return dict(
+        run_id="twin",
+        title="Mock / real twin comparison",
+        panels=[],
+        sections=[
+            table(
+                "Metrics",
+                ["metric", "mock", "real", "distance", "floor", "verdict", "note"],
+                rows,
+            ),
+            details("Hints", payload["hints"]),
+            details("Warnings", payload["warnings"]),
+            details("Gate", payload["gate"]),
+        ],
     )
-    warn_html = ""
-    if payload["warnings"]:
-        items = "".join(f"<li>{w}</li>" for w in payload["warnings"])
-        warn_html = f'<ul style="color:#b8860b">{items}</ul>'
-    passed = payload["gate"]["passed"]
-    return _HTML_TEMPLATE.format(
-        label_m=payload["mock"]["label"],
-        label_r=payload["real"]["label"],
-        lo=payload["steady_window"]["lo_s"],
-        hi=payload["steady_window"]["hi_s"],
-        floor_source=payload["floor_source"],
-        warnings=warn_html,
-        rows="\n".join(rows),
-        hint_items=hint_items,
-        gate_cls="gate-pass" if passed else "gate-fail",
-        gate_text=(
-            "PASS — 无 DIVERGED (exit 0)" if passed else "FAIL — 存在 DIVERGED (exit 1)"
-        ),
-    )
+
+
+def render_html(payload):
+    return render(report_spec(payload))
 
 
 def build_payload(mock, real, lo, hi, win_source, results, floors):
@@ -2220,7 +2164,7 @@ def parse_args(argv=None):
         "--out",
         default="twin",
         help="output prefix (default 'twin' -> twin_summary.json "
-        "+ twin_report.html; '-' for stdout only)",
+        "+ reports/comparison/twin/report.html; '-' for stdout only)",
     )
     ap.add_argument(
         "--steady-lo",
@@ -2273,10 +2217,20 @@ def main(argv=None):
             json.dump(metrics_to_json(payload), fh, indent=2, ensure_ascii=False)
         print(f"\nJSON summary -> {json_path}")
         if not args.no_html:
-            html_path = args.out + "_report.html"
-            with open(html_path, "w", encoding="utf-8") as fh:
-                fh.write(render_html(payload))
-            print(f"HTML report  -> {html_path}")
+            bundle = write_bundle(
+                out_dir,
+                "comparison",
+                "twin",
+                metrics_to_json(payload),
+                report_spec(payload),
+                meta=run_meta(
+                    dict(id="twin"),
+                    configuration=payload.get("steady_window"),
+                    evidence=dict(mock=payload["mock"], real=payload["real"]),
+                ),
+                producer="twin",
+            )
+            print(f"HTML report  -> {bundle / 'report.html'}")
     return payload["gate"]["exit_code"]
 
 

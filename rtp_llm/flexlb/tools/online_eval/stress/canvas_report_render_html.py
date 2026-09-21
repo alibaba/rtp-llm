@@ -111,6 +111,50 @@ def series_color(tone, idx):
     return PALETTE[idx % len(PALETTE)]
 
 
+def render_sections(sections):
+    """The only HTML construction boundary for report tables and evidence blocks."""
+
+    def text(value):
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False, indent=2)
+        return html.escape(str(value), quote=True)
+
+    out = []
+    for section in sections:
+        title = text(section.get("title", ""))
+        kind = section["type"]
+        if kind == "details":
+            out.append(
+                f'<details><summary>{title}</summary><pre>{text(section["value"])}</pre></details>'
+            )
+        elif kind == "table":
+            heads = "".join("<th>" + text(c) + "</th>" for c in section["columns"])
+            rows = "".join(
+                "<tr>" + "".join("<td>" + text(v) + "</td>" for v in row) + "</tr>"
+                for row in section["rows"]
+            )
+            out.append(
+                f"<section><h2>{title}</h2><table><thead><tr>{heads}</tr></thead><tbody>{rows}</tbody></table></section>"
+            )
+        elif kind == "links":
+            items = []
+            for item in section["items"]:
+                href = item["href"]
+                if ":" in href or href.startswith("//"):
+                    raise ValueError("report links must be relative artifact paths")
+                items.append(
+                    '<li><a href="'
+                    + text(href)
+                    + '">'
+                    + text(item["label"])
+                    + "</a></li>"
+                )
+            out.append(f'<section><h2>{title}</h2><ul>{"".join(items)}</ul></section>')
+        else:
+            raise ValueError("unsupported report section: " + kind)
+    return '<div class="report-sections">' + "".join(out) + "</div>"
+
+
 def render(spec):
     """spec: 见模块 docstring。返回完整 HTML 字符串。"""
     run_id = spec.get("run_id", "")
@@ -142,6 +186,9 @@ def render(spec):
                 "title": p.get("title", ""),
                 "caption": p.get("caption", ""),
                 "type": p.get("type", "line"),
+                "bounds": p.get("bounds"),
+                "axisLabels": p.get("axisLabels"),
+                "events": p.get("events"),
                 "x": p.get("x", []),
                 "timeX": bool(p.get("timeX")),
                 "xNums": p.get("xNums") or [],
@@ -167,16 +214,27 @@ def render(spec):
         ],
     }
 
+    sections = list(spec.get("sections", []))
+    if spec.get("run_meta") is not None:
+        sections.append(
+            dict(type="details", title="Run provenance", value=spec["run_meta"])
+        )
     page_title = html.escape(title)
     resource_dir = Path(__file__).resolve().parent
     chartjs = (resource_dir / "vendor" / "chart.umd.min.js").read_text(encoding="utf-8")
     overlay = (resource_dir / "multi_curve.js").read_text(encoding="utf-8")
     interaction = (resource_dir / "legend_interaction.js").read_text(encoding="utf-8")
-    return (_TEMPLATE.replace("__PAGE_TITLE__", page_title)
-            .replace("__SPEC_JSON__", json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c"))
-            .replace("__CHARTJS_JS__", chartjs)
-            .replace("__LEGEND_INTERACTION_JS__", interaction)
-            .replace("__MULTI_CURVE_JS__", overlay))
+    return (
+        _TEMPLATE.replace("__SECTIONS__", render_sections(sections))
+        .replace("__PAGE_TITLE__", page_title)
+        .replace(
+            "__SPEC_JSON__",
+            json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c"),
+        )
+        .replace("__CHARTJS_JS__", chartjs)
+        .replace("__LEGEND_INTERACTION_JS__", interaction)
+        .replace("__MULTI_CURVE_JS__", overlay)
+    )
 
 
 _TEMPLATE = r"""<!doctype html>
@@ -186,6 +244,7 @@ _TEMPLATE = r"""<!doctype html>
 <script>__MULTI_CURVE_JS__</script>
 <script>__LEGEND_INTERACTION_JS__</script>
 <style>
+.report-sections{padding:24px}.report-sections table{width:100%;border-collapse:collapse}.report-sections td,.report-sections th{border:1px solid #ddd;padding:6px;text-align:left}.report-sections pre{white-space:pre-wrap;overflow-wrap:anywhere}.report-sections details{margin:16px 0}
 :root{
   --bg:#f5f6fa; --card:#fff; --fg:rgba(0,0,0,0.85); --sub:rgba(0,0,0,0.55);
   --border:rgba(0,0,0,0.08); --danger:#f5222d; --success:#52c41a; --warn:#faad14;
@@ -402,7 +461,8 @@ function visibleMax(chart){
   return m>0 ? m*1.05 : undefined;
 }
 function rescaleY(chart){
-  chart.options.scales.y.max = visibleMax(chart);
+  chart.options.scales.y.max = chart.$reportYBounds ? chart.$reportYBounds[1] : visibleMax(chart);
+  if(chart.$reportYBounds) chart.options.scales.y.min=chart.$reportYBounds[0];
   chart.update('none');
 }
 const grid = document.getElementById('grid');
@@ -425,6 +485,16 @@ SPEC.panels.forEach(p=>{
   wrap.querySelector('canvas').id='c-'+p.id;
   grid.appendChild(wrap);
   const ctx=wrap.querySelector('canvas').getContext('2d');
+  if(p.type==='scatter'){
+    const b=p.bounds||{}, labels=p.axisLabels||{};
+    new Chart(ctx,{type:'bubble', data:{datasets:p.series.map(s=>({label:s.name,
+      data:s.points,backgroundColor:s.color,borderColor:s.color}))},
+      options:{responsive:true,maintainAspectRatio:false,scales:{
+        x:{type:'linear',min:b.x?.[0],max:b.x?.[1],title:{display:true,text:labels.x||''}},
+        y:{min:b.y?.[0],max:b.y?.[1],title:{display:true,text:labels.y||''}}}}});
+    return;
+  }
+
   // 时间轴面板：数据点转 {x, y}，linear x 轴钉 [TA_MIN, TA_MAX]（warmup
   // 负值段被轴裁剪，数据保留）；tooltip 按 x 最近点联动。非时间轴面板
   // 保持类目轴 + index 联动。
@@ -480,6 +550,7 @@ SPEC.panels.forEach(p=>{
       }
     }
   });
+  chart.$reportYBounds = p.bounds?.y;
   legendController = FlexLegend.controller(chart, rescaleY);
   // 初次 render 后按当前可见系列锁一次 max
   rescaleY(chart);
@@ -498,8 +569,8 @@ SPEC.panels.forEach(p=>{
 if (TIME_AXIS){
   // 页脚时间轴口径声明（与头部元数据面板标注一致，防止报告被断章取义）
   const note=document.createElement('div');
-  note.textContent='时间轴口径：'+(SPEC.timeOriginLabel || 't=0 = 压测正式开始（warmup 后）')+'；T_END='+TA_MAX+'s = 全部时序面板最后采样点（含收尾排空）；全部时序面板 x 轴统一 [0, '+TA_MAX+']，负值区间不显示，原始数据保留。';
+  note.textContent='时间轴口径：'+(SPEC.timeOriginLabel || 't=0 = 压测正式开始（warmup 后）')+'；T_END='+TA_MAX+'s = 全部时序面板最后采样点（含收尾排空）；全部时序面板 x 轴统一 ['+TA_MIN+', '+TA_MAX+']，轴范围外不显示，原始数据保留。';
   document.getElementById('hint').appendChild(note);
 }
-</script></body></html>
+</script>__SECTIONS__</body></html>
 """

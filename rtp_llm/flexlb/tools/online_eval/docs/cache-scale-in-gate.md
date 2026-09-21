@@ -116,7 +116,7 @@ and the intended regression is reproduced under controlled traffic.
 
 ## Artifacts and second review
 
-The standard `workload-report.html` links the gate's self-contained Chart.js page.
+The workload report bundle links `reports/run/cache-scale-in/report.html`; gate analysis lives alongside it in `analysis.json`.
 `cache-gate-evidence.json` contains parameters, counter samples, actual events and
 completion-time curves; `cache-gate-result.json` records every adjudicated window.
 `cache-gate-samples.jsonl` is incrementally flushed so interrupted runs retain

@@ -6,7 +6,11 @@ from pathlib import Path
 
 from online_eval.traffic_source import materialize
 from online_eval.workload_profile import profile
-from flexlb_test_framework.workload.cache_gate import align_send_counters, analyze, write_report
+from flexlb_test_framework.workload.cache_gate import (
+    align_send_counters,
+    analyze,
+    write_report,
+)
 from flexlb_test_framework.scenario import compile_scenarios, load_scenarios
 from flexlb_test_framework.scenario.catalog import handlers
 
@@ -77,8 +81,9 @@ class CacheGateTest(unittest.TestCase):
         evidence = self.evidence()
         evidence["samples"][40]["started"] -= 120
         self.assertEqual(analyze(evidence)["verdict"], "INVALID")
-        issued = [dict(send_start_epoch_ms=1000000 + (i + .5) * 100)
-                  for i in range(800)]
+        issued = [
+            dict(send_start_epoch_ms=1000000 + (i + 0.5) * 100) for i in range(800)
+        ]
         align_send_counters(evidence, issued)
         self.assertEqual(evidence["samples"][40]["journal_observed_started"], 280)
         self.assertEqual(analyze(evidence)["verdict"], "PASS")
@@ -131,11 +136,14 @@ class CacheGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             write_report(d, e, analyze(e))
             self.assertEqual(
-                json.loads((Path(d) / "cache-gate-result.json").read_text())["verdict"],
+                json.loads(
+                    (Path(d) / "reports/run/cache-scale-in/analysis.json").read_text()
+                )["result"]["verdict"],
                 "FAIL",
             )
             self.assertIn(
-                "缩 P 实验 · 关键曲线", (Path(d) / "cache-gate.html").read_text()
+                "缩 P 实验 · 关键曲线",
+                (Path(d) / "reports/run/cache-scale-in/report.html").read_text(),
             )
 
     def test_report_includes_warmup_and_survivor_transition(self):
@@ -143,7 +151,7 @@ class CacheGateTest(unittest.TestCase):
         result = analyze(e)
         with tempfile.TemporaryDirectory() as d:
             write_report(d, e, result)
-            html = (Path(d) / "cache-gate.html").read_text()
+            html = (Path(d) / "reports/run/cache-scale-in/report.html").read_text()
             spec, _ = json.JSONDecoder().raw_decode(html.split("const SPEC = ", 1)[1])
             curves = {s["name"]: s["points"] for s in spec["panels"][0]["series"]}
             for name in ("发送 QPS", "完成 QPS", "Model forward"):
@@ -157,32 +165,55 @@ class CacheGateTest(unittest.TestCase):
 
     def test_ab_requires_aligned_controls(self):
         from flexlb_test_framework.workload.cache_gate_ab import compare
+
         old, new = self.evidence(0.1), self.evidence(0.8)
         for i, e in enumerate((old, new)):
             e["events"] = [{"name": "withdraw_start", "t": 20}]
-            e["provenance"] = dict(topology={"prefill": 2, "decode": 2},
-                performance={}, master_config={}, mock_formula_config={}, client_environment={},
-                trace={"sha256": "trace"}, files={"/mock/flexlb-mock-engine-test.jar": "mock"},
-                historical_master={"source_commit": str(i) * 40})
+            e["provenance"] = dict(
+                topology={"prefill": 2, "decode": 2},
+                performance={},
+                master_config={},
+                mock_formula_config={},
+                client_environment={},
+                trace={"sha256": "trace"},
+                files={"/mock/flexlb-mock-engine-test.jar": "mock"},
+                historical_master={"source_commit": str(i) * 40},
+            )
         with tempfile.TemporaryDirectory() as d:
-            a, b = Path(d) / 'a.json', Path(d) / 'b.json'
-            a.write_text(json.dumps(old)); b.write_text(json.dumps(new))
-            result = compare(a, b, Path(d) / 'report')
-            self.assertTrue(result['expected_control_observed'])
-            new['provenance']['trace']['sha256'] = 'other'
+            a, b = Path(d) / "a.json", Path(d) / "b.json"
+            a.write_text(json.dumps(old))
             b.write_text(json.dumps(new))
-            result = compare(a, b, Path(d) / 'unaligned')
-            self.assertFalse(result['expected_control_observed'])
-            self.assertFalse(result['alignment']['trace_sha256'])
-            new['provenance']['trace']['sha256'] = 'trace'
-            new.update(events=[], baseline_start=0, baseline_end=0,
-                       post_start=0, post_end=0, samples=new['samples'][:20],
-                       errors=['warmup timeout'])
+            result = compare(a, b, Path(d) / "report")
+            self.assertTrue(result["expected_control_observed"])
+            new["provenance"]["trace"]["sha256"] = "other"
             b.write_text(json.dumps(new))
-            result = compare(a, b, Path(d) / 'no-withdrawal')
-            self.assertEqual(result['new']['verdict'], 'INVALID')
-            self.assertFalse(result['expected_control_observed'])
-            self.assertIn('缩容事件不完整', (Path(d)/'no-withdrawal/ab.html').read_text())
+            result = compare(a, b, Path(d) / "unaligned")
+            self.assertFalse(result["expected_control_observed"])
+            self.assertIn(
+                "/trace_sha256",
+                [d["path"] for d in result["control_comparison"]["differences"]],
+            )
+            new["provenance"]["trace"]["sha256"] = "trace"
+            new.update(
+                events=[],
+                baseline_start=0,
+                baseline_end=0,
+                post_start=0,
+                post_end=0,
+                samples=new["samples"][:20],
+                errors=["warmup timeout"],
+            )
+            b.write_text(json.dumps(new))
+            result = compare(a, b, Path(d) / "no-withdrawal")
+            self.assertEqual(result["new"]["verdict"], "INVALID")
+            self.assertFalse(result["expected_control_observed"])
+            self.assertIn(
+                "缩容事件不完整",
+                (
+                    Path(d)
+                    / "no-withdrawal/reports/comparison/cache-scale-in-ab/report.html"
+                ).read_text(),
+            )
 
     def test_formula_shared_by_master_and_mock_envelope(self):
         from flexlb_cfg import ConfigOverride, render_env, render_process_config
@@ -270,7 +301,7 @@ class WorkloadTest(unittest.TestCase):
             path = materialize(Path(d) / "512.jsonl", spec, "g", d)
             row = json.loads(path.read_text().splitlines()[0])
             self.assertEqual(row["cache_key_block_size"], 512)
-            self.assertEqual(row["il"], len(row["input_token_blocks"])*512)
+            self.assertEqual(row["il"], len(row["input_token_blocks"]) * 512)
             self.assertEqual(profile(path)["requests"], 80)
 
     def test_reject_nan_and_wrong_block_before_publication(self):

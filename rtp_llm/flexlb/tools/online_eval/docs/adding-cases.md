@@ -210,7 +210,7 @@ Trace 每行必须提供 `rid/ts/il/ol/input_ids/priority/cache_key_block_size`�
 报告无需改变 case 的执行过程。从 online_eval 目录运行：
 
 ```bash
-python3 -m flexlb_test_framework.workload.views --view report_views/scale_out.yaml --reports /path/to/workload-report.json --out /path/to/view
+python3 -m flexlb_test_framework.workload.views --view report_views/scale_out.yaml --reports /path/to/reports/run/INSTANCE/analysis.json --out /path/to/view
 ```
 
-同一个 timeline 配置可传入多个报告，版本对比要求同实例、同配置与同运行参数。参数扫描改用 `report_views/parameter_sweep.example.yaml`，填写真实配置轴、已有命中率序列和场景认可的约束；示例没有虚构阈值或网格结果，缺指标将显示缺失。窗口 TTFT p95 可配置为 `{requests: ttft_ms, reducer: p95, cohort: sent, outcomes: success}`，完成吞吐为 `{requests: count, reducer: rate, cohort: completed, outcomes: success}`。输出 `view.json` 保存完整来源与裁决，`view.html` 提供离线时间轴、散点和约束网格视图。
+同一个 timeline 配置可传入多个报告，版本对比要求同实例、同配置与同运行参数。参数扫描改用 `report_views/parameter_sweep.example.yaml`，填写真实配置轴、已有命中率序列和场景认可的约束；示例没有虚构阈值或网格结果，缺指标将显示缺失。窗口 TTFT p95 可配置为 `{requests: ttft_ms, reducer: p95, cohort: sent, outcomes: success}`，完成吞吐为 `{requests: count, reducer: rate, cohort: completed, outcomes: success}`。输出 `reports/comparison/timeline/` 或 `reports/sweep/sweep/`；`analysis.json` 保存完整来源与裁决，`report.html` 提供离线时间轴、散点和约束网格视图。

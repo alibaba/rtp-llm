@@ -57,10 +57,12 @@ import math
 import os
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from online_eval.playback import comparison_notice
 
-from canvas_report_render_html import render as render_charts
+from online_eval.reporting import render, write_bundle, table, details, run_meta
+from online_eval.reporting.statistics import select_window
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from experiment_archive import create_archive
@@ -341,19 +343,24 @@ def precheck(run_a, run_b):
     mismatch (different trace / different experiment parameters)."""
     errors, warnings, details = [], [], {}
 
-    manifests_a=run_a['meta'].get('traffic_manifests',[])
-    manifests_b=run_b['meta'].get('traffic_manifests',[])
+    manifests_a = run_a["meta"].get("traffic_manifests", [])
+    manifests_b = run_b["meta"].get("traffic_manifests", [])
     for left in manifests_a:
         for right in manifests_b:
-            notice=comparison_notice(left,right)
-            if notice and notice not in warnings: warnings.append(notice)
+            notice = comparison_notice(left, right)
+            if notice and notice not in warnings:
+                warnings.append(notice)
     tps_a = run_a["meta"].get("prefill_tps_contract", "legacy_or_unknown")
     tps_b = run_b["meta"].get("prefill_tps_contract", "legacy_or_unknown")
     details["prefill_tps_contract"] = {"a": tps_a, "b": tps_b, "match": tps_a == tps_b}
     if tps_a != tps_b:
-        errors.append(f"prefill TPS contract mismatch: A={tps_a} B={tps_b}; recollect both with aligned producers")
+        errors.append(
+            f"prefill TPS contract mismatch: A={tps_a} B={tps_b}; recollect both with aligned producers"
+        )
     elif tps_a != "execution_us_v1":
-        warnings.append("prefill TPS is legacy/unknown; not valid for a real-aligned TPS gate")
+        warnings.append(
+            "prefill TPS is legacy/unknown; not valid for a real-aligned TPS gate"
+        )
 
     sha_a = run_a["meta"].get("trace_file_sha256")
     sha_b = run_b["meta"].get("trace_file_sha256")
@@ -414,7 +421,10 @@ def precheck(run_a, run_b):
 
     details["errors"] = errors
     if errors:
-        raise PrecheckError("A/B precheck failed:\n  - " + "\n  - ".join(errors + [w for w in warnings if "不可直比" in w]))
+        raise PrecheckError(
+            "A/B precheck failed:\n  - "
+            + "\n  - ".join(errors + [w for w in warnings if "不可直比" in w])
+        )
     return details, warnings
 
 
@@ -437,13 +447,16 @@ def derive_steady_window(meta, lo_opt, hi_opt):
 
 
 def steady_mean(rows, lo, hi, keys):
-    sel = [r for r in rows if lo <= r["t"] <= hi]
+    sel = select_window(rows, lo, hi, time=lambda r: r["t"], include_end=True)
     if not sel:
         return None, 0
     out = {}
     for key in keys:
-        values = [r[key] for r in sel
-                  if isinstance(r.get(key), (int, float)) and math.isfinite(r[key])]
+        values = [
+            r[key]
+            for r in sel
+            if isinstance(r.get(key), (int, float)) and math.isfinite(r[key])
+        ]
         if values:
             out[key] = sum(values) / len(values)
     return out, len(sel)
@@ -564,8 +577,13 @@ def _collect_cache_tps(sa, sb, agg_a, agg_b, lo, hi, out):
         sb.get("output_token_tps"),
     )
 
-    keys = ("context_tps", "context_tps_with_cache", "context_wall_tps",
-            "context_wall_tps_with_cache", "generate_tps")
+    keys = (
+        "context_tps",
+        "context_tps_with_cache",
+        "context_wall_tps",
+        "context_wall_tps_with_cache",
+        "generate_tps",
+    )
     mta, _ = steady_mean(agg_a.get("mock_tps_ts") or [], lo, hi, keys)
     mtb, _ = steady_mean(agg_b.get("mock_tps_ts") or [], lo, hi, keys)
     for k in keys:
@@ -957,95 +975,42 @@ def render_stdout(payload):
     return "\n".join(lines)
 
 
-_HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<title>A/B regression gate — {label_a} vs {label_b}</title>
-<style>
-body {{ font-family: 'SF Mono', Menlo, Consolas, monospace; margin: 24px auto;
-       max-width: 1080px; color: #1a1a1a; background: #fafafa; }}
-h1 {{ font-size: 18px; }}
-.meta {{ color: #666; font-size: 13px; margin-bottom: 16px; }}
-table {{ border-collapse: collapse; width: 100%; margin-bottom: 28px; font-size: 13px; }}
-th, td {{ border: 1px solid #ddd; padding: 5px 10px; text-align: right; }}
-th {{ background: #f0f0f0; }}
-td.name {{ text-align: left; font-family: inherit; }}
-h2.t1 {{ color: #c0392b; border-bottom: 2px solid #c0392b; }}
-h2.t2 {{ color: #b8860b; border-bottom: 2px solid #b8860b; }}
-h2.t3 {{ color: #1e7e34; border-bottom: 2px solid #1e7e34; }}
-h2.t4 {{ color: #666; border-bottom: 2px solid #999; }}
-.gate-pass {{ color: #1e7e34; font-weight: bold; }}
-.gate-trip {{ color: #c0392b; font-weight: bold; }}
-.worse {{ color: #c0392b; }}
-.better {{ color: #1e7e34; }}
-</style>
-</head>
-<body>
-<h1>A/B 差分回归门</h1>
-<div class="meta">A = {label_a} &nbsp;|&nbsp; B = {label_b} &nbsp;|&nbsp;
-稳态窗口 [{lo:.1f}s, {hi:.1f}s]（{src}） &nbsp;|&nbsp;
-噪声地板 {floor:.1%}</div>
-{warnings}
-{sections}
-<p>回归门: <span class="{gate_cls}">{gate_text}</span></p>
-</body>
-</html>
-"""
-
-
-def render_html(payload, chart_link=None):
-    tier_titles = {1: TIER1_TITLE, 2: TIER2_TITLE, 3: TIER3_TITLE, 4: TIER4_TITLE}
+def comparison_sections(payload):
+    titles = {1: TIER1_TITLE, 2: TIER2_TITLE, 3: TIER3_TITLE, 4: TIER4_TITLE}
     sections = []
     for tier in (1, 2, 3, 4):
         rows = payload["tiers"][tier]
-        parts = [
-            f'<h2 class="t{tier}">Tier {tier} · {tier_titles[tier]}（{len(rows)}）</h2>'
-        ]
-        parts.append(
-            '<table><tr><th class="name">metric</th><th>A</th><th>B</th>'
-            "<th>rel diff</th><th>abs diff</th><th>note</th><th>方向</th></tr>"
-        )
-        for m in rows:
-            d = _direction_label(m)
-            cls = "worse" if "劣化" in d else ("better" if "改善" in d else "")
-            note = m.get("note", "").replace("[", "").replace("]", "")
-            parts.append(
-                '<tr><td class="name">%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
-                '<td>%s</td><td class="%s">%s</td></tr>'
-                % (
-                    m["name"],
-                    fmt_val(m, "a"),
-                    fmt_val(m, "b"),
-                    fmt_rel(m),
-                    fmt_abs(m) or "—",
-                    note,
-                    cls,
-                    d,
-                )
+        sections.append(
+            table(
+                f"Tier {tier} · {titles[tier]}（{len(rows)}）",
+                ["metric", "A", "B", "rel diff", "abs diff", "note", "方向"],
+                [
+                    [
+                        m["name"],
+                        fmt_val(m, "a"),
+                        fmt_val(m, "b"),
+                        fmt_rel(m),
+                        fmt_abs(m) or "—",
+                        m.get("note", ""),
+                        _direction_label(m),
+                    ]
+                    for m in rows
+                ],
             )
-        parts.append("</table>")
-        sections.append("\n".join(parts))
-    warn_html = ""
-    if payload["precheck_warnings"]:
-        items = "".join(f"<li>{w}</li>" for w in payload["precheck_warnings"])
-        warn_html = f'<ul style="color:#b8860b">{items}</ul>'
-    passed = payload["gate"]["passed"]
-    return _HTML_TEMPLATE.format(
-        label_a=payload["run_a"]["label"],
-        label_b=payload["run_b"]["label"],
-        lo=payload["steady_window"]["lo_s"],
-        hi=payload["steady_window"]["hi_s"],
-        src=payload["steady_window"]["source"],
-        floor=payload["noise_floor"],
-        warnings=warn_html + (f'<p><a href="{chart_link}">查看 A/B 时序曲线</a></p>' if chart_link else ""),
-        sections="\n".join(sections),
-        gate_cls="gate-pass" if passed else "gate-trip",
-        gate_text=(
-            "PASS — 显著且关键区为空"
-            if passed
-            else "TRIPPED — 显著且关键区非空，必须人工审"
-        ),
+        )
+    sections.append(details("Precheck warnings", payload["precheck_warnings"]))
+    sections.append(details("Gate", payload["gate"]))
+    return sections
+
+
+def render_html(payload):
+    return render(
+        dict(
+            run_id="stress-ab",
+            title="Stress A/B",
+            panels=[],
+            sections=comparison_sections(payload),
+        )
     )
 
 
@@ -1060,16 +1025,65 @@ def build_curve_spec(run_a, run_b, lo, hi):
         ("inflight_ts", None, "prefill_requests", "Prefill 在飞", "requests", False),
         ("inflight_ts", None, "decode_reserved", "Decode 预留", "requests", False),
         ("mock_tps_ts", None, "context_tps", "Prefill 计算 TPS", "tokens/s", False),
-        ("mock_tps_ts", None, "context_tps_with_cache", "Prefill 含缓存 TPS", "tokens/s", False),
-        ("mock_tps_ts", None, "context_wall_tps", "Prefill 墙钟计算 TPS", "tokens/s", False),
-        ("mock_tps_ts", None, "context_wall_tps_with_cache", "Prefill 墙钟含缓存 TPS", "tokens/s", False),
+        (
+            "mock_tps_ts",
+            None,
+            "context_tps_with_cache",
+            "Prefill 含缓存 TPS",
+            "tokens/s",
+            False,
+        ),
+        (
+            "mock_tps_ts",
+            None,
+            "context_wall_tps",
+            "Prefill 墙钟计算 TPS",
+            "tokens/s",
+            False,
+        ),
+        (
+            "mock_tps_ts",
+            None,
+            "context_wall_tps_with_cache",
+            "Prefill 墙钟含缓存 TPS",
+            "tokens/s",
+            False,
+        ),
         ("mock_tps_ts", None, "generate_tps", "Decode 生成 TPS", "tokens/s", False),
         ("cache_hit_ts", None, "engine_token", "引擎 token 命中比例", "ratio", False),
         ("cache_hit_ts", None, "master_routing", "Master 路由命中比例", "ratio", False),
-        ("kv_blocks_ts_by_role", "prefill", "available_blocks", "P 可用 KV 块", "blocks", False),
-        ("kv_blocks_ts_by_role", "decode", "available_blocks", "D 可用 KV 块", "blocks", False),
-        ("kv_blocks_ts_by_role", "prefill", "cache_evictions", "P KV 驱逐速率", "blocks/s", True),
-        ("kv_blocks_ts_by_role", "decode", "cache_evictions", "D KV 驱逐速率", "blocks/s", True),
+        (
+            "kv_blocks_ts_by_role",
+            "prefill",
+            "available_blocks",
+            "P 可用 KV 块",
+            "blocks",
+            False,
+        ),
+        (
+            "kv_blocks_ts_by_role",
+            "decode",
+            "available_blocks",
+            "D 可用 KV 块",
+            "blocks",
+            False,
+        ),
+        (
+            "kv_blocks_ts_by_role",
+            "prefill",
+            "cache_evictions",
+            "P KV 驱逐速率",
+            "blocks/s",
+            True,
+        ),
+        (
+            "kv_blocks_ts_by_role",
+            "decode",
+            "cache_evictions",
+            "D KV 驱逐速率",
+            "blocks/s",
+            True,
+        ),
     )
     panels = []
     for source, role, key, title, unit, counter_rate in sources:
@@ -1079,48 +1093,84 @@ def build_curve_spec(run_a, run_b, lo, hi):
             rows.append(data.get(role) or [] if role else data or [])
         series_maps = []
         for side in rows:
-            points = sorted((float(r["t"]), r[key]) for r in side
-                            if isinstance(r.get("t"), (int, float))
-                            and isinstance(r.get(key), (int, float)))
+            points = sorted(
+                (float(r["t"]), r[key])
+                for r in side
+                if isinstance(r.get("t"), (int, float))
+                and isinstance(r.get(key), (int, float))
+            )
             if counter_rate:
-                points = [(t, (v - previous_v) / (t - previous_t))
-                          for (previous_t, previous_v), (t, v) in zip(points, points[1:])
-                          if t > previous_t and v >= previous_v]
+                points = [
+                    (t, (v - previous_v) / (t - previous_t))
+                    for (previous_t, previous_v), (t, v) in zip(points, points[1:])
+                    if t > previous_t and v >= previous_v
+                ]
             series_maps.append(dict(points))
         axis = sorted(set(series_maps[0]) | set(series_maps[1]))
         if not axis:
             continue
         panel_id = f"ab_{source}_{role + '_' if role else ''}{key}"
-        panels.append({
-            "id": panel_id, "title": title,
-            "caption": (f"同一相对时间轴；稳态窗 {lo:g}–{hi:g}s；空窗保留为空值"
-                        + ("；累计计数相邻有效样本差分，重置处留空" if counter_rate else "")),
-            "type": "line", "timeX": True, "x": [str(t) for t in axis],
-            "xNums": axis, "unit": unit,
-            "series": [
-                {"name": name, "data": [values.get(t) for t in axis], "color": color}
-                for name, values, color in (
-                    ("A · baseline", series_maps[0], "#1677ff"),
-                    ("B · candidate", series_maps[1], "#f5222d"),
-                )
-            ],
-        })
+        panels.append(
+            {
+                "id": panel_id,
+                "title": title,
+                "caption": (
+                    f"同一相对时间轴；稳态窗 {lo:g}–{hi:g}s；空窗保留为空值"
+                    + ("；累计计数相邻有效样本差分，重置处留空" if counter_rate else "")
+                ),
+                "type": "line",
+                "timeX": True,
+                "x": [str(t) for t in axis],
+                "xNums": axis,
+                "unit": unit,
+                "series": [
+                    {
+                        "name": name,
+                        "data": [values.get(t) for t in axis],
+                        "color": color,
+                    }
+                    for name, values, color in (
+                        ("A · baseline", series_maps[0], "#1677ff"),
+                        ("B · candidate", series_maps[1], "#f5222d"),
+                    )
+                ],
+            }
+        )
         if key in {"success", "sched_p95", "engine_token"}:
-            panels.append({
-                "id": panel_id + "_delta", "title": title + " · B−A",
-                "caption": "仅共同采样时刻相减；缺失采样不补零",
-                "type": "line", "timeX": True, "x": [str(t) for t in axis],
-                "xNums": axis, "unit": unit,
-                "series": [{"name": "B−A", "color": "#722ed1", "data": [
-                    (series_maps[1][t] - series_maps[0][t]
-                     if t in series_maps[0] and t in series_maps[1] else None)
-                    for t in axis
-                ]}],
-            })
+            panels.append(
+                {
+                    "id": panel_id + "_delta",
+                    "title": title + " · B−A",
+                    "caption": "仅共同采样时刻相减；缺失采样不补零",
+                    "type": "line",
+                    "timeX": True,
+                    "x": [str(t) for t in axis],
+                    "xNums": axis,
+                    "unit": unit,
+                    "series": [
+                        {
+                            "name": "B−A",
+                            "color": "#722ed1",
+                            "data": [
+                                (
+                                    series_maps[1][t] - series_maps[0][t]
+                                    if t in series_maps[0] and t in series_maps[1]
+                                    else None
+                                )
+                                for t in axis
+                            ],
+                        }
+                    ],
+                }
+            )
     return {
-        "run_id": "ab", "title": "A/B 时序对比",
+        "run_id": "ab",
+        "title": "A/B 时序对比",
         "subtitle": f"A: {run_a['label']} · B: {run_b['label']}",
-        "timeAxis": {"min": 0, "max": max((max(p["xNums"]) for p in panels), default=hi)},
+        "timeAxis": {
+            "min": 0,
+            "max": max((max(p["xNums"]) for p in panels), default=hi),
+        },
         "meta": {"sampling": "两次运行按相对秒对齐；缺采样不补零"},
         "panels": panels,
     }
@@ -1217,10 +1267,13 @@ def parse_args(argv=None):
     ap.add_argument(
         "--html",
         action="store_true",
-        help="also emit a self-contained ab_compare.html table",
+        help="also emit a report bundle with comparison tables and curves",
     )
-    ap.add_argument("--archive", default=None,
-                    help="also save both runs and comparison outputs in one compressed ZIP")
+    ap.add_argument(
+        "--archive",
+        default=None,
+        help="also save both runs and comparison outputs in one compressed ZIP",
+    )
     ap.add_argument(
         "--noise-floor",
         type=float,
@@ -1270,36 +1323,45 @@ def main(argv=None):
         print(f"\nJSON summary -> {args.out}")
     write_html = args.html or bool(args.archive)
     if write_html:
-        html_path = (
-            "ab_compare.html"
-            if args.out == "-"
-            else os.path.join(
-                os.path.dirname(os.path.abspath(args.out)), "ab_compare.html"
-            )
+        root = Path.cwd() if args.out == "-" else Path(args.out).resolve().parent
+        spec = build_curve_spec(run_a, run_b, lo, hi)
+        spec["sections"] = comparison_sections(payload)
+        bundle = write_bundle(
+            root,
+            "comparison",
+            "stress-ab",
+            metrics_to_json(payload),
+            spec,
+            meta=run_meta(
+                dict(id="stress-ab"),
+                implementation=[r["meta"].get("git_commit") for r in (run_a, run_b)],
+                workload=[r["meta"].get("traffic_manifests") for r in (run_a, run_b)],
+                configuration=payload["precheck"],
+                evidence=[r["aggregate_path"] for r in (run_a, run_b)],
+            ),
+            producer="stress-ab",
         )
-        os.makedirs(os.path.dirname(os.path.abspath(html_path)), exist_ok=True)
-        curve_path = os.path.join(os.path.dirname(os.path.abspath(html_path)), "ab_curves.html")
-        with open(curve_path, "w", encoding="utf-8") as fh:
-            fh.write(render_charts(build_curve_spec(run_a, run_b, lo, hi)))
-        with open(html_path, "w", encoding="utf-8") as fh:
-            fh.write(render_html(payload, chart_link="ab_curves.html"))
+        html_path = str(bundle / "report.html")
         print(f"HTML report  -> {html_path}")
-        print(f"A/B curves   -> {curve_path}")
 
     if args.archive:
         sources = {
             "run_a": os.path.dirname(run_a["aggregate_path"]),
             "run_b": os.path.dirname(run_b["aggregate_path"]),
-            "comparison": args.out,
+            "comparison": str(bundle),
         }
-        if write_html:
-            sources["curves"] = curve_path
-            sources["report"] = html_path
-        create_archive(args.archive, sources, kind="ab", metadata={
-            "gate_exit_code": payload["gate"]["exit_code"],
-            "steady_window": payload["steady_window"],
-            "trace_file_sha256": run_a["meta"].get("trace_file_sha256"),
-        })
+        if args.out != "-":
+            sources["summary"] = args.out
+        create_archive(
+            args.archive,
+            sources,
+            kind="ab",
+            metadata={
+                "gate_exit_code": payload["gate"]["exit_code"],
+                "steady_window": payload["steady_window"],
+                "trace_file_sha256": run_a["meta"].get("trace_file_sha256"),
+            },
+        )
         print(f"Experiment ZIP -> {args.archive}")
 
     return payload["gate"]["exit_code"]

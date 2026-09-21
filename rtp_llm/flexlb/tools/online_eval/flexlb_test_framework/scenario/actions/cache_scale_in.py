@@ -130,10 +130,13 @@ def observe(ctx, p, deadline):
     )
     actual_config = ctx.env.run_dir / "actual-master-config.json"
     if actual_config.exists():
-        evidence["provenance"]["mock_formula_config"] = evidence["provenance"]["master_config"]
+        evidence["provenance"]["mock_formula_config"] = evidence["provenance"][
+            "master_config"
+        ]
         evidence["provenance"]["master_config"] = json.loads(actual_config.read_text())
         evidence["provenance"]["historical_master"] = json.loads(
-            (ctx.env.run_dir / "historical-master.json").read_text())
+            (ctx.env.run_dir / "historical-master.json").read_text()
+        )
     path = ctx.artifact_dir / "cache-gate-evidence.json"
 
     def event(name):
@@ -329,8 +332,8 @@ def check(ctx, p, deadline):
             str(ctx.artifact_dir / name)
             for name in (
                 "cache-gate-evidence.json",
-                "cache-gate-result.json",
-                "cache-gate.html",
+                "reports/run/cache-scale-in/analysis.json",
+                "reports/run/cache-scale-in/report.html",
             )
         ],
     )

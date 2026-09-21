@@ -2,11 +2,16 @@
 
 import argparse
 import hashlib
-import json
 import statistics
 from pathlib import Path
 
-from stress.canvas_report_render_html import render
+from online_eval.reporting.statistics import select_window
+from online_eval.reporting import (
+    write_bundle,
+    load_analysis,
+    run_meta,
+    compare_controls,
+)
 
 
 def phase_windows(report):
@@ -21,14 +26,19 @@ def phase_windows(report):
 def compare(a, b):
     if a["id"] != b["id"]:
         raise ValueError("comparison requires the same workload instance")
-    if not a.get("configuration_sha256") or a["configuration_sha256"] != b.get(
-        "configuration_sha256"
-    ):
-        raise ValueError("comparison requires identical declared configuration")
-    if a["workload"].get("runtime_configuration") != b["workload"].get(
-        "runtime_configuration"
-    ):
-        raise ValueError("comparison requires identical runtime configuration")
+    controls = [
+        {
+            "configuration_sha256": r.get("configuration_sha256"),
+            "runtime": r["workload"].get("runtime_configuration"),
+        }
+        for r in (a, b)
+    ]
+    alignment = compare_controls(*controls, required=("/configuration_sha256",))
+    if not alignment["aligned"]:
+        raise ValueError(
+            "comparison requires identical declared configuration and runtime configuration: "
+            + str(alignment)
+        )
     wa, wb = phase_windows(a), phase_windows(b)
     rows = []
     for phase in sorted(set(wa) | set(wb)):
@@ -41,8 +51,11 @@ def compare(a, b):
                     if window is None
                     else [
                         [t - window[0], v]
-                        for t, v in report["series"].get(metric, [])
-                        if window[0] <= t < window[1]
+                        for t, v in select_window(
+                            report["series"].get(metric, []),
+                            *window,
+                            time=lambda p: p[0],
+                        )
                     ]
                 )
             left, right = samples
@@ -119,13 +132,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.max_panels < 1:
         parser.error("--max-panels must be positive")
-    result = compare(
-        json.loads(args.baseline.read_text()), json.loads(args.candidate.read_text())
-    )
+    result = compare(load_analysis(args.baseline), load_analysis(args.candidate))
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "comparison.json").write_text(
-        json.dumps(result, indent=2, allow_nan=False) + "\n"
-    )
     panels = []
     for row in result["changes"][: args.max_panels]:
         axis = sorted(
@@ -156,30 +164,38 @@ def main(argv=None):
                 ],
             )
         )
-    (args.out / "comparison.html").write_text(
-        render(
-            dict(
-                run_id=result["id"],
-                title="Workload A/B: " + result["id"],
-                timeOriginLabel="t=0 = 当前阶段开始",
-                subtitle=result["ranking"]
-                + f"; showing {len(panels)} of {len(result['changes'])} panels; all data in comparison.json; differences are not a product verdict",
-                panels=panels,
-                timeAxis=dict(
-                    min=0,
-                    max=max(
-                        (
-                            t
-                            for row in result["changes"]
-                            for field in ("baseline", "candidate")
-                            for t, _ in row[field]
-                        ),
-                        default=1,
-                    )
-                    or 1,
+    spec = dict(
+        run_id=result["id"],
+        title="Workload A/B: " + result["id"],
+        timeOriginLabel="t=0 = 当前阶段开始",
+        subtitle=result["ranking"]
+        + f"; showing {len(panels)} of {len(result['changes'])} panels; all data in analysis.json; differences are not a product verdict",
+        panels=panels,
+        timeAxis=dict(
+            min=0,
+            max=max(
+                (
+                    t
+                    for row in result["changes"]
+                    for field in ("baseline", "candidate")
+                    for t, _ in row[field]
                 ),
+                default=1,
             )
-        )
+            or 1,
+        ),
+    )
+    write_bundle(
+        args.out,
+        "comparison",
+        result["id"],
+        result,
+        spec,
+        meta=run_meta(
+            dict(id=result["id"], kind="comparison"),
+            evidence=[str(args.baseline), str(args.candidate)],
+        ),
+        producer="workload-compare",
     )
     return 0
 

@@ -225,6 +225,7 @@ class WorkloadPolicy:
 
     def finalize(self, ctx, result):
         from .report import write_report
+        from .evidence_analysis import analyze_report
 
         evidence = ctx.artifact_dir / "workload-evidence.json"
         records = []
@@ -325,7 +326,9 @@ class WorkloadPolicy:
             row["status"] == "ERROR" for row in result["workload"]["stress_aggregates"]
         ):
             result["workload"]["runtime_validity"] = "INVALID"
-        write_report(ctx.artifact_dir, result, payload)
+        analysis = analyze_report(ctx.artifact_dir, result, payload)
+        bundle = write_report(ctx.artifact_dir, analysis)
+        result["workload"]["report"] = str(bundle / "report.html")
 
 
 def execute_workload(instance, backend, handlers=None, artifact_dir=".", **kwargs):

@@ -32,7 +32,7 @@
 
 ## 扩展工具
 
-- A/B 比较继续由 `stress/compare_ab.py` 负责门禁。`--html` 现在输出原指标表及 `ab_curves.html`；两次运行按相对秒对齐，缺失采样保留空值，稳态窗在每图说明中标明。曲线覆盖 QPS、TTFT、P/D TPS、在飞请求、KV 可用量/驱逐及局部差值，由现有通用 Chart.js 报告渲染器生成。
+- A/B 比较继续由 `stress/compare_ab.py` 负责门禁。`--html` 输出 `reports/comparison/stress-ab/` 报告包，`report.html` 合并指标表和曲线；两次运行按相对秒对齐，缺失采样保留空值，稳态窗在每图说明中标明。曲线覆盖 QPS、TTFT、P/D TPS、在飞请求、KV 可用量/驱逐及局部差值，由现有通用 Chart.js 报告渲染器生成。
 - 图表交互由 `stress/legend_interaction.js` 封装，只改变图例行为，不定主题：单击切换一条，双击隔离；只剩一条时再双击恢复全显，也提供“全选”按钮。
 - `compare_case_runs.py` 比较功能/场景跑批的相同实例 ID、状态、失败断言与耗时，保留 `FINDING-CONFIRMED` 的独立语义；输出 JSON、离线表格、耗时曲线和可选档案，不擅自将发现探针判成普通失败。
 - `experiment_archive.py` 可把 case、场景、压测、A/B 的运行目录和汇总打成一个 ZIP。`manifest.json` 记录执行状态、来源元信息、每个文件的大小、SHA-256 和完整度；结构化结果完整保存，超 2 MiB 的原始日志保留头尾并显式记录，疑似密钥文件名跳过。`parallel_runner.py --archive FILE`、`scenario_runner.py --archive FILE`、压测 `EXPERIMENT_ARCHIVE_PATH`、`compare_ab.py --archive FILE` 均可生成档案。中断或聚合缺失的执行标为 `incomplete`。单档案是交接与阅读入口，不把原始日志的省略伪装成完整数据。

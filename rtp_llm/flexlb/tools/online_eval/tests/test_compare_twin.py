@@ -204,12 +204,20 @@ class PromParsingTests(unittest.TestCase):
     def test_recent_token_gauges_are_not_cumulative_key_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "prom.jsonl"
-            path.write_text("\n".join(json.dumps({
-                "t": t,
-                "rtp_llm_prefill_worker_recent_cache_key_hit_count": 32 * t,
-                "rtp_llm_prefill_worker_recent_cache_key_total_count": 64 * t,
-                "rtp_llm_prefill_worker_recent_cache_key_hit_ratio": 0.5,
-            }) for t in (1, 2, 3)))
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        {
+                            "t": t,
+                            "rtp_llm_prefill_worker_recent_cache_key_hit_count": 32 * t,
+                            "rtp_llm_prefill_worker_recent_cache_key_total_count": 64
+                            * t,
+                            "rtp_llm_prefill_worker_recent_cache_key_hit_ratio": 0.5,
+                        }
+                    )
+                    for t in (1, 2, 3)
+                )
+            )
             side = ct.SideData("real", "real")
             ct._load_prom_series(side, str(path))
             self.assertNotIn("cache_hit_key_pct", side.series)
@@ -356,8 +364,8 @@ class SelfConsistencyTests(unittest.TestCase):
             summary = json.loads((Path(str(out) + "_summary.json")).read_text())
             self.assertEqual(summary["gate"]["exit_code"], 0)
             self.assertEqual(len(summary["metrics"]), 12)
-            html = Path(str(out) + "_report.html").read_text()
-            self.assertIn("v-ALIGNED", html)
+            html = (out.parent / "reports/comparison/twin/report.html").read_text()
+            self.assertIn("ALIGNED", html)
 
 
 class DeviationFixtureTests(unittest.TestCase):

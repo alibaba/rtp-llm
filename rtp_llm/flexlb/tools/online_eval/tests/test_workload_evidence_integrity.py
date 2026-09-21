@@ -6,12 +6,12 @@ from types import SimpleNamespace
 
 from flexlb_test_framework.scenario.actions.master import OwnedHaClient
 from flexlb_test_framework.workload.compare import main
-from flexlb_test_framework.workload.report import write_report
+from flexlb_test_framework.workload.evidence_analysis import analyze_report
 
 
 class EvidenceIntegrityTest(unittest.TestCase):
     def test_failed_scrape_is_attributed_at_observed_completion(self):
-        from flexlb_test_framework.workload.report import (
+        from flexlb_test_framework.workload.evidence_analysis import (
             classify_gaps,
             collection_gaps,
             journal_rows,
@@ -41,7 +41,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
             self.assertTrue(journal_rows(p)[1])
 
     def test_collector_lifetime_requires_start_and_tail_coverage(self):
-        from flexlb_test_framework.workload.report import audit_journals
+        from flexlb_test_framework.workload.evidence_analysis import audit_journals
 
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d) / "telemetry/1"
@@ -92,7 +92,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
                     runtime_configuration=dict(max_sample_gap_s=5),
                 ),
             )
-            write_report(
+            analyze_report(
                 root,
                 result,
                 dict(
@@ -122,7 +122,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
                     stages=[],
                     workload=dict(capture_metrics=False, runtime_validity="INVALID"),
                 )
-                write_report(d, result, dict(clock_anchor={"epoch_s": 0}, phases=[]))
+                analyze_report(d, result, dict(clock_anchor={"epoch_s": 0}, phases=[]))
                 if status in ("FAIL", "TIMEOUT"):
                     self.assertEqual(result["status"], status)
                 else:
@@ -195,7 +195,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
                 phases=[],
                 expected_telemetry=["1/mock", "1/master-A", "1/master-B"],
             )
-            write_report(p, r, e)
+            analyze_report(p, r, e)
             self.assertEqual(r["status"], "ERROR")
             self.assertEqual(r["workload"]["missing_telemetry"], ["1/master-B"])
             self.assertEqual(r["workload"]["runtime_validity"], "INVALID")
@@ -223,7 +223,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
                     str(p / "out"),
                 ]
             )
-            html = (p / "out/comparison.html").read_text()
+            html = (p / "out/reports/comparison/test/report.html").read_text()
             spec = json.loads(html.split("const SPEC = ", 1)[1].split(";\n", 1)[0])
             self.assertEqual(spec["timeAxis"], {"min": 0, "max": 12.2})
             self.assertEqual(spec["timeOriginLabel"], "t=0 = 当前阶段开始")
@@ -233,7 +233,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
 
     def test_failed_sample_breaks_curve_and_disables_window_comparison(self):
         from flexlb_test_framework.workload.compare import compare
-        from flexlb_test_framework.workload.report import read_series
+        from flexlb_test_framework.workload.evidence_analysis import read_series
 
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "telemetry/1"
@@ -257,7 +257,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
             self.assertIsNone(row["rank_score"])
 
     def test_outage_exemption_is_source_and_window_specific(self):
-        from flexlb_test_framework.workload.report import classify_gaps
+        from flexlb_test_framework.workload.evidence_analysis import classify_gaps
 
         evidence = dict(
             clock_anchor={"epoch_s": 100},
@@ -298,7 +298,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
         self.assertFalse(predicate(dict(status="ok", error="business failure")))
 
     def test_raw_samples_without_matching_rounds_are_incomplete(self):
-        from flexlb_test_framework.workload.report import audit_journals
+        from flexlb_test_framework.workload.evidence_analysis import audit_journals
 
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d) / "telemetry/1"
@@ -333,7 +333,10 @@ class EvidenceIntegrityTest(unittest.TestCase):
         self.assertIsNone(row["rank_score"])
 
     def test_silent_sampling_pause_breaks_curve_without_fabricating_zero(self):
-        from flexlb_test_framework.workload.report import audit_journals, read_series
+        from flexlb_test_framework.workload.evidence_analysis import (
+            audit_journals,
+            read_series,
+        )
 
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d) / "telemetry/1"

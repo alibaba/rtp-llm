@@ -322,7 +322,9 @@ def main(argv=None):
     reports = []
     for path in args.reports:
         raw = path.read_bytes()
-        report = json.loads(raw)
+        from online_eval.reporting import load_analysis
+
+        report = load_analysis(path)
         report["provenance"] = dict(
             path=str(path.resolve()),
             sha256=hashlib.sha256(raw).hexdigest(),
@@ -347,10 +349,20 @@ def main(argv=None):
         reports.append(report)
     result = build(reports, load_document(args.view))
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "view.json").write_text(json.dumps(result, indent=2, allow_nan=False))
-    from .view_render import render
+    from online_eval.reporting import write_bundle, run_meta
+    from .view_render import build_spec
 
-    (args.out / "view.html").write_text(render(result))
+    write_bundle(
+        args.out,
+        "sweep" if result["kind"] == "sweep" else "comparison",
+        result["kind"],
+        result,
+        build_spec(result),
+        meta=run_meta(
+            dict(id=result["kind"]), evidence=[r["provenance"] for r in reports]
+        ),
+        producer="views",
+    )
 
 
 if __name__ == "__main__":

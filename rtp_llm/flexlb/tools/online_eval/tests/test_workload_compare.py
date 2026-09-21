@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from flexlb_test_framework.workload.compare import compare
-from flexlb_test_framework.workload.report import mature_series
+from flexlb_test_framework.workload.evidence_analysis import mature_series
 
 
 class WorkloadCompareTest(unittest.TestCase):

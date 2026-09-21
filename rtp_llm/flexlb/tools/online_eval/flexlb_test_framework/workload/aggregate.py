@@ -1,6 +1,8 @@
 """Prepare the existing stress aggregator's inputs from workload evidence."""
 
 import gzip
+from online_eval.reporting import bundle_path
+
 import json
 import shutil
 import subprocess
@@ -99,7 +101,9 @@ def run_canvas(out, timeout_s):
                 "--aggregate",
                 str(out / "canvas.json"),
                 "--out",
-                str(out / "report.html"),
+                str(out),
+                "--run-id",
+                out.name,
                 *render_metadata,
             ],
             stdout=log,
@@ -129,8 +133,11 @@ def aggregate_workload(
         out = directory / "aggregate" / epoch
         out.mkdir(parents=True, exist_ok=True)
         try:
-            manifests=[json.loads(p.read_text()).get('trace',{}) for p in sorted(directory.glob('flows/*/flow-input.json'))]
-            (out/'traffic-manifests.json').write_text(json.dumps(manifests))
+            manifests = [
+                json.loads(p.read_text()).get("trace", {})
+                for p in sorted(directory.glob("flows/*/flow-input.json"))
+            ]
+            (out / "traffic-manifests.json").write_text(json.dumps(manifests))
             if epoch in (environment_metadata or {}):
                 (out / "run_meta.json").write_text(
                     json.dumps(dict(params=environment_metadata[epoch]))
@@ -259,7 +266,9 @@ def aggregate_workload(
                     run_canvas(plane, timeout_s)
                     planes[name] = dict(
                         path=str(plane / "canvas.json"),
-                        report=str(plane / "report.html"),
+                        report=str(
+                            bundle_path(plane, "run", plane.name) / "report.html"
+                        ),
                         client_scope="whole environment",
                         master_metrics_scope=name,
                     )
@@ -268,7 +277,7 @@ def aggregate_workload(
                     env_epoch=epoch,
                     status="GENERATED",
                     path=str(out / "canvas.json"),
-                    report=str(out / "report.html"),
+                    report=str(bundle_path(out, "run", out.name) / "report.html"),
                     test_valid=aggregate.get("summary", {}).get("test_valid"),
                     master_sources=list(masters),
                     master_aggregates=planes,
