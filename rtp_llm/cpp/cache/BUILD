@@ -283,6 +283,7 @@ cc_library(
         ":kv_cache_group",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:gpu_block_copy",
     ],
 )
 

@@ -68,6 +68,7 @@ public:
     void blockBatchCopy(const torch::Tensor& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    void blockBatchCopyForForward(const torch::Tensor& copy_mapping);
 
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,
