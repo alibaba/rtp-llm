@@ -920,6 +920,51 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             kv_pool[1, 1], self._expected(raw[4:8], cos[4], sin[4], 4)
         )
 
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_target_prefix_reuse_accepts_mixed_cold_and_hot_rows(self):
+        device = torch.device("cuda")
+        indexer = self._decode_indexer()
+        indexer.k_norm_gamma = indexer.k_norm_gamma.to(device)
+        kv_base = torch.zeros(16, 2 * self.D * 2, dtype=torch.uint8, device=device)
+        state_base = torch.zeros(
+            16, 2 * self.RATIO * self.D, dtype=torch.float32, device=device
+        )
+        context = self._draft_incremental_context(
+            kv_base,
+            state_base,
+            prefixes=[0, 8],
+            lengths=[8, 4],
+            is_mtp_draft=False,
+        )
+        q = torch.randn(12, 2, self.D, dtype=torch.bfloat16, device=device)
+        raw = torch.randn(12, self.D, dtype=torch.bfloat16, device=device)
+
+        def _score(q, weight, pool, table, lengths, *, block_size, max_ctx_len):
+            return torch.zeros(
+                q.shape[1], max_ctx_len, dtype=torch.float32, device=device
+            )
+
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+            "qsa_paged_indexer_score",
+            side_effect=_score,
+        ):
+            selected = context.select_prefix_reuse_prefill_tokens(
+                q,
+                raw,
+                indexer=indexer,
+                rope_config=self.rope_config,
+            )
+
+        self.assertEqual(selected.shape, (12, 11))
+        offset = 0
+        for prefix, length in ((0, 8), (8, 4)):
+            for local_idx in range(length):
+                valid = selected[offset + local_idx]
+                valid = valid[valid >= 0]
+                self.assertTrue(bool(torch.all(valid < prefix + local_idx + 1)))
+            offset += length
+
     def test_decode_completes_prefill_tail_then_scores_same_projection(self):
         prefill_raw = torch.randn(7, self.D, dtype=torch.bfloat16)
         decode_raw = torch.randn(1, self.D, dtype=torch.bfloat16)

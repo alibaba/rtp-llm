@@ -22,8 +22,8 @@ Scope of this restricted production bridge:
 
 Target verification is restricted to a contiguous text-only window no wider
 than one QSA compression group. Under that bound, writing the uncommitted
-physical tail cannot alias committed indexer state. Prefix-cache reuse, PD, CP
-and CUDA Graph remain fail-fast.
+physical tail cannot alias committed indexer state. Page-aligned prefix-cache
+reuse is supported; PD, CP and CUDA Graph remain fail-fast.
 
 The top-level Qwen4 serving gate remains closed until those missing modes and
 the indexer's two side pools are integrated.
@@ -138,11 +138,12 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
 
     def _is_prefix_reuse_prefill(self) -> bool:
-        """Ranaged prefill that starts at a reused prefix block boundary.
+        """Ragged prefill batch containing at least one reused prefix.
 
         Covers both the MTP draft's post-rejection incremental commit and the
         target's page-aligned prefix-reuse prefill: both carry an explicit
-        prefix and consume the ragged paged bridge.
+        prefix and consume the ragged paged bridge. Cold rows with prefix zero
+        may share the same target batch and are handled by that bridge as well.
         """
         return (
             self.is_prefill

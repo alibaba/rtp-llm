@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules.qwen4_exp.indexer import (
     apply_partial_rope,
 )
 from rtp_llm.models_py.modules.qwen4_exp.indexer_compressor import (
+    _write_indexer_cache_vectorized,
     compress_prefill,
     restore_indexer_cache,
     write_indexer_cache,
@@ -221,6 +222,69 @@ class IndexerCacheWriterTest(unittest.TestCase):
         self.assertEqual(int(result["kv_slots"][12]), 3)
         torch.testing.assert_close(state_pool[6, 4], first[4].float())
         torch.testing.assert_close(state_pool[2, 7], second[7].float())
+
+    def test_vectorized_writer_matches_reference_for_ragged_prefill(self):
+        first = torch.randn(5, self.D, dtype=torch.bfloat16)
+        second = torch.randn(8, self.D, dtype=torch.bfloat16)
+        raw = torch.cat([first, second])
+        reference_kv, reference_state = self._pools()
+        vector_kv, vector_state = self._pools()
+        cu = torch.tensor([0, 5, 13], dtype=torch.int32)
+        starts = torch.tensor([0, 0], dtype=torch.int64)
+        kv_table = torch.tensor([[3, 5], [1, 4]], dtype=torch.int32)
+        state_table = torch.tensor([[6], [2]], dtype=torch.int32)
+        positions = torch.cat([torch.arange(5), torch.arange(8)])
+        block_starts = positions - positions.remainder(self.RATIO)
+        token_rope_cos = self.cos.index_select(0, block_starts)
+        token_rope_sin = self.sin.index_select(0, block_starts)
+
+        reference = write_indexer_cache(
+            raw,
+            cu,
+            starts,
+            self.cos,
+            self.sin,
+            self.gamma,
+            reference_kv,
+            kv_table,
+            reference_state,
+            state_table,
+            ratio=self.RATIO,
+            kv_tokens_per_block=self.KV_TOKENS_PER_BLOCK,
+            state_tokens_per_block=self.STATE_TOKENS_PER_BLOCK,
+            norm_eps=_EPS,
+            capture_undo=True,
+        )
+        vectorized = _write_indexer_cache_vectorized(
+            raw,
+            cu,
+            starts,
+            token_rope_cos,
+            token_rope_sin,
+            self.gamma,
+            vector_kv,
+            kv_table,
+            vector_state,
+            state_table,
+            ratio=self.RATIO,
+            kv_tokens_per_block=self.KV_TOKENS_PER_BLOCK,
+            state_tokens_per_block=self.STATE_TOKENS_PER_BLOCK,
+            norm_eps=_EPS,
+            invalid_block_policy="raise",
+            capture_undo=True,
+            rope_is_token_aligned=True,
+        )
+
+        torch.testing.assert_close(vector_kv, reference_kv)
+        torch.testing.assert_close(vector_state, reference_state)
+        for key in ("state_slots", "kv_slots", "completed"):
+            self.assertTrue(torch.equal(vectorized[key], reference[key]))
+        self.assertEqual(vectorized["num_state_writes"], reference["num_state_writes"])
+        self.assertEqual(vectorized["num_kv_writes"], reference["num_kv_writes"])
+
+        restore_indexer_cache(vectorized["undo"])
+        self.assertEqual(int(torch.count_nonzero(vector_kv)), 0)
+        self.assertEqual(int(torch.count_nonzero(vector_state)), 0)
 
     def test_decode_completes_a_prefill_tail_from_the_state_ring(self):
         block = torch.randn(self.RATIO, self.D, dtype=torch.bfloat16)
