@@ -13,7 +13,6 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_fp8_kernels i
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_prefix_fp8_producer import (
     Fp8MlaPrefixGather,
 )
-from rtp_llm.models_py.modules.kimi_k3.fp8_producers import KdaOutputNorm
 from rtp_llm.models_py.triton_kernels.kimi_kda.attn_res import kimi_k3_attn_res
 from rtp_llm.models_py.triton_kernels.kimi_kda.attn_res_fp8 import kimi_k3_attn_res_fp8
 from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_producers import (
@@ -21,6 +20,20 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_producers import (
     rmsnorm_fp8,
     sigmoid_gate_fp8,
 )
+from rtp_llm.models_py.triton_kernels.kimi_kda.rms_norm_gate import (
+    kimi_kda_rms_norm_sigmoid_gate,
+)
+
+
+def kda_reference(x, gate, weight, eps, mode):
+    if mode == "decode":
+        return (
+            x.float()
+            * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + eps)
+            * weight.float()
+            * torch.sigmoid(gate.float())
+        ).to(x.dtype)
+    return kimi_kda_rms_norm_sigmoid_gate(x, gate, weight, eps)
 
 
 def quant(x):
@@ -66,8 +79,8 @@ class ProducerTest(unittest.TestCase):
         torch.testing.assert_close(
             actual.scale_wire, expected.scale_wire, atol=0, rtol=0
         )
-        # The existing BF16 producer and CUDA quantizer are independent oracles.
-        reference = KdaOutputNorm(weight, 1e-5)(dense_x, dense_gate, mode)
+        # The phase-specific arithmetic and CUDA quantizer are independent oracles.
+        reference = kda_reference(dense_x, dense_gate, weight, 1e-5, mode)
         self.check(actual, reference.reshape(-1, dense_x.shape[-2] * 128))
 
     def _check_independent_strides(
@@ -130,7 +143,7 @@ class ProducerTest(unittest.TestCase):
                 for mode in ("prefill", "decode"):
                     with self.subTest(m=m, heads=heads, mode=mode):
                         actual = kda_output_fp8(x, g, w, 1.0e-5, mode=mode)
-                        reference = KdaOutputNorm(w, 1.0e-5)(x, g, mode).reshape(
+                        reference = kda_reference(x, g, w, 1.0e-5, mode).reshape(
                             m, heads * 128
                         )
                         try:

@@ -18,6 +18,7 @@ from rtp_llm.models_py.model_desc.kimi_k3 import (
     KimiK3MLA,
     KimiK3Model,
 )
+from rtp_llm.models_py.modules.dsv4.moe.input_packer import mask_pack_routes
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 from rtp_llm.models_py.modules.kimi_k3.parallel_mode import (
     KimiK3ParallelMode,
@@ -189,7 +190,6 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
 
         module = KimiK3KDA.__new__(KimiK3KDA)
         nn.Module.__init__(module)
-        module._decode_small_kernels_enabled = False
         module.attn_tp_size = tp_size
         module.attn_tp_rank = tp_size - 1
         module.ktp_size = 1
@@ -727,7 +727,11 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             routed_input,
             expert_ids,
             routing_weights,
+            **pack_options,
         ):
+            expert_ids, routing_weights = mask_pack_routes(
+                expert_ids, routing_weights, **pack_options
+            )
             captured["expert_ids"] = expert_ids.clone()
             captured["routing_weights"] = routing_weights.clone()
             return routed_input + 1
@@ -794,7 +798,6 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         layer = KimiK3DecoderLayer.__new__(KimiK3DecoderLayer)
         nn.Module.__init__(layer)
         layer.parallel_mode = KimiK3ParallelMode.TP_SP
-        layer._decode_small_kernels = False
         layer.layer_idx = 1
         layer._previous_blocks = 1
         layer._writes_block = False
@@ -861,9 +864,10 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 valid_token_count,
                 valid_token_mask=None,
                 prepared_context=None,
+                residual=None,
             ):
                 self.valid_token_count = valid_token_count
-                return torch.zeros_like(hidden_states)
+                return residual
 
         class IdentityResidual(nn.Module):
             def forward(self, prefix_sum, *args, **kwargs):
@@ -876,7 +880,6 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         layer._previous_blocks = 1
         layer._writes_block = False
         layer.eps = 1e-6
-        layer._decode_small_kernels = False
         layer.attn_res_block_size = 2
         layer.layer_type = kimi_k3.HybridAttentionType.LINEAR
         layer.attention_norm = nn.Identity()

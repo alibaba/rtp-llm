@@ -1,12 +1,8 @@
 """Producer implementations selected once when a K3 layer is initialized."""
 
-import torch
 from torch import nn
 
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
-from rtp_llm.models_py.modules.kimi_k3.small_kernel_config import (
-    decode_small_kernels_enabled,
-)
 from rtp_llm.models_py.triton_kernels.kimi_kda import decode_bf16_producers as bf16
 from rtp_llm.models_py.triton_kernels.kimi_kda.attn_res_fp8 import kimi_k3_attn_res_fp8
 from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_producers import (
@@ -44,38 +40,22 @@ class Fp8RMSNorm(nn.Module):
 
 
 class Bf16RMSNorm(nn.Module):
-    """Opt-in strided latent norm with the original dense norm fallback."""
+    """BF16 latent norm that consumes projection slices directly."""
 
-    def __init__(self, weight, eps, reference):
+    def __init__(self, weight, eps):
         super().__init__()
         self.weight, self.variance_epsilon = weight, eps
-        self.reference = reference
-        self._decode_small_kernels_enabled = decode_small_kernels_enabled()
 
     def forward(self, x):
-        if self._decode_small_kernels_enabled and bf16.supports_latent_rmsnorm(
-            x, self.weight
-        ):
-            return bf16.latent_rmsnorm(x, self.weight, self.variance_epsilon)
-        return self.reference(x.contiguous())
+        return bf16.latent_rmsnorm(x, self.weight, self.variance_epsilon)
 
 
 class SigmoidGate(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self._decode_small_kernels_enabled = decode_small_kernels_enabled()
-
     def accepts_strided(self, x, gate):
-        return (
-            self._decode_small_kernels_enabled
-            and gate is not None
-            and bf16.supports_sigmoid_gate(x, gate)
-        )
+        return gate is not None and bf16.supports_sigmoid_gate(x, gate)
 
     def forward(self, x, gate):
-        if self.accepts_strided(x, gate):
-            return bf16.sigmoid_gate(x, gate)
-        return x * torch.sigmoid(gate.reshape_as(x))
+        return bf16.sigmoid_gate(x, gate)
 
 
 class Fp8SigmoidGate(nn.Module):
@@ -87,37 +67,19 @@ class KdaOutputNorm(nn.Module):
     def __init__(self, weight, eps):
         super().__init__()
         self.weight, self.eps = weight, eps
-        self._decode_small_kernels_enabled = decode_small_kernels_enabled()
 
     def forward(self, output, output_gate, mode):
         # Prefill already has a fused producer with a distinct reduction and
         # sigmoid expression. Keep that arithmetic and only cache its launch.
-        if (
-            self._decode_small_kernels_enabled
-            and mode in ("decode", "target_verify")
-            and bf16.supports_kda_norm_gate(output, output_gate, self.weight)
-        ):
+        if mode in ("decode", "target_verify"):
             return bf16.kda_norm_gate(output, output_gate, self.weight, self.eps)
-        if mode == "decode":
-            output_dtype = output.dtype
-            output_float = output.float()
-            rms = torch.rsqrt(
-                output_float.square().mean(dim=-1, keepdim=True) + self.eps
-            )
-            output = output_float * rms
-            output = output * self.weight.float()
-            output = output * torch.sigmoid(output_gate.float())
-            return output.to(dtype=output_dtype)
         return kimi_kda_rms_norm_sigmoid_gate(
             output,
             output_gate,
             self.weight,
             self.eps,
-            use_cached_launch=(
-                self._decode_small_kernels_enabled
-                and bf16.supports_kda_prefill_norm_gate(
-                    output, output_gate, self.weight
-                )
+            use_cached_launch=bf16.supports_kda_prefill_norm_gate(
+                output, output_gate, self.weight
             ),
         )
 

@@ -45,8 +45,6 @@ class MegaMoeInputPacker(ABC):
 
 class TorchMegaMoeInputPacker(MegaMoeInputPacker):
     name = "torch"
-    # Keep MoE's reference pre-mask path; direct calls still honor all options.
-    supports_decode_options = False
 
     def pack(
         self,
@@ -76,7 +74,6 @@ class TorchMegaMoeInputPacker(MegaMoeInputPacker):
 
 class FusedMegaMoeInputPacker(MegaMoeInputPacker):
     name = "fused"
-    supports_decode_options = True
 
     def pack(
         self,

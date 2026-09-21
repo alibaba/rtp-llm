@@ -105,11 +105,6 @@ class KimiK3LatentMoE(nn.Module):
         layer_idx: int = -1,
     ) -> None:
         super().__init__()
-        from rtp_llm.models_py.modules.kimi_k3.small_kernel_config import (
-            decode_small_kernels_enabled,
-        )
-
-        self._decode_small_kernels = decode_small_kernels_enabled()
         self.parallelism_config = parallelism_config
         self.weights = weights
         self.expert_num = int(config.expert_num)
@@ -624,47 +619,6 @@ class KimiK3LatentMoE(nn.Module):
             )
         return expert_ids, expert_weights * self.routed_scaling_factor
 
-    @staticmethod
-    def _mask_padding_routes(
-        expert_ids: torch.Tensor,
-        routing_weights: torch.Tensor,
-        *,
-        token_count: int,
-        valid_token_count: Optional[int],
-        valid_token_mask: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Route padding through legal expert IDs with zero contribution."""
-
-        if valid_token_mask is not None:
-            if valid_token_mask.ndim != 1 or valid_token_mask.numel() != token_count:
-                raise ValueError(
-                    "valid_token_mask must contain one entry per local token: "
-                    f"mask={tuple(valid_token_mask.shape)}, rows={token_count}"
-                )
-            valid = valid_token_mask.to(
-                device=expert_ids.device,
-                dtype=torch.bool,
-            )
-            expert_ids = torch.where(valid.unsqueeze(-1), expert_ids, 0)
-            routing_weights = routing_weights * valid.to(
-                routing_weights.dtype
-            ).unsqueeze(-1)
-
-        if valid_token_count is None:
-            return expert_ids, routing_weights
-        if valid_token_count < 0 or valid_token_count > token_count:
-            raise ValueError(
-                "valid_token_count is outside the local token shard: "
-                f"valid={valid_token_count}, rows={token_count}"
-            )
-        if valid_token_count < token_count:
-            expert_ids = expert_ids.clone()
-            routing_weights = routing_weights.clone()
-            # DeepGEMM validates expert IDs before applying routing weights.
-            expert_ids[valid_token_count:] = 0
-            routing_weights[valid_token_count:] = 0
-        return expert_ids, routing_weights
-
     def _mega_expert_sum(
         self,
         routed_input: torch.Tensor,
@@ -688,30 +642,21 @@ class KimiK3LatentMoE(nn.Module):
         valid_token_count: Optional[int],
         valid_token_mask: Optional[torch.Tensor],
         prepared_context,
-        optimize_decode: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, bool, dict]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict]:
         if prepared_context is not None:
             if hidden_states.shape[0] != prepared_context.token_count:
                 raise ValueError("prepared MoE token count does not match input")
             valid_token_count = prepared_context.valid_tokens
 
         expert_ids, routing_weights = self._route(hidden_states)
-        optimize = self._can_optimize_decode(hidden_states, optimize_decode)
-        pack_options = {}
-        if optimize and self._mega_input_packer.supports_decode_options:
-            pack_options = dict(
+        return (
+            expert_ids,
+            routing_weights,
+            dict(
                 valid_token_count=valid_token_count,
                 valid_token_mask=valid_token_mask,
-            )
-        else:
-            expert_ids, routing_weights = self._mask_padding_routes(
-                expert_ids,
-                routing_weights,
-                token_count=hidden_states.shape[0],
-                valid_token_count=valid_token_count,
-                valid_token_mask=valid_token_mask,
-            )
-        return expert_ids, routing_weights, optimize, pack_options
+            ),
+        )
 
     def forward(
         self,
@@ -721,16 +666,12 @@ class KimiK3LatentMoE(nn.Module):
         valid_token_mask: Optional[torch.Tensor] = None,
         prepared_context=None,
         residual: Optional[torch.Tensor] = None,
-        optimize_decode: bool = False,
     ) -> torch.Tensor:
-        expert_ids, routing_weights, optimize, pack_options = (
-            self._prepare_mega_moe_routing(
-                hidden_states,
-                valid_token_count=valid_token_count,
-                valid_token_mask=valid_token_mask,
-                prepared_context=prepared_context,
-                optimize_decode=optimize_decode,
-            )
+        expert_ids, routing_weights, pack_options = self._prepare_mega_moe_routing(
+            hidden_states,
+            valid_token_count=valid_token_count,
+            valid_token_mask=valid_token_mask,
+            prepared_context=prepared_context,
         )
         routed_input = torch.matmul(hidden_states, self.weights[K3W.MOE_ROUTED_DOWN])
         routed_output = self._mega_expert_sum(
@@ -745,16 +686,7 @@ class KimiK3LatentMoE(nn.Module):
         shared_output = self._shared_expert_forward(hidden_states)
         from rtp_llm.models_py.triton_kernels.kimi_kda.moe_decode import add_moe_output
 
-        return add_moe_output(routed_output, shared_output, residual, optimize=optimize)
-
-    def _can_optimize_decode(self, hidden_states, optimize_decode):
-        return (
-            optimize_decode
-            and self._decode_small_kernels
-            and hidden_states.is_cuda
-            and hidden_states.dtype == torch.bfloat16
-            and hidden_states.is_contiguous()
-        )
+        return add_moe_output(routed_output, shared_output, residual)
 
 
 __all__ = [

@@ -8,15 +8,11 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
 import torch
 
 from rtp_llm.models_py.distributed.sequence_parallel import SequenceParallelLayout
-from rtp_llm.models_py.modules.base import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 from rtp_llm.models_py.modules.kimi_k3.parallel_mode import (
     KimiK3ParallelMode,
     resolve_kimi_k3_parallel_mode,
-)
-from rtp_llm.models_py.modules.kimi_k3.small_kernel_config import (
-    decode_small_kernels_enabled,
 )
 from rtp_llm.ops import ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
@@ -100,7 +96,6 @@ class KimiK3MLA(MlaAttention):
             getattr(config, "k3_attention_quant_config", None) or config.quant_config,
             replicate_query_heads=q_replicated,
         )
-        self._decode_small_kernels_enabled = decode_small_kernels_enabled()
         tp_size = int(parallelism_config.get_attn_tp_size())
         self.attn_tp_size = tp_size
         self.parallel_mode = resolve_kimi_k3_parallel_mode(parallelism_config)
@@ -131,9 +126,6 @@ class KimiK3MLA(MlaAttention):
         self._kv_a_norm = weights[W.mla_kv_a_ln_gamma]
         self._fp8_enabled = quant_config is not None
         self._fp8_input_fused = fp8_input_fused
-        self._perf_accepts_strided_latent = (
-            self._fp8_enabled and parallelism_config.role_type == RoleType.PREFILL
-        )
         self._fp8_gate = (
             LinearFactory.create_linear_from_weights(
                 weights, W.attn_gate_w, W.attn_gate_s, None, quant_config=quant_config
@@ -152,8 +144,6 @@ class KimiK3MLA(MlaAttention):
         self._packed_qkv_gate_w = weights[W.mla_fusedqkrope_w]
         # These are only the two small MLA latent norms; decoder-wide norms keep
         # the framework kernel.
-        self.q_a_layernorm = RMSNorm(self._q_a_norm, latent_norm_eps)
-        self.kv_a_layernorm = RMSNorm(self._kv_a_norm, latent_norm_eps)
         from rtp_llm.models_py.modules.kimi_k3.fp8_producers import (
             Bf16RMSNorm,
             Fp8RMSNorm,
@@ -167,19 +157,13 @@ class KimiK3MLA(MlaAttention):
                 self.kv_a_layernorm = Fp8RMSNorm(
                     self._kv_a_norm, latent_norm_eps, retain_bf16=True
                 )
-            elif self._decode_small_kernels_enabled:
+            else:
                 # Decode caches the BF16 compressed latent even when its
                 # projections are FP8. Consume the projection slice directly.
-                self.kv_a_layernorm = Bf16RMSNorm(
-                    self._kv_a_norm, latent_norm_eps, self.kv_a_layernorm
-                )
-        elif self._decode_small_kernels_enabled:
-            self.q_a_layernorm = Bf16RMSNorm(
-                self._q_a_norm, latent_norm_eps, self.q_a_layernorm
-            )
-            self.kv_a_layernorm = Bf16RMSNorm(
-                self._kv_a_norm, latent_norm_eps, self.kv_a_layernorm
-            )
+                self.kv_a_layernorm = Bf16RMSNorm(self._kv_a_norm, latent_norm_eps)
+        else:
+            self.q_a_layernorm = Bf16RMSNorm(self._q_a_norm, latent_norm_eps)
+            self.kv_a_layernorm = Bf16RMSNorm(self._kv_a_norm, latent_norm_eps)
         self.output_gate_op = Fp8SigmoidGate() if self._fp8_enabled else SigmoidGate()
 
     def tp_input_projection_weights(self) -> list:
@@ -253,29 +237,8 @@ class KimiK3MLA(MlaAttention):
         )
 
     def _normalize_latent(self, norm, latent):
-        from rtp_llm.models_py.modules.kimi_k3.fp8_producers import (
-            Bf16RMSNorm,
-            Fp8RMSNorm,
-        )
-        from rtp_llm.models_py.triton_kernels.kimi_kda.decode_bf16_producers import (
-            supports_latent_rmsnorm,
-        )
-
-        if isinstance(norm, Bf16RMSNorm):
-            return norm(latent)
-        if self._perf_accepts_strided_latent:
-            # FP8 Prefill already opted into this contract at construction.
-            # Keep its existing direct path without repeating capability checks.
-            return norm(latent)
-        if (
-            self._decode_small_kernels_enabled
-            and isinstance(norm, Fp8RMSNorm)
-            and supports_latent_rmsnorm(latent, norm.weight)
-        ):
-            # The existing FP8 producer already loads row-strided latents;
-            # keep its quantization and retained BF16 arithmetic unchanged.
-            return norm(latent)
-        return super()._normalize_latent(norm, latent)
+        # Both K3 producers consume row-strided projection slices directly.
+        return norm(latent)
 
     def _prepare_output_layout(self, attn_output, input_shape, output_gate):
         from rtp_llm.models_py.modules.kimi_k3.fp8_producers import SigmoidGate
@@ -295,8 +258,7 @@ class KimiK3MLA(MlaAttention):
     ) -> torch.Tensor:
         """K3 sigmoid output gate, applied on the framework (kernel) path.
 
-        The reference consumes flattened head-major context. The enabled BF16
-        producer also accepts the strided 3-D context, and writes dense
+        The BF16 producer accepts the strided 3-D context and writes dense
         ``[tokens, local_heads * v_head_dim]`` rows for the output projection.
         This runs before the strict TP-SP or local-KTP output projection, so
         each rank gates only its local heads.

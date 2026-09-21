@@ -1,4 +1,4 @@
-"""Stride-aware BF16 producers; callers own the immutable opt-in selection."""
+"""Stride-aware BF16 latent norm, KDA norm/gate, and MLA gate producers."""
 
 import torch
 import triton
@@ -18,11 +18,6 @@ def _bf16_cuda_pair(x, other):
     )
 
 
-def supports_kda_norm_gate(x, gate, weight):
-    # Only the decode reduction needs gather (absent in Triton 3.2).
-    return hasattr(tl, "gather") and supports_kda_prefill_norm_gate(x, gate, weight)
-
-
 def supports_kda_prefill_norm_gate(x, gate, weight):
     return (
         x.ndim in (3, 4)
@@ -34,22 +29,6 @@ def supports_kda_prefill_norm_gate(x, gate, weight):
         and weight.shape == (128,)
         and weight.device == x.device
         and weight.dtype in (torch.bfloat16, torch.float32)
-        and weight.stride(0) == 1
-    )
-
-
-def supports_latent_rmsnorm(x, weight):
-    # The original native producer interprets gamma using the input dtype.
-    # Only admit its valid BF16/BF16 contract; keep other combinations on it.
-    return (
-        x.ndim == 2
-        and x.shape[1] in (512, 1536)
-        and x.is_cuda
-        and x.dtype == torch.bfloat16
-        and x.stride(1) == 1
-        and weight.shape == (x.shape[1],)
-        and weight.device == x.device
-        and weight.dtype == torch.bfloat16
         and weight.stride(0) == 1
     )
 

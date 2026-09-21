@@ -57,13 +57,19 @@ class ProjectionKtpSmallKernelTest(unittest.TestCase):
                 lambda _: projected,
                 forget,
                 output=output,
-                optimize=True,
                 **projection_options()
             )
 
         actual = run()
         self.assertIs(actual, output)
         assert_exact(actual, expected)
+        # Packing writes the communication buffer directly, without a temporary
+        # concatenation, even when no optimization flag is configured.
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as profile:
+            run()
+        self.assertNotIn("aten::cat", {event.key for event in profile.key_averages()})
 
     def test_production_pack_and_unpack_layouts_are_bitwise_exact(self):
         generator = torch.Generator(device="cuda").manual_seed(20260918)

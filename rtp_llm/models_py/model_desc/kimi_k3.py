@@ -172,11 +172,6 @@ class KimiK3DecoderLayer(nn.Module):
         moe_strategy: str = "mega_moe",
     ) -> None:
         super().__init__()
-        from rtp_llm.models_py.modules.kimi_k3.small_kernel_config import (
-            decode_small_kernels_enabled,
-        )
-
-        self._decode_small_kernels = decode_small_kernels_enabled()
         self.weights = weights
         self.layer_idx = int(layer_idx)
         self.parallel_mode = resolve_kimi_k3_parallel_mode(parallelism_config)
@@ -428,25 +423,15 @@ class KimiK3DecoderLayer(nn.Module):
             delta=attention_delta,
             num_blocks=active_blocks,
         )
-        residual_included = False
         if isinstance(self.mlp, (KimiK3LatentMoE, KimiK3LatentMoESE)):
             # mlp_residual has already applied attention_delta to prefix_sum
             # in place. A supplied residual is included on every MoE path.
-            residual_included = (
-                self._decode_small_kernels
-                and normalized_mlp_input.is_cuda
-                and normalized_mlp_input.dtype == torch.bfloat16
-            )
-            mlp_output = self.mlp(
+            output = self.mlp(
                 normalized_mlp_input,
                 valid_token_count=local_valid_tokens,
                 valid_token_mask=attn_meta.valid_token_mask,
                 prepared_context=moe_context,
-                **(
-                    dict(residual=prefix_sum, optimize_decode=True)
-                    if residual_included
-                    else {}
-                ),
+                residual=prefix_sum,
             )
         else:
             mlp_output = (
@@ -458,7 +443,7 @@ class KimiK3DecoderLayer(nn.Module):
                     valid_token_count=local_valid_tokens,
                 )
             )
-        output = mlp_output if residual_included else prefix_sum + mlp_output
+            output = prefix_sum + mlp_output
         return KimiK3DecoderOutput(output, block_residual)
 
 

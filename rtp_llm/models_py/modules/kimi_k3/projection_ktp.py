@@ -137,7 +137,6 @@ def _all_gather_projection_input(
     local_input: torch.Tensor | QuantizedActivation,
     *,
     ktp_size: int,
-    optimize: bool = False,
 ) -> torch.Tensor | QuantizedActivation:
     """Gather either BF16 rows or the complete group128 FP8 wire format.
 
@@ -149,12 +148,7 @@ def _all_gather_projection_input(
     rows from ranks after rank 0.
     """
 
-    if (
-        not isinstance(local_input, QuantizedActivation)
-        and optimize
-        and local_input.is_cuda
-        and local_input.dtype == torch.bfloat16
-    ):
+    if not isinstance(local_input, QuantizedActivation):
         local_input = local_input.contiguous()
         output = torch.empty(
             (ktp_size * local_input.shape[0], *local_input.shape[1:]),
@@ -162,9 +156,6 @@ def _all_gather_projection_input(
             device=local_input.device,
         )
         return all_gather_into(local_input, output, group=Group.KTP)
-
-    if not isinstance(local_input, QuantizedActivation):
-        return all_gather(local_input.contiguous(), group=Group.KTP)
 
     local_rows, hidden_size = local_input.shape
     local_scale_columns = int(local_input.scale_wire.shape[1])
@@ -216,7 +207,6 @@ def pack_ktp_projection_payload(
     ktp_size: int,
     ktp_rank: int,
     output: torch.Tensor | None = None,
-    optimize: bool = False,
 ) -> torch.Tensor:
     """Project all owner rows with one rank's head shard and pack A2A input."""
 
@@ -234,8 +224,7 @@ def pack_ktp_projection_payload(
     # this view without materializing the other fused-projection sections.
     forget_latent = projected.narrow(1, 4 * local_projection_size, forget_latent_size)
     use_strided_fp8_forget = (
-        optimize
-        and forget_latent_size == 128
+        forget_latent_size == 128
         and forget_latent.is_cuda
         and forget_latent.dtype == torch.bfloat16
         and forget_latent.ndim == 2
@@ -265,46 +254,28 @@ def pack_ktp_projection_payload(
             "KTP projection pack output must be contiguous and match "
             f"shape={output_shape}, device={projected.device}"
         )
-    use_optimized_pack = (
-        optimize
-        and projected.is_cuda
-        and projected.dtype == torch.bfloat16
-        and raw_gate.is_cuda
-        and raw_gate.dtype == torch.bfloat16
-        and projected.stride(1) == 1
-        and raw_gate.stride(1) == 1
-    )
-    if use_optimized_pack:
-        if output is not None and output.dtype != projected.dtype:
-            raise ValueError(
-                "optimized KTP projection pack output dtype must match "
-                f"projection dtype={projected.dtype}, got {output.dtype}"
-            )
-        if output is None:
-            output = torch.empty(
-                output_shape, dtype=projected.dtype, device=projected.device
-            )
-        from rtp_llm.models_py.triton_kernels.kimi_kda.projection_ktp import (
-            pack_ktp_projection_payload_cuda,
+    if output is not None and output.dtype != projected.dtype:
+        raise ValueError(
+            "KTP projection pack output dtype must match "
+            f"projection dtype={projected.dtype}, got {output.dtype}"
         )
-
-        return pack_ktp_projection_payload_cuda(
-            projected,
-            raw_gate,
-            output,
-            local_projection_size=local_projection_size,
-            forget_latent_size=forget_latent_size,
-            local_heads=local_heads,
-            ktp_rank=ktp_rank,
-        )
-
-    q, k, v, output_gate, _, full_raw_beta = torch.split(projected, sizes, dim=1)
-    raw_beta = full_raw_beta.narrow(1, ktp_rank * local_heads, local_heads)
-    packed = torch.cat((q, k, v, output_gate, raw_gate, raw_beta), dim=-1)
     if output is None:
-        return packed
-    output.copy_(packed)
-    return output
+        output = torch.empty(
+            output_shape, dtype=projected.dtype, device=projected.device
+        )
+    from rtp_llm.models_py.triton_kernels.kimi_kda.projection_ktp import (
+        pack_ktp_projection_payload_cuda,
+    )
+
+    return pack_ktp_projection_payload_cuda(
+        projected,
+        raw_gate,
+        output,
+        local_projection_size=local_projection_size,
+        forget_latent_size=forget_latent_size,
+        local_heads=local_heads,
+        ktp_rank=ktp_rank,
+    )
 
 
 def reassemble_ktp_projection_payload(
@@ -314,7 +285,6 @@ def reassemble_ktp_projection_payload(
     physical_batch: int,
     local_projection_size: int,
     local_heads: int,
-    optimize: bool = False,
 ) -> KtpProjectionResult:
     """Convert source-major A2A payload into owner-major full-head tensors."""
 
@@ -324,46 +294,16 @@ def reassemble_ktp_projection_payload(
         raise ValueError(
             f"KTP A2A payload shape {tuple(received.shape)} != expected {expected}"
         )
-    if (
-        optimize
-        and received.is_cuda
-        and received.dtype == torch.bfloat16
-        and received.is_contiguous()
-    ):
-        from rtp_llm.models_py.triton_kernels.kimi_kda.projection_ktp import (
-            reassemble_ktp_projection_payload_cuda,
-        )
-
-        q, k, v, output_gate, raw_gate, raw_beta = (
-            reassemble_ktp_projection_payload_cuda(
-                received,
-                ktp_size=ktp_size,
-                physical_batch=physical_batch,
-                local_projection_size=local_projection_size,
-                local_heads=local_heads,
-            )
-        )
-        return KtpProjectionResult(q, k, v, raw_gate, raw_beta, output_gate)
-
-    source_major = received.reshape(ktp_size, physical_batch, payload_width)
-    sections = torch.split(
-        source_major,
-        [
-            local_projection_size,
-            local_projection_size,
-            local_projection_size,
-            local_projection_size,
-            local_projection_size,
-            local_heads,
-        ],
-        dim=-1,
+    from rtp_llm.models_py.triton_kernels.kimi_kda.projection_ktp import (
+        reassemble_ktp_projection_payload_cuda,
     )
 
-    def _heads_full(section: torch.Tensor) -> torch.Tensor:
-        return section.permute(1, 0, 2).contiguous().reshape(physical_batch, -1)
-
-    q, k, v, output_gate, raw_gate, raw_beta = (
-        _heads_full(section) for section in sections
+    q, k, v, output_gate, raw_gate, raw_beta = reassemble_ktp_projection_payload_cuda(
+        received,
+        ktp_size=ktp_size,
+        physical_batch=physical_batch,
+        local_projection_size=local_projection_size,
+        local_heads=local_heads,
     )
     return KtpProjectionResult(q, k, v, raw_gate, raw_beta, output_gate)
 
@@ -379,7 +319,6 @@ def project_kda_inputs_ktp(
     ktp_size: int,
     ktp_rank: int,
     workspace: KtpProjectionWorkspace | None = None,
-    optimize: bool = False,
 ) -> KtpProjectionResult:
     """Run KDA's projection-only KTP AllGather/GEMM/AllToAll pipeline."""
 
@@ -401,7 +340,6 @@ def project_kda_inputs_ktp(
     gathered_hidden = _all_gather_projection_input(
         hidden_states,
         ktp_size=ktp_size,
-        optimize=optimize,
     )
     buffers = workspace.get(physical_batch) if workspace is not None else None
     send = pack_ktp_projection_payload(
@@ -414,7 +352,6 @@ def project_kda_inputs_ktp(
         ktp_size=ktp_size,
         ktp_rank=ktp_rank,
         output=buffers[0] if buffers is not None else None,
-        optimize=optimize,
     )
     received = (
         all_to_all_single(send, group=Group.KTP, output=buffers[1])
@@ -427,7 +364,6 @@ def project_kda_inputs_ktp(
         physical_batch=physical_batch,
         local_projection_size=local_projection_size,
         local_heads=local_heads,
-        optimize=optimize,
     )
 
 

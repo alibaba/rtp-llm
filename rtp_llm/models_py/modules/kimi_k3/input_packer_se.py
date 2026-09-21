@@ -47,8 +47,6 @@ class TorchKimiK3MegaMoeSeInputPacker(KimiK3MegaMoeSeInputPacker):
     """Reference packer that materializes FP8 activation and scale tensors."""
 
     name = "torch"
-    # Keep MoE's reference pre-mask/copy path; direct calls honor all options.
-    supports_decode_options = False
 
     def pack(
         self,
@@ -82,7 +80,6 @@ class FusedKimiK3MegaMoeSeInputPacker(KimiK3MegaMoeSeInputPacker):
     """Triton packer that writes the final symmetric-buffer views directly."""
 
     name = "fused"
-    supports_decode_options = True
 
     def pack(
         self,

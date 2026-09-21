@@ -22,8 +22,6 @@ from rtp_llm.models_py.modules.kimi_k3.ktp_step import (
 )
 from rtp_llm.models_py.modules.kimi_k3.moe import validate_mega_moe_topology
 from rtp_llm.models_py.modules.kimi_k3.projection_ktp import (
-    pack_ktp_projection_payload,
-    reassemble_ktp_projection_payload,
     resolve_projection_local_heads,
     validate_projection_ktp_sp_type,
 )
@@ -51,64 +49,6 @@ class KtpProjectionWorkspaceTest(unittest.TestCase):
         with mock.patch.object(workspace, "_is_capturing", return_value=True):
             with self.assertRaisesRegex(RuntimeError, "not prepared"):
                 workspace.get(3)
-
-    def test_workspace_transport_matches_temporary_transport(self):
-        workspace = self.make_workspace()
-        torch.manual_seed(91)
-        hidden = torch.randn(2, 8, dtype=torch.bfloat16)
-        fused = torch.randn(8, 4 * 8 + 4 + 16, dtype=torch.bfloat16)
-        forget = torch.randn(4, 8, dtype=torch.bfloat16)
-        kwargs = dict(
-            total_heads=16, head_dim=4, forget_latent_size=4, ktp_size=8, ktp_rank=3
-        )
-        seen = []
-
-        def exchange(send, group, output=None):
-            if output is None:
-                return send.clone()
-            seen.append((send.data_ptr(), output.data_ptr()))
-            output.copy_(send)
-            return output
-
-        with mock.patch.object(
-            projection_ktp,
-            "_all_gather_projection_input",
-            side_effect=lambda x, **kw: x.repeat(8, 1),
-        ), mock.patch.object(projection_ktp, "all_to_all_single", side_effect=exchange):
-            expected = projection_ktp.project_kda_inputs_ktp(
-                hidden, fused, forget, **kwargs
-            )
-            for _ in range(2):
-                actual = projection_ktp.project_kda_inputs_ktp(
-                    hidden, fused, forget, workspace=workspace, **kwargs
-                )
-                for name, value in vars(expected).items():
-                    torch.testing.assert_close(
-                        getattr(actual, name), value, rtol=0, atol=0
-                    )
-        send, receive = workspace.get(2)
-        self.assertEqual(seen, [(send.data_ptr(), receive.data_ptr())] * 2)
-
-    def test_reassembled_heads_survive_receive_buffer_reuse(self):
-        workspace = self.make_workspace()
-        for batch in (1, 2):
-            received = workspace.get(batch)[1]
-            received.copy_(torch.arange(received.numel()).reshape(received.shape))
-            result = reassemble_ktp_projection_payload(
-                received,
-                ktp_size=8,
-                physical_batch=batch,
-                local_projection_size=8,
-                local_heads=2,
-            )
-            before = {name: value.clone() for name, value in vars(result).items()}
-            received.zero_()
-            for name, value in vars(result).items():
-                self.assertNotEqual(
-                    value.untyped_storage().data_ptr(),
-                    received.untyped_storage().data_ptr(),
-                )
-                torch.testing.assert_close(value, before[name], rtol=0, atol=0)
 
 
 class KtpStepPlanTest(unittest.TestCase):
@@ -483,50 +423,6 @@ class KtpProjectionLayoutTest(unittest.TestCase):
             [[11, 22, 33, 44, 55, 66, 77, 88]],
         )
 
-    def test_projection_payload_accepts_quantized_linear_callables(self):
-        torch.manual_seed(5)
-        hidden = torch.randn(4, 3)
-        fused_weight = torch.randn(3, 7)
-        forget_weight = torch.randn(1, 1)
-
-        class Linear:
-            def __init__(self, weight):
-                self.weight = weight
-                self.calls = 0
-
-            def __call__(self, inputs):
-                self.calls += 1
-                self.assert_contiguous = inputs.is_contiguous()
-                return inputs @ self.weight
-
-        fused_linear = Linear(fused_weight)
-        forget_linear = Linear(forget_weight)
-        expected = pack_ktp_projection_payload(
-            hidden,
-            fused_weight,
-            forget_weight,
-            total_heads=2,
-            head_dim=1,
-            forget_latent_size=1,
-            ktp_size=2,
-            ktp_rank=1,
-        )
-        actual = pack_ktp_projection_payload(
-            hidden,
-            fused_linear,
-            forget_linear,
-            total_heads=2,
-            head_dim=1,
-            forget_latent_size=1,
-            ktp_size=2,
-            ktp_rank=1,
-        )
-        torch.testing.assert_close(actual, expected)
-        self.assertEqual(fused_linear.calls, 1)
-        self.assertEqual(forget_linear.calls, 1)
-        self.assertTrue(fused_linear.assert_contiguous)
-        self.assertTrue(forget_linear.assert_contiguous)
-
     def test_projection_local_heads_preserve_attention_tp_when_ktp_is_off(self):
         cases = (
             (8, 1, 12),
@@ -544,78 +440,6 @@ class KtpProjectionLayoutTest(unittest.TestCase):
                     ),
                     expected_heads,
                 )
-
-    def test_all_gather_projection_all_to_all_matches_full_head_reference(self):
-        torch.manual_seed(7)
-        ktp_size = 2
-        physical_batch = 3
-        hidden_size = 5
-        total_heads = 4
-        head_dim = 2
-        forget_rank = 3
-        gathered_hidden = torch.randn(ktp_size * physical_batch, hidden_size)
-        full_qkvg = torch.randn(hidden_size, 4 * total_heads * head_dim)
-        f_a = torch.randn(hidden_size, forget_rank)
-        beta = torch.randn(hidden_size, total_heads)
-        full_fused = torch.cat((full_qkvg, f_a, beta), dim=1)
-        full_f_b = torch.randn(forget_rank, total_heads * head_dim)
-
-        sends = []
-        local_projection = total_heads // ktp_size * head_dim
-        for rank in range(ktp_size):
-            q, k, v, g = torch.split(full_qkvg, [total_heads * head_dim] * 4, dim=1)
-            begin = rank * local_projection
-            local_fused = torch.cat(
-                tuple(
-                    section.narrow(1, begin, local_projection)
-                    for section in (q, k, v, g)
-                )
-                + (f_a, beta),
-                dim=1,
-            )
-            sends.append(
-                pack_ktp_projection_payload(
-                    gathered_hidden,
-                    local_fused,
-                    full_f_b.narrow(1, begin, local_projection),
-                    total_heads=total_heads,
-                    head_dim=head_dim,
-                    forget_latent_size=forget_rank,
-                    ktp_size=ktp_size,
-                    ktp_rank=rank,
-                ).reshape(ktp_size, physical_batch, -1)
-            )
-
-        owner = 1
-        received = torch.cat([send[owner] for send in sends], dim=0)
-        actual = reassemble_ktp_projection_payload(
-            received,
-            ktp_size=ktp_size,
-            physical_batch=physical_batch,
-            local_projection_size=local_projection,
-            local_heads=total_heads // ktp_size,
-        )
-        owner_hidden = gathered_hidden.narrow(0, owner * physical_batch, physical_batch)
-        full = owner_hidden @ full_fused
-        q, k, v, output_gate, forget_latent, raw_beta = torch.split(
-            full,
-            [
-                total_heads * head_dim,
-                total_heads * head_dim,
-                total_heads * head_dim,
-                total_heads * head_dim,
-                forget_rank,
-                total_heads,
-            ],
-            dim=1,
-        )
-        raw_gate = forget_latent @ full_f_b
-        torch.testing.assert_close(actual.q, q)
-        torch.testing.assert_close(actual.k, k)
-        torch.testing.assert_close(actual.v, v)
-        torch.testing.assert_close(actual.output_gate, output_gate)
-        torch.testing.assert_close(actual.raw_gate, raw_gate)
-        torch.testing.assert_close(actual.raw_beta, raw_beta)
 
     def test_projection_weight_layout_for_ktp8_and_ktp16(self):
         config = LinearAttnConfig.__new__(LinearAttnConfig)
@@ -645,44 +469,6 @@ class KtpProjectionLayoutTest(unittest.TestCase):
             self.assertEqual(
                 tuple(local_f_b.shape), (forget_rank, expected_heads * 128)
             )
-
-    def test_source_head_shards_reassemble_for_each_owner(self):
-        ktp_size = 2
-        batch = 3
-        local_projection = 2
-        local_heads = 1
-        chunks = []
-        for source in range(ktp_size):
-            for owner in range(batch):
-                base = 100 * source + 10 * owner
-                chunks.append(
-                    torch.tensor(
-                        [
-                            base + 1,
-                            base + 2,
-                            base + 3,
-                            base + 4,
-                            base + 5,
-                            base + 6,
-                            base + 7,
-                            base + 8,
-                            base + 9,
-                            base + 10,
-                            base + 11,
-                        ],
-                        dtype=torch.float32,
-                    )
-                )
-        result = reassemble_ktp_projection_payload(
-            torch.stack(chunks),
-            ktp_size=ktp_size,
-            physical_batch=batch,
-            local_projection_size=local_projection,
-            local_heads=local_heads,
-        )
-        self.assertEqual(tuple(result.q.shape), (batch, 4))
-        self.assertEqual(result.q[1].tolist(), [11.0, 12.0, 111.0, 112.0])
-        self.assertEqual(result.raw_beta[2].tolist(), [31.0, 131.0])
 
 
 class MixedTpDpInputPreparationTest(unittest.TestCase):

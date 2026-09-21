@@ -1,9 +1,7 @@
 """Focused one-GPU correctness checks for the BF16 producer integration."""
 
-import os
 import unittest
 from functools import partial
-from unittest.mock import patch
 
 import torch
 import triton.language as tl
@@ -13,6 +11,9 @@ from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
 from rtp_llm.models_py.modules.kimi_k3 import fp8_producers as producers
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.triton_kernels.kimi_kda import decode_bf16_producers as kernels
+from rtp_llm.models_py.triton_kernels.kimi_kda.rms_norm_gate import (
+    kimi_kda_rms_norm_sigmoid_gate,
+)
 
 assert_exact = partial(torch.testing.assert_close, rtol=0, atol=0)
 assert_near = partial(torch.testing.assert_close, rtol=1e-2, atol=1e-3)
@@ -23,11 +24,9 @@ def latent_fixture(rows, width):
     return randn(rows, width + 96)[:, 32 : 32 + width], randn(width)
 
 
-def mla_fixture(enabled):
+def mla_fixture():
     module = KimiK3MLA.__new__(KimiK3MLA)
     nn.Module.__init__(module)
-    module._decode_small_kernels_enabled = enabled
-    module._perf_accepts_strided_latent = False
     module._fp8_enabled = False
     module.use_output_gate = True
     module.output_gate_op = producers.SigmoidGate()
@@ -58,9 +57,6 @@ def kda_reference(x, gate, weight, eps):
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class DecodeBf16ProducersCudaTest(unittest.TestCase):
     def setUp(self):
-        self.env = patch.dict(os.environ, {"KIMI_K3_DECODE_SMALL_KERNELS": "1"})
-        self.env.start()
-        self.addCleanup(self.env.stop)
         torch.manual_seed(20260918)
 
     def test_int64_token_and_head_addressing(self):
@@ -100,36 +96,24 @@ class DecodeBf16ProducersCudaTest(unittest.TestCase):
         del latent, x, gate, storage
 
     def test_noncontiguous_native_norm_and_gate_integration(self):
-        for enabled in (False, True):
-            with patch.dict(
-                os.environ, {"KIMI_K3_DECODE_SMALL_KERNELS": str(int(enabled))}
-            ):
-                module = mla_fixture(enabled)
-                norms = []
-                for width in (512, 1536):
-                    latent, weight = latent_fixture(32, width)
-                    reference = RMSNorm(weight, 1e-6)
-                    norms.append(
-                        (producers.Bf16RMSNorm(weight, 1e-6, reference), latent)
-                    )
-
-            for norm, latent in norms:
-                expected = norm.reference(latent.contiguous())
-                actual = norm(latent)
-                (assert_near if enabled else assert_exact)(actual, expected)
-                self.assertTrue(actual.is_contiguous())
-
-            context = randn(12, 32, 144).transpose(0, 1)[..., :128]
-            gate = randn(32, 1576)[:, 40:]
-            prepared = module._prepare_output_layout(context, (32,), gate)
-            if enabled:
-                self.assertIs(prepared, context)
-            else:
-                self.assertTrue(prepared.is_contiguous())
-            actual = module._apply_output_gate(prepared, gate)
-            expected = context.reshape(32, -1) * torch.sigmoid(gate)
+        module = mla_fixture()
+        for width in (512, 1536):
+            latent, weight = latent_fixture(32, width)
+            reference = RMSNorm(weight, 1e-6)
+            norm = producers.Bf16RMSNorm(weight, 1e-6)
+            expected = reference(latent.contiguous())
+            actual = norm(latent)
+            assert_near(actual, expected)
             self.assertTrue(actual.is_contiguous())
-            assert_exact(actual, expected)
+
+        context = randn(12, 32, 144).transpose(0, 1)[..., :128]
+        gate = randn(32, 1576)[:, 40:]
+        prepared = module._prepare_output_layout(context, (32,), gate)
+        self.assertIs(prepared, context)
+        actual = module._apply_output_gate(prepared, gate)
+        expected = context.reshape(32, -1) * torch.sigmoid(gate)
+        self.assertTrue(actual.is_contiguous())
+        assert_exact(actual, expected)
 
     def test_kda_decode_strides_extremes_and_rank_alias(self):
         x = randn(12, 3, 144).transpose(0, 1)[..., :128]
@@ -149,51 +133,17 @@ class DecodeBf16ProducersCudaTest(unittest.TestCase):
         x = randn(32, 12, 144)[..., :128]
         gate = randn(32, 12, 136)[..., :128]
         weight = randn(128, dtype=torch.float32)
-        with patch.dict(os.environ, {"KIMI_K3_DECODE_SMALL_KERNELS": "0"}):
-            reference = producers.KdaOutputNorm(weight, 1e-6)
-        expected = reference(x, gate, "prefill")
+        expected = kimi_kda_rms_norm_sigmoid_gate(x, gate, weight, 1e-6)
         actual = producers.KdaOutputNorm(weight, 1e-6)(x, gate, "prefill")
         assert_exact(actual, expected)
 
-    def test_target_verify_matches_disabled_prefill_arithmetic(self):
+    def test_target_verify_matches_prefill_arithmetic(self):
         x = randn(7, 96, 128)
         gate = randn(7, 96, 128)
         weight = randn(128, dtype=torch.float32)
-        with patch.dict(os.environ, {"KIMI_K3_DECODE_SMALL_KERNELS": "0"}):
-            reference = producers.KdaOutputNorm(weight, 1e-6)
-        expected = reference(x, gate, "target_verify")
+        expected = kimi_kda_rms_norm_sigmoid_gate(x, gate, weight, 1e-6)
         actual = producers.KdaOutputNorm(weight, 1e-6)(x, gate, "target_verify")
         assert_near(actual, expected)
-
-    def test_opt_out_and_unsupported_inputs_use_reference_arithmetic(self):
-        x = randn(3, 12, 128)
-        gate = randn(3, 12, 128)
-        weight = randn(128)
-        expected = kda_reference(x, gate, weight, 1e-6)
-
-        with patch.dict(os.environ, {"KIMI_K3_DECODE_SMALL_KERNELS": "0"}):
-            disabled = producers.KdaOutputNorm(weight, 1e-6)
-        assert_exact(disabled(x, gate, "decode"), expected)
-
-        enabled = producers.KdaOutputNorm(weight, 1e-6)
-        with patch.dict(tl.__dict__):
-            tl.__dict__.pop("gather", None)
-            assert_exact(enabled(x, gate, "decode"), expected)
-
-        float_x, float_gate = x.float(), gate.float()
-        assert_exact(
-            enabled(float_x, float_gate, "decode"),
-            kda_reference(float_x, float_gate, weight, 1e-6),
-        )
-        assert_exact(
-            producers.SigmoidGate()(float_x, float_gate),
-            float_x * torch.sigmoid(float_gate),
-        )
-
-        latent = randn(3, 1600)[:, :1536]
-        fp32_gamma = randn(1536, dtype=torch.float32)
-        norm = producers.Bf16RMSNorm(fp32_gamma, 1e-6, nn.Identity())
-        assert_exact(norm(latent), latent)
 
     def test_sigmoid_rounds_to_bf16_before_multiplication(self):
         x = torch.full((1, 12, 128), 1.5, device="cuda", dtype=torch.bfloat16)
@@ -206,10 +156,8 @@ class DecodeBf16ProducersCudaTest(unittest.TestCase):
     def test_two_stream_graph_replay_reads_changing_values(self):
         weight, latent_weight = randn(128), randn(512)
         kda = producers.KdaOutputNorm(weight, 1e-6)
-        with patch.dict(os.environ, {"KIMI_K3_DECODE_SMALL_KERNELS": "0"}):
-            kda_reference_op = producers.KdaOutputNorm(weight, 1e-6)
         native_norm = RMSNorm(latent_weight, 1e-5)
-        norm = producers.Bf16RMSNorm(latent_weight, 1e-5, native_norm)
+        norm = producers.Bf16RMSNorm(latent_weight, 1e-5)
         gate_op = producers.SigmoidGate()
 
         cases = []
@@ -234,7 +182,7 @@ class DecodeBf16ProducersCudaTest(unittest.TestCase):
                     latent.fill_(((-1) ** (index + replay)) * 1e-4 * (1 + replay))
                     graph.replay()
                     expected = (
-                        kda_reference_op(x, gate, "decode"),
+                        kda_reference(x, gate, weight, 1e-6),
                         native_norm(latent.contiguous()),
                         (x * torch.sigmoid(gate)).reshape(7, -1),
                     )

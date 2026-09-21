@@ -101,70 +101,65 @@ def worker(rank, ranks, rendezvous):
 
             local = torch.empty((rows, 7168), device="cuda", dtype=torch.bfloat16)
             # The workspace contract intentionally requires KTP > 1.
-            workspaces = [
-                (
-                    KtpProjectionWorkspace(
-                        [rows],
-                        ktp_size=ranks,
+            workspace = (
+                KtpProjectionWorkspace(
+                    [rows],
+                    ktp_size=ranks,
+                    total_heads=96,
+                    head_dim=128,
+                    device=local.device,
+                )
+                if ranks > 1
+                else None
+            )
+            for padded in (False, True):
+
+                def run(use_workspace=True):
+                    return project_kda_inputs_ktp(
+                        local,
+                        project,
+                        forget,
                         total_heads=96,
                         head_dim=128,
-                        device=local.device,
+                        forget_latent_size=latent,
+                        ktp_size=ranks,
+                        ktp_rank=rank,
+                        workspace=workspace if use_workspace else None,
                     )
-                    if ranks > 1
-                    else None
-                )
-                for _ in range(2)
-            ]
-            for padded in (False, True):
-                for optimize in (False, True):
 
-                    def run():
-                        return project_kda_inputs_ktp(
-                            local,
-                            project,
-                            forget,
-                            total_heads=96,
-                            head_dim=128,
-                            forget_latent_size=latent,
-                            ktp_size=ranks,
-                            ktp_rank=rank,
-                            workspace=workspaces[int(optimize)],
-                            optimize=optimize,
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    local.fill_(rank)
+                    for _ in range(3):
+                        run()
+                stream.synchronize()
+                dist.barrier()
+                with managed_graph(stream) as graph:
+                    with torch.cuda.graph(graph, stream=stream):
+                        captured = run()
+                    for replay in range(4):
+                        cpu_local = (
+                            (
+                                (torch.arange(rows) % 3).to(torch.bfloat16)
+                                + rank * 4
+                                + replay * 0.25
+                            )[:, None]
+                            .expand(rows, 7168)
+                            .clone()
                         )
-
-                    stream = torch.cuda.Stream()
-                    stream.wait_stream(torch.cuda.current_stream())
-                    with torch.cuda.stream(stream):
-                        local.fill_(rank)
-                        for _ in range(3):
-                            run()
-                    stream.synchronize()
-                    dist.barrier()
-                    with managed_graph(stream) as graph:
-                        with torch.cuda.graph(graph, stream=stream):
-                            captured = run()
-                        for replay in range(4):
-                            cpu_local = (
-                                (
-                                    (torch.arange(rows) % 3).to(torch.bfloat16)
-                                    + rank * 4
-                                    + replay * 0.25
-                                )[:, None]
-                                .expand(rows, 7168)
-                                .clone()
-                            )
-                            if padded:
-                                cpu_local[max(0, rows - 1) :].zero_()
-                            expected = expected_fields(cpu_local, ranks)
-                            with torch.cuda.stream(stream):
-                                local.copy_(cpu_local)
-                                graph.replay()
-                            stream.synchronize()
-                            # The stream is complete; both executions see the changed inputs.
-                            for actual in (captured, run()):
-                                for name, want in expected.items():
-                                    assert_exact(getattr(actual, name).cpu(), want)
-                    dist.barrier()
+                        if padded:
+                            cpu_local[max(0, rows - 1) :].zero_()
+                        expected = expected_fields(cpu_local, ranks)
+                        with torch.cuda.stream(stream):
+                            local.copy_(cpu_local)
+                            graph.replay()
+                        stream.synchronize()
+                        # Compare replay and eager with/without communication buffers.
+                        for actual in (captured, run(), run(False)):
+                            for name, want in expected.items():
+                                assert_exact(getattr(actual, name).cpu(), want)
+                dist.barrier()
             if rank == 0:
                 print(
                     json.dumps(
@@ -173,7 +168,7 @@ def worker(rank, ranks, rendezvous):
                             "local_M": rows,
                             "gathered_M": rows * ranks,
                             "valid_and_padded": True,
-                            "variants": 2,
+                            "variants": 1,
                             "replays_each": 4,
                             "eager_and_graph": "PASS",
                         }

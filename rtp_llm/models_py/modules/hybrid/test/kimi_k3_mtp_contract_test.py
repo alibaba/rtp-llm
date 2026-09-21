@@ -27,8 +27,8 @@ class _Attention(nn.Module):
 
 
 class _Moe(nn.Linear):
-    def forward(self, x, **_kwargs):
-        return super().forward(x)
+    def forward(self, x, *, residual, **_kwargs):
+        return super().forward(x) + residual
 
 
 class KimiK3MtpContractTest(unittest.TestCase):
@@ -65,13 +65,12 @@ class KimiK3MtpContractTest(unittest.TestCase):
                     self.assertIsNotNone(staging_ref())
                 return value * 2
 
-            def moe(value, **kwargs):
+            def moe(value, *, residual, **kwargs):
                 if prefill:
                     self.assertIsNone(output_ref())
-                return torch.zeros_like(value)
+                return residual
 
             layer = SimpleNamespace(
-                _decode_small_kernels=False,
                 enorm=lambda x: x,
                 hnorm=lambda x: x,
                 eh_proj=lambda x: x[:, :4],
@@ -440,7 +439,6 @@ class KimiK3MtpContractTest(unittest.TestCase):
         torch.manual_seed(31)
         layer = KimiK3MtpLayer.__new__(KimiK3MtpLayer)
         nn.Module.__init__(layer)
-        layer._decode_small_kernels = False
         for name in ("enorm", "hnorm", "input_norm", "post_norm"):
             setattr(layer, name, nn.RMSNorm(4, eps=1e-5))
         layer.attn_tp_size = 1
@@ -689,15 +687,14 @@ class KimiK3MtpContractTest(unittest.TestCase):
                 self.linear = nn.Linear(4, 4, bias=False)
                 self.calls = []
 
-            def forward(self, x, **kwargs):
+            def forward(self, x, *, residual, **kwargs):
                 fmha.release_forward_workspace.assert_called_once()
                 self.calls.append((x.shape, kwargs))
-                return self.linear(x)
+                return self.linear(x) + residual
 
         torch.manual_seed(31)
         layer = KimiK3MtpLayer.__new__(KimiK3MtpLayer)
         nn.Module.__init__(layer)
-        layer._decode_small_kernels = False
         for name in ("enorm", "hnorm", "input_norm", "post_norm"):
             setattr(layer, name, nn.RMSNorm(4, eps=1e-5))
         layer.attn_tp_size = 8

@@ -1,4 +1,4 @@
-"""Manual GPU correctness for opt-in MoE packing and residual fusion."""
+"""Manual GPU correctness for MoE packing and residual fusion."""
 
 import os
 
@@ -148,14 +148,33 @@ class MoeDecodeSmallKernelTest(unittest.TestCase):
         shared[0, :2] = 1
         residual_before = residual.clone()
 
-        output = moe_decode.add_moe_output(routed, shared, residual, optimize=True)
+        # A default MoE residual add must preserve both BF16 roundings in one
+        # GPU launch; silently using two torch additions regresses decode.
+        moe_decode.add_moe_output(routed, shared, residual)
+        torch.cuda.synchronize()
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            acc_events=True,
+        ) as profile:
+            output = moe_decode.add_moe_output(routed, shared, residual)
+            torch.cuda.synchronize()
+        kernels = [
+            event
+            for event in profile.events()
+            if event.device_type == torch.autograd.DeviceType.CUDA
+        ]
+        self.assertEqual(len(kernels), 1)
         assert_exact(output, (routed + shared) + residual)
         self.assertEqual(output[0, :2].tolist(), [0.0, 1.0])
         assert_exact(residual, residual_before)
+        assert_exact(moe_decode.add_moe_output(routed, shared), routed + shared)
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            output = moe_decode.add_moe_output(routed, shared, residual, optimize=True)
+            output = moe_decode.add_moe_output(routed, shared, residual)
         routed.add_(2)
         shared.sub_(1)
         residual.add_(0.5)

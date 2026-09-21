@@ -11,9 +11,6 @@ from torch import nn
 from rtp_llm.model_loader.linear_attn_weight import split_kda_qkvg_fa_beta_sections
 from rtp_llm.models_py.distributed.sequence_parallel import SequenceParallelLayout
 from rtp_llm.models_py.modules.factory import LinearFactory
-from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
-    QuantizedActivation,
-)
 from rtp_llm.models_py.modules.kimi_k3.kda.cache import KimiK3KDACache
 from rtp_llm.models_py.modules.kimi_k3.kda.decode import KimiK3KDADecode
 from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
@@ -28,9 +25,6 @@ from rtp_llm.models_py.modules.kimi_k3.parallel_mode import (
 from rtp_llm.models_py.modules.kimi_k3.projection_ktp import (
     project_kda_inputs_ktp,
     resolve_projection_local_heads,
-)
-from rtp_llm.models_py.modules.kimi_k3.small_kernel_config import (
-    decode_small_kernels_enabled,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_quant import (
     quantize_forget_latent_fp8,
@@ -60,7 +54,6 @@ class KimiK3KDA(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
-        self._decode_small_kernels_enabled = decode_small_kernels_enabled()
         self.projection_ktp_workspace = None
         self.parallelism_config = parallelism_config
         self.weights = weights
@@ -244,23 +237,6 @@ class KimiK3KDA(nn.Module):
         else:
             self.decode_executor = None
 
-    def _use_small_kernels(self, hidden_states) -> bool:
-        """Select layout optimizations by activation capability, not phase.
-
-        FP8 projections also produce BF16 Q/K/V and gate tensors. Their wire
-        input is handled by the existing quantized gather; packing/reassembly
-        independently validate the actual projection outputs.
-        """
-
-        return bool(
-            self._decode_small_kernels_enabled
-            and hidden_states.is_cuda
-            and (
-                hidden_states.dtype == torch.bfloat16
-                or isinstance(hidden_states, QuantizedActivation)
-            )
-        )
-
     def _project_fused_kda_inputs(
         self,
         hidden_states: torch.Tensor,
@@ -279,8 +255,6 @@ class KimiK3KDA(nn.Module):
     ]:
         """Run and unpack the loader-provided Q/K/V/G/F_A/beta projection."""
 
-        optimize = self._use_small_kernels(hidden_states)
-
         if self.parallel_mode is KimiK3ParallelMode.PROJECTION_KTP:
             if projected_fused is not None:
                 raise ValueError("Projection KTP does not accept a TP projection")
@@ -297,7 +271,6 @@ class KimiK3KDA(nn.Module):
                 ktp_size=self.ktp_size,
                 ktp_rank=self.ktp_rank,
                 workspace=self.projection_ktp_workspace,
-                optimize=optimize,
             )
             mixed_qkv_projected = (
                 torch.cat((result.q, result.k, result.v), dim=-1)
@@ -453,7 +426,6 @@ class KimiK3KDA(nn.Module):
             attention_inputs=attention_inputs,
             sp_layout=sp_layout,
         )
-        use_small_kernels = self._use_small_kernels(hidden_states)
         (
             mixed_qkv_projected,
             q_projected,
@@ -468,7 +440,7 @@ class KimiK3KDA(nn.Module):
             projected_fused=projected_fused,
             # Prefill's convolution consumes packed QKV. Decode/target verify
             # consume the separate views and need no staging concatenation.
-            need_mixed_qkv=mode == "prefill" or not use_small_kernels,
+            need_mixed_qkv=mode == "prefill",
         )
         token_count = q_projected.shape[0]
         output_gate = output_gate_projected.reshape(

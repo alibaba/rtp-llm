@@ -22,8 +22,10 @@ py_test(
     srcs = ["test_moe_decode_small.py"],
     main = "test_moe_decode_small.py",
     deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
-    env = {"DSV4_MOE_STRICT_FUSED": "0"},
+    env = {"GPU_COUNT": "1", "DSV4_MOE_STRICT_FUSED": "0"},
     timeout = "short",
+    tags = ["manual", "H20"],
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
 )
 
 py_test(

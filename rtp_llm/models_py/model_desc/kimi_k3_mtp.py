@@ -27,9 +27,6 @@ from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import (
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
-from rtp_llm.models_py.modules.kimi_k3.small_kernel_config import (
-    decode_small_kernels_enabled,
-)
 from rtp_llm.models_py.modules.kimi_k3.utils import (
     collective_gemm_workspace_global_tokens,
     prefill_chunk_tokens,
@@ -81,7 +78,6 @@ def mtp_positions(inputs):
 class KimiK3MtpLayer(nn.Module):
     def __init__(self, config, parallelism, weights, moe_strategy):
         super().__init__()
-        self._decode_small_kernels = decode_small_kernels_enabled()
         self.attn_tp_size = int(parallelism.get_attn_tp_size())
         self.enorm = RMSNorm(weights["kimi_k3.mtp.enorm"], config.layernorm_eps)
         self.hnorm = RMSNorm(weights["kimi_k3.mtp.hnorm"], config.layernorm_eps)
@@ -170,20 +166,11 @@ class KimiK3MtpLayer(nn.Module):
             else None
         )
         normalized_mlp_input = self.post_norm(a)
-        if (
-            self._decode_small_kernels
-            and normalized_mlp_input.is_cuda
-            and normalized_mlp_input.dtype == torch.bfloat16
-        ):
-            # As in the target model, MoE owns residual addition on every
-            # backend/fallback once the residual is supplied. No phase gate.
-            return self.moe(
-                normalized_mlp_input,
-                valid_token_count=local_valid_tokens,
-                residual=a,
-                optimize_decode=True,
-            )
-        return a + self.moe(normalized_mlp_input, valid_token_count=local_valid_tokens)
+        return self.moe(
+            normalized_mlp_input,
+            valid_token_count=local_valid_tokens,
+            residual=a,
+        )
 
 
 class KimiK3MtpModel(GptModelBase):
