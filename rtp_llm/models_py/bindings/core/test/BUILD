@@ -6,6 +6,24 @@ test_copts = [
 ] + copts()
 
 cc_test(
+    name = "gpu_block_copy_test",
+    srcs = ["GpuBlockCopyTest.cc"],
+    deps = [
+        "//rtp_llm/models_py/bindings/core:gpu_block_copy",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    copts = copts(),
+    target_compatible_with = select({
+        "@//:using_cuda": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+)
+
+cc_test(
     name = "generic_sampler_batch_fallback_test",
     srcs = ["GenericSamplerBatchFallbackTest.cc"],
     deps = [
