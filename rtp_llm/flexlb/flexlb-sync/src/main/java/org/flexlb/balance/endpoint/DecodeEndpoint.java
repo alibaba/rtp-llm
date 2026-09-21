@@ -563,7 +563,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long maxKvUsagePercent) {
 
         public AdmissionCapacity {
-            if (maxEngineRequests < 0L || maxKvUsagePercent < 0L
+            if (maxEngineRequests < 0L || maxKvUsagePercent <= 0L
                     || maxKvUsagePercent > RoutingConfig.PERCENTAGE_SCALE) {
                 throw new IllegalArgumentException(
                         "Decode admission limits are outside their domain");
@@ -585,7 +585,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long requests = maxEngineRequests == 0L ? 0L
                     : shortfall(Math.max(0L, usage.occupiedRequests - release.requests),
                             1L, maxEngineRequests, 0L);
-            if (usage.totalKvTokens == 0L && maxKvUsagePercent > 0L) {
+            if (usage.totalKvTokens == 0L) {
                 return new CapacityDeficit(requests, 0L, 0L);
             }
             return new CapacityDeficit(requests,

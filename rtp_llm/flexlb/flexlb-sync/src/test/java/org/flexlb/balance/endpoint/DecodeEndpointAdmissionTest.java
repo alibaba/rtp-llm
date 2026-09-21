@@ -893,7 +893,7 @@ class DecodeEndpointAdmissionTest {
         accepted.setInputLength(100L);
         updateStatus(Map.of("72", accepted), Map.of(), 9900L);
 
-        var capacity = new DecodeEndpoint.AdmissionCapacity(1L, 0L);
+        var capacity = new DecodeEndpoint.AdmissionCapacity(1L, 1L);
         var acquisition = endpoint.acquireDispatchPermit(handle, capacity);
         assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED, acquisition.status());
         assertNotNull(acquisition.permit(), "the handoff must retain the exact accepted reservation");
@@ -982,14 +982,11 @@ class DecodeEndpointAdmissionTest {
     }
 
     @Test
-    void zeroKvPercentageDoesNotDisableAdmission() {
-        updateStatus(Map.of(), Map.of(), 10_000L);
-        var handle = reserveQueued(1L, 1L, 1L, 50);
-        var acquired = endpoint.acquireDispatchPermit(handle, new DecodeEndpoint.AdmissionCapacity(10L, 0L));
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL, acquired.status());
-        assertNull(acquired.permit());
-        endpoint.release(handle, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
-        assertEquals(0, endpoint.getInflightCount());
+    void invalidKvPercentageCannotReachAdmissionChecks() {
+        for (long percent : new long[]{-1L, 0L, 101L}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> new DecodeEndpoint.AdmissionCapacity(10L, percent));
+        }
     }
 
     // ==================== helpers ====================
@@ -1163,12 +1160,13 @@ class DecodeEndpointAdmissionTest {
     }
 
     @Test
-    void zeroPercentAcceptsOnlyZeroUsageAndDemandEvenWithUnknownTotal() {
-        var capacity = new DecodeEndpoint.AdmissionCapacity(0L, 0L);
+    void validKvPercentagePreservesUnknownCapacityBehavior() {
         var usage = new DecodeEndpoint.CapacityUsage(0L, 0L, 0L, 0L, 0L);
-        assertTrue(capacity.evaluate(usage, 0L, 0L).fits());
-        assertFalse(capacity.evaluate(usage, 0L, 1L).fits());
-        assertTrue(new DecodeEndpoint.AdmissionCapacity(0L, 90L).evaluate(usage, 100L, 200L).fits());
+        for (long percent : new long[]{1L, 90L, 100L}) {
+            var capacity = new DecodeEndpoint.AdmissionCapacity(0L, percent);
+            assertTrue(capacity.evaluate(usage, 100L, 200L).fits());
+            assertEquals(percent, capacity.kvBudget(100L));
+        }
     }
 
 }

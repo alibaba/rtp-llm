@@ -94,6 +94,7 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class DecodeAvailabilityConfig {
+        /** Maximum Decode KV usage percentage, in [1, 100]. */
         private long maxKvUsagePercent = 90;
 
         /** Master-side cap for all Engine-facing Decode ownership. */

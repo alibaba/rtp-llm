@@ -691,13 +691,13 @@ class DecodeSelectorTest {
                 availableStrategy(decodeRegistry()).select(DecodeBinding.capture(context), null).status());
     }
 
-    @Test
-    void zeroKvBudgetRejectsPositiveDemand() {
+    @ParameterizedTest
+    @ValueSource(longs = {-1L, 0L, 101L})
+    void invalidKvPercentageFailsBeforeWorkerSelection(long percent) {
         configService.loadBalanceConfig().getRouter().getRoles().getDecode()
-                .getAvailability().setMaxKvUsagePercent(0);
-        registerWorker("127.0.0.1", 10_000L, 10_000L);
-        Assertions.assertEquals(PlacementResult.Status.REJECTED,
-                availableStrategy(decodeRegistry()).select(DecodeBinding.capture(context(1L, 992L)), null).status());
+                .getAvailability().setMaxKvUsagePercent(percent);
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> DecodeBinding.capture(context(1L, 992L)));
     }
 
     private void configureCost(String expression) {
