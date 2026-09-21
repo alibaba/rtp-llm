@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Callable, Dict, Optional
 
 import torch
@@ -70,6 +71,17 @@ def _quantized_all_reduce(
     return hidden_states
 
 
+def _should_enable_pro5000_int8_allreduce(
+    config: ModelConfig, device: torch.device
+) -> bool:
+    return (
+        config.enable_qwen3_pro5000_int8_allreduce
+        and device.type == "cuda"
+        and torch.version.hip is None
+        and "RTX PRO 5000" in torch.cuda.get_device_name(device).upper()
+    )
+
+
 class Qwen3DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -109,13 +121,21 @@ class Qwen3DecoderLayer(nn.Module):
         self.quant = None
         self.dequant = None
         device = weights[W.pre_ln_gamma].device
-        if (
-            device.type == "cuda"
-            and torch.version.hip is None
-            and "RTX PRO 5000" in torch.cuda.get_device_name(device).upper()
-        ):
+        if _should_enable_pro5000_int8_allreduce(config, device):
             self.quant = quantize
             self.dequant = dequantize_reduce
+        if layer_idx == 0:
+            logging.info(
+                "Qwen3 RTX PRO 5000 INT8 TP AllReduce is %s "
+                "(ENABLE_QWEN3_PRO5000_INT8_ALLREDUCE=%s, device=%s)",
+                "enabled" if self.quant is not None else "disabled",
+                config.enable_qwen3_pro5000_int8_allreduce,
+                (
+                    torch.cuda.get_device_name(device)
+                    if device.type == "cuda" and torch.version.hip is None
+                    else device.type
+                ),
+            )
 
     def forward(
         self,

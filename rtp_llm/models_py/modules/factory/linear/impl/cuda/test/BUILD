@@ -28,6 +28,12 @@ py_test(
 )
 
 py_test(
+    name = "fp8_gemm_ab_switch_test",
+    srcs = ["fp8_gemm_ab_switch_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "fp8_deepgemm_linear_sm100_test",
     srcs = [
         "fp8_deepgemm_linear_sm100_test.py",
