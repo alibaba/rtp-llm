@@ -3,13 +3,14 @@ package org.flexlb.dispatcher;
 import com.alibaba.fastjson2.JSONObject;
 import com.google.common.util.concurrent.RateLimiter;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
+import reactor.core.scheduler.Scheduler;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -25,12 +26,15 @@ public class FanoutService {
 
     private final FeClient feClient;
     private final DispatcherMetricsReporter metricsReporter;
+    private final Scheduler cpuScheduler;
     /** During an FE outage the fanout path fails per chunk; cap the WARN stream at 1/s. */
     private final RateLimiter failureWarn = RateLimiter.create(1);
 
-    public FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter) {
+    public FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter,
+                         @Qualifier("dispatcherCpuScheduler") Scheduler cpuScheduler) {
         this.feClient = feClient;
         this.metricsReporter = metricsReporter;
+        this.cpuScheduler = cpuScheduler;
     }
 
     public Mono<List<SubBatchResult>> dispatchChunks(String fePath,
@@ -80,12 +84,12 @@ public class FanoutService {
                     }
                     return payload;
                 })
-                .subscribeOn(Schedulers.parallel())
+                .subscribeOn(cpuScheduler)
                 .flatMap(payload -> {
                     long start = System.currentTimeMillis();
                     return feClient.postBytes(plan.feUrl(), fePath, payload, inboundHeaders,
                                     rawQuery, responseReservation)
-                            .publishOn(Schedulers.parallel())
+                            .publishOn(cpuScheduler)
                             .map(bytes -> {
                                 JSONObject parsed = BatchBodyParser.parseObject(bytes);
                                 SubBatchResult result = SubBatchResult.ok(parsed, plan.chunkSize(), plan.startIndex());

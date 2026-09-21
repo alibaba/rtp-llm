@@ -289,7 +289,7 @@ class DispatcherE2ETest {
         connections = ConnectionProvider.builder("e2e").build();
         DispatcherMetricsReporter metrics = DispatcherTestSupport.noopMetrics();
         feClient = spy(new FeClient(WebClient.builder(), connections, cfg));
-        FanoutService fanout = new FanoutService(feClient, metrics);
+        FanoutService fanout = new FanoutService(feClient, metrics, Schedulers.parallel());
         when(coordinator.schedule(any())).thenAnswer(call -> {
             if (allocationFails) {
                 return Mono.just(BatchScheduleResponse.error(StrategyErrorType.NO_AVAILABLE_WORKER, "no FE endpoints available"));
