@@ -32,6 +32,26 @@ state transfer is still unproven.
 
 ## Current evidence
 
+Standalone KDA GPU checks at source `4ee3fc6ca0ff76edaff43239ec55ba9881473b2f`
+passed on L20-dev-115, GPU 1, inside `lhc_GPU` as `luohaocheng.lhc`, using
+PyTorch 2.11.0+cu130 and Triton 3.6.0. Three K3 tests cover bounded gate
+extremes, whole versus split prefill followed by cached decode, and paged
+verification candidate states for accept counts 0/1/2/3 at block boundaries.
+The null block and untouched state slots remain unchanged. Five existing
+unbounded KDA gate/prefill/decode tests also passed.
+
+For K3 batch sizes 1 and 3, split-prefill output and final state exactly matched
+the whole-prefill kernel. The largest prefill output error against the PyTorch
+recurrence was 0.000332601; decode output error was at most 0.0000622608.
+These are synthetic operator checks, not full-model precision or engine state
+commit validation. They do not cover conv/KV/hidden commit, RDMA or Graph.
+GPU 0 on that host reported ERR/N/A, so this host was not accepted for TP8.
+
+The source-only operator bundle initially omitted Python dependencies; two
+import failures were preserved before the successful run. Result manifests,
+raw logs and source archives are under the local task evidence directory
+`/Users/luohaocheng/Desktop/k3-main-evidence-20260922`.
+
 On macOS, a separate Python 3.9 / PyTorch 2.8 CPU environment ran:
 
 ```sh
