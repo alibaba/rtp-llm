@@ -192,9 +192,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
     RTP_LLM_PROFILE_FUNCTION();
-    // Cap outstanding stream-async bookkeeping to one step unless DROP_BROAD_SYNC is on.
-    // Still sync when gatherModelInput lacks NormalAsyncDeviceState; host
-    // token/seq_len fallbacks race the previous worker.
+    // Choose one input epoch before StreamGroups reads any host metadata.
+    // The gatherer owns the eligibility predicate, including position IDs;
+    // grouping and gathering must never independently choose different paths.
     bool worker_synced = false;
     if (useStreamAsync() && !useDropBroadSync()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
@@ -202,18 +202,28 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         worker_synced = true;
     }
 
-    StreamGroups stream_groups(streams);
-    prepareGrpcNormalDeviceState(stream_groups);
+    prepareGrpcNormalDeviceState(streams);
+    auto normal_device_states = batch_stream_processor_->prepareDeviceStateInputs(streams);
 
-    if (useStreamAsync() && useDropBroadSync() && !gatherCanUseDeviceState(stream_groups)) {
+    if (useStreamAsync() && !worker_synced && normal_device_states.empty()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
         dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
         worker_synced = true;
-        // Rebuild StreamGroups after waiting: cached maxSeqLen/batch sizes can
-        // be stale while the previous worker mutates GenerateStream host state.
-        stream_groups = StreamGroups(streams);
-        prepareGrpcNormalDeviceState(stream_groups);
+        prepareGrpcNormalDeviceState(streams);
+        normal_device_states = batch_stream_processor_->prepareDeviceStateInputs(streams);
     }
+    const bool   uses_normal_snapshot = !normal_device_states.empty();
+    StreamGroups stream_groups(streams, std::move(normal_device_states));
+    auto         finish_snapshot_gather = [&] {
+        if (uses_normal_snapshot) {
+            // The previous worker reads iter_count when producing its output.
+            // Advance it only after joining that worker, even though this
+            // round's model forward has already overlapped its host commit.
+            for (const auto& stream : streams) {
+                stream->step();
+            }
+        }
+    };
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
@@ -291,6 +301,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
         cudaSyncAndCheck();
+        // Warmup does not launch dispatch workers; non-root streams are empty.
+        finish_snapshot_gather();
         model_->releaseBuffers();
         if (profile_step_finish_) {
             profile_step_finish_();
@@ -313,6 +325,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             // instead of appending one column behind.
             stream_groups = StreamGroups(streams);
         }
+        finish_snapshot_gather();
 
         CHECK_AND_RETURN_REF(sampler_input,
                              batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
@@ -505,41 +518,7 @@ void NormalExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, c
     check(model_input.lm_output_indexes, "lm_output_indexes");
 }
 
-bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) const {
-    // Decode-only batch is the only shape the device-state path supports.
-    if (stream_groups.totalContextBatchSize() != 0 || stream_groups.totalDecodeBatchSize() == 0) {
-        return false;
-    }
-    for (const auto& stream : stream_groups.decodeStreams()) {
-        // Use config-only proxies for the batch-1 check. currentBatchSize() reads
-        // outputTokenLen() → seqLength() which itself races with the worker we're
-        // trying to decide whether to skip syncing.
-        if (stream->hasNumBeams() || stream->numReturnSequences() > 1) {
-            return false;
-        }
-        bool has_blocking_stateful_processor = false;
-        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            if (processor != nullptr && processor->isStateful() && !processor->supportsNormalAsyncDeviceState()) {
-                has_blocking_stateful_processor = true;
-                break;
-            }
-        }
-        // NormalAsyncDeviceState mirrors token ids and sequence length. Stateful
-        // processors that cannot publish their own device-side next-step state
-        // still need the old wait before the next sampler consumes logits.
-        if (has_blocking_stateful_processor && stream->hasPendingAsyncBookkeeping()) {
-            return false;
-        }
-        const auto& state = stream->getNormalAsyncDeviceState();
-        if (!state.last_sample_token_gpu.defined() || !state.last_sample_token_gpu.is_cuda()
-            || !state.next_seq_len_gpu.defined() || !state.next_seq_len_gpu.is_cuda()) {
-            return false;
-        }
-    }
-    return true;
-}
-
-void NormalExecutor::prepareGrpcNormalDeviceState(const StreamGroups& stream_groups) {
+void NormalExecutor::prepareGrpcNormalDeviceState(const std::list<GenerateStreamPtr>& streams) {
     // publishNormalDeviceState (the per-step refresher) is gated on
     // useDeviceInput(); without the same gate here the published snapshot goes
     // stale and GenerateStateMachine overrides incrKVBlock with an old seq_len,
@@ -547,13 +526,19 @@ void NormalExecutor::prepareGrpcNormalDeviceState(const StreamGroups& stream_gro
     if (!useDeviceInput()) {
         return;
     }
-    if (role_type_ != RoleType::DECODE || stream_groups.totalContextBatchSize() != 0
-        || stream_groups.totalDecodeBatchSize() == 0) {
+    if (role_type_ != RoleType::DECODE) {
         return;
     }
 
     const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    for (const auto& stream : stream_groups.decodeStreams()) {
+    for (const auto& stream : streams) {
+        // Handoff initialization is the only bootstrap allowed before plan
+        // selection. An established stream with pending bookkeeping must wait
+        // for the executor fallback before consulting any host token history.
+        if (!stream->hasGrpcNormalDeviceStatePending() || stream->hasPendingAsyncBookkeeping()
+            || stream->isContextStream()) {
+            continue;
+        }
         if (!stream->consumeGrpcNormalDeviceStatePending()) {
             continue;
         }
@@ -583,11 +568,12 @@ void NormalExecutor::prepareGrpcNormalDeviceState(const StreamGroups& stream_gro
 
         const auto seq_length = stream->seqLength();
         stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
-            .epoch                 = 0,
-            .last_sample_token_gpu = torch::full({1}, static_cast<int64_t>(current_tokens[0]), cuda_i32),
-            .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(seq_length), cuda_i32),
-            .last_real_seq_len     = seq_length,
-            .next_real_seq_len     = seq_length,
+            .epoch                   = 0,
+            .last_sample_token_gpu   = torch::full({1}, static_cast<int64_t>(current_tokens[0]), cuda_i32),
+            .next_seq_len_gpu        = torch::full({1}, static_cast<int64_t>(seq_length), cuda_i32),
+            .last_real_seq_len       = seq_length,
+            .next_real_seq_len       = seq_length,
+            .kv_cache_update_pending = !stream->streamCacheResource().getKVBlockUpdateMapping().empty(),
         });
     }
 }
@@ -647,15 +633,17 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
                 token_ids_gpu.narrow(0, batch_idx_out, 1).select(-1, last_col).reshape({1}).to(torch::kInt32);
         }
 
-        // Mirror next_seq_len_gpu on host for the next iter's scheduler.
-        // Fall back to live seqLength only on first publish (no prior worker).
+        // The pre-sampler join has committed the previous round. Publish the
+        // next epoch before launching this round's worker, while host history
+        // is still exclusively ours. A context reset must not reuse an old
+        // snapshot length merely because the stream object survived.
         const auto& prev_state = stream->getNormalAsyncDeviceState();
-        const int   cur_real_seq_len =
-            prev_state.next_real_seq_len > 0 ? prev_state.next_real_seq_len : stream->seqLength();
+        const int   cur_real_seq_len = stream->seqLength();
 
         torch::Tensor cur_seq_len_gpu;
         const auto&   prev_next_seq_len = prev_state.next_seq_len_gpu;
-        if (prev_next_seq_len.defined() && prev_next_seq_len.is_cuda()) {
+        if (prev_state.next_real_seq_len == cur_real_seq_len && prev_next_seq_len.defined()
+            && prev_next_seq_len.is_cuda()) {
             cur_seq_len_gpu = prev_next_seq_len;
         } else {
             cur_seq_len_gpu = torch::full({1}, static_cast<int64_t>(cur_real_seq_len), cuda_i32);
@@ -672,6 +660,7 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
         state.next_seq_len_gpu      = (cur_seq_len_gpu + 1).to(torch::kInt32);
         state.last_real_seq_len     = cur_real_seq_len;
         state.next_real_seq_len     = cur_real_seq_len + 1;
+        state.kv_cache_update_pending = !stream->streamCacheResource().getKVBlockUpdateMapping().empty();
         stream->setNormalAsyncDeviceState(std::move(state));
         batch_idx_out += 1;
     }
