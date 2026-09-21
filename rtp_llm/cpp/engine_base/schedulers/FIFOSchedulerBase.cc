@@ -130,8 +130,15 @@ size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& stre
         auto state     = (*it)->getStatus();
         auto new_state = (*it)->moveToNext();
         if (new_state != state) {
-            addStreamToNewState(*it, new_state);
-            it = streams.erase(it);
+            {
+                RTP_LLM_PROFILE_SCOPE("scheduler.add_stream_to_new_state");
+                addStreamToNewState(*it, new_state);
+            }
+            {
+                // Includes full object/member destruction if this is the last owner.
+                RTP_LLM_PROFILE_SCOPE("scheduler.erase_transitioned_stream");
+                it = streams.erase(it);
+            }
             ++moved_count;
         } else {
             it++;

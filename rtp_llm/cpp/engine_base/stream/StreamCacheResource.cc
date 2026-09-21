@@ -275,6 +275,7 @@ void StreamCacheResource::init(int batch_size) {
 }
 
 void StreamCacheResource::releaseResource() {
+    RTP_LLM_PROFILE_SCOPE("cache.release_resource");
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager) {
         return;
@@ -316,6 +317,7 @@ void StreamCacheResource::releaseResource() {
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
+    RTP_LLM_PROFILE_SCOPE("cache.release_kv_blocks");
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
 
@@ -426,6 +428,7 @@ absl::Status StreamCacheResource::initKVBlock() {
 }
 
 absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
+    RTP_LLM_PROFILE_SCOPE("cache.increment_kv_blocks");
     RTP_LLM_PROFILE_FUNCTION();
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {

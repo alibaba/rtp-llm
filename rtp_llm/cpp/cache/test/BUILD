@@ -167,7 +167,7 @@ cc_test(
         "//rtp_llm/cpp/cache:block_pool",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ],
+    ] + cuda13_torch_link_deps,
     env = {
         "RTP_LLM_PIN_HOST_BLOCK_POOL": "0",
     },

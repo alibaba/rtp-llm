@@ -225,13 +225,22 @@ absl::Status GenerateStream::incrKVBlock() {
 
 void GenerateStream::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
+    RTP_LLM_PROFILE_SCOPE("stream.release_resource");
     // Return KV blocks only after all workers that captured this stream finish.
     // Earlier release could let a worker write into blocks owned by another stream.
     waitPendingAsyncBookkeeping();
     std::lock_guard<std::mutex> lock(*mutex_);
     if (!stream_cache_resource_->isResourceReleased()) {
+        RTP_LLM_PROFILE_SCOPE("stream.release_kv_resource");
         stream_cache_resource_->releaseResource();
     }
+}
+
+GenerateStream::~GenerateStream() {
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("stream.destructor_body(id=%ld)", streamId());
+    reportMetricOnce();
+    releaseResource();
+    stream_magic_ = 0;
 }
 
 void GenerateStream::incPendingAsyncBookkeeping() {
@@ -793,6 +802,7 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 }
 
 StreamState GenerateStream::moveToNext() {
+    RTP_LLM_PROFILE_SCOPE("stream.move_to_next");
     StreamState state;
     bool        should_report_metric = false;
     {
@@ -1106,31 +1116,37 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     const auto& new_tokens     = update_info.new_tokens;
     auto        num_new_tokens = update_info.num_new_tokens;
 
-    int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens,
-                                     begin_time_us_,
-                                     num_new_tokens,
-                                     generate_input_->inputLength(),
-                                     maxTokenNum(),
-                                     vocab_size_,
-                                     usesBeamSearchTokenLayoutForCurrentStep(),
-                                     streamId(),
-                                     error_token_id,
-                                     update_info.src_batch_indices)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
-                               "output token id:" + std::to_string(error_token_id)
-                                   + " out of vocab size: " + std::to_string(vocab_size_));
-        return;
+    {
+        RTP_LLM_PROFILE_SCOPE("output.update_tokens");
+        int error_token_id = 0;
+        if (!complete_token_ids_->update(new_tokens,
+                                         begin_time_us_,
+                                         num_new_tokens,
+                                         generate_input_->inputLength(),
+                                         maxTokenNum(),
+                                         vocab_size_,
+                                         usesBeamSearchTokenLayoutForCurrentStep(),
+                                         streamId(),
+                                         error_token_id,
+                                         update_info.src_batch_indices)) {
+            reportEventWithoutLock(StreamEvents::Error,
+                                   ErrorCode::OUT_OF_VOCAB_RANGE,
+                                   "output token id:" + std::to_string(error_token_id)
+                                       + " out of vocab size: " + std::to_string(vocab_size_));
+            return;
+        }
     }
 
     resizeSubGenerateStatus(update_info.new_tokens.size(0));
 
     // Update processor state before publishing output, including the batch that
     // finishes the stream, so normal and speculative decoding share one lifecycle.
-    if (auto error = updateNormalLogitProcessorStatus(update_info); error.has_value()) {
-        reportEventWithoutLock(StreamEvents::Error, error->code(), error->ToString());
-        return;
+    {
+        RTP_LLM_PROFILE_SCOPE("output.update_processor_state");
+        if (auto error = updateNormalLogitProcessorStatus(update_info); error.has_value()) {
+            reportEventWithoutLock(StreamEvents::Error, error->code(), error->ToString());
+            return;
+        }
     }
 
     // TODO(xinfei.sxf) fix this (update_queue)
@@ -1142,6 +1158,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 
     if (!is_done || stream_cache_resource_->reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
+        RTP_LLM_PROFILE_SCOPE("output.update_kv_blocks");
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {
             reportEventWithoutLock(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
@@ -1281,6 +1298,7 @@ void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_rep
 }
 
 void GenerateStream::reportMetricOnce() {
+    RTP_LLM_PROFILE_SCOPE("stream.report_terminal_metrics");
     if (metrics_reported_) {
         return;
     }

@@ -1,3 +1,4 @@
+import os
 from typing import Any, Optional
 
 import torch
@@ -31,7 +32,13 @@ from rtp_llm.ops.compute_ops import (
 )
 
 # Constants
-DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
+# Large beam-search graph buckets can exceed FlashInfer's default workspace.
+# Allocate the configured capacity before capture so replay never reallocates it.
+DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = int(
+    os.environ.get("PY_FLASHINFER_WORKSPACE_SIZE_MB", "128")
+)
+if DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB <= 0:
+    raise ValueError("PY_FLASHINFER_WORKSPACE_SIZE_MB must be positive")
 
 # FP8 KV cache uses a unit quantization scale: K/V are cast
 # directly to float8_e4m3fn and FA3 FP8 kernels run with scale_q/k/v = 1.0.
