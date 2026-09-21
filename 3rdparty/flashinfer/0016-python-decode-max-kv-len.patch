@@ -1,0 +1,21 @@
+diff --git a/flashinfer/decode.py b/flashinfer/decode.py
+--- a/flashinfer/decode.py
++++ b/flashinfer/decode.py
+@@ -1007,7 +1007,7 @@
+             kv_lens_arr_host = seq_lens.cpu()
+         if self._backend == "trtllm-gen":
+             assert logits_soft_cap == 0.0
+-            self._max_kv_len = max(kv_lens_arr_host).item()
++            self._max_kv_len = kv_lens_arr_host.max().item()
+             required_size = len(kv_lens_arr_host)
+             if required_size > self._kv_lens_buffer.shape[0]:
+                 self._kv_lens_buffer = torch.empty(
+@@ -1050,7 +1050,7 @@
+             )
+             self._plan_info = self._cached_module.plan()  # None
+         elif self.use_tensor_cores:
+-            self._max_kv_len = max(kv_lens_arr_host).item()
++            self._max_kv_len = kv_lens_arr_host.max().item()
+             if self._jit_module is not None:
+                 self._cached_module = self._jit_module
+             else:
