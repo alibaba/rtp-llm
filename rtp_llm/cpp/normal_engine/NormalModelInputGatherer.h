@@ -44,6 +44,10 @@ class NormalModelInputGatherer {
 public:
     explicit NormalModelInputGatherer(const NormalModelInputGathererConfig& config);
 
+    // All-or-none batch plan. Empty means the caller must join bookkeeping
+    // before constructing StreamGroups or gathering from host stream state.
+    StreamGroups::NormalDeviceStates prepareDeviceStateInputs(const std::list<GenerateStreamPtr>& streams) const;
+
     absl::StatusOr<GptModelInputs> gather(const StreamGroups& stream_groups, TensorHolder& host_holder) const;
 
     // Build only the CUDA kv_cache_kernel_block_id tensor in 3-D layout.

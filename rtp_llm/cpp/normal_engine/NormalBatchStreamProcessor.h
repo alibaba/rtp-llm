@@ -24,6 +24,11 @@ public:
                                const CacheConfig&                 cache_config,
                                bool                               warm_up,
                                int                                async_worker_count = 0);
+    virtual ~NormalBatchStreamProcessor() = default;
+
+    StreamGroups::NormalDeviceStates prepareDeviceStateInputs(const std::list<GenerateStreamPtr>& streams) const {
+        return model_input_gatherer_->prepareDeviceStateInputs(streams);
+    }
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,

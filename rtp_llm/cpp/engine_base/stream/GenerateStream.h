@@ -736,6 +736,9 @@ public:
         // scheduler can drive incrKVBlock without racing the async worker.
         // -1 = unset (first iter / cleared).
         int next_real_seq_len = -1;
+        // Read the mapping before launching dispatch, never while the worker
+        // clears it. Only fixed, non-beam streams with no remapping may overlap.
+        bool kv_cache_update_pending = false;
     };
 
     uint64_t setNormalAsyncDeviceState(NormalAsyncDeviceState state) {
