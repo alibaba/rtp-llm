@@ -176,6 +176,26 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_pb.cache_key_block_size, 1024)
         self.assertEqual(request_pb.priority, 50)
 
+    async def test_schedule_payload_priority_uses_config_and_validates_range(self):
+        for headers, config_priority, expected in [
+            ({"X-DashScope-Inner-QoS-Level": "70"}, 77, 70),
+            ({}, 77, 77),
+            ({"x-dashscope-inner-qos-level": "101"}, 77, 77),
+            ({"x-dashscope-inner-qos-level": "bad"}, 101, 50),
+        ]:
+            with self.subTest(headers=headers, config_priority=config_priority):
+                client = _CaptureMasterClient()
+                request = _FakeInput(headers=headers)
+                request.generate_config.qos_priority = config_priority
+                await client.get_backend_role_addrs(
+                    block_cache_keys=[1],
+                    cache_key_block_size=1024,
+                    input=request,
+                    request_id=101,
+                    input_pb=_FakeInputPB(),
+                )
+                self.assertEqual(client.calls[0]["request_pb"].priority, expected)
+
     async def test_schedule_payload_priority_from_qos_header(self):
         client = _CaptureMasterClient()
 
