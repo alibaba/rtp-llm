@@ -8,23 +8,14 @@ import lombok.Setter;
 @Getter
 @Setter
 public class DispatchConfig {
-    public enum FeAllocation { MASTER, LOCAL }
-
-    /** Empty discovery may retain the previous pool for this long; zero disables retention. */
-    private long discoveryFailureGraceMs = 300_000;
-
     private String subBatch = "count:5";
     private String fePoolServiceId = "";
 
     /** Passed to Reactor Netty responseTimeout for each FE sub-call. */
     private int batchTimeoutMs = 30_000;
 
-    /** The whole sub-call, including response body, is capped at batchTimeoutMs + bodyReadMarginMs. */
-    private long bodyReadMarginMs = 30_000;
-
     private String probePath = "/frontend_health";
 
-    private FeAllocation feAllocation = FeAllocation.MASTER;
     private boolean preAssignBe = true;
 
     /**
@@ -34,12 +25,6 @@ public class DispatchConfig {
      */
     @JsonIgnore
     private String trustedRoutingToken = "";
-
-    /** Aggregate retained response bytes per batch, in addition to the per-FE response cap. */
-    private long maxAggregateResponseBytes = 128L * 1024 * 1024;
-
-    /** Aggregate outbound bytes, including the envelope repeated across chunks. */
-    private long maxAggregateRequestBytes = 128L * 1024 * 1024;
 
     /** Derived at startup; excluded from JSON binding despite Lombok's generated accessors. */
     @JsonIgnore

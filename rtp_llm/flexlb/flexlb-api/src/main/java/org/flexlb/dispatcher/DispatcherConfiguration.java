@@ -63,12 +63,7 @@ public class DispatcherConfiguration {
         URI probe = URI.create(c.getProbePath());
         Assert.isTrue(c.getProbePath().startsWith("/") && probe.getRawAuthority() == null && probe.getRawFragment() == null,
                 "dispatch.probe-path must be an absolute HTTP path without authority or fragment");
-        Assert.notNull(c.getFeAllocation(), "dispatch.fe-allocation must be master or local");
         Assert.isTrue(c.getBatchTimeoutMs() > 0, "dispatch.batch-timeout-ms must be > 0");
-        Assert.isTrue(c.getBodyReadMarginMs() >= 0, "dispatch.body-read-margin-ms must be >= 0");
-        Assert.isTrue(c.getDiscoveryFailureGraceMs() >= 0, "dispatch.discovery-failure-grace-ms must be >= 0");
-        Assert.isTrue(c.getMaxAggregateResponseBytes() > 0, "dispatch.max-aggregate-response-bytes must be > 0");
-        Assert.isTrue(c.getMaxAggregateRequestBytes() > 0, "dispatch.max-aggregate-request-bytes must be > 0");
         Assert.isTrue(!c.isPreAssignBe() || !c.getTrustedRoutingToken().isBlank(),
                 "DISPATCH_ROUTING_TOKEN must be non-blank when preAssignBe is enabled");
         c.setSubBatchSpec(SubBatchSpec.parse(c.getSubBatch()));

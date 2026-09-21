@@ -15,7 +15,6 @@ import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.dispatcher.DispatchConfig.FeAllocation;
 import org.flexlb.enums.EngineType;
 import org.flexlb.service.BatchScheduleCoordinator;
 import org.junit.jupiter.api.AfterEach;
@@ -24,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ReactorHttpHandlerAdapter;
 import org.springframework.test.web.reactive.server.WebTestClient;
@@ -38,6 +38,7 @@ import reactor.netty.resources.ConnectionProvider;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -45,9 +46,12 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -59,8 +63,8 @@ class DispatcherE2ETest {
     private final DispatchConfig cfg = new DispatchConfig();
     private final FlexlbConfig lb = new FlexlbConfig();
     private final BatchScheduleCoordinator coordinator = mock(BatchScheduleCoordinator.class);
-    private boolean policy;
     private boolean allocationFails;
+    private FeClient feClient;
     private WebTestClient client;
     private DisposableServer server;
     private ConnectionProvider connections;
@@ -153,12 +157,11 @@ class DispatcherE2ETest {
     }
 
     @ParameterizedTest
-    @CsvSource({"MASTER,true,false", "MASTER,false,false", "LOCAL,true,false", "LOCAL,false,false", "MASTER,true,true"})
-    void allocationDimensionsAppearOnTheFeWire(FeAllocation mode, boolean preassign, boolean groupPolicy) throws Exception {
+    @CsvSource({"true,false,generate_config", "false,false,generate_config", "true,true,generate_config",
+            "true,false,generation_config"})
+    void masterAllocationAndOptionalBeAssignmentAppearOnTheFeWire(boolean preassign, boolean groupPolicy, String configKey) throws Exception {
         cfg.setPreAssignBe(preassign);
-        cfg.setFeAllocation(mode);
-        policy = groupPolicy;
-        if (policy) {
+        if (groupPolicy) {
             TrafficPolicyConfig.Target target = new TrafficPolicyConfig.Target();
             target.setGroup("tenant");
             target.setWeight(1);
@@ -172,27 +175,19 @@ class DispatcherE2ETest {
         startDispatcher(1);
         JSONArray preview = preview("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", "split", 2);
         assertFalse(preview.toJSONString().contains("role_addrs"));
-        String configKey = mode == FeAllocation.MASTER ? "generate_config" : "generation_config";
         JSONObject body = JSONObject.of("prompt_batch", JSONArray.of("a", "b", "c"));
-        if (mode == FeAllocation.LOCAL) {
-            body.put(configKey, JSONObject.of("temperature", 0.5));
-        }
+        body.put(configKey, JSONObject.of("temperature", 0.5));
         post("/batch_infer", body.toJSONString(), 200);
         for (int i = 0; i < 3; i++) {
             JSONObject chunk = takeChunk(i, "/batch_infer", "prompt_batch", 1);
             assertEquals(String.valueOf((char) ('a' + i)), chunk.getJSONArray("prompt_batch").getString(0));
             assertFalse(chunk.containsKey("pre_assigned_be"));
-            Object expected = preassign && !policy ? JSONArray.of(JSONObject.of("role", "PDFUSION", "ip", "10.0.0." + (i + 1),
+            Object expected = preassign && !groupPolicy ? JSONArray.of(JSONObject.of("role", "PDFUSION", "ip", "10.0.0." + (i + 1),
                     "http_port", 23840, "grpc_port", 23841)) : null;
             JSONObject config = chunk.getJSONObject(configKey);
             assertEquals(expected, config == null ? null : config.get("role_addrs"));
         }
-        if (mode == FeAllocation.MASTER || preassign && !policy) {
-            verify(coordinator).schedule(argThat(r -> r.isAssignBe() == (preassign && !policy)
-                    && r.isAssignFe() == (mode == FeAllocation.MASTER)));
-        } else {
-            verifyNoInteractions(coordinator);
-        }
+        verify(coordinator).schedule(argThat(r -> r.isAssignBe() == (preassign && !groupPolicy) && r.isAssignFe()));
     }
 
     @ParameterizedTest
@@ -212,30 +207,37 @@ class DispatcherE2ETest {
     }
 
     @ParameterizedTest
-    @CsvSource({"request,1,413", "response,1,413", "count,1,413", "request,44,200", "request,43,413"})
-    void requestAndResponseBudgetsEnforceTheWireBoundary(String limit, long bytes, int status) {
+    @ValueSource(strings = {"request", "count"})
+    void oversizedBatchesFailBeforeAllocation(String limit) {
         cfg.setPreAssignBe(false);
-        boolean responseLimit = limit.equals("response");
+        String input = "{\"prompt_batch\":[\"a\",\"b\"]}";
         if (limit.equals("count")) {
             lb.getRouter().setBatchScheduleMaxCount(1);
-        } else if (responseLimit) {
-            cfg.setMaxAggregateResponseBytes(1);
         } else {
-            cfg.setMaxAggregateRequestBytes(bytes);
+            // Small input, but repeating its envelope across 1,000 chunks exceeds the fixed 128 MiB budget.
+            input = JSONObject.of("prompt_batch", Collections.nCopies(1000, "a"),
+                    "metadata", "x".repeat(140 * 1024)).toJSONString();
         }
-        reply(0, 200, "{\"response_batch\":[1]}");
-        reply(1, 200, "{\"response_batch\":[2]}");
         startDispatcher(1);
-        post("/_dryrun/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", responseLimit ? 200 : 413);
-        if (limit.equals("request") && bytes == 1) {
-            post("/_dryrun", "{}", 413);
-            post("/_dryrun/", "{\"prompt_batch\":[]}", 413);
-        }
+        post("/_dryrun/batch_infer", input, 413);
+        post("/batch_infer", input, 413);
         verifyNoInteractions(coordinator);
         assertNoFeTraffic();
-        post("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", status);
-        assertEquals(responseLimit || status == 200 ? 1 : 0, frontends.get(0).getRequestCount());
-        assertEquals(status == 200 ? 1 : 0, frontends.get(1).getRequestCount());
+    }
+
+    @Test
+    void exhaustedResponseBudgetReturns413() {
+        cfg.setPreAssignBe(false);
+        reply(0, 200, "{\"response_batch\":[1]}");
+        startDispatcher(1);
+        doAnswer(call -> {
+            // Exhaust the real budget without allocating a 128 MiB response fixture.
+            AtomicByteBudget.Reservation reservation = call.getArgument(5);
+            assertTrue(reservation.tryReserve(FanoutService.MAX_AGGREGATE_BYTES));
+            return call.callRealMethod();
+        }).when(feClient).postBytes(any(), any(), any(), any(), any(), any());
+        assertEquals("batch_response_too_large", post("/batch_infer", "{\"prompt_batch\":[\"a\"]}", 413).getString("error"));
+        assertEquals(1, frontends.get(0).getRequestCount());
     }
 
     @Test
@@ -275,7 +277,8 @@ class DispatcherE2ETest {
         cfg.setSubBatchSpec(SubBatchSpec.parse(cfg.getSubBatch()));
         connections = ConnectionProvider.builder("e2e").build();
         DispatcherMetricsReporter metrics = DispatcherTestSupport.noopMetrics();
-        FanoutService fanout = new FanoutService(new FeClient(WebClient.builder(), connections, cfg), metrics, cfg);
+        feClient = spy(new FeClient(WebClient.builder(), connections, cfg));
+        FanoutService fanout = new FanoutService(feClient, metrics);
         when(coordinator.schedule(any())).thenAnswer(call -> {
             if (allocationFails) {
                 return Mono.just(BatchScheduleResponse.error(StrategyErrorType.NO_AVAILABLE_WORKER, "no FE endpoints available"));
@@ -290,7 +293,7 @@ class DispatcherE2ETest {
             return Mono.just(BatchScheduleResponse.success(targets));
         });
         PassthroughClient passthrough = new PassthroughClient(WebClient.create(), pool, metrics, cfg);
-        BatchHandler handler = new BatchHandler(fanout, cfg, coordinator, passthrough, metrics, DispatcherTestSupport.configService(lb), pool, Schedulers.immediate());
+        BatchHandler handler = new BatchHandler(fanout, cfg, coordinator, passthrough, metrics, DispatcherTestSupport.configService(lb), Schedulers.immediate());
         DispatchRouter router = new DispatchRouter(handler, passthrough);
         // A real transport is required to exercise lazy DataBuffer bodies and their ownership.
         server = HttpServer.create().port(0).handle(new ReactorHttpHandlerAdapter(RouterFunctions.toHttpHandler(router.routes()))).bindNow();

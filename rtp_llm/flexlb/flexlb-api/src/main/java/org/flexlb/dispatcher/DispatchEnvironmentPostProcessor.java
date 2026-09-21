@@ -7,6 +7,7 @@ import org.springframework.core.env.MapPropertySource;
 import org.springframework.core.env.StandardEnvironment;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -15,12 +16,13 @@ public class DispatchEnvironmentPostProcessor implements EnvironmentPostProcesso
     @Override
     public void postProcessEnvironment(ConfigurableEnvironment environment, SpringApplication application) {
         Map<String, Object> properties = new HashMap<>();
-        System.getenv().forEach((name, value) -> {
-            // Credentials stay outside Spring properties; the removed JSON configuration is not supported.
-            if (name.startsWith("DISPATCH_") && !name.equals("DISPATCH_ROUTING_TOKEN") && !name.equals("DISPATCH_CONFIG")) {
-                properties.put("dispatch." + name.substring("DISPATCH_".length()).toLowerCase(Locale.ROOT).replace('_', '-'), value);
+        // Credentials are loaded separately; only the supported deployment settings enter Spring properties.
+        for (String name : List.of("fe-pool-service-id", "sub-batch", "pre-assign-be", "batch-timeout-ms", "probe-path")) {
+            String value = System.getenv("DISPATCH_" + name.toUpperCase(Locale.ROOT).replace('-', '_'));
+            if (value != null) {
+                properties.put("dispatch." + name, value);
             }
-        });
+        }
         // Keep normal precedence: command line / system properties > environment > configuration files.
         environment.getPropertySources().addAfter(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
                 new MapPropertySource("dispatchEnvironment", properties));

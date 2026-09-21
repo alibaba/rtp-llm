@@ -2,7 +2,6 @@ package org.flexlb.dispatcher;
 
 import com.alibaba.fastjson2.JSONObject;
 import com.google.common.util.concurrent.RateLimiter;
-import org.flexlb.dispatcher.DispatchConfig.FeAllocation;
 import org.flexlb.util.Logger;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
@@ -19,23 +18,19 @@ import java.util.List;
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class FanoutService {
 
-    private static final int FANOUT_MAX_CONCURRENCY = 64;
+    /** Independent per-batch ceilings for outbound requests and retained FE responses. */
+    static final long MAX_AGGREGATE_BYTES = 128L * 1024 * 1024;
+
+    private static final int FANOUT_CONCURRENCY = (int) (MAX_AGGREGATE_BYTES / FeClient.MAX_RESPONSE_BYTES);
 
     private final FeClient feClient;
     private final DispatcherMetricsReporter metricsReporter;
-    private final FeAllocation feAllocationMode;
-    private final long maxAggregateResponseBytes;
-    private final long maxAggregateRequestBytes;
     /** During an FE outage the fanout path fails per chunk; cap the WARN stream at 1/s. */
     private final RateLimiter failureWarn = RateLimiter.create(1);
 
-    public FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter,
-                         DispatchConfig config) {
+    public FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter) {
         this.feClient = feClient;
         this.metricsReporter = metricsReporter;
-        this.feAllocationMode = config.getFeAllocation();
-        this.maxAggregateResponseBytes = config.getMaxAggregateResponseBytes();
-        this.maxAggregateRequestBytes = config.getMaxAggregateRequestBytes();
     }
 
     public Mono<List<SubBatchResult>> dispatchChunks(String fePath,
@@ -55,12 +50,12 @@ public class FanoutService {
             start += chunkSize;
         }
         return Mono.defer(() -> {
-            AtomicByteBudget responseBudget = new AtomicByteBudget(maxAggregateResponseBytes);
-            AtomicByteBudget requestBudget = new AtomicByteBudget(maxAggregateRequestBytes);
+            AtomicByteBudget responseBudget = new AtomicByteBudget(MAX_AGGREGATE_BYTES);
+            AtomicByteBudget requestBudget = new AtomicByteBudget(MAX_AGGREGATE_BYTES);
             return Flux.fromIterable(plans)
                     .flatMapSequential(plan -> dispatchOne(fePath, plan, spec, inboundHeaders,
                                     rawQuery, responseBudget, requestBudget),
-                            effectiveConcurrency())
+                            FANOUT_CONCURRENCY)
                     .collectList();
         });
     }
@@ -73,8 +68,7 @@ public class FanoutService {
         if (plan.feUrl() == null || plan.feUrl().isBlank()) {
             metricsReporter.reportChunk(DispatcherMetricsReporter.CHUNK_NO_FE, 0);
             if (failureWarn.tryAcquire()) {
-                Logger.warn("chunk has no {} FE assignment: size={}",
-                        feAllocationMode.toString().toLowerCase(java.util.Locale.ROOT), plan.chunkSize());
+                Logger.warn("chunk has no master FE assignment: size={}", plan.chunkSize());
             }
             return Mono.just(SubBatchResult.failed(plan.chunkSize(), plan.startIndex(), 0));
         }
@@ -118,11 +112,6 @@ public class FanoutService {
                     plan.feUrl(), path, plan.chunkSize(), reason);
         }
         return Mono.just(SubBatchResult.failed(plan.chunkSize(), plan.startIndex(), status));
-    }
-
-    private int effectiveConcurrency() {
-        long byWorstCaseResponse = maxAggregateResponseBytes / FeClient.MAX_RESPONSE_BYTES;
-        return (int) Math.max(1, Math.min(FANOUT_MAX_CONCURRENCY, byWorstCaseResponse));
     }
 
     /** Bounded failure-reason category for the {@code reason} metric tag (keeps cardinality low). */

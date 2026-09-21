@@ -33,6 +33,9 @@ public class FeClient {
     /** Hard in-memory ceiling for one FE sub-batch response. */
     static final int MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
+    /** Extra time for the body; the entire sub-call is still bounded even if the FE keeps sending data. */
+    private static final long BODY_READ_MARGIN_MS = 30_000;
+
     private final WebClient webClient;
     private final Duration overallTimeout;
     private final String trustedRoutingToken;
@@ -50,7 +53,7 @@ public class FeClient {
         this.webClient = builder.clone()
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
                 .build();
-        this.overallTimeout = Duration.ofMillis(cfg.getBatchTimeoutMs() + cfg.getBodyReadMarginMs());
+        this.overallTimeout = Duration.ofMillis(cfg.getBatchTimeoutMs() + BODY_READ_MARGIN_MS);
         this.trustedRoutingToken = cfg.isPreAssignBe() ? cfg.getTrustedRoutingToken() : "";
     }
 

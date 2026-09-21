@@ -9,7 +9,6 @@ import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dispatcher.DispatchConfig.FeAllocation;
 import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.service.BatchScheduleCoordinator;
 import org.flexlb.util.Logger;
@@ -26,6 +25,8 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.flexlb.dispatcher.FanoutService.MAX_AGGREGATE_BYTES;
+
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class BatchHandler {
@@ -36,7 +37,6 @@ public class BatchHandler {
     private final PassthroughClient passthroughClient;
     private final DispatcherMetricsReporter metricsReporter;
     private final FlexlbConfig loadBalanceConfig;
-    private final FePool fePool;
     private final Scheduler cpuScheduler;
 
     public BatchHandler(FanoutService fanoutService,
@@ -45,7 +45,6 @@ public class BatchHandler {
                         PassthroughClient passthroughClient,
                         DispatcherMetricsReporter metricsReporter,
                         ConfigService configService,
-                        FePool fePool,
                         @Qualifier("dispatcherCpuScheduler") Scheduler cpuScheduler) {
         this.cfg = cfg;
         this.fanoutService = fanoutService;
@@ -53,7 +52,6 @@ public class BatchHandler {
         this.passthroughClient = passthroughClient;
         this.metricsReporter = metricsReporter;
         this.loadBalanceConfig = configService.loadBalanceConfig();
-        this.fePool = fePool;
         this.cpuScheduler = cpuScheduler;
     }
 
@@ -131,8 +129,8 @@ public class BatchHandler {
                             + loadBalanceConfig.getRouter().getBatchScheduleMaxCount() + " (router.batchScheduleMaxCount)");
         }
         // Charge repeated envelopes before allocating targets or materializing chunks.
-        if (batch.projectedBytes() > cfg.getMaxAggregateRequestBytes()) {
-            throw new AggregateRequestTooLargeException(cfg.getMaxAggregateRequestBytes());
+        if (batch.projectedBytes() > MAX_AGGREGATE_BYTES) {
+            throw new AggregateRequestTooLargeException(MAX_AGGREGATE_BYTES);
         }
 
         if (dryRun) {
@@ -140,8 +138,7 @@ public class BatchHandler {
         }
 
         boolean assignBe = cfg.isPreAssignBe() && spec.isPreAssignable() && preAssignmentAllowed;
-        boolean assignFe = cfg.getFeAllocation() == FeAllocation.MASTER;
-        return resolveTargets(chunkCount, assignBe, assignFe)
+        return resolveTargets(chunkCount, assignBe)
                 .publishOn(cpuScheduler)
                 .flatMap(allocation -> {
                     if (!allocation.isSuccess()) {
@@ -152,8 +149,7 @@ public class BatchHandler {
                     }
                     List<BatchScheduleTarget> targets = allocation.getServerStatus();
                     List<JSONObject> chunkBodies = batch.chunks(assignBe ? targets : List.of());
-                    List<String> preAssignedFeUrls = assignFe
-                            ? targets.stream().map(BatchScheduleTarget::getFeUrl).toList() : localFeUrls(chunkCount);
+                    List<String> preAssignedFeUrls = targets.stream().map(BatchScheduleTarget::getFeUrl).toList();
                     return fanoutService.dispatchChunks(
                                     spec == BatchEndpointSpec.ROOT ? BatchEndpointSpec.BATCH_INFER.getPath() : spec.getPath(), chunkBodies,
                                     preAssignedFeUrls, spec,
@@ -168,19 +164,10 @@ public class BatchHandler {
     /** Preview uses the outbound byte budget and stops before any target allocation. */
     private Mono<ServerResponse> preview(String mode, List<JSONObject> chunks) {
         byte[] body = BatchBodyParser.serialize(JSONObject.of("mode", mode, "chunk_count", chunks.size(), "chunks", chunks));
-        if (body.length > cfg.getMaxAggregateRequestBytes()) {
-            throw new AggregateRequestTooLargeException(cfg.getMaxAggregateRequestBytes());
+        if (body.length > MAX_AGGREGATE_BYTES) {
+            throw new AggregateRequestTooLargeException(MAX_AGGREGATE_BYTES);
         }
         return DispatcherResponses.jsonBytes(200, body);
-    }
-
-    private List<String> localFeUrls(int count) {
-        try {
-            return fePool.nextBatch(count);
-        } catch (RuntimeException unavailable) {
-            // Empty assignments retain one failed result per chunk, just as master failures do.
-            return List.of();
-        }
     }
 
     private Mono<ServerResponse> badRequest(String message) {
@@ -192,14 +179,11 @@ public class BatchHandler {
     }
 
     private Mono<BatchScheduleResponse> resolveTargets(
-            int chunkCount, boolean assignBe, boolean assignFe) {
-        if (!assignBe && !assignFe) {
-            return Mono.just(BatchScheduleResponse.success(List.of()));
-        }
+            int chunkCount, boolean assignBe) {
         BatchScheduleRequest request = new BatchScheduleRequest();
         request.setBatchCount(chunkCount);
         request.setAssignBe(assignBe);
-        request.setAssignFe(assignFe);
+        request.setAssignFe(true);
         return batchScheduleCoordinator.schedule(request);
     }
 }

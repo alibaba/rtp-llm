@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 import org.springframework.core.io.buffer.NettyDataBufferFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -20,6 +21,7 @@ import reactor.test.StepVerifier;
 
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -52,17 +54,14 @@ class FeClientTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void headerAndWholeBodyDeadlinesBoundEachCall(boolean trickle) throws Exception {
+    @Test
+    void headerDeadlineBoundsEachCall() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
-            server.enqueue(trickle ? new MockResponse().setBody("x".repeat(64)).throttleBody(1, 30, TimeUnit.MILLISECONDS)
-                    : new MockResponse().setHeadersDelay(2, TimeUnit.SECONDS).setBody("{}"));
+            server.enqueue(new MockResponse().setHeadersDelay(2, TimeUnit.SECONDS).setBody("{}"));
             ConnectionProvider connections = ConnectionProvider.builder("fe-deadline-test").build();
             try {
                 DispatchConfig cfg = new DispatchConfig();
                 cfg.setBatchTimeoutMs(300);
-                cfg.setBodyReadMarginMs(200);
                 FeClient client = new FeClient(WebClient.builder(), connections, cfg);
                 StepVerifier.create(client.postBytes(server.url("/").toString(), "/batch_infer",
                         new byte[0], new HttpHeaders(), null, new AtomicByteBudget(FeClient.MAX_RESPONSE_BYTES).newReservation())).expectError().verify(Duration.ofSeconds(3));
@@ -70,6 +69,21 @@ class FeClientTest {
                 connections.disposeLater().block();
             }
         }
+    }
+
+    @Test
+    void wholeBodyDeadlineStopsAnOngoingResponse() {
+        DispatchConfig cfg = new DispatchConfig();
+        cfg.setBatchTimeoutMs(300);
+        StepVerifier.withVirtualTime(() -> {
+            var builder = WebClient.builder().exchangeFunction(request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+                    .body(Flux.interval(Duration.ofMillis(30))
+                            .map(tick -> DefaultDataBufferFactory.sharedInstance.wrap(new byte[]{1}))).build()));
+            FeClient client = new FeClient(builder, ConnectionProvider.newConnection(), cfg);
+            return client.postBytes("http://fe", "/batch_infer", new byte[0], new HttpHeaders(), null,
+                    new AtomicByteBudget(FeClient.MAX_RESPONSE_BYTES).newReservation());
+        }).expectSubscription().expectNoEvent(Duration.ofMillis(30_299)).thenAwait(Duration.ofMillis(1))
+                .expectError(TimeoutException.class).verify(Duration.ofSeconds(3));
     }
 
     @ParameterizedTest

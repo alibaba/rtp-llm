@@ -36,13 +36,15 @@ import java.util.function.LongSupplier;
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class FePool {
+    /** Retain the last nonempty discovery snapshot for five minutes; health probes continue. */
+    private static final long DISCOVERY_FAILURE_GRACE_NANOS = TimeUnit.MINUTES.toNanos(5);
+
     private final ServiceDiscovery discovery;
     private final WebClient probeClient;
     private final DispatchConfig cfg;
     private final DispatcherMetricsReporter metrics;
     private final LongSupplier clock;
     private final long lookupTimeoutMs;
-    private final long graceNanos;
     private final AtomicReference<List<String>> urls = new AtomicReference<>(List.of());
     private final ConcurrentHashMap<String, AtomicInteger> failures = new ConcurrentHashMap<>();
     private final AtomicLong cursor = new AtomicLong();
@@ -68,7 +70,6 @@ public class FePool {
         this.metrics = metrics;
         this.clock = clock;
         this.lookupTimeoutMs = lookupTimeoutMs;
-        this.graceNanos = TimeUnit.MILLISECONDS.toNanos(cfg.getDiscoveryFailureGraceMs());
     }
 
     @PostConstruct
@@ -110,7 +111,7 @@ public class FePool {
                 }
             } else {
                 List<String> previous = urls.get();
-                if (!previous.isEmpty() && clock.getAsLong() - lastNonEmpty >= graceNanos) {
+                if (!previous.isEmpty() && clock.getAsLong() - lastNonEmpty >= DISCOVERY_FAILURE_GRACE_NANOS) {
                     if (urls.compareAndSet(previous, List.of())) {
                         Logger.warn("FE discovery remained empty beyond grace; dropping {} hosts", previous.size());
                     }

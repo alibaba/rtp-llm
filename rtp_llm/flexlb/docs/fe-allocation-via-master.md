@@ -18,14 +18,25 @@ Send `{"batch_count":5,"assign_be":true,"assign_fe":false}` for BE-only placemen
 
 ```sh
 export DISPATCH_FE_POOL_SERVICE_ID=your-fe-discovery-service
-export DISPATCH_SUB_BATCH=count:5
-export DISPATCH_FE_ALLOCATION=master
 export DISPATCH_ROUTING_TOKEN=your-shared-token
 java -jar flexlb-api.jar
 ```
-Set these variables in the platform's advanced environment settings. Ordinary Dispatcher settings also support native Spring `dispatch.*` command-line or configuration-file properties. Environment names use `DISPATCH_` followed by the uppercase property name with hyphens replaced by underscores; for example, `DISPATCH_PRE_ASSIGN_BE` and `DISPATCH_BATCH_TIMEOUT_MS`. Command-line properties override environment values, which override configuration-file values; all use the same binding and validation. This support is limited to Dispatcher and does not restore removed Master variables or `DISPATCH_CONFIG`. The FE discovery name enables `/dispatcher` on the existing listener. The shared credential `DISPATCH_ROUTING_TOKEN` is read directly from the environment on both Master and FE; keep it out of command-line arguments, which Master logs at startup.
+Set these two variables in the platform's advanced environment settings to use the defaults. Dispatcher exposes only the following settings:
 
-`count:N` balances at most N nonempty chunks; `size:N` caps items per chunk. `master` uses master FE allocation; `local` uses the local cursor. Discovered FE addresses are deduplicated before publication. Empty discovery can retain the old pool within `discoveryFailureGraceMs` (default 300000; zero disables retention); health probes continue. HTTP input defaults to 5MB via the `spring.codec.max-in-memory-size` property in [application.yml](../flexlb-api/src/main/resources/application.yml); aggregate requests/responses default to 128 MiB each, and each FE response to 16 MiB. Request accounting includes repeated envelopes; aggregate excess returns 413. Invalid allocation returns 400; unavailable master assignments return 503 without local fallback.
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `DISPATCH_FE_POOL_SERVICE_ID` | Unset: disabled | FE service discovery name; enables `/dispatcher` |
+| `DISPATCH_ROUTING_TOKEN` | Empty | Shared credential on Master and receiving FEs; required for BE preassignment |
+| `DISPATCH_SUB_BATCH` | `count:5` | `count:N` balances at most N nonempty chunks; `size:N` or bare N caps items per chunk |
+| `DISPATCH_PRE_ASSIGN_BE` | `true` | Preassign a BE per eligible chunk |
+| `DISPATCH_BATCH_TIMEOUT_MS` | `30000` | FE response read timeout in milliseconds |
+| `DISPATCH_PROBE_PATH` | `/frontend_health` | Health endpoint; use `/health` for FEs exposing that route |
+
+The five ordinary settings also support native Spring `dispatch.*` command-line or configuration-file properties; for example, `dispatch.sub-batch` and `dispatch.pre-assign-be`. Command-line properties override environment values, which override configuration-file values; all use the same binding and validation. This support is limited to Dispatcher and does not restore removed Master variables or `DISPATCH_CONFIG`. The credential `DISPATCH_ROUTING_TOKEN` is read directly from the environment on both Master and FE; keep it out of command-line arguments, which Master logs at startup.
+
+Batch FE allocation always uses the Master batch-schedule coordinator, including when BE preassignment is off. There is no local allocation mode or fallback. Invalid allocation returns 400; unavailable master assignments return 503. Streaming and other passthrough requests retain their existing local FE routing.
+
+Internal limits retain their previous defaults and are no longer configuration options: the whole FE sub-call is capped at `batch-timeout-ms + 30000` milliseconds; empty discovery retains the old pool for five minutes while health probes continue; aggregate requests and responses each have an independent 128 MiB limit, and each FE response has a 16 MiB limit. Fanout concurrency remains eight. Request accounting includes repeated envelopes; aggregate excess returns 413. Remove the old FE allocation mode, body-read margin, discovery grace and aggregate-byte settings when upgrading. HTTP input defaults to 5MB via the server's existing `spring.codec.max-in-memory-size` property in [application.yml](../flexlb-api/src/main/resources/application.yml). Discovered FE addresses are deduplicated before publication.
 
 BE preassignment defaults on for single-stage PDFUSION batch inference with round-robin placement per chunk. Configure a matching nonempty `DISPATCH_ROUTING_TOKEN` on dispatcher and receiving FEs; dispatcher startup fails without it unless `--dispatch.pre-assign-be=false`. Set that property to false for multi-role deployments, FEs without preassignment support, or workloads requiring master admission/accounting: placement reserves no LLM capacity. Setting the token on an FE enables credential checks for preassigned `role_addrs` on both raw inference routes; FEs without the token retain mainline direct-routing behavior. Group routing disables preassignment. Unassigned LLM items use mainline scheduling. For single-stage PDFUSION, configure its normal scheduling with `scheduler.type=DIRECT` and `dispatcher.type=NON_BATCH` as shown in the [Master configuration guide](../README.md#scheduler-ordering-decision-and-dispatcher). The schema-v3 `dispatcher.type=BATCH` setting controls Master-to-Prefill `EnqueueBatch` delivery; it is separate from HTTP `/dispatcher` fanout and FE-to-BE `BatchGenerateCall`. Batch RPC requires a shared PDFUSION target or static local PDFUSION; item deadlines/order are preserved and failed RPCs are not replayed.
 
@@ -37,7 +48,7 @@ Mainline election remains disabled by default, giving independent cursors. For a
 ```sh
 export FLEXLB_SYNC_CONSISTENCY_CONFIG='{"needConsistency":true,"masterElectType":"ZOOKEEPER","zookeeperConfig":{"zkHost":"your-zookeeper:2181","zkTimeoutMs":10000}}'
 ```
-Followers forward once; unknown leaders, self-forwarding, repeated hops and transport failures fail without local allocation. Upgrade every potential master to support `/rtp_llm/batch_schedule` before enabling master FE allocation.
+Followers forward once; unknown leaders, self-forwarding, repeated hops and transport failures fail without local allocation. Upgrade every potential master to support `/rtp_llm/batch_schedule` before enabling Dispatcher.
 
 ## Shutdown
 
