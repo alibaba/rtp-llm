@@ -33,10 +33,11 @@ FIELDS = {
     "drain_timeout_ms",
     "topology_timeout_s",
 }
+OPTIONAL_FIELDS = {"intermediate_p", "intermediate_hold_s"}
 
 
 def validate(params, plan):
-    p = _validate(params, plan, FIELDS, FIELDS)
+    p = _validate(params, plan, FIELDS | OPTIONAL_FIELDS, FIELDS)
     plan.reference(p["flow"], "java_flow")
     if plan.environment.get("discovery") != "discovery_file":
         raise ValueError("scale-in requires dynamic discovery_file")
@@ -48,6 +49,27 @@ def validate(params, plan):
             raise ValueError(k + " must be a positive integer")
     if not 1 <= p["target_p"] < plan.environment["n_prefill"] <= 512:
         raise ValueError("scale-in requires fewer target P and at most 512 initial P")
+    if OPTIONAL_FIELDS & p.keys():
+        if not OPTIONAL_FIELDS <= p.keys():
+            raise ValueError(
+                "intermediate P and hold duration must be specified together"
+            )
+        if (
+            type(p["intermediate_p"]) is not int
+            or not p["target_p"]
+            < p["intermediate_p"]
+            < plan.environment["n_prefill"]
+        ):
+            raise ValueError(
+                "intermediate P must lie strictly between initial and target P"
+            )
+        hold = p["intermediate_hold_s"]
+        if (
+            type(hold) not in (int, float)
+            or not math.isfinite(hold)
+            or hold < p["baseline_s"]
+        ):
+            raise ValueError("intermediate hold must cover a full baseline window")
     for k in (
         "qps_tolerance",
         "baseline_min_hit",
@@ -214,6 +236,63 @@ def observe(ctx, p, deadline):
                     break
             if t >= p["warmup_timeout_s"]:
                 raise ValueError("stable warm baseline not reached")
+        intermediate_removals = []
+        if "intermediate_p" in p:
+            intermediate = p["intermediate_p"]
+            event("intermediate_withdraw_start")
+            with ThreadPoolExecutor(
+                max_workers=len(initial) - intermediate,
+                thread_name_prefix="scale-in-intermediate",
+            ) as intermediate_pool:
+                intermediate_futures = [
+                    intermediate_pool.submit(
+                        _http,
+                        ctx.ops,
+                        "remove_engine",
+                        deadline,
+                        dict(
+                            engine=name,
+                            mode="graceful",
+                            drain_timeout_ms=p["drain_timeout_ms"],
+                        ),
+                    )
+                    for name in initial[intermediate:]
+                ]
+                topology_end = ctx.clock() + p["topology_timeout_s"]
+                while True:
+                    deadline.sleep(p["sample_s"])
+                    row = sample()
+                    if row["master_p"] == intermediate:
+                        event("intermediate_topology_observed")
+                        break
+                    if ctx.clock() >= topology_end:
+                        raise ValueError("intermediate topology did not converge")
+                hold_end = row["t"] + p["intermediate_hold_s"]
+                while row["t"] < hold_end:
+                    deadline.sleep(min(p["sample_s"], hold_end - row["t"]))
+                    row = sample()
+                    if row["master_p"] != intermediate:
+                        raise ValueError(
+                            "intermediate topology changed during hold"
+                        )
+                evidence["intermediate_window"] = window(
+                    evidence["samples"],
+                    row["t"] - p["baseline_s"],
+                    row["t"],
+                    initial[:intermediate],
+                    p["max_gap_s"],
+                )
+                intermediate_removals = [
+                    future.result(timeout=max(0.01, deadline.remaining()))
+                    for future in intermediate_futures
+                ]
+                if any(
+                    not removal.get("drained", False)
+                    for removal in intermediate_removals
+                ):
+                    raise ValueError("intermediate graceful drain timed out")
+            initial = initial[:intermediate]
+
         removed = initial[p["target_p"] :]
         event("withdraw_start")
         # Every removal withdraws discovery before waiting. Parallel requests do
@@ -247,7 +326,7 @@ def observe(ctx, p, deadline):
             row = sample()
         evidence["post_end"] = row["t"]
         event("observation_end")
-        evidence["removals"] = [
+        evidence["removals"] = intermediate_removals + [
             f.result(timeout=max(0.01, deadline.remaining())) for f in futures
         ]
         if any(not r.get("drained", False) for r in evidence["removals"]):

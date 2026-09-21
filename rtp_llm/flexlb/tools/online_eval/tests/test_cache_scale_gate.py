@@ -237,6 +237,41 @@ class CacheGateTest(unittest.TestCase):
         )
         self.assertIn("cache_scale_in_check", [s["action"] for s in plans[0]["stages"]])
 
+    def test_staircase_validates_order_hold_and_traffic_budget(self):
+        import yaml
+
+        case = yaml.safe_load(
+            (ROOT / "scenarios/workload/cache_scale_in.yaml").read_text()
+        )
+        gate = case["parameters"]["gate"]
+        gate.update(intermediate_p=6, intermediate_hold_s=30)
+        flow = case["parameters"]["flow"]
+        flow["source"]["parameters"]["count"] = 30000
+        flow["client"]["DURATION_S"] = "360"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "staircase.yaml"
+
+            def compile_case(value):
+                path.write_text(yaml.safe_dump(value))
+                return compile_scenarios(
+                    load_scenarios(path), handlers=handlers()
+                )
+
+            self.assertEqual(len(compile_case(case)), 1)
+            for key, value in (
+                ("intermediate_p", 4),
+                ("intermediate_p", 8),
+                ("intermediate_hold_s", 29),
+            ):
+                invalid = copy.deepcopy(case)
+                invalid["parameters"]["gate"][key] = value
+                with self.assertRaises(Exception):
+                    compile_case(invalid)
+            insufficient = copy.deepcopy(case)
+            insufficient["parameters"]["flow"]["client"]["DURATION_S"] = "310"
+            with self.assertRaisesRegex(Exception, "traffic plan must cover"):
+                compile_case(insufficient)
+
 
 class WorkloadTest(unittest.TestCase):
     def spec(self):
