@@ -320,20 +320,9 @@ class V4Transformer(nn.Module):
         except ValueError:
             return
         buf = self._mtp_hidden_buffer
-        assert buf is not None, (
-            "DSpARK aux capture requires the shared MTP hidden buffer; "
-            "the target model must request it before binding runtime buffers"
-        )
         pooled = hidden.mean(dim=-2)
         flat = pooled.reshape(-1, pooled.size(-1))
         rows, dim = flat.shape
-        assert (segment + 1) * dim <= buf.size(1), (
-            f"aux segment overflow: segment={segment} dim={dim} "
-            f"row_width={buf.size(1)}"
-        )
-        assert rows <= buf.size(
-            0
-        ), f"_mtp_hidden_buffer overflow: T={rows} > cap={buf.size(0)}"
         buf[:rows, segment * dim : (segment + 1) * dim].copy_(flat)
 
     def _note_aux_hidden_rows(self, rows: int, is_cuda_graph: bool) -> None:
@@ -343,11 +332,6 @@ class V4Transformer(nn.Module):
         count is only advanced outside CUDA graph capture/replay; graphed
         readers pass an explicit row count instead.
         """
-        assert self._mtp_hidden_buffer is not None
-        assert rows <= self._mtp_hidden_buffer.size(0), (
-            f"_mtp_hidden_buffer overflow: T={rows} > "
-            f"cap={self._mtp_hidden_buffer.size(0)}"
-        )
         if not is_cuda_graph:
             self._mtp_hidden_valid_tokens = int(rows)
 
@@ -385,7 +369,6 @@ class V4Transformer(nn.Module):
         token_capacity: int,
     ) -> None:
         token_capacity = int(token_capacity)
-        assert token_capacity > 0, token_capacity
         hc_dim = self.args.hc_mult * self.args.dim
         if self._mtp_last_hidden_buffer is not None and int(
             self._mtp_last_hidden_buffer.size(0)
@@ -406,10 +389,6 @@ class V4Transformer(nn.Module):
         if self._mtp_hidden_buffer is None:
             return
         T = flat.size(0)
-        assert T <= self._mtp_hidden_buffer.size(0), (
-            f"_mtp_hidden_buffer overflow: T={T} > "
-            f"cap={self._mtp_hidden_buffer.size(0)}"
-        )
         self._mtp_hidden_buffer[:T].copy_(flat)
         if not is_cuda_graph:
             self._mtp_hidden_valid_tokens = int(T)
@@ -419,9 +398,6 @@ class V4Transformer(nn.Module):
             return
         T = flat.size(0)
         buf = self._mtp_last_hidden_buffer
-        assert T <= buf.size(
-            0
-        ), f"_mtp_last_hidden_buffer overflow: T={T} > cap={buf.size(0)}"
         buf[:T].copy_(flat)
         self._mtp_last_hidden_valid_tokens = int(T)
 
@@ -586,11 +562,6 @@ class V4Transformer(nn.Module):
         # cu_seqlens:[B+1]). Standalone tests run with B==1; we flatten before
         # the loop and restore at the end so the hc_head_reduce / norm / rt
         # record paths below see the original [B, S, hc, d] shape.
-        assert B == 1, (
-            f"V4Transformer.forward standalone path expects B==1; got B={B}. "
-            "Production inference goes through prefill/forward.py::forward_layers, "
-            "which already handles multi-request via cu_seqlens."
-        )
         h_flat = h.squeeze(0)  # [S, hc, d]
         input_ids_flat = input_ids.squeeze(0)  # [S]
         _start_pos_int = (

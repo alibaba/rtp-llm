@@ -40,6 +40,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
     _SPARSE_PREFILL_TOPK_ALIGNMENT,
     combine_topk_swa_indices,
     combine_topk_swa_indices_cp,
+    combine_topk_swa_indices_cp_prepared,
 )
 
 
@@ -363,6 +364,31 @@ class SwaCombineTopkTest(unittest.TestCase):
             )
         self.assertTrue(torch.equal(got_lens, ref_lens))
         self.assertTrue(torch.equal(got_idx, ref_idx))
+
+        prepared_idx, prepared_lens = combine_topk_swa_indices_cp_prepared(
+            topk_indices=topk_indices,
+            global_positions=global_positions.reshape(-1).contiguous(),
+            sp_int=sp_int,
+            window_size=window_size,
+            compress_ratio=compress_ratio,
+            topk=topk,
+            M=M,
+            N=N,
+            req_id_per_token=(
+                None
+                if req_id_per_token is None
+                else req_id_per_token.reshape(-1).contiguous()
+            ),
+            prefix_lengths=(
+                None
+                if prefix_lengths is None
+                else prefix_lengths.reshape(-1).contiguous()
+            ),
+            flash_mla_indices=True,
+        )
+        self.assertTrue(torch.equal(prepared_lens, ref_lens))
+        self.assertEqual(tuple(prepared_idx.shape[:2]), (ref_idx.shape[0], 1))
+        self.assertTrue(torch.equal(prepared_idx.squeeze(1), ref_idx))
 
     def test_cp_fused_b1_zigzag(self):
         seq_full = 64

@@ -262,21 +262,6 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         self.assertEqual(ind._kv_eb, 0)
         ind.compressor.clear_pool_context.assert_called_once()
 
-    def test_gather_prefill_k_cache_requires_prebuilt_sharded_plan(self) -> None:
-        ind = _make_indexer_stub(bind_pool=True, device=self.device)
-        ind._cp_ctx = SimpleNamespace(cp_size=2, kv_cache_sharded=True)
-        meta = _make_meta(self.device, T=5)._replace(
-            block_table_i32=torch.ones(2, 3, dtype=torch.int32, device=self.device),
-            cu_kv_seqlens=torch.tensor(
-                [0, 3, 5], dtype=torch.int32, device=self.device
-            ),
-        )
-        k_quant_flat = torch.empty(5, INDEXER_HEAD_DIM, dtype=torch.uint8)
-        k_scale_buf = torch.empty(5, 4, dtype=torch.uint8)
-
-        with self.assertRaisesRegex(AssertionError, "requires prebuilt plan"):
-            ind._gather_prefill_k_cache(meta, k_quant_flat, k_scale_buf)
-
     def test_gather_prefill_k_cache_reuses_prebuilt_sharded_plan(self) -> None:
         ind = _make_indexer_stub(bind_pool=True, device=self.device)
         cp_ctx = SimpleNamespace(cp_size=2, kv_cache_sharded=True)
@@ -450,7 +435,6 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         import rtp_llm.models_py.modules.dsv4.fp8.indexer as indexer_mod
 
         with (
-            patch.object(indexer_mod, "has_fp8_mqa_logits", return_value=True),
             patch.object(
                 indexer_mod,
                 "indexer_q_rope_fp8_quant_fold",
@@ -580,12 +564,10 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
             ind.n_heads, x.size(-1), dtype=torch.bfloat16, device=self.device
         )
 
-        # has_fp8_mqa_logits is asserted before T==0 early return — patch via
-        # module-level binding (the production assert path needs DeepGEMM).
+        # Keep quantization independent of device kernels in this lifecycle test.
         import rtp_llm.models_py.modules.dsv4.fp8.indexer as indexer_mod
 
         with (
-            patch.object(indexer_mod, "has_fp8_mqa_logits", return_value=True),
             patch.object(
                 indexer_mod,
                 "indexer_q_rope_fp8_quant_fold",

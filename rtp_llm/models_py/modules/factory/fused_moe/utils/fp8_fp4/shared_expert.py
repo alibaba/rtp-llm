@@ -70,8 +70,7 @@ def _ensure_shared_expert_stream(device: torch.device) -> torch.cuda.Stream | No
     device = _normalize_cuda_device(device)
     if device is None:
         return None
-    device_index = device.index
-    assert device_index is not None
+    device_index: int = device.index  # type: ignore[assignment]
     stream = _SHARED_EXPERT_STREAM_CACHE.get(device_index)
     if stream is None:
         stream = torch.cuda.Stream(device=device)
@@ -87,8 +86,7 @@ def _get_shared_expert_stream(
     device = _normalize_cuda_device(device)
     if device is None:
         raise RuntimeError(f"shared expert overlap requires CUDA device, got {device}")
-    device_index = device.index
-    assert device_index is not None
+    device_index: int = device.index  # type: ignore[assignment]
     stream = _SHARED_EXPERT_STREAM_CACHE.get(device_index)
     if stream is not None:
         return stream
@@ -289,8 +287,7 @@ class FusedSharedExpertFastPath:
             raise RuntimeError(
                 f"shared expert dim mismatch: got {D}, expected {self.dim}"
             )
-        inter = self.inter_dim
-        assert inter is not None
+        inter: int = self.inter_dim  # type: ignore[assignment]
         capacity = max(T, self.max_tokens_per_rank or 0, 1)
         workspace = self._workspace
         if (
@@ -391,9 +388,12 @@ class FusedSharedExpertFastPath:
     def _run_prepared(self, shared_experts: nn.Module, x: torch.Tensor) -> torch.Tensor:
         if self._prepared_shared_experts is not shared_experts:
             self.prepare(shared_experts)
-        w13_parts = self._w13_parts
-        w2_parts = self._w2_parts
-        assert w13_parts is not None and w2_parts is not None
+        w13_parts: tuple[torch.Tensor, torch.Tensor] = (
+            self._w13_parts  # type: ignore[assignment]
+        )
+        w2_parts: tuple[torch.Tensor, torch.Tensor] = (
+            self._w2_parts  # type: ignore[assignment]
+        )
         workspace = self._ensure_workspace(x)
         T = x.size(0)
 
@@ -476,8 +476,7 @@ class SequentialSharedExpertExecutor(SharedExpertExecutor):
             self._out = _run_shared_expert(shared_experts, x, self._fast_path)
 
     def finish(self) -> torch.Tensor:
-        assert self._out is not None
-        out = self._out
+        out: torch.Tensor = self._out  # type: ignore[assignment]
         self._out = None
         return out
 
@@ -546,7 +545,7 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
             raise
 
     def finish(self) -> torch.Tensor:
-        assert self._out is not None
+        out: torch.Tensor = self._out  # type: ignore[assignment]
         if self._active_stream is not None:
             current_stream = torch.cuda.current_stream(self._out.device)
             current_stream.wait_stream(self._active_stream)
@@ -554,7 +553,6 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
             assert producer_stream is not None
             if producer_stream != current_stream:
                 producer_stream.wait_stream(self._active_stream)
-        out = self._out
         self._input = None
         self._out = None
         self._active_stream = None

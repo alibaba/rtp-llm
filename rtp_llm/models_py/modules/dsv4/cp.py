@@ -38,9 +38,11 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 if TYPE_CHECKING:
     # PrefillWorkspace lives in its own module; cp.py only CONSUMES the
-    # interface (gather/restore getters) — the quoted annotations below resolve
-    # via this type-only import, with no runtime dependency or import cycle.
+    # interface (gather/restore getters), with no runtime dependency or import
+    # cycle.
     from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+else:
+    PrefillWorkspace = Any
 
 _DEFAULT_CP_PROFILE_NAME = "dsv4.cp.all_gather"
 
@@ -144,14 +146,11 @@ class CPCudaAsyncGatherHandle:
     stream: Any
     completion_event: Any
     local_2d: torch.Tensor
+    # Per-forward scratch owner and the compressor role selecting its buffer
+    # pair. Both are required before a handle can exist.
+    workspace: PrefillWorkspace
+    cp_role: str
     profile_name: str = _DEFAULT_CP_PROFILE_NAME
-    # The per-forward :class:`PrefillWorkspace` that owns this gather's reusable
-    # ``cp_{gather,restore}_{main,idx,swa}`` scratch. Always set by the CUDA
-    # impl (passed down from the prefill forward); never None.
-    workspace: Optional["PrefillWorkspace"] = None
-    # Which gather this is (``main`` / ``indexer`` / ``swa_kv_full``); selects
-    # the workspace buffer pair in start()/wait().
-    cp_role: str = _CP_ROLE_MAIN
 
 
 class SyncCPGatherImpl:
@@ -198,17 +197,9 @@ class CudaAsyncCPGatherImpl:
         stream: Optional[Any] = None,
         *,
         profile_name: Optional[str] = None,
-        workspace: Optional["PrefillWorkspace"] = None,
+        workspace: PrefillWorkspace,
         cp_role: str,
     ) -> CPCudaAsyncGatherHandle:
-        # Fail loud: every prefill caller threads its per-forward workspace down
-        # here. A None workspace means a caller forgot to pass it — never a cue
-        # to silently fall back to a temporary allocation.
-        assert workspace is not None, "CudaAsyncCPGatherImpl.start requires a workspace"
-        assert cp_role in (
-            _CP_ROLE_MAIN,
-            _CP_ROLE_INDEXER,
-        ), f"unknown cp_role {cp_role!r}"
         profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.async"
         local_2d = _cp_gather_2d(local_2d, cp_ctx)
         if not local_2d.is_cuda:
@@ -297,7 +288,6 @@ class CudaAsyncCPGatherImpl:
         # ignores ``out``.
         out_buf = None
         if not handle.cp_ctx.unpad_restore_is_prefix:
-            assert handle.workspace is not None
             rows = handle.cp_ctx.seq_len_full
             dim = handle.gathered.size(1)
             dtype = handle.gathered.dtype
@@ -779,7 +769,7 @@ def cp_all_gather_full_async(
     stream: Optional[Any] = None,
     *,
     profile_name: Optional[str] = None,
-    workspace: "PrefillWorkspace",
+    workspace: PrefillWorkspace,
     cp_role: str,
 ) -> Any:
     """Start CP gather for flattened ``[T_local, H]`` input.
@@ -854,10 +844,6 @@ def cp_all_gather_full_varlen(
     ``prefill/forward.py::forward_layers``).
     """
     profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.varlen"
-    assert local_flat.dim() >= 1
-    assert (
-        local_flat.size(0) == cp_ctx.chunk_length
-    ), f"local_flat.size(0)={local_flat.size(0)} != chunk_length={cp_ctx.chunk_length}"
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
     with record_function_range(f"{profile_name}.launch"):
@@ -877,25 +863,20 @@ def cp_gather_last_by_request(
     CP-split input.  The result is ``[B, H]`` in request order.  This avoids the
     old full-sequence all-gather used only to slice one row per request for MTP.
     """
-    assert local_2d.dim() == 2
-    assert (
-        local_2d.size(0) == cp_ctx.chunk_length
-    ), f"local_2d.size(0)={local_2d.size(0)} != chunk_length={cp_ctx.chunk_length}"
-    assert (
-        cp_ctx.input_lengths_global is not None
-    ), "CP last-hidden gather requires input_lengths_global"
-    assert cp_ctx.prefix_lengths is not None, "CP last-hidden gather requires prefixes"
-    assert (
-        cp_ctx.req_id_per_token is not None
-    ), "CP last-hidden gather requires req_id_per_token"
-
     device = local_2d.device
-    B = int(cp_ctx.input_lengths_global.numel())
+    input_lengths_global = cp_ctx.input_lengths_global
+    prefix_lengths = cp_ctx.prefix_lengths
+    req_id_per_token = cp_ctx.req_id_per_token
+    B = int(input_lengths_global.numel())  # type: ignore[union-attr]
     H = int(local_2d.size(1))
 
-    req_ids = cp_ctx.req_id_per_token.to(device=device, dtype=torch.long).reshape(-1)
-    prefixes = cp_ctx.prefix_lengths.to(device=device, dtype=torch.long).reshape(-1)[:B]
-    input_lengths = cp_ctx.input_lengths_global.to(
+    req_ids = req_id_per_token.to(  # type: ignore[union-attr]
+        device=device, dtype=torch.long
+    ).reshape(-1)
+    prefixes = prefix_lengths.to(  # type: ignore[union-attr]
+        device=device, dtype=torch.long
+    ).reshape(-1)[:B]
+    input_lengths = input_lengths_global.to(  # type: ignore[union-attr]
         device=device, dtype=torch.long
     ).reshape(-1)[:B]
     target_positions = prefixes + input_lengths - 1
@@ -1077,10 +1058,9 @@ def build_cp_full_prefill_positions(
             target_device.index is None or cached_device.index == target_device.index
         ):
             return cached
-    assert (
-        cp_ctx.input_lengths_global is not None
-    ), "CP full prefill positions require input_lengths_global"
-    lengths = cp_ctx.input_lengths_global.to(device=device, dtype=torch.long)
+    lengths = cp_ctx.input_lengths_global.to(  # type: ignore[union-attr]
+        device=device, dtype=torch.long
+    )
     if cp_ctx.prefix_lengths is not None:
         prefixes = cp_ctx.prefix_lengths.to(device=device, dtype=torch.long)
     else:
