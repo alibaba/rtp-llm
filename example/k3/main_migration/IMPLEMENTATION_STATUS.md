@@ -38,7 +38,8 @@ On macOS, a separate Python 3.9 / PyTorch 2.8 CPU environment ran:
 python -m pytest -q tests/kimi_k3
 ```
 
-Result: 55 passed: 36 model math/checkpoint checks, five launch-profile checks and 14 smoke-harness
+Result: 71 passed: 36 model math/checkpoint checks, 16 chunk-planning checks,
+five launch-profile checks and 14 smoke-harness
 contract checks. These cover AttnRes against a scalar float64 reference, unused
 residual-bank capacity, output normalization, MTP source-layer and safetensors
 shape/dtype/payload validation, and TP1/2/4/8 fused KDA projection equivalence
@@ -79,7 +80,10 @@ not yet runtime-validated and does not replace fleet selection or runtime eviden
 
 A newly confirmed integration gap is whole-model chunk prefill: main's
 `max_batch_tokens_size` is a scheduler constraint, not a chunk executor, and the
-current K3 target has no chunk loop. The 65536 setting in the launch profile
+current K3 target has no chunk loop. A CPU planner now splits real requests at
+ordinary checkpoint boundaries; tests cover budget+1/+7, reused prefixes and
+random batch 1/2/3/7/8/9 with exact token coverage. It is not wired into model
+execution and does not establish chunk correctness. The 65536 setting in the launch profile
 alone must not be described as chunk support. Port the target/draft round
 coordination and verify KDA/conv/KV continuity before counting any >64K or
 budget+1/+7 case as passed.
@@ -132,3 +136,14 @@ alone must not unlock FP8 or be described as complete BF16 acceptance.
 Native draft Attention, ordinary projections and cache must stay BF16 in both
 profiles. The initial phase must not enable target FP8. No reduced-concurrency
 or shorter-prefix substitute may be counted as the required full smoke.
+
+## Current host transition
+
+The 2026-09-22 fleet snapshot rejected 144/145 for eight external compute
+processes per host (minimum free memory 12.7/19.0 GiB). It selected 114/110
+in l20-a, with approximately 268.6 GiB free per GPU. This is not a reservation.
+Source clones are in progress; both hosts need independent local builds.
+114's literal lhc_GPU does not mount the host's full checkpoint at /data2.
+The same-image lhc_GPU_k3_bs8_20260921 does mount it and can execute as the
+personal user, but its mounts omit /data6. Resolve a common source/build path
+before using it for runtime. No existing container was changed.
