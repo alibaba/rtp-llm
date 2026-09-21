@@ -3,6 +3,7 @@ import glob
 import json
 import logging
 import os
+import re
 import shutil
 from typing import Any, Dict, List, Type, Union
 
@@ -28,6 +29,23 @@ from smoke.task_info import TaskInfo
 from smoke.utils import resolve_prompt_refs
 
 from rtp_llm.utils.util import str_to_bool
+
+_ENV_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_required_env(value: str, *, field: str) -> str:
+    """Expand explicit braced environment placeholders or fail clearly."""
+
+    def _replace(match: re.Match) -> str:
+        name = match.group(1)
+        resolved = os.environ.get(name)
+        if not resolved:
+            raise RuntimeError(
+                f"smoke {field} requires non-empty environment variable {name}"
+            )
+        return resolved
+
+    return _ENV_PLACEHOLDER.sub(_replace, value)
 
 
 def get_runner_type(
@@ -96,6 +114,10 @@ if __name__ == "__main__":
             x = json5.load(f)
         except ImportError:
             x = json.load(f)
+        for path_field in ("model_path", "tokenizer_path", "ptuning_path"):
+            value = x.get(path_field)
+            if isinstance(value, str):
+                x[path_field] = _expand_required_env(value, field=path_field)
         if "query_result" in x:
             x["query_result"] = [resolve_prompt_refs(qr) for qr in x["query_result"]]
         task_info = TaskInfo(
@@ -103,7 +125,7 @@ if __name__ == "__main__":
         )
 
     env_args = json.loads(args.envs)
-    smoke_args = args.smoke_args
+    smoke_args = _expand_required_env(args.smoke_args, field="smoke_args")
     if smoke_args:
         smoke_args_clean = smoke_args.strip().strip("'\"")
         if smoke_args_clean.startswith("{") and smoke_args_clean.endswith("}"):
