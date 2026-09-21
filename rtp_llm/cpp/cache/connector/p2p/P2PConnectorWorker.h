@@ -2,8 +2,8 @@
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
@@ -56,8 +56,8 @@ private:
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;
     kmonitor::MetricsReporterPtr         metrics_reporter_;
 
-    std::unique_ptr<P2PConnectorWorkerPrefill> prefill_;
-    std::unique_ptr<P2PConnectorWorkerDecode>  decode_;
+    std::unique_ptr<P2PWorkerPrefillRead> prefill_;
+    std::unique_ptr<P2PWorkerDecodeRead>  decode_;
 };
 
 }  // namespace rtp_llm

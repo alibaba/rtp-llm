@@ -17,7 +17,7 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
@@ -125,7 +125,7 @@ private:
 // so the async context cannot release blocks based on a fabricated lease status.
 class LeaseMemoryService: public RpcService::Service {
 public:
-    P2PConnectorWorkerDecode* worker = nullptr;
+    P2PWorkerDecodeRead* worker = nullptr;
     P2PWorkerRoutePlan        plan;
     std::atomic<int>          lease_queries{0};
 
@@ -191,7 +191,7 @@ protected:
         worker_config.tp_size       = 1;
         worker_config.tp_rank       = 0;
         worker_config.layer_all_num = 2;
-        worker_         = std::make_unique<P2PConnectorWorkerDecode>(worker_config, converter, nullptr, receiver_);
+        worker_         = std::make_unique<P2PWorkerDecodeRead>(worker_config, converter, nullptr, receiver_);
         service_.worker = worker_.get();
         grpc::ServerBuilder builder;
         int                 port = 0;
@@ -287,7 +287,7 @@ protected:
     size_t                                               initial_free_ = 0;
     const std::string                                    key_          = "cancel_memory_reuse";
     std::shared_ptr<LeaseMemoryReceiver>                 receiver_;
-    std::unique_ptr<P2PConnectorWorkerDecode>            worker_;
+    std::unique_ptr<P2PWorkerDecodeRead>            worker_;
     LeaseMemoryService                                   service_;
     std::unique_ptr<grpc::Server>                        server_;
     std::shared_ptr<P2PBroadcastClient>                  client_;

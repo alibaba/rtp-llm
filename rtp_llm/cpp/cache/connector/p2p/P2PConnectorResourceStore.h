@@ -18,7 +18,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
-#include <torch/torch.h>
+#include "rtp_llm/cpp/cache/connector/p2p/PrefillResultStore.h"
 
 namespace rtp_llm {
 
@@ -29,22 +29,6 @@ struct P2PConnectorResourceEntry {
     int64_t            deadline_ms;        // Prefill 资源持有截止时间
     int64_t            request_deadline_ms;  // 原始请求截止时间
     int64_t            add_time_us;        // 添加时间
-
-    // Published CPU tensors are owned by this payload and must remain read-only.
-    struct SideChannelData {
-        bool                 has_first_token  = false;
-        int64_t              first_token_id   = 0;
-        int32_t              total_reuse_len  = 0;
-        int32_t              local_reuse_len  = 0;
-        int32_t              remote_reuse_len = 0;
-        int32_t              memory_reuse_len = 0;
-        int32_t              disk_reuse_len   = 0;
-        std::vector<int>     propose_tokens;
-        torch::Tensor        propose_probs;
-        torch::Tensor        propose_hidden;
-        std::vector<int32_t> position_ids;
-        std::map<std::string, torch::Tensor> first_token_tensors;
-    };
 };
 
 // Prefill rank 0 holds request KV resources until StartLoad takes ownership.
@@ -96,7 +80,7 @@ public:
     // Publish locally computed first-token / SP data for the Prefill StartLoad handler.
     void publishPrefillPayload(const std::string&                           unique_key,
                                 int64_t                                      deadline_ms,
-                                P2PConnectorResourceEntry::SideChannelData&& data);
+                                PrefillResultStore::SideChannelData&& data);
 
     // Wait on Prefill for local computation to publish the response payload.
     bool waitPrefillPayloadReady(const std::string&    unique_key,
@@ -104,7 +88,7 @@ public:
                               std::function<bool()> is_cancelled = nullptr);
 
     // Move the local payload out so the Prefill handler can serialize it for Decode.
-    bool takePrefillPayload(const std::string& unique_key, P2PConnectorResourceEntry::SideChannelData& out_data);
+    bool takePrefillPayload(const std::string& unique_key, PrefillResultStore::SideChannelData& out_data);
     void clearPrefillPayload(const std::string& unique_key);
 
 private:
@@ -123,7 +107,6 @@ private:
         bool request_registered = false;
         bool consumed = false;
         bool terminal = false;
-        std::optional<P2PConnectorResourceEntry::SideChannelData> side_channel_data;
 
         int64_t deadlineMs() const {
             return load_deadline_ms > 0 ? load_deadline_ms : request_deadline_ms;
@@ -132,6 +115,8 @@ private:
 
     void scheduleDeadlineCheckLocked(const std::string& unique_key, RequestState& state);
 
+    // Lock order: ResourceStore -> ResultStore. Waiting and serialization run without this lock.
+    PrefillResultStore result_store_;
     mutable std::mutex resource_map_mutex_;
     std::condition_variable resource_cv_;
     std::condition_variable deadline_cv_;

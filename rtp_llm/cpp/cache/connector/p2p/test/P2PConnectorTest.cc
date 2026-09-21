@@ -7,7 +7,7 @@
 
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
@@ -150,7 +150,7 @@ protected:
             worker->set_ip("127.0.0.1");
             worker->set_cache_store_port(12345 + i);
         }
-        P2PConnectorSchedulerPrefill scheduler(config_.scheduler_config, nullptr, nullptr);
+        P2PSchedulerPrefillRead scheduler(config_.scheduler_config, nullptr, nullptr);
         const auto                   plan = scheduler.planFor(num_workers, unique_key);
         RTP_LLM_CHECK_WITH_INFO(plan && plan->ok(), "test StartLoad plan must be valid");
         request.set_plan_digest(plan->plan.digest());
@@ -284,7 +284,7 @@ TEST_F(P2PConnectorTest, StartLoadWaitsForGenerateStreamRegistration) {
     EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
     auto stream = createGenerateStream(key, 5020, 5000);
     ASSERT_NE(connector_->asyncRead(createValidKVCacheResource(), createMockMeta(stream.get()), 0, 0), nullptr);
-    P2PConnectorResourceEntry::SideChannelData data;
+    PrefillResultStore::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 42;
     connector_->streamStore()->publishPrefillPayload(key, stream->deadlineMs(), std::move(data));
@@ -338,7 +338,7 @@ TEST_F(P2PConnectorTest, StartLoadDoesNotRestartLoadBudgetAfterRegistrationWait)
     const std::string key    = "registration-load-budget";
     auto              stream = createGenerateStream(key, 5022, 5000);
     ASSERT_NE(connector_->asyncRead(createValidKVCacheResource(), createMockMeta(stream.get()), 0, 0), nullptr);
-    P2PConnectorResourceEntry::SideChannelData data;
+    PrefillResultStore::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 42;
     connector_->streamStore()->publishPrefillPayload(key, stream->deadlineMs(), std::move(data));
@@ -472,7 +472,7 @@ TEST_F(P2PConnectorTest, HandleReadAcceptsMatchingPlanDigestBeforeResourceWait) 
 
 TEST_F(P2PConnectorTest, HandleReadRejectsTailKeyPlanMismatchBeforeResourceWait) {
     auto request = createValidStartLoadRequest("plan-tail-mismatch", currentTimeMs() + 5000, 2);
-    P2PConnectorSchedulerPrefill scheduler(config_.scheduler_config, nullptr, nullptr);
+    P2PSchedulerPrefillRead scheduler(config_.scheduler_config, nullptr, nullptr);
     const auto                   result = scheduler.planFor(2, request.unique_key());
     ASSERT_NE(result, nullptr);
     ASSERT_TRUE(result->ok()) << result->error.ToString();
@@ -805,8 +805,8 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithPublishedPrefillPayload) {
     }
 
     // 3. 在调用 handleRead 之前，先调用 publishPrefillPayload
-    //    payload 保存在请求状态中，waitPrefillPayloadAndFillResponse 会直接消费。
-    P2PConnectorResourceEntry::SideChannelData data;
+    //    payload 由 ResourceStore 校验后保存在 ResultStore，等待完成后再次校验并消费。
+    PrefillResultStore::SideChannelData data;
     data.has_first_token  = true;
     data.first_token_id   = 12345;
     data.total_reuse_len  = 10;
@@ -818,6 +818,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithPublishedPrefillPayload) {
     data.position_ids     = {1, 2, 3, 4};
     data.propose_probs    = torch::tensor({0.25f, 0.75f});
     data.propose_hidden   = torch::tensor({1.0f, 2.0f});
+    data.first_token_tensors.emplace("first_token_logits", torch::tensor({3.0f, 4.0f}));
 
     connector_->streamStore()->publishPrefillPayload(unique_key, stream->deadlineMs(), std::move(data));
 
@@ -834,6 +835,8 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithPublishedPrefillPayload) {
     EXPECT_EQ(response.payload().first_generate_token_id(), 12345);
     EXPECT_EQ(response.payload().total_reuse_len(), 10);
     EXPECT_EQ(response.payload().disk_reuse_len(), 3);
+    ASSERT_EQ(response.payload().tensors().count("first_token_logits"), 1u);
+    EXPECT_EQ(response.payload().tensors().at("first_token_logits").tensor().fp32_data().size(), 2 * sizeof(float));
 
     // 6. 验证 scheduler_->sendKVCache 被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
@@ -852,7 +855,7 @@ TEST_F(P2PConnectorTest, HandleRead_HoldsRank0RequestResourceUntilAllRanksReturn
     auto meta   = createMockMeta(stream.get());
     ASSERT_NE(connector_->asyncRead(resource, meta, 0, 0), nullptr);
 
-    P2PConnectorResourceEntry::SideChannelData data;
+    PrefillResultStore::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 12345;
     connector_->streamStore()->publishPrefillPayload(unique_key, stream->deadlineMs(), std::move(data));
@@ -895,7 +898,7 @@ TEST_F(P2PConnectorTest, HandleRead_TimeoutReleasesPrefillResourceAfterCancelBro
     auto meta   = createMockMeta(stream.get());
     ASSERT_NE(connector_->asyncRead(resource, meta, 0, 0), nullptr);
 
-    P2PConnectorResourceEntry::SideChannelData data;
+    PrefillResultStore::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 12345;
     connector_->streamStore()->publishPrefillPayload(unique_key, request_deadline_ms, std::move(data));
@@ -946,7 +949,7 @@ TEST_F(P2PConnectorTest, HandleRead_NoTransferSkipsDataTransferAndReturnsSideCha
     resource.reset();
     EXPECT_FALSE(weak_resource.expired());
 
-    P2PConnectorResourceEntry::SideChannelData data;
+    PrefillResultStore::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 34567;
     connector_->streamStore()->publishPrefillPayload(unique_key, stream->deadlineMs(), std::move(data));
@@ -1006,7 +1009,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WhenPrefillPayloadPublishedAfterSte
     }
     ASSERT_TRUE(kv_cache_sent);
 
-    P2PConnectorResourceEntry::SideChannelData data;
+    PrefillResultStore::SideChannelData data;
     data.has_first_token  = true;
     data.first_token_id   = 23456;
     data.total_reuse_len  = 12;
@@ -1039,7 +1042,7 @@ TEST_F(P2PConnectorTest, HandleRead_PreservesZeroFirstToken) {
         server->service()->setP2PResponseSuccess(true);
     }
 
-    P2PConnectorResourceEntry::SideChannelData data;
+    PrefillResultStore::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 0;
     connector_->streamStore()->publishPrefillPayload(unique_key, stream->deadlineMs(), std::move(data));

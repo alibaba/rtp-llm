@@ -10,17 +10,15 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorBackend.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
-#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
 #include <chrono>
 #include <utility>
-#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -41,7 +39,7 @@ bool P2PConnectorPrefill::init() {
             RTP_LLM_LOG_ERROR("prefill connector init failed: tp_broadcast_client init failed");
             return false;
         }
-        scheduler_ = std::make_unique<P2PConnectorSchedulerPrefill>(
+        scheduler_ = std::make_unique<P2PSchedulerPrefillRead>(
             config_.scheduler_config, metrics_reporter_, tp_broadcast_client_);
     }
 
@@ -51,7 +49,7 @@ bool P2PConnectorPrefill::init() {
         RTP_LLM_LOG_ERROR("prefill connector init failed: transfer backend init failed");
         return false;
     }
-    worker_ = std::make_shared<P2PConnectorWorkerPrefill>(
+    worker_ = std::make_shared<P2PWorkerPrefillRead>(
         config_.worker_config, layer_block_converter_, metrics_reporter_, sender);
     if (!worker_->init()) {
         RTP_LLM_LOG_ERROR("prefill connector init failed: worker init failed");
@@ -316,7 +314,7 @@ void P2PConnectorPrefill::waitPrefillPayloadAndFillResponse(
     const auto  wait_start_us = currentTimeUs();
     const bool ready = stream_store_->waitPrefillPayloadReady(unique_key, resource_entry->deadline_ms, is_cancelled);
     collector.prefill_scheduler_side_channel_wait_time_us = currentTimeUs() - wait_start_us;
-    P2PConnectorResourceEntry::SideChannelData data;
+    PrefillResultStore::SideChannelData data;
     if (!ready || !stream_store_->takePrefillPayload(unique_key, data)) {
         stream_store_->clearPrefillPayload(unique_key);
         response.set_error_code(transErrorCodeToRPC(
@@ -325,7 +323,7 @@ void P2PConnectorPrefill::waitPrefillPayloadAndFillResponse(
         return;
     }
     const auto   fill_start_us                            = currentTimeUs();
-    grpc::Status fill_status                              = fillStartLoadResponsePayload(data, response);
+    grpc::Status fill_status = PrefillResultStore::fillStartLoadResponsePayload(data, response);
     collector.prefill_scheduler_side_channel_fill_time_us = currentTimeUs() - fill_start_us;
     if (!fill_status.ok()) {
         RTP_LLM_LOG_WARNING("waitPrefillPayloadAndFillResponse failed, unique_key: %s, error: %s",
@@ -460,89 +458,6 @@ grpc::Status P2PConnectorPrefill::waitForResourceEntry(
     // duplicate or delayed calls cannot wait again.
     stream_store_->markCancelled(unique_key, request_deadline_ms);
     return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "resource wait transfer deadline exceeded");
-}
-
-grpc::Status P2PConnectorPrefill::fillStartLoadResponsePayload(const P2PConnectorResourceEntry::SideChannelData& data,
-                                                             P2PConnectorStartLoadResponsePB& response) {
-    try {
-        // Clear only the payload so each TensorPB is filled exactly once, including on reuse.
-        response.clear_payload();
-        // Fill response proto from side-channel data
-        auto* payload = response.mutable_payload();
-        payload->set_has_first_generate_token(data.has_first_token);
-        if (data.has_first_token) {
-            payload->set_first_generate_token_id(data.first_token_id);
-        }
-        payload->set_total_reuse_len(data.total_reuse_len);
-        payload->set_local_reuse_len(data.local_reuse_len);
-        payload->set_remote_reuse_len(data.remote_reuse_len);
-        payload->set_memory_reuse_len(data.memory_reuse_len);
-        payload->set_disk_reuse_len(data.disk_reuse_len);
-
-        if (!data.propose_tokens.empty()) {
-            auto& propose_tensor = (*payload->mutable_tensors())["propose_tokens"];
-            auto* tokens_pb      = propose_tensor.mutable_tensor();
-            tokens_pb->set_data_type(TensorPB::INT32);
-            tokens_pb->add_shape(data.propose_tokens.size());
-            std::vector<int32_t> int32_tokens(data.propose_tokens.begin(), data.propose_tokens.end());
-            tokens_pb->set_int32_data(int32_tokens.data(), int32_tokens.size() * sizeof(int32_t));
-        }
-        const auto fill_tensor = [&](const char* name, const torch::Tensor& tensor) {
-            if (!tensor.defined()) {
-                // An absent SPOutputBuffer previously supplied a default FP32 PB with no shape.
-                (*payload->mutable_tensors())[name].mutable_tensor();
-                return;
-            }
-            if (!tensor.device().is_cpu()) {
-                throw std::runtime_error("side-channel tensor must be on CPU");
-            }
-            switch (tensor.scalar_type()) {
-                case torch::kFloat32:
-                    break;
-                case torch::kFloat16:
-                case torch::kBFloat16:
-                    if (tensor.numel() == 0) {
-                        return;
-                    }
-                    break;
-                case torch::kInt32:
-                    // Preserve the old filter, which omitted PBs with only int32_data.
-                    return;
-                default:
-                    throw std::runtime_error("unsupported side-channel tensor dtype");
-            }
-            TensorPbConvert::torchToPb((*payload->mutable_tensors())[name].mutable_tensor(), tensor);
-        };
-        fill_tensor("propose_probs", data.propose_probs);
-        fill_tensor("propose_hidden", data.propose_hidden);
-        for (const auto& [name, tensor] : data.first_token_tensors) {
-            if (!tensor.defined() || !tensor.device().is_cpu()) {
-                throw std::runtime_error("first token output tensor must be defined and on CPU");
-            }
-            TensorPbConvert::torchToPb((*payload->mutable_tensors())[name].mutable_tensor(), tensor);
-        }
-        if (!data.position_ids.empty()) {
-            auto& pos_tensor = (*payload->mutable_tensors())["position_ids"];
-            auto* pos_pb     = pos_tensor.mutable_tensor();
-            pos_pb->set_data_type(TensorPB::INT32);
-            pos_pb->add_shape(data.position_ids.size());
-            pos_pb->set_int32_data(data.position_ids.data(), data.position_ids.size() * sizeof(int32_t));
-        }
-
-        RTP_LLM_LOG_DEBUG("fill response from entry: first_token: %ld, total_reuse: %d, local: %d, remote: %d, "
-                          "memory: %d, disk: %d",
-                          data.first_token_id,
-                          data.total_reuse_len,
-                          data.local_reuse_len,
-                          data.remote_reuse_len,
-                          data.memory_reuse_len,
-                          data.disk_reuse_len);
-
-        return grpc::Status::OK;
-    } catch (const std::exception& error) {
-        response.clear_payload();
-        return grpc::Status(grpc::StatusCode::INTERNAL, error.what());
-    }
 }
 
 }  // namespace rtp_llm
