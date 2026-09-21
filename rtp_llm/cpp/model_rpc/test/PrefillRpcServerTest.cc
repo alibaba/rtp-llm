@@ -6,6 +6,7 @@
 
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 
 namespace rtp_llm {
@@ -223,6 +224,78 @@ TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {
     ASSERT_EQ(second_aux_info->multimodal_lengths_size(), 2);
     EXPECT_EQ(second_aux_info->multimodal_lengths().at(0), 2752);
     EXPECT_EQ(second_aux_info->multimodal_lengths().at(1), 64);
+}
+
+TEST_F(PrefillRpcServerTest, pollRemoteOutputForwardsTokensWithoutAuxInfo) {
+    class DecodeService final: public RpcService::Service {
+    public:
+        grpc::Status RemoteGenerate(grpc::ServerContext*,
+                                    grpc::ServerReaderWriter<GenerateOutputsPB, GenerateRequestPB>* rpc) override {
+            for (int token : {11, 12}) {
+                GenerateOutputsPB response;
+                auto* flat = response.mutable_flatten_output();
+                flat->add_finished(token == 12);
+                auto* ids = flat->mutable_output_ids();
+                ids->set_data_type(TensorPB::INT32);
+                for (int dim : {1, 1, 1}) {
+                    ids->add_shape(dim);
+                }
+                const int32_t value = token;
+                ids->set_int32_data(reinterpret_cast<const char*>(&value), sizeof(value));
+                if (!rpc->Write(response)) {
+                    return grpc::Status(grpc::StatusCode::CANCELLED, "write failed");
+                }
+            }
+            return grpc::Status::OK;
+        }
+    } service;
+    class Writer final: public grpc::internal::WriterInterface<GenerateOutputsPB> {
+    public:
+        bool Write(const GenerateOutputsPB& output, grpc::WriteOptions) override {
+            outputs.push_back(output);
+            return true;
+        }
+        std::vector<GenerateOutputsPB> outputs;
+    } writer;
+
+    int port = 0;
+    grpc::ServerBuilder builder;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&service);
+    auto decode_server = builder.BuildAndStart();
+    ASSERT_TRUE(decode_server);
+    GenerateInputPB request;
+    request.set_request_id(42);
+    auto context = makeContext(&request);
+    context->meta = std::make_shared<RpcServerRuntimeMeta>();
+    context->rpc_context.writer = &writer;
+    context->generate_input = std::make_shared<GenerateInput>();
+    context->generate_input->generate_config = std::make_shared<GenerateConfig>();
+    context->generate_input->generate_config->aux_info = false;
+    context->generate_input->input_ids = torch::tensor({1, 2}, torch::kInt32);
+    ModelConfig model;
+    model.max_seq_len = 32;
+    model.vocab_size = 128;
+    context->setStream(std::make_shared<NormalGenerateStream>(
+        context->generate_input, model, RuntimeConfig{}, ResourceContext{}, nullptr));
+    auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials());
+    context->stub = RpcService::NewStub(channel);
+    context->client_context = std::make_shared<grpc::ClientContext>();
+    context->client_context->set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    context->client_stream = context->stub->RemoteGenerate(context->client_context.get());
+    TestPrefillRpcServer server;
+    server.pollRemoteOutput(*context);
+    context->markRpcHandlingCompleted();
+    EXPECT_FALSE(context->hasError());
+    ASSERT_EQ(writer.outputs.size(), 2);
+    EXPECT_FALSE(writer.outputs[0].flatten_output().finished(0));
+    EXPECT_TRUE(writer.outputs[1].flatten_output().finished(0));
+    for (const auto& output : writer.outputs) {
+        EXPECT_EQ(output.flatten_output().aux_info_size(), 0);
+        EXPECT_EQ(output.flatten_output().output_ids().int32_data().size(), sizeof(int32_t));
+    }
+    decode_server->Shutdown();
+    decode_server->Wait();
 }
 
 TEST_F(PrefillRpcServerTest, multimodalProcessMarksDeterministicErrorNonRetryable) {
