@@ -101,6 +101,16 @@ def _get_or_create_final_out(
     return cached
 
 
+try:
+    from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import (
+        set_gate_step_context as _set_gate_step,
+    )
+except Exception:  # pragma: no cover
+
+    def _set_gate_step(*_args, **_kwargs):
+        pass
+
+
 @contextmanager
 def synchronized_moe_chunk_plan(
     layers: Iterable[nn.Module], tokens: int, device: torch.device
@@ -309,6 +319,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         if not self._should_chunk(
             synchronized_tokens, is_decode_forward=is_decode_forward
         ):
+            _set_gate_step(is_decode_forward, flat_x.size(0))
             if observer is None:
                 self._call_moe(flat_x, flat_ids, out=output)
             else:
@@ -332,6 +343,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
                     positions[local_start:end] if positions is not None else None
                 )
                 chunk_observer = self._observer(chunk_positions)
+            _set_gate_step(is_decode_forward, synchronized_tokens)
             if chunk_observer is None:
                 self._call_moe(
                     flat_x[local_start:end],

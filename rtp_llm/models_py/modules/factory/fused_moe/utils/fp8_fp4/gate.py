@@ -104,6 +104,28 @@ def _select_routes_with_nonfinite_fallback(
     return weights, indices
 
 
+# RELEASE FIX (B300 semantic parity): the chunked MoE layer reports
+# (is_decode, step_tokens) so the payload decision can key on the prefill
+# step size without any device sync.
+_GATE_STEP_CTX = None
+
+
+def set_gate_step_context(is_decode: bool, step_tokens: int):
+    global _GATE_STEP_CTX
+    _GATE_STEP_CTX = (bool(is_decode), int(step_tokens))
+
+
+def _payload_allowed_for_step() -> bool:
+    ctx = _GATE_STEP_CTX
+    if ctx is None:
+        return False
+    is_decode, step_tokens = ctx
+    if is_decode:
+        return True
+    threshold = int(os.environ.get("MOE_GATE_PAYLOAD_MAX_TOKENS", "32768"))
+    return step_tokens <= threshold
+
+
 class Gate(nn.Module):
     """Per-token routing scores + top-k expert selection.
 
@@ -187,6 +209,12 @@ class Gate(nn.Module):
         if (
             x.size(0) == 0
             or os.environ.get("MOE_GATE_FP32", "0") == "1"
+            # RELEASE FIX (B300 semantic parity): hash layers take the ordinary
+            # forward (eager epilogue) for old-package parity; large prefill
+            # steps also take the ordinary forward because the payload path's
+            # BF16 pack epilogue flips razor-edge items in long prompts.
+            or (self.hash and os.environ.get("MOE_GATE_HASH_EAGER", "0") == "1")
+            or not _payload_allowed_for_step()
             or not _use_fused_gate(self.score_func, x.size(0), self.topk)
         ):
             return False
@@ -246,6 +274,13 @@ class Gate(nn.Module):
             if (
                 self.hash
                 and self.fuse_hash_gate
+                # RELEASE FIX (B300 semantic parity): the old package ran hash
+                # layers through the eager FP32 epilogue on upcast scores; the
+                # fused Triton hash kernel's per-layer drift flips greedy
+                # argmax at razor-edge positions (deterministic digit
+                # transposition at the 524288/1M bins). MOE_GATE_HASH_EAGER=1
+                # restores old-package parity.
+                and os.environ.get("MOE_GATE_HASH_EAGER", "0") != "1"
                 and _use_fused_gate(self.score_func, x.size(0), self.topk)
             ):
                 assert input_ids is not None
