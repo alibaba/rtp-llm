@@ -18,8 +18,7 @@ cc_library(
 cc_library(
     name = "xgrammar_internal_headers",
     hdrs = glob([
-        "cpp/*.h",
-        "cpp/support/*.h",
+        "cpp/**/*.h",
         "3rdparty/picojson/picojson.h",
     ]),
     includes = [
@@ -31,12 +30,14 @@ cc_library(
 
 cc_library(
     name = "xgrammar",
-    # cpp/testing.cc must stay in: it defines xgrammar::PrintTokenByIds, used by
-    # matcher/compiled_grammar operator<<.
-    srcs = glob([
-        "cpp/*.cc",
-        "cpp/support/*.cc",
-    ]),
+    srcs = glob(
+        [
+            "cpp/**/*.cc",
+        ],
+        exclude = [
+            "cpp/tvm_ffi/**",
+        ],
+    ),
     defines = [
         "XGRAMMAR_ENABLE_CPPTRACE=0",
     ],
