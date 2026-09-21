@@ -687,7 +687,7 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi",
-    "xgrammar==0.2.5",
+    "xgrammar==0.2.7",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
@@ -730,7 +730,7 @@ whl_reqs_dash_sc_grpc = [
     "grpcio>=1.57.0",
     "jsonschema==4.26.0",
     "protobuf>=4.25",
-    "xgrammar==0.2.5",
+    "xgrammar==0.2.7",
 ]
 
 py_wheel(

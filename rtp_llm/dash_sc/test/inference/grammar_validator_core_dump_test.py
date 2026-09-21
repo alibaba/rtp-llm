@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import ctypes
-import importlib
-import importlib.util
 import json
 import os
 import resource
@@ -11,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+
+import xgrammar as xgr
 
 from rtp_llm.dash_sc.inference.core_dump_control import (
     _XGRAMMAR_SANDBOX_CORE_DUMP_ENV,
@@ -28,20 +28,6 @@ _OOM_HEADROOM_MB = 1
 _OOM_SCHEMA_ENUM_ENTRIES = 100_000
 _OOM_SCHEMA_LITERAL_PADDING = 64
 _PR_SET_DUMPABLE = 4
-
-
-def _load_xgrammar() -> Any:
-    module_spec = importlib.util.find_spec("xgrammar")
-    if module_spec is not None and module_spec.origin is not None:
-        package_dir = str(Path(module_spec.origin).parent)
-        search_path = os.environ.get("LD_LIBRARY_PATH", "")
-        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
-            path for path in (package_dir, search_path) if path
-        )
-    return importlib.import_module("xgrammar")
-
-
-xgr = _load_xgrammar()
 
 
 def _enable_core_dump_for_probe() -> None:
@@ -99,9 +85,7 @@ def _run_real_xgrammar_oom_probe() -> None:
     _enable_core_dump_for_probe()
     _configure_xgrammar_sandbox_core_dump_for_current_process()
     schema = _build_oom_schema()
-    tokenizer_info = xgr.TokenizerInfo.deserialize_json(
-        _build_tokenizer_info_json()
-    )
+    tokenizer_info = xgr.TokenizerInfo.deserialize_json(_build_tokenizer_info_json())
     compiler = xgr.GrammarCompiler(
         tokenizer_info,
         max_threads=1,

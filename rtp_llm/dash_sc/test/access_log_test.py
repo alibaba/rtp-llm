@@ -933,6 +933,8 @@ class GrpcMetricsTest(TestCase):
         # Monitor verdict is computed before report_frontend_rpc_done; here we stub it to
         # the "loop hit" shape and assert the metric projection.
         rec._repetition_monitor = SimpleNamespace(
+            output_repetition_check_ms=0.0,
+            output_repetition_result=None,
             tool_call_loop_check_ms=1.5,
             tool_call_loop_result=ToolCallLoopResult(
                 hit=True, repeat_count=5, current_span_tokens=6, marker_index=0

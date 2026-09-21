@@ -1,4 +1,4 @@
-load("@rules_python//python:pip.bzl", "pip_parse")
+load("@rules_python//python:pip.bzl", "package_annotation", "pip_parse")
 
 PIP_EXTRA_ARGS = [
     "--cache-dir=~/.cache/pip",
@@ -6,11 +6,15 @@ PIP_EXTRA_ARGS = [
     "--verbose",
 ]
 
+# TVM-FFI locates xgrammar's native library through the wheel RECORD file.
+XGRAMMAR_ANNOTATIONS = {"xgrammar": package_annotation(data=[":dist_info"])}
+
 def pip_deps():
     pip_parse(
         name = "pip_cpu_torch",
         requirements_lock = "//open_source/deps:requirements_lock_torch_cpu.txt",
         python_interpreter = "/opt/conda310/bin/python3",
+        annotations = XGRAMMAR_ANNOTATIONS,
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 3600,
     )
@@ -19,6 +23,7 @@ def pip_deps():
         name = "pip_arm_torch",
         requirements_lock = "//open_source/deps:requirements_lock_torch_arm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
+        annotations = XGRAMMAR_ANNOTATIONS,
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 3600,
     )
@@ -27,6 +32,7 @@ def pip_deps():
         name = "pip_ppu_torch",
         requirements_lock = "//open_source/deps:requirements_lock_torch_gpu_cuda12.txt",
         python_interpreter = "/opt/conda310/bin/python3",
+        annotations = XGRAMMAR_ANNOTATIONS,
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 3600,
     )
@@ -35,6 +41,7 @@ def pip_deps():
         name = "pip_gpu_cuda12_torch",
         requirements_lock = "//open_source/deps:requirements_lock_torch_gpu_cuda12.txt",
         python_interpreter = "/opt/conda310/bin/python3",
+        annotations = XGRAMMAR_ANNOTATIONS,
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 3600,
         quiet = False,
@@ -44,6 +51,7 @@ def pip_deps():
         name = "pip_gpu_cuda12_9_torch",
         requirements_lock = "//open_source/deps:requirements_lock_torch_gpu_cuda12_9.txt",
         python_interpreter = "/opt/conda310/bin/python3",
+        annotations = XGRAMMAR_ANNOTATIONS,
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 3600,
         quiet = False,
@@ -53,6 +61,7 @@ def pip_deps():
         name = "pip_cuda12_arm_torch",
         requirements_lock = "//open_source/deps:requirements_lock_cuda12_arm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
+        annotations = XGRAMMAR_ANNOTATIONS,
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 3600,
         quiet = False,
@@ -62,6 +71,7 @@ def pip_deps():
         name = "pip_gpu_rocm_torch",
         requirements_lock = "//open_source/deps:requirements_lock_rocm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
+        annotations = XGRAMMAR_ANNOTATIONS,
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 12000,
     )

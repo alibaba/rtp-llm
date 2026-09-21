@@ -1,4 +1,4 @@
-# xgrammar built from source (mlc-ai/xgrammar @ v0.2.3).
+# xgrammar built from the revision pinned in WORKSPACE.
 
 cc_library(
     name = "xgrammar_headers",
@@ -16,8 +16,7 @@ cc_library(
 cc_library(
     name = "xgrammar_internal_headers",
     hdrs = glob([
-        "cpp/*.h",
-        "cpp/support/*.h",
+        "cpp/**/*.h",
         "3rdparty/picojson/picojson.h",
     ]),
     includes = [
@@ -31,11 +30,10 @@ cc_library(
     name = "xgrammar",
     srcs = glob(
         [
-            "cpp/*.cc",
-            "cpp/support/*.cc",
+            "cpp/**/*.cc",
         ],
         exclude = [
-            "cpp/nanobind/**",
+            "cpp/tvm_ffi/**",
         ],
     ),
     defines = [
