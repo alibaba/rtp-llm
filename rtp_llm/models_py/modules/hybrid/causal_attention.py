@@ -52,8 +52,11 @@ class CausalAttention(nn.Module):
         self.parallelism_config = parallelism_config
         self.tp_size = parallelism_config.get_attn_tp_size()
         self.head_num = attn_config.head_num
+        self.kv_head_num = attn_config.kv_head_num
         self.num_key_value_groups = attn_config.head_num // attn_config.kv_head_num
         self.head_dim = attn_config.size_per_head
+        self.page_size = attn_config.tokens_per_block
+        self.nvfp4_kv_cache = bool(getattr(attn_config, "nvfp4_kv_cache", False))
         self.q_size = attn_config.head_num * self.head_dim
 
         # Create linear layers using LinearFactory
@@ -122,7 +125,22 @@ class CausalAttention(nn.Module):
             qkv = self.qkv_proj(hidden_states)
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
-        attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
+        if self.nvfp4_kv_cache:
+            from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
+                dense_attention_forward,
+            )
+
+            attn_output = dense_attention_forward(
+                fmha_impl,
+                qkv,
+                kv_cache,
+                self.layer_idx,
+                self.kv_head_num,
+                self.page_size,
+                self.head_dim,
+            )
+        else:
+            attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
             if self._fuse_sigmoid_mul_quant and attn_output.dim() == 2:

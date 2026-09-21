@@ -64,10 +64,15 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
         // the main K/V during PD separation. is_mla stays false (the main K/V
         // keeps its HND layout); the scale region is exposed to Python as FP32
         // and reinterpreted as BF16 or E4M3 there.
-        config.kv_scale_stride_bytes =
+        const size_t indexer_bytes =
             indexerCacheBlockBytes(static_cast<size_t>(model_config.attn_config.indexer_head_dim),
                                    model_config.attn_config.indexer_cache_fp8_mode,
                                    spec->seq_size_per_block);
+        // NVFP4 needs both scale families in this opaque side region: main
+        // K/V block scales first, followed by packed indexer-K values/scales.
+        // Other M3 modes retain their historical indexer-only layout.
+        config.kv_scale_stride_bytes =
+            model_config.attn_config.nvfp4_kv_cache ? spec->scale_block_size_bytes() + indexer_bytes : indexer_bytes;
         config.kv_scale_size_bytes = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
         // PD transfer: the idx_K cache in the scale slot is a single logical
         // block (not k/v separable), and the main K/V HND block is not k/v-split

@@ -270,9 +270,13 @@ class ModelConfig(CppModelConfig):
         # Get kv_cache_dtype from attn_config
         kv_cache_dtype_enum = self.attn_config.kv_cache_dtype
         kv_cache_bytes = (
-            1
-            if kv_cache_dtype_enum in [KvCacheDataType.FP8, KvCacheDataType.INT8]
-            else 2
+            9.0 / 16.0
+            if self.attn_config.nvfp4_kv_cache
+            else (
+                1
+                if kv_cache_dtype_enum in [KvCacheDataType.FP8, KvCacheDataType.INT8]
+                else 2
+            )
         )
         kv_cache_size = (
             2
@@ -677,7 +681,40 @@ class ModelConfig(CppModelConfig):
                 kv_cache_dtype_override,
             )
         elif kv_cache_config is not None:
-            if kv_cache_config.int8_kv_cache:
+            enabled_kv_quantizers = sum(
+                bool(value)
+                for value in (
+                    kv_cache_config.int8_kv_cache,
+                    kv_cache_config.fp8_kv_cache,
+                    kv_cache_config.nvfp4_kv_cache,
+                )
+            )
+            if enabled_kv_quantizers > 1:
+                raise ValueError(
+                    "int8_kv_cache, fp8_kv_cache and nvfp4_kv_cache are mutually exclusive"
+                )
+            self.attn_config.nvfp4_kv_cache = bool(kv_cache_config.nvfp4_kv_cache)
+            if kv_cache_config.nvfp4_kv_cache:
+                # Keep the existing BASE attention selection. The persistent
+                # pool is packed NVFP4, and a replaceable Triton adapter
+                # materializes BF16 immediately before the existing operator.
+                self.attn_config.kv_cache_dtype = KvCacheDataType.BASE
+                logging.info(
+                    "Enabling packed NVFP4 KV cache with BASE/BF16 attention adapter"
+                )
+                sparse_config = getattr(self, "msa_sparse_config", None)
+                if sparse_config is not None:
+                    if self.attn_config.indexer_head_dim <= 0:
+                        raise ValueError(
+                            "MiniMax-M3 NVFP4 KV cache requires M3_IDX_PAGED=1 "
+                            "so indexer-K shares the persistent paged cache"
+                        )
+                    # Mode 3 is internal to the MSA cache layout: packed E2M1
+                    # indexer values followed by one E4M3 scale per 16 values.
+                    sparse_config["idx_k_fp8_mode"] = 3
+                    sparse_config["nvfp4_kv_cache"] = True
+                    self.attn_config.indexer_cache_fp8_mode = 3
+            elif kv_cache_config.int8_kv_cache:
                 self.attn_config.kv_cache_dtype = KvCacheDataType.INT8
                 logging.info(
                     "Setting attn_config.kv_cache_dtype to INT8 based on kv_cache_config.int8_kv_cache"
@@ -693,7 +730,11 @@ class ModelConfig(CppModelConfig):
                     "Setting attn_config.kv_cache_dtype to BASE (default, no int8/fp8 kv_cache specified)"
                 )
 
-        if quant_config and quant_config.get_method().lower() == "fp8":
+        if (
+            quant_config
+            and quant_config.get_method().lower() == "fp8"
+            and not self.attn_config.nvfp4_kv_cache
+        ):
             self.attn_config.kv_cache_dtype = KvCacheDataType.FP8
             logging.info(
                 "Setting attn_config.kv_cache_dtype to FP8 based on quant_config.get_method().lower() == 'fp8'"

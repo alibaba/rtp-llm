@@ -149,7 +149,8 @@ bool ModelConfig::isGatedActivation() const {
 }
 
 bool ModelConfig::isKvCacheQuant() const {
-    return attn_config.kv_cache_dtype == KvCacheDataType::FP8 || attn_config.kv_cache_dtype == KvCacheDataType::INT8;
+    return attn_config.nvfp4_kv_cache || attn_config.kv_cache_dtype == KvCacheDataType::FP8
+           || attn_config.kv_cache_dtype == KvCacheDataType::INT8;
 }
 
 AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {

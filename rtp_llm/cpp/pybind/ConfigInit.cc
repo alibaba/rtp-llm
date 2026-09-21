@@ -441,6 +441,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
+        .def_readwrite("nvfp4_kv_cache", &KVCacheConfig::nvfp4_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
@@ -572,7 +573,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.memory_cache_d2h_copy_mode,
                                       self.memory_cache_d2h_copy_strict,
                                       self.enable_memory_cache_d2h_3d_batch_auto,
-                                      self.memory_cache_remote_eviction_watermark_ratio);
+                                      self.memory_cache_remote_eviction_watermark_ratio,
+                                      self.nvfp4_kv_cache);
             },
             [](py::tuple t) {
                 const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
@@ -676,6 +678,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                             }
                             if (extra_count >= 18) {
                                 c.memory_cache_remote_eviction_watermark_ratio = t[extra_start + 17].cast<int>();
+                            }
+                            if (extra_count >= 19) {
+                                c.nvfp4_kv_cache = t[extra_start + 18].cast<int>();
                             }
                         }
                     }
@@ -1647,6 +1652,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("v_head_dim", &AttentionConfigs::v_head_dim)
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
+        .def_readwrite("nvfp4_kv_cache", &AttentionConfigs::nvfp4_kv_cache)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
         .def_readwrite("is_sparse", &AttentionConfigs::is_sparse)
         .def_readwrite("indexer_head_dim", &AttentionConfigs::indexer_head_dim)

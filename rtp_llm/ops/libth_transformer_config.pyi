@@ -93,6 +93,7 @@ class AttentionConfigs:
     is_causal: bool
     is_sparse: bool
     kv_cache_dtype: KvCacheDataType
+    nvfp4_kv_cache: bool
     kv_head_num: int
     kv_lora_rank: int
     max_seq_len: int
@@ -678,6 +679,7 @@ class KVCacheConfig:
     dsv4_hca_state_pool_blocks: int
     dsv4_fixed_pool_use_memory: bool
     fp8_kv_cache: int
+    nvfp4_kv_cache: int
     int8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int

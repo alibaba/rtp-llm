@@ -230,6 +230,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         kv_cache.use_mla       = params.description.attention_conf.use_mla;
         kv_cache.kv_lora_rank  = params.description.attention_conf.kv_lora_rank;
         kv_cache.rope_head_dim = params.description.attention_conf.rope_head_dim;
+        kv_cache.nvfp4         = params.description.attention_conf.nvfp4_kv_cache;
         for (const auto& t : layout.layers_to_kv_buffer_ptrs) {
             kv_cache.kv_cache_base_by_layer.push_back(t);
         }

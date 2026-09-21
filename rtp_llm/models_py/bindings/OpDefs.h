@@ -29,6 +29,7 @@ struct LayerKVCache {
     int                        seq_size_per_block = 0;
     int                        layer_id           = -1;
     int                        group_id           = -1;
+    bool                       nvfp4              = false;
     rtp_llm::KVCacheRegionName region_name        = rtp_llm::KVCacheRegionName::DEFAULT;
 };
 
@@ -45,6 +46,7 @@ struct KVCache {
     bool                       use_mla                   = false;
     int                        kv_lora_rank              = 0;
     int                        rope_head_dim             = 0;
+    bool                       nvfp4                     = false;
 
     // Per-layer attention type (CacheGroupType::FULL or LINEAR).
     std::vector<rtp_llm::CacheGroupType>    layer_group_types;
@@ -62,6 +64,7 @@ struct KVCache {
     LayerKVCache getLayerCache(int idx) {
         LayerKVCache layer_cache;
         layer_cache.layer_id = idx;
+        layer_cache.nvfp4    = nvfp4;
 
         // Determine whether this layer is a full-attention layer.
         if (idx < 0 || static_cast<size_t>(idx) >= layer_group_types.size())
@@ -95,7 +98,7 @@ struct KVCache {
                     layer_cache.kv_cache_base = base.reshape({kernel_block_num,
                                                               (int64_t)kernel_seq_size_per_block,
                                                               (int64_t)(kv_lora_rank + rope_head_dim)});
-                } else if (num_kv_heads > 0 && head_dim > 0) {
+                } else if (!nvfp4 && num_kv_heads > 0 && head_dim > 0) {
                     // MHA layout: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
                     layer_cache.kv_cache_base = base.reshape({kernel_block_num,
                                                               2,
@@ -172,6 +175,7 @@ struct KVCache {
 
         LayerKVCache layer_cache;
         layer_cache.layer_id           = idx;
+        layer_cache.nvfp4              = nvfp4;
         layer_cache.group_id           = layer_region_to_group_id.empty() ? -1 : layer_region_to_group_id[layer][attn];
         layer_cache.region_name        = region_name;
         const bool is_full_region      = !rtp_llm::isDsv4FixedRegion(region_name);

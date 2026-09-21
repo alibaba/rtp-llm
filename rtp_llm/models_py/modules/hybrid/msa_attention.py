@@ -71,6 +71,28 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
     CudaMxfp8Linear,
 )
+from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import NVFP4_GROUP_SIZE
+from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
+    cache_layout as nvfp4_cache_layout,
+)
+from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
+    clear_working_tails as nvfp4_clear_working_tails,
+)
+from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
+    gather_index_rows as nvfp4_gather_index_rows,
+)
+from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
+    gather_main_rows as nvfp4_gather_main_rows,
+)
+from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
+    quantize_index_rows as nvfp4_quantize_index_rows,
+)
+from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
+    quantize_main_rows as nvfp4_quantize_main_rows,
+)
+from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
+    scatter_main_rows_to_hnd as nvfp4_scatter_main_rows_to_hnd,
+)
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
@@ -2138,6 +2160,7 @@ class MSAAttention(nn.Module):
         self.kv_size = self.kv_head_num * self.head_dim
         self.page_size = attn_config.kernel_tokens_per_block
         self.physical_page_size = attn_config.tokens_per_block
+        self.nvfp4_kv_cache = bool(getattr(attn_config, "nvfp4_kv_cache", False))
 
         # --- main GQA branch (identical construction to CausalAttention) ---
         self.qkv_proj = LinearFactory.create_linear_from_weights(
@@ -2178,12 +2201,21 @@ class MSAAttention(nn.Module):
         # fallback. Optional raw MXFP8 copies feed only the fused decode matmul.
         self.idx_head_dim = int(sparse_config["idx_head_dim"])
         self.idx_k_fp8_mode = int(sparse_config.get("idx_k_fp8_mode", 0))
-        if self.idx_k_fp8_mode not in (0, 1, 2):
+        if self.idx_k_fp8_mode not in (0, 1, 2, 3):
             raise ValueError(
-                f"invalid idx_k_fp8_mode={self.idx_k_fp8_mode}; expected 0, 1, or 2"
+                f"invalid idx_k_fp8_mode={self.idx_k_fp8_mode}; "
+                "expected 0, 1, 2, or internal NVFP4 mode 3"
+            )
+        if self.nvfp4_kv_cache != (self.idx_k_fp8_mode == 3):
+            raise ValueError(
+                "MiniMax-M3 NVFP4 main K/V and indexer-K cache modes must be "
+                f"enabled together (nvfp4={self.nvfp4_kv_cache}, "
+                f"idx_mode={self.idx_k_fp8_mode})"
             )
         self._idx_k_persistent_dtype = (
-            torch.float8_e4m3fn if self.idx_k_fp8_mode > 0 else torch.bfloat16
+            torch.uint8
+            if self.idx_k_fp8_mode == 3
+            else (torch.float8_e4m3fn if self.idx_k_fp8_mode > 0 else torch.bfloat16)
         )
         self._idx_k_working_dtype = (
             torch.float8_e4m3fn if self.idx_k_fp8_mode == 2 else torch.bfloat16
@@ -2303,6 +2335,8 @@ class MSAAttention(nn.Module):
 
     def _paged_kv_base_view(self, kv_cache: LayerKVCache) -> Optional[torch.Tensor]:
         base = None if kv_cache is None else kv_cache.kv_cache_base
+        if self.nvfp4_kv_cache:
+            return base
         if base is None or base.dim() != 2:
             return base
         from rtp_llm.models_py.modules.factory.attention.common import (
@@ -2314,6 +2348,11 @@ class MSAAttention(nn.Module):
         )
 
     def _check_paged_decode_static(self, kv_cache: LayerKVCache) -> bool:
+        # The native paged MSA decode kernel has no NVFP4 specialization.  Keep
+        # its original BF16/FP8 path intact and route NVFP4 through the explicit
+        # gather/dequant scratch boundary below.
+        if self.nvfp4_kv_cache:
+            return False
         if (
             kv_cache is None
             or self._kv_sharded
@@ -2783,6 +2822,72 @@ class MSAAttention(nn.Module):
         flat scratch on this path. Working pages come from ``_BF16_WORKING_PAGES``
         so all sparse layers of one forward share a single buffer.
         """
+        if self.nvfp4_kv_cache:
+            if self._kv_sharded:
+                raise RuntimeError(
+                    "NVFP4 MSA CP prefill currently requires the replicated "
+                    "paged cache (PREFILL_CP_KV_CACHE_SHARDED=0)"
+                )
+            layout = nvfp4_cache_layout(
+                kv_cache.kv_cache_base,
+                kv_cache.kv_scale_base,
+                self.kv_head_num,
+                self.physical_page_size,
+                self.head_dim,
+            )
+            selected = packed.index_select(
+                0, unpad_indices[:token_count].to(torch.long)
+            ).contiguous()
+            k = selected[:, :nk].view(token_count, self.kv_head_num, self.head_dim)
+            v = selected[:, nk : 2 * nk].view(
+                token_count, self.kv_head_num, self.head_dim
+            )
+            idx = selected[:, 2 * nk : 2 * nk + ni].view(token_count, ni)
+            physical_slots = slot_mapping[:token_count]
+            destination_slots = write_slots[:token_count]
+            nvfp4_quantize_main_rows(k, v, physical_slots, layout)
+            nvfp4_quantize_index_rows(idx, physical_slots, layout)
+
+            scratch_slots = int(self._scratch_slots)
+            if scratch_slots % int(self.page_size) != 0:
+                raise RuntimeError(
+                    f"MSA CP scratch slots {scratch_slots} are not page-aligned "
+                    f"to page_size={self.page_size}"
+                )
+            page_count = scratch_slots // int(self.page_size)
+            k_paged, v_paged = None, None
+            if write_main_scratch:
+                k_paged, v_paged = _BF16_WORKING_PAGES.acquire(
+                    page_count,
+                    self.kv_head_num,
+                    int(self.page_size),
+                    self.head_dim,
+                    packed.device,
+                )
+                nvfp4_scatter_main_rows_to_hnd(
+                    k, v, destination_slots, k_paged, v_paged
+                )
+            idx_scratch = _IDX_K_SCRATCH.acquire(
+                scratch_slots,
+                1,
+                self.idx_head_dim,
+                torch.bfloat16,
+                packed.device,
+            )
+            idx_scratch[destination_slots, 0] = idx
+            if write_main_scratch:
+                nvfp4_clear_working_tails(
+                    k_paged,
+                    v_paged,
+                    idx_scratch,
+                    kv_lens,
+                    int(self._scratch_seq_len),
+                )
+            self._scratch_k = None
+            self._scratch_v = None
+            self._scratch_idx_k = idx_scratch
+            return k_paged, v_paged
+
         base = self._paged_kv_base_view(kv_cache)
         if base is None or base.dim() != 5:
             raise RuntimeError(
@@ -2938,6 +3043,43 @@ class MSAAttention(nn.Module):
           full sequence (``k``/``v`` are the full sequence in CP prefill).
         * not sharded (non-CP prefill, or the original decode path): the full
           active history is read back from the persistent paged pool."""
+        if self.nvfp4_kv_cache:
+            layout = nvfp4_cache_layout(
+                kv_cache.kv_cache_base,
+                kv_cache.kv_scale_base,
+                self.kv_head_num,
+                self.physical_page_size,
+                self.head_dim,
+            )
+            if slot_mapping is None:
+                slot_mapping = self._kernel_slots_to_paged(write_slots, attn_inputs)
+            nvfp4_quantize_main_rows(k, v, slot_mapping, layout)
+
+            scratch_slots = int(self._scratch_slots)
+            scratch_k, scratch_v = _MAIN_KV_SCRATCH.acquire(
+                scratch_slots, self.kv_head_num, self.head_dim, k.dtype, device
+            )
+            if self._kv_sharded:
+                scratch_k[write_slots] = k
+                scratch_v[write_slots] = v
+            else:
+                graph_decode = (
+                    not attn_inputs.is_prefill
+                ) and self._cuda_graph_forward_active()
+                dst_full, physical_slots = self._full_history_slots(
+                    req_to_token, kv_lens, attn_inputs, device, graph_decode
+                )
+                nvfp4_gather_main_rows(
+                    layout,
+                    physical_slots,
+                    dst_full,
+                    scratch_k,
+                    scratch_v,
+                )
+            self._scratch_k = scratch_k
+            self._scratch_v = scratch_v
+            return
+
         base = self._paged_kv_base_view(kv_cache)
         if base is None or base.dim() != 5:
             raise RuntimeError(
@@ -3002,6 +3144,25 @@ class MSAAttention(nn.Module):
         self, kv_cache: LayerKVCache
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Return idx_K values and optional per-token scales from the side region."""
+        if self.nvfp4_kv_cache:
+            layout = nvfp4_cache_layout(
+                kv_cache.kv_cache_base,
+                kv_cache.kv_scale_base,
+                self.kv_head_num,
+                self.physical_page_size,
+                self.head_dim,
+            )
+            values, scales = layout.indexer(self.idx_head_dim)
+            return values.view(
+                layout.num_blocks,
+                self.page_size,
+                self.idx_head_dim // 2,
+            ), scales.view(
+                layout.num_blocks,
+                self.page_size,
+                self.idx_head_dim // NVFP4_GROUP_SIZE,
+            )
+
         scale = kv_cache.kv_scale_base
         if scale is None or scale.dim() != 2:
             raise RuntimeError(
@@ -3058,6 +3219,45 @@ class MSAAttention(nn.Module):
         flat row is exactly its physical slot. Non-owned tokens (slot == -1)
         are skipped. The kernel scratch is filled directly from the
         all-gathered ``idx_k`` (no paged read-back)."""
+        if self.nvfp4_kv_cache:
+            layout = nvfp4_cache_layout(
+                kv_cache.kv_cache_base,
+                kv_cache.kv_scale_base,
+                self.kv_head_num,
+                self.physical_page_size,
+                self.head_dim,
+            )
+            idx_flat = idx_k.reshape(-1, self.idx_head_dim)
+            if slot_mapping is None:
+                slot_mapping = self._kernel_slots_to_paged(write_slots, attn_inputs)
+            nvfp4_quantize_index_rows(idx_flat, slot_mapping, layout)
+
+            graph_decode = (
+                not attn_inputs.is_prefill
+            ) and self._cuda_graph_forward_active()
+            idx_scratch = _IDX_K_SCRATCH.acquire(
+                int(self._scratch_slots),
+                1,
+                self.idx_head_dim,
+                self._idx_k_working_dtype,
+                device,
+            )
+            if self._kv_sharded:
+                idx_scratch[write_slots, 0] = idx_flat
+            else:
+                dst_full, physical_slots = self._full_history_slots(
+                    req_to_token, kv_lens, attn_inputs, device, graph_decode
+                )
+                nvfp4_gather_index_rows(
+                    layout,
+                    self.idx_head_dim,
+                    physical_slots,
+                    dst_full,
+                    idx_scratch,
+                )
+            self._scratch_idx_k = idx_scratch
+            return
+
         idx_view, idx_scale = self._idx_k_paged_storage(kv_cache)
         if idx_view.dtype != self._idx_k_persistent_dtype:
             raise RuntimeError(
@@ -3136,6 +3336,67 @@ class MSAAttention(nn.Module):
             )
         if self._scratch_idx_k is None:
             raise RuntimeError("MSA CP prefix restore requires idx-K scratch")
+
+        if self.nvfp4_kv_cache:
+            if self._kv_sharded:
+                raise RuntimeError(
+                    "NVFP4 CP prefix restore currently requires "
+                    "PREFILL_CP_KV_CACHE_SHARDED=0"
+                )
+            block_table = self._physical_block_table(attn_inputs)
+            physical_page_parts = [
+                block_table[batch_idx, : int(prefix_len) // int(self.page_size)]
+                for batch_idx, prefix_len in enumerate(prefix_cpu.tolist())
+                if int(prefix_len) > 0
+            ]
+            physical_pages = torch.cat(physical_page_parts).to(torch.long)
+            if dst_pages is None:
+                dst_page_parts = [
+                    req_to_token[batch_idx, : int(prefix_len) : self.page_size]
+                    .to(torch.long)
+                    .div(self.page_size, rounding_mode="floor")
+                    for batch_idx, prefix_len in enumerate(prefix_cpu.tolist())
+                    if int(prefix_len) > 0
+                ]
+                dst_pages = torch.cat(dst_page_parts)
+            if int(physical_pages.numel()) != int(dst_pages.numel()):
+                raise RuntimeError(
+                    "NVFP4 CP prefix physical/destination page counts differ: "
+                    f"{physical_pages.numel()} vs {dst_pages.numel()}"
+                )
+            offsets = torch.arange(
+                self.page_size, device=physical_pages.device, dtype=torch.long
+            )
+            physical_slots = (
+                physical_pages[:, None] * self.page_size + offsets[None, :]
+            ).reshape(-1)
+            destination_slots = (
+                dst_pages.to(device=physical_pages.device)[:, None] * self.page_size
+                + offsets[None, :]
+            ).reshape(-1)
+            layout = nvfp4_cache_layout(
+                kv_cache.kv_cache_base,
+                kv_cache.kv_scale_base,
+                self.kv_head_num,
+                self.physical_page_size,
+                self.head_dim,
+            )
+            nvfp4_gather_main_rows(
+                layout,
+                physical_slots,
+                destination_slots,
+                k_paged,
+                v_paged,
+                out_hnd=True,
+            )
+            nvfp4_gather_index_rows(
+                layout,
+                self.idx_head_dim,
+                physical_slots,
+                destination_slots,
+                self._scratch_idx_k,
+            )
+            return
 
         block_table = self._physical_block_table(attn_inputs)
         idx_pool, idx_scale_pool = self._idx_k_paged_storage(kv_cache)
@@ -3533,6 +3794,11 @@ class MSAAttention(nn.Module):
         )
 
         if _CP_COMPACT_PREFILL:
+            if self.nvfp4_kv_cache:
+                raise ValueError(
+                    "M3_MSA_CP_COMPACT_PREFILL has no NVFP4 reader; disable it "
+                    "until the compact attention kernel gains native NVFP4 support"
+                )
             from .msa_cp_compact import validate_compact_mode
 
             validate_compact_mode(_CP_PACKED_KV_OVERLAP, _CP_PREFIX_PREFETCH)

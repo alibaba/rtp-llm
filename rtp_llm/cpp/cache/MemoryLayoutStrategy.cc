@@ -117,7 +117,24 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
                             static_cast<size_t>(kv_scale_tensor.nbytes()),
                             config_.kv_scale_pool_size_bytes);
 
-    if (config_.is_mla) {
+    if (config_.dtype == rtp_llm::TYPE_BYTES) {
+        // Packed NVFP4 uses a byte-addressed side region: E4M3 main K/V
+        // scales followed (for M3 MSA) by packed indexer-K data and scales.
+        auto scale_options =
+            torch::TensorOptions().dtype(torch::kUInt8).device(kv_scale_tensor.device()).requires_grad(false);
+        torch::Tensor kv_scale_typed = torch::from_blob(
+            kv_scale_tensor.data_ptr(), {static_cast<int64_t>(config_.kv_scale_pool_size_bytes)}, scale_options);
+        torch::Tensor reshaped_scale_tensor =
+            kv_scale_typed.reshape({static_cast<int64_t>(config_.layer_num),
+                                    static_cast<int64_t>(config_.block_num),
+                                    static_cast<int64_t>(config_.kv_scale_stride_bytes)});
+        reshaped_scale_tensor.fill_(0);
+        layer_kv_scale_tensors_.clear();
+        layer_kv_scale_tensors_.reserve(config_.layer_num);
+        for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
+            layer_kv_scale_tensors_.push_back(reshaped_scale_tensor[layer_id]);
+        }
+    } else if (config_.is_mla) {
         // MLA: scale is byte-packed (UINT8), shape [layer_num, block_num, seq_size_per_block, bytes_per_token]
         RTP_LLM_CHECK_WITH_INFO(config_.seq_size_per_block > 0, "seq_size_per_block must be > 0 for MLA scale");
         RTP_LLM_CHECK_WITH_INFO(config_.kv_scale_stride_bytes % config_.seq_size_per_block == 0,
