@@ -46,6 +46,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->normalized_hidden_states = config_proto->normalized_hidden_states();
     generate_config->calculate_loss           = config_proto->calculate_loss();
     generate_config->is_streaming             = config_proto->is_streaming();
+    TRANS_OPTIONAL(aux_info);
     generate_config->timeout_ms               = config_proto->timeout_ms();
     generate_config->sp_edit                  = config_proto->sp_edit();
     generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();

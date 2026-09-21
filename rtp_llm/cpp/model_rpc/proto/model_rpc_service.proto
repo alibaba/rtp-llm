@@ -144,6 +144,8 @@ message GenerateConfigPB {
     google.protobuf.StringValue structural_tag = 72;
     ThinkingModePB thinking_mode = 73;
     reserved 74;
+    // Missing on legacy clients: preserve the engine's historical default true.
+    google.protobuf.BoolValue aux_info = 75;
 }
 
 message MMPreprocessConfigPB {

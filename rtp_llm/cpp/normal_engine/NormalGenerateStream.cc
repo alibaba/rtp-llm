@@ -179,12 +179,14 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             if (update_info.cum_log_probs.defined()) {
                 generate_output.aux_info.cum_log_probs = cum_log_probs_.narrow(0, i, 1).cpu().clone();
             }
-            if (generate_input_->generate_config->return_all_probs != ReturnAllProbsMode::NONE) {
-                if (!update_info.all_probs.defined()) {
-                    throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
-                }
-                generate_output.aux_info.all_probs = all_probs_.narrow(0, i, 1).clone();
+        }
+        // all_probs is returned as an independent tensor in FlattenOutputPB.
+        // Disabling auxiliary metadata must not discard this explicit output.
+        if (generate_input_->generate_config->return_all_probs != ReturnAllProbsMode::NONE) {
+            if (!update_info.all_probs.defined()) {
+                throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
             }
+            generate_output.aux_info.all_probs = all_probs_.narrow(0, i, 1).clone();
         }
         // hidden_states post process
         if (generate_output.finished && generate_input_->generate_config->return_hidden_states

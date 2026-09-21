@@ -128,6 +128,7 @@ def trans_input(input_py: GenerateInput):
     validate_engine_ready(input_py.generate_config)
 
     generate_config_pb = input_pb.generate_config
+    generate_config_pb.aux_info.value = input_py.generate_config.aux_info
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
     generate_config_pb.max_thinking_tokens = (
         input_py.generate_config.max_thinking_tokens

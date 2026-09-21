@@ -178,6 +178,26 @@ class ModelRpcClientTest(TestCase):
             generate_config=generate_config,
         )
 
+    def test_nested_aux_info_survives_rpc_serialization(self):
+        from rtp_llm.structure.request_extractor import RequestExtractor
+
+        for value in (None, False, True):
+            for streaming in (False, True):
+                with self.subTest(aux_info=value, streaming=streaming):
+                    request = json.loads('{"generate_config": {"aux_info": false}}')
+                    if value is None:
+                        request["generate_config"].pop("aux_info")
+                    else:
+                        request["generate_config"]["aux_info"] = value
+                    request["generate_config"]["is_streaming"] = streaming
+                    config, _ = RequestExtractor(GenerateConfig())._format_generate_config(request)
+                    input_pb = trans_input(self._make_generate_input(config))
+                    received = GenerateInputPB.FromString(input_pb.SerializeToString())
+
+                    self.assertTrue(received.generate_config.HasField("aux_info"))
+                    self.assertEqual(received.generate_config.aux_info.value, value is not False)
+                    self.assertEqual(received.generate_config.is_streaming, streaming)
+
     def test_thinking_mode_values_match_proto_contract(self):
         cases = (
             (ThinkingMode.UNSPECIFIED, GenerateConfigPB.THINKING_MODE_UNSPECIFIED),
