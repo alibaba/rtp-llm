@@ -163,6 +163,7 @@ class Qwen3NextMetadata(object):
             tuple[object, ...], _AiterFlydslGdnDecodeCacheEntry
         ] = {}
         self.aiter_flydsl_gdn_decode_unsupported: set[tuple[object, ...]] = set()
+        self.flashinfer_prefill_metadata = {}
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -532,7 +533,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             else None
         )
         fuse_qkv = (
-            os.getenv("RTP_QWEN35_FUSED_CONV_QKV_NORM", "0") == "1"
+            os.getenv("RTP_QWEN35_FUSED_CONV_QKV_NORM", "1") == "1"
             and mixed_qkv.is_cuda
             and torch.version.hip is None
             and torch.cuda.get_device_capability(mixed_qkv.device)[0] == 10
@@ -567,13 +568,29 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         attn_inputs: PyAttentionInputs,
         attn_meta: Qwen3NextMetadata,
         normalized_qkv=None,
+        prefill_metadata=None,
     ) -> torch.Tensor:
-        gating = fused_gdn_gating
-        if os.getenv(
-            "RTP_QWEN35_TILED_PREFILL_GATING", "0"
-        ) == "1" and supports_gdn_gating_prefill(self.alog, a, b, self.dt_bias):
-            gating = gdn_gating_prefill
-        g, beta = gating(self.alog, a, b, self.dt_bias)
+        from rtp_llm.models_py.triton_kernels.common.prefill_fusion import (
+            GATING,
+            enabled,
+            gdn_prefill_backend,
+            in_prefill,
+        )
+
+        backend = gdn_prefill_backend(mixed_qkv, self.head_k_dim, self.head_v_dim)
+        tiled_gating = supports_gdn_gating_prefill(self.alog, a, b, self.dt_bias)
+        gates_prepared = (
+            backend == "flashinfer"
+            and in_prefill()
+            and enabled(GATING)
+            and tiled_gating
+        )
+        if tiled_gating:
+            g, beta = gdn_gating_prefill(
+                self.alog, a, b, self.dt_bias, flashinfer=gates_prepared
+            )
+        else:
+            g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         ssm_states = (
             self._get_ssm_states(kv_cache_tensor)
             if kv_cache_tensor is not None
@@ -630,12 +647,11 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             value = value.view(
                 1, value.shape[0], self.local_num_v_heads, self.head_v_dim
             )
-        backend = os.getenv("RTP_QWEN35_GDN_PREFILL_BACKEND", "native")
         if backend not in ("native", "flashinfer"):
             raise ValueError(f"Unknown GDN prefill backend: {backend}")
         if backend == "flashinfer":
-            # Explicit opt-in: unsupported dtype/architecture/layout is an error,
-            # so a candidate comparison cannot silently measure the old backend.
+            # Explicit backend overrides remain strict: unsupported contracts fail
+            # instead of silently measuring a different backend.
             from rtp_llm.models_py.triton_kernels.fla.flashinfer_prefill import (
                 flashinfer_gdn_prefill,
                 store_flashinfer_ssm_state,
@@ -651,6 +667,8 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_state=initial_states,
                 checkpoint_interval=seq_size_per_block,
                 qk_normalized=normalized_qkv is not None,
+                gates_prepared=gates_prepared,
+                metadata=prefill_metadata,
             )
             if ssm_states is not None:
                 store_flashinfer_ssm_state(
@@ -777,6 +795,18 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             attn_inputs,
             metadata=attn_meta.get_prefill_conv1d_meta(),
         )
+        prefill_metadata = None
+        metadata_by_input = getattr(attn_meta, "flashinfer_prefill_metadata", {})
+        if metadata_by_input:
+            from rtp_llm.models_py.triton_kernels.fla.flashinfer_prefill import (
+                flashinfer_metadata_key,
+            )
+
+            prefill_metadata = metadata_by_input.get(
+                flashinfer_metadata_key(
+                    attn_inputs.cu_seqlens_device, seq_size_per_block
+                )
+            )
         attn_out = self._fla(
             mixed_qkv if isinstance(conv_output, tuple) else conv_output,
             b,
@@ -786,6 +816,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             attn_inputs,
             attn_meta,
             normalized_qkv=conv_output if isinstance(conv_output, tuple) else None,
+            prefill_metadata=prefill_metadata,
         )
         cache_store_inputs = attn_inputs.cache_store_inputs
         cache_store_writer = attn_inputs.cache_store_writer
@@ -1028,7 +1059,11 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         is_target_verify = self._is_target_verify(attn_inputs, attn_meta)
         g = None
         beta = None
-        if torch.version.hip is None and not is_target_verify and gdn_decode_backend() != "flashinfer":
+        if (
+            torch.version.hip is None
+            and not is_target_verify
+            and gdn_decode_backend() != "flashinfer"
+        ):
             batch, seq = self._get_bs_from_attenion_input(
                 mixed_qkv, attn_inputs, is_target_verify
             )
@@ -1264,7 +1299,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
     def _norm_output_project(self, x, z, *, enable_fusion=False):
         if (
             enable_fusion
-            and os.getenv("RTP_QWEN35_FUSED_GATED_RMSNORM_FP8", "0") == "1"
+            and os.getenv("RTP_QWEN35_FUSED_GATED_RMSNORM_FP8", "1") == "1"
         ):
             from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
                 CudaFp8DeepGEMMLinear,
@@ -1673,7 +1708,18 @@ class Qwen3NextDecoderLayer(nn.Module):
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> tuple[torch.Tensor, torch.Tensor]:
         is_prefill = attention_inputs is not None and attention_inputs.is_prefill
-        with fusion_phase(is_prefill=is_prefill):
+        from rtp_llm.models_py.triton_kernels.common.prefill_fusion import (
+            prefill_fusion_scope,
+        )
+
+        ordinary_prefill = (
+            is_prefill
+            and not attn_meta.is_target_verify
+            and not attn_meta.is_cp_linear_attn
+        )
+        with fusion_phase(is_prefill=is_prefill), prefill_fusion_scope(
+            ordinary_prefill
+        ):
             return self._forward_with_phase(
                 hidden_states,
                 residual,
@@ -2012,6 +2058,41 @@ class Qwen3NextModel(GptModelBase):
             is_cuda_graph=is_cuda_graph,
             aiter_gdn_prefill_metadata=aiter_gdn_prefill_metadata,
         )
+
+        from rtp_llm.models_py.triton_kernels.common.prefill_fusion import (
+            METADATA,
+            enabled,
+            gdn_prefill_backend,
+        )
+
+        if (
+            attention_inputs.is_prefill
+            and not is_target_verify
+            and not is_cp
+            and self.kv_cache is not None
+            and enabled(METADATA)
+            and gdn_prefill_backend(hidden_states) == "flashinfer"
+        ):
+            from rtp_llm.models_py.triton_kernels.fla.flashinfer_prefill import (
+                flashinfer_metadata_key,
+                prepare_flashinfer_prefill_metadata,
+            )
+
+            for i, layer in enumerate(self.layers):
+                if layer.layer_type != HybridAttentionType.LINEAR:
+                    continue
+                layer_inputs = select_attention_inputs_for_layer(
+                    inputs, self.kv_cache, i
+                )
+                cu = layer_inputs.cu_seqlens_device
+                interval = self.kv_cache.get_layer_cache(i).seq_size_per_block
+                key = flashinfer_metadata_key(cu, interval)
+                if key not in attn_meta.flashinfer_prefill_metadata:
+                    attn_meta.flashinfer_prefill_metadata[key] = (
+                        prepare_flashinfer_prefill_metadata(
+                            cu, hidden_states.shape[0], interval
+                        )
+                    )
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)

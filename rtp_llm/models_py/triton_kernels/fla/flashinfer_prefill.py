@@ -7,6 +7,7 @@ public use_qk_l2norm_in_kernel argument. Serving selects this adapter explicitly
 
 import importlib.util
 import sys
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -40,6 +41,59 @@ def _flashinfer_blackwell_kernel():
     return chunk_gated_delta_rule_sm100
 
 
+@dataclass(frozen=True)
+class FlashInferPrefillMetadata:
+    source_cu: torch.Tensor
+    cu_seqlens: torch.Tensor
+    checkpoint_starts: torch.Tensor
+    checkpoint_interval: int
+    total_tokens: int
+    checkpoint_capacity: int
+
+
+def flashinfer_metadata_key(cu, interval):
+    return (
+        cu.data_ptr(),
+        tuple(cu.shape),
+        tuple(cu.stride()),
+        cu.dtype,
+        cu.device,
+        interval,
+    )
+
+
+def prepare_flashinfer_prefill_metadata(cu, total_tokens, checkpoint_interval=2048):
+    if checkpoint_interval < 128 or checkpoint_interval % 64:
+        raise ValueError(
+            "Checkpoint interval must be a multiple of 64 and at least 128 tokens"
+        )
+    if (
+        not cu.is_cuda
+        or cu.ndim != 1
+        or cu.numel() < 2
+        or cu.dtype not in (torch.int32, torch.int64)
+    ):
+        raise ValueError("Expected CUDA int32/int64 packed sequence offsets")
+    cu32 = cu.to(dtype=torch.int32).contiguous()
+    # Shape/interval are host-known; no device-to-host synchronization.
+    starts = torch.empty_like(cu32)
+    _prepare_checkpoint_starts[(1,)](
+        cu32,
+        starts,
+        cu32.numel(),
+        checkpoint_interval,
+        BLOCK=triton.next_power_of_2(cu32.numel()),
+    )
+    return FlashInferPrefillMetadata(
+        cu,
+        cu32,
+        starts,
+        checkpoint_interval,
+        total_tokens,
+        total_tokens // checkpoint_interval,
+    )
+
+
 def flashinfer_gdn_prefill(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -51,6 +105,9 @@ def flashinfer_gdn_prefill(
     scale: Optional[float] = None,
     checkpoint_interval: int = 2048,
     qk_normalized: bool = False,
+    *,
+    gates_prepared: bool = False,
+    metadata: Optional[FlashInferPrefillMetadata] = None,
 ):
     """Return (output[1,T,H,V], final[N,H,V,K], checkpoints, checkpoint_starts).
 
@@ -102,11 +159,29 @@ def flashinfer_gdn_prefill(
         qn, kn = fused_l2norm_qk_exact(q, k)
     else:
         qn, kn = l2norm_fwd(q.contiguous()), l2norm_fwd(k.contiguous())
-    cu = cu_seqlens.to(dtype=torch.int64).contiguous()
-    counts = (cu[1:] - cu[:-1]) // checkpoint_interval
-    starts = torch.cat(
-        (torch.zeros(1, device=cu.device, dtype=torch.int64), counts.cumsum(0))
-    )
+    if metadata is None:
+        cu = cu_seqlens.to(dtype=torch.int64).contiguous()
+        counts = (cu[1:] - cu[:-1]) // checkpoint_interval
+        starts = torch.cat(
+            (torch.zeros(1, device=cu.device, dtype=torch.int64), counts.cumsum(0))
+        )
+        kernel_cu, kernel_starts = cu.to(torch.int32), starts.to(torch.int32)
+    else:
+        if (
+            flashinfer_metadata_key(metadata.source_cu, metadata.checkpoint_interval)
+            != flashinfer_metadata_key(cu_seqlens, checkpoint_interval)
+            or metadata.total_tokens != q.shape[1]
+        ):
+            raise ValueError("FlashInfer metadata does not match this prefill")
+        cu = kernel_cu = metadata.cu_seqlens
+        starts = kernel_starts = metadata.checkpoint_starts
+    if gates_prepared and (
+        g.dtype != torch.float32
+        or beta.dtype != torch.float32
+        or not g.is_contiguous()
+        or not beta.is_contiguous()
+    ):
+        raise ValueError("Prepared FlashInfer gates must be contiguous FP32")
     checkpoints = torch.empty(
         (q.shape[1] // checkpoint_interval, v.shape[2], 128, 128),
         device=q.device,
@@ -121,15 +196,15 @@ def flashinfer_gdn_prefill(
         qn[0],
         kn[0],
         v[0].contiguous(),
-        g[0].float().exp(),
-        beta[0].float().contiguous(),
+        g[0] if gates_prepared else g[0].float().exp(),
+        beta[0] if gates_prepared else beta[0].float().contiguous(),
         output,
-        cu.to(torch.int32),
+        kernel_cu,
         None if initial_state is None else initial_state.float().contiguous(),
         state,
         128**-0.5 if scale is None else scale,
         checkpoint_every_n_tokens=checkpoint_interval if enabled else 0,
-        cu_checkpoints=starts.to(torch.int32) if enabled else None,
+        cu_checkpoints=kernel_starts if enabled else None,
         output_checkpoints=checkpoints if enabled else None,
     )
     return output.unsqueeze(0), state, checkpoints, starts
@@ -138,6 +213,17 @@ def flashinfer_gdn_prefill(
 # Sparse checkpoints avoid materializing one H*V*K state for every 64 tokens.
 import triton
 import triton.language as tl
+
+
+@triton.jit
+def _prepare_checkpoint_starts(
+    CU, STARTS, N: tl.constexpr, INTERVAL: tl.constexpr, BLOCK: tl.constexpr
+):
+    i = tl.arange(0, BLOCK)
+    right = tl.load(CU + i, i < N, 0).to(tl.int64)
+    left = tl.load(CU + i - 1, (i > 0) & (i < N), 0).to(tl.int64)
+    counts = tl.where((i > 0) & (i < N), (right - left) // INTERVAL, 0)
+    tl.store(STARTS + i, tl.cumsum(counts).to(tl.int32), i < N)
 
 
 @triton.jit

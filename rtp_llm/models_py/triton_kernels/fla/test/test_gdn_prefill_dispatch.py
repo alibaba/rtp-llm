@@ -3,6 +3,7 @@
 import json
 import os
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,7 +11,11 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNetPrefill
-from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
+from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
+    RmsNormGated,
+    layer_norm_fwd,
+)
+from rtp_llm.models_py.triton_kernels.common.prefill_fusion import prefill_fusion_scope
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating_prefill import gdn_gating_prefill
 
 
@@ -25,12 +30,6 @@ class PrefillDispatch(unittest.TestCase):
             )
         )
         out.mkdir(parents=True, exist_ok=True)
-        flags = {
-            "RTP_QWEN35_FUSED_PREFILL_QK_NORM": "0",
-            "RTP_QWEN35_TILED_PREFILL_GATING": "0",
-            "RTP_QWEN35_TILED_PREFILL_RMSNORM": "0",
-            "RTP_QWEN35_GDN_PREFILL_BACKEND": "native",
-        }
         for lengths, prefix in [
             ([1], 0),
             ([63], 0),
@@ -96,22 +95,27 @@ class PrefillDispatch(unittest.TestCase):
 
             def run(backend, fused):
                 c = initial.clone()
-                with patch.dict(
+                with prefill_fusion_scope(True), patch.dict(
                     os.environ,
                     {
-                        **flags,
                         "RTP_QWEN35_GDN_PREFILL_BACKEND": backend,
-                        **(
-                            {
-                                k: "1"
-                                for k in flags
-                                if k != "RTP_QWEN35_GDN_PREFILL_BACKEND"
-                            }
-                            if fused
-                            else {}
-                        ),
+                        "RTP_QWEN35_PREFILL_FLASHINFER_GATING": "0",
                     },
-                ):
+                ), ExitStack() as stack:
+                    if not fused:
+                        # Reference dispatch deliberately invokes the original kernels.
+                        stack.enter_context(
+                            patch(
+                                "rtp_llm.models_py.model_desc.qwen3_next.supports_gdn_gating_prefill",
+                                return_value=False,
+                            )
+                        )
+                        stack.enter_context(
+                            patch(
+                                "rtp_llm.models_py.triton_kernels.fla.chunk.supports_exact_qk_norm",
+                                return_value=False,
+                            )
+                        )
                     y = Qwen3NextGatedDeltaNetPrefill._fla(
                         obj, mixed, b, a, c, 2048, args
                     )
@@ -168,13 +172,18 @@ class PrefillDispatch(unittest.TestCase):
                     )
                     bias = torch.randn_like(w)
                     norm = RmsNormGated(w, bias, group_size=d, activation=act)
-                    with patch.dict(
-                        os.environ, {"RTP_QWEN35_TILED_PREFILL_RMSNORM": "0"}
-                    ):
-                        expected = norm(x, z)
-                    with patch.dict(
-                        os.environ, {"RTP_QWEN35_TILED_PREFILL_RMSNORM": "1"}
-                    ):
+                    expected = layer_norm_fwd(
+                        x,
+                        w,
+                        bias,
+                        norm.eps,
+                        z=z,
+                        group_size=d,
+                        norm_before_gate=True,
+                        is_rms_norm=True,
+                        activation=act,
+                    )[0]
+                    with prefill_fusion_scope(True):
                         actual = norm(x, z)
                     self.assertTrue(torch.equal(actual, expected), (d, shared, act))
         report["status"] = "PASS"

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import torch
 
+from rtp_llm.models_py.triton_kernels.common.prefill_fusion import prefill_fusion_scope
+
 OUT = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "/tmp/gdn-fusion-tests"))
 LENGTHS = [10007, 16384, 24601, 32768, 40009]
 
@@ -148,21 +150,19 @@ class GatedRmsNormFp8Test(unittest.TestCase):
                 z = torch.randn(t, k + 128, device="cuda", dtype=torch.bfloat16)[
                     :, 128:
                 ]
-                with patch.dict(
+                with prefill_fusion_scope(True), patch.dict(
                     os.environ,
                     {
                         "RTP_QWEN35_FUSED_GATED_RMSNORM_FP8": "0",
-                        "RTP_QWEN35_TILED_PREFILL_RMSNORM": "1",
                     },
                 ):
                     ref = Qwen3NextGatedDeltaNet._norm_output_project(
                         obj, x, z, enable_fusion=enabled
                     )
-                with patch.dict(
+                with prefill_fusion_scope(True), patch.dict(
                     os.environ,
                     {
                         "RTP_QWEN35_FUSED_GATED_RMSNORM_FP8": "1",
-                        "RTP_QWEN35_TILED_PREFILL_RMSNORM": "1",
                     },
                 ):
                     with patch.object(

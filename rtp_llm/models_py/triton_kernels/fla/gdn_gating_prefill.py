@@ -20,6 +20,7 @@ def _gdn_gating_flat(
     SOFT_BETA: tl.constexpr,
     THRESHOLD: tl.constexpr,
     BLOCK: tl.constexpr,
+    FLASHINFER: tl.constexpr,
 ):
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     row = i // H
@@ -36,11 +37,18 @@ def _gdn_gating_flat(
         x,
     )
     g = -tl.exp(al) * sp
+    beta_value = tl.sigmoid(b)
+    if FLASHINFER:
+        # The old adapter widens beta *after* the gating BF16 store.
+        beta_value = beta_value.to(B.dtype.element_ty).to(tl.float32)
+        g = tl.extra.cuda.libdevice.exp(g)
     tl.store(G + i, g, mask)
-    tl.store(BET + i, tl.sigmoid(b), mask)
+    tl.store(BET + i, beta_value, mask)
 
 
-def gdn_gating_prefill(alog, a, b, dt_bias, beta=1.0, threshold=20.0, *, block=256):
+def gdn_gating_prefill(
+    alog, a, b, dt_bias, beta=1.0, threshold=20.0, *, block=256, flashinfer=False
+):
     if a.ndim != 2 or b.shape != a.shape or a.stride(1) != 1 or b.stride(1) != 1:
         raise ValueError("Expected matching token/head matrices with contiguous heads")
     n, h = a.shape
@@ -49,7 +57,9 @@ def gdn_gating_prefill(alog, a, b, dt_bias, beta=1.0, threshold=20.0, *, block=2
     if not a.is_cuda or torch.version.hip is not None:
         raise ValueError("CUDA required")
     g = torch.empty((1, n, h), device=a.device, dtype=torch.float32)
-    bet = torch.empty((1, n, h), device=a.device, dtype=b.dtype)
+    bet = torch.empty(
+        (1, n, h), device=a.device, dtype=torch.float32 if flashinfer else b.dtype
+    )
     if n:
         _gdn_gating_flat[(triton.cdiv(n * h, block),)](
             a,
@@ -65,6 +75,7 @@ def gdn_gating_prefill(alog, a, b, dt_bias, beta=1.0, threshold=20.0, *, block=2
             beta,
             threshold,
             block,
+            flashinfer,
             num_warps=4,
         )
     return g, bet

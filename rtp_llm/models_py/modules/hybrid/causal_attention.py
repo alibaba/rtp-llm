@@ -96,15 +96,36 @@ class CausalAttention(nn.Module):
         attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
+            from rtp_llm.models_py.triton_kernels.common.prefill_fusion import (
+                SIGMOID,
+                enabled,
+                in_prefill,
+                prefill_quantized_linear,
+            )
             from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.sigmoid_mul_fp8_quant import (
+                _tensors_supported,
                 maybe_sigmoid_mul_fp8_quant,
+                sigmoid_mul_fp8_quant,
             )
 
-            output_linear = quantized_linear_for(self.o_proj)
+            prefill_sigmoid = in_prefill() and enabled(SIGMOID)
+            output_linear = (
+                prefill_quantized_linear(self.o_proj, attn_output)
+                if prefill_sigmoid
+                else quantized_linear_for(self.o_proj)
+            )
             fused = (
-                maybe_sigmoid_mul_fp8_quant(attn_output, gate)
-                if output_linear is not None
-                else None
+                (
+                    sigmoid_mul_fp8_quant(attn_output, gate)
+                    if _tensors_supported(attn_output, gate)
+                    else None
+                )
+                if prefill_sigmoid and output_linear is not None
+                else (
+                    maybe_sigmoid_mul_fp8_quant(attn_output, gate)
+                    if output_linear is not None
+                    else None
+                )
             )
             if fused is not None:
                 output = output_linear.forward_quantized(*fused)
