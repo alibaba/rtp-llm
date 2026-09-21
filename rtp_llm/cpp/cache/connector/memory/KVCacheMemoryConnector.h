@@ -69,22 +69,21 @@ public:
     // The memory connector owns one host BlockPool per RTP client. These
     // accessors expose its shared backing to the remote KVCM client without
     // transferring ownership of either the mapping or the memfd.
-    void* hostPoolBaseAddress() const;
+    void*  hostPoolBaseAddress() const;
     size_t hostPoolSizeBytes() const;
-    int hostPoolSharedMemoryFd() const;
+    int    hostPoolSharedMemoryFd() const;
 
     using MemoryRemoteEvictionItem = MemoryDiskBlockCache::CacheItem;
-    using HostBlockBuffer = std::vector<BlockInfo>;
-    using HostBlockBuffers = std::vector<HostBlockBuffer>;
-    size_t totalMemoryBlocks() const;
-    size_t freeMemoryBlocks() const;
+    using HostBlockBuffer          = std::vector<BlockInfo>;
+    using HostBlockBuffers         = std::vector<HostBlockBuffer>;
+    size_t                                totalMemoryBlocks() const;
+    size_t                                freeMemoryBlocks() const;
     std::vector<MemoryRemoteEvictionItem> prepareRemoteEviction(size_t block_num);
-    bool buildHostBlockBuffers(const std::vector<MemoryRemoteEvictionItem>& items,
-                               const std::vector<size_t>& selected_indices,
-                               HostBlockBuffers& buffers) const;
-    void finishRemoteEviction(const std::vector<MemoryRemoteEvictionItem>& items, bool remote_success);
+    bool                                  buildHostBlockBuffers(const std::vector<MemoryRemoteEvictionItem>& items,
+                                                                const std::vector<size_t>&                   selected_indices,
+                                                                HostBlockBuffers&                            buffers) const;
+    void   finishRemoteEviction(const std::vector<MemoryRemoteEvictionItem>& items, bool remote_success);
     size_t evictMemoryImmediately(size_t block_num);
-
 
 private:
     struct LayerRegionSlot {
@@ -149,9 +148,9 @@ private:
     bool                     tryCopyCacheWith3DBatchedMemoryCopy(const MemoryOperationRequestPB&     request,
                                                                  CopyDirection                       direction,
                                                                  const std::vector<LayerRegionSlot>& slots,
-                                                                 size_t* tile_count = nullptr,
-                                                                 size_t* run_count = nullptr,
-                                                                 size_t* payload_bytes = nullptr);
+                                                                 size_t*                             tile_count = nullptr,
+                                                                 size_t*                             run_count = nullptr,
+                                                                 size_t*                             payload_bytes = nullptr);
     bool                     tryCopyCacheWithBatchedMemoryCopy(const MemoryOperationRequestPB&     request,
                                                                CopyDirection                       direction,
                                                                const std::vector<LayerRegionSlot>& slots);
@@ -175,7 +174,7 @@ private:
     bool                     copyMemoryItemsGeneric(const MemoryOperationRequestPB&     request,
                                                     CopyDirection                       direction,
                                                     const std::vector<LayerRegionSlot>& slots,
-                                                    bool use_split_kv = false);
+                                                    bool                                use_split_kv = false);
     bool                     validateCopyItemBacking(const MemoryOperationRequestPB::CopyItem& item) const;
 
     void                         checkLayerBlockStrideBytes() const;
@@ -284,6 +283,8 @@ private:
     void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
     void reportWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
     void reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
+    void reportCopyTaskMetrics(int64_t queue_wait_us, CopyDirection direction, int64_t bytes);
+    void reportCopyPoolMetrics(bool submit_failed);
     void report3DCopyMetrics(bool          success,
                              int64_t       latency_us,
                              CopyDirection direction,

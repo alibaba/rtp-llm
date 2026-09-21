@@ -281,6 +281,7 @@ bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(running_stream_size_metric, "rtp_llm_running_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(remote_running_stream_size_metric, "rtp_llm_remote_running_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_stream_size_metric, "rtp_llm_loading_cache_stream_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(cache_exposed_wait_us_metric, "rtp_llm_scheduler_cache_exposed_wait_us");
     return true;
 }
 
@@ -289,6 +290,11 @@ void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSch
     REPORT_MUTABLE_METRIC(running_stream_size_metric, collector->running_stream_size);
     REPORT_MUTABLE_METRIC(remote_running_stream_size_metric, collector->remote_running_stream_size);
     REPORT_MUTABLE_METRIC(loading_cache_stream_size_metric, collector->loading_cache_stream_size);
+}
+
+void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags*               tags,
+                                    RtpLLMSchedulerCacheStallMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(cache_exposed_wait_us_metric, collector->cache_exposed_wait_us);
 }
 
 bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -469,14 +475,11 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
 }
 
 bool RtpLLMCacheEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_lifetime_ms_metric,
-                                  "rtp_llm_kv_cache_evicted_block_lifetime_ms");
+    REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_lifetime_ms_metric, "rtp_llm_kv_cache_evicted_block_lifetime_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_count_metric, "rtp_llm_kv_cache_evicted_block_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(direct_evicted_block_count_metric,
-                                  "rtp_llm_kv_cache_direct_evicted_block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(direct_evicted_block_count_metric, "rtp_llm_kv_cache_direct_evicted_block_count");
     REGISTER_QPS_MUTABLE_METRIC(memory_direct_evict_qps_metric, "rtp_llm_memory_direct_evict_qps");
-    REGISTER_GAUGE_MUTABLE_METRIC(memory_direct_evict_block_count_metric,
-                                  "rtp_llm_memory_direct_evict_block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(memory_direct_evict_block_count_metric, "rtp_llm_memory_direct_evict_block_count");
     return true;
 }
 
@@ -493,8 +496,7 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
     }
     REPORT_QPS(memory_direct_evict_qps);
     if (collector->memory_direct_evict_block_count >= 0) {
-        REPORT_MUTABLE_METRIC(memory_direct_evict_block_count_metric,
-                              collector->memory_direct_evict_block_count);
+        REPORT_MUTABLE_METRIC(memory_direct_evict_block_count_metric, collector->memory_direct_evict_block_count);
     }
 }
 
@@ -560,14 +562,12 @@ void RtpLLMRemoteCacheWriteMetrics::report(const kmonitor::MetricsTags*         
 bool RtpLLMMemoryRemoteEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(memory_remote_evict_qps_metric, "rtp_llm_memory_remote_evict_qps");
     REGISTER_QPS_MUTABLE_METRIC(memory_remote_evict_fail_qps_metric, "rtp_llm_memory_remote_evict_fail_qps");
-    REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_block_count_metric,
-                                  "rtp_llm_memory_remote_evict_block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_block_count_metric, "rtp_llm_memory_remote_evict_block_count");
     REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_success_block_count_metric,
                                   "rtp_llm_memory_remote_evict_success_block_count");
     REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_failed_block_count_metric,
                                   "rtp_llm_memory_remote_evict_failed_block_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_latency_us_metric,
-                                  "rtp_llm_memory_remote_evict_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_latency_us_metric, "rtp_llm_memory_remote_evict_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_bytes_metric, "rtp_llm_memory_remote_evict_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_inflight_blocks_metric,
                                   "rtp_llm_memory_remote_evict_inflight_blocks");
@@ -578,8 +578,8 @@ bool RtpLLMMemoryRemoteEvictionMetrics::init(kmonitor::MetricsGroupManager* mana
     return true;
 }
 
-void RtpLLMMemoryRemoteEvictionMetrics::report(
-    const kmonitor::MetricsTags* tags, RtpLLMMemoryRemoteEvictionMetricsCollector* collector) {
+void RtpLLMMemoryRemoteEvictionMetrics::report(const kmonitor::MetricsTags*                tags,
+                                               RtpLLMMemoryRemoteEvictionMetricsCollector* collector) {
     REPORT_QPS(memory_remote_evict_qps);
     REPORT_QPS(memory_remote_evict_fail_qps);
     REPORT_MUTABLE_METRIC(memory_remote_evict_block_count_metric, collector->memory_remote_evict_block_count);
@@ -589,10 +589,8 @@ void RtpLLMMemoryRemoteEvictionMetrics::report(
                           collector->memory_remote_evict_failed_block_count);
     REPORT_MUTABLE_METRIC(memory_remote_evict_latency_us_metric, collector->memory_remote_evict_latency_us);
     REPORT_MUTABLE_METRIC(memory_remote_evict_bytes_metric, collector->memory_remote_evict_bytes);
-    REPORT_MUTABLE_METRIC(memory_remote_evict_inflight_blocks_metric,
-                          collector->memory_remote_evict_inflight_blocks);
-    REPORT_MUTABLE_METRIC(memory_emergency_evict_block_count_metric,
-                          collector->memory_emergency_evict_block_count);
+    REPORT_MUTABLE_METRIC(memory_remote_evict_inflight_blocks_metric, collector->memory_remote_evict_inflight_blocks);
+    REPORT_MUTABLE_METRIC(memory_emergency_evict_block_count_metric, collector->memory_emergency_evict_block_count);
     REPORT_MUTABLE_METRIC(device_to_memory_after_remote_latency_us_metric,
                           collector->device_to_memory_after_remote_latency_us);
 }
@@ -890,10 +888,19 @@ bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                 "rtp_llm_kv_cache_memory_cache_copy_failed_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_latency_metric,
                                   "rtp_llm_kv_cache_memory_cache_copy_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_task_queue_wait_us_metric,
+                                  "rtp_llm_kv_cache_memory_cache_copy_task_queue_wait_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_task_bytes_metric,
+                                  "rtp_llm_kv_cache_memory_cache_copy_task_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_pool_active_threads_metric,
+                                  "rtp_llm_kv_cache_memory_cache_copy_pool_active_threads");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_pool_pending_tasks_metric,
+                                  "rtp_llm_kv_cache_memory_cache_copy_pool_pending_tasks");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_copy_pool_submit_failed_qps_metric,
+                                "rtp_llm_kv_cache_memory_cache_copy_pool_submit_failed_qps");
 
     // cudaMemcpy3D batch copy metrics, split by copy_direction tag.
-    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_3d_copy_qps_metric,
-                                "rtp_llm_kv_cache_memory_cache_3d_copy_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_3d_copy_qps_metric, "rtp_llm_kv_cache_memory_cache_3d_copy_qps");
     REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_3d_copy_failed_qps_metric,
                                 "rtp_llm_kv_cache_memory_cache_3d_copy_failed_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_3d_copy_block_count_metric,
@@ -983,6 +990,22 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*           tag
     // 如果失败，上报失败 QPS
     if (collector->failed) {
         kv_cache_memory_cache_copy_failed_qps_metric->Report(&copy_tag, 1);
+    }
+}
+
+void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*               tags,
+                                      RtpLLMMemoryCacheCopyTaskMetricsCollector* collector) {
+    kmonitor::MetricsTags copy_tag("copy_direction", collector->from_gpu ? "FROM_GPU" : "TO_GPU");
+    kv_cache_memory_cache_copy_task_queue_wait_us_metric->Report(&copy_tag, collector->queue_wait_us);
+    kv_cache_memory_cache_copy_task_bytes_metric->Report(&copy_tag, collector->bytes);
+}
+
+void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*               tags,
+                                      RtpLLMMemoryCacheCopyPoolMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_copy_pool_active_threads_metric, collector->active_threads);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_copy_pool_pending_tasks_metric, collector->pending_tasks);
+    if (collector->submit_failed) {
+        REPORT_MUTABLE_QPS(kv_cache_memory_cache_copy_pool_submit_failed_qps_metric);
     }
 }
 

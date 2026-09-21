@@ -179,6 +179,7 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.emplace_back(stream);
+        updateCacheExposedWaitLocked();
         schedule_trigger_ = true;
     }
     cond_.notify_all();
@@ -196,6 +197,7 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
+        updateCacheExposedWaitLocked();
         schedule_trigger_ = true;
     }
     cond_.notify_all();
@@ -337,6 +339,7 @@ void FIFOScheduler::cachePrepareLoop() {
             if (max_inited_kv_cache_streams_ > 0 && !already_inited && inited_streams >= max_inited_kv_cache_streams_) {
                 std::lock_guard<std::mutex> lock(lock_);
                 cache_prepare_blocked_stream_ = stream;
+                updateCacheExposedWaitLocked();
                 break;
             }
 
@@ -357,6 +360,7 @@ void FIFOScheduler::cachePrepareLoop() {
             if (result == CachePrepareResult::LACK_MEM) {
                 std::lock_guard<std::mutex> lock(lock_);
                 cache_prepare_blocked_stream_ = stream;
+                updateCacheExposedWaitLocked();
                 break;
             }
             has_pending = has_pending || result == CachePrepareResult::WAIT;
@@ -364,6 +368,7 @@ void FIFOScheduler::cachePrepareLoop() {
         }
         if (changed) {
             std::lock_guard<std::mutex> lock(lock_);
+            updateCacheExposedWaitLocked();
             schedule_trigger_ = true;
             cond_.notify_all();
         }
@@ -593,6 +598,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     if (waiting_streams_.size() < prev_waiting_size) {
         schedule_trigger_ = true;
     }
+    updateCacheExposedWaitLocked();
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     if (running_streams_changed) {
@@ -674,6 +680,35 @@ void FIFOScheduler::reportMetrics() {
         metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerMetricsCollector>(nullptr, &collector);
     }
     return;
+}
+
+void FIFOScheduler::updateCacheExposedWaitLocked() {
+    const bool cache_blocks_execution = async_cache_prepare_enabled_ && running_streams_.empty()
+                                        && !waiting_streams_.empty() && !waiting_streams_.front()->hasError()
+                                        && !waiting_streams_.front()->hasEvent(StreamEvents::CachePrepared)
+                                        && cache_prepare_blocked_stream_ != waiting_streams_.front();
+    const auto now = std::chrono::steady_clock::now();
+    if (cache_blocks_execution) {
+        if (!cache_exposed_wait_active_) {
+            cache_exposed_wait_active_ = true;
+            cache_exposed_wait_start_  = now;
+        }
+        return;
+    }
+    if (!cache_exposed_wait_active_) {
+        return;
+    }
+
+    const auto elapsed_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(now - cache_exposed_wait_start_).count();
+    cache_exposed_wait_us_total_ += elapsed_us;
+    if (metrics_reporter_) {
+        RtpLLMSchedulerCacheStallMetricsCollector collector;
+        collector.cache_exposed_wait_us = elapsed_us;
+        metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerCacheStallMetricsCollector>(nullptr,
+                                                                                                     &collector);
+    }
+    cache_exposed_wait_active_ = false;
 }
 
 }  // namespace rtp_llm

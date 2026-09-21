@@ -294,16 +294,23 @@ public:
     int64_t loading_cache_stream_size  = 0;
 };
 
+class RtpLLMSchedulerCacheStallMetricsCollector final {
+public:
+    int64_t cache_exposed_wait_us = 0;
+};
+
 class RtpLLMSchedulerMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
     void report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerCacheStallMetricsCollector* collector);
 
 public:
     kmonitor::MutableMetric* wait_stream_size_metric           = nullptr;
     kmonitor::MutableMetric* running_stream_size_metric        = nullptr;
     kmonitor::MutableMetric* remote_running_stream_size_metric = nullptr;
     kmonitor::MutableMetric* loading_cache_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* cache_exposed_wait_us_metric      = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -885,16 +892,16 @@ public:
 
 class RtpLLMMemoryRemoteEvictionMetricsCollector final {
 public:
-    bool    memory_remote_evict_qps                     = false;
-    bool    memory_remote_evict_fail_qps                = false;
-    int64_t memory_remote_evict_block_count             = 0;
-    int64_t memory_remote_evict_success_block_count     = 0;
-    int64_t memory_remote_evict_failed_block_count      = 0;
-    int64_t memory_remote_evict_latency_us              = 0;
-    int64_t memory_remote_evict_bytes                   = 0;
-    int64_t memory_remote_evict_inflight_blocks         = 0;
-    int64_t memory_emergency_evict_block_count          = 0;
-    int64_t device_to_memory_after_remote_latency_us    = 0;
+    bool    memory_remote_evict_qps                  = false;
+    bool    memory_remote_evict_fail_qps             = false;
+    int64_t memory_remote_evict_block_count          = 0;
+    int64_t memory_remote_evict_success_block_count  = 0;
+    int64_t memory_remote_evict_failed_block_count   = 0;
+    int64_t memory_remote_evict_latency_us           = 0;
+    int64_t memory_remote_evict_bytes                = 0;
+    int64_t memory_remote_evict_inflight_blocks      = 0;
+    int64_t memory_emergency_evict_block_count       = 0;
+    int64_t device_to_memory_after_remote_latency_us = 0;
 };
 
 class RtpLLMMemoryRemoteEvictionMetrics: public kmonitor::MetricsGroup {
@@ -1262,6 +1269,20 @@ public:
     bool    from_gpu   = false;
 };
 
+class RtpLLMMemoryCacheCopyTaskMetricsCollector final {
+public:
+    bool    from_gpu      = false;
+    int64_t queue_wait_us = 0;
+    int64_t bytes         = 0;
+};
+
+class RtpLLMMemoryCacheCopyPoolMetricsCollector final {
+public:
+    int64_t active_threads = 0;
+    int64_t pending_tasks  = 0;
+    bool    submit_failed  = false;
+};
+
 class RtpLLMMemoryCache3DCopyMetricsCollector final {
 public:
     bool    failed      = false;
@@ -1289,6 +1310,8 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheReadMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheWriteMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyTaskMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyPoolMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCache3DCopyMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheStatusMetricsCollector* collector);
 
@@ -1318,6 +1341,12 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_latency_metric    = nullptr;
 
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_queue_wait_us_metric     = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_bytes_metric             = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_pool_active_threads_metric    = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_pool_pending_tasks_metric     = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_pool_submit_failed_qps_metric = nullptr;
+
     kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_qps_metric         = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_failed_qps_metric  = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_block_count_metric = nullptr;
@@ -1326,7 +1355,7 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_bytes_metric       = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_latency_us_metric  = nullptr;
 
-    kmonitor::MutableMetric* kv_cache_memory_cache_status_item_num_metric        = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_status_item_num_metric            = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_total_block_num_metric     = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_allocated_block_num_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_available_block_num_metric = nullptr;

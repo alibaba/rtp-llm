@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -597,9 +598,10 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_CoordinatorReturnsNull_Return
     cache_manager_->coordinator_ = mock_coord;
 
     // Coordinator returns nullptr (no connector available)
-    EXPECT_CALL(*mock_coord, asyncRead(testing::_)).WillOnce(testing::Return(nullptr));
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_)).Times(2).WillRepeatedly(testing::Return(nullptr));
 
     ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_FALSE(resource.asyncLoadCache());
     ASSERT_FALSE(resource.asyncLoadCache());
 }
 
@@ -680,6 +682,60 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_Done_ReturnsTrue_ClearsContext
 
     // Subsequent call returns true (no context)
     ASSERT_TRUE(resource.loadCacheDone());
+}
+
+TEST_F(StreamCacheResourceTest, testLoadCacheDone_TransferFailureRetriesWithoutPublishingReuse) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+    resource.resource_context_.load_cache_retry_times              = 1;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
+    cache_manager_->coordinator_ = mock_coord;
+
+    auto make_load_context = [](bool read_success, size_t memory_reuse_blocks) {
+        auto match = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
+        ON_CALL(*match, done()).WillByDefault(testing::Return(true));
+        ON_CALL(*match, success()).WillByDefault(testing::Return(true));
+        ON_CALL(*match, matchedBlockCount()).WillByDefault(testing::Return(2));
+        auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match});
+
+        auto read = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+        ON_CALL(*read, done()).WillByDefault(testing::Return(true));
+        ON_CALL(*read, success()).WillByDefault(testing::Return(read_success));
+        auto fused_read = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{read});
+
+        auto kv_resource = std::make_shared<KVCacheResource>();
+        kv_resource->setMemoryReuseBlockNum(memory_reuse_blocks);
+        auto load_context = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, nullptr);
+        load_context->setFusedReadContext(fused_read);
+        return load_context;
+    };
+
+    auto failed_load     = make_load_context(/*read_success=*/false, /*memory_reuse_blocks=*/2);
+    auto successful_load = make_load_context(/*read_success=*/true, /*memory_reuse_blocks=*/2);
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(failed_load)))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(successful_load)));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.asyncLoadCache());
+
+    EXPECT_FALSE(resource.loadCacheDone());
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_FALSE(stream_->hasError());
+    ASSERT_NE(resource.load_cache_context_, nullptr);
+
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(stream_->reuseLength(), 2 * resource.seqSizePerBlock());
 }
 
 TEST_F(StreamCacheResourceTest, testReleaseResource_ClearsPendingLoadCacheContext) {

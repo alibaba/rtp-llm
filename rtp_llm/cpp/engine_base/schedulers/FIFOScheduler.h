@@ -1,6 +1,7 @@
 #pragma once
 
 #include <queue>
+#include <chrono>
 #include <tuple>
 #include <thread>
 #include <vector>
@@ -60,6 +61,7 @@ private:
     void   accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool   waitPredicate();
     void   cachePrepareLoop();
+    void   updateCacheExposedWaitLocked();
     void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
     void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
     void   cancelStreams(std::list<GenerateStreamPtr>& streams);
@@ -87,16 +89,19 @@ protected:
     // Optional guard for Context-Parallel prefill: when enabled, force prefill
     // to one stream per round. This remains the conservative default while
     // newer dsv4 CP paths can opt in to batched prefill through runtime config.
-    const bool                   cp_force_single_prefill_        = false;
-    const bool                   worker_status_snapshot_enabled_ = false;
-    std::atomic<bool>            stop_                           = false;
-    bool                         schedule_trigger_               = false;
-    bool                         async_cache_prepare_enabled_    = false;
-    std::thread                  cache_prepare_thread_;
-    GenerateStreamPtr            cache_prepare_blocked_stream_;
-    std::mutex                   lock_;
-    std::condition_variable      cond_;
-    kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
+    const bool                            cp_force_single_prefill_        = false;
+    const bool                            worker_status_snapshot_enabled_ = false;
+    std::atomic<bool>                     stop_                           = false;
+    bool                                  schedule_trigger_               = false;
+    bool                                  async_cache_prepare_enabled_    = false;
+    std::thread                           cache_prepare_thread_;
+    GenerateStreamPtr                     cache_prepare_blocked_stream_;
+    bool                                  cache_exposed_wait_active_ = false;
+    std::chrono::steady_clock::time_point cache_exposed_wait_start_;
+    int64_t                               cache_exposed_wait_us_total_ = 0;
+    std::mutex                            lock_;
+    std::condition_variable               cond_;
+    kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
 
     std::vector<EngineScheduleInfo::TaskInfo>          waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo>          running_task_list_;

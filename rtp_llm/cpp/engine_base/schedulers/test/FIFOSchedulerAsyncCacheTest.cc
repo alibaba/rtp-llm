@@ -687,6 +687,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testAsyncPrepareDoesNotPublishOutOfOrderComp
     auto blocked = scheduler->schedule();
     ASSERT_TRUE(blocked.ok());
     EXPECT_TRUE(blocked->empty());
+    EXPECT_TRUE(scheduler->cache_exposed_wait_active_);
 
     first_done.store(true);
     ASSERT_TRUE(waitUntil([&]() { return first->hasEvent(StreamEvents::CachePrepared); }));
@@ -694,6 +695,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testAsyncPrepareDoesNotPublishOutOfOrderComp
     ASSERT_TRUE(ready.ok());
     ASSERT_EQ(ready->size(), 2);
     EXPECT_EQ(ready->front(), first);
+    EXPECT_FALSE(scheduler->cache_exposed_wait_active_);
+    EXPECT_GT(scheduler->cache_exposed_wait_us_total_, 0);
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testNextPrepareOverlapsCurrentGpuRound) {
