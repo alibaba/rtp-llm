@@ -255,7 +255,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
 
             // Publish local Prefill output for the StartLoad handler to return to Decode.
             if (rc.cache_manager && rc.cache_manager->hasP2PConnector()) {
-                P2PConnectorResourceEntry::SideChannelData side_data;
+                PrefillResultStore::SideChannelData side_data;
                 auto                                       tokens = currentExecuteTokens(0);
                 if (!tokens.empty()) {
                     side_data.has_first_token = true;

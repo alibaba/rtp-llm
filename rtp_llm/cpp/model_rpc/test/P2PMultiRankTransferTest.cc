@@ -36,9 +36,9 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheReceiver.h"
@@ -411,7 +411,7 @@ public:
     }
     bool hasCompletedTask(const std::string& request_key) {
         auto* worker = connector->decode_->worker_.get();
-        std::shared_ptr<P2PConnectorWorkerDecode::ReadTaskGroup> group;
+        std::shared_ptr<P2PWorkerDecodeRead::ReadTaskGroup> group;
         {
             std::lock_guard<std::mutex> lock(worker->read_tasks_mutex_);
             auto it = worker->read_tasks_.find(request_key);
@@ -574,7 +574,7 @@ TEST_F(P2PMultiRankPeer, DISABLED_Serve) {
                 meta->setRequestId(command.id);
                 meta->setDeadlineMs(source.deadline);
                 check(store->addResource(meta, source.resources[0]), "batch registration failed");
-                P2PConnectorResourceEntry::SideChannelData payload;
+                PrefillResultStore::SideChannelData payload;
                 payload.has_first_token = true;
                 payload.first_token_id = command.id;
                 store->publishPrefillPayload(key(command.id), source.deadline, std::move(payload));
@@ -615,7 +615,7 @@ TEST_F(P2PMultiRankPeer, DISABLED_Serve) {
                 meta->setRequestId(id);
                 meta->setDeadlineMs(deadline);
                 check(store->addResource(meta, ranks[0]->resource), "Prefill resource registration failed");
-                P2PConnectorResourceEntry::SideChannelData payload;
+                PrefillResultStore::SideChannelData payload;
                 payload.has_first_token = true;
                 payload.first_token_id = id;
                 store->publishPrefillPayload(key(id), deadline, std::move(payload));

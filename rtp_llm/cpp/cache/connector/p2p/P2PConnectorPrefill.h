@@ -17,9 +17,9 @@ namespace rtp_llm {
 class KVCacheConnectorLayerContext;
 class Meta;
 class P2PBroadcastClient;
-class P2PConnectorSchedulerPrefill;
+class P2PSchedulerPrefillRead;
 class LayerBlockConverter;
-class P2PConnectorWorkerPrefill;
+class P2PWorkerPrefillRead;
 class P2PConnectorMetricsCollector;
 
 class P2PConnectorPrefill {
@@ -83,16 +83,14 @@ private:
                                            std::function<bool()>                             is_cancelled,
                                            P2PConnectorMetricsCollector&                     collector);
 
-    grpc::Status fillStartLoadResponsePayload(const P2PConnectorResourceEntry::SideChannelData& data,
-                                              P2PConnectorStartLoadResponsePB&                 response);
 
 private:
     const P2PConnectorConfig                       config_;
     std::shared_ptr<LayerBlockConverter>           layer_block_converter_;
     kmonitor::MetricsReporterPtr                   metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient>            tp_broadcast_client_;
-    std::unique_ptr<P2PConnectorSchedulerPrefill> scheduler_;
-    std::shared_ptr<P2PConnectorWorkerPrefill>    worker_;
+    std::unique_ptr<P2PSchedulerPrefillRead> scheduler_;
+    std::shared_ptr<P2PWorkerPrefillRead>    worker_;
     std::shared_ptr<P2PConnectorResourceStore>    stream_store_;
 };
 

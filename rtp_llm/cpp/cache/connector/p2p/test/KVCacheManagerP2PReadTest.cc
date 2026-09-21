@@ -14,7 +14,7 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/TestRpcServer.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -97,7 +97,7 @@ protected:
         auto connector = std::make_shared<P2PConnector>(connector_config, nullptr, nullptr);
         connector->decode_ = std::make_unique<P2PConnectorDecode>(connector_config, nullptr, nullptr);
         connector->decode_->scheduler_ =
-            std::make_unique<P2PConnectorSchedulerDecode>(scheduler_config, nullptr, broadcast);
+            std::make_unique<P2PSchedulerDecodeRead>(scheduler_config, nullptr, broadcast);
         ASSERT_TRUE(connector->decode_->scheduler_->init("manager_prefix_read_test"));
 
         // Keep the manager, allocator reference handling, connector, planner and

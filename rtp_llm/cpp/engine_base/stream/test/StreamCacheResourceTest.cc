@@ -1622,7 +1622,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                              .loss              = requested ? loss : torch::Tensor{},
                              .all_hidden_states = all_hidden});
             ASSERT_FALSE(prefill->hasError());
-            P2PConnectorResourceEntry::SideChannelData published;
+            PrefillResultStore::SideChannelData published;
             ASSERT_TRUE(prefill_connector.stream_store_->takePrefillPayload(key, published));
             EXPECT_EQ(published.first_token_tensors.size(), requested ? 7u : 0u);
             // Reusing executor buffers after publication must not change the payload.

@@ -20,7 +20,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillRead.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
@@ -819,7 +819,7 @@ TEST_F(KVCacheManagerTest, WriteP2PLayer_HoldsAllocatorReferenceUntilLayerCleanu
     connector_config.worker_config.tp_rank       = 0;
     connector_config.worker_config.layer_all_num = 1;
     connector_config.worker_config.topology      = cache_config.topologyPtr();
-    auto worker = std::make_shared<P2PConnectorWorkerPrefill>(
+    auto worker = std::make_shared<P2PWorkerPrefillRead>(
         connector_config.worker_config, nullptr, nullptr, nullptr);
     ASSERT_TRUE(worker->init());
     auto connector = std::make_shared<P2PConnector>(connector_config, nullptr, nullptr);

@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PKeyUtil.h"
@@ -15,7 +15,7 @@
 
 namespace rtp_llm {
 
-P2PConnectorWorkerDecode::P2PConnectorWorkerDecode(P2PConnectorWorkerConfig                    config,
+P2PWorkerDecodeRead::P2PWorkerDecodeRead(P2PConnectorWorkerConfig                    config,
                                                    const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                                                    const kmonitor::MetricsReporterPtr&         metrics_reporter,
                                                    const transfer::IKVCacheReceiverPtr&        receiver):
@@ -25,10 +25,10 @@ P2PConnectorWorkerDecode::P2PConnectorWorkerDecode(P2PConnectorWorkerConfig     
     receiver_(receiver) {
     completion_callback_state_        = std::make_shared<CompletionCallbackState>();
     completion_callback_state_->owner = this;
-    pending_cancel_expiry_thread_     = std::thread(&P2PConnectorWorkerDecode::runPendingCancelExpiryLoop, this);
+    pending_cancel_expiry_thread_     = std::thread(&P2PWorkerDecodeRead::runPendingCancelExpiryLoop, this);
 }
 
-P2PConnectorWorkerDecode::~P2PConnectorWorkerDecode() {
+P2PWorkerDecodeRead::~P2PWorkerDecodeRead() {
     {
         std::lock_guard<std::mutex> lock(completion_callback_state_->mutex);
         completion_callback_state_->owner = nullptr;
@@ -44,7 +44,7 @@ P2PConnectorWorkerDecode::~P2PConnectorWorkerDecode() {
     }
 }
 
-ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&             worker_plan,
+ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&             worker_plan,
                                                    const std::string&                    unique_key,
                                                    int64_t                               deadline_ms,
                                                    const std::shared_ptr<ReadTaskGroup>& task_group,
@@ -141,7 +141,7 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
     return ErrorInfo::OkStatus();
 }
 
-void P2PConnectorWorkerDecode::cleanupRecvTaskStore(const std::shared_ptr<ReadTaskGroup>& task_group,
+void P2PWorkerDecodeRead::cleanupRecvTaskStore(const std::shared_ptr<ReadTaskGroup>& task_group,
                                                     bool                                   cancel_pending_tasks) const {
     if (!task_group) {
         return;
@@ -156,8 +156,8 @@ void P2PConnectorWorkerDecode::cleanupRecvTaskStore(const std::shared_ptr<ReadTa
     }
 }
 
-P2PConnectorWorkerDecode::ReadWaitOutcome
-P2PConnectorWorkerDecode::waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<ReadTaskGroup>& task_group,
+P2PWorkerDecodeRead::ReadWaitOutcome
+P2PWorkerDecodeRead::waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<ReadTaskGroup>& task_group,
                                                               int64_t                               deadline_ms,
                                                               int64_t                               request_id,
                                                               const std::string&                    unique_key) const {
@@ -203,7 +203,7 @@ P2PConnectorWorkerDecode::waitRecvTasksWithReadDeadlinePolicy(const std::shared_
             return ReadWaitOutcome::ReturnDeadlineIncomplete;
 }
 
-void P2PConnectorWorkerDecode::reportReadMetrics(P2PConnectorMetricsCollector&         collector,
+void P2PWorkerDecodeRead::reportReadMetrics(P2PConnectorMetricsCollector&         collector,
                                                  bool                                  success,
                                                  int64_t                               read_start_time_us,
                                                  const std::shared_ptr<ReadTaskGroup>& task_group) const {
@@ -219,7 +219,7 @@ void P2PConnectorWorkerDecode::reportReadMetrics(P2PConnectorMetricsCollector&  
     metrics_reporter_->report<P2PConnectorMetrics, P2PConnectorMetricsCollector>(nullptr, &collector);
 }
 
-ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
+ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
                                          const std::string&        unique_key,
                                          int64_t                   deadline_ms,
                                          const P2PWorkerRoutePlan& worker_plan) {
@@ -373,8 +373,8 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
     return ErrorInfo::OkStatus();
 }
 
-P2PConnectorWorkerDecode::RecvResultInfo
-P2PConnectorWorkerDecode::aggregateRecvTaskResults(const std::shared_ptr<ReadTaskGroup>& task_group) const {
+P2PWorkerDecodeRead::RecvResultInfo
+P2PWorkerDecodeRead::aggregateRecvTaskResults(const std::shared_ptr<ReadTaskGroup>& task_group) const {
     RecvResultInfo result;
     const auto     first = task_group->first_error.snapshot().error;
     if (first.hasError())
@@ -400,7 +400,7 @@ P2PConnectorWorkerDecode::aggregateRecvTaskResults(const std::shared_ptr<ReadTas
     return result;
 }
 
-bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key, int64_t request_deadline_ms) {
+bool P2PWorkerDecodeRead::cancelRead(const std::string& unique_key, int64_t request_deadline_ms) {
     RTP_LLM_LOG_DEBUG("cancelRead start, unique_key: %s", unique_key.c_str());
     std::shared_ptr<ReadTaskGroup> task_group;
     {
@@ -440,7 +440,7 @@ bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key, int64_t
     return true;
 }
 
-void P2PConnectorWorkerDecode::registerTaskCompletionCallback(
+void P2PWorkerDecodeRead::registerTaskCompletionCallback(
     const transfer::IKVCacheRecvTaskPtr& task,
     const std::string&                    unique_key,
     const std::shared_ptr<ReadTaskGroup>& task_group) {
@@ -499,7 +499,7 @@ void P2PConnectorWorkerDecode::registerTaskCompletionCallback(
     });
 }
 
-void P2PConnectorWorkerDecode::onRecvTaskDone(const std::string& unique_key,
+void P2PWorkerDecodeRead::onRecvTaskDone(const std::string& unique_key,
                                                const std::weak_ptr<ReadTaskGroup>& weak_task_group) {
     const auto task_group = weak_task_group.lock();
     if (!task_group) {
@@ -515,12 +515,12 @@ void P2PConnectorWorkerDecode::onRecvTaskDone(const std::string& unique_key,
     }
 }
 
-void P2PConnectorWorkerDecode::schedulePendingCancelExpiryLocked() {
+void P2PWorkerDecodeRead::schedulePendingCancelExpiryLocked() {
     ++pending_cancel_generation_;
     pending_cancel_cv_.notify_one();
 }
 
-void P2PConnectorWorkerDecode::runPendingCancelExpiryLoop() {
+void P2PWorkerDecodeRead::runPendingCancelExpiryLoop() {
     std::unique_lock<std::mutex> lock(read_tasks_mutex_);
     while (!stopping_) {
         const int64_t now_ms = currentTimeMs();
@@ -556,7 +556,7 @@ void P2PConnectorWorkerDecode::runPendingCancelExpiryLoop() {
     }
 }
 
-bool P2PConnectorWorkerDecode::queryLeaseStatus(
+bool P2PWorkerDecodeRead::queryLeaseStatus(
     const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped) {
     // Keep the registration state and lease-map transition in one observation.
     // The read path acquires these locks in the same order when publishing a lease.
@@ -598,7 +598,7 @@ bool P2PConnectorWorkerDecode::queryLeaseStatus(
     return true;
 }
 
-std::shared_ptr<DecodeTargetWriteLease> P2PConnectorWorkerDecode::leaseFor(const std::string& unique_key) const {
+std::shared_ptr<DecodeTargetWriteLease> P2PWorkerDecodeRead::leaseFor(const std::string& unique_key) const {
     std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
     auto                        it = lease_map_.find(unique_key);
     if (it == lease_map_.end() || !it->second.task_group) {

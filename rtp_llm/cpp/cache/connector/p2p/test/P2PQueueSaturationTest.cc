@@ -8,7 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "autil/LockFreeThreadPool.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/TestRpcServer.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -67,7 +67,7 @@ protected:
         }
         client_ = std::make_shared<P2PBroadcastClient>(config_.worker_grpc_addrs);
         ASSERT_TRUE(client_->init());
-        scheduler_ = std::make_unique<P2PConnectorSchedulerDecode>(config_, nullptr, client_);
+        scheduler_ = std::make_unique<P2PSchedulerDecodeRead>(config_, nullptr, client_);
         ASSERT_TRUE(scheduler_->init("saturation"));
         // Replace both references before any request exists. Keep production
         // kickoff and control dispatch sharing one bounded pool, with no new API.
@@ -152,7 +152,7 @@ protected:
     std::unique_ptr<TestRpcServer> prefill_;
     std::shared_ptr<P2PBroadcastClient> client_;
     std::shared_ptr<autil::LockFreeThreadPool> pool_;
-    std::unique_ptr<P2PConnectorSchedulerDecode> scheduler_;
+    std::unique_ptr<P2PSchedulerDecodeRead> scheduler_;
     std::shared_ptr<QueueGate> gate_;
 };
 

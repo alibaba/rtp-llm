@@ -777,7 +777,7 @@ bool KVCacheManager::hasP2PConnector() const {
 
 void KVCacheManager::publishPrefillPayload(const std::string&                           unique_key,
                                             int64_t                                      deadline_ms,
-                                            P2PConnectorResourceEntry::SideChannelData&& data) {
+                                            PrefillResultStore::SideChannelData&& data) {
     if (p2p_connector_ && pd_sep_config_.role_type == RoleType::PREFILL && parallelism_config_.tp_rank == 0) {
         auto stream_store = p2p_connector_->streamStore();
         if (stream_store) {

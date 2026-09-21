@@ -11,8 +11,8 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -244,9 +244,9 @@ protected:
             scheduler_config.worker_grpc_addrs, scheduler_config.p2p_cancel_broadcast_timeout_ms);
         ASSERT_TRUE(tp_broadcast_client_->init());
         prefill_scheduler_ =
-            std::make_unique<P2PConnectorSchedulerPrefill>(scheduler_config, nullptr, tp_broadcast_client_);
+            std::make_unique<P2PSchedulerPrefillRead>(scheduler_config, nullptr, tp_broadcast_client_);
         decode_scheduler_ =
-            std::make_unique<P2PConnectorSchedulerDecode>(std::move(scheduler_config), nullptr, tp_broadcast_client_);
+            std::make_unique<P2PSchedulerDecodeRead>(std::move(scheduler_config), nullptr, tp_broadcast_client_);
         ASSERT_TRUE(decode_scheduler_->init("p2p_connector_scheduler_test"));
     }
 
@@ -256,8 +256,8 @@ protected:
     std::unique_ptr<TestRpcServer>              prefill_server_;
     std::string                                 prefill_addr_;
     std::shared_ptr<P2PBroadcastClient>             tp_broadcast_client_;
-    std::unique_ptr<P2PConnectorSchedulerPrefill>   prefill_scheduler_;
-    std::unique_ptr<P2PConnectorSchedulerDecode>    decode_scheduler_;
+    std::unique_ptr<P2PSchedulerPrefillRead>   prefill_scheduler_;
+    std::unique_ptr<P2PSchedulerDecodeRead>    decode_scheduler_;
 };
 
 TEST_F(P2PConnectorSchedulerTest, AsyncReadUsesConfiguredLoadBudgetAndRequestDeadline) {
@@ -1509,8 +1509,8 @@ TEST(P2PReplicaPlanTest, BothSchedulersRotateMirrorPlansAndBoundCacheBySourceRan
     P2PConnectorSchedulerConfig decode_config;
     decode_config.topology                   = topology;
     decode_config.parallelism_config.tp_size = 1;
-    P2PConnectorSchedulerPrefill prefill(prefill_config, nullptr, nullptr);
-    P2PConnectorSchedulerDecode  decode(decode_config, nullptr, nullptr);
+    P2PSchedulerPrefillRead prefill(prefill_config, nullptr, nullptr);
+    P2PSchedulerDecodeRead  decode(decode_config, nullptr, nullptr);
     std::set<int>                selected;
     for (int i = 0; i < 64; ++i) {
         const auto key    = "decode-dp-" + std::to_string(i);

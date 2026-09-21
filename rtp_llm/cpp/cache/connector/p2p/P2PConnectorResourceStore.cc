@@ -55,6 +55,7 @@ P2PConnectorResourceStore::~P2PConnectorResourceStore() {
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         stopping_ = true;
+        result_store_.stop();
         ++deadline_generation_;
     }
     deadline_cv_.notify_one();
@@ -173,7 +174,7 @@ void P2PConnectorResourceStore::markCancelled(const std::string& unique_key, int
 
 void P2PConnectorResourceStore::markTerminal(const std::string& unique_key, int64_t request_deadline_ms) {
     std::optional<int64_t>                                    request_id;
-    std::optional<P2PConnectorResourceEntry::SideChannelData> retired;
+    std::optional<PrefillResultStore::SideChannelData> retired;
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         auto it = request_states_.find(unique_key);
@@ -185,7 +186,7 @@ void P2PConnectorResourceStore::markTerminal(const std::string& unique_key, int6
             it->second.terminal = true;
             it->second.terminal_expire_at_ms = currentTimeMs() + kTombstoneRetentionMs;
         }
-        retired.swap(it->second.side_channel_data);
+        retired = result_store_.markTerminal(unique_key);
         request_deadline_ms = it->second.request_deadline_ms;
         auto resource = resource_map_.find(unique_key);
         if (resource != resource_map_.end()) {
@@ -248,7 +249,7 @@ std::shared_ptr<P2PConnectorResourceEntry> P2PConnectorResourceStore::waitAndSte
 
 void P2PConnectorResourceStore::checkTimeout(int64_t now_ms) {
     std::vector<std::pair<int64_t, int64_t>>                released;
-    std::vector<P2PConnectorResourceEntry::SideChannelData> retired;
+    std::vector<PrefillResultStore::SideChannelData> retired;
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         while (!deadline_index_.empty() && deadline_index_.begin()->first <= now_ms) {
@@ -259,9 +260,8 @@ void P2PConnectorResourceStore::checkTimeout(int64_t now_ms) {
             if (!state.terminal) {
                 state.terminal = true;
                 state.terminal_expire_at_ms = now_ms + kTombstoneRetentionMs;
-                if (state.side_channel_data) {
-                    retired.push_back(std::move(*state.side_channel_data));
-                    state.side_channel_data.reset();
+                if (auto data = result_store_.markTerminal(it->first)) {
+                    retired.push_back(std::move(*data));
                 }
                 auto resource = resource_map_.find(it->first);
                 if (resource != resource_map_.end()) {
@@ -271,6 +271,7 @@ void P2PConnectorResourceStore::checkTimeout(int64_t now_ms) {
                 }
             }
             if (now_ms >= state.terminal_expire_at_ms) {
+                result_store_.eraseRequest(it->first);
                 request_states_.erase(it);
             } else {
                 // Resources still expire at the original phase deadline. Only
@@ -294,6 +295,9 @@ void P2PConnectorResourceStore::checkTimeout(int64_t now_ms) {
 }
 
 void P2PConnectorResourceStore::scheduleDeadlineCheckLocked(const std::string& unique_key, RequestState& state) {
+    if (!state.terminal) {
+        result_store_.updateDeadline(unique_key, state.deadlineMs());
+    }
     const int64_t deadline_ms = state.terminal ? state.terminal_expire_at_ms : state.deadlineMs();
     if (state.scheduled_deadline_ms == deadline_ms) {
         return;
@@ -342,11 +346,11 @@ void P2PConnectorResourceStore::runDeadlineLoop() {
 
 void P2PConnectorResourceStore::publishPrefillPayload(const std::string&                           unique_key,
                                                        int64_t                                      request_deadline_ms,
-                                                       P2PConnectorResourceEntry::SideChannelData&& data) {
+                                                       PrefillResultStore::SideChannelData&& data) {
     if (!validDeadline(request_deadline_ms) || currentTimeMs() >= request_deadline_ms) {
         return;
     }
-    std::optional<P2PConnectorResourceEntry::SideChannelData> retired;
+    std::optional<PrefillResultStore::SideChannelData> retired;
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         if (currentTimeMs() >= request_deadline_ms) {
@@ -359,23 +363,24 @@ void P2PConnectorResourceStore::publishPrefillPayload(const std::string&        
             || state.request_deadline_ms != request_deadline_ms) {
             return;
         }
-        retired.swap(state.side_channel_data);
-        state.side_channel_data.emplace(std::move(data));
+        retired = result_store_.publishPrefillPayload(unique_key, std::move(data));
     }
     resource_cv_.notify_all();
 }
 
 bool P2PConnectorResourceStore::takePrefillPayload(
-    const std::string& unique_key, P2PConnectorResourceEntry::SideChannelData& out_data) {
-    std::optional<P2PConnectorResourceEntry::SideChannelData> consumed;
+    const std::string& unique_key, PrefillResultStore::SideChannelData& out_data) {
+    std::optional<PrefillResultStore::SideChannelData> consumed;
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         auto                        it = request_states_.find(unique_key);
-        if (it == request_states_.end() || it->second.terminal || currentTimeMs() >= it->second.deadlineMs()
-            || !it->second.side_channel_data) {
+        if (it == request_states_.end() || it->second.terminal || currentTimeMs() >= it->second.deadlineMs()) {
             return false;
         }
-        consumed.swap(it->second.side_channel_data);
+        consumed = result_store_.takePrefillPayload(unique_key);
+        if (!consumed) {
+            return false;
+        }
     }
     // Replacing an existing output may free its tensors; do that outside the store lock.
     out_data = std::move(*consumed);
@@ -383,32 +388,19 @@ bool P2PConnectorResourceStore::takePrefillPayload(
 }
 
 void P2PConnectorResourceStore::clearPrefillPayload(const std::string& unique_key) {
-    std::optional<P2PConnectorResourceEntry::SideChannelData> retired;
+    std::optional<PrefillResultStore::SideChannelData> retired;
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         auto                        it = request_states_.find(unique_key);
         if (it != request_states_.end()) {
-            retired.swap(it->second.side_channel_data);
+            retired = result_store_.clearPrefillPayload(unique_key);
         }
     }
 }
 
 bool P2PConnectorResourceStore::waitPrefillPayloadReady(const std::string& unique_key, int64_t deadline_ms,
                                                    std::function<bool()> is_cancelled) {
-    std::unique_lock<std::mutex> lock(resource_map_mutex_);
-    const auto ready = [&]() {
-        auto it = request_states_.find(unique_key);
-        return it == request_states_.end() || it->second.terminal || currentTimeMs() >= it->second.deadlineMs()
-               || it->second.side_channel_data.has_value();
-    };
-    if (!validDeadline(deadline_ms) || currentTimeMs() >= deadline_ms) {
-        return false;
-    }
-    waitWithBackoff(lock, resource_cv_,
-        std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms)), ready, is_cancelled);
-    auto it = request_states_.find(unique_key);
-    return !(is_cancelled && is_cancelled()) && it != request_states_.end() && !it->second.terminal
-           && currentTimeMs() < it->second.deadlineMs() && it->second.side_channel_data.has_value();
+    return result_store_.waitPrefillPayloadReady(unique_key, deadline_ms, std::move(is_cancelled));
 }
 
 void P2PConnectorResourceStore::reportMetrics(bool timeout, bool cancelled, int64_t wait_start_time_us) {

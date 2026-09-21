@@ -25,9 +25,9 @@ bool P2PConnectorScheduler::init(const std::string& process_id) {
         return false;
     }
 
-    prefill_ = std::make_unique<P2PConnectorSchedulerPrefill>(config_, metrics_reporter_, tp_broadcast_client_);
+    prefill_ = std::make_unique<P2PSchedulerPrefillRead>(config_, metrics_reporter_, tp_broadcast_client_);
 
-    decode_ = std::make_unique<P2PConnectorSchedulerDecode>(config_, metrics_reporter_, tp_broadcast_client_);
+    decode_ = std::make_unique<P2PSchedulerDecodeRead>(config_, metrics_reporter_, tp_broadcast_client_);
     if (!decode_->init(process_id)) {
         RTP_LLM_LOG_ERROR("init failed: decode scheduler init failed");
         return false;

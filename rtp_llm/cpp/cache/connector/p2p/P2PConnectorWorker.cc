@@ -40,13 +40,13 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
         }
     }
 
-    prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(config_, layer_block_converter_, metrics_reporter_, sender);
+    prefill_ = std::make_unique<P2PWorkerPrefillRead>(config_, layer_block_converter_, metrics_reporter_, sender);
     if (!prefill_->init(store_wait_timeout_ms)) {
         RTP_LLM_LOG_ERROR("init failed: prefill init failed");
         return false;
     }
 
-    decode_ = std::make_unique<P2PConnectorWorkerDecode>(config_, layer_block_converter_, metrics_reporter_, receiver);
+    decode_ = std::make_unique<P2PWorkerDecodeRead>(config_, layer_block_converter_, metrics_reporter_, receiver);
 
     RTP_LLM_LOG_INFO("init success");
     return true;

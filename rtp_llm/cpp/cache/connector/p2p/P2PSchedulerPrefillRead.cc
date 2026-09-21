@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
 
 #include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
@@ -10,13 +10,13 @@
 
 namespace rtp_llm {
 
-P2PConnectorSchedulerPrefill::P2PConnectorSchedulerPrefill(
+P2PSchedulerPrefillRead::P2PSchedulerPrefillRead(
     P2PConnectorSchedulerConfig                config,
     const kmonitor::MetricsReporterPtr&        metrics_reporter,
     const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client):
     config_(std::move(config)), metrics_reporter_(metrics_reporter), tp_broadcast_client_(tp_broadcast_client) {}
 
-std::shared_ptr<const PlanResult> P2PConnectorSchedulerPrefill::planFor(int                decode_tp_size,
+std::shared_ptr<const PlanResult> P2PSchedulerPrefillRead::planFor(int                decode_tp_size,
                                                                         const std::string& unique_key) {
     const auto offset = KVCacheTransferPlanner::sourceReplicaOffset(unique_key, config_.parallelism_config.tp_size);
     const auto key    = std::make_pair(decode_tp_size, offset);
@@ -44,7 +44,7 @@ std::shared_ptr<const PlanResult> P2PConnectorSchedulerPrefill::planFor(int     
     return it->second;
 }
 
-ErrorInfo P2PConnectorSchedulerPrefill::checkPlanDigest(int                decode_tp_size,
+ErrorInfo P2PSchedulerPrefillRead::checkPlanDigest(int                decode_tp_size,
                                                         uint64_t           decode_plan_digest,
                                                         const std::string& unique_key) {
     if (!config_.topology) {
@@ -70,7 +70,7 @@ ErrorInfo P2PConnectorSchedulerPrefill::checkPlanDigest(int                decod
 }
 
 P2PBroadcastClient::RankRoutes
-P2PConnectorSchedulerPrefill::buildPrefillRankRoutes(const TransferPlan&  plan,
+P2PSchedulerPrefillRead::buildPrefillRankRoutes(const TransferPlan&  plan,
                                                      size_t               worker_num,
                                                      const std::set<int>& active_route_ids) const {
     P2PBroadcastClient::RankRoutes rank_routes(worker_num);
@@ -89,7 +89,7 @@ P2PConnectorSchedulerPrefill::buildPrefillRankRoutes(const TransferPlan&  plan,
 }
 
 ErrorInfo
-P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                                   unique_key,
+P2PSchedulerPrefillRead::sendKVCache(const std::string&                                   unique_key,
                                           int64_t                                              request_id,
                                           const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
                                           int64_t                                              deadline_ms,
@@ -217,7 +217,7 @@ P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                    
 }
 
 std::shared_ptr<P2PBroadcastClient::Result>
-P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P2PBroadcastClient::Result>& result,
+P2PSchedulerPrefillRead::waitForBroadcastCompletion(const std::shared_ptr<P2PBroadcastClient::Result>& result,
                                                          const std::string&                                 unique_key,
                                                          int64_t                                            request_id,
                                                          int64_t                                            deadline_ms,
