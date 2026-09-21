@@ -8,7 +8,7 @@ import torch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory_register import ModelDict
-from rtp_llm.models_py.distributed.rank_layout import RankLayout
+from rtp_llm.models_py.distributed.rank_layout import Group, RankLayout
 from rtp_llm.ops import (
     FfnDisAggregateConfig,
     ParallelismConfig,
@@ -128,10 +128,8 @@ def auto_configure_deepep(
         # All are None, use auto configuration
         _apply_auto_deepep_config(
             moe_config=moe_config,
-            world_size=parallelism_config.world_size,
-            local_world_size=parallelism_config.local_world_size,
+            parallelism_config=parallelism_config,
             role_type=role_type,
-            pp_size=parallelism_config.pp_size,
         )
     else:
         # User has set at least one value, copy them to moe_config
@@ -168,11 +166,8 @@ def auto_configure_deepep(
 
 def _apply_auto_deepep_config(
     moe_config,
-    world_size: int,
-    local_world_size: int,
+    parallelism_config,
     role_type: RoleType,
-    *,
-    pp_size: int = 1,
 ):
     """
     Internal function to apply automatic DeepEP configuration based on deployment scenario.
@@ -184,17 +179,17 @@ def _apply_auto_deepep_config(
     is_inference = role_type == RoleType.PDFUSION
     is_decode = role_type == RoleType.DECODE
 
-    # Determine GPU configuration
-    if pp_size > 1:
-        stage_size = world_size // pp_size
+    # Determine GPU configuration via RankLayout (stage-local view under PP).
+    local_world_size = parallelism_config.local_world_size
+    world_size = parallelism_config.world_size
+    if parallelism_config.pp_size > 1:
+        layout = RankLayout.from_parallelism_config(parallelism_config)
+        stage_size = layout.size_of(Group.STAGE)
         is_single_gpu = stage_size == 1
         is_multi_gpu = stage_size > 1
-        # STAGE and node ranks occupy contiguous blocks. The parent config is
-        # shared by workers, so retain internode if any stage crosses a node.
         is_multi_node = any(
-            (stage * stage_size) // local_world_size
-            != ((stage + 1) * stage_size - 1) // local_world_size
-            for stage in range(pp_size)
+            min(g) // local_world_size != max(g) // local_world_size
+            for g in layout.groups(Group.STAGE)
         )
     else:
         is_single_gpu = world_size == 1

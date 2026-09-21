@@ -56,7 +56,7 @@ GenerateStreamPtr PPExecutor::createMinFakeDecodeStream(const ModelConfig&      
     /** Cover target verification and the next draft round, including DSpARK's
      * proposal window. All entries reference block 0 without allocating real KV blocks. */
     const size_t reserved_blocks = 2 * (propose_step + 1);
-    auto fake_stream = makeFakeStream(1, reserved_blocks, model_config, runtime_config, resource_context);
+    auto         fake_stream     = makeFakeStream(1, reserved_blocks, model_config, runtime_config, resource_context);
 
     /** Seed [prompt, t0] with a one-token request budget. The initialization may
      * mark the request done; PP fake execution skips request sampling and dispatch. */
@@ -267,7 +267,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
             pp_layout_.firstMoeLayer(params.model_config_.num_layers, params.model_config_.moe_layer_index);
         if (first_moe_layer >= 0) {
             const auto& moe_kernel = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
-            auto        moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
+            auto        moe_weight_type     = torchDTypeToDataType(moe_kernel.dtype());
             bool        is_gated_activation = params.model_config_.isGatedActivation();
             auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
 
@@ -1122,7 +1122,8 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     auto& next_batch                = slots_[current_slot_];
     bool  received_result_this_step = false;
     if (isFirstStage() && isStageRoot() && !next_batch.skip_run) {
-        received_result_this_step = true;
+        // A fake batch's result is not real progress; it must not reset the drain counter.
+        received_result_this_step = !next_batch.stream_groups.isFakeStream();
 
         const auto& stream_groups            = next_batch.stream_groups;
         auto        token_counts_by_priority = stream_groups.tokenCountsByPriority();
@@ -1144,8 +1145,9 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     }
 
     if (isFirstStage() && isStageRoot() && !plan.model_input.shutdown) {
-        // A step counts as idle only when it neither runs a batch nor receives a result.
-        const bool no_work   = plan.model_input.skip_run;
+        // Idle = no real request (skip_run or fake-stream placeholder) and no real result;
+        // fake batches must not reset the counter, or DP+PP never emits the sentinel.
+        const bool no_work   = plan.model_input.skip_run || plan.model_input.is_fake_stream;
         const bool no_result = !received_result_this_step;
         idle_streak_         = (no_work && no_result) ? idle_streak_ + 1 : 0;
     }
