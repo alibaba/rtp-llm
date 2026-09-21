@@ -652,7 +652,6 @@ class Pipeline(object):
                     )
                 break
 
-    @torch.inference_mode()
     async def batch_infer(
         self,
         prompts: List[str],
@@ -688,7 +687,6 @@ class Pipeline(object):
             **kwargs,
         )
 
-    @torch.inference_mode()
     async def batch_infer_prepared(
         self,
         prompts: List[str],
@@ -720,9 +718,7 @@ class Pipeline(object):
         if item_count == 0:
             return []
         request_headers = normalize_request_headers(headers)
-        effective_group_id = (
-            request_ids[0] if group_id is None and request_ids else group_id
-        )
+        effective_group_id = request_ids[0] if group_id is None else group_id
 
         inputs = []
         for i, (prompt, request_id, generate_config, urls) in enumerate(
@@ -789,7 +785,7 @@ class Pipeline(object):
                 generate_config=generate_config,
                 tokenizer=self.tokenizer,
                 group_size=item_count,
-                group_id=effective_group_id if effective_group_id is not None else -1,
+                group_id=effective_group_id,
                 headers=request_headers,
             )
             inputs.append(gen_input)

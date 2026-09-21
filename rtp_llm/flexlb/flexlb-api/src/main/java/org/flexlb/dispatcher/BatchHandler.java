@@ -2,6 +2,7 @@ package org.flexlb.dispatcher;
 
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import com.google.common.util.concurrent.RateLimiter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.TrafficPolicyConfig;
@@ -39,6 +40,7 @@ public class BatchHandler {
     private final DispatcherMetricsReporter metricsReporter;
     private final FlexlbConfig loadBalanceConfig;
     private final Scheduler cpuScheduler;
+    private final RateLimiter failureWarn = RateLimiter.create(1);
 
     public BatchHandler(FanoutService fanoutService,
                         DispatchConfig cfg,
@@ -65,8 +67,9 @@ public class BatchHandler {
                                 () -> handleBody(request, spec, bytes, dryRun, delegatedToPassthrough))
                         .subscribeOn(cpuScheduler))
                 .onErrorResume(e -> {
-                    String errMsg = e.toString();
-                    Logger.warn("dispatcher request failed: spec={}, err={}", spec.getPath(), errMsg);
+                    if (failureWarn.tryAcquire()) {
+                        Logger.warn("dispatcher request failed: spec={}, err={}", spec.getPath(), e.toString());
+                    }
                     if (e instanceof BatchScheduleTransportException) {
                         return DispatcherResponses.error(503, "batch_schedule_failed", "batch target allocation failed");
                     }

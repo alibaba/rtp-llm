@@ -227,13 +227,20 @@ class DispatcherE2ETest {
         assertNoFeTraffic();
     }
 
-    @Test
-    void oversizedFeResponseReturns413EvenWhenAnotherChunkSucceeds() {
+    @ParameterizedTest
+    @ValueSource(ints = {200, 400, 500})
+    void oversizedFeBodyReturns413OnlyForSuccessfulResponses(int feStatus) {
         cfg.setPreAssignBe(false);
-        reply(0, 200, "{\"response_batch\":[\"" + "x".repeat(FeClient.MAX_RESPONSE_BYTES) + "\"]}");
+        reply(0, feStatus, "{\"response_batch\":[\"" + "x".repeat(FeClient.MAX_RESPONSE_BYTES) + "\"]}");
         reply(1, 200, "{\"response_batch\":[1]}");
         startDispatcher(1);
-        assertEquals("batch_response_too_large", post("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", 413).getString("error"));
+        JSONObject response = post("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", feStatus == 200 ? 413 : 200);
+        if (feStatus == 200) {
+            assertEquals("batch_response_too_large", response.getString("error"));
+        } else {
+            assertEquals(JSONArray.of(null, 1), response.getJSONArray("response_batch"));
+            assertEquals(1, response.getJSONObject("_partial_failure").getIntValue("failed_count"));
+        }
     }
 
     @Test

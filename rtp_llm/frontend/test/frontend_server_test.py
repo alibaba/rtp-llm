@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import torch
 from pydantic import BaseModel
+from starlette.datastructures import Headers
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
@@ -344,10 +345,10 @@ class BatchFrontendWorkerTest(TestCase):
 
 
 class FakeRawRequest(object):
-    headers: dict[str, str]
+    headers: Headers
 
     def __init__(self, headers: dict[str, str] | None = None):
-        self.headers = headers or {}
+        self.headers = Headers(headers)
 
     async def is_disconnected(self):
         return False
@@ -457,7 +458,7 @@ class FrontendServerTest(TestCase):
                             ),
                         }
                         headers = {
-                            "x-rtp-llm-dispatcher-routing-token": provided,
+                            "X-Rtp-Llm-Dispatcher-Routing-Token": provided,
                             "X-Request-ID": "trace",
                             "ignored": "secret",
                         }

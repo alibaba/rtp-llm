@@ -73,20 +73,17 @@ public class FeClient {
                     })
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(body)
-                    .exchangeToMono(response -> readBody(response, reservation)
-                            .flatMap(bytes -> {
-                                int status = response.rawStatusCode();
-                                if (status < 200 || status >= 300) {
-                                    HttpStatus resolved = HttpStatus.resolve(status);
-                                    String reason = resolved == null
-                                            ? "FE response" : resolved.getReasonPhrase();
-                                    return Mono.error(WebClientResponseException.create(
-                                            status, reason, response.headers().asHttpHeaders(),
-                                            bytes, StandardCharsets.UTF_8));
-                                }
-                                retained.set(true);
-                                return Mono.just(bytes);
-                            }))
+                    .exchangeToMono(response -> {
+                        int status = response.rawStatusCode();
+                        if (status < 200 || status >= 300) {
+                            HttpStatus resolved = HttpStatus.resolve(status);
+                            String reason = resolved == null ? "FE response" : resolved.getReasonPhrase();
+                            // Only successful bodies are retained for merging; discard upstream error bodies.
+                            return response.releaseBody().then(Mono.error(WebClientResponseException.create(
+                                    status, reason, response.headers().asHttpHeaders(), null, StandardCharsets.UTF_8)));
+                        }
+                        return readBody(response, reservation).doOnNext(bytes -> retained.set(true));
+                    })
                     .timeout(overallTimeout)
                     .doFinally(ignored -> {
                         if (!retained.get()) {
