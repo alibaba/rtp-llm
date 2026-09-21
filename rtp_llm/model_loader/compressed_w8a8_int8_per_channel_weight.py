@@ -7,6 +7,7 @@ from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
     PerChannelFp8Weight,
     _ckpt_base_matches_quant_exclude,
     _ckpt_base_matches_regex_exclude,
+    _ckpt_module_name,
 )
 from rtp_llm.model_loader.weight_module import WeightModule
 
@@ -37,7 +38,13 @@ class CompressedW8A8Int8PerChannelWeight(PerChannelFp8Weight):
         ):
             return False
         for ckpt_w in src_weight_info.weights:
-            base_name = ckpt_w.name.rsplit(".", 1)[0]
+            # Match exclude entries with the same module-name derivation as the
+            # parent FP8 path (_ckpt_module_name keeps suffix-less stacked fused
+            # keys like "...experts.gate_up_proj" intact). The old rsplit
+            # truncation assumed a ".weight" suffix, so a tensor-name-specific
+            # ignore entry on a fused key silently bypassed this fail-fast guard
+            # and fell back to loading quantized bytes as compute-dtype values.
+            base_name = _ckpt_module_name(ckpt_w.name)
             if (
                 base_name not in quant_config.exclude_modules
                 and _ckpt_base_matches_quant_exclude(
