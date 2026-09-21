@@ -26,7 +26,7 @@ checkout，不在历史 bundle 上做部分覆盖。CPU 基座通过流水线
 `vars.mock_runtime_base_image` 固定版本；升级 Python/JDK 基座必须显式修改该变量。
 
 ```bash
-python3 /Users/wangziyi/.agents/skills/ci-image-build/scripts/ci_image_build.py \
+python3 ~/.agents/skills/ci-image-build/scripts/ci_image_build.py \
   --pipeline-branch feat/dsv4-master-bundle-codex \
   --build-ref origin/codex/ft-case-framework \
   --jobs mock-bundle --poll
