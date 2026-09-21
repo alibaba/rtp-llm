@@ -73,7 +73,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         T = eos - bos
         i_t = i_tg - bos
     else:
-        bos = (i_tg // T) * T
+        bos = (i_tg // T).to(tl.int64) * T
         i_t = i_tg % T
 
     if i_t >= T:
@@ -84,6 +84,8 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     i_tc = i_c * BT
     i_ts = i_tc + i_s * BC
 
+    # Keep tile coordinates int32, but widen each global address product.
+    bos = bos.to(tl.int64)
     q += bos * H * K
     k += bos * H * K
     g += bos * H * K
@@ -98,15 +100,17 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     m_k = o_k < K
 
     p_q = tl.make_block_ptr(
-        q + i_t * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
+        q + i_t.to(tl.int64) * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
     )
     p_k = tl.make_block_ptr(
-        k + i_t * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
+        k + i_t.to(tl.int64) * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
     )
     p_g = tl.make_block_ptr(
-        g + i_t * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
+        g + i_t.to(tl.int64) * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
     )
-    p_beta = tl.make_block_ptr(beta + i_t * H, (H,), (1,), (i_hg * BH,), (BH,), (0,))
+    p_beta = tl.make_block_ptr(
+        beta + i_t.to(tl.int64) * H, (H,), (1,), (i_hg * BH,), (BH,), (0,)
+    )
     # [BH, BK]
     b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
     b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
@@ -115,10 +119,20 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
 
     for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
         p_kj = tl.make_block_ptr(
-            k + j * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
+            k + tl.cast(j, tl.int64) * H * K,
+            (H, K),
+            (K, 1),
+            (i_hg * BH, 0),
+            (BH, BK),
+            (1, 0),
         )
         p_gj = tl.make_block_ptr(
-            g + j * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
+            g + tl.cast(j, tl.int64) * H * K,
+            (H, K),
+            (K, 1),
+            (i_hg * BH, 0),
+            (BH, BK),
+            (1, 0),
         )
         # [BH, BK]
         b_kj = tl.load(p_kj, boundary_check=(0, 1)).to(tl.float32)
@@ -132,12 +146,12 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         b_Akk = tl.sum(b_k * b_kgj, axis=1) * tl.where(j < i_t, 1.0, 0.0)
 
         tl.store(
-            Aqk + i_t * H * BT + (i_hg * BH + o_h) * BT + j % BT,
+            Aqk + i_t.to(tl.int64) * H * BT + (i_hg * BH + o_h) * BT + j % BT,
             b_Aqk.to(Aqk.dtype.element_ty),
             mask=m_h,
         )
         tl.store(
-            Akk + i_t * H * BC + (i_hg * BH + o_h) * BC + j - i_ts,
+            Akk + i_t.to(tl.int64) * H * BC + (i_hg * BH + o_h) * BC + j - i_ts,
             b_Akk.to(Akk.dtype.element_ty),
             mask=m_h,
         )

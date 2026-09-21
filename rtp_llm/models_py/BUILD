@@ -98,6 +98,7 @@ py_library(
         "modules/dsv4/_fused_rmsnorm_rope_triton.py",
         "modules/dsv4/_rope_only_triton.py",
         "modules/dsv4/moe/_mega_input_pack_triton.py",
+        "modules/dsv4/fp8/_indexer_small_page.py",
     ],
     visibility = ["//visibility:public"],
 )

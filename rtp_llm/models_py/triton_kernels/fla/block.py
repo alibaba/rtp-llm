@@ -23,7 +23,8 @@ def load_initial_state_from_block_map_kernel(
     SSM_PER_HEAD = K * V
     SSM_PER_BATCH = HEAD_NUM * SSM_PER_HEAD
 
-    i_b, i_h, i_v = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_b = tl.program_id(0).to(tl.int64)
+    i_h, i_v = tl.program_id(1), tl.program_id(2)
 
     prefix = tl.load(prefix_lengths + i_b)
 
@@ -111,9 +112,11 @@ def store_ssm_state_to_block_map_kernel(
     CHUNK_SIZE: tl.constexpr,
     CONV_STRIDE_TOKEN: tl.constexpr,
 ):
-    i_c, i_h, i_v = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    # Both the source checkpoint and destination page can exceed 2^31 elements.
+    i_c = tl.program_id(0).to(tl.int64)
+    i_h, i_v = tl.program_id(1), tl.program_id(2)
 
-    batch = tl.load(chunk_indices + i_c * 2).to(tl.int32)
+    batch = tl.load(chunk_indices + i_c * 2).to(tl.int64)
     chunk = tl.load(chunk_indices + i_c * 2 + 1).to(tl.int32)
 
     SSM_PER_HEAD = K * V

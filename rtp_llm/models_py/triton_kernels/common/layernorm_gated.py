@@ -37,8 +37,9 @@ def _layer_norm_fwd_1pass_kernel(
     SIGMOID_GATE: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
-    row = tl.program_id(0)
-    group = tl.program_id(1)
+    # Widen before row * stride; the element offset can exceed INT32_MAX.
+    row = tl.program_id(0).to(tl.int64)
+    group = tl.program_id(1).to(tl.int64)
     X += row * stride_x_row + group * N
     Y += row * stride_y_row + group * N
     if HAS_Z:

@@ -204,7 +204,11 @@ def kda_gate_chunk_cumsum_vector_kernel(
         ).to(tl.int32)
         T = eos - bos
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = i_b.to(tl.int64) * T
+        eos = bos + T
+
+    # Block-pointer coordinates stay int32; global base offsets must not.
+    bos = bos.to(tl.int64)
 
     p_s = tl.make_block_ptr(
         s + (bos * H + i_h) * S,

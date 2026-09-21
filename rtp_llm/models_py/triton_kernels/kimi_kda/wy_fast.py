@@ -71,7 +71,11 @@ def recompute_w_u_fwd_kda_kernel(
         ).to(tl.int32)
         T = eos - bos
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = i_b.to(tl.int64) * T
+        eos = bos + T
+
+    # Block-pointer coordinates stay int32; global base offsets must not.
+    bos = bos.to(tl.int64)
     p_b = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     b_b = tl.load(p_b, boundary_check=(0,))
 

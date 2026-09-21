@@ -22,7 +22,8 @@ def _score(
     QUERY_TILE: tl.constexpr,
     KEY_TILE: tl.constexpr,
 ):
-    batch = tl.program_id(0)
+    # Score rows and Q/W addresses can exceed 2^31 elements independently of KV.
+    batch = tl.program_id(0).to(tl.int64)
     queries = tl.program_id(1) * QUERY_TILE + tl.arange(0, QUERY_TILE)
     lengths = tl.load(Lengths + batch * NEXT + queries, queries < NEXT, other=0)
     cols = tl.program_id(2) * KEY_TILE + tl.arange(0, KEY_TILE)

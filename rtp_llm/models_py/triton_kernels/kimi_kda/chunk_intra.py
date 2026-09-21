@@ -98,7 +98,11 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         ).to(tl.int32)
         T = eos - bos
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = i_b.to(tl.int64) * T
+        eos = bos + T
+
+    # Block-pointer coordinates stay int32; global base offsets must not.
+    bos = bos.to(tl.int64)
 
     if i_t * BT >= T:
         return
@@ -164,7 +168,9 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
             b_q1 = tl.load(p_q1, boundary_check=(0, 1)).to(tl.float32)
             b_k1 = tl.load(p_k1, boundary_check=(0, 1)).to(tl.float32)
             b_g1 = tl.load(p_g1, boundary_check=(0, 1)).to(tl.float32)
-            b_gn1 = tl.load(g + i_tc1 * H * K + o_k, mask=m_k, other=0).to(tl.float32)
+            b_gn1 = tl.load(g + i_tc1.to(tl.int64) * H * K + o_k, mask=m_k, other=0).to(
+                tl.float32
+            )
             b_gqn = tl.where(m_tc1[:, None], exp2(b_g1 - b_gn1[None, :]), 0)
             b_kgt = tl.trans(b_k0 * exp2(b_gn1[None, :] - b_g0))
             b_Aqk10 += tl.dot(b_q1 * b_gqn, b_kgt)
@@ -183,9 +189,9 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
                 b_q2 = tl.load(p_q2, boundary_check=(0, 1)).to(tl.float32)
                 b_k2 = tl.load(p_k2, boundary_check=(0, 1)).to(tl.float32)
                 b_g2 = tl.load(p_g2, boundary_check=(0, 1)).to(tl.float32)
-                b_gn2 = tl.load(g + i_tc2 * H * K + o_k, mask=m_k, other=0).to(
-                    tl.float32
-                )
+                b_gn2 = tl.load(
+                    g + i_tc2.to(tl.int64) * H * K + o_k, mask=m_k, other=0
+                ).to(tl.float32)
                 b_gqn2 = tl.where(m_tc2[:, None], exp2(b_g2 - b_gn2[None, :]), 0)
                 b_qg2 = b_q2 * b_gqn2
                 b_kg2 = b_k2 * b_gqn2
@@ -209,9 +215,9 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
                     b_q3 = tl.load(p_q3, boundary_check=(0, 1)).to(tl.float32)
                     b_k3 = tl.load(p_k3, boundary_check=(0, 1)).to(tl.float32)
                     b_g3 = tl.load(p_g3, boundary_check=(0, 1)).to(tl.float32)
-                    b_gn3 = tl.load(g + i_tc3 * H * K + o_k, mask=m_k, other=0).to(
-                        tl.float32
-                    )
+                    b_gn3 = tl.load(
+                        g + i_tc3.to(tl.int64) * H * K + o_k, mask=m_k, other=0
+                    ).to(tl.float32)
                     b_gqn3 = tl.where(m_tc3[:, None], exp2(b_g3 - b_gn3[None, :]), 0)
                     b_qg3 = b_q3 * b_gqn3
                     b_kg3 = b_k3 * b_gqn3
@@ -320,22 +326,22 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         b_Ai33 = -tl.where(m_A, b_Ai33, 0)
 
         for i in range(2, min(BC, T - i_tc0)):
-            b_a00 = -tl.load(Akkd + (i_tc0 + i) * H * BC + o_i)
+            b_a00 = -tl.load(Akkd + (i_tc0 + i).to(tl.int64) * H * BC + o_i)
             b_a00 = tl.where(o_i < i, b_a00, 0.0)
             b_a00 += tl.sum(b_a00[:, None] * b_Ai00, 0)
             b_Ai00 = tl.where((o_i == i)[:, None], b_a00, b_Ai00)
         for i in range(BC + 2, min(2 * BC, T - i_tc0)):
-            b_a11 = -tl.load(Akkd + (i_tc0 + i) * H * BC + o_i)
+            b_a11 = -tl.load(Akkd + (i_tc0 + i).to(tl.int64) * H * BC + o_i)
             b_a11 = tl.where(o_i < i - BC, b_a11, 0.0)
             b_a11 += tl.sum(b_a11[:, None] * b_Ai11, 0)
             b_Ai11 = tl.where((o_i == i - BC)[:, None], b_a11, b_Ai11)
         for i in range(2 * BC + 2, min(3 * BC, T - i_tc0)):
-            b_a22 = -tl.load(Akkd + (i_tc0 + i) * H * BC + o_i)
+            b_a22 = -tl.load(Akkd + (i_tc0 + i).to(tl.int64) * H * BC + o_i)
             b_a22 = tl.where(o_i < i - 2 * BC, b_a22, 0.0)
             b_a22 += tl.sum(b_a22[:, None] * b_Ai22, 0)
             b_Ai22 = tl.where((o_i == i - 2 * BC)[:, None], b_a22, b_Ai22)
         for i in range(3 * BC + 2, min(4 * BC, T - i_tc0)):
-            b_a33 = -tl.load(Akkd + (i_tc0 + i) * H * BC + o_i)
+            b_a33 = -tl.load(Akkd + (i_tc0 + i).to(tl.int64) * H * BC + o_i)
             b_a33 = tl.where(o_i < i - 3 * BC, b_a33, 0.0)
             b_a33 += tl.sum(b_a33[:, None] * b_Ai33, 0)
             b_Ai33 = tl.where((o_i == i - 3 * BC)[:, None], b_a33, b_Ai33)
@@ -470,7 +476,11 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
         ).to(tl.int32)
         T = eos - bos
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = i_b.to(tl.int64) * T
+        eos = bos + T
+
+    # Block-pointer coordinates stay int32; global base offsets must not.
+    bos = bos.to(tl.int64)
 
     i_ti = i_t * BT + i_i * BC
     if i_ti >= T:
@@ -502,7 +512,11 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
             b_g, tl.full([1, BK], min(BC // 2, T - i_ti - 1), dtype=tl.int16), axis=0
         )
     else:
-        p_gn = g + (i_ti + min(BC // 2, T - i_ti - 1)) * H * K + tl.arange(0, BK)
+        p_gn = (
+            g
+            + (i_ti + min(BC // 2, T - i_ti - 1)).to(tl.int64) * H * K
+            + tl.arange(0, BK)
+        )
         b_gn = tl.load(p_gn, mask=tl.arange(0, BK) < K, other=0.0)
         b_gn = b_gn[None, :]
 
@@ -539,7 +553,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
 
     b_Ai = -b_Akk
     for i in range(2, min(BC, T - i_ti)):
-        b_a = -tl.load(Akk + (i_ti + i) * H * BC + o_i)
+        b_a = -tl.load(Akk + (i_ti + i).to(tl.int64) * H * BC + o_i)
         b_a = tl.where(o_i < i, b_a, 0.0)
         b_a += tl.sum(b_a[:, None] * b_Ai, 0)
         b_Ai = tl.where((o_i == i)[:, None], b_a, b_Ai)
