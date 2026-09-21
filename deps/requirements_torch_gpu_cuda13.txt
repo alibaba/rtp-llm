@@ -16,7 +16,7 @@ flashinfer-cubin@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp
 deep-ep@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/deepep/deep_ep-1.2.1.12%2B37fda1c.base-cp310-cp310-linux_x86_64.whl
 tilelang==0.1.9
 quack-kernels==0.5.3
-flash-attn-4@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/flash_attn_4-4.0.0b21-py3-none-any.whl
+flash-attn-4@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn-4/flash_attn_4-0.0.1.dev1%2Bg466a1da7d-py3-none-any.whl
 nvidia-cutlass-dsl==4.6.0.dev0
 nvidia-cutlass-dsl-libs-base@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/nvidia_cutlass_dsl_libs_base-4.6.0.dev0-cp310-cp310-manylinux_2_28_x86_64.whl
 rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel-0.1.0%2B3bc0ca45.cu13sm103a-cp310-cp310-linux_x86_64.whl

@@ -648,8 +648,8 @@ filelock==3.20.0 \
     #   huggingface-hub
     #   torch
     #   transformers
-flash-attn-4 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/flash_attn_4-4.0.0b21-py3-none-any.whl \
-    --hash=sha256:8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949
+flash-attn-4 @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn-4/flash_attn_4-0.0.1.dev1%2Bg466a1da7d-py3-none-any.whl \
+    --hash=sha256:cec4af2ded6c59943daf4ee09cdae08e84fe990bf5d450893508894655fc9727
     # via FA4 vision attention dependencies
 flash-mla @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/flash_mla/flash_mla-1.0.0%2Bcb10b79-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:c7d87a8d5b6fe92af4144eea925ccce10b72d24cdc184091c6c3ccd2e5c0bc15

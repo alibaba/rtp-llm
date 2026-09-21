@@ -12,6 +12,7 @@ mysql-connector-python
 # against torch 2.11+cu130; SHAs encoded in filename).
 http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.0+4fb5ddc.cu132-cp310-cp310-linux_aarch64.whl
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0530/arm_pkg/sglang/flash_mla-1.0.0%2B92fd68b-cp310-cp310-linux_aarch64.whl
+flash-attn-4@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn-4/flash_attn_4-0.0.1.dev1%2Bg466a1da7d-py3-none-any.whl
 
 # rtp_kernel built from gitlab cuda_extension main against torch 2.11+cu130
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/rtp_kernel-0.1.0-49c379b-cp310-cp310-linux_aarch64.whl
