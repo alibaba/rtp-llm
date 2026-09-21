@@ -17,6 +17,7 @@ where entries were written, so the caller can set up the actual pool views throu
 ``PoolBackedModule.set_pool_context`` and call these functions with the real tensors.
 """
 
+import os
 from dataclasses import dataclass
 from typing import Literal, Optional
 
@@ -26,6 +27,8 @@ from rtp_llm.models_py.modules.qwen4_exp.indexer import apply_partial_rope
 from rtp_llm.models_py.modules.qwen4_exp.norm import exact_head_rms_norm
 
 InvalidBlockPolicy = Literal["raise", "skip"]
+
+_VECTORIZED_WRITER_ENV = "RTP_LLM_QWEN4_VECTORIZED_INDEXER_WRITER"
 
 
 @dataclass(frozen=True)
@@ -97,6 +100,305 @@ def _physical_block(
     return block_id
 
 
+def _vectorized_writer_enabled() -> bool:
+    value = os.environ.get(_VECTORIZED_WRITER_ENV, "1").strip().lower()
+    return value not in ("0", "false", "off", "no")
+
+
+def _last_write_per_slot(
+    slots: torch.Tensor, values: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Deduplicate destinations while preserving sequential last-write semantics."""
+    if not int(slots.numel()):
+        return slots, values
+    order = torch.argsort(slots, stable=True)
+    sorted_slots = slots.index_select(0, order)
+    is_last = torch.ones_like(sorted_slots, dtype=torch.bool)
+    is_last[:-1] = sorted_slots[:-1] != sorted_slots[1:]
+    last_order = order[is_last]
+    return slots.index_select(0, last_order), values.index_select(0, last_order)
+
+
+def _capture_tensor_slots(
+    pool: torch.Tensor, slots: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    unique_slots = torch.unique(slots)
+    original = pool.flatten(0, 1).index_select(0, unique_slots).clone()
+    return unique_slots, original
+
+
+def _write_indexer_cache_vectorized(
+    raw_keys: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    start_positions: torch.Tensor,
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    k_norm_gamma: torch.Tensor,
+    kv_pool: torch.Tensor,
+    kv_block_table: torch.Tensor,
+    state_pool: torch.Tensor,
+    state_block_table: torch.Tensor,
+    *,
+    ratio: int,
+    kv_tokens_per_block: int,
+    state_tokens_per_block: int,
+    norm_eps: float,
+    invalid_block_policy: InvalidBlockPolicy,
+    capture_undo: bool,
+    rope_is_token_aligned: bool,
+) -> dict:
+    """Device-vectorized writer used by the production CUDA path.
+
+    Metadata validation has a constant number of host synchronizations. All
+    token-to-page resolution, state writes, completed-group pooling and KV
+    writes stay on the device; there is no per-token host scalar read or copy.
+    """
+    device = raw_keys.device
+    token_count = int(raw_keys.shape[0])
+    batch_size = int(cu_seqlens.numel()) - 1
+    head_dim = int(raw_keys.shape[1])
+    state_ring_entries = int(state_pool.shape[1])
+    kv_entries_per_block = kv_tokens_per_block // ratio
+
+    if cu_seqlens.dtype not in (torch.int32, torch.int64):
+        raise ValueError("cu_seqlens must use int32 or int64")
+    if start_positions.dtype not in (torch.int32, torch.int64):
+        raise ValueError("start_positions must use int32 or int64")
+    device_tensors = (
+        cu_seqlens,
+        start_positions,
+        rope_cos,
+        rope_sin,
+        k_norm_gamma,
+        kv_pool,
+        kv_block_table,
+        state_pool,
+        state_block_table,
+    )
+    if any(tensor.device != device for tensor in device_tensors):
+        raise ValueError("vectorized indexer writer requires device-local tensors")
+    valid_rope_dims = (2,) if rope_is_token_aligned else (2, 3)
+    if rope_cos.shape != rope_sin.shape or rope_cos.dim() not in valid_rope_dims:
+        raise ValueError(
+            "rope_cos/rope_sin must have equal token-aligned [N, rotary_dim], "
+            "shared [max_pos, rotary_dim], or "
+            f"[B, max_pos, rotary_dim] shapes, got {rope_cos.shape} and "
+            f"{rope_sin.shape}"
+        )
+    if rope_is_token_aligned and int(rope_cos.shape[0]) != token_count:
+        raise ValueError(
+            f"token-aligned RoPE must have N={token_count} rows, got "
+            f"{rope_cos.shape[0]}"
+        )
+    if (
+        not rope_is_token_aligned
+        and rope_cos.dim() == 3
+        and int(rope_cos.shape[0]) != batch_size
+    ):
+        raise ValueError(
+            f"request-specific RoPE table must have B={batch_size}, got "
+            f"{rope_cos.shape[0]}"
+        )
+    rotary_dim = int(rope_cos.shape[-1])
+    if rotary_dim <= 0 or rotary_dim > head_dim or rotary_dim % 2:
+        raise ValueError(
+            f"rotary_dim must be positive, even, and <= {head_dim}; got "
+            f"{rotary_dim}"
+        )
+
+    cu = cu_seqlens.to(torch.long)
+    starts = start_positions.to(torch.long)
+    lengths = cu[1:] - cu[:-1]
+    invalid_cu = (
+        (cu[0] != 0)
+        | (cu[-1] != token_count)
+        | torch.any(lengths < 0)
+        | torch.any(starts < 0)
+    )
+    if bool(invalid_cu.item()):
+        raise ValueError(
+            "cu_seqlens must be monotonic from 0 to raw_keys.shape[0], and "
+            "start_positions must be non-negative"
+        )
+    if not rope_is_token_aligned:
+        max_position = int((starts + lengths).max().item()) if batch_size else 0
+        if max_position > int(rope_cos.shape[-2]):
+            raise ValueError(
+                f"RoPE tables cover {rope_cos.shape[-2]} positions, "
+                f"need {max_position}"
+            )
+
+    flat_indices = torch.arange(token_count, dtype=torch.long, device=device)
+    request_ids = torch.repeat_interleave(
+        torch.arange(batch_size, dtype=torch.long, device=device), lengths
+    )
+    local_indices = flat_indices - cu.index_select(0, request_ids)
+    positions = starts.index_select(0, request_ids) + local_indices
+
+    def _resolve(
+        table: torch.Tensor,
+        requests: torch.Tensor,
+        logical_blocks: torch.Tensor,
+        *,
+        pool_blocks: int,
+        tag: str,
+        required: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        width = int(table.shape[1])
+        in_bounds = (logical_blocks >= 0) & (logical_blocks < width)
+        safe_columns = logical_blocks.clamp(0, max(width - 1, 0))
+        blocks = table[requests, safe_columns].to(torch.long)
+        out_of_pool = required & in_bounds & (blocks >= pool_blocks)
+        if bool(torch.any(out_of_pool).item()):
+            raise IndexError(f"{tag} physical block is outside pool size {pool_blocks}")
+        allocated = in_bounds & (blocks > 0) & (blocks < pool_blocks)
+        missing = required & ~allocated
+        if invalid_block_policy == "raise" and bool(torch.any(missing).item()):
+            raise ValueError(f"{tag} resolves to an unallocated logical block")
+        return blocks, allocated
+
+    state_logical = positions // state_tokens_per_block
+    state_blocks, state_allocated = _resolve(
+        state_block_table,
+        request_ids,
+        state_logical,
+        pool_blocks=int(state_pool.shape[0]),
+        tag="indexer_state",
+        required=torch.ones(token_count, dtype=torch.bool, device=device),
+    )
+    state_slots = torch.where(
+        state_allocated,
+        state_blocks * state_ring_entries + positions % state_ring_entries,
+        -1,
+    )
+
+    completed = (positions + 1).remainder(ratio) == 0
+    completed_indices = torch.nonzero(completed, as_tuple=False).flatten()
+    kv_slots = torch.full_like(flat_indices, -1)
+    kv_write_slots = torch.empty(0, dtype=torch.long, device=device)
+    kv_write_values = raw_keys.new_empty((0, head_dim), dtype=torch.bfloat16)
+
+    if int(completed_indices.numel()):
+        completed_requests = request_ids.index_select(0, completed_indices)
+        completed_positions = positions.index_select(0, completed_indices)
+        block_starts = completed_positions - ratio + 1
+        source_positions = block_starts[:, None] + torch.arange(
+            ratio, dtype=torch.long, device=device
+        )
+        row_starts = starts.index_select(0, completed_requests)
+        row_lengths = lengths.index_select(0, completed_requests)
+        source_local = source_positions - row_starts[:, None]
+        source_in_current = (source_local >= 0) & (source_local < row_lengths[:, None])
+
+        source_requests = completed_requests[:, None].expand(-1, ratio)
+        source_logical = source_positions // state_tokens_per_block
+        source_blocks, source_allocated = _resolve(
+            state_block_table,
+            source_requests,
+            source_logical,
+            pool_blocks=int(state_pool.shape[0]),
+            tag="indexer_state source",
+            required=~source_in_current,
+        )
+        source_valid = source_in_current | source_allocated
+        group_sources_valid = torch.all(source_valid, dim=1)
+
+        raw_source_indices = (
+            cu.index_select(0, source_requests.reshape(-1)).view_as(source_requests)
+            + source_local
+        ).clamp(0, max(token_count - 1, 0))
+        state_source_slots = source_blocks.clamp(
+            0, int(state_pool.shape[0]) - 1
+        ) * state_ring_entries + source_positions.remainder(state_ring_entries)
+        gathered_raw = raw_keys.index_select(0, raw_source_indices.reshape(-1)).view(
+            -1, ratio, head_dim
+        )
+        gathered_state = (
+            state_pool.flatten(0, 1)
+            .index_select(0, state_source_slots.reshape(-1))
+            .view(-1, ratio, head_dim)
+        )
+        gathered = torch.where(
+            source_in_current.unsqueeze(-1), gathered_raw.float(), gathered_state
+        )
+
+        kv_logical = block_starts // kv_tokens_per_block
+        kv_blocks, kv_allocated = _resolve(
+            kv_block_table,
+            completed_requests,
+            kv_logical,
+            pool_blocks=int(kv_pool.shape[0]),
+            tag="indexer_kv",
+            required=group_sources_valid,
+        )
+        kv_write_valid = group_sources_valid & kv_allocated
+        compressed_indices = block_starts // ratio
+        completed_kv_slots = (
+            kv_blocks * kv_entries_per_block
+            + compressed_indices.remainder(kv_entries_per_block)
+        )
+        kv_slots[completed_indices[kv_write_valid]] = completed_kv_slots[kv_write_valid]
+
+        pooled = gathered.mean(dim=1).to(raw_keys.dtype)
+        pooled = exact_head_rms_norm(pooled, k_norm_gamma, norm_eps)
+        if rope_is_token_aligned:
+            cos = rope_cos.index_select(0, completed_indices)
+            sin = rope_sin.index_select(0, completed_indices)
+        elif rope_cos.dim() == 2:
+            cos = rope_cos.index_select(0, block_starts)
+            sin = rope_sin.index_select(0, block_starts)
+        else:
+            cos = rope_cos[completed_requests, block_starts]
+            sin = rope_sin[completed_requests, block_starts]
+        pooled = apply_partial_rope(pooled, cos, sin).to(torch.bfloat16)
+        kv_write_slots = completed_kv_slots[kv_write_valid]
+        kv_write_values = pooled[kv_write_valid]
+
+    state_write_mask = state_slots >= 0
+    state_write_slots, state_write_values = _last_write_per_slot(
+        state_slots[state_write_mask], raw_keys[state_write_mask].float()
+    )
+    kv_write_slots, kv_write_values = _last_write_per_slot(
+        kv_write_slots, kv_write_values
+    )
+
+    undo = None
+    if capture_undo:
+        state_undo_slots, original_state = _capture_tensor_slots(
+            state_pool, state_write_slots
+        )
+        kv_undo_slots, original_kv = _capture_tensor_slots(kv_pool, kv_write_slots)
+        undo = IndexerCacheUndo(
+            state_pool=state_pool,
+            state_slots=state_undo_slots,
+            original_state=original_state,
+            kv_pool=kv_pool,
+            kv_slots=kv_undo_slots,
+            original_kv=original_kv,
+        )
+
+    try:
+        state_pool.flatten(0, 1).index_copy_(0, state_write_slots, state_write_values)
+        kv_pool.flatten(0, 1).index_copy_(0, kv_write_slots, kv_write_values)
+    except BaseException:
+        if undo is not None:
+            restore_indexer_cache(undo)
+            if state_pool.is_cuda:
+                torch.cuda.current_stream(device).synchronize()
+        raise
+
+    result = {
+        "state_slots": state_slots,
+        "kv_slots": kv_slots,
+        "completed": completed,
+        "num_state_writes": int(state_write_mask.sum().item()),
+        "num_kv_writes": int((kv_slots >= 0).sum().item()),
+    }
+    if capture_undo:
+        result["undo"] = undo
+    return result
+
+
 def write_indexer_cache(
     raw_keys: torch.Tensor,
     cu_seqlens: torch.Tensor,
@@ -115,6 +417,7 @@ def write_indexer_cache(
     norm_eps: float = 1e-6,
     invalid_block_policy: InvalidBlockPolicy = "raise",
     capture_undo: bool = False,
+    rope_is_token_aligned: bool = False,
 ) -> dict:
     """Write ragged raw indexer keys to the state ring and completed means to KV.
 
@@ -136,9 +439,11 @@ def write_indexer_cache(
     corruption. Both tables use absolute logical-block columns. Only the payload
     offset inside an ``indexer_state`` block is a ring.
 
-    ``rope_cos`` / ``rope_sin`` must cover absolute positions and may be shared
-    ``[max_position, rotary_dim]`` or request-specific
-    ``[B, max_position, rotary_dim]``.
+    By default, ``rope_cos`` / ``rope_sin`` cover absolute positions and may be
+    shared ``[max_position, rotary_dim]`` or request-specific
+    ``[B, max_position, rotary_dim]``. With ``rope_is_token_aligned=True``, they
+    instead contain one ``[rotary_dim]`` block-start row for each packed input
+    token; only rows that complete a compression group are consumed.
     """
     if invalid_block_policy not in ("raise", "skip"):
         raise ValueError(
@@ -209,6 +514,44 @@ def write_indexer_cache(
         if int(table.shape[1]) == 0:
             raise ValueError(f"{name} must contain at least one block column")
 
+    if (
+        raw_keys.is_cuda
+        and _vectorized_writer_enabled()
+        and all(
+            tensor.device == raw_keys.device
+            for tensor in (
+                cu_seqlens,
+                start_positions,
+                rope_cos,
+                rope_sin,
+                k_norm_gamma,
+                kv_pool,
+                kv_block_table,
+                state_pool,
+                state_block_table,
+            )
+        )
+    ):
+        return _write_indexer_cache_vectorized(
+            raw_keys,
+            cu_seqlens,
+            start_positions,
+            rope_cos,
+            rope_sin,
+            k_norm_gamma,
+            kv_pool,
+            kv_block_table,
+            state_pool,
+            state_block_table,
+            ratio=ratio,
+            kv_tokens_per_block=kv_tokens_per_block,
+            state_tokens_per_block=state_tokens_per_block,
+            norm_eps=norm_eps,
+            invalid_block_policy=invalid_block_policy,
+            capture_undo=capture_undo,
+            rope_is_token_aligned=rope_is_token_aligned,
+        )
+
     offsets = [int(v) for v in cu_seqlens.tolist()]
     if offsets[0] != 0 or offsets[-1] != int(raw_keys.shape[0]):
         raise ValueError(
@@ -221,13 +564,24 @@ def write_indexer_cache(
     if any(pos < 0 for pos in starts):
         raise ValueError(f"start_positions must be non-negative, got {starts}")
 
-    if rope_cos.shape != rope_sin.shape or rope_cos.dim() not in (2, 3):
+    valid_rope_dims = (2,) if rope_is_token_aligned else (2, 3)
+    if rope_cos.shape != rope_sin.shape or rope_cos.dim() not in valid_rope_dims:
         raise ValueError(
-            "rope_cos/rope_sin must have equal [max_pos, rotary_dim] or "
+            "rope_cos/rope_sin must have equal token-aligned [N, rotary_dim], "
+            "shared [max_pos, rotary_dim], or "
             f"[B, max_pos, rotary_dim] shapes, got {rope_cos.shape} and "
             f"{rope_sin.shape}"
         )
-    if rope_cos.dim() == 3 and int(rope_cos.shape[0]) != batch_size:
+    if rope_is_token_aligned and int(rope_cos.shape[0]) != int(raw_keys.shape[0]):
+        raise ValueError(
+            f"token-aligned RoPE must have N={raw_keys.shape[0]} rows, got "
+            f"{rope_cos.shape[0]}"
+        )
+    if (
+        not rope_is_token_aligned
+        and rope_cos.dim() == 3
+        and int(rope_cos.shape[0]) != batch_size
+    ):
         raise ValueError(
             f"request-specific RoPE table must have B={batch_size}, got "
             f"{rope_cos.shape[0]}"
@@ -238,15 +592,16 @@ def write_indexer_cache(
             f"rotary_dim must be positive, even, and <= {head_dim}; got "
             f"{rotary_dim}"
         )
-    rope_positions = int(rope_cos.shape[-2])
-    max_position = max(
-        (starts[b] + offsets[b + 1] - offsets[b] for b in range(batch_size)),
-        default=0,
-    )
-    if max_position > rope_positions:
-        raise ValueError(
-            f"RoPE tables cover {rope_positions} positions, need {max_position}"
+    if not rope_is_token_aligned:
+        rope_positions = int(rope_cos.shape[-2])
+        max_position = max(
+            (starts[b] + offsets[b + 1] - offsets[b] for b in range(batch_size)),
+            default=0,
         )
+        if max_position > rope_positions:
+            raise ValueError(
+                f"RoPE tables cover {rope_positions} positions, need {max_position}"
+            )
 
     # Stage every value and destination first. Strict-mode validation therefore
     # cannot leave one pool half-written if a later request has bad metadata.
@@ -326,16 +681,15 @@ def write_indexer_cache(
             kv_offset = compressed_idx % kv_entries_per_block
             pooled = torch.stack(gathered).float().mean(dim=0).to(raw_keys.dtype)
             pooled = exact_head_rms_norm(pooled, k_norm_gamma, norm_eps)
-            cos = (
-                rope_cos[block_start]
-                if rope_cos.dim() == 2
-                else rope_cos[request_idx, block_start]
-            )
-            sin = (
-                rope_sin[block_start]
-                if rope_sin.dim() == 2
-                else rope_sin[request_idx, block_start]
-            )
+            if rope_is_token_aligned:
+                cos = rope_cos[flat_idx]
+                sin = rope_sin[flat_idx]
+            elif rope_cos.dim() == 2:
+                cos = rope_cos[block_start]
+                sin = rope_sin[block_start]
+            else:
+                cos = rope_cos[request_idx, block_start]
+                sin = rope_sin[request_idx, block_start]
             pooled = apply_partial_rope(pooled, cos, sin).to(torch.bfloat16)
             kv_slots[flat_idx] = kv_block * kv_entries_per_block + kv_offset
             kv_writes.append((kv_block, kv_offset, pooled))
