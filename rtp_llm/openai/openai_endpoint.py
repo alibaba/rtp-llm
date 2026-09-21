@@ -1,3 +1,4 @@
+import asyncio
 import itertools
 import json
 import logging
@@ -787,7 +788,22 @@ class OpenaiEndpoint(object):
             inputs.append(gen_input)
             all_configs.append(generate_config)
 
-        batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
+        visitor = self.backend_rpc_server_visitor
+        if visitor.host_service.service_available:
+            generators = [await visitor.enqueue(item) for item in inputs]
+            tasks = [
+                asyncio.create_task(CompleteResponseAsyncGenerator.get_last_value(gen))
+                for gen in generators
+            ]
+            try:
+                batch_outputs = await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+        else:
+            batch_outputs = await visitor.batch_enqueue(inputs)
 
         responses = []
         for i, outputs in enumerate(batch_outputs):

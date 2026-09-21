@@ -2,6 +2,7 @@ package org.flexlb.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.flexlb.enums.EngineType;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
@@ -19,6 +20,34 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
+    @Test
+    void batchPlacementConfigUsesTheV3Document() {
+        FlexlbConfig defaults = ConfigTestFixtures.parse("{}");
+        assertEquals(1000, defaults.getRouter().getBatchScheduleMaxCount());
+        assertEquals(EngineType.LLM, defaults.getWorkerRegistry().getEngineType());
+        FlexlbConfig config = ConfigTestFixtures.parse("""
+                {"router":{"batchScheduleMaxCount":32},"workerRegistry":{"engineType":"EMBEDDING"}}
+                """);
+        assertEquals(32, config.getRouter().getBatchScheduleMaxCount());
+        assertEquals(EngineType.EMBEDDING, config.getWorkerRegistry().getEngineType());
+        for (String patch : new String[]{"{\"router\":{\"batchScheduleMaxCount\":0}}",
+                "{\"workerRegistry\":{\"engineType\":\"UNKNOWN\"}}", "{\"batchScheduleMaxCount\":32}"}) {
+            assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch), patch);
+        }
+    }
+
+    @Test
+    void legacyBatchPlacementVariablesAreRejectedEvenWhenEmpty() {
+        for (String name : new String[]{"ENGINE_TYPE", "FLEXLB_ENGINE_TYPE",
+                "BATCH_SCHEDULE_MAX_COUNT", "FLEXLB_BATCH_SCHEDULE_MAX_COUNT",
+                "BATCH_LOAD_BALANCE_STRATEGY", "FLEXLB_BATCH_LOAD_BALANCE_STRATEGY"}) {
+            ConfigValidationException error = assertThrows(ConfigValidationException.class,
+                    () -> new ConfigService(Map.of(ConfigService.FLEXLB_CONFIG_ENV,
+                            ConfigTestFixtures.REQUIRED, name, "")));
+            assertTrue(error.getMessage().contains(name), error.getMessage());
+        }
+    }
+
     @Test
     void shutdownQuietPeriodUsesConfigDefaultsOverridesAndValidation() {
         assertEquals(5000L, ConfigTestFixtures.parse("{}").getGrpcServer().getShutdownQuietPeriodMs());
