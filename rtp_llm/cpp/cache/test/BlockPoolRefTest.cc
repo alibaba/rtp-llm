@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/BlockPool.h"
 
 #include <gtest/gtest.h>
+#include <thread>
 
 namespace rtp_llm {
 namespace test {
@@ -95,6 +96,71 @@ TEST_F(BlockPoolRefTest, BlockCacheFreeRespectsRemainingReferences) {
     block_pool_->blockCacheFree(cache_owned_blocks);
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
     EXPECT_EQ(block_pool_->blockCacheRefBlocksNum(), 0);
+}
+
+TEST_F(BlockPoolRefTest, BatchReleasePreservesSharedPrefixAndOtherOwners) {
+    auto row = block_pool_->malloc(3);
+    BlockIndicesType prefix{row[0], row[1]};
+    block_pool_->requestReference(prefix);
+    block_pool_->connectorReference(row[0]);
+    block_pool_->blockCacheReference(row[1]);
+    block_pool_->requestFreeBatch({&row, &prefix});
+    EXPECT_EQ(block_pool_->requestRefBlocksNum(), 0u);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
+    block_pool_->connectorFree(row[0]);
+    block_pool_->blockCacheFree(row[1]);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+}
+
+TEST_F(BlockPoolRefTest, ReassignmentIsAtomicAtExactCapacity) {
+    auto owned = block_pool_->malloc(total_blocks_);
+    BlockIndicesType allocated;
+    int required_free = 0;
+    std::vector<BlockPool::RequestRefDelta> deltas{{owned[0], -1}};
+    EXPECT_FALSE(block_pool_->reassignRequestBlocks(deltas, 2, allocated, required_free));
+    EXPECT_EQ(required_free, 1);
+    EXPECT_TRUE(allocated.empty());
+    EXPECT_EQ(block_pool_->freeBlocksNum(), 0u);
+    EXPECT_EQ(block_pool_->requestRefBlocksNum(), total_blocks_);
+    ASSERT_TRUE(block_pool_->reassignRequestBlocks(deltas, 1, allocated, required_free));
+    ASSERT_EQ(allocated, (BlockIndicesType{owned[0]}));
+    EXPECT_EQ(block_pool_->freeBlocksNum(), 0u);
+    block_pool_->requestFree(owned);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+}
+
+TEST_F(BlockPoolRefTest, ConcurrentAllocationAndBatchFree) {
+    auto prefix = block_pool_->malloc(1);
+    auto run = [&] {
+        for (int i = 0; i < 100; ++i) {
+            block_pool_->requestReference(prefix);
+            auto tail = block_pool_->malloc(1);
+            ASSERT_EQ(tail.size(), 1u);
+            BlockIndicesType row{prefix.front(), tail.front()};
+            block_pool_->requestFreeBatch({&row});
+        }
+    };
+    std::thread a(run), b(run);
+    a.join();
+    b.join();
+    EXPECT_EQ(block_pool_->requestRefBlocksNum(), 1u);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 1);
+    block_pool_->requestFree(prefix);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+}
+
+TEST(BlockRefCounterTest, WeightedUpdatesPreserveBusyTransitions) {
+    BlockRefCounter counter(8);
+    counter.updateRefCounter(1, 1024);
+    EXPECT_EQ(counter.busyBlockNum(), 1u);
+    counter.updateRefCounter(1, -1023);
+    EXPECT_EQ(counter.getRefCounter(1), 1);
+    EXPECT_EQ(counter.busyBlockNum(), 1u);
+    counter.updateRefCounter(1, -1);
+    EXPECT_EQ(counter.busyBlockNum(), 0u);
+    EXPECT_EQ(counter.freeBlockNum(), 7u);
+    EXPECT_THROW(counter.updateRefCounter(1, -1), std::runtime_error);
+    EXPECT_EQ(counter.getRefCounter(1), 0);
 }
 
 }  // namespace

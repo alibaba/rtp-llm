@@ -51,6 +51,28 @@ TEST(BlockIdsTest, NonFull_MirrorsKernelBlocks) {
     ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{3, 9, 1}));
 }
 
+TEST(KVCacheResourceTest, CompactBeamTablesPreserveLayerViewsAndKernelMapping) {
+    auto topology = makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/3,
+                                           /*layer_group_ids=*/{{0}, {0, 1}, {1}},
+                                           /*kernel_blocks_per_kv_block=*/4,
+                                           /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR});
+    KVCacheResource resource;
+    resource.initGroups(topology, false);
+    resource.mutableBlockIds(0).assign(BlockIndicesType{2, 3});
+    resource.mutableBlockIds(1).assign(BlockIndicesType{4});
+    EXPECT_EQ(resource.groupId(0, 1), -1);
+    EXPECT_EQ(resource.groupId(1, 1), 1);
+    EXPECT_EQ(resource.blocks(1, 0), (BlockIndicesType{2, 3}));
+    EXPECT_EQ(resource.kernelBlocks(1, 0), (BlockIndicesType{8, 9, 10, 11, 12, 13, 14, 15}));
+    auto projection = resource.layerGroupBlocks();
+    EXPECT_EQ(projection[0][1], nullptr);
+    EXPECT_EQ(projection[1][0], resource.groupBlocks()[0]);
+    auto moved = std::move(resource);
+    moved.mutableBlockIds(1, 0).setAt(1, 5);
+    EXPECT_EQ(projection[1][0]->blocks(), (BlockIndicesType{2, 5}));
+    EXPECT_EQ(moved.groupTagsForLayer(1), topology->layer(1).group_tags);
+}
+
 TEST(BlockIdsTest, Full_ExpandsKernelBlocks) {
     BlockIds ids(/*kernel_blocks_per_kv_block=*/2);
 
