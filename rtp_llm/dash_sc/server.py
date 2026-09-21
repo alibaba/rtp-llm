@@ -43,18 +43,15 @@ def dash_sc_grpc_server_channel_options(dash_sc_grpc_config) -> list[tuple[str, 
 # Max time for grpc.aio.Server.start() + bind before start_on_loop returns.
 _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S = 30.0
 
-# HTTP/2 keepalive permissions for the dash_sc gRPC server side. The upstream
-# (whoever calls us: dash_sc forwarder, client SDK, …) needs to be able to
-# send keepalive PINGs every ~30s to defeat the 100s LBS idle timeout — but
-# grpcio's server default is to GOAWAY any client that exceeds 2 PINGs in
-# 5 minutes without data (``min_ping_interval_without_data_ms=300000`` +
-# ``max_pings_without_data=2``). Raising permit here so the client-side
-# keepalive we ship in ``forward_service._FORWARD_CHANNEL_OPTS`` actually
-# works end-to-end instead of racing a GOAWAY.
+# Keep long-running RPCs alive during gaps between response frames. Preserve
+# the 30s PING / 10s acknowledgement timeout used by the proxy client.
+# Without active RPCs, do not send keepalive PINGs: idle connections may be
+# reclaimed normally by max_connection_idle_ms and the client channel pool.
 #
-# We also enable server-originated PINGs (``keepalive_time_ms=30000``) so
-# the server probes the client just as actively; this is symmetric and
-# catches the case where the downstream is healthy but the client went dark.
+# max_pings_without_data controls our outgoing PING budget, not enforcement
+# of incoming PINGs. Zero permits continued probes during an active but silent
+# stream. Incoming PING frequency is governed by min_recv_ping_interval...
+# (10s fallback, below the proxy's 30s interval) and max_ping_strikes.
 #
 # Merged via ``setdefault`` — anything explicitly set by
 # ``DashScGrpcConfig.get_server_config()`` wins, so operators can still
@@ -63,7 +60,7 @@ _SERVER_KEEPALIVE_OPTS: list[tuple[str, int]] = [
     ("grpc.keepalive_time_ms", 30000),
     ("grpc.keepalive_timeout_ms", 10000),
     ("grpc.keepalive_permit_without_calls", 0),
-    ("grpc.http2.min_ping_interval_without_data_ms", 10000),
+    ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
     ("grpc.http2.max_pings_without_data", 0),
 ]
 

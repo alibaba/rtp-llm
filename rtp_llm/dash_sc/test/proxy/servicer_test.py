@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import grpc
 
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
-from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.service_route import BackendAddr, VipServerServiceDiscovery
 from rtp_llm.dash_sc.proxy.service_route_config import (
     LEGACY_FORWARD_ENV_KEY,
@@ -142,6 +142,87 @@ def _make_servicer(
             os.environ.pop(SERVICE_ROUTE_ENV_KEY, None)
         else:
             os.environ[SERVICE_ROUTE_ENV_KEY] = saved_route
+
+
+class ProxyRpcStatusTest(unittest.IsolatedAsyncioTestCase):
+    """Verify the status on the wire, not just the handler's Python exception."""
+
+    async def asyncSetUp(self):
+        self.backend_started = asyncio.Event()
+        self.backend_cancelled = asyncio.Event()
+        self.mode = "unavailable"
+        owner = self
+
+        class Backend(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
+            async def ModelStreamInfer(self, requests, context):
+                async for _ in requests:
+                    break
+                owner.backend_started.set()
+                if owner.mode == "cancel":
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        owner.backend_cancelled.set()
+                        raise
+                if owner.mode == "after_first":
+                    yield _make_response()
+                await context.abort(grpc.StatusCode.UNAVAILABLE, "backend unavailable")
+
+        self.backend = grpc.aio.server()
+        predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(
+            Backend(), self.backend
+        )
+        port = self.backend.add_insecure_port("127.0.0.1:0")
+        await self.backend.start()
+        self.addAsyncCleanup(self.backend.stop, None)
+        self.servicer = _make_servicer(["127.0.0.1:8096"])
+        self.addAsyncCleanup(self.servicer.close)
+        route = patch.object(
+            self.servicer._discovery,
+            "resolve",
+            return_value=MagicMock(grpc_target=f"127.0.0.1:{port}"),
+        )
+        route.start()
+        self.addCleanup(route.stop)
+        self.proxy = grpc.aio.server()
+        predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(
+            self.servicer, self.proxy
+        )
+        proxy_port = self.proxy.add_insecure_port("127.0.0.1:0")
+        await self.proxy.start()
+        self.addAsyncCleanup(self.proxy.stop, None)
+        self.channel = grpc.aio.insecure_channel(f"127.0.0.1:{proxy_port}")
+        self.addAsyncCleanup(self.channel.close)
+        self.stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(self.channel)
+
+    async def _assert_unavailable(self, expected_count):
+        responses = []
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            async for response in self.stub.ModelStreamInfer(
+                _request_gen(_make_request()), timeout=5
+            ):
+                responses.append(response)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.UNAVAILABLE)
+        self.assertEqual(raised.exception.details(), "backend unavailable")
+        self.assertEqual(len(responses), expected_count)
+        if responses:
+            self.assertEqual(responses[0], _make_response())
+
+    async def test_unavailable_before_first_response(self):
+        await self._assert_unavailable(0)
+
+    async def test_unavailable_after_buffered_response(self):
+        self.mode = "after_first"
+        await self._assert_unavailable(1)
+
+    async def test_client_cancellation_reaches_backend(self):
+        self.mode = "cancel"
+        call = self.stub.ModelStreamInfer(_request_gen(_make_request()), timeout=5)
+        await asyncio.wait_for(self.backend_started.wait(), timeout=5)
+        call.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await call.read()
+        await asyncio.wait_for(self.backend_cancelled.wait(), timeout=5)
 
 
 class ServiceRouteConfigTest(unittest.TestCase):
@@ -865,9 +946,11 @@ class ChannelPoolTest(unittest.IsolatedAsyncioTestCase):
             "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
             side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
         ) as mock_ch:
-            ch1 = await pool.get("10.0.0.1:8096")
-            ch2 = await pool.get("10.0.0.1:8096")
-            ch3 = await pool.get("10.0.0.2:8096")
+            async with pool.acquire("10.0.0.1:8096") as ch1:
+                async with pool.acquire("10.0.0.1:8096") as ch2:
+                    async with pool.acquire("10.0.0.2:8096") as ch3:
+                        self.assertIs(ch1, ch2)
+                        self.assertIsNot(ch1, ch3)
 
         self.assertIs(ch1, ch2)
         self.assertIsNot(ch1, ch3)

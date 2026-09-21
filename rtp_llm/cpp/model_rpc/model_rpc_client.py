@@ -1,7 +1,9 @@
+import asyncio
 import functools
 import json
 import logging
 import time
+from contextlib import AsyncExitStack
 from typing import AsyncGenerator
 
 import grpc
@@ -628,15 +630,30 @@ class ModelRpcClient(object):
         stub = None
         stream_done = False
         terminal_seen = False
+        resources = AsyncExitStack()
+        acquire_start = time.monotonic()
         try:
             # Select target address
             target_address = address_list[input_py.request_id % len(address_list)]
             logging.debug(f"target_address: {target_address}")
             # Get channel from pool
-            channel = await self._channel_pool.get(target_address)
+            channel = await resources.enter_async_context(
+                self._channel_pool.acquire(
+                    target_address,
+                    timeout=effective_ms / 1000.0 if effective_ms > 0 else None,
+                )
+            )
             stub = RpcServiceStub(channel)
 
-            grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
+            grpc_kwargs = (
+                {
+                    "timeout": max(
+                        0.0, effective_ms / 1000.0 - (time.monotonic() - acquire_start)
+                    )
+                }
+                if effective_ms > 0
+                else {}
+            )
             if use_fetch_response:
                 response_iterator = stub.FetchResponse(
                     FetchRequestPB(request_id=input_pb.request_id), **grpc_kwargs
@@ -650,6 +667,11 @@ class ModelRpcClient(object):
                     terminal_seen = True
                 yield output
             stream_done = True
+        except asyncio.TimeoutError as e:
+            raise FtRuntimeException(
+                ExceptionType.GENERATE_TIMEOUT,
+                "timed out waiting for RPC channel capacity",
+            ) from e
         except grpc.RpcError as e:
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
@@ -702,3 +724,4 @@ class ModelRpcClient(object):
             )
             if response_iterator and should_cancel:
                 response_iterator.cancel()
+            await resources.aclose()

@@ -7,7 +7,9 @@ or async generator so the whole proxy path stays on a single asyncio event loop.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import AsyncExitStack, aclosing
 from typing import Optional
 
 import grpc
@@ -23,6 +25,10 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.service_route import create_service_discovery_from_env
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
+# Probe active streams even while no tokens arrive; do not keep unused
+# connections alive. max_pings_without_data=0 removes the outgoing PING
+# budget, not the requirement for an active RPC. The peer must permit this
+# 30s interval in its receive-side keepalive policy.
 _FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
     ("grpc.keepalive_time_ms", 30000),
     ("grpc.keepalive_timeout_ms", 10000),
@@ -116,6 +122,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
         emit_query_log(record, rank_id=self._rank_id, server_id=self._server_id)
         exc: Optional[BaseException] = None
+        resources = AsyncExitStack()
         try:
             request_iter = request_iterator.__aiter__()
             try:
@@ -168,7 +175,21 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
 
             grpc_target = route_addr.grpc_target
             try:
-                channel = await self._channel_pool.get(grpc_target)
+                remaining = context.time_remaining()
+                channel = await resources.enter_async_context(
+                    self._channel_pool.acquire(
+                        grpc_target,
+                        timeout=(
+                            remaining if isinstance(remaining, (int, float)) else None
+                        ),
+                    )
+                )
+            except asyncio.TimeoutError:
+                await context.abort(
+                    grpc.StatusCode.DEADLINE_EXCEEDED,
+                    "timed out waiting for forward channel capacity",
+                )
+                return
             except RuntimeError as e:
                 record.mark_request_done("eof")
                 msg = f"forward channel pool unavailable for backend {grpc_target}"
@@ -179,15 +200,29 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 return
 
             stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
-            async for resp in self._forward(
-                stub, grpc_target, validated_request_iter(), context, record
-            ):
-                self._record_and_report_chunk(record, resp)
-                yield resp
+            try:
+                forward = await resources.enter_async_context(
+                    aclosing(
+                        self._forward(
+                            stub, grpc_target, validated_request_iter(), context, record
+                        )
+                    )
+                )
+                async for resp in forward:
+                    self._record_and_report_chunk(record, resp)
+                    yield resp
+            except grpc.aio.AioRpcError as e:
+                # Map after buffered responses and downstream cleanup complete.
+                # Raising a client-side RpcError from a handler produces UNKNOWN.
+                exc = e
+                await context.abort(e.code(), e.details())
         except BaseException as e:
-            exc = e
+            if exc is None:
+                exc = e
             raise
         finally:
+            # Close the forwarding generator (and its RPC) before releasing its lease.
+            await resources.aclose()
             end_ts = record.resolve_status(context, exc)
             # Log first, metrics second — a kmonitor hiccup must never delay or
             # drop the access record (user-mandated ordering).
