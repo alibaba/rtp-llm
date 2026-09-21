@@ -16,6 +16,7 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("is_cuda_fabric_allocation", &is_cuda_fabric_allocation, py::arg("tensor"));
     rtp_ops_m.def("custom_all_gather_staging",
                   &custom_all_gather_staging,
                   py::arg("input"),

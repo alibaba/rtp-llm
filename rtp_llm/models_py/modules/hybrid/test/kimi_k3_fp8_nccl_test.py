@@ -76,6 +76,10 @@ class KimiK3Fp8NcclTest(unittest.TestCase):
                 ), patch.object(
                     ag, "reserve_fused_all_gather_matmul_workspace"
                 ) as reserve, patch.object(
+                    ag, "is_same_host_group", return_value=True
+                ), patch.object(
+                    rs, "is_same_host_group", return_value=True
+                ), patch.object(
                     torch.cuda, "get_device_capability", return_value=(10, 0)
                 ) as capability, patch.object(
                     rs.torch, "tensor", return_value=ready

@@ -1,8 +1,11 @@
-"""TP8 native AG payloads, mixed sizes, graph replay and AG/GEMM dispatch.
+"""TP2/4/8/16 native AG payloads, mixed sizes, graph replay and AG/GEMM dispatch.
 
-Run on eight SM100/SM103 NVLink GPUs with the compiled RTP CUDA bindings.
+Use --world-size for local GPUs, or torchrun for a multi-node NVLink domain.
+Requires SM100/SM103 GPUs and the compiled RTP CUDA bindings.
 """
 
+import argparse
+import os
 import socket
 from datetime import timedelta
 from unittest.mock import patch
@@ -23,15 +26,21 @@ from rtp_llm.models_py.modules.kimi_k3 import all_gather_gemm as ag
 
 def _reference(values, wire, group):
     rows, k = values.shape
-    out = torch.empty((rows * 8, k), dtype=values.dtype, device=values.device)
+    out = torch.empty(
+        (rows * group.size(), k), dtype=values.dtype, device=values.device
+    )
     dist.all_gather_into_tensor(
         out.view(torch.uint8), values.view(torch.uint8), group=group
     )
     if wire is None:
         return out
-    parts = [torch.empty_like(wire) for _ in range(8)]
+    parts = [torch.empty_like(wire) for _ in range(group.size())]
     dist.all_gather(parts, wire, group=group)
-    return out, torch.cat([part[:, :rows] for part in parts], dim=1).T
+    gathered = torch.cat([part[:, :rows] for part in parts], dim=1)
+    padded = (gathered.shape[1] + 3) // 4 * 4
+    scales = wire.new_zeros((wire.shape[0], padded))
+    scales[:, : gathered.shape[1]].copy_(gathered)
+    return out, scales[:, : gathered.shape[1]].T
 
 
 def _payload(rows, rank, fp8, *, raw=False):
@@ -66,8 +75,7 @@ def _payload(rows, rank, fp8, *, raw=False):
     return values.view(torch.float8_e4m3fn), wire
 
 
-def _check_payload(workspace, values, wire, group):
-    staging = values.shape[0] < 128
+def _check_payload(workspace, values, wire, group, *, staging):
     if wire is None:
         actual = workspace.all_gather(values, staging=staging)
         torch.testing.assert_close(
@@ -80,12 +88,12 @@ def _check_payload(workspace, values, wire, group):
             actual.view(torch.uint8), expected.view(torch.uint8), rtol=0, atol=0
         )
         torch.testing.assert_close(scales, expected_scales, rtol=0, atol=0)
-        assert scales.stride() == (1, values.shape[0] * 8)
+        assert scales.stride() == (1, (values.shape[0] * group.size() + 3) // 4 * 4)
 
 
 def _graph_payloads(workspace, rank, fp8, group):
     inputs = [
-        _payload(rows, rank, fp8, raw=True) for rows in (3, 128, 1, 256, 127, 512)
+        _payload(rows, rank, fp8, raw=True) for rows in (3, 129, 1, 256, 127, 512)
     ]
     order = (0, 1, 2, 3, 4, 5, 0, 1)
 
@@ -144,7 +152,7 @@ def _projection(fp8):
 
 
 def _gemm_dispatch(group, rank, fp8, prefill):
-    device = torch.device("cuda", rank)
+    device = torch.device("cuda", torch.cuda.current_device())
     # Boundary and adjacent per-rank inputs, including decode above the prefill
     # staging limit. Decode must still fit and replay its staging workspace.
     local_rows = (
@@ -153,18 +161,21 @@ def _gemm_dispatch(group, rank, fp8, prefill):
     ag.configure_all_gather_gemm(
         group,
         device,
-        max_m=max(local_rows) * 8,
+        max_m=max(local_rows) * group.size(),
         k=7168,
         dtype=torch.bfloat16,
         fp8=fp8,
         use_fused=prefill,
     )
-    state = ag._STATES[(group, rank, fp8)]
+    state = ag._STATES[(group, device.index, fp8)]
     assert state.custom is not None
-    assert state.custom.storage["values"].shape[0] == (32760 if prefill else 4096)
+    assert state.custom.storage["values"].shape[0] == (
+        (4095 if prefill else 512) * group.size()
+    )
     projection = _projection(fp8)
     for local_m in local_rows:
-        m = local_m * 8
+        m = local_m * group.size()
+        logical_m = max(1, m - 3)
         values, wire = _payload(local_m, rank, fp8)
         if prefill and local_m >= 4096:
             # The original overlap consumers use the rank-local tensor directly.
@@ -178,23 +189,23 @@ def _gemm_dispatch(group, rank, fp8, prefill):
         ref = _reference(values, wire, group)
         expected = projection.forward_quantized(*ref) if fp8 else ref @ projection
         with patch.object(ag, "get_process_group", return_value=group):
-            actual = ag.all_gather_gemm(local, [projection], logical_m=m - 3)[0]
+            actual = ag.all_gather_gemm(local, [projection], logical_m=logical_m)[0]
             overlap = prefill and local_m >= 4096
             torch.testing.assert_close(
                 actual,
-                expected[: m - 3],
+                expected[:logical_m],
                 rtol=0.02 if overlap else 0,
                 atol=0.0625 if overlap else 0,
             )
             if not prefill:
                 for _ in range(2):
-                    ag.all_gather_gemm(local, [projection], logical_m=m - 3)
+                    ag.all_gather_gemm(local, [projection], logical_m=logical_m)
                 torch.cuda.synchronize()
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph, stream=torch.cuda.Stream()):
-                    captured = ag.all_gather_gemm(local, [projection], logical_m=m - 3)[
-                        0
-                    ]
+                    captured = ag.all_gather_gemm(
+                        local, [projection], logical_m=logical_m
+                    )[0]
                 for step in range(2):
                     if fp8:
                         values.view(torch.uint8).copy_(
@@ -213,7 +224,7 @@ def _gemm_dispatch(group, rank, fp8, prefill):
                         projection.forward_quantized(*ref) if fp8 else ref @ projection
                     )
                     torch.testing.assert_close(
-                        captured, expected[: m - 3], rtol=0, atol=0
+                        captured, expected[:logical_m], rtol=0, atol=0
                     )
                 torch.cuda.synchronize()
                 graph.reset()
@@ -224,31 +235,33 @@ def _gemm_dispatch(group, rank, fp8, prefill):
             )
 
 
-def worker(rank, port):
-    torch.cuda.set_device(rank)
+def worker(rank, port, world_size=8, local_rank=None):
+    torch.cuda.set_device(rank if local_rank is None else local_rank)
     torch.manual_seed(991 + rank)
     dist.init_process_group(
         "nccl",
-        init_method=f"tcp://127.0.0.1:{port}",
+        init_method=f"tcp://127.0.0.1:{port}" if port is not None else "env://",
         rank=rank,
-        world_size=8,
+        world_size=world_size,
         timeout=timedelta(minutes=5),
     )
     group = dist.group.WORLD
-    device = torch.device("cuda", rank)
+    device = torch.device("cuda", torch.cuda.current_device())
     for fp8 in (False, True):
         # Exercise both native kernels independently of decode's staging policy.
         workspace = custom_ag.create_custom_all_gather(
-            group, device, max_m=32768, k=7168, fp8=fp8
+            group, device, max_m=4096 * world_size, k=7168, fp8=fp8
         )
         assert workspace is not None, "custom AG must be enabled on the supported setup"
-        for m in (8, 1016, 1024, 24, 8192, 512, 32760, 8, 32768):
-            values, wire = _payload(m // 8, rank, fp8, raw=True)
-            _check_payload(workspace, values, wire, group)
+        for local_m in (1, 127, 128, 3, 1024, 64, 4095, 1, 4096):
+            values, wire = _payload(local_m, rank, fp8, raw=True)
+            for staging in (True, False) if local_m < 128 else (False,):
+                _check_payload(workspace, values, wire, group, staging=staging)
             values.view(torch.uint8).zero_()
             if wire is not None:
                 wire.zero_()
-            _check_payload(workspace, values, wire, group)
+            for staging in (True, False) if local_m < 128 else (False,):
+                _check_payload(workspace, values, wire, group, staging=staging)
         _graph_payloads(workspace, rank, fp8, group)
         if rank == 0:
             print(
@@ -256,26 +269,26 @@ def worker(rank, port):
                 flush=True,
             )
         _gemm_dispatch(group, rank, fp8, False)
-    prefill_group = dist.new_group(list(range(8)))
+    prefill_group = dist.new_group(list(range(world_size)))
     for fp8 in (False, True):
         _gemm_dispatch(prefill_group, rank, fp8, True)
 
     # A single peer's rejection must select fallback for the complete group.
-    fallback_group = dist.new_group(list(range(8)))
+    fallback_group = dist.new_group(list(range(world_size)))
     with patch.object(custom_ag, "_nvlink_peers", return_value=rank != 0):
         ag.configure_all_gather_gemm(
             fallback_group,
             device,
-            max_m=8,
+            max_m=world_size,
             k=7168,
             dtype=torch.bfloat16,
             use_fused=False,
         )
-    assert ag._STATES[(fallback_group, rank, False)].custom is None
+    assert ag._STATES[(fallback_group, device.index, False)].custom is None
     values, _ = _payload(1, rank, False)
     weight = _projection(False)
     with patch.object(ag, "get_process_group", return_value=fallback_group):
-        actual = ag.all_gather_gemm(values, [weight], logical_m=8)[0]
+        actual = ag.all_gather_gemm(values, [weight], logical_m=world_size)[0]
     expected = _reference(values, None, fallback_group) @ weight
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     if rank == 0:
@@ -291,7 +304,20 @@ def worker(rank, port):
 
 
 if __name__ == "__main__":
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    mp.spawn(worker, args=(port,), nprocs=8, join=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--world-size", type=int, choices=(2, 4, 8, 16), default=8)
+    args = parser.parse_args()
+    if "RANK" in os.environ:
+        worker(
+            int(os.environ["RANK"]),
+            None,
+            int(os.environ["WORLD_SIZE"]),
+            int(os.environ["LOCAL_RANK"]),
+        )
+    else:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        mp.spawn(
+            worker, args=(port, args.world_size), nprocs=args.world_size, join=True
+        )

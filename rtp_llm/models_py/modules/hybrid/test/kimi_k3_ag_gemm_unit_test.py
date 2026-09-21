@@ -466,6 +466,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         device = torch.device("cuda", 0)
         with (
             patch.dict(kimi_k3_ag_gemm._STATES, {}, clear=True),
+            patch.object(kimi_k3_ag_gemm, "is_same_host_group", return_value=True),
             patch.object(
                 kimi_k3_ag_gemm,
                 "reserve_fused_all_gather_matmul_workspace",

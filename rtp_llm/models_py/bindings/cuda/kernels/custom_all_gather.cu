@@ -28,11 +28,26 @@
 
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 
 namespace rtp_llm {
 namespace {
 
-constexpr uint32_t kWorld = 8;
+template<typename F>
+void dispatch_world_size(uint32_t world_size, F&& f) {
+    switch (world_size) {
+        case 2:
+            return f(std::integral_constant<uint32_t, 2>{});
+        case 4:
+            return f(std::integral_constant<uint32_t, 4>{});
+        case 8:
+            return f(std::integral_constant<uint32_t, 8>{});
+        case 16:
+            return f(std::integral_constant<uint32_t, 16>{});
+        default:
+            TORCH_CHECK(false, "Custom all-gather requires TP2/4/8/16");
+    }
+}
 
 struct alignas(16) Vector {
     uint32_t words[4];
@@ -61,6 +76,8 @@ struct Params {
     int64_t         slot_bytes;
     uint32_t        num_counters;
     uint32_t        rank;
+    uint32_t        world_size;
+    uint32_t        scale_stride;
     uint32_t        rows;
     uint32_t        padded_rows;
     uint32_t        output_rows;
@@ -141,6 +158,7 @@ __device__ __forceinline__ void trigger_dependents() {
 // Thread 0 alone owns the reservation and arrival count. The reservation must
 // precede the PDL wait, but signalling must follow it: signalling promises
 // that this rank's preceding producer grid flushed.
+template<uint32_t WorldSize>
 struct MulticastBarrier {
     Semaphore* local;
     Semaphore* mc;
@@ -149,7 +167,7 @@ struct MulticastBarrier {
     __device__ __forceinline__ MulticastBarrier(Semaphore* local_base, Semaphore* mc_base):
         local(local_base + blockIdx.x), mc(mc_base + blockIdx.x), window(0) {
         if (threadIdx.x == 0)
-            window = atomicAdd(&local->counter, 2 * kWorld);
+            window = atomicAdd(&local->counter, 2 * WorldSize);
     }
 
     template<bool ReleaseAcquire>
@@ -162,8 +180,8 @@ struct MulticastBarrier {
         } else {
             asm volatile("multimem.red.relaxed.sys.global.add.u32 [%0], %1;" ::"l"(&mc->flag), "r"(1u) : "memory");
         }
-        const uint32_t current = window + n * kWorld;
-        while (load_word<ReleaseAcquire>(&local->flag) - current < kWorld) {}
+        const uint32_t current = window + n * WorldSize;
+        while (load_word<ReleaseAcquire>(&local->flag) - current < WorldSize) {}
 #else
         asm volatile("trap;");
 #endif
@@ -182,6 +200,7 @@ __device__ __forceinline__ bool bump_inactive_counters(const Params& p, uint32_t
     return true;
 }
 
+template<uint32_t WorldSize>
 __global__ void all_gather_staging_kernel(const __grid_constant__ Params p) {
     wait_primary();
     const uint32_t phase = p.counters[blockIdx.x] & 1;
@@ -189,7 +208,7 @@ __global__ void all_gather_staging_kernel(const __grid_constant__ Params p) {
         return;
     const uint32_t tid          = blockIdx.x * blockDim.x + threadIdx.x;
     const uint32_t step         = (gridDim.x - 1) * blockDim.x;
-    const int64_t  phase_offset = phase * kWorld * p.slot_bytes;
+    const int64_t  phase_offset = phase * WorldSize * p.slot_bytes;
     auto*          producer     = p.workspace_mc + phase_offset + p.rank * p.slot_bytes;
     for (uint32_t vid = tid; vid < p.value_vecs; vid += step) {
         Vector value;
@@ -204,7 +223,7 @@ __global__ void all_gather_staging_kernel(const __grid_constant__ Params p) {
     trigger_dependents();
 
     const Vector zero = {};
-    for (uint32_t vid = tid; vid < kWorld * p.value_vecs; vid += step) {
+    for (uint32_t vid = tid; vid < WorldSize * p.value_vecs; vid += step) {
         const uint32_t src_rank  = vid / p.value_vecs;
         const uint32_t local_vid = vid - src_rank * p.value_vecs;
         auto*          src       = p.workspace + phase_offset + src_rank * p.slot_bytes;
@@ -220,20 +239,20 @@ __global__ void all_gather_staging_kernel(const __grid_constant__ Params p) {
         p.counters[blockIdx.x] = phase ^ 1;
 }
 
-template<bool AlignedScales>
+template<uint32_t WorldSize, bool AlignedScales>
 __global__ void all_gather_fp8_staging_kernel(const __grid_constant__ Params p) {
     wait_primary();
     const uint32_t phase = p.counters[blockIdx.x] & 1;
     if (bump_inactive_counters(p, phase))
         return;
-    const uint32_t lanes         = blockDim.x / kWorld;
+    const uint32_t lanes         = blockDim.x / WorldSize;
     const uint32_t tid           = blockIdx.x * lanes + threadIdx.x % lanes;
     const uint32_t step          = (gridDim.x - 1) * lanes;
-    const int64_t  phase_offset  = phase * kWorld * p.slot_bytes;
+    const int64_t  phase_offset  = phase * WorldSize * p.slot_bytes;
     const int64_t  meta_offset   = (p.slot_bytes / 20) * 16;
     auto*          producer      = p.workspace_mc + phase_offset + p.rank * p.slot_bytes;
     auto*          producer_meta = reinterpret_cast<uint32_t*>(producer + meta_offset);
-    // One subgroup produces; eight subgroups consume the corresponding
+    // One subgroup produces; WorldSize subgroups consume the corresponding
     // vectors from every rank. Four reserved sign bits are stored separately,
     // with a fifth marker bit, so every published word is independently ready.
     if (threadIdx.x < lanes) {
@@ -276,7 +295,7 @@ __global__ void all_gather_fp8_staging_kernel(const __grid_constant__ Params p) 
             const uint32_t scale_vid = vid - p.value_vecs;
             const uint32_t group     = scale_vid / (p.padded_rows / 4);
             const uint32_t row       = (scale_vid % (p.padded_rows / 4)) * 4;
-            const uint32_t dst       = group * p.output_rows + src_rank * p.rows + row;
+            const uint32_t dst       = group * p.scale_stride + src_rank * p.rows + row;
             if constexpr (AlignedScales) {
                 store_vector(p.output_scales, dst / 4, value);
             } else {
@@ -296,11 +315,11 @@ __global__ void all_gather_fp8_staging_kernel(const __grid_constant__ Params p) 
         p.counters[blockIdx.x] = phase ^ 1;
 }
 
-template<bool FP8, bool AlignedScales = true>
+template<uint32_t WorldSize, bool FP8, bool AlignedScales = true>
 __global__ void all_gather_direct_kernel(const __grid_constant__ Params p) {
-    const MulticastBarrier barrier(p.sem_local, p.sem_mc);
+    const MulticastBarrier<WorldSize> barrier(p.sem_local, p.sem_mc);
     wait_primary();
-    barrier.arrive<false>(0);
+    barrier.template arrive<false>(0);
     __syncthreads();
     const uint32_t tid      = blockIdx.x * blockDim.x + threadIdx.x;
     const uint32_t step     = gridDim.x * blockDim.x;
@@ -317,7 +336,7 @@ __global__ void all_gather_direct_kernel(const __grid_constant__ Params p) {
             for (uint32_t vid = tid; vid < count; vid += step) {
                 const uint32_t group = vid / rows4;
                 const uint32_t row4  = vid - group * rows4;
-                const uint32_t dst   = group * (p.output_rows / 4) + p.rank * rows4 + row4;
+                const uint32_t dst   = group * (p.scale_stride / 4) + p.rank * rows4 + row4;
                 Vector         value;
                 load_vector<false>(value, p.scales, vid);
                 multicast_vector(p.output_scales_mc, dst, value);
@@ -327,7 +346,7 @@ __global__ void all_gather_direct_kernel(const __grid_constant__ Params p) {
             for (uint32_t i = tid; i < count; i += step) {
                 const uint32_t group = i / p.rows;
                 const uint32_t row   = i - group * p.rows;
-                const uint32_t dst   = group * p.output_rows + p.rank * p.rows + row;
+                const uint32_t dst   = group * p.scale_stride + p.rank * p.rows + row;
                 multicast_word(p.output_scales_mc + dst, p.scales[group * p.padded_rows + row]);
             }
         }
@@ -335,7 +354,7 @@ __global__ void all_gather_direct_kernel(const __grid_constant__ Params p) {
     // Values and scales share one entry/exit protocol.
     trigger_dependents();
     __syncthreads();
-    barrier.arrive<true>(1);
+    barrier.template arrive<true>(1);
 }
 
 void check_tensor(const torch::Tensor& tensor, const torch::Tensor& input, at::ScalarType type, const char* name) {
@@ -368,24 +387,29 @@ Params make_params(const torch::Tensor& input, torch::Tensor& output, int64_t ra
                 "Custom all-gather requires a contiguous CUDA ",
                 fp8 ? "uint8" : "BF16",
                 " [rows,K] input");
-    TORCH_CHECK(input.size(0) > 0 && input.size(1) > 0
-                    && input.size(0) <= std::numeric_limits<uint32_t>::max() / kWorld,
-                "Custom all-gather requires nonempty shards within the row indexing range");
+    TORCH_CHECK(input.size(0) > 0 && input.size(1) > 0, "Custom all-gather requires nonempty shards");
     check_tensor(input, input, type, "input");
     check_tensor(output, input, type, "output");
-    TORCH_CHECK(output.dim() == 2 && output.size(0) == kWorld * input.size(0) && output.size(1) == input.size(1),
-                "Custom all-gather output must contain eight rank-contiguous row shards");
+    TORCH_CHECK(output.dim() == 2 && output.size(0) % input.size(0) == 0 && output.size(1) == input.size(1),
+                "Custom all-gather output must contain rank-contiguous row shards");
+    const int64_t world_size = output.size(0) / input.size(0);
+    TORCH_CHECK(world_size == 2 || world_size == 4 || world_size == 8 || world_size == 16,
+                "Custom all-gather requires TP2/4/8/16");
+    TORCH_CHECK(output.size(0) <= int64_t(std::numeric_limits<uint32_t>::max()) - 3,
+                "Custom all-gather exceeds the row indexing range");
     TORCH_CHECK(input.nbytes() % 16 == 0, "Custom all-gather requires 16-byte aligned shards");
-    TORCH_CHECK(rank >= 0 && rank < kWorld, "Custom all-gather requires TP8 ranks");
+    TORCH_CHECK(rank >= 0 && rank < world_size, "Custom all-gather rank is outside its TP group");
     check_indices(output.nbytes() / 16, 1);
     Params p{};
-    p.input       = static_cast<const uint8_t*>(input.data_ptr());
-    p.output      = static_cast<uint8_t*>(output.data_ptr());
-    p.rank        = rank;
-    p.rows        = input.size(0);
-    p.output_rows = output.size(0);
-    p.value_vecs  = input.nbytes() / 16;
-    p.total_vecs  = p.value_vecs;
+    p.input        = static_cast<const uint8_t*>(input.data_ptr());
+    p.output       = static_cast<uint8_t*>(output.data_ptr());
+    p.rank         = rank;
+    p.world_size   = world_size;
+    p.scale_stride = (output.size(0) + 3) / 4 * 4;
+    p.rows         = input.size(0);
+    p.output_rows  = output.size(0);
+    p.value_vecs   = input.nbytes() / 16;
+    p.total_vecs   = p.value_vecs;
     return p;
 }
 
@@ -398,8 +422,8 @@ void bind_scales(Params& p, const torch::Tensor& input, const torch::Tensor& sca
     check_tensor(output_scales, input, at::kInt, "output scales");
     TORCH_CHECK(scales.dim() == 2 && scales.size(0) == groups && scales.size(1) == padded_rows,
                 "Custom FP8 all-gather scales must be int32[ceil(K/512), align(local_rows,4)]");
-    TORCH_CHECK(output_scales.dim() == 2 && output_scales.size(0) == groups && output_scales.size(1) == p.output_rows,
-                "Custom FP8 all-gather output scales must be int32[ceil(K/512), global_rows]");
+    TORCH_CHECK(output_scales.dim() == 2 && output_scales.size(0) == groups && output_scales.size(1) == p.scale_stride,
+                "Custom FP8 all-gather output scales must be int32[ceil(K/512), align(global_rows,4)]");
     check_indices(output_scales.numel(), 1);
     check_indices(scales.numel(), 1);
     check_indices(int64_t(p.value_vecs) + scales.numel() / 4, 1);
@@ -422,10 +446,10 @@ int check_launch(const Params& p, int64_t blocks, int64_t threads, bool staging,
     TORCH_CHECK(threads >= minimum_threads && threads <= maximum_threads && threads % minimum_threads == 0,
                 "Invalid custom all-gather block size");
     const int64_t step = blocks * threads;
-    check_indices(int64_t(kWorld) * p.value_vecs, step);
+    check_indices(int64_t(p.world_size) * p.value_vecs, step);
     check_indices(p.total_vecs, step);
     if (fp8) {
-        check_indices(int64_t(p.groups) * p.output_rows, step);
+        check_indices(int64_t(p.groups) * p.scale_stride, step);
         check_indices(int64_t(p.groups) * p.padded_rows, step);
     }
     return sms;
@@ -440,10 +464,10 @@ void bind_staging(Params&              p,
                   bool                 fp8) {
     check_tensor(workspace, input, at::kByte, "workspace");
     check_tensor(counters, input, at::kInt, "counters");
-    TORCH_CHECK(workspace.dim() == 1 && workspace.numel() > 0 && workspace.numel() % (2 * kWorld) == 0,
-                "Custom all-gather workspace must be uint8[16 * slot_bytes]");
+    TORCH_CHECK(workspace.dim() == 1 && workspace.numel() > 0 && workspace.numel() % (2 * p.world_size) == 0,
+                "Custom all-gather workspace must be uint8[2 * TP * slot_bytes]");
     TORCH_CHECK(counters.dim() == 1 && counters.numel() == sms, "Custom all-gather counters must be int32[SM_count]");
-    const int64_t slot_bytes = workspace.numel() / (2 * kWorld);
+    const int64_t slot_bytes = workspace.numel() / (2 * p.world_size);
     if (fp8) {
         TORCH_CHECK(slot_bytes % 80 == 0 && slot_bytes / 20 >= p.total_vecs,
                     "Custom FP8 all-gather encoded slot must be a multiple of 80 bytes and fit payload plus metadata");
@@ -505,7 +529,9 @@ void custom_all_gather_staging(const torch::Tensor& input,
     const c10::cuda::CUDAGuard guard(input.device());
     const int                  sms = check_launch(p, blocks, threads, true, false);
     bind_staging(p, input, workspace, counters, workspace_mc_ptr, sms, false);
-    launch(all_gather_staging_kernel, p, blocks + 1, threads);
+    dispatch_world_size(p.world_size, [&](auto size) {
+        launch(all_gather_staging_kernel<decltype(size)::value>, p, blocks + 1, threads);
+    });
 }
 
 void custom_all_gather_direct(const torch::Tensor& input,
@@ -520,7 +546,9 @@ void custom_all_gather_direct(const torch::Tensor& input,
     const c10::cuda::CUDAGuard guard(input.device());
     const int                  sms = check_launch(p, blocks, threads, false, false);
     bind_direct(p, input, output, semaphores, output_mc_ptr, semaphore_mc_ptr, sms);
-    launch(all_gather_direct_kernel<false>, p, blocks, threads);
+    dispatch_world_size(p.world_size, [&](auto size) {
+        launch(all_gather_direct_kernel<decltype(size)::value, false>, p, blocks, threads);
+    });
 }
 
 void custom_all_gather_fp8_staging(const torch::Tensor& values,
@@ -538,10 +566,12 @@ void custom_all_gather_fp8_staging(const torch::Tensor& values,
     const c10::cuda::CUDAGuard guard(values.device());
     const int                  sms = check_launch(p, blocks, threads, true, true);
     bind_staging(p, values, workspace, counters, workspace_mc_ptr, sms, true);
-    if (p.rows % 4 == 0)
-        launch(all_gather_fp8_staging_kernel<true>, p, blocks + 1, threads);
-    else
-        launch(all_gather_fp8_staging_kernel<false>, p, blocks + 1, threads);
+    dispatch_world_size(p.world_size, [&](auto size) {
+        if (p.rows % 4 == 0)
+            launch(all_gather_fp8_staging_kernel<decltype(size)::value, true>, p, blocks + 1, threads);
+        else
+            launch(all_gather_fp8_staging_kernel<decltype(size)::value, false>, p, blocks + 1, threads);
+    });
 }
 
 void custom_all_gather_fp8_direct(const torch::Tensor& values,
@@ -562,10 +592,12 @@ void custom_all_gather_fp8_direct(const torch::Tensor& values,
     bind_direct(p, values, output_values, semaphores, output_values_mc_ptr, semaphore_mc_ptr, sms);
     check_mc(output_scales_mc_ptr, output_scales.nbytes(), 16, "output scales address");
     p.output_scales_mc = reinterpret_cast<uint32_t*>(static_cast<uintptr_t>(output_scales_mc_ptr));
-    if (p.rows % 4 == 0)
-        launch(all_gather_direct_kernel<true, true>, p, blocks, threads);
-    else
-        launch(all_gather_direct_kernel<true, false>, p, blocks, threads);
+    dispatch_world_size(p.world_size, [&](auto size) {
+        if (p.rows % 4 == 0)
+            launch(all_gather_direct_kernel<decltype(size)::value, true, true>, p, blocks, threads);
+        else
+            launch(all_gather_direct_kernel<decltype(size)::value, true, false>, p, blocks, threads);
+    });
 }
 
 }  // namespace rtp_llm

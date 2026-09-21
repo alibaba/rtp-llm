@@ -1,4 +1,4 @@
-"""AG/GEMM dispatch by per-rank input rows on the supported TP8 setup.
+"""AG/GEMM dispatch by per-rank input rows on the supported TP2/4/8/16 NVLink setups.
 
 Prefill: M < 128 staging, 128 <= M < 4096 direct, M >= 4096 overlap.
 Decode: staging at every configured size. BF16 and FP8 share this policy.
@@ -19,6 +19,7 @@ from rtp_llm.models_py.distributed.custom_all_gather import (
     CustomAllGather,
     create_custom_all_gather,
 )
+from rtp_llm.models_py.distributed.push_reduce_scatter import is_same_host_group
 from rtp_llm.models_py.distributed.symm_mem import (
     fused_all_gather_fp8_linear,
     fused_all_gather_matmul,
@@ -73,7 +74,7 @@ def configure_all_gather_gemm(
             existing.max_m,
             existing.k,
             existing.dtype,
-            existing.use_fused
+            existing.use_fused,
         ):
             raise RuntimeError(
                 "K3 AllGather/GEMM was already configured with a different shape or backend"
@@ -94,7 +95,9 @@ def configure_all_gather_gemm(
         workspace_bytes = (
             local_m * k + ((k + 511) // 512) * ((local_m + 3) // 4 * 4) * 4
         )
-    if world_size > 1 and use_fused:
+    same_host = world_size > 1 and use_fused and is_same_host_group(group)
+    if same_host:
+        # Preserve priority for the mandatory overlap buffer under memory pressure.
         reserve_fused_all_gather_matmul_workspace(group, workspace_bytes)
     if not use_fused:
         workspace_bytes = 0
@@ -104,6 +107,13 @@ def configure_all_gather_gemm(
     custom = create_custom_all_gather(
         group, device, max_m=custom_max_m, k=k, fp8=fp8, staging_only=not use_fused
     )
+    if world_size > 1 and use_fused and not same_host:
+        if custom is None:
+            raise RuntimeError(
+                "custom AG preflight failed for cross-host prefill; requires one "
+                "NVLink fabric clique and CUDA FABRIC mappings with compatible IMEX access"
+            )
+        reserve_fused_all_gather_matmul_workspace(group, workspace_bytes)
     _STATES[key] = _AllGatherGemmState(
         fp8,
         group,
@@ -258,9 +268,11 @@ def _all_gather_quantized(local_input, projections, *, logical_m, group):
             dist.all_gather_into_tensor(
                 values.view(torch.uint8),
                 local_input.values.view(torch.uint8),
-                group=process_group
+                group=process_group,
             )
-            dist.all_gather_into_tensor(wire, local_input.scale_wire, group=process_group)
+            dist.all_gather_into_tensor(
+                wire, local_input.scale_wire, group=process_group
+            )
             # Each rank pads its scale rows independently. Remove that padding
             # before joining rank-local rows, then restore the GEMM's global alignment.
             scales = wire.new_zeros((groups, (size * m + 3) // 4 * 4))

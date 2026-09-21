@@ -1,6 +1,7 @@
 """Multicast AG workspaces, configured collectively before warmup/capture.
 
-Only the measured TP8 / K=7168 / SM100 or SM103 NVLink setup is enabled.
+TP2/4/8/16 / K=7168 / SM100 or SM103 use one NVLink domain, including
+cross-host fabric cliques with CUDA FABRIC allocations.
 FP8 communicates values and packed UE8M0 scales together, without requantizing.
 """
 
@@ -13,7 +14,12 @@ from bisect import bisect_left
 import torch
 import torch.distributed as dist
 
-from rtp_llm.models_py.distributed.push_reduce_scatter import _all_ready, _nvlink_peers
+from rtp_llm.models_py.distributed.push_reduce_scatter import (
+    _all_ready,
+    _is_fabric_allocation,
+    _nvlink_fabric,
+    _nvlink_peers,
+)
 
 STAGING_MAX_LOCAL_M = 128  # Prefill only; exclusive per-rank input rows.
 # Kernel launch tuning uses the gathered (global) row count.
@@ -72,12 +78,13 @@ def create_custom_all_gather(
 
     All capability, allocation and multicast mapping checks finish here. Forward
     must never rendezvous or make a rank-local choice to fall back to NCCL.
-    max_m is the gathered output capacity (eight times the per-rank input rows).
+    max_m is the gathered output capacity (TP times the per-rank input rows).
     """
-    if group.size() != 8 or k != 7168:
+    world_size = group.size()
+    if world_size not in (2, 4, 8, 16) or k != 7168:
         return None
-    if max_m <= 0 or max_m % 8:
-        raise ValueError("custom AG capacity must be positive and divisible by TP8")
+    if max_m <= 0 or max_m % world_size:
+        raise ValueError("custom AG capacity must be positive and divisible by TP size")
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError("Custom AG must be configured before CUDA Graph capture")
     failure = ""
@@ -98,6 +105,7 @@ def create_custom_all_gather(
             fp8,
             staging_only,
             props.multi_processor_count,
+            _nvlink_fabric(str(props.uuid)),
         )
     except Exception as exc:
         failure = str(exc)
@@ -107,20 +115,23 @@ def create_custom_all_gather(
         )
         return None
 
-    peers_metadata = [None] * 8
+    peers_metadata = [None] * world_size
     dist.all_gather_object(peers_metadata, metadata, group=group)
     try:
         uuids = [item[1] for item in peers_metadata]
+        hostnames = [item[0] for item in peers_metadata]
+        cross_host = len(set(hostnames)) > 1
         if (
-            any(
-                (item[0], item[2:]) != (metadata[0], metadata[2:])
-                for item in peers_metadata
+            any(item[2:-1] != metadata[2:-1] for item in peers_metadata)
+            or len(set(uuids)) != world_size
+            or not _nvlink_peers(
+                uuids,
+                hostnames=hostnames,
+                fabrics=[item[-1] for item in peers_metadata],
             )
-            or len(set(uuids)) != 8
-            or not _nvlink_peers(uuids)
         ):
             raise RuntimeError(
-                "requires eight distinct NVLink peers and matching capacities/precision"
+                "requires distinct NVLink peers and matching capacities/precision/SM counts"
             )
     except Exception as exc:
         failure = str(exc)
@@ -133,7 +144,7 @@ def create_custom_all_gather(
 
     # Decode has no row-dependent dispatch: reserve staging for its configured
     # token capacity. Prefill switches to direct at STAGING_MAX_LOCAL_M input rows.
-    local_staging_m = max_m // 8
+    local_staging_m = max_m // world_size
     if not staging_only:
         local_staging_m = min(local_staging_m, STAGING_MAX_LOCAL_M - 1)
     groups = (k + 511) // 512
@@ -147,7 +158,7 @@ def create_custom_all_gather(
     storage = {}
     try:
         storage["staging"] = symm.empty(
-            2 * 8 * slot_bytes, dtype=torch.uint8, device=device
+            2 * world_size * slot_bytes, dtype=torch.uint8, device=device
         )
         storage["semaphores"] = symm.empty(
             (props.multi_processor_count, 128), dtype=torch.uint8, device=device
@@ -157,8 +168,10 @@ def create_custom_all_gather(
         )
         if fp8:
             storage["scales"] = symm.empty(
-                max_m * groups, dtype=torch.int32, device=device
+                ((max_m + 3) // 4 * 4) * groups, dtype=torch.int32, device=device
             )
+        if cross_host and not all(_is_fabric_allocation(t) for t in storage.values()):
+            raise RuntimeError("cross-host NVLink requires CUDA FABRIC allocations")
         counters = torch.zeros(
             props.multi_processor_count, dtype=torch.int32, device=device
         )
@@ -190,9 +203,12 @@ def create_custom_all_gather(
     storage["semaphores"].zero_()
     torch.cuda.synchronize(device)
     dist.barrier(group=group)
-    workspace = CustomAllGather(kernels, storage, handles, counters, group.rank(), fp8)
+    workspace = CustomAllGather(
+        kernels, storage, handles, counters, group.rank(), fp8, world_size
+    )
     logging.info(
-        "[CUSTOM_AG] enabled TP8 max_m=%d k=%d fp8=%s workspace=%.3f MiB",
+        "[CUSTOM_AG] enabled TP%d max_m=%d k=%d fp8=%s workspace=%.3f MiB",
+        world_size,
         max_m,
         k,
         fp8,
@@ -209,13 +225,14 @@ class CustomAllGather:
     Own the symmetric allocations and handles for the entire model/graph lifetime.
     """
 
-    def __init__(self, kernels, storage, handles, counters, rank, fp8):
+    def __init__(self, kernels, storage, handles, counters, rank, fp8, world_size):
         self.staging_kernel, self.direct_kernel = kernels
         self.storage = storage
         self.handles = handles
         self.counters = counters
         self.rank = rank
         self.fp8 = fp8
+        self.world_size = world_size
         self.pointers = {
             name: int(handle.multicast_ptr) for name, handle in handles.items()
         }
@@ -239,7 +256,7 @@ class CustomAllGather:
     def all_gather(self, local_input, *, staging):
         if self.fp8:
             raise TypeError("BF16 AG requires a BF16 workspace")
-        m = local_input.shape[0] * 8
+        m = local_input.shape[0] * self.world_size
         if not 0 < m <= self.storage["values"].shape[0]:
             raise ValueError("BF16 AG exceeds configured capacity")
         local_input = self._aligned(local_input)
@@ -273,13 +290,16 @@ class CustomAllGather:
         if not self.fp8:
             raise TypeError("FP8 AG requires an FP8 workspace")
         m, k = values.shape
-        m *= 8
+        m *= self.world_size
         if not 0 < m <= self.storage["values"].shape[0]:
             raise ValueError("FP8 AG exceeds configured capacity")
         values = self._aligned(values.view(torch.uint8))
         wire = self._aligned(wire)
         output = self.storage["values"][:m]
-        scales = self.storage["scales"][: ((k + 511) // 512) * m].view(-1, m)
+        scale_rows = (m + 3) // 4 * 4
+        scales = self.storage["scales"][: ((k + 511) // 512) * scale_rows].view(
+            -1, scale_rows
+        )
         blocks, threads = self._launch(m, staging)
         if staging:
             self.staging_kernel(
@@ -308,4 +328,4 @@ class CustomAllGather:
                 blocks,
                 threads,
             )
-        return output.view(torch.float8_e4m3fn), scales.T
+        return output.view(torch.float8_e4m3fn), scales[:, :m].T

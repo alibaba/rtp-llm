@@ -19,12 +19,16 @@
 // reduce_scatter_res_kernel<8, false, true>, and include/sgl_kernel/{vec,
 // distributed/communicator,distributed/ptx}.cuh.
 // Preserve its 16-byte Lamport payload, two phases, counter bumper, PDL and
-// rank-ordered FP32 accumulation. Only the host binding is changed to PyTorch.
+// rank-ordered FP32 accumulation, generalized to TP2/4/8/16 with PyTorch bindings.
 #include "rtp_llm/models_py/bindings/cuda/kernels/push_reduce_scatter.h"
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
+#include <torch/version.h>
+#if TORCH_VERSION_MAJOR > 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 11)
+#include <c10/cuda/driver_api.h>
+#endif
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
@@ -34,12 +38,12 @@
 namespace rtp_llm {
 namespace {
 
-constexpr uint32_t kWorld = 8;
+constexpr uint32_t kMaxWorld = 16;
 
 struct Params {
     const uint8_t* input;
     uint8_t*       output;
-    uint8_t*       peers[kWorld];
+    uint8_t*       peers[kMaxWorld];
     uint32_t*      counters;
     int64_t        stride_bytes;
     uint32_t       num_counters;
@@ -86,6 +90,7 @@ __device__ __forceinline__ void trigger_dependents() {
 #endif
 }
 
+template<uint32_t WorldSize>
 __global__ void push_reduce_scatter_kernel(const __grid_constant__ Params params) {
 #if __CUDA_ARCH__ >= 900
     asm volatile("griddepcontrol.wait;" ::: "memory");
@@ -103,9 +108,9 @@ __global__ void push_reduce_scatter_kernel(const __grid_constant__ Params params
     }
     const uint32_t tid             = bx * blockDim.x + threadIdx.x;
     const uint32_t step            = (gridDim.x - 1) * blockDim.x;
-    const int64_t  phase_offset    = phase * kWorld * params.stride_bytes;
+    const int64_t  phase_offset    = phase * WorldSize * params.stride_bytes;
     const int64_t  producer_offset = phase_offset + params.rank * params.stride_bytes;
-    for (uint32_t vid = tid; vid < kWorld * params.local_vecs; vid += step) {
+    for (uint32_t vid = tid; vid < WorldSize * params.local_vecs; vid += step) {
         const uint32_t dst_rank  = vid / params.local_vecs;
         const uint32_t local_vid = vid - dst_rank * params.local_vecs;
         Vector         v;
@@ -123,11 +128,11 @@ __global__ void push_reduce_scatter_kernel(const __grid_constant__ Params params
     auto*        poll_base = params.peers[params.rank] + phase_offset;
     const Vector zero      = {};
     for (uint32_t vid = tid; vid < params.local_vecs; vid += step) {
-        Vector values[kWorld];
+        Vector values[WorldSize];
         while (true) {
             bool empty = false;
 #pragma unroll
-            for (uint32_t rank = 0; rank < kWorld; ++rank) {
+            for (uint32_t rank = 0; rank < WorldSize; ++rank) {
                 load<true>(values[rank], poll_base + rank * params.stride_bytes, vid);
 #pragma unroll
                 for (int j = 0; j < 4; ++j)
@@ -138,7 +143,7 @@ __global__ void push_reduce_scatter_kernel(const __grid_constant__ Params params
         }
         float2 acc[4];
 #pragma unroll
-        for (uint32_t rank = 0; rank < kWorld; ++rank) {
+        for (uint32_t rank = 0; rank < WorldSize; ++rank) {
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
                 const auto pair = __bfloat1622float2(values[rank].pairs[j]);
@@ -152,7 +157,7 @@ __global__ void push_reduce_scatter_kernel(const __grid_constant__ Params params
             out.pairs[j] = __float22bfloat162_rn(acc[j]);
         store<false>(params.output, vid, out);
 #pragma unroll
-        for (uint32_t rank = 0; rank < kWorld; ++rank) {
+        for (uint32_t rank = 0; rank < WorldSize; ++rank) {
             store<false>(poll_base + rank * params.stride_bytes, vid, zero);
         }
     }
@@ -170,12 +175,15 @@ void push_reduce_scatter(const torch::Tensor&              input,
                          int64_t                           rank,
                          int64_t                           blocks,
                          int64_t                           threads) {
+    const int64_t world_size = peers.size();
+    TORCH_CHECK(world_size == 2 || world_size == 4 || world_size == 8 || world_size == 16,
+                "Push RS requires TP2/4/8/16");
     TORCH_CHECK(input.is_cuda() && input.dim() == 2 && input.scalar_type() == at::kBFloat16 && input.is_contiguous(),
                 "Push RS requires contiguous CUDA BF16 [M,N]");
     TORCH_CHECK(output.device() == input.device() && output.dim() == 2 && output.scalar_type() == at::kBFloat16
                     && output.is_contiguous() && output.size(1) == input.size(1)
-                    && input.size(0) == kWorld * output.size(0),
-                "Push RS output must be a matching TP8 row shard");
+                    && input.size(0) == world_size * output.size(0),
+                "Push RS output must be a matching TP row shard");
     TORCH_CHECK(output.numel() > 0 && output.numel() % 8 == 0, "Push RS requires nonempty 16-byte aligned shards");
     // The upstream producer loop uses uint32 vector indices; avoid wraparound.
     TORCH_CHECK(input.numel() / 8 <= std::numeric_limits<uint32_t>::max() - 65536,
@@ -183,7 +191,7 @@ void push_reduce_scatter(const torch::Tensor&              input,
     TORCH_CHECK(reinterpret_cast<uintptr_t>(input.data_ptr()) % 16 == 0
                     && reinterpret_cast<uintptr_t>(output.data_ptr()) % 16 == 0,
                 "Push RS tensor addresses must be 16-byte aligned");
-    TORCH_CHECK(peers.size() == kWorld && rank >= 0 && rank < kWorld, "Push RS requires TP8");
+    TORCH_CHECK(rank >= 0 && rank < world_size, "Push RS rank is outside its TP group");
     TORCH_CHECK(counters.device() == input.device() && counters.scalar_type() == at::kInt && counters.dim() == 1
                     && counters.is_contiguous(),
                 "invalid Push RS counters");
@@ -195,17 +203,17 @@ void push_reduce_scatter(const torch::Tensor&              input,
                 "Push RS is enabled only on SM100/SM103");
     TORCH_CHECK(blocks < properties->multiProcessorCount, "Push RS grid must fit concurrently on the GPU");
     const int64_t bytes = peers[0].numel();
-    TORCH_CHECK(bytes % (2 * kWorld * 16) == 0 && bytes / (2 * kWorld) >= output.nbytes(),
+    TORCH_CHECK(bytes % (2 * world_size * 16) == 0 && bytes / (2 * world_size) >= output.nbytes(),
                 "Push RS workspace is too small or misaligned");
     Params params{};
     params.input        = static_cast<const uint8_t*>(input.data_ptr());
     params.output       = static_cast<uint8_t*>(output.data_ptr());
     params.counters     = reinterpret_cast<uint32_t*>(counters.data_ptr<int32_t>());
-    params.stride_bytes = bytes / (2 * kWorld);
+    params.stride_bytes = bytes / (2 * world_size);
     params.num_counters = counters.numel();
     params.rank         = rank;
     params.local_vecs   = output.numel() / 8;
-    for (uint32_t i = 0; i < kWorld; ++i) {
+    for (uint32_t i = 0; i < world_size; ++i) {
         TORCH_CHECK(peers[i].device() == input.device() && peers[i].scalar_type() == at::kByte
                         && peers[i].is_contiguous() && peers[i].numel() == bytes
                         && reinterpret_cast<uintptr_t>(peers[i].data_ptr()) % 16 == 0,
@@ -221,7 +229,41 @@ void push_reduce_scatter(const torch::Tensor&              input,
     config.stream   = at::cuda::getCurrentCUDAStream();
     config.attrs    = &attribute;
     config.numAttrs = 1;
-    C10_CUDA_CHECK(cudaLaunchKernelEx(&config, push_reduce_scatter_kernel, params));
+    switch (world_size) {
+        case 2:
+            C10_CUDA_CHECK(cudaLaunchKernelEx(&config, push_reduce_scatter_kernel<2>, params));
+            break;
+        case 4:
+            C10_CUDA_CHECK(cudaLaunchKernelEx(&config, push_reduce_scatter_kernel<4>, params));
+            break;
+        case 8:
+            C10_CUDA_CHECK(cudaLaunchKernelEx(&config, push_reduce_scatter_kernel<8>, params));
+            break;
+        case 16:
+            C10_CUDA_CHECK(cudaLaunchKernelEx(&config, push_reduce_scatter_kernel<16>, params));
+            break;
+    }
+}
+
+// Check the actual allocation before cross-host rendezvous. Device capability
+// alone is insufficient: the symmetric allocator caches its handle type.
+bool is_cuda_fabric_allocation(const torch::Tensor& tensor) {
+    TORCH_CHECK(tensor.is_cuda() && tensor.numel() > 0, "Fabric allocation check requires a nonempty CUDA tensor");
+#if TORCH_VERSION_MAJOR > 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 11)
+    const c10::cuda::CUDAGuard   guard(tensor.device());
+    auto*                        driver = c10::cuda::DriverAPI::get();
+    CUmemGenericAllocationHandle handle{};
+    C10_CUDA_DRIVER_CHECK(driver->cuMemRetainAllocationHandle_(&handle, tensor.data_ptr()));
+    CUmemAllocationProp props{};
+    const auto          result = driver->cuMemGetAllocationPropertiesFromHandle_(&props, handle);
+    C10_CUDA_DRIVER_CHECK(driver->cuMemRelease_(handle));
+    C10_CUDA_DRIVER_CHECK(result);
+    return (props.requestedHandleTypes & CU_MEM_HANDLE_TYPE_FABRIC) != 0;
+#else
+    // Older supported Torch builds lack the cross-host CUDA symmetric allocator
+    // and these DriverAPI entrypoints. Keep their intra-host kernels buildable.
+    return false;
+#endif
 }
 
 }  // namespace rtp_llm

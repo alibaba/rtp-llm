@@ -1,4 +1,4 @@
-"""TP8 push RS workspace, initialized collectively before warmup/capture.
+"""TP2/4/8/16 push RS workspace, initialized collectively before warmup/capture.
 
 BF16 partials are accumulated in FP32 in rank order, then rounded once to BF16.
 This need not be bitwise identical to NCCL's BF16 reduction tree.
@@ -6,6 +6,7 @@ This need not be bitwise identical to NCCL's BF16 reduction tree.
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import socket
 from bisect import bisect_left
@@ -40,7 +41,47 @@ def _load_kernel():
     return rtp_llm_ops.push_reduce_scatter
 
 
-def _nvlink_peers(uuids: list[str]) -> bool:
+def _nvlink_fabric(uuid):
+    """Return the local GPU's usable fabric identity; old drivers may lack it."""
+    import pynvml
+
+    pynvml.nvmlInit()
+    try:
+        handle = pynvml.nvmlDeviceGetHandleByUUID("GPU-" + uuid)
+        info = pynvml.c_nvmlGpuFabricInfoV_t()
+        pynvml.nvmlDeviceGetGpuFabricInfoV(handle, ctypes.byref(info))
+        # Older NVML bindings decode c_char arrays as text and truncate at NUL.
+        field = type(info).clusterUuid
+        cluster = ctypes.string_at(ctypes.addressof(info) + field.offset, field.size)
+        if (
+            info.state == pynvml.NVML_GPU_FABRIC_STATE_COMPLETED
+            and info.status == pynvml.NVML_SUCCESS
+            and any(cluster)
+        ):
+            return cluster, int(info.cliqueId)
+    except (AttributeError, pynvml.NVMLError):
+        pass
+    finally:
+        pynvml.nvmlShutdown()
+    return None
+
+
+def _is_fabric_allocation(tensor):
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+    return rtp_llm_ops.is_cuda_fabric_allocation(tensor)
+
+
+def _nvlink_peers(uuids: list[str], *, hostnames=None, fabrics=None) -> bool:
+    if hostnames is not None and len(set(hostnames)) > 1:
+        # Remote UUIDs cannot be looked up using this host's NVML. A nonzero
+        # cluster UUID plus clique ID identifies a shared multi-node NVLink domain.
+        return (
+            fabrics is not None
+            and len(fabrics) == len(uuids)
+            and fabrics[0] is not None
+            and all(f == fabrics[0] for f in fabrics)
+        )
     # UUIDs remain unambiguous with CUDA_VISIBLE_DEVICES remapping. NVML also
     # handles NVSwitch paths, unlike testing only direct NVLink remote ports.
     import pynvml
@@ -59,6 +100,13 @@ def _nvlink_peers(uuids: list[str]) -> bool:
         pynvml.nvmlShutdown()
 
 
+def is_same_host_group(group):
+    """Agree on allocation ordering before any prefill workspace rendezvous."""
+    hosts = [None] * group.size()
+    dist.all_gather_object(hosts, socket.gethostname(), group=group)
+    return len(set(hosts)) == 1
+
+
 def _all_ready(ready: bool, group, device) -> bool:
     flag = torch.tensor([int(ready)], dtype=torch.int32, device=device)
     dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
@@ -68,12 +116,16 @@ def _all_ready(ready: bool, group, device) -> bool:
 def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
     """Return a workspace, or collectively select NCCL on unsupported setups.
 
-    Only the measured TP8 / BF16 / N=7168 shape and NVLink topology are enabled.
+    TP2/4/8/16 / BF16 / N=7168 use direct NVLink peer mappings.
+    Cross-host peers additionally require one fabric clique and FABRIC allocations.
     No JIT, allocation, rendezvous, topology query or backend change is allowed
     in forward/capture.
     """
-    if group.size() != 8 or n != 7168:
+    world_size = group.size()
+    if world_size not in (2, 4, 8, 16) or n != 7168:
         return None
+    if max_m <= 0 or max_m % world_size:
+        raise ValueError("Push RS capacity must be positive and divisible by TP size")
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError("Push RS must be configured before CUDA Graph capture")
     failure = ""
@@ -86,27 +138,37 @@ def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
             raise RuntimeError("requires SM100/SM103")
         if symm.get_backend(device) != "CUDA":
             raise RuntimeError("requires the CUDA symmetric-memory backend")
-        metadata = (socket.gethostname(), str(props.uuid), max_m, n)
+        metadata = (
+            socket.gethostname(),
+            str(props.uuid),
+            max_m,
+            n,
+            props.multi_processor_count,
+            _nvlink_fabric(str(props.uuid)),
+        )
     except Exception as exc:
         failure = str(exc)
     if not _all_ready(not failure, group, device):
         logging.info("[PUSH_RS] NCCL fallback: %s", failure or "unsupported peer")
         return None
 
-    peers_metadata = [None] * 8
+    peers_metadata = [None] * world_size
     dist.all_gather_object(peers_metadata, metadata, group=group)
     try:
         uuids = [item[1] for item in peers_metadata]
+        hostnames = [item[0] for item in peers_metadata]
+        cross_host = len(set(hostnames)) > 1
         if (
-            any(
-                (item[0], item[2:]) != (metadata[0], metadata[2:])
-                for item in peers_metadata
+            any(item[2:-1] != metadata[2:-1] for item in peers_metadata)
+            or len(set(uuids)) != world_size
+            or not _nvlink_peers(
+                uuids,
+                hostnames=hostnames,
+                fabrics=[item[-1] for item in peers_metadata],
             )
-            or len(set(uuids)) != 8
-            or not _nvlink_peers(uuids)
         ):
             raise RuntimeError(
-                "requires eight distinct GPUs in one NVLink domain and matching capacities"
+                "requires distinct GPUs in one NVLink domain with matching capacities and SM counts"
             )
     except Exception as exc:
         failure = str(exc)
@@ -121,6 +183,8 @@ def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
     storage = counters = None
     try:
         storage = symm.empty(2 * max_m * n * 2, dtype=torch.uint8, device=device)
+        if cross_host and not _is_fabric_allocation(storage):
+            raise RuntimeError("cross-host NVLink requires a CUDA FABRIC allocation")
         counters = torch.zeros(
             props.multi_processor_count, dtype=torch.int32, device=device
         )
@@ -136,7 +200,8 @@ def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
     try:
         handle = symm.rendezvous(storage, group=group)
         buffers = [
-            handle.get_buffer(i, [storage.numel()], torch.uint8) for i in range(8)
+            handle.get_buffer(i, [storage.numel()], torch.uint8)
+            for i in range(world_size)
         ]
         storage.zero_()
     except Exception as exc:
@@ -152,7 +217,8 @@ def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
     dist.barrier(group=group)
     state = PushReduceScatter(kernel, storage, handle, buffers, counters, group.rank())
     logging.info(
-        "[PUSH_RS] enabled TP8 max_m=%d n=%d workspace=%.3f MiB",
+        "[PUSH_RS] enabled TP%d max_m=%d n=%d workspace=%.3f MiB",
+        world_size,
         max_m,
         n,
         storage.numel() / (1 << 20),
@@ -179,7 +245,8 @@ class PushReduceScatter:
         self.rank = rank
 
     def reduce_scatter(self, partial: torch.Tensor, output: torch.Tensor) -> None:
-        # Rounded buckets from the existing TP8 / hidden=7168 tuning. The bumper
+        # Use the existing TP8 / hidden=7168 buckets as the initial launch profile
+        # for each supported TP size. The bumper
         # CTA keeps phases consistent when either blocks or threads changes.
         index = min(bisect_left(_ROWS, partial.shape[0]), len(_ROWS) - 1)
         blocks, threads = _LAUNCHES[index]

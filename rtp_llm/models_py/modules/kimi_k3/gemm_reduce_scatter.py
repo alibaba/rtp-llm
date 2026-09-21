@@ -12,13 +12,16 @@ from typing import Any, Optional
 import torch
 import torch.distributed as dist
 
-from rtp_llm.models_py.distributed.push_reduce_scatter import create_push_reduce_scatter
+from rtp_llm.models_py.distributed.push_reduce_scatter import (
+    create_push_reduce_scatter,
+    is_same_host_group,
+)
 from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
     QuantizedActivation,
 )
 from rtp_llm.models_py.modules.kimi_k3._collective_gemm import collective_gemm_state_key
 
-_SUPPORTED_WORLD_SIZES = (2, 4, 8)
+_SUPPORTED_WORLD_SIZES = (2, 4, 8, 16)
 _MIN_FUSED_M = 512
 
 
@@ -49,9 +52,9 @@ def configure_gemm_reduce_scatter(
 ) -> bool:
     """Enable Prefill fusion eligibility; execution also requires M >= 512.
 
-    Decode callers pass use_fused=False. TP16 always uses NCCL.
+    Decode callers pass use_fused=False. TP16 uses separate GEMM plus push
+    for small prefill/decode and NCCL for prefill M >= 512.
     """
-    use_fused = use_fused and int(group.size()) != 16
     key = collective_gemm_state_key(group, device)
     device = torch.device("cuda", key[1])
     existing = _STATES.get(key)
@@ -64,24 +67,34 @@ def configure_gemm_reduce_scatter(
             raise RuntimeError(
                 "K3 GEMM/RS was already configured with a different shape or backend"
             )
-        if fp8 and existing.use_fused:
+        if fp8 and existing.use_fused and existing.world_size != 16:
             _validate_fp8_backend(existing.deep_gemm)
         existing.fp8 = existing.fp8 or fp8
         return True
     world_size = int(group.size())
-    if world_size not in _SUPPORTED_WORLD_SIZES and world_size != 16:
+    if world_size not in _SUPPORTED_WORLD_SIZES:
         raise RuntimeError(
-            f"GEMM/RS supports TP{(*_SUPPORTED_WORLD_SIZES, 16)}, got TP{world_size}"
+            f"GEMM/RS supports TP{_SUPPORTED_WORLD_SIZES}, got TP{world_size}"
         )
     if max_m <= 0 or max_m % world_size or n <= 0:
         raise ValueError(
             "GEMM/RS capacity must be positive with max_m divisible by TP size"
         )
-    if not use_fused:
-        # Decode: both GEMM dtypes share one push workspace (NCCL fallback).
-        push = create_push_reduce_scatter(group, device, max_m=max_m, n=n)
+    if not use_fused or world_size == 16:
+        # TP16 has no fused GEMM/RS backend. Keep the prefill role so large
+        # inputs retain NCCL, while decode uses push at every configured size.
+        push = create_push_reduce_scatter(
+            group, device, max_m=min(max_m, _MIN_FUSED_M) if use_fused else max_m, n=n
+        )
         _STATES[key] = _GemmReduceScatterState(
-            group, device, world_size, max_m, n, fp8=True, use_fused=False, push=push
+            group,
+            device,
+            world_size,
+            max_m,
+            n,
+            fp8=True,
+            use_fused=use_fused,
+            push=push,
         )
         logging.info(
             "[K3_GEMM_REDUCE_SCATTER] %s TP%d max_m=%d n=%d",
@@ -119,10 +132,24 @@ def configure_gemm_reduce_scatter(
         raise RuntimeError(
             failure_reason or "at least one TP rank cannot use DeepGEMM GEMM/RS"
         )
-    workspace = deep_gemm.GemmRSBuffer(group, max_m=max_m, n=n, device=device)
+    same_host = is_same_host_group(group)
+    # Same-host allocation keeps the mandatory fused buffer ahead of optional
+    # push storage. Cross-host setup must validate fabric before fused rendezvous.
+    workspace = (
+        deep_gemm.GemmRSBuffer(group, max_m=max_m, n=n, device=device)
+        if same_host
+        else None
+    )
     push = create_push_reduce_scatter(
         group, device, max_m=min(max_m, _MIN_FUSED_M), n=n
     )
+    if not same_host:
+        if push is None:
+            raise RuntimeError(
+                "push RS preflight failed for cross-host prefill; requires one "
+                "NVLink fabric clique and CUDA FABRIC mappings with compatible IMEX access"
+            )
+        workspace = deep_gemm.GemmRSBuffer(group, max_m=max_m, n=n, device=device)
     _STATES[key] = _GemmReduceScatterState(
         group, device, world_size, max_m, n, deep_gemm, workspace, fp8=fp8, push=push
     )

@@ -56,3 +56,20 @@ py_test(
     tags = ["manual", "B300"],
     exec_properties = {"gpu": "B300", "gpu_count": "8"},
 )
+
+# TP8 retains the existing target names above. TP16 can be run using torchrun
+# across hosts in one NVLink fabric; these targets exercise a single host.
+[
+    py_test(
+        name = "%s_tp%d_gpu_test" % (operator, tp),
+        srcs = ["test_%s_gpu.py" % operator],
+        main = "test_%s_gpu.py" % operator,
+        args = ["--world-size", str(tp)],
+        deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+        timeout = "long",
+        tags = ["manual", "B300"],
+        exec_properties = {"gpu": "B300", "gpu_count": str(tp)},
+    )
+    for operator in ["custom_all_gather", "push_reduce_scatter"]
+    for tp in [2, 4]
+]

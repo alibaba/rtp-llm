@@ -1,8 +1,10 @@
-"""TP8 K3 push RS: rank ownership, changing grids, zeros and graph replay.
+"""TP2/4/8/16 K3 push RS: rank ownership, changing grids, zeros and graph replay.
 
-Run with eight SM100/SM103 NVLink GPUs; no model weights are required.
+Use --world-size for local GPUs, or torchrun across SM100/SM103 NVLink nodes.
 """
 
+import argparse
+import os
 import socket
 from datetime import timedelta
 from unittest.mock import patch
@@ -25,19 +27,19 @@ def ordered_reference(x, group):
     return result.bfloat16()
 
 
-def worker(rank, port):
-    torch.cuda.set_device(rank)
-    device = torch.device("cuda", rank)
+def worker(rank, port, world_size=8, local_rank=None):
+    torch.cuda.set_device(rank if local_rank is None else local_rank)
+    device = torch.device("cuda", torch.cuda.current_device())
     dist.init_process_group(
         "nccl",
-        init_method=f"tcp://127.0.0.1:{port}",
+        init_method=f"tcp://127.0.0.1:{port}" if port is not None else "env://",
         rank=rank,
-        world_size=8,
+        world_size=world_size,
         timeout=timedelta(minutes=3),
     )
     group = dist.group.WORLD
     rs.configure_gemm_reduce_scatter(group, device, max_m=8192, n=7168, use_fused=False)
-    state = rs._STATES[(group, rank)]
+    state = rs._STATES[(group, device.index)]
     assert state.push is not None, "K3 push must be enabled on this supported setup"
     first_push = state.push
     rs.configure_gemm_reduce_scatter(
@@ -46,7 +48,19 @@ def worker(rank, port):
     assert state.push is first_push, "BF16/FP8 must share the workspace"
     torch.manual_seed(1337 + rank)
     # Repeated non-monotone shapes exercise both phases and launch changes.
-    for m in (0, 8, 128, 512, 1024, 24, 384, 8192, 8, 768, 256):
+    for m in (
+        0,
+        world_size,
+        128,
+        512,
+        1024,
+        3 * world_size,
+        384,
+        8192,
+        world_size,
+        768,
+        256,
+    ):
         x = torch.empty((m, 7168), dtype=torch.bfloat16, device=device)
         for kind in ("zeros", "rank_rows", "random"):
             if kind == "zeros":
@@ -67,8 +81,8 @@ def worker(rank, port):
                 continue
             if kind == "rank_rows":
                 expected = (
-                    sum((row + col + peer) % 9 - 4 for peer in range(8))
-                    .chunk(8)[rank]
+                    sum((row + col + peer) % 9 - 4 for peer in range(world_size))
+                    .chunk(world_size)[rank]
                     .bfloat16()
                 )
             else:
@@ -82,8 +96,10 @@ def worker(rank, port):
 
     # A rank-local storage offset must not split push/NCCL dispatch.
     offset = int(rank == 0)
-    storage = torch.randn(8 * 7168 + offset, dtype=torch.bfloat16, device=device)
-    x = storage[offset:].view(8, 7168)
+    storage = torch.randn(
+        world_size * 7168 + offset, dtype=torch.bfloat16, device=device
+    )
+    x = storage[offset:].view(world_size, 7168)
     actual = rs.reduce_scatter(x, group)
     torch.testing.assert_close(actual, ordered_reference(x, group), rtol=0, atol=0)
     if rank == 0:
@@ -101,7 +117,7 @@ def worker(rank, port):
         # Two sizes and an immediate consumer detect stale output / phase state.
         out = rs.reduce_scatter(x, group)
         consumed = out.float() * 3
-        small = rs.reduce_scatter(x[:8], group)
+        small = rs.reduce_scatter(x[:world_size], group)
     for step in range(8):
         x.normal_().mul_(step + rank + 1)
         eager = rs.reduce_scatter(x, group)
@@ -111,7 +127,7 @@ def worker(rank, port):
         torch.testing.assert_close(eager, expected, rtol=0, atol=0)
         torch.testing.assert_close(consumed, expected.float() * 3, rtol=0, atol=0)
         torch.testing.assert_close(
-            small, ordered_reference(x[:8], group), rtol=0, atol=0
+            small, ordered_reference(x[:world_size], group), rtol=0, atol=0
         )
     torch.cuda.synchronize()
     graph.reset()
@@ -121,30 +137,39 @@ def worker(rank, port):
         )
 
     # Equal TP sizes do not imply the same rank domain or workspace.
-    second = dist.new_group(list(range(8)))
-    rs.configure_gemm_reduce_scatter(second, device, max_m=8, n=7168, use_fused=False)
+    second = dist.new_group(list(range(world_size)))
+    rs.configure_gemm_reduce_scatter(
+        second, device, max_m=world_size, n=7168, use_fused=False
+    )
     assert (
-        rs._STATES[(second, rank)].push.storage.data_ptr()
+        rs._STATES[(second, device.index)].push.storage.data_ptr()
         != first_push.storage.data_ptr()
     )
-    actual = rs.reduce_scatter(x[:8], second)
-    torch.testing.assert_close(actual, ordered_reference(x[:8], second), rtol=0, atol=0)
+    actual = rs.reduce_scatter(x[:world_size], second)
+    torch.testing.assert_close(
+        actual, ordered_reference(x[:world_size], second), rtol=0, atol=0
+    )
     if rank == 0:
         print("PASS separate process groups own separate workspaces", flush=True)
     # One rank declining the topology must send the entire group to NCCL.
-    fallback_group = dist.new_group(list(range(8)))
+    fallback_group = dist.new_group(list(range(world_size)))
     with patch.object(push_rs, "_nvlink_peers", return_value=rank != 0):
         rs.configure_gemm_reduce_scatter(
-            fallback_group, device, max_m=8, n=7168, use_fused=False
+            fallback_group, device, max_m=world_size, n=7168, use_fused=False
         )
-    assert rs._STATES[(fallback_group, rank)].push is None
+    assert rs._STATES[(fallback_group, device.index)].push is None
     x.fill_(rank)
     with patch.object(
         rs.dist, "reduce_scatter_tensor", wraps=dist.reduce_scatter_tensor
     ) as nccl:
-        actual = rs.reduce_scatter(x[:8], fallback_group)
+        actual = rs.reduce_scatter(x[:world_size], fallback_group)
         assert nccl.call_count == 1
-    torch.testing.assert_close(actual, torch.full_like(actual, 28), rtol=0, atol=0)
+    torch.testing.assert_close(
+        actual,
+        torch.full_like(actual, world_size * (world_size - 1) // 2),
+        rtol=0,
+        atol=0,
+    )
     if rank == 0:
         print(
             "PASS single-rank topology rejection selects NCCL on all ranks", flush=True
@@ -157,7 +182,20 @@ def worker(rank, port):
 
 
 if __name__ == "__main__":
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    mp.spawn(worker, args=(port,), nprocs=8, join=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--world-size", type=int, choices=(2, 4, 8, 16), default=8)
+    args = parser.parse_args()
+    if "RANK" in os.environ:
+        worker(
+            int(os.environ["RANK"]),
+            None,
+            int(os.environ["WORLD_SIZE"]),
+            int(os.environ["LOCAL_RANK"]),
+        )
+    else:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        mp.spawn(
+            worker, args=(port, args.world_size), nprocs=args.world_size, join=True
+        )
