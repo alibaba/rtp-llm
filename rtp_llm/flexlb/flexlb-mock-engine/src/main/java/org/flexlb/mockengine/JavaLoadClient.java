@@ -74,7 +74,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   java -cp <jar> org.flexlb.mockengine.JavaLoadClient
  * }</pre>
  */
-public final class JavaLoadClient {
+public final class JavaLoadClient implements AutoCloseable {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BLOCK_SIZE = 1024;
@@ -128,6 +128,8 @@ public final class JavaLoadClient {
     final List<RequestResult> completedResults = Collections.synchronizedList(new ArrayList<>());
     private volatile ScheduledExecutorService pushgatewayExecutor;
     private ClientEventJournal liveJournal;
+    private Playback playback;
+    private long tokenStride = 1;
     private FlowControl flowControl;
     private volatile double lastGradientLogS = -10.0;
     final List<String> fallbackPrefillAddrs = new ArrayList<>();
@@ -191,6 +193,11 @@ public final class JavaLoadClient {
     }
 
     void run() throws Exception {
+        run(new Playback(System.getenv(), config.loop, config.durationS));
+    }
+
+    void run(Playback policy) throws Exception {
+        this.playback = policy;
         boolean controlled = !System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank();
         if (controlled && (config.maxInputLen > 0 || config.maxOutputLen > 0
                 || config.replayUniquePrefix || config.forcePriority > 0)) {
@@ -201,17 +208,13 @@ public final class JavaLoadClient {
             throw new RuntimeException("no replayable requests loaded from " + config.traceFile);
         }
 
-        // Parity with the legacy Python load client: load_replay_requests applies
-        // duration/limit filters FIRST, then num_shards slicing — so LIMIT applies
-        // to the whole trace, not per shard. Loop mode skips both filters (duration
-        // becomes a wall-clock timeout, limit a total sent cap) but still slices
-        // the trace across shards so N workers do not each replay the full trace.
-        // Uniform send mode reuses the loop-mode record semantics (shard slice
-        // only, wall-clock duration, total sent cap): request bodies still come
-        // from cycling the trace shard, only the arrival process changes.
-        boolean cyclic = config.loop || config.isUniform();
+        long sourceFirstTsMs = records.get(0).tsMs;
+        long sourceSpanMs = Math.max(1, records.get(records.size()-1).tsMs-sourceFirstTsMs) + 1;
+        // Playback owns wall duration and explicit laps. Source timestamps
+        // must not be truncated before replay-speed scaling or sharding.
+        boolean cyclic = playback.maxLaps != 1;
         records = filterAndShard(records,
-                cyclic ? 0 : config.durationS,
+                0,
                 cyclic ? 0 : config.limit,
                 config.numShards, config.shardIndex);
         if (records.isEmpty()) {
@@ -246,6 +249,12 @@ public final class JavaLoadClient {
         }
 
         Files.createDirectories(Path.of(config.outputDir));
+        Map<String,Object> playbackManifest = new java.util.LinkedHashMap<>(playback.manifest());
+        playbackManifest.put("mode", config.sendMode);
+        playbackManifest.put("qps", config.sendModeQps);
+        playbackManifest.put("speed", config.replaySpeed);
+        playbackManifest.put("ramp_up_seconds", config.rampUpSeconds);
+        MAPPER.writeValue(Path.of(config.outputDir,"playback.json").toFile(), playbackManifest);
         String controlDirectory = System.getenv("FLOW_CONTROL_DIR");
         if (controlDirectory != null && !controlDirectory.isBlank()) {
             flowControl = new FlowControl(Path.of(controlDirectory),
@@ -261,8 +270,8 @@ public final class JavaLoadClient {
             resetServerLatency();
         }
 
-        long firstTsMs = records.get(0).tsMs;
-        long traceSpanMs = Math.max(records.get(records.size() - 1).tsMs - firstTsMs, 1);
+        long firstTsMs = sourceFirstTsMs;
+        long traceSpanMs = sourceSpanMs;
 
         if (config.gradient && config.isUniform()) {
             System.out.println("WARNING: GRADIENT is ignored in uniform send mode");
@@ -301,17 +310,14 @@ public final class JavaLoadClient {
         List<Future<RequestResult>> futures = new ArrayList<>();
         int sentCount = 0;
         int loopIdx = 0;
-        // Per-shard uniform interval: total target rate SEND_MODE_QPS is split
-        // evenly across NUM_SHARDS instances.
-        double uniformIntervalS = config.isUniform()
-                ? config.numShards / config.sendModeQps : 0.0;
+        Playback.Clock playbackClock = playback.new Clock();
 
         if (flowControl != null) flowControl.publish("SENDING", 0, 0, 0);
         sending:
         while (true) {
             for (TraceRecord record : records) {
                 if (flowControl != null && flowControl.stopRequested()) break sending;
-                if (cyclic && config.durationS > 0) {
+                if (config.durationS > 0) {
                     if ((System.nanoTime() - replayStartedNanos) / 1_000_000_000L >= config.durationS) {
                         break;
                     }
@@ -347,11 +353,9 @@ public final class JavaLoadClient {
                     // linear-QPS-climb schedule (see uniformDueSeconds):
                     // pacing lag keeps measuring send_start against the
                     // ramped ideal schedule, so it is not polluted by ramp.
-                    dueSeconds = config.rampUpSeconds > 0
-                            ? uniformDueSeconds(sentCount,
-                                    config.sendModeQps / config.numShards,
-                                    config.rampUpSeconds)
-                            : sentCount * uniformIntervalS;
+                    dueSeconds = playbackClock.due((long)sentCount * config.numShards + config.shardIndex,
+                            config.sendModeQps, config.rampUpSeconds);
+                    if (config.durationS > 0 && dueSeconds >= config.durationS) break sending;
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
                     if (sleepNanos > 0) {
@@ -361,9 +365,10 @@ public final class JavaLoadClient {
                             Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
                         }
                     }
-                } else if (currentSpeed > 0 && record.tsMs > 0) {
+                } else if (currentSpeed > 0) {
                     long loopOffsetMs = (long) loopIdx * traceSpanMs;
                     dueSeconds = (record.tsMs - firstTsMs + loopOffsetMs) / 1000.0 / currentSpeed;
+                    if (config.durationS > 0 && dueSeconds >= config.durationS) break sending;
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
                     if (sleepNanos > 0) {
@@ -375,7 +380,7 @@ public final class JavaLoadClient {
                     }
                 }
 
-                if (cyclic && config.durationS > 0) {
+                if (config.durationS > 0) {
                     if ((System.nanoTime() - replayStartedNanos) / 1_000_000_000L >= config.durationS) {
                         break;
                     }
@@ -406,7 +411,7 @@ public final class JavaLoadClient {
                 if (flowControl != null) flowControl.progress(sentCount, actualSentCount.get(), responseCount.get());
             }
 
-            if (!cyclic) {
+            if (!playback.more(loopIdx)) {
                 break;
             }
             if (config.durationS > 0
@@ -614,22 +619,13 @@ public final class JavaLoadClient {
         String newSourceRid = req.sourceRid + loopSuffix;
         String newTraceId = req.traceId.isEmpty() ? "" : req.traceId + loopSuffix;
         long newRequestId = stableRequestId(newSourceRid);
-        // REPLAY_UNIQUE_PREFIX (default on): without re-salting, every loop
-        // round presents byte-identical block_cache_keys, so cache affinity
-        // routes each rid to the SAME prefill engine round after round and
-        // the P-side load collapses onto a handful of engines (Gini ~0.56).
-        // Re-salting only keys[0] keeps the shared suffix blocks (cross-
-        // request prefix reuse) while giving every round a unique routing
-        // prefix. The source list is shared across rounds, so it is copied
-        // here and never mutated in place.
-        List<Long> blockKeys = req.blockKeys;
-        if (config.replayUniquePrefix && !blockKeys.isEmpty()) {
-            List<Long> salted = new ArrayList<>(blockKeys);
-            salted.set(0, roundSaltedKey(blockKeys.get(0), loopIdx));
-            blockKeys = salted;
-        }
+        Playback policy = playback != null ? playback : new Playback(Map.of("MAX_LAPS","1"), false, config.durationS);
+        if (req.tokenIds == null) throw new IllegalArgumentException("lap relabel requires token-backed plans");
+        if (playback == null) tokenStride = req.tokenIds.stream().mapToLong(t -> (long)t+1).max().orElse(1);
+        List<Integer> tokens = policy.relabel(req.tokenIds, req.blockKeys, req.cacheKeyBlockSize, loopIdx, tokenStride);
+        List<Long> blockKeys = tokens == req.tokenIds ? req.blockKeys : computeBlockKeys(tokens, req.cacheKeyBlockSize);
         return new TraceRecord(newRequestId, newSourceRid, newTraceId, req.tsMs,
-                req.inputLen, req.outputLen, blockKeys, req.tokenIds, req.priority);
+                req.inputLen, req.outputLen, blockKeys, tokens, req.priority, req.cacheKeyBlockSize, loopIdx);
     }
 
     private RequestResult handleRequest(TraceRecord record, Semaphore semaphore, double dueS) {
@@ -642,6 +638,7 @@ public final class JavaLoadClient {
 
         RequestResult result = new RequestResult();
         result.rid = record.sourceRid;
+        result.iteration = record.iteration;
         result.traceId = record.traceId;
         result.requestId = record.requestId;
         result.ts = record.tsMs;
@@ -1134,7 +1131,7 @@ public final class JavaLoadClient {
                 .setForceDisableSpRun(false)
                 .setModel(config.model)
                 .setApiKey(config.apiKey)
-                .setCacheKeyBlockSize(BLOCK_SIZE);
+                .setCacheKeyBlockSize(record.cacheKeyBlockSize);
         if (record.priority > 0) {
             builder.setPriority(record.priority);
         }
@@ -1206,56 +1203,56 @@ public final class JavaLoadClient {
     private List<TraceRecord> loadTrace(String path) throws IOException {
         List<TraceRecord> records = new ArrayList<>();
         java.util.Set<Long> controlledIds = new java.util.HashSet<>();
-        for (String line : Files.readAllLines(Path.of(path))) {
-            if (line.isBlank()) {
-                continue;
-            }
-            try {
-                JsonNode raw = MAPPER.readTree(line);
-                if (!System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()) validateControlledTrace(raw);
-                TraceRecord record = parseTraceRecord(raw);
-                if (record != null) {
-                    if (!System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()
-                            && !controlledIds.add(record.requestId)) {
-                        throw new IOException("duplicate controlled trace request identity");
+        try (java.io.BufferedReader reader = Files.newBufferedReader(Path.of(path))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                try {
+                    JsonNode raw = MAPPER.readTree(line);
+                    if (!System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()) validateControlledTrace(raw);
+                    TraceRecord record = parseTraceRecord(raw);
+                    if (record != null) {
+                        if (!System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()
+                                && !controlledIds.add(record.requestId)) {
+                            throw new IOException("duplicate controlled trace request identity");
+                        }
+                        records.add(record);
                     }
-                    records.add(record);
+                } catch (Exception e) {
+                    if (!System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()) {
+                        throw new IOException("invalid controlled trace; no rows may be silently filtered", e);
+                    }
+                    System.err.println("skipping malformed trace line: " + e.getMessage());
                 }
-            } catch (Exception e) {
-                if (!System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()) {
-                    throw new IOException("invalid controlled trace; no rows may be silently filtered", e);
-                }
-                System.err.println("skipping malformed trace line: " + e.getMessage());
             }
         }
         records.sort(Comparator.comparingLong(r -> r.tsMs));
         return records;
     }
 
+    private static boolean validCacheKeyBlockSize(int value) {
+        return value >= 64 && value <= 4096 && (value & (value - 1)) == 0;
+    }
+
     static void validateControlledTrace(JsonNode raw) {
         int il = raw.path("il").asInt(0);
         if (!raw.path("il").isIntegralNumber() || il <= 0
                 || !raw.path("ol").isIntegralNumber() || raw.path("ol").asInt() <= 0
-                || !raw.path("input_ids").isArray() || raw.path("input_ids").size() != il
                 || raw.path("rid").asText().isBlank()
                 || !raw.path("ts").isIntegralNumber() || raw.path("ts").asLong() < 0
-                || raw.path("cache_key_block_size").asInt() != BLOCK_SIZE
+                || !raw.path("cache_key_block_size").isIntegralNumber()
+                || !validCacheKeyBlockSize(raw.path("cache_key_block_size").asInt())
                 || !raw.path("priority").isIntegralNumber()
                 || !PriorityNormalizer.isValid(raw.path("priority").asInt())) {
             throw new IllegalArgumentException("controlled trace requires exact shape, identity, tokens, timing, block size and priority");
         }
-        for (JsonNode token : raw.path("input_ids")) {
-            if (!token.isIntegralNumber() || !token.canConvertToInt() || token.asInt() < 0) {
-                throw new IllegalArgumentException("invalid controlled trace token");
-            }
-        }
-        // Hash the actual tokens with the same client implementation. Do not
-        // permit an unrelated cache identity to disguise the requested prefix.
+        List<Integer> decodedTokens = decodeInputTokens(raw, il);
+        if (decodedTokens == null) throw new IllegalArgumentException("controlled trace requires tokens");
         if (raw.has("bh") || raw.has("block_cache_keys")) {
             JsonNode supplied = raw.has("bh") ? raw.get("bh") : raw.get("block_cache_keys");
-            List<Integer> tokens = new ArrayList<>();
-            raw.path("input_ids").forEach(t -> tokens.add(t.asInt()));
-            List<Long> expected = computeBlockKeys(tokens, BLOCK_SIZE);
+            List<Long> expected = computeBlockKeys(decodedTokens, raw.path("cache_key_block_size").asInt());
             if (!supplied.isArray() || supplied.size() != expected.size()) {
                 throw new IllegalArgumentException("controlled trace cache key count mismatch");
             }
@@ -1266,6 +1263,49 @@ public final class JavaLoadClient {
                 }
             }
         }
+    }
+
+    // A lossless run encoding for synthetic token blocks. Hashing and RPCs still
+    // consume the expanded token sequence; supplied KV hashes cannot bypass it.
+    static List<Integer> decodeInputTokens(JsonNode raw, int inputLen) {
+        if (raw.has("input_ids") && raw.has("input_token_blocks")) {
+            throw new IllegalArgumentException("ambiguous token encoding");
+        }
+        boolean compact = raw.has("input_token_blocks");
+        JsonNode values = raw.get(compact ? "input_token_blocks" : "input_ids");
+        if (values == null) return null;
+        int block = raw.path("cache_key_block_size").asInt(BLOCK_SIZE);
+        if (inputLen <= 0 || !validCacheKeyBlockSize(block) || !values.isArray()
+                || values.size() != (compact ? ((inputLen - 1) / block + 1) : inputLen)) {
+            throw new IllegalArgumentException("token encoding length mismatch");
+        }
+        List<List<Integer>> blocks = new ArrayList<>();
+        List<Integer> tokens = new ArrayList<>();
+        for (JsonNode value : values) {
+            if (compact && value.isArray()) {
+                if (value.size() != block) throw new IllegalArgumentException("pinned block size mismatch");
+                List<Integer> exact = new ArrayList<>();
+                for (JsonNode token : value) {
+                    if (!token.isIntegralNumber() || !token.canConvertToInt() || token.asInt()<0)
+                        throw new IllegalArgumentException("invalid pinned token");
+                    exact.add(token.asInt());
+                }
+                blocks.add(exact);
+            } else {
+                if (!value.isIntegralNumber() || !value.canConvertToInt() || value.asInt()<0)
+                    throw new IllegalArgumentException("invalid token label");
+                if (compact) blocks.add(Collections.nCopies(block,value.asInt()));
+                else tokens.add(value.asInt());
+            }
+        }
+        if (!compact) return tokens;
+        return new java.util.AbstractList<Integer>() {
+            @Override public Integer get(int index) {
+                java.util.Objects.checkIndex(index, inputLen);
+                return blocks.get(index/block).get(index%block);
+            }
+            @Override public int size() { return inputLen; }
+        };
     }
 
     // Package-visible for per-record priority parsing assertions in tests.
@@ -1302,14 +1342,13 @@ public final class JavaLoadClient {
         long tsMs = raw.path("ts").asLong(raw.path("request_enter_ts_epoch_ms")
                 .asLong(raw.path("ts_epoch_ms").asLong(0)));
 
-        List<Integer> tokenIds = null;
-        JsonNode inputIdsNode = raw.get("input_ids");
-        if (inputIdsNode != null && inputIdsNode.isArray()) {
-            tokenIds = new ArrayList<>(inputIdsNode.size());
-            for (JsonNode token : inputIdsNode) {
-                tokenIds.add(token.asInt());
-            }
-        } else {
+        JsonNode encoded = raw.has("input_token_blocks") ? raw.get("input_token_blocks") : raw.get("input_ids");
+        if (encoded != null && encoded.isArray()) for (JsonNode value : encoded) {
+            if (value.isArray()) for (JsonNode token : value) tokenStride = Math.max(tokenStride, token.asLong()+1);
+            else tokenStride = Math.max(tokenStride, value.asLong()+1);
+        }
+        List<Integer> tokenIds = decodeInputTokens(raw, inputLen);
+        if (tokenIds == null) {
             tokenIds = Collections.nCopies(inputLen, 0);
         }
 
@@ -1323,7 +1362,7 @@ public final class JavaLoadClient {
                 blockKeys.add(toSignedInt64(key.bigIntegerValue()));
             }
         } else if (tokenIds != null) {
-            blockKeys = computeBlockKeys(tokenIds, BLOCK_SIZE);
+            blockKeys = computeBlockKeys(tokenIds, raw.path("cache_key_block_size").asInt(BLOCK_SIZE));
         }
 
         // Auto-TPM QoS priority: FORCE_PRIORITY > 0 pins every replayed
@@ -1349,7 +1388,8 @@ public final class JavaLoadClient {
         }
 
         return new TraceRecord(requestId, sourceRid, traceId, tsMs,
-                inputLen, outputLen, blockKeys, tokenIds, priority);
+                inputLen, outputLen, blockKeys, tokenIds, priority,
+                raw.path("cache_key_block_size").asInt(BLOCK_SIZE));
     }
 
     private String extractTraceId(JsonNode raw) {
@@ -1388,7 +1428,7 @@ public final class JavaLoadClient {
         return "";
     }
 
-    private static List<Long> computeBlockKeys(List<Integer> tokenIds, int blockSize) {
+    static List<Long> computeBlockKeys(List<Integer> tokenIds, int blockSize) {
         List<Long> keys = new ArrayList<>();
         int numBlocks = tokenIds.size() / blockSize;
         for (int b = 0; b < numBlocks; b++) {
@@ -1405,17 +1445,6 @@ public final class JavaLoadClient {
         return Hashing.murmur3_128()
                 .hashString(value, StandardCharsets.UTF_8)
                 .asLong() & 0x7FFF_FFFF_FFFF_FFFFL;
-    }
-
-    // Package-visible for loop-mode unique-prefix assertions in tests.
-    // Deterministic per-round salt: the same (key, loop) pair always maps to
-    // the same value, different loops map to different values.
-    static long roundSaltedKey(long blockKey, int loopIdx) {
-        return Hashing.murmur3_128().newHasher()
-                .putLong(blockKey)
-                .putInt(loopIdx)
-                .hash()
-                .asLong();
     }
 
     private static long toSignedInt64(BigInteger value) {
@@ -1526,6 +1555,7 @@ public final class JavaLoadClient {
         node.put("error_kind", result.errorKind);
         node.put("wall_clock_ts", result.wallClockTs);
         node.put("send_due_epoch_ms", result.sendDueEpochMs);
+        node.put("iteration", result.iteration);
         node.put("send_start_epoch_ms", result.sendStartEpochMs);
         node.put("pacing_lag_ms", result.pacingLagMs);
         if (!result.synthetic) {
@@ -1614,12 +1644,12 @@ public final class JavaLoadClient {
                     tokens = new ArrayList<>(tokens.subList(0, Math.min(maxInputLen, tokens.size())));
                 }
                 cur = new TraceRecord(cur.requestId, cur.sourceRid, cur.traceId, cur.tsMs,
-                        maxInputLen, cur.outputLen, cur.blockKeys, tokens, cur.priority);
+                        maxInputLen, cur.outputLen, cur.blockKeys, tokens, cur.priority, cur.cacheKeyBlockSize);
                 truncated++;
             }
             if (maxOutputLen > 0 && cur.outputLen > maxOutputLen) {
                 cur = new TraceRecord(cur.requestId, cur.sourceRid, cur.traceId, cur.tsMs,
-                        cur.inputLen, maxOutputLen, cur.blockKeys, cur.tokenIds, cur.priority);
+                        cur.inputLen, maxOutputLen, cur.blockKeys, cur.tokenIds, cur.priority, cur.cacheKeyBlockSize);
                 truncated++;
             }
             out.add(cur);
@@ -1792,7 +1822,7 @@ public final class JavaLoadClient {
      *
      * <p>Package-visible for the ramp-up schedule unit tests.
      */
-    static double uniformDueSeconds(int index, double perShardQps, double rampUpSeconds) {
+    static double uniformDueSeconds(long index, double perShardQps, double rampUpSeconds) {
         if (rampUpSeconds <= 0) {
             return index / perShardQps;
         }
@@ -1819,7 +1849,7 @@ public final class JavaLoadClient {
 
     // ---- Cleanup ----
 
-    private void close() {
+    @Override public void close() {
         if (liveJournal != null) {
             liveJournal.close();
         }
@@ -2330,6 +2360,8 @@ public final class JavaLoadClient {
         final List<Integer> tokenIds;
         /** Auto-TPM QoS priority in [1, 100]; 0 means unset. */
         final int priority;
+        final int cacheKeyBlockSize;
+        final int iteration;
 
         TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,
                     int inputLen, int outputLen, List<Long> blockKeys, List<Integer> tokenIds) {
@@ -2339,6 +2371,23 @@ public final class JavaLoadClient {
         TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,
                     int inputLen, int outputLen, List<Long> blockKeys, List<Integer> tokenIds,
                     int priority) {
+            this(requestId, sourceRid, traceId, tsMs, inputLen, outputLen, blockKeys, tokenIds, priority, BLOCK_SIZE);
+        }
+
+        TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,
+                    int inputLen, int outputLen, List<Long> blockKeys, List<Integer> tokenIds,
+                    int priority, int cacheKeyBlockSize) {
+            this(requestId, sourceRid, traceId, tsMs, inputLen, outputLen, blockKeys, tokenIds, priority, cacheKeyBlockSize, 0);
+        }
+
+        TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,
+                    int inputLen, int outputLen, List<Long> blockKeys, List<Integer> tokenIds,
+                    int priority, int cacheKeyBlockSize, int iteration) {
+            this.iteration = iteration;
+            if (!validCacheKeyBlockSize(cacheKeyBlockSize)) {
+                throw new IllegalArgumentException("invalid cache key block size");
+            }
+            this.cacheKeyBlockSize = cacheKeyBlockSize;
             this.requestId = requestId;
             this.sourceRid = sourceRid;
             this.traceId = traceId;
@@ -2384,6 +2433,7 @@ public final class JavaLoadClient {
         String errorKind = "none";
         double wallClockTs;
         double sendDueEpochMs;
+        int iteration;
         double sendStartEpochMs;
         double pacingLagMs;
         /** Auto-TPM QoS priority carried by the schedule request; 0 means unset. */

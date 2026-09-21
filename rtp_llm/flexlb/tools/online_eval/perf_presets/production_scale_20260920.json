@@ -1,0 +1,46 @@
+{
+  "block_size": 64,
+  "sleep_scale": 1,
+  "jitter_pct": 0,
+  "prefill": {
+    "scale": 1.0,
+    "max_waiting_batches": 256,
+    "direct_batch_size_max": 1,
+    "max_batch_requests": 1,
+    "fifo": {
+      "max_requests": 64,
+      "max_batch_tokens": 512000,
+      "max_batch_kv_len": 3145728,
+      "max_seq_len": 1048576,
+      "cp_size": 8,
+      "force_single": false,
+      "max_batch_tokens_without_cache": 50000,
+      "max_waiting_requests": 1024,
+      "max_inited_kv_streams": 128
+    },
+    "memory_cache": {
+      "enabled": true,
+      "capacity_blocks": 95311,
+      "read_ms_per_block": 0,
+      "copy_lifecycle": true,
+      "write_ms_per_block": 0,
+      "enable_prefix_tree": false
+    },
+    "enable_gpu_prefix_tree": true,
+    "reserve_block_ratio": 1.0
+  },
+  "decode": {
+    "scale": 1.0,
+    "tokens_per_step": 2.8638118322884645,
+    "step_base_ms": 33.42547963178996,
+    "step_per_running_ms": 0.2785192715553533,
+    "eos": {
+      "enabled": true,
+      "distribution": "geometric",
+      "mean_tokens": 420,
+      "seed": 20260913
+    },
+    "reuse_cache": false,
+    "reserve_block_ratio": 8
+  }
+}

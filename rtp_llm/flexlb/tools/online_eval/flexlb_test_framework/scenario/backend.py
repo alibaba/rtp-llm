@@ -506,6 +506,21 @@ def make_env_spec(plan, profile, lease):
         master_env=({"FLEXLB_DEBUG_ENABLED": "true"} if plan["debug_enabled"] else {}),
         master_debug_log=plan.get("master_debug_log", False),
     )
+    if plan["perf_preset"] == "production_scale_20260920":
+        import json
+        from pathlib import Path
+
+        spec.perf = json.loads(
+            (
+                Path(__file__).resolve().parents[2]
+                / "perf_presets"
+                / "production_scale_20260920.json"
+            ).read_text()
+        )
+        spec.mock_heap = "32g"
+        spec.mock_extra_args.extend(
+            ["--prefill-block-size", "512", "--decode-block-size", "64"]
+        )
     for key in (
         "prefill_cache_blocks",
         "decode_cache_blocks",
@@ -526,6 +541,16 @@ def make_env_spec(plan, profile, lease):
         spec.perf.setdefault("prefill", {})["max_waiting_batches"] = plan[
             "prefill_max_waiting_batches"
         ]
+    if "prefill_cache_policy" in plan:
+        cache = plan["prefill_cache_policy"]
+        prefill = spec.perf.setdefault("prefill", {})
+        prefill["enable_gpu_prefix_tree"] = cache["device_tree"]
+        prefill["memory_cache"] = dict(
+            enabled=cache["memory_blocks"] > 0,
+            capacity_blocks=cache["memory_blocks"],
+            enable_prefix_tree=cache["memory_tree"],
+            copy_lifecycle=True,
+        )
     return spec
 
 

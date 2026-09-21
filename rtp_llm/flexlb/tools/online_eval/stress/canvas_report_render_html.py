@@ -133,6 +133,7 @@ def render(spec):
             ],
         },
         "timeAxis": spec.get("timeAxis"),
+        "events": spec.get("events", []),
         "timeOriginLabel": spec.get("timeOriginLabel"),
         "meta": spec.get("meta"),
         "panels": [
@@ -145,12 +146,18 @@ def render(spec):
                 "timeX": bool(p.get("timeX")),
                 "xNums": p.get("xNums") or [],
                 "yMax": p.get("yMax"),
+                "overlay": p.get("overlay", False),
+                "axes": p.get("axes", {}),
+                "presets": p.get("presets", {}),
                 "unit": p.get("unit", "") or "",
                 "series": [
                     {
                         "name": s.get("name", ""),
                         "data": s.get("data", []),
                         "points": s.get("points"),
+                        "axis": s.get("axis", "y"),
+                        "unit": s.get("unit", ""),
+                        "hidden": s.get("hidden", False),
                         "color": s.get("color") or series_color(s.get("tone"), i),
                     }
                     for i, s in enumerate(p.get("series", []))
@@ -161,18 +168,22 @@ def render(spec):
     }
 
     page_title = html.escape(title)
-    chartjs = (Path(__file__).parent / "stress" / "vendor" / "chart.umd.min.js").read_text(encoding="utf-8")
-    interaction = (Path(__file__).parent / "stress" / "legend_interaction.js").read_text(encoding="utf-8")
+    resource_dir = Path(__file__).resolve().parent
+    chartjs = (resource_dir / "vendor" / "chart.umd.min.js").read_text(encoding="utf-8")
+    overlay = (resource_dir / "multi_curve.js").read_text(encoding="utf-8")
+    interaction = (resource_dir / "legend_interaction.js").read_text(encoding="utf-8")
     return (_TEMPLATE.replace("__PAGE_TITLE__", page_title)
             .replace("__SPEC_JSON__", json.dumps(payload, ensure_ascii=False))
             .replace("__CHARTJS_JS__", chartjs)
-            .replace("__LEGEND_INTERACTION_JS__", interaction))
+            .replace("__LEGEND_INTERACTION_JS__", interaction)
+            .replace("__MULTI_CURVE_JS__", overlay))
 
 
 _TEMPLATE = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"/>
 <title>__PAGE_TITLE__</title>
 <script>__CHARTJS_JS__</script>
+<script>__MULTI_CURVE_JS__</script>
 <script>__LEGEND_INTERACTION_JS__</script>
 <style>
 :root{
@@ -404,6 +415,7 @@ const TIME_AXIS = (SPEC.timeAxis
 const TA_MIN = TIME_AXIS ? TIME_AXIS.min : undefined;
 const TA_MAX = TIME_AXIS ? TIME_AXIS.max : undefined;
 SPEC.panels.forEach(p=>{
+  if (p.overlay) { FlexMultiCurve.mount(grid, p, {timeAxis:TIME_AXIS, events:SPEC.events || []}); return; }
   const wrap=document.createElement('div'); wrap.className='panel';
   wrap.innerHTML=`<h3>${p.title}</h3><div class="cap">${p.caption}</div><div class="box"><canvas id="c-${p.id}"></canvas></div>`;
   grid.appendChild(wrap);
@@ -414,6 +426,20 @@ SPEC.panels.forEach(p=>{
   const isTime = !!(p.timeX && TIME_AXIS && p.xNums && p.xNums.length);
   let legendController;
   const chart = new Chart(ctx,{
+    plugins: [{id:'phaseEvents', afterDraw(chart) {
+      if (!isTime) return;
+      const {ctx, chartArea:a, scales:{x}} = chart;
+      ctx.save(); ctx.font='10px sans-serif';
+      (SPEC.events || []).forEach((e,i) => {
+        if (!Number.isFinite(e.t)) return;
+        const px=x.getPixelForValue(e.t);
+        if(px<a.left || px>a.right) return;
+        ctx.strokeStyle='#94a3b8'; ctx.setLineDash([3,3]);
+        ctx.beginPath(); ctx.moveTo(px,a.top); ctx.lineTo(px,a.bottom); ctx.stroke();
+        ctx.fillStyle='#64748b'; ctx.fillText(e.name || e.label || '',px+2,a.top+12+(i%3)*12);
+      });
+      ctx.restore();
+    }}],
     type: p.type==='bar'?'bar':'line',
     data:{
       labels: isTime ? undefined : p.x,

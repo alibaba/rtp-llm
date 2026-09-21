@@ -7,6 +7,9 @@ workload_runtime:
   max_sample_gap_s: 5.0
   collector_shutdown_s: 10.0
 cases:
+  cache_scale_in::step:
+    kind: workload
+    reason: Fixed Java traffic across one-step P withdrawal with cache collapse adjudication
   trace_scale_out::prepared_background:
     kind: workload
     reason: Java background traffic persists across Python checkpoints and Decode scale-out

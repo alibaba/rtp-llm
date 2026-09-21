@@ -9,6 +9,7 @@ from pathlib import Path
 from online_eval.java_flow import JavaFlowGroup
 from online_eval.load_client import LOAD_CLIENT_ENV_VARS
 from online_eval.traffic_source import materialize
+from online_eval.playback import normalize
 
 from ...harness import ClientOps
 from ..contracts import CheckResult, StageHandler, StageOutput
@@ -30,12 +31,7 @@ def _start_validate(params, plan):
     if ("source" in p) == ("trace" in p):
         raise ValueError("specify exactly one traffic source")
     if "trace" in p:
-        p["source"] = dict(
-            kind="synthetic",
-            model="prefix_families",
-            version="1",
-            parameters=p.pop("trace"),
-        )
+        raise ValueError("legacy trace shorthand retired; use synthetic/realistic/1")
     if not all(
         isinstance(p[k], str) and p[k]
         for k in ("group_id", "phase_id", "jvm_xms", "jvm_xmx")
@@ -49,7 +45,9 @@ def _start_validate(params, plan):
         or p["poll_s"] <= 0
     ):
         raise ValueError("invalid flow polling interval")
-    client = p["client"]
+    client, _ = normalize(p["client"])
+    if p["source"].get("kind") == "synthetic" and client.get("SEND_MODE") == "replay":
+        raise ValueError("statistical source requires client-paced uniform/burst/gradient playback")
     if (
         not isinstance(client, dict)
         or client.get("REPLAY_UNIQUE_PREFIX") != "false"
@@ -90,7 +88,27 @@ def _start(ctx, p, deadline):
         ctx.instance["id"] + ":" + p["group_id"],
         Path(ctx.instance["source_path"]).parent,
     )
+    environment, playback = normalize(p["client"])
     client = ClientOps(ctx.backend.manager, p["jvm_xms"], p["jvm_xmx"])
+    count = json.loads(trace.with_suffix('.manifest.json').read_text())['request_count']
+    laps = int(environment.get('MAX_LAPS', 0 if environment.get('LOOP')=='true' else 1))
+    if laps:
+        event_budget = max(50_000, 2*count*laps)
+    elif environment.get('SEND_MODE')=='uniform':
+        rate = float(environment['SEND_MODE_QPS'])
+        modulation = float(environment.get('BURST_FACTOR',1))*(1+float(environment.get('DIURNAL_AMPLITUDE',0)))
+        event_budget = max(50_000, 2*math.ceil(rate*modulation*int(environment['DURATION_S'])+1))
+    else:
+        # A finite model can contain coincident timestamps. Use its full cycle
+        # span rather than average rate, including one partial final lap.
+        first = last = None
+        with trace.open() as stream:
+            for line in stream:
+                last = json.loads(line)['ts']
+                if first is None: first=last
+        span_ms=max(1,last-first)+1
+        laps=math.ceil(int(environment['DURATION_S'])*1000*float(environment.get('REPLAY_SPEED',1))/span_ms)+1
+        event_budget=max(50_000,2*count*laps)
     flow = JavaFlowGroup(
         client,
         directory,
@@ -98,6 +116,7 @@ def _start(ctx, p, deadline):
         group_id=p["group_id"],
         phase_id=p["phase_id"],
         poll_s=p["poll_s"],
+        max_events=event_budget,
     )
 
     def cleanup(d):
@@ -107,7 +126,7 @@ def _start(ctx, p, deadline):
 
     handle = ctx.register_resource("java_flow", flow, cleanup=cleanup)
     environment = dict(
-        p["client"], GRPC_TARGET=f"127.0.0.1:{ctx.env.master_http_port + 2}"
+        environment, GRPC_TARGET=f"127.0.0.1:{ctx.env.master_http_port + 2}"
     )
     state = flow.start(trace, environment, deadline)
     return StageOutput({"flow": handle}, artifacts=[str(directory / "flow-input.json")])

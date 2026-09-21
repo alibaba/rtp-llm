@@ -1,16 +1,27 @@
 """Phase-level Java traffic control; Python never forwards individual requests."""
 
-import hashlib
 import json
 import time
 import uuid
 from pathlib import Path
 
 from flexlb_test_framework.ha import LiveClientEvents
+from .traffic_source import sha256_file
+from .playback import normalize
 
 
 class JavaFlowGroup:
-    def __init__(self, client, directory, *, run_id, group_id, phase_id, poll_s):
+    def __init__(
+        self,
+        client,
+        directory,
+        *,
+        run_id,
+        group_id,
+        phase_id,
+        poll_s,
+        max_events=50_000,
+    ):
         if not all(isinstance(x, str) and x for x in (run_id, group_id, phase_id)):
             raise ValueError("flow identities must be explicit nonempty strings")
         if poll_s <= 0:
@@ -21,7 +32,9 @@ class JavaFlowGroup:
         self.poll_s = poll_s
         self.proc = None
         self.control = self.directory / "control"
-        self.journal = LiveClientEvents(self.directory / "client_lifecycle.jsonl")
+        self.journal = LiveClientEvents(
+            self.directory / "client_lifecycle.jsonl", max_events=max_events
+        )
         self.stop_command = None
         self.trace_manifest = None
 
@@ -29,12 +42,14 @@ class JavaFlowGroup:
         if self.proc is not None or self.directory.exists():
             raise ValueError("flow output directory must be fresh")
         trace = Path(trace).resolve()
-        self.trace_manifest = dict(
-            path=str(trace), sha256=hashlib.sha256(trace.read_bytes()).hexdigest()
-        )
+        self.trace_manifest = dict(path=str(trace), sha256=sha256_file(trace))
         self.directory.mkdir(parents=True)
         self.control.mkdir()
-        env = dict(environment)
+        env, playback = normalize(environment)
+        source_manifest = trace.with_suffix('.manifest.json')
+        semantics = json.loads(source_manifest.read_text()) if source_manifest.exists() else {}
+        self.trace_manifest.update(semantics)
+        self.trace_manifest['playback'] = playback
         env.update(
             TRACE_FILE=str(trace),
             FLOW_CONTROL_DIR=str(self.control),

@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 
 from online_eval.metrics import parse_prometheus_samples
+from online_eval.playback import iteration_windows
 from stress.canvas_report_render_html import render
 
 
@@ -248,6 +249,13 @@ def write_report(directory, result, evidence):
         evidence["clock_anchor"]["epoch_s"],
     )
     series.update(derived)
+    from .cache_gate import report_series
+
+    gate_series, gate_sources = report_series(
+        directory, evidence["clock_anchor"]["epoch_s"]
+    )
+    series.update(gate_series)
+    statistic_sources.update(gate_sources)
     if statistic_issues:
         result["workload"]["statistics_issues"] = statistic_issues
         result["workload"]["runtime_validity"] = "INVALID"
@@ -313,8 +321,30 @@ def write_report(directory, result, evidence):
             result.get("error")
             or "workload evidence is invalid; inspect workload diagnostics"
         )
+    if gate_series:
+        # Audit every raw source above, but avoid duplicating hundreds of MB of
+        # per-engine telemetry into the gate's JSON and thousands of HTML panels.
+        # Full raw samples remain available for independent reanalysis.
+        result["workload"]["report_series_scope"] = "derived_and_cache_gate"
+        result["workload"]["raw_telemetry_sources"] = [
+            dict(path=str(path), bytes=path.stat().st_size)
+            for path in sorted(directory.glob("telemetry/*/*.prom"))
+        ]
+        series = {**derived, **gate_series}
+    traffic = []
+    iterations = []
+    for flow_input in sorted(directory.glob('flows/*/flow-input.json')):
+        flow = json.loads(flow_input.read_text())
+        traffic.append(flow.get('trace',{}))
+        journal = flow_input.parent/'client_lifecycle.jsonl'
+        if journal.exists():
+            issued = (json.loads(line) for line in journal.open() if line.strip())
+            laps = iteration_windows(row for row in issued if row.get('event')=='issued')
+            iterations.extend(dict(group=flow.get('group_id'),**lap) for lap in laps)
     payload = dict(
         schema_version=1,
+        traffic_manifests=traffic,
+        iterations=iterations,
         configuration=result.get("implementation", {}).get("configuration"),
         implementation=result.get("implementation", {}),
         id=result["id"],
@@ -387,7 +417,9 @@ def write_report(directory, result, evidence):
             + html.escape(json.dumps(row, ensure_ascii=False, indent=2))
             + "</pre></td></tr>"
         )
-    table += "</table><h2>Statistical reports</h2><ul>"
+    table += "</table><h2>Playback iterations</h2><pre>" + html.escape(json.dumps(iterations,ensure_ascii=False,indent=2)) + "</pre>"
+    table += "<h2>Traffic semantics</h2><pre>" + html.escape(json.dumps(traffic,ensure_ascii=False,indent=2)) + "</pre>"
+    table += "<h2>Statistical reports</h2><ul>"
     for aggregate in result["workload"].get("stress_aggregates", []):
         if aggregate["status"] != "GENERATED":
             table += (
@@ -411,6 +443,9 @@ def write_report(directory, result, evidence):
                 + "</a></li>"
             )
     table += "</ul>"
+    if (directory / "cache-gate.html").is_file():
+        table += '<p><a href="cache-gate.html">P scale-in cache gate: curves and verdict</a></p>'
+
     (directory / "workload-report.html").write_text(
         render(spec).replace("</body>", table + "</body>")
     )

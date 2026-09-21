@@ -1,0 +1,31 @@
+{
+  "bytes": 624288,
+  "sha256": "ac2f8aad472e882de2c649f5e0507d76787655a66d53e0e7285bdcb8aae87cca",
+  "version": 2,
+  "block_size": 512,
+  "count": 141113,
+  "realism": "EMPIRICAL_PREFIX_STRUCTURE",
+  "tail": "BLOCK_ALIGNED_LOSSY_TOKENS",
+  "arrival": "TRUE_TIMESTAMPS_PACED_BY_CLIENT",
+  "provenance": {
+    "missing_pod_indices": [
+      7,
+      15
+    ],
+    "source_start": 1789970400000,
+    "source_end": 1789971299999,
+    "expected_pods": 20,
+    "source_pods": 18,
+    "v1_sha256": "ac24838f1bcee4d81c3379234e37c2f767fc24adba0a5dfb973d27eec5735912",
+    "fit_report_sha256": "9c597e0ec0fa44677a77669fcd6bb3fae6a8f7201dd5acf9b13f63a14d9361c2"
+  },
+  "token_adjustment": {
+    "original_tokens": 12803417727,
+    "aligned_tokens": 12769425408,
+    "removed_tokens": 35099269,
+    "added_tokens": 1106950,
+    "short_requests": 3609,
+    "relative_change": -0.0026549410262789903
+  },
+  "allocation_bitmap": "reserve discarded v1 partial-block labels; no tail lengths retained"
+}

@@ -75,7 +75,7 @@ FLEXLB_JVM_HEAP_SIZE="${FLEXLB_JVM_HEAP_SIZE:-32g}"
 PROCESS_CONFIG_FILE="${PROCESS_CONFIG_FILE:-${RUN_DIR}/master_config.json}"
 
 # Default load (user-approved 2026-09-02, replay profile): 12P/40D + replay
-# mode (trace-timestamp pacing) + LOOP=1 cyclic refill + duration 120s.
+# mode (trace-timestamp pacing), duration 120s; cyclic refill requires explicit LOOP=1.
 # REPLAY_SPEED is caller-supplied (the upstream orchestrator
 # auto-calibrates it from the trace to the nominal 650 QPS target); this
 # script never invents a speed. Baseline break (2026-09-02): the mock3
@@ -172,9 +172,9 @@ ENABLE_FALLBACK="${ENABLE_FALLBACK:-0}"
 # equivalent under a uniform priority). Multi-priority experiments opt out
 # explicitly with FORCE_PRIORITY=0 so per-record trace priority wins.
 FORCE_PRIORITY="${FORCE_PRIORITY:-50}"
-# LOOP=1 (default): cyclic replay refills the trace to fill DURATION_S
-# (uniform mode is cyclic by construction and ignores LOOP).
-LOOP="${LOOP:-1}"
+# LOOP=1 explicitly opts into cyclic refill; default is one finite pass.
+# uniform mode also obeys explicit LOOP/MAX_LAPS; it no longer implies looping.
+LOOP="${LOOP:-0}"
 # Send mode is a pure pass-through (single env-var layer). Default replay
 # (trace-timestamp pacing; user-approved 2026-09-02, speed auto-calibrated
 # upstream). uniform is the explicit opt-in for the strictest scheduling
@@ -1152,9 +1152,17 @@ launch_java_load_client() {
   local shard_index="$3"
   local max_concurrency="$4"
   local skip_server_latency="$5"
+  local playback_args=()
+  local playback_key
+  for playback_key in MAX_LAPS LAP_IDENTITY LAP_RETAIN_PROBABILITY PLAYBACK_SEED \
+      BURST_FACTOR BURST_PERIOD_SECONDS BURST_DUTY DIURNAL_AMPLITUDE DIURNAL_PERIOD_SECONDS; do
+    if [[ -n "${!playback_key:-}" ]]; then
+      playback_args+=("${playback_key}=${!playback_key}")
+    fi
+  done
   # M9: one client_env.json per run, written at the first launch.
   if [[ ! -f "${RUN_DIR}/client_env.json" ]]; then
-    write_client_env_snapshot \
+    write_client_env_snapshot "${playback_args[@]}" \
       "TRACE_FILE=${TRACE_FILE}" \
       "TARGET_ADDR=${TARGET_ADDR:-${FLEXLB_HTTP_ADDR}}" \
       "GRPC_TARGET=${GRPC_TARGET:-}" \
@@ -1192,7 +1200,7 @@ launch_java_load_client() {
       "DRY_RUN=${DRY_RUN:-0}" \
       "CLIENT_PACING_LAG_P99_LIMIT_MS=${CLIENT_PACING_LAG_P99_LIMIT_MS}"
   fi
-  run_java_load_client \
+  run_java_load_client "${playback_args[@]}" \
     "TRACE_FILE=${TRACE_FILE}" \
     "TARGET_ADDR=${TARGET_ADDR:-${FLEXLB_HTTP_ADDR}}" \
     "GRPC_TARGET=${GRPC_TARGET:-}" \

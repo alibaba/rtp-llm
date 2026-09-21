@@ -2,6 +2,7 @@
 
 import os
 
+from ..resource_plan import MOCK_WINDOW_LAST, WORKER_PORT_CAPACITY
 from .loader import ScenarioError, load_document
 
 
@@ -29,7 +30,7 @@ def validate_lease(path, budget, environ=None):
         if type(data[key]) is not int or data[key] < 0:
             raise ScenarioError(f"invalid lease {key}")
     m, b = data["master_base"], data["mock_base"]
-    if not (1024 <= m <= 65530 and 1025 <= b <= 65384):
+    if not (1024 <= m <= 65530 and 1025 <= b <= 65535 - MOCK_WINDOW_LAST):
         raise ScenarioError("lease ports outside valid unprivileged range")
     expected = {
         "FLEXLB_FT_MASTER_HTTP_PORT": str(m),
@@ -44,17 +45,17 @@ def validate_lease(path, budget, environ=None):
         raise ScenarioError("process port environment differs from parent lease")
     intervals = [
         dict(side="master", first=m, last=m + 5),
-        dict(side="mock", first=b - 1, last=b + 151),
+        dict(side="mock", first=b - 1, last=b + MOCK_WINDOW_LAST),
     ]
-    if data["intervals"] != intervals or not (m + 5 < b - 1 or b + 151 < m):
+    if data["intervals"] != intervals or not (m + 5 < b - 1 or b + MOCK_WINDOW_LAST < m):
         raise ScenarioError("lease intervals invalid or overlap")
-    if data["lock_names"] != [f"m{m}_{m+5}.lock", f"g{b-1}_{b+151}.lock"]:
+    if data["lock_names"] != [f"m{m}_{m+5}.lock", f"g{b-1}_{b+MOCK_WINDOW_LAST}.lock"]:
         raise ScenarioError("lease lock names do not match port windows")
     worker_bound = budget.get("max_environment_workers", budget["initial_workers"])
     if (
         budget["backend"] != "java_mock"
         or budget["bounded"] is not True
-        or not 1 <= data["worker_capacity"] <= 149
+        or not 1 <= data["worker_capacity"] <= WORKER_PORT_CAPACITY
         or type(worker_bound) is not int
         or worker_bound < budget["initial_workers"]
         or worker_bound + budget["max_dynamic_additions"] > data["worker_capacity"]

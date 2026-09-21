@@ -1,5 +1,7 @@
 """Resource admission checks; no ports, processes, or backends are started."""
 
+import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -14,6 +16,45 @@ from flexlb_test_framework.resource_plan import (
 
 
 class ResourcePlanTest(unittest.TestCase):
+    def test_large_explicit_window_covers_topology_and_rejects_overlap(self):
+        script = """
+from flexlb_test_framework.resource_plan import *
+from flexlb_test_framework.scenario.lease import validate_lease
+import json, tempfile
+from pathlib import Path
+from flexlb_test_framework.scenario import load_scenarios
+from flexlb_test_framework.scenario.compiler import compile_scenarios
+from flexlb_test_framework.scenario.catalog import handlers
+import flexlb_test_framework.resource_plan as resource_plan
+root=Path(resource_plan.__file__).resolve().parent.parent
+plans=compile_scenarios(load_scenarios(root/'scale_cases/cache_scale_in_online.yaml'), handlers=handlers())
+assert plans[0]['environment']['n_prefill']==125
+assert plans[0]['environment']['n_decode']==536
+source=plans[0]['stages'][1]['params']['source']['parameters']
+assert source['profile']=='frontend_20260921'
+assert plans[0]['stages'][1]['params']['client']['playback']['qps']==240
+budget = JavaMockBudget(661, 0)
+lease = plan_lane_leases([[budget]], master_base=61000, mock_base=61010, mock_stride=704)[0]
+assert lease.intervals()[-1] == ('mock', 61009, 61712)
+assert 61670 in lease.ports()
+try:
+    plan_lane_leases([[budget],[budget]], master_base=18000, mock_base=54000, mock_stride=500)
+except ResourcePlanError:
+    pass
+else:
+    raise AssertionError('overlapping large lanes accepted')
+with tempfile.TemporaryDirectory() as d:
+    path=Path(d)/'lease.json'
+    path.write_text(json.dumps(dict(schema_version=1, **lease.to_manifest())))
+    validate_lease(path, dict(backend='java_mock', bounded=True, initial_workers=661, max_dynamic_additions=0), lease.child_env())
+"""
+        env = dict(
+            os.environ,
+            FLEXLB_FT_WORKER_PORT_CAPACITY="700",
+            PYTHONPATH=str(Path(__file__).resolve().parents[1]),
+        )
+        subprocess.run([sys.executable, "-c", script], env=env, check=True)
+
     def test_cumulative_adds_not_peak_live_workers_bound_ports(self):
         self.assertEqual(149, JavaMockBudget(6, 143).worker_capacity)
         with self.assertRaisesRegex(ResourcePlanError, "cumulative"):

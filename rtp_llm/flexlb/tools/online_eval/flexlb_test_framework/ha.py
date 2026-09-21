@@ -158,7 +158,10 @@ def rows_between(rows: list, lo_s: Optional[float], hi_s: Optional[float]) -> li
 class LiveClientEvents:
     """Incremental journal reader; incomplete trailing writes are retried, not lost."""
 
-    def __init__(self, path):
+    def __init__(self, path, *, max_events=50_000):
+        if type(max_events) is not int or not 1 <= max_events <= 2_000_000:
+            raise ValueError("live client event budget must be in 1..2000000")
+        self.max_events = max_events
         self.path = Path(path)
         self.offset = 0
         self.pending = b""
@@ -234,7 +237,7 @@ class LiveClientEvents:
             else:
                 raise ValueError("unknown live client event")
             self.sequence += 1
-            if self.sequence > 50_000:
+            if self.sequence > self.max_events:
                 raise ValueError("live client journal exceeds event budget")
 
     def cohort(self, lower_ms, upper_ms, transition=False):

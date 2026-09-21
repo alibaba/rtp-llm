@@ -1345,6 +1345,7 @@ public final class JavaMockEngineCluster {
         private final PrefillTpsMetrics.Reader prometheusPrefillTps = new PrefillTpsMetrics.Reader();
         private final LongAdder lifetimeContextComputeTokens = new LongAdder();
         private final LongAdder lifetimeContextTokens = new LongAdder();
+        private final LongAdder lifetimeContextRequests = new LongAdder();
         private final LongAdder lifetimeGenerateTokens = new LongAdder();
         private final LongAdder lifetimeDecodeStepTokens = new LongAdder();
         private final AtomicLong generateTokens = new AtomicLong();
@@ -3820,6 +3821,7 @@ public final class JavaMockEngineCluster {
                         }
                         lifetimeContextComputeTokens.add(Math.max(0L, inputLen - hitTokens));
                         lifetimeContextTokens.add(inputLen);
+                        lifetimeContextRequests.increment();
                         reportMetricEvent(Map.of("rtp_llm_input_token_length", inputLen,
                                 "rtp_llm_reuse_length", hitTokens,
                                 "rtp_llm_effective_context_length", Math.max(0L, inputLen - hitTokens)));
@@ -6329,6 +6331,10 @@ public final class JavaMockEngineCluster {
             row.put("batch_size", batchSize);
             row.put("input_len", shape.inputLen());
             row.put("cache_hit_tokens", shape.hitTokens());
+            long memoryHitTokens = memoryCache == null ? 0L
+                    : Math.min(shape.hitTokens(), (long) shape.memoryHitBlocks() * seqSizePerBlock);
+            row.put("cache_memory_hit_tokens", memoryHitTokens);
+            row.put("cache_device_hit_tokens", shape.hitTokens() - memoryHitTokens);
             MockLruBlockCache.BlockLease lease = activeBlockLeases.get(requestId);
             row.put("kv_used_tokens",
                     lease != null ? (long) lease.totalBlocks() * seqSizePerBlock : 0L);
@@ -6481,6 +6487,7 @@ public final class JavaMockEngineCluster {
             // availability, matching the production master's view.
             long effectiveActiveKv = usedKvTokens();
             snap.put("name", engineName);
+            snap.put("engine_incarnation", engineIncarnation);
             snap.put("role", roleName.toLowerCase());
             snap.put("grpc_addr", host + ":" + grpcPort);
             snap.put("http_addr", host + ":" + (grpcPort - 1));
@@ -6588,6 +6595,7 @@ public final class JavaMockEngineCluster {
             // window with its own atomic numerator/time ledger (see METRICS.md).
             snap.put("context_compute_tokens_total", lifetimeContextComputeTokens.sum());
             snap.put("context_tokens_total", lifetimeContextTokens.sum());
+            snap.put("context_requests_total", lifetimeContextRequests.sum());
             snap.put("generate_tokens_total", lifetimeGenerateTokens.sum());
             snap.putAll(prometheusPrefillTps.last());
             snap.put("generate_tps",

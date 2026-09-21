@@ -1,6 +1,7 @@
 """Registered Python case programs. YAML can only select entries in this registry."""
 
 PROGRAMS = {
+    "cache_scale_in": "flexlb_test_framework.case_programs.cache_scale_in",
     "trace_scale_out": "flexlb_test_framework.case_programs.trace_scale_out",
     "late_completion": "flexlb_test_framework.case_programs.late_completion",
     "admission_queue": "flexlb_test_framework.case_programs.admission_queue",

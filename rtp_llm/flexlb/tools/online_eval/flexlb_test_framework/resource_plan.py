@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 from typing import Sequence
 
 MASTER_PORT_COUNT = 6
 MOCK_CONTROL_OFFSET = -1
-VICTIM_OFFSETS = (149, 150, 151)
+WORKER_PORT_CAPACITY = int(os.environ.get("FLEXLB_FT_WORKER_PORT_CAPACITY", "149"))
+if not 149 <= WORKER_PORT_CAPACITY <= 4096:
+    raise ValueError("FLEXLB_FT_WORKER_PORT_CAPACITY must be between 149 and 4096")
+VICTIM_OFFSETS = tuple(range(WORKER_PORT_CAPACITY, WORKER_PORT_CAPACITY + 3))
 MOCK_WINDOW_LAST = max(VICTIM_OFFSETS)
 MIN_MOCK_STRIDE = MOCK_WINDOW_LAST - MOCK_CONTROL_OFFSET + 1
 

@@ -71,6 +71,7 @@ T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；m
 from __future__ import annotations
 
 import argparse
+import html as html_escape
 import bisect
 import json
 import math
@@ -4730,6 +4731,16 @@ def main():
             + "production-alignment annotation missing"
         )
 
+    if (agg.get('meta') or {}).get('traffic_manifests'):
+        semantics = html_escape.escape(json.dumps(agg['meta']['traffic_manifests'],ensure_ascii=False,indent=2))
+        html_out=html_out.replace('</body>', '<details><summary>流量来源、长度与播放口径</summary><pre>'+semantics+'</pre></details></body>')
+    if agg.get('iterations'):
+        columns=('iteration','requests','input_tokens','start_epoch_ms','end_epoch_ms')
+        table='<section><h2>播放轮次 / Playback iterations</h2><table><tr>'
+        table+=''.join('<th>'+column+'</th>' for column in columns)+'</tr>'
+        for row in agg['iterations']:
+            table+='<tr>'+''.join('<td>'+html_escape.escape(str(row.get(column,'')))+'</td>' for column in columns)+'</tr>'
+        html_out=html_out.replace('</body>',table+'</table></section></body>')
     out_dir = os.path.dirname(os.path.abspath(args.out))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)

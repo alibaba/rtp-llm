@@ -129,6 +129,8 @@ def aggregate_workload(
         out = directory / "aggregate" / epoch
         out.mkdir(parents=True, exist_ok=True)
         try:
+            manifests=[json.loads(p.read_text()).get('trace',{}) for p in sorted(directory.glob('flows/*/flow-input.json'))]
+            (out/'traffic-manifests.json').write_text(json.dumps(manifests))
             if epoch in (environment_metadata or {}):
                 (out / "run_meta.json").write_text(
                     json.dumps(dict(params=environment_metadata[epoch]))
@@ -235,6 +237,7 @@ def aggregate_workload(
                     plane.mkdir(parents=True, exist_ok=True)
                     for file in (
                         "client_events.jsonl",
+                        "traffic-manifests.json",
                         "engine_events.jsonl",
                         "master.log",
                         "mock_per_engine_timeseries.json.gz",

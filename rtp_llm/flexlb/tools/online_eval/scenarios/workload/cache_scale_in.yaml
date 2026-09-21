@@ -1,0 +1,93 @@
+schema_version: 2
+case: cache_scale_in
+profiles:
+- single-nonbatch
+environment:
+  backend: java_mock
+  discovery: discovery_file
+  n_prefill: 8
+  n_decode: 8
+  perf_preset: default
+  prefill_cache_blocks: 512
+  decode_cache_blocks: 4096
+  prefill_cache_policy:
+    device_tree: true
+    memory_tree: false
+    memory_blocks: 1024
+  prefill_max_waiting_batches: 1024
+  config_overrides:
+    max_inflight_per_prefill_worker: 1024
+    prefill_expression: 12 + 0.025 * sum(computeTokens) + 0.001 * sum(hitCacheTokens)
+execution:
+  timeout_s: 900
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+metadata:
+  description: Small orchestration smoke; use scale_cases/cache_scale_in_online.yaml
+    for production-scale execution.
+  category: kv
+variants:
+- id: step
+  program: step
+parameters:
+  gate:
+    target_p: 4
+    warmup_timeout_s: 90
+    baseline_s: 30
+    observe_s: 180
+    sample_s: 1
+    window_s: 10
+    step_s: 1
+    sustain_s: 30
+    max_gap_s: 3
+    qps: 80
+    qps_tolerance: 0.1
+    baseline_min_hit: 0.65
+    baseline_max_spread: 0.05
+    absolute_min_hit: 0.45
+    max_drop: 0.25
+    min_completed: 20
+    min_waiting: 64
+    max_pacing_lag_ms: 1000
+    drain_timeout_ms: 30000
+    topology_timeout_s: 20
+  flow:
+    group_id: scale_in
+    phase_id: continuous
+    poll_s: 0.1
+    jvm_xms: 1g
+    jvm_xmx: 8g
+    source:
+      kind: synthetic
+      model: realistic
+      version: '1'
+      parameters:
+        seed: 91021
+        count: 25000
+        block_size: 1024
+        families: 48
+        shared_blocks: 1
+        prefix_blocks: 6
+        suffix_blocks: 1
+        zipf_alpha: 0.7
+        cold_fraction: 0.05
+        session_requests: 4
+        session_growth_blocks: 1
+        output_tokens: 8
+        priority: 50
+    client:
+      DURATION_S: '310'
+      MAX_CONCURRENCY: '8192'
+      TIMEOUT_MS: '10000'
+      RESPONSE_TIMEOUT: '60'
+      REPLAY_UNIQUE_PREFIX: 'false'
+      FETCH_OUTPUT_STREAM: 'true'
+      N_CHANNELS: '4'
+      EVENT_LOOP_THREADS: '8'
+      SKIP_SERVER_LATENCY: 'true'
+      PRIORITY: '50'
+      playback:
+        mode: uniform
+        qps: 80.0
+        max_laps: 1
+        identity: structural-relabel

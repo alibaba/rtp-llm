@@ -6,10 +6,32 @@ from types import SimpleNamespace
 
 from flexlb_test_framework.scenario.runtime import Deadline
 from online_eval.java_flow import JavaFlowGroup
-from online_eval.synthetic_trace import write_trace
+from online_eval.realistic import write_trace
 
 
 class JavaFlowTest(unittest.TestCase):
+    def test_large_flow_event_budget_is_explicit_and_bounded(self):
+        flow = JavaFlowGroup(
+            None,
+            "/unused",
+            run_id="r",
+            group_id="g",
+            phase_id="p",
+            poll_s=1,
+            max_events=201600,
+        )
+        self.assertEqual(flow.journal.max_events, 201600)
+        with self.assertRaises(ValueError):
+            JavaFlowGroup(
+                None,
+                "/unused",
+                run_id="r",
+                group_id="g",
+                phase_id="p",
+                poll_s=1,
+                max_events=2000001,
+            )
+
     def test_no_process_exit_is_not_drain_even_with_terminal_status(self):
         with tempfile.TemporaryDirectory() as d:
             flow = JavaFlowGroup(
@@ -42,30 +64,19 @@ class JavaFlowTest(unittest.TestCase):
             self.assertFalse((flow.control / "stop.json.tmp").exists())
 
     def test_trace_is_reproducible_and_preserves_declared_prefix(self):
-        spec = dict(
-            seed=19,
-            count=3,
-            interval_ms=10,
-            block_size=1024,
-            families=[
-                dict(
-                    name="hot",
-                    prefix_tokens=[4, 5],
-                    suffix_length=3,
-                    token_max=100,
-                    output_len=2,
-                    priority=30,
-                )
-            ],
-        )
+        spec = dict(seed=19,count=3,block_size=512,families=1,shared_blocks=0,
+            prefix_blocks=0,suffix_blocks=1,zipf_alpha=0,cold_fraction=0,
+            pinned_blocks=[[4,5]*256],output_tokens=2,priority=30)
         with tempfile.TemporaryDirectory() as d:
-            one = write_trace(Path(d) / "one.jsonl", spec, "run:group")
-            two = write_trace(Path(d) / "two.jsonl", spec, "run:group")
+            one=Path(d)/"one.jsonl"
+            write_trace(one,spec,"run:group")
+            two=Path(d)/"two.jsonl"
+            write_trace(two,spec,"run:group")
             self.assertEqual(one.read_bytes(), two.read_bytes())
             rows = [json.loads(line) for line in one.read_text().splitlines()]
-            self.assertEqual([0, 10, 20], [r["ts"] for r in rows])
+            self.assertEqual([0, 1, 2], [r["ts"] for r in rows])
             self.assertTrue(
-                all(r["input_ids"][:2] == [4, 5] and r["il"] == 5 for r in rows)
+                all(r["input_token_blocks"][0] == [4,5]*256 and r["il"] == 1024 for r in rows)
             )
             self.assertEqual(3, len({r["rid"] for r in rows}))
 

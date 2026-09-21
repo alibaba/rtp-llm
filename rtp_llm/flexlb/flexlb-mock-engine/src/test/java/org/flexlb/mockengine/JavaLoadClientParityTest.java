@@ -46,6 +46,60 @@ class JavaLoadClientParityTest {
         return new JavaLoadClient(config);
     }
 
+    @Test
+    void compactTokensPreservePartialTailAndActualHashes() throws Exception {
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        var compact = mapper.createObjectNode().put("rid", "compact").put("il", 1031)
+                .put("ol", 8).put("ts", 0).put("priority", 50).put("cache_key_block_size", 512);
+        compact.putArray("input_token_blocks").add(7).add(8).add(9);
+        var explicit = compact.deepCopy();
+        explicit.remove("input_token_blocks");
+        var tokens = explicit.putArray("input_ids");
+        for (int i = 0; i < 1031; i++) tokens.add(i < 512 ? 7 : i < 1024 ? 8 : 9);
+        JavaLoadClient.validateControlledTrace(compact);
+        JavaLoadClient.validateControlledTrace(explicit);
+        var client = dryRunClient();
+        var actual = client.parseTraceRecord(compact);
+        var expected = client.parseTraceRecord(explicit);
+        assertEquals(expected.tokenIds, actual.tokenIds);
+        assertEquals(expected.blockKeys, actual.blockKeys);
+        assertEquals(9, actual.tokenIds.get(1030));
+        assertEquals(expected.blockKeys, JavaLoadClient.truncateRecords(List.of(actual), 1024, 0).get(0).blockKeys);
+        compact.putArray("input_ids").add(1);
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> JavaLoadClient.validateControlledTrace(compact));
+        compact.remove("input_ids");compact.put("il", 1024);
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> JavaLoadClient.validateControlledTrace(compact));
+        compact.put("il", 1031);compact.withArray("input_token_blocks").set(0,mapper.getNodeFactory().numberNode(-1));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> JavaLoadClient.validateControlledTrace(compact));
+    }
+
+    @Test
+    void perRecordBlockSizeMatchesHashesAndScheduleWire() throws Exception {
+        var json = new com.fasterxml.jackson.databind.ObjectMapper();
+        var row = json.createObjectNode().put("rid", "blocks-512").put("il", 1024)
+                .put("ol", 8).put("ts", 0).put("priority", 50).put("cache_key_block_size", 512);
+        var tokens = row.putArray("input_ids");
+        for (int n = 0; n < 1024; n++) tokens.add(n < 512 ? 7 : 8);
+        JavaLoadClient.validateControlledTrace(row);
+        var client = dryRunClient();
+        var record = client.parseTraceRecord(row);
+        assertEquals(2, record.blockKeys.size());
+        var expected = com.google.common.hash.Hashing.murmur3_128().newHasher();
+        for (int n = 0; n < 512; n++) expected.putInt(7);
+        assertEquals(expected.hash().asLong(), record.blockKeys.get(0));
+        var request = client.buildScheduleRequest(record,
+                org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.getDefaultInstance());
+        assertEquals(512, request.getCacheKeyBlockSize());
+        assertEquals(record.blockKeys, request.getBlockCacheKeysList());
+        assertEquals(512, JavaLoadClient.truncateRecords(List.of(record), 0, 4).get(0).cacheKeyBlockSize);
+        row.put("cache_key_block_size", 513);
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> JavaLoadClient.validateControlledTrace(row));
+    }
+
     // ------------------------------------------------------------------
     // Item 1: shard ordering — duration/limit filters BEFORE i % numShards.
     // ------------------------------------------------------------------

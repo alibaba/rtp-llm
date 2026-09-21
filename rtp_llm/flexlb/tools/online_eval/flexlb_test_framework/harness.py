@@ -103,7 +103,9 @@ JAVA_MODULE_OPTS = [
     "java.instrument/sun.instrument=ALL-UNNAMED",
 ]
 
-DEFAULT_MOCK_HEAP = "2g"
+from .resource_plan import VICTIM_OFFSETS
+
+DEFAULT_MOCK_HEAP = os.environ.get("FLEXLB_FT_MOCK_HEAP", "2g")
 DEFAULT_MOCK_EVENT_LOOP_THREADS = 8
 DEFAULT_MOCK_COMPLETION_THREADS = 4
 DEFAULT_PREFILL_CACHE_BLOCKS = 6000
@@ -815,6 +817,7 @@ class EnvSpec:
     n_prefill: int = 2
     n_decode: int = 4
     mock_heap: str = DEFAULT_MOCK_HEAP
+    mock_extra_args: list = field(default_factory=list)
     perf: dict = field(default_factory=default_perf)
     # Built-in scheduling profile (PROFILES) or "none" (master not
     # started); the FLEXLB_CONFIG document is rendered by flexlb_cfg from
@@ -884,6 +887,8 @@ class EnvSpec:
                 "runtime_mode": self.runtime_mode,
                 "n_decode": self.n_decode,
                 "perf": self.perf,
+                "mock_extra_args": self.mock_extra_args,
+                "mock_heap": self.mock_heap,
                 "master_profile": self.master_profile,
                 "master_env": self.master_env,
                 # config axes: overrides serialized field-by-field (OMIT as
@@ -1089,7 +1094,7 @@ class EnvManager:
         for _ in range(12):
             # mock http = base-1; engines base .. base+n-1; victim zone base+149..base+151
             needed = [base - 1] + list(range(base, base + n_prefill + n_decode))
-            needed += [base + 149, base + 150, base + 151]
+            needed += [base + offset for offset in VICTIM_OFFSETS]
             # wildcard probe (PROBE_BIND_HOST): the mock binds 0.0.0.0, a
             # loopback-only probe misses foreign binds on other interfaces
             if not any(port_in_use(p, PROBE_BIND_HOST) for p in needed):
@@ -1194,6 +1199,7 @@ class EnvManager:
             "--env-file",
             str(env.run_dir / "flexlb_env.txt"),
         ]
+        argv += spec.mock_extra_args
         argv += ["--discovery-file", str(env.discovery_file)]
         proc = ProcessOps.start(argv, dict(os.environ), env.run_dir / "mock_engine.log")
         env.mock = proc
@@ -1843,7 +1849,7 @@ class EnvManager:
         heap: str = "1g",
     ) -> ManagedProcess:
         """Start a standalone single-engine JVM (role: prefill|decode) at base+150."""
-        grpc_port = env.base_grpc_port + 150
+        grpc_port = env.base_grpc_port + VICTIM_OFFSETS[1]
         http_port = grpc_port - 1
         # Pre-flight: wait briefly for the ports to be released after a kill -9
         # (mirrors the legacy engine-kill script's stale-port check).

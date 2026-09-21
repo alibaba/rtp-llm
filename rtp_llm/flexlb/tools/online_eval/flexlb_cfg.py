@@ -215,6 +215,7 @@ class ConfigOverride:
     cleanup_interval_ms: Optional[int] = None
     decode_max_engine_requests: Optional[int] = None
     decode_max_kv_usage_percent: Optional[int] = None
+    prefill_expression: Optional[str] = None
     strip_preemption: bool = False
 
     def omit_map(self) -> dict:
@@ -308,6 +309,7 @@ def build_flexlb_config(
     queue_timeout_ms: Optional[int] = None,
     # Explicit functional-test workload values; these are not Java defaults.
     max_inflight_per_prefill_worker: int = 2,
+    prefill_expression: str = DSV4_PREFILL_EXPRESSION,
     request_timeout_ms: int = 60_000,
     decision_lifetime: float = 2.0,
     status_rpc_ms: int = 1_000,
@@ -376,7 +378,7 @@ def build_flexlb_config(
                     "prefill": {
                         "executionTimeEstimator": {
                             "type": "FORMULA",
-                            "expression": DSV4_PREFILL_EXPRESSION,
+                            "expression": prefill_expression,
                         },
                         "cacheAffinity": {
                             "maxExtraTtftMs": 20,
@@ -595,6 +597,7 @@ _STRESS_BASE: dict = {
 
 # override field -> document path for the stress base (edit-in-place).
 _STRESS_DOC_PATHS = {
+    "prefill_expression": ("router", "roles", "prefill", "executionTimeEstimator", "expression"),
     "max_requests": ("scheduler", "decision", "maxRequests"),
     "max_collection_wait_ms": ("scheduler", "decision", "maxCollectionWaitMs"),
     "max_predicted_execution_ms": ("scheduler", "decision", "maxPredictedExecutionMs"),
@@ -851,7 +854,7 @@ _INT_FIELDS = frozenset(
     }
 )
 _FLOAT_FIELDS = frozenset({"decision_lifetime"})
-_STR_FIELDS = frozenset({"ordering", "decision", "dispatcher"})
+_STR_FIELDS = frozenset({"ordering", "decision", "dispatcher", "prefill_expression"})
 _BOOL_FIELDS = frozenset({"strip_preemption"})
 
 

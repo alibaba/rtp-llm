@@ -117,6 +117,7 @@
   "cache_local_index::isolation_batch::single-batch",
   "cache_local_index::isolation_nonbatch::single-nonbatch",
   "cache_local_index::isolation_nonbatch::window-nonbatch",
+  "cache_scale_in::step::single-nonbatch",
   "cancel_fence_settlement::decode_retire_closes_fence::batch-window",
   "cancel_fence_settlement::decode_retire_closes_fence::single-batch",
   "cancel_fence_settlement::decode_retire_closes_fence::single-nonbatch",

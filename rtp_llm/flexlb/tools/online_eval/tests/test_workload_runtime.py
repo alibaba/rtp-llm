@@ -92,4 +92,5 @@ class WorkloadRuntimeTests(unittest.TestCase):
             )
         )
         self.assertTrue(any("::sustained_mix::" in identity for identity in w))
-        self.assertEqual(len(plans), 388)
+        self.assertEqual(len(plans), 389)
+        self.assertIn("cache_scale_in::step::single-nonbatch", w)

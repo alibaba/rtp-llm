@@ -50,6 +50,20 @@ class JournalTest(unittest.TestCase):
     def write(self, rows):
         self.path.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
+    def test_large_journal_passes_legacy_limit_and_still_enforces_budget(self):
+        journal = LiveClientEvents(self.path, max_events=52_000)
+        for start in range(0, 26_000, 1000):
+            with self.path.open("a") as out:
+                for n in range(start, start + 1000):
+                    out.write(json.dumps(row(str(n), "issued", 2 * n + 1)) + "\n")
+                    out.write(json.dumps(row(str(n), "terminal", 2 * n + 2)) + "\n")
+            journal.read()
+        self.assertEqual(len(journal.terminal), 26_000)
+        with self.path.open("a") as out:
+            out.write(json.dumps(row("overflow", "issued", 52_001)) + "\n")
+        with self.assertRaisesRegex(ValueError, "event budget"):
+            journal.read()
+
     def test_legal_failed_terminals_do_not_drop_following_requests(self):
         statuses = [
             "engine_error",

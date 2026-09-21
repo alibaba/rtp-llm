@@ -2,6 +2,7 @@
 
 from .actions.admission import HANDLERS as ADMISSION_HANDLERS
 from .actions.balance import HANDLERS as BALANCE_HANDLERS
+from .actions.cache_scale_in import HANDLERS as CACHE_SCALE_IN_HANDLERS
 from .actions.cache_storm import HANDLERS as CACHE_STORM_HANDLERS
 from .actions.cancel import HANDLERS as CANCEL_HANDLERS
 from .actions.client_fetch import HANDLERS as CLIENT_FETCH_HANDLERS
@@ -35,6 +36,7 @@ def handlers():
         *CANCEL_HANDLERS,
         *CLIENT_FETCH_HANDLERS,
         *CACHE_STORM_HANDLERS,
+        *CACHE_SCALE_IN_HANDLERS,
         *DECODE_SCALE_OUT_HANDLERS,
         *ELASTIC_HANDLERS,
         *ELASTIC_ADDED_WORKER_HANDLERS,

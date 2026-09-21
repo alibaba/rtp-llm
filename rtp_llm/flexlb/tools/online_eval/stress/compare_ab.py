@@ -56,6 +56,9 @@ import json
 import math
 import os
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from online_eval.playback import comparison_notice
 
 from canvas_report_render_html import render as render_charts
 
@@ -338,6 +341,12 @@ def precheck(run_a, run_b):
     mismatch (different trace / different experiment parameters)."""
     errors, warnings, details = [], [], {}
 
+    manifests_a=run_a['meta'].get('traffic_manifests',[])
+    manifests_b=run_b['meta'].get('traffic_manifests',[])
+    for left in manifests_a:
+        for right in manifests_b:
+            notice=comparison_notice(left,right)
+            if notice and notice not in warnings: warnings.append(notice)
     tps_a = run_a["meta"].get("prefill_tps_contract", "legacy_or_unknown")
     tps_b = run_b["meta"].get("prefill_tps_contract", "legacy_or_unknown")
     details["prefill_tps_contract"] = {"a": tps_a, "b": tps_b, "match": tps_a == tps_b}
@@ -405,7 +414,7 @@ def precheck(run_a, run_b):
 
     details["errors"] = errors
     if errors:
-        raise PrecheckError("A/B precheck failed:\n  - " + "\n  - ".join(errors))
+        raise PrecheckError("A/B precheck failed:\n  - " + "\n  - ".join(errors + [w for w in warnings if "不可直比" in w]))
     return details, warnings
 
 

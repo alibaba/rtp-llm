@@ -14,6 +14,7 @@ from flexlb_cfg import (
     render_env,
 )
 
+from ..resource_plan import VICTIM_OFFSETS
 from .contracts import PlanContext
 from .loader import ScenarioError
 
@@ -150,6 +151,7 @@ def environment(value, path, profile):
             "discovery",
             "perf_preset",
             "prefill_perf",
+            "prefill_cache_policy",
             "prefill_max_waiting_batches",
             "master_debug_log",
             "debug_enabled",
@@ -169,7 +171,7 @@ def environment(value, path, profile):
     result = {"backend": "java_mock", "n_prefill": 2, "n_decode": 4}
     for key, default, allowed in (
         ("discovery", "file", ("file", "discovery_file")),
-        ("perf_preset", "default", ("default", "fault_env")),
+        ("perf_preset", "default", ("default", "fault_env", "production_scale_20260920")),
         ("master_layout", "single", ("single", "dual_standalone")),
     ):
         val = value.get(key, default)
@@ -223,6 +225,15 @@ def environment(value, path, profile):
     result["master_stable_window_s"] = number(
         value.get("master_stable_window_s", 3), path + ".master_stable_window_s"
     )
+    if "prefill_cache_policy" in value:
+        field = path + ".prefill_cache_policy"
+        keys = {"device_tree", "memory_tree", "memory_blocks"}
+        cache = mapping(value["prefill_cache_policy"], field, keys, keys)
+        for key in ("device_tree", "memory_tree"):
+            if type(cache[key]) is not bool:
+                fail(field + "." + key, "expected boolean")
+        number(cache["memory_blocks"], field + ".memory_blocks", integer=True)
+        result["prefill_cache_policy"] = dict(cache)
     if "prefill_perf" in value:
         field = path + ".prefill_perf"
         required = {"fixed_ms", "scale", "max_batch_tokens", "max_batch_requests"}
@@ -238,7 +249,14 @@ def environment(value, path, profile):
         value.get("config_overrides", {}),
         path + ".config_overrides",
         INTEGER_OVERRIDES
-        | {"ordering", "decision", "dispatcher", "preemption", "decision_lifetime"},
+        | {
+            "ordering",
+            "decision",
+            "dispatcher",
+            "preemption",
+            "decision_lifetime",
+            "prefill_expression",
+        },
     )
     kwargs = {}
     for key, val in overrides.items():
@@ -251,6 +269,9 @@ def environment(value, path, profile):
             }[key]
             if val not in choices:
                 fail(field, f"expected one of {choices}")
+        elif key == "prefill_expression":
+            if not isinstance(val, str) or not val.strip() or len(val) > 4096:
+                fail(field, "expected a nonempty formula of at most 4096 characters")
         elif key == "preemption":
             mapping(
                 val,
@@ -604,6 +625,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                     "discovery",
                     "perf_preset",
                     "prefill_perf",
+                    "prefill_cache_policy",
                     "prefill_max_waiting_batches",
                     "master_debug_log",
                     "debug_enabled",
@@ -736,7 +758,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                             p,
                         )
                         stage_caps = set(next_env["effective_capabilities"])
-                if max_environment_workers + additions > 149:
+                if max_environment_workers + additions > VICTIM_OFFSETS[0]:
                     fail(
                         source,
                         "maximum environment workers plus cumulative additions overlap the reserved victim port range",
@@ -777,9 +799,9 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                             ),
                             "max_dynamic_additions": additions,
                             "mock_control_offset": -1,
-                            "victim_control_offset": 149,
-                            "victim_grpc_offset": 150,
-                            "reserved_tail_offset": 151,
+                            "victim_control_offset": VICTIM_OFFSETS[0],
+                            "victim_grpc_offset": VICTIM_OFFSETS[1],
+                            "reserved_tail_offset": VICTIM_OFFSETS[2],
                         },
                         "environment": resolved,
                         "execution": dict(variant_budgets),

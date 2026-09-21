@@ -72,6 +72,9 @@ import sys
 from bisect import bisect_right
 from collections import Counter, defaultdict
 from datetime import datetime
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from online_eval.playback import iteration_windows
 
 run_dir = os.getcwd()
 
@@ -2906,6 +2909,7 @@ out = {
     "meta": {
         "run_dir": os.path.basename(run_dir),
         "fetch_output_stream": fetch_output_stream,
+        "traffic_manifests": load_json("traffic-manifests.json") or [],
         # New HTTP producers expose the measured window. Do not mark legacy
         # captures aligned merely because they were reprocessed by new code.
         "prefill_tps_contract": "execution_us_v1" if _ts_role_ip_split(
@@ -2913,6 +2917,7 @@ out = {
         ) else "legacy_or_unknown",
         **_meta_conditions,
     },
+    "iterations": iteration_windows(rows),
     "summary": {
         # ---- rows 唯一指标源（no-backward-compat）：全部自算，rows 缺失
         # ---- 即 None；不透传 summary 键，不做旧键名映射。 ----
