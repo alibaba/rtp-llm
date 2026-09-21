@@ -84,6 +84,8 @@ public:
                                              int32_t          disk_slot,
                                              uint64_t         generation);
 
+    // Complete Linear snapshots can be evicted without removing their descendants.
+    std::optional<CacheItem>  popOldestIndependentState(CacheBackingType backing_type);
     std::optional<CacheItem> popOldestEvictable(CacheBlockKind kind);
     std::optional<CacheItem> popOldestEvictable(CacheBlockKind kind, CacheBackingType backing_type);
     std::vector<CacheItem>   popOldestStateOrChainEvictable(CacheBackingType backing_type);

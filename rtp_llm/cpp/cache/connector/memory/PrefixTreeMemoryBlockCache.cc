@@ -256,6 +256,36 @@ PrefixTreeMemoryBlockCache::releaseInFlight(CacheKeyType     cache_key,
 }
 
 std::optional<PrefixTreeMemoryBlockCache::CacheItem>
+PrefixTreeMemoryBlockCache::popOldestIndependentState(CacheBackingType backing_type) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto                                oldest = nodes_.end();
+    const auto                          kind   = CacheBlockKind::STATE_SWA_KV;
+    for (auto it = nodes_.begin(); it != nodes_.end(); ++it) {
+        const auto& state = it->second.kinds[kindIndex(kind)];
+        if (!state.has_value || state.detached || state.backing_type != backing_type || state.is_resident
+            || state.in_flight_ref > 0) {
+            continue;
+        }
+        if (oldest == nodes_.end() || state.last_access_seq < oldest->second.kinds[kindIndex(kind)].last_access_seq) {
+            oldest = it;
+        }
+    }
+    if (oldest == nodes_.end()) {
+        return std::nullopt;
+    }
+    auto  item  = toItemLocked(oldest->second, kind);
+    auto& state = oldest->second.kinds[kindIndex(kind)];
+    eraseEvictKeyLocked(oldest->second, kind);
+    state.detached = true;
+    decrementAncestorsLocked(item->cache_key, kind);
+    const auto descendant_ref_count = state.subtree_ref_count;
+    state                           = KindState{};
+    state.subtree_ref_count         = descendant_ref_count;
+    pruneLocked(item->cache_key);
+    return item;
+}
+
+std::optional<PrefixTreeMemoryBlockCache::CacheItem>
 PrefixTreeMemoryBlockCache::popOldestEvictable(CacheBlockKind kind) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     if (!validKind(kind)) {

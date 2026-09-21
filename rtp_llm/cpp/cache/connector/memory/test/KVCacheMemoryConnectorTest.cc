@@ -1097,6 +1097,114 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_AverageLengthSizesHostPoolsInde
     }
 }
 
+TEST_F(KVCacheMemoryConnectorTest, initBlockPool_AverageLengthSizesHostTailsWithDiskCheckpoints) {
+    auto cfg                                  = createCompactRequestConnectorConfig();
+    cfg.linear_request_cache_avg_query_length = 100000;
+    auto kv                                   = kv_cache_config_;
+    kv.memory_cache_size_mb                   = 1;
+    kv.enable_memory_cache_disk               = true;
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv, allocator_, server_addrs_);
+    ASSERT_NO_THROW(conn->initBlockPool());
+    const size_t pages  = conn->compressed_pool_->totalBlocksNum();
+    const size_t states = conn->state_swa_pool_->totalBlocksNum();
+    EXPECT_EQ(states, (pages + 781u) / 782u);
+    EXPECT_GT(states, 1u);
+    EXPECT_LE((pages + 1) * 64 + (states + 1) * 192, 1024u * 1024u);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, LinearRequestWriteKeepsOnlyTailInHost) {
+    for (bool disk : {false, true}) {
+        DiskTempDir disk0;
+        auto        cfg                           = createCompactRequestConnectorConfig();
+        cfg.linear_request_cache_avg_query_length = 100000;
+        auto kv                                   = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
+        kv.memory_cache_size_mb                   = 1;
+        kv.enable_memory_cache_disk               = disk;
+        auto conn                                 = std::make_shared<KVCacheMemoryConnector>(
+            cfg, kv, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+        ASSERT_TRUE(conn->init());
+        // Sparse checkpoints; the final paged block has no state. The last
+        // materialized state (key 13) is the sole host tail, not key 14.
+        auto resource =
+            makeCacheResource({10, 11, 12, 13, 14}, {{1, 2, 3, 4, 5}, {6, NULL_BLOCK_IDX, 7, 8, NULL_BLOCK_IDX}});
+        auto slots         = conn->layerRegionSlots();
+        auto blocks        = conn->resourceLayerRegionBlocks(*resource, slots);
+        bool no_need_write = true;
+        auto plan = conn->buildPrefixCopyPlanForWrite(resource->cacheKeys(), {}, blocks, slots, 0, 5, no_need_write);
+        ASSERT_NE(plan, nullptr);
+        EXPECT_FALSE(no_need_write);
+        size_t host_states = 0, disk_states = 0, paged = 0;
+        for (const auto& copy : plan->copy_infos) {
+            if (copy.kind == CacheBlockKind::COMPRESSED_KV) {
+                ++paged;
+                EXPECT_EQ(copy.backing_type, CacheBackingType::MEMORY);
+            } else if (copy.cache_key == 13) {
+                ++host_states;
+                EXPECT_TRUE(copy.is_linear_tail);
+                EXPECT_EQ(copy.backing_type, CacheBackingType::MEMORY);
+            } else {
+                ++disk_states;
+                EXPECT_FALSE(copy.is_linear_tail);
+                EXPECT_EQ(copy.backing_type, CacheBackingType::DISK);
+            }
+        }
+        EXPECT_EQ(paged, 5u);
+        EXPECT_EQ(host_states, 1u);
+        EXPECT_EQ(disk_states, disk ? 2u : 0u);
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, LinearRequestEvictionStaysInTargetTier) {
+    DiskTempDir disk0;
+    auto        cfg                           = createCompactRequestConnectorConfig();
+    cfg.linear_request_cache_avg_query_length = 100000;
+    auto kv                                   = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
+    kv.memory_cache_size_mb                   = 1;
+    auto conn =
+        std::make_shared<KVCacheMemoryConnector>(cfg, kv, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    const auto slots         = conn->layerRegionSlots();
+    auto       resource      = makeCacheResource({10, 11}, {{1, 2}, {3, 4}});
+    auto       blocks        = conn->resourceLayerRegionBlocks(*resource, slots);
+    bool       no_need_write = true;
+    auto       plan = conn->buildPrefixCopyPlanForWrite(resource->cacheKeys(), {}, blocks, slots, 0, 2, no_need_write);
+    ASSERT_NE(plan, nullptr);
+    for (auto& copy : plan->copy_infos) {
+        conn->putPrefixToCache(
+            copy, copy.cache_key == 10 ? BlockDependency{false, 0, 0} : BlockDependency{true, 10, 1}, slots);
+    }
+    plan.reset();
+    // Exhaust each physical tier with request references. A checkpoint must
+    // evict the disk ancestor while preserving its host descendant and MLA.
+    auto                 disk_pool = conn->diskPoolFor(CacheBlockKind::STATE_SWA_KV);
+    std::vector<int32_t> held_disk;
+    int32_t              slot = -1;
+    while (conn->tryMallocDiskSlot(CacheBlockKind::STATE_SWA_KV, slot)) {
+        held_disk.push_back(slot);
+    }
+    KVCacheMemoryConnector::CopyInfoPerKey middle;
+    middle.kind = CacheBlockKind::STATE_SWA_KV;
+    ASSERT_TRUE(conn->allocateOnePrefixBacking(middle));
+    EXPECT_EQ(middle.backing_type, CacheBackingType::DISK);
+    EXPECT_FALSE(conn->prefix_block_cache_->contains(10, CacheBlockKind::STATE_SWA_KV));
+    EXPECT_TRUE(conn->prefix_block_cache_->contains(11, CacheBlockKind::STATE_SWA_KV));
+    EXPECT_TRUE(conn->prefix_block_cache_->contains(10, CacheBlockKind::COMPRESSED_KV));
+    conn->releasePrefixRequestBacking(middle);
+    for (auto held : held_disk) {
+        disk_pool->requestFree(held);
+    }
+    auto held_host = conn->state_swa_pool_->malloc(conn->state_swa_pool_->freeBlocksNum());
+    KVCacheMemoryConnector::CopyInfoPerKey tail;
+    tail.kind           = CacheBlockKind::STATE_SWA_KV;
+    tail.is_linear_tail = true;
+    ASSERT_TRUE(conn->allocateOnePrefixBacking(tail));
+    EXPECT_EQ(tail.backing_type, CacheBackingType::MEMORY);
+    EXPECT_FALSE(conn->prefix_block_cache_->contains(11, CacheBlockKind::STATE_SWA_KV));
+    EXPECT_TRUE(conn->prefix_block_cache_->contains(11, CacheBlockKind::COMPRESSED_KV));
+    conn->releasePrefixRequestBacking(tail);
+    conn->state_swa_pool_->requestFree(held_host);
+}
+
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_PrefixPoolRatioChangesStateCapacity) {
     auto cfg    = createDsv4TypedConnectorConfig();
     auto kv_cfg = kv_cache_config_;

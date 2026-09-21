@@ -88,6 +88,7 @@ private:
         std::vector<BlockIdxType> gpu_blocks;
         std::vector<uint8_t>      slot_valid_mask;
         bool                      is_complete{true};
+        bool                      is_linear_tail{false};
         bool                      request_released{false};
         uint64_t                  generation{0};
         uint64_t                  src_generation{0};

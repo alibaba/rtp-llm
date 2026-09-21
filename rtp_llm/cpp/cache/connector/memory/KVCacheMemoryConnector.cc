@@ -335,7 +335,7 @@ void KVCacheMemoryConnector::initBlockPool() {
         size_t       compressed_capacity = 0;
         size_t       state_swa_capacity  = 0;
         bool         device_scaled       = false;
-        const bool   average_scaled = whole_request_cache && !diskCacheEnabled() && cache_config_.linear_request_cache_avg_query_length > 0;
+        const bool   average_scaled = whole_request_cache && cache_config_.linear_request_cache_avg_query_length > 0;
         if (average_scaled) {
             // Both pools reserve block zero. Cover each average query with
             // one state and pages_per_query paged blocks, using host strides
@@ -392,7 +392,7 @@ void KVCacheMemoryConnector::initBlockPool() {
                 device_scaled       = true;
             }
         }
-        if (device_scaled && !diskCacheEnabled() && state_swa_capacity < 2) {
+        if (device_scaled && state_swa_capacity < 2) {
             // The active device pool can be tiny at low concurrency. A host
             // cache still needs its null block plus at least one usable state.
             state_swa_capacity       = 2;
@@ -406,13 +406,6 @@ void KVCacheMemoryConnector::initBlockPool() {
             const size_t key_capacity  = total_bytes / bytes_per_key;
             compressed_capacity        = key_capacity;
             state_swa_capacity         = key_capacity;
-        }
-        if (whole_request_cache && diskCacheEnabled()) {
-            // Checkpoints are disk-backed. Keep only the host pool's sentinel
-            // capacity; the worker allocates pinned staging for in-flight IO.
-            state_swa_capacity       = 2;
-            const size_t state_bytes = state_swa_capacity * state_swa_block_size_;
-            compressed_capacity = total_bytes > state_bytes ? (total_bytes - state_bytes) / compressed_block_size_ : 0;
         }
         RTP_LLM_CHECK_WITH_INFO(compressed_capacity > 1 && state_swa_capacity > 1,
                                 "pool_size_mb=%ld too small for prefix memory pools, compressed=%zu state_swa=%zu "
@@ -1672,11 +1665,26 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForWrite(const CacheKeysType&        
                                                     size_t                              reused_blocks) {
     std::vector<CopyInfoPerKey> copy_infos;
     copy_infos.reserve(static_cast<size_t>(write_num) * 2);
+    // The last materialized, reusable state is the request tail. Earlier
+    // checkpoints may be staged on the device, but must never occupy host cache.
+    int linear_tail_index = -1;
+    if (wholeStateRequestCache()) {
+        for (int i = start_index + write_num - 1; i >= start_index; --i) {
+            if (kindRequiredAt(layer_attn_block_ids, slots, i, CacheBlockKind::STATE_SWA_KV)) {
+                linear_tail_index = i;
+                break;
+            }
+        }
+    }
     for (int i = start_index; i < start_index + write_num; ++i) {
         const auto cache_key = cache_keys.at(i);
         for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
             if (wholeStateRequestCache() && kind == CacheBlockKind::STATE_SWA_KV
                 && static_cast<size_t>(i + 1) < reused_blocks) {
+                continue;
+            }
+            if (wholeStateRequestCache() && kind == CacheBlockKind::STATE_SWA_KV && i != linear_tail_index
+                && !diskCacheEnabled()) {
                 continue;
             }
             const auto slot_valid_mask = prefixSlotValidMask(layer_attn_block_ids, slots, static_cast<size_t>(i), kind);
@@ -1694,6 +1702,7 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForWrite(const CacheKeysType&        
             copy_info.mem_block       = NULL_BLOCK_IDX;
             copy_info.block_size      = prefixKindBlockSize(kind, slots);
             copy_info.is_complete     = true;
+            copy_info.is_linear_tail  = kind == CacheBlockKind::STATE_SWA_KV && i == linear_tail_index;
             copy_info.slot_valid_mask = slot_valid_mask;
             copy_info.gpu_blocks.reserve(slots.size());
             for (const auto& slot : slots) {
@@ -2995,10 +3004,9 @@ bool KVCacheMemoryConnector::allocatePrefixBackingsForWrite(std::vector<CopyInfo
 }
 
 bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info) {
-    const bool disk_only =
-        wholeStateRequestCache() && diskCacheEnabled() && copy_info.kind == CacheBlockKind::STATE_SWA_KV;
-    const bool allow_disk =
-        diskCacheEnabled() && (!wholeStateRequestCache() || copy_info.kind == CacheBlockKind::STATE_SWA_KV);
+    const bool   linear_state = wholeStateRequestCache() && copy_info.kind == CacheBlockKind::STATE_SWA_KV;
+    const bool   disk_only    = linear_state && !copy_info.is_linear_tail;
+    const bool   allow_disk   = diskCacheEnabled() && (!wholeStateRequestCache() || disk_only);
     BlockIdxType mem_block = NULL_BLOCK_IDX;
     if (!disk_only && tryMallocMemoryBlock(copy_info.kind, mem_block)) {
         copy_info.backing_type = CacheBackingType::MEMORY;
@@ -3017,8 +3025,16 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
 
     while (true) {
         std::vector<PrefixTreeMemoryBlockCache::CacheItem> evicted_items;
-        if (kv_cache_config_.enable_dsv4_state_block_independent_eviction
-            && copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
+        if (linear_state) {
+            // Linear states are complete snapshots. Evict within the target
+            // tier even when a newer state references the same MLA prefix.
+            auto evicted = prefix_block_cache_->popOldestIndependentState(disk_only ? CacheBackingType::DISK :
+                                                                                      CacheBackingType::MEMORY);
+            if (evicted.has_value()) {
+                evicted_items.push_back(*evicted);
+            }
+        } else if (kv_cache_config_.enable_dsv4_state_block_independent_eviction
+                   && copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
             evicted_items = prefix_block_cache_->popOldestStateOrChainEvictable(CacheBackingType::MEMORY);
             if (evicted_items.empty() && diskCacheEnabled()) {
                 evicted_items = prefix_block_cache_->popOldestStateOrChainEvictable(CacheBackingType::DISK);
