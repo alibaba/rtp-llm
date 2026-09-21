@@ -1,3 +1,5 @@
+#include <ATen/record_function.h>
+#include <functional>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -232,6 +234,86 @@ TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
     EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(normal_stream->stream_cache_resource_->isResourceReleased());
     EXPECT_FALSE(normal_stream->hasOutput());
+}
+
+namespace {
+thread_local std::function<void()>   rpc_terminal_pack_hook;
+std::unique_ptr<at::ObserverContext> observeRpcTerminalPack(const at::RecordFunction& fn) {
+    if (std::string(fn.name()).find("rpc.pack_terminal_result(") == 0 && rpc_terminal_pack_hook) {
+        rpc_terminal_pack_hook();
+    }
+    return nullptr;
+}
+}  // namespace
+
+TEST(LocalRpcServerTest, TerminalRpcPackingIsOutsideStreamLockAndCancellationStopsWrite) {
+    for (bool cancel_during_pack : {false, true}) {
+        TestLocalRpcServer server;
+        auto               input = std::make_shared<GenerateInput>();
+        input->generate_config   = std::make_shared<GenerateConfig>();
+        input->input_ids         = torch::tensor({1, 2, 3}, torch::kInt32);
+        input->begin_time_us     = autil::TimeUtility::currentTimeInMicroSeconds();
+        ModelConfig model;
+        model.max_seq_len = 8;
+        model.vocab_size  = 32;
+        auto normal = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+        normal->generateConfig()->max_new_tokens = 1;
+        normal->generateConfig()->min_new_tokens = 1;
+        normal->generateConfig()->ignore_eos     = true;
+        normal->generateConfig()->is_streaming   = false;
+        normal->generate_status_->status.store(StreamState::RUNNING);
+        normal->step();
+        normal->update(StreamUpdateInfo{.new_tokens     = torch::tensor({7}, torch::kInt32).reshape({1, 1}),
+                                        .num_new_tokens = 1,
+                                        .cum_log_probs  = torch::tensor({-0.5f})});
+        ASSERT_TRUE(normal->hasOutput());
+        ASSERT_TRUE(normal->generate_outputs_.front().batched_output);
+        std::shared_ptr<GenerateStream> stream = normal;
+        RecordingWriter                 writer;
+        std::promise<void>              pack_started, resume;
+        auto                            entered = pack_started.get_future();
+        auto                            proceed = resume.get_future().share();
+        auto                            rpc     = std::async(std::launch::async, [&] {
+            rpc_terminal_pack_hook = [&] {
+                pack_started.set_value();
+                proceed.wait();
+            };
+            const auto cb = at::addThreadLocalCallback(at::RecordFunctionCallback(observeRpcTerminalPack));
+            auto       status = server.poll(&writer, stream);
+            at::removeCallback(cb);
+            rpc_terminal_pack_hook = {};
+            return status;
+        });
+        const bool started = entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        EXPECT_TRUE(started);
+        if (started) {
+            const bool unlocked = normal->mutex_->try_lock();
+            EXPECT_TRUE(unlocked);
+            if (unlocked) {
+                normal->mutex_->unlock();
+                EXPECT_EQ(normal->moveToNext(), StreamState::FINISHED);
+                EXPECT_FALSE(normal->hasPendingAsyncBookkeeping());
+            }
+            server.cancelled = cancel_during_pack;
+        }
+        resume.set_value();
+        if (rpc.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+            normal->reportError(ErrorCode::EXECUTION_EXCEPTION, "test timed out");
+        }
+        const auto status = rpc.get();
+        if (cancel_during_pack) {
+            EXPECT_EQ(status.error_code(), grpc::StatusCode::CANCELLED);
+            EXPECT_TRUE(writer.outputs_.empty());
+        } else {
+            EXPECT_TRUE(status.ok());
+            ASSERT_EQ(writer.outputs_.size(), 1);
+            const auto& output = writer.outputs_[0].flatten_output();
+            EXPECT_EQ(output.finished_size(), 1);
+            EXPECT_TRUE(output.finished(0));
+            EXPECT_EQ(output.output_ids().shape_size(), 3);
+            EXPECT_EQ(output.output_ids().int32_data(), std::string("\x07\0\0\0", 4));
+        }
+    }
 }
 
 }  // namespace rtp_llm

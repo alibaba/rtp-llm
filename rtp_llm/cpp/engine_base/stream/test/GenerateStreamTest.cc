@@ -10,6 +10,8 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 #include <chrono>
+#include <functional>
+#include <ATen/record_function.h>
 #include <future>
 #include <mutex>
 #include <vector>
@@ -842,6 +844,198 @@ TEST_F(GenerateStreamTest, testInputEmbeddingsDisableTokenOnlyReuseCache) {
     ASSERT_FALSE(stream->enableDeviceCache());
     ASSERT_FALSE(stream->enableMemoryCache());
     ASSERT_FALSE(stream->enableRemoteCache());
+}
+
+namespace {
+thread_local std::function<void()> terminal_materialize_hook;
+
+std::unique_ptr<at::ObserverContext> observeTerminalMaterialization(const at::RecordFunction& fn) {
+    if (std::string(fn.name()).find("output.materialize_terminal(") == 0 && terminal_materialize_hook) {
+        terminal_materialize_hook();
+    }
+    return nullptr;
+}
+
+std::shared_ptr<NormalGenerateStream> makeTerminalTestStream() {
+    auto stream =
+        std::dynamic_pointer_cast<NormalGenerateStream>(GenerateStreamBuilder().createComplexContextStream({1, 2, 3}));
+    stream->generateConfig()->reuse_cache    = false;
+    stream->generateConfig()->max_new_tokens = 2;
+    stream->generateConfig()->min_new_tokens = 2;
+    stream->generateConfig()->ignore_eos     = true;
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    return stream;
+}
+
+void publishTerminalTestOutput(const std::shared_ptr<NormalGenerateStream>& stream,
+                               const torch::Tensor&                         scores = torch::Tensor()) {
+    stream->step();
+    stream->update(StreamUpdateInfo{.new_tokens     = torch::tensor({11, 12, 21, 22}, torch::kInt32).reshape({2, 2}),
+                                    .num_new_tokens = 2,
+                                    .cum_log_probs  = scores});
+}
+}  // namespace
+
+TEST_F(GenerateStreamTest, terminalSnapshotOwnsSuffixScoresAndMetadataAfterStreamDestruction) {
+    auto stream = makeTerminalTestStream();
+    auto scores = torch::tensor({-1.0f, -2.0f});
+    publishTerminalTestOutput(stream, scores);
+    ASSERT_TRUE(stream->hasOutput());
+    ASSERT_TRUE(stream->generate_outputs_.front().generate_outputs.empty());
+    auto result = stream->nextOutputForRpc();
+    ASSERT_TRUE(result.ok());
+    auto snapshot = result.value().batched_output;
+    ASSERT_NE(snapshot, nullptr);
+    EXPECT_EQ(snapshot->output_ids.sizes(), torch::IntArrayRef({2, 1, 2}));
+    EXPECT_TRUE(snapshot->output_ids.is_contiguous());
+    EXPECT_EQ(snapshot->output_ids.storage().nbytes(), 4 * sizeof(int32_t));
+    EXPECT_EQ(snapshot->cum_log_probs.storage().nbytes(), 2 * sizeof(float));
+    EXPECT_EQ(snapshot->aux_info.input_len, 3);
+    EXPECT_EQ(snapshot->aux_info.output_len, 2);
+    EXPECT_EQ(snapshot->aux_info.step_output_len, 2);
+    // Force alias mutation to prove no subsequent stream/sampler state is read.
+    stream->completeTokenIds().fill_(99);
+    scores.fill_(-99.0f);
+    stream->resetBeginTime(0);
+    stream->generateConfig()->max_new_tokens = 100;
+    auto done                                = stream->nextOutputForRpc();
+    ASSERT_FALSE(done.ok());
+    EXPECT_EQ(done.status().code(), ErrorCode::FINISHED);
+    std::weak_ptr<NormalGenerateStream> weak = stream;
+    stream.reset();
+    EXPECT_TRUE(weak.expired());
+    EXPECT_TRUE(torch::equal(snapshot->output_ids.flatten(), torch::tensor({11, 12, 21, 22}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(snapshot->cum_log_probs, torch::tensor({-1.0f, -2.0f})));
+    EXPECT_EQ(snapshot->aux_info.output_len, 2);
+}
+
+TEST_F(GenerateStreamTest, terminalSnapshotCompactsStridedScoresWithoutChangingShape) {
+    auto stream = makeTerminalTestStream();
+    auto scores = torch::tensor({-1.0f, -2.0f, -3.0f, -4.0f}).reshape({2, 2}).transpose(0, 1);
+    ASSERT_FALSE(scores.is_contiguous());
+    publishTerminalTestOutput(stream, scores);
+    auto result = stream->nextOutputForRpc();
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result.value().batched_output);
+    const auto& snapshot = result.value().batched_output->cum_log_probs;
+    EXPECT_TRUE(snapshot.is_contiguous());
+    EXPECT_EQ(snapshot.sizes(), scores.sizes());
+    EXPECT_TRUE(torch::equal(snapshot, scores));
+}
+
+TEST_F(GenerateStreamTest, terminalCompatibilityMaterializesAfterUnlockAndAllowsKvRelease) {
+    auto       stream             = makeTerminalTestStream();
+    auto       cache              = stream->stream_cache_resource_->resourceContext().cache_manager;
+    const auto free_blocks_before = cache->freeBlocksNum();
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    ASSERT_LT(cache->freeBlocksNum(), free_blocks_before);
+    publishTerminalTestOutput(stream, torch::tensor({-1.0f, -2.0f}));
+    std::promise<void> packaging_started, resume;
+    auto               entered  = packaging_started.get_future();
+    auto               proceed  = resume.get_future().share();
+    auto               consumer = std::async(std::launch::async, [stream, &packaging_started, proceed] {
+        terminal_materialize_hook = [&] {
+            packaging_started.set_value();
+            proceed.wait();
+        };
+        const auto callback = at::addThreadLocalCallback(at::RecordFunctionCallback(observeTerminalMaterialization));
+        auto       result = stream->nextOutput();
+        at::removeCallback(callback);
+        terminal_materialize_hook = {};
+        return result;
+    });
+    const bool         started  = entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    EXPECT_TRUE(started);
+    bool unlocked = false;
+    if (started) {
+        unlocked = stream->mutex_->try_lock();
+        EXPECT_TRUE(unlocked);
+        if (unlocked)
+            stream->mutex_->unlock();
+        // A paused consumer must not retain a KV usage claim or stop scheduling.
+        EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+        if (unlocked) {
+            EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+            EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+            EXPECT_EQ(cache->freeBlocksNum(), free_blocks_before);
+        }
+    }
+    resume.set_value();
+    waitForConsumer(consumer, stream);
+    auto result = consumer.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_FALSE(result.value().batched_output);
+    ASSERT_EQ(result.value().generate_outputs.size(), 2);
+    EXPECT_TRUE(torch::equal(result.value().generate_outputs[1].output_ids,
+                             torch::tensor({21, 22}, torch::kInt32).reshape({1, 2})));
+    EXPECT_TRUE(result.value().generate_outputs[0].finished);
+    EXPECT_EQ(stream->nextOutput().status().code(), ErrorCode::FINISHED);
+}
+
+TEST_F(GenerateStreamTest, terminalRpcConsumerWakesAndDrainsSnapshotBeforeFinished) {
+    auto stream   = makeTerminalTestStream();
+    auto consumer = std::async(std::launch::async, [stream] { return stream->nextOutputForRpc(); });
+    publishTerminalTestOutput(stream);
+    waitForConsumer(consumer, stream);
+    auto result = consumer.get();
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result.value().batched_output);
+    EXPECT_EQ(result.value().batched_output->output_ids.numel(), 4);
+    EXPECT_EQ(stream->nextOutputForRpc().status().code(), ErrorCode::FINISHED);
+}
+
+TEST_F(GenerateStreamTest, terminalSnapshotKeepsErrorPrecedenceAndFirstError) {
+    for (const auto error : {ErrorCode::CANCELLED, ErrorCode::EXECUTION_EXCEPTION}) {
+        auto stream = makeTerminalTestStream();
+        publishTerminalTestOutput(stream);
+        stream->reportError(error, "terminal error");
+        stream->reportError(ErrorCode::GENERATE_TIMEOUT, "later error");
+        EXPECT_EQ(stream->nextOutputForRpc().status().code(), error);
+        EXPECT_TRUE(stream->hasOutput());
+    }
+}
+
+TEST_F(GenerateStreamTest, terminalSnapshotPreservesMixedQueueOrder) {
+    auto stream = makeTerminalTestStream();
+    {
+        std::lock_guard<std::mutex> lock(*stream->mutex_);
+        GenerateOutputs             preceding;
+        preceding.request_id = 987;
+        stream->enqueueGenerateOutput(std::move(preceding));
+    }
+    publishTerminalTestOutput(stream);
+    auto first = stream->nextOutputForRpc();
+    ASSERT_TRUE(first.ok());
+    EXPECT_EQ(first.value().request_id, 987);
+    EXPECT_FALSE(first.value().batched_output);
+    auto last = stream->nextOutputForRpc();
+    ASSERT_TRUE(last.ok());
+    EXPECT_TRUE(last.value().batched_output);
+    EXPECT_EQ(stream->nextOutputForRpc().status().code(), ErrorCode::FINISHED);
+}
+
+TEST_F(GenerateStreamTest, terminalSnapshotRetainsCompatibilityForStreamingAndOptionalOutputs) {
+    for (int mode = 0; mode < 4; ++mode) {
+        auto stream = makeTerminalTestStream();
+        if (mode == 0)
+            stream->generateConfig()->is_streaming = true;
+        if (mode == 1)
+            stream->generateConfig()->return_logits = true;
+        if (mode == 2)
+            stream->generateConfig()->return_hidden_states = true;
+        if (mode == 3)
+            stream->generateConfig()->pd_separation = true;
+        // Eligibility can be checked without exercising a PD network handoff.
+        stream->finished_ = true;
+        EXPECT_FALSE(stream->canDeferTerminalOutput(StreamUpdateInfo{}));
+        if (mode < 3) {
+            publishTerminalTestOutput(stream);
+            auto result = stream->nextOutputForRpc();
+            ASSERT_TRUE(result.ok());
+            EXPECT_FALSE(result.value().batched_output);
+            EXPECT_EQ(result.value().generate_outputs.size(), 2);
+        }
+    }
 }
 
 }  // namespace rtp_llm

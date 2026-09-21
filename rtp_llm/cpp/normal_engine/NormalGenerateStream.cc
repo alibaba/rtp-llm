@@ -7,6 +7,16 @@
 namespace rtp_llm {
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(int64_t wait_timeout_ms) {
+    auto result = nextOutputForRpc(wait_timeout_ms);
+    if (result.ok() && result.value().batched_output) {
+        // nextOutputForRpc has released mutex_. Materialization only reads the
+        // owned snapshot, so it cannot delay scheduling or safe KV reclamation.
+        return materializeTerminalOutput(std::move(result.value()));
+    }
+    return result;
+}
+
+ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutputForRpc(int64_t wait_timeout_ms) {
     RTP_LLM_CHECK_WITH_INFO(wait_timeout_ms >= 0, "nextOutput wait_timeout_ms must be non-negative");
 
     const auto stream_timeout_ms = getTimeoutMs();
@@ -52,6 +62,9 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(int64_t wait_timeo
     if (!generate_outputs_.empty()) {
         auto output = std::move(generate_outputs_.front());
         generate_outputs_.pop_front();
+        if (output.batched_output) {
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC("output.dequeue_terminal(id=%ld)", output.request_id);
+        }
         return output;
     }
 
@@ -69,6 +82,78 @@ bool NormalGenerateStream::hasOutput() {
 
 bool NormalGenerateStream::consumerReadyWithoutLock() const {
     return hasErrorWithoutLock() || !generate_outputs_.empty() || consumerFinishedWithoutLock();
+}
+
+bool NormalGenerateStream::canDeferTerminalOutput(const StreamUpdateInfo& update_info) const {
+    const auto& config = *generate_input_->generate_config;
+    // First implementation: ordinary non-streaming terminal tokens/scores.
+    // PD handoff and optional tensor outputs keep their established behavior.
+    return finished_ && !config.is_streaming && !queryPdSep() && !config.return_logits && !config.return_prompt_logits
+           && !config.return_hidden_states && !config.return_all_hidden_states && !config.return_softmax_probs
+           && config.return_all_probs == ReturnAllProbsMode::NONE && config.calculate_loss == 0 && !loss_.defined()
+           && !update_info.prompt_logits.has_value()
+           && (!update_info.cum_log_probs.defined()
+               || (cum_log_probs_.device().is_cpu() && cum_log_probs_.scalar_type() == torch::kFloat32
+                   && cum_log_probs_.dim() >= 1));
+}
+
+GenerateOutputs NormalGenerateStream::snapshotTerminalOutput(const StreamUpdateInfo& update_info) {
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("output.snapshot_terminal(id=%ld,beams=%d)", request_id_, currentBatchSize());
+    const int64_t batch_size = currentBatchSize();
+    const int64_t output_len = seqLength() - last_output_pos_;
+    auto          snapshot   = std::make_shared<BatchedGenerateOutput>();
+    // Copy only the returned suffix (e.g. 1024 x 3 ints), not the 500-token
+    // prompt/history. Independent storage also protects against forced updates
+    // and speculative stream copies retaining aliases of CompleteTokenIds.
+    snapshot->output_ids = complete_token_ids_->completeTokenIds()
+                               .narrow(0, 0, batch_size)
+                               .narrow(1, last_output_pos_, output_len)
+                               .clone()
+                               .unsqueeze(1);
+    auto& aux      = snapshot->aux_info;
+    aux.iter_count = iter_count_;
+    if (generate_input_->generate_config->aux_info) {
+        aux.cost_time_us             = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        aux.first_token_cost_time_us = complete_token_ids_->firstTokenLatencyUs();
+        aux.wait_time_us             = wait_time_us_;
+        aux.input_len                = generate_input_->promptLength();
+        aux.prefix_len               = generate_input_->prefix_length;
+        aux.output_len               = seqLength() - generate_input_->inputLength();
+        aux.step_output_len          = output_len;
+        aux.reuse_len                = initial_reuse_length_;
+        aux.pd_sep                   = queryPdSep();
+        aux.local_reuse_len          = local_reuse_length_;
+        aux.remote_reuse_len         = remote_reuse_length_;
+        aux.memory_reuse_len         = memory_reuse_length_;
+        aux.multimodal_lengths       = generate_input_->multimodalLengths();
+        if (update_info.cum_log_probs.defined()) {
+            // Dispatcher has completed D2H before entering update(). Clone only
+            // this request's final scores to detach from reusable sampler input.
+            snapshot->cum_log_probs = cum_log_probs_.narrow(0, 0, batch_size).clone(at::MemoryFormat::Contiguous);
+        }
+    }
+    GenerateOutputs result;
+    result.request_id     = request_id_;
+    result.batched_output = std::move(snapshot);
+    return result;
+}
+
+GenerateOutputs NormalGenerateStream::materializeTerminalOutput(GenerateOutputs output) {
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("output.materialize_terminal(id=%ld)", output.request_id);
+    const auto    snapshot   = std::move(output.batched_output);
+    const int64_t batch_size = snapshot->output_ids.size(0);
+    output.generate_outputs.reserve(batch_size);
+    for (int64_t i = 0; i < batch_size; ++i) {
+        GenerateOutput row;
+        row.finished   = true;
+        row.output_ids = snapshot->output_ids.select(0, i);
+        row.aux_info   = snapshot->aux_info;
+        if (snapshot->cum_log_probs.defined()) {
+            row.aux_info.cum_log_probs = snapshot->cum_log_probs.narrow(0, i, 1);
+        }
+        output.generate_outputs.emplace_back(std::move(row));
+    }
+    return output;
 }
 
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
@@ -289,7 +374,15 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     RTP_LLM_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
-    enqueueGenerateOutput(prepareGenerateOutput(update_info));
+    if (canDeferTerminalOutput(update_info)) {
+        auto result = snapshotTerminalOutput(update_info);
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("output.publish_terminal(id=%ld)", request_id_);
+        // GenerateDone and the result become visible together when update()
+        // unlocks the stream mutex. Queue draining precedes FINISHED.
+        enqueueGenerateOutput(std::move(result));
+    } else {
+        enqueueGenerateOutput(prepareGenerateOutput(update_info));
+    }
 
     if (hasErrorWithoutLock()) {
         return;
