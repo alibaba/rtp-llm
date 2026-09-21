@@ -661,6 +661,13 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                      /*batch_reuse_info_size=*/batch_size * 4,
                      forbid_realloc);
 
+    // Restore active shapes before the kernel's capacity checks. A previous
+    // smaller replay may have narrowed these tensors without reallocating the
+    // storage reserved by ensureTensorSize.
+    paged_kv_last_page_len_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
+    decode_page_indptr_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size + 1});
+    page_indice_d.unsafeGetTensorImpl()->set_sizes_contiguous({page_num_upper});
+
     cudaStream_t stream = GET_CURRENT_STREAM();
     invokeMhaPagedAttnPlan(t_input_lengths_dev,
                            t_sequence_lengths_dev,
@@ -673,13 +680,6 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                            batch_indice_d,
                            positions_d,
                            stream);
-
-    // FlashInfer uses paged_kv_last_page_len/decode_page_indptr sizes;
-    // page_indice may stay oversized. Consumers narrow batch_indice/positions
-    // to nnz without a host sync.
-    paged_kv_last_page_len_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
-    decode_page_indptr_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size + 1});
-    page_indice_d.unsafeGetTensorImpl()->set_sizes_contiguous({page_num_upper});
 
     decode_page_indptr     = decode_page_indptr_d;
     page_indice            = page_indice_d;
