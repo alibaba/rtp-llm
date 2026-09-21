@@ -1,0 +1,87 @@
+schema_version: 2
+case: cache_scale_in
+profiles:
+- single-nonbatch
+environment:
+  backend: java_mock
+  discovery: discovery_file
+  n_prefill: 125
+  n_decode: 536
+  perf_preset: production_scale_20260920
+  metric_whitelist: flexlb_auto_tpm_request_count,flexlb_app_engine_balancing_master_all_qps,flexlb_app_engine_balancing_master_dispatch_reason,flexlb_app_flexlb_batcher_queue_size,flexlb_app_flexlb_scheduler_inflight_size,flexlb_app_flexlb_inflight_request_count,flexlb_auto_tpm_decode_reserved_count,flexlb_auto_tpm_decode_running_count
+  prefill_cache_blocks: 31218
+  decode_cache_blocks: 46157
+  prefill_cache_policy:
+    device_tree: true
+    memory_tree: false
+    memory_blocks: 95311
+  prefill_max_waiting_batches: 256
+  config_overrides:
+    max_inflight_per_prefill_worker: 1024
+    prefill_expression: 77.82664607924481 + 112.5170362714666 * batchSize + 10.87594301934867 * sum(computeTokens / 1024.)
+execution:
+  timeout_s: 1200
+  stage_timeout_s: 60
+  cleanup_timeout_s: 420
+metadata:
+  description: 125P to 72P to 64P at 80 QPS, selected between the stable 40 QPS and overloaded 157 QPS probes; diagnostic thresholds are not the formal cache gate.
+  category: kv
+variants:
+- id: step
+  program: step
+parameters:
+  gate:
+    intermediate_p: 72
+    intermediate_hold_s: 90
+    target_p: 64
+    warmup_timeout_s: 180
+    baseline_s: 30
+    observe_s: 120
+    sample_s: 1
+    window_s: 10
+    step_s: 1
+    sustain_s: 30
+    max_gap_s: 5
+    qps: 80
+    qps_tolerance: 0.1
+    baseline_min_hit: 0.10
+    baseline_max_spread: 0.10
+    absolute_min_hit: 0.05
+    max_drop: 0.25
+    min_completed: 20
+    min_waiting: 64
+    max_pacing_lag_ms: 1000
+    drain_timeout_ms: 30000
+    topology_timeout_s: 30
+  flow:
+    group_id: scale_in
+    phase_id: continuous
+    poll_s: 0.1
+    jvm_xms: 1g
+    jvm_xmx: 32g
+    source:
+      kind: synthetic
+      model: realistic
+      version: '1'
+      parameters:
+        seed: 91021
+        count: 120000
+        output_tokens: 420
+        priority: 50
+        profile: frontend_20260921
+    client:
+      DURATION_S: '500'
+      MAX_CONCURRENCY: '32768'
+      TIMEOUT_MS: '300000'
+      RESPONSE_TIMEOUT: '360'
+      REPLAY_UNIQUE_PREFIX: 'false'
+      FETCH_OUTPUT_STREAM: 'true'
+      N_CHANNELS: '16'
+      EVENT_LOOP_THREADS: '16'
+      SKIP_SERVER_LATENCY: 'true'
+      PRIORITY: '50'
+      playback:
+        mode: uniform
+        qps: 80.0
+        max_laps: 1
+        identity: structural-relabel
