@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 using namespace std;
@@ -111,6 +112,76 @@ TEST_F(QueryConverterTest, EnableMemoryCacheIsPreservedFromProto) {
         GenerateConfigPB config;
         config.set_enable_memory_cache(enabled);
         EXPECT_EQ(QueryConverter::transGenerateConfig(&config)->enable_memory_cache, enabled);
+    }
+}
+
+TEST_F(QueryConverterTest, AuxInfoRpcRoundTripPreservesOutputsAndLegacyDefault) {
+    for (const int aux_mode : {-1, 0, 1}) {
+        for (const bool streaming : {false, true}) {
+            for (const bool return_all_probs : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "aux_mode=" << aux_mode << " streaming=" << streaming
+                                                 << " all_probs=" << return_all_probs);
+                GenerateInputPB request;
+                request.add_token_ids(1);
+                request.add_token_ids(2);
+                auto* config = request.mutable_generate_config();
+                config->set_max_new_tokens(2);
+                config->set_min_new_tokens(2);
+                config->set_num_return_sequences(2);
+                config->set_is_streaming(streaming);
+                if (aux_mode >= 0) {
+                    config->mutable_aux_info()->set_value(aux_mode == 1);
+                }
+                if (return_all_probs) {
+                    config->set_return_all_probs_mode(2);
+                }
+                GenerateInputPB received;
+                ASSERT_TRUE(received.ParseFromString(request.SerializeAsString()));
+                auto input = QueryConverter::transQuery(&received);
+                ASSERT_EQ(input->generate_config->aux_info, aux_mode != 0);
+
+                ModelConfig model;
+                model.max_seq_len = 32;
+                model.vocab_size = 128;
+                auto stream = std::make_shared<NormalGenerateStream>(
+                    input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+                stream->generate_status_->status.store(StreamState::RUNNING);
+                stream->step();
+                const auto tokens = torch::tensor({11, 12, 21, 22}, torch::kInt32).reshape({2, 2});
+                const auto scores = torch::tensor({-1.0f, -2.0f});
+                const auto probs = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({2, 2});
+                stream->update(StreamUpdateInfo{.new_tokens = tokens,
+                                                .num_new_tokens = 2,
+                                                .cum_log_probs = scores,
+                                                .all_probs = return_all_probs ? probs : torch::Tensor()});
+                EXPECT_TRUE(torch::equal(stream->cumLogProbs(), scores));
+                auto result = stream->nextOutput();
+                ASSERT_TRUE(result.ok());
+                for (const auto& row : result.value().generate_outputs) {
+                    EXPECT_EQ(row.aux_info.cum_log_probs.has_value(), aux_mode != 0);
+                }
+                GenerateOutputsPB output;
+                QueryConverter::transResponse(&output, &result.value(), input->generate_config->aux_info, "", 0);
+                const auto& flat = output.flatten_output();
+                ASSERT_EQ(flat.finished_size(), 2);
+                EXPECT_TRUE(flat.finished(0));
+                EXPECT_TRUE(flat.finished(1));
+                ASSERT_EQ(flat.output_ids().shape_size(), 3);
+                EXPECT_EQ(flat.output_ids().shape(0), 2);
+                EXPECT_EQ(flat.output_ids().shape(1), 1);
+                EXPECT_EQ(flat.output_ids().shape(2), 2);
+                EXPECT_EQ(flat.output_ids().int32_data(),
+                          std::string(static_cast<const char*>(tokens.data_ptr()), tokens.nbytes()));
+                EXPECT_EQ(flat.aux_info_size(), aux_mode == 0 ? 0 : 2);
+                if (return_all_probs) {
+                    EXPECT_EQ(flat.all_probs().fp32_data(),
+                              std::string(static_cast<const char*>(probs.data_ptr()), probs.nbytes()));
+                }
+                auto drained = stream->nextOutput();
+                ASSERT_FALSE(drained.ok());
+                EXPECT_EQ(drained.status().code(), ErrorCode::FINISHED);
+            }
+        }
     }
 }
 

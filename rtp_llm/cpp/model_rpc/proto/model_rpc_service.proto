@@ -153,6 +153,8 @@ message GenerateConfigPB {
     ThinkingModePB thinking_mode = 73;
     // 请求级 L3 写入开关；RPC 缺失时为 false。
     bool enable_disk_cache = 74;
+    // Missing on legacy clients: preserve the engine's historical default true.
+    google.protobuf.BoolValue aux_info = 75;
 }
 
 message MMPreprocessConfigPB {

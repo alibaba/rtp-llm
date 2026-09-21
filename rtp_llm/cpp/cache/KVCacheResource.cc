@@ -6,8 +6,9 @@
 
 namespace rtp_llm {
 
-void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) {
+void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology, bool materialize_layer_views) {
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "KVCacheResource::initGroups requires a topology");
+    topology_ = materialize_layer_views ? nullptr : topology;
     tag_to_group_id_.clear();
     layer_group_tags_.clear();
     group_block_ids.clear();
@@ -17,7 +18,9 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) 
     group_block_ids.reserve(groups.size());
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
         const auto& group = groups[group_id];
-        tag_to_group_id_.emplace(group.tag, static_cast<int>(group_id));
+        if (materialize_layer_views) {
+            tag_to_group_id_.emplace(group.tag, static_cast<int>(group_id));
+        }
 
         const size_t blocks_per_kv_block = group.seq_size_per_block / group.kernel_seq_size_per_block;
         const size_t stored_blocks_per_kv_block =
@@ -25,6 +28,9 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) 
         group_block_ids.push_back(std::make_shared<BlockIds>(stored_blocks_per_kv_block));
     }
 
+    if (!materialize_layer_views) {
+        return;
+    }
     const auto& layers = topology->layers();
     layer_group_tags_.reserve(layers.size());
     layer_group_block_ids.resize(layers.size());
@@ -215,6 +221,10 @@ BlockIds& KVCacheResource::mutableBlockIds(std::string_view tag) const {
 }
 
 BlockIds& KVCacheResource::mutableBlockIds(int layer_id, int group_id) const {
+    if (layer_group_block_ids.empty()) {
+        RTP_LLM_CHECK(this->groupId(layer_id, group_id) >= 0);
+        return mutableBlockIds(group_id);
+    }
     RTP_LLM_CHECK(static_cast<size_t>(layer_id) < layer_group_block_ids.size());
     RTP_LLM_CHECK(static_cast<size_t>(group_id) < layer_group_block_ids[static_cast<size_t>(layer_id)].size());
     auto block_ids = layer_group_block_ids[static_cast<size_t>(layer_id)][static_cast<size_t>(group_id)];
@@ -237,9 +247,11 @@ const BlockIds& KVCacheResource::blockIdsForLayer(int layer_id, std::string_view
 }
 
 int KVCacheResource::groupIdForTag(std::string_view tag) const {
-    const auto value = std::string(tag);
-    const auto it    = tag_to_group_id_.find(value);
-    RTP_LLM_CHECK_WITH_INFO(it != tag_to_group_id_.end(), "KVCacheResource missing tag=%s", value.c_str());
+    if (topology_) {
+        return static_cast<int>(topology_->groupIdForTag(tag));
+    }
+    const auto it = tag_to_group_id_.find(std::string(tag));
+    RTP_LLM_CHECK_WITH_INFO(it != tag_to_group_id_.end(), "KVCacheResource unknown tag=%s", std::string(tag).c_str());
     return it->second;
 }
 
@@ -254,11 +266,11 @@ int KVCacheResource::groupIdForLayerTag(int layer_id, std::string_view tag) cons
 }
 
 const std::vector<std::string>& KVCacheResource::groupTagsForLayer(int layer_id) const {
-    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_group_tags_.size(),
-                            "KVCacheResource invalid layer_id=%d size=%zu",
-                            layer_id,
-                            layer_group_tags_.size());
-    return layer_group_tags_[static_cast<size_t>(layer_id)];
+    if (topology_) {
+        return topology_->layer(layer_id).group_tags;
+    }
+    RTP_LLM_CHECK(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_group_tags_.size());
+    return layer_group_tags_[layer_id];
 }
 
 const std::string& KVCacheResource::soleGroupTagForLayer(int layer_id) const {
@@ -269,12 +281,12 @@ const std::string& KVCacheResource::soleGroupTagForLayer(int layer_id) const {
 }
 
 bool KVCacheResource::hasOneGroupPerLayer() const {
-    return std::all_of(
+    return topology_ ? topology_->hasOneGroupPerLayer() : std::all_of(
         layer_group_tags_.begin(), layer_group_tags_.end(), [](const auto& tags) { return tags.size() == 1; });
 }
 
 int KVCacheResource::layerNum() const {
-    return static_cast<int>(layer_group_tags_.size());
+    return topology_ ? static_cast<int>(topology_->layers().size()) : static_cast<int>(layer_group_tags_.size());
 }
 
 int KVCacheResource::groupNums() const {
@@ -294,6 +306,13 @@ LayerBlockIds KVCacheResource::layerBlocks() const {
                             "KVCacheResource::layerBlocks is a deprecated single-group-per-layer projection; "
                             "use blockIdsForLayer(layer, tag) for multi-group layers");
     LayerBlockIds layer_blocks;
+    if (layer_group_block_ids.empty()) {
+        layer_blocks.reserve(layerNum());
+        for (int layer = 0; layer < layerNum(); ++layer) {
+            layer_blocks.push_back(group_block_ids[groupIdForTag(soleGroupTagForLayer(layer))]);
+        }
+        return layer_blocks;
+    }
     layer_blocks.reserve(layer_group_block_ids.size());
     for (size_t layer = 0; layer < layer_group_block_ids.size(); ++layer) {
         const auto&               group_blocks = layer_group_block_ids[layer];
@@ -320,11 +339,31 @@ LayerBlockIds KVCacheResource::layerBlocks() const {
     return layer_blocks;
 }
 
-const LayerAttnBlockIds& KVCacheResource::layerGroupBlocks() const {
-    return layer_group_block_ids;
+LayerAttnBlockIds KVCacheResource::layerGroupBlocks() const {
+    if (!layer_group_block_ids.empty() || !topology_) {
+        return layer_group_block_ids;
+    }
+    // Compatibility projection built only for callers that need a per-layer
+    // view. Returning a value avoids mutable lazy caches in concurrent readers.
+    LayerAttnBlockIds result(layerNum(), GroupBlockIds(groupNums()));
+    for (const auto& layer : topology_->layers()) {
+        for (const auto& tag : layer.group_tags) {
+            const int group = groupIdForTag(tag);
+            result[layer.layer_id][group] = group_block_ids[group];
+        }
+    }
+    return result;
 }
 
 int KVCacheResource::groupId(int layer_id, int group_id) const {
+    if (layer_group_block_ids.empty()) {
+        RTP_LLM_CHECK(layer_id >= 0 && layer_id < layerNum());
+        if (group_id < 0 || group_id >= groupNums()) {
+            return -1;
+        }
+        const auto& ids = topology_->layerGroupIdsSnapshot()[layer_id];
+        return std::find(ids.begin(), ids.end(), group_id) != ids.end() ? group_id : -1;
+    }
     RTP_LLM_CHECK(static_cast<size_t>(layer_id) < layer_group_block_ids.size());
     if (group_id < 0 || static_cast<size_t>(group_id) >= layer_group_block_ids[static_cast<size_t>(layer_id)].size()
         || !layer_group_block_ids[static_cast<size_t>(layer_id)][static_cast<size_t>(group_id)]) {

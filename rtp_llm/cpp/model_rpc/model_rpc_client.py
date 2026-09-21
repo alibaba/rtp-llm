@@ -34,6 +34,7 @@ from rtp_llm.telemetry import inject_context_to_metadata, start_client_span
 from rtp_llm.utils.base_model_datatypes import (
     GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED,
     AuxInfo,
+    BatchedTerminalOutputs,
     GenerateConfig,
     GenerateInput,
     GenerateOutput,
@@ -83,6 +84,8 @@ def _engine_reported_finished(outputs: Optional[GenerateOutputs]) -> bool:
     """
     if outputs is None or not outputs.generate_outputs:
         return False
+    if isinstance(outputs.generate_outputs, BatchedTerminalOutputs):
+        return True
     return all(bool(out.finished) for out in outputs.generate_outputs)
 
 
@@ -381,6 +384,7 @@ def _record_client_span_latency(
 class StreamState:
     def __init__(self):
         self.cached_logits_dict = {}
+        self.seen_output = False
 
 
 def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
@@ -484,6 +488,7 @@ def trans_input(input_py: GenerateInput):
     validate_engine_ready(input_py.generate_config)
 
     generate_config_pb = input_pb.generate_config
+    generate_config_pb.aux_info.value = input_py.generate_config.aux_info
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
     generate_config_pb.max_thinking_tokens = (
         input_py.generate_config.max_thinking_tokens
@@ -699,6 +704,9 @@ def trans_output(
     if num_outputs == 0:
         return GenerateOutputs()
 
+    first_output = not stream_state.seen_output
+    stream_state.seen_output = True
+
     logits_index = input_py.generate_config.logits_index
     aux_info_flag = input_py.generate_config.aux_info
 
@@ -708,6 +716,39 @@ def trans_output(
         and (len(output_pb.output_ids.shape) > 0 and output_pb.output_ids.shape[0] > 0)
         else None
     )
+    # Keep the wire batch intact for terminal multi-sequence responses. Checking
+    # both the config and actual fields prevents discarding optional outputs.
+    config = input_py.generate_config
+    if (
+        first_output
+        and not config.is_streaming
+        and config.has_num_beams()
+        and config.num_return_sequences > 1
+        and not aux_info_flag
+        and not stream_state.cached_logits_dict
+        and all(output_pb.finished)
+        and all_output_ids is not None
+        and all_output_ids.dim() == 3
+        and all_output_ids.shape[0] == num_outputs
+        and all_output_ids.shape[1] == 1
+        and not output_pb.HasField("prompt_logits")
+        and not any(
+            output_pb.HasField(name)
+            and getattr(output_pb, name).shape
+            and getattr(output_pb, name).shape[0] > 0
+            for name in (
+                "hidden_states",
+                "all_hidden_states",
+                "loss",
+                "logits",
+                "all_probs",
+                "custom_output",
+            )
+        )
+    ):
+        return GenerateOutputs(
+            BatchedTerminalOutputs(all_output_ids, input_py.token_ids.reshape(1, -1))
+        )
     all_hidden_states = (
         trans_tensor(output_pb.hidden_states)
         if output_pb.HasField("hidden_states")

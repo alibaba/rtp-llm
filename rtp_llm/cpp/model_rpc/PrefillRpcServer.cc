@@ -658,7 +658,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, status.error_message()), status);
             return;
         }
-        if (response.flatten_output().aux_info_size() == 0) {
+        // Auxiliary metadata is optional; completion flags identify output rows.
+        if (response.flatten_output().finished_size() == 0) {
             RTP_LLM_LOG_ERROR("request [%ld] generate output size is 0", request_id);
             break;
         }

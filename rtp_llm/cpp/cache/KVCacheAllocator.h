@@ -101,6 +101,12 @@ public:
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
     virtual void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
+    // Forward consumes the copied KV on the current device stream. Implementations
+    // may enqueue asynchronously; the legacy blockBatchCopy APIs keep their semantics.
+    virtual void blockBatchCopyForForward(const torch::Tensor& copy_mapping) {
+        blockBatchCopy(copy_mapping);
+    }
+
     DeviceBlockPoolPtr getDeviceBlockPool() const {
         return block_pool_;
     }

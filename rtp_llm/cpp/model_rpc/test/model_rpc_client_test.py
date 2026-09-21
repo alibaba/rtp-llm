@@ -1,9 +1,10 @@
 import asyncio
+import gc
 import json
 import struct
 import sys
 from enum import Enum
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Mock the ops module to avoid CUDA dependency in this unit test
 # This MUST be at the very top before any other imports, even before unittest
@@ -71,6 +72,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE, tracing
 from rtp_llm.utils.base_model_datatypes import (
+    BatchedTerminalOutputs,
     GenerateInput,
     GenerateOutputs,
     RequestInfo,
@@ -197,6 +199,178 @@ def _decode_role_addr(ip="decode", grpc_port=9001):
     return RoleAddr(role=RoleType.DECODE, ip=ip, http_port=8001, grpc_port=grpc_port)
 
 
+class BatchedTerminalOutputTest(TestCase):
+    def setUp(self):
+        self.input = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([7, 8]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(
+                num_beams=4, num_return_sequences=4, aux_info=False, is_streaming=False
+            ),
+        )
+        self.pb = GenerateOutputsPB()
+        flat = self.pb.flatten_output
+        flat.finished.extend([True] * 4)
+        flat.output_ids.data_type = TensorPB.INT32
+        flat.output_ids.shape.extend([4, 1, 2])
+        flat.output_ids.int32_data = struct.pack("<8i", *range(8))
+
+    def test_terminal_batch_owns_storage_after_protobuf_release(self):
+        rows = trans_output(self.input, self.pb, StreamState()).generate_outputs
+        self.assertIsInstance(rows, BatchedTerminalOutputs)
+        self.pb.Clear()
+        del self.pb, self.input
+        gc.collect()
+        self.assertEqual(rows.output_ids.reshape(-1).tolist(), list(range(8)))
+        self.assertEqual(rows[-1].output_ids.tolist(), [[6, 7]])
+        self.assertTrue(rows[0].finished)
+        self.assertIsNone(rows[0].aux_info)
+        self.assertEqual(rows[1:3][0].input_ids.tolist(), [[7, 8]])
+        # Reading a legacy view does not duplicate the underlying token storage.
+        self.assertEqual(rows[0].output_ids.data_ptr(), rows.output_ids.data_ptr())
+        with self.assertRaises(IndexError):
+            rows[4]
+
+    def test_terminal_finished_check_keeps_batch_intact(self):
+        result = trans_output(self.input, self.pb, StreamState())
+        with patch.object(
+            BatchedTerminalOutputs, "__getitem__", side_effect=AssertionError("unbatch")
+        ):
+            self.assertTrue(_engine_reported_finished(result))
+
+    def test_empty_responses_preserve_terminal_batching(self):
+        state = StreamState()
+        for _ in range(2):
+            empty = trans_output(self.input, GenerateOutputsPB(), state)
+            self.assertEqual(len(empty.generate_outputs), 0)
+            self.assertFalse(state.seen_output)
+
+        rows = trans_output(self.input, self.pb, state).generate_outputs
+        self.assertIsInstance(rows, BatchedTerminalOutputs)
+        self.assertEqual(rows.output_ids.reshape(-1).tolist(), list(range(8)))
+        self.assertTrue(state.seen_output)
+
+    def test_prompt_logits_are_preserved(self):
+        prompt = self.pb.flatten_output.prompt_logits
+        prompt.topk_logprobs.data_type = TensorPB.FP32
+        prompt.topk_logprobs.shape.extend([1, 1])
+        prompt.topk_logprobs.fp32_data = struct.pack("<f", -0.5)
+        prompt.topk_token_ids.data_type = TensorPB.INT32
+        prompt.topk_token_ids.shape.extend([1, 1])
+        prompt.topk_token_ids.int32_data = struct.pack("<i", 7)
+        rows = trans_output(self.input, self.pb, StreamState()).generate_outputs
+        self.assertIsInstance(rows, list)
+        self.assertEqual(rows[0].prompt_logits["topk_token_ids"].tolist(), [[7]])
+
+    def test_custom_output_is_preserved(self):
+        custom = self.pb.flatten_output.custom_output
+        custom.data_type = TensorPB.FP32
+        custom.shape.extend([4, 2])
+        custom.fp32_data = struct.pack("<8f", *range(8))
+        rows = trans_output(self.input, self.pb, StreamState()).generate_outputs
+        self.assertIsInstance(rows, list)
+        self.assertEqual(rows[2].custom_output.tolist(), [4.0, 5.0])
+        self.assertEqual(rows[2].output_ids.tolist(), [[4, 5]])
+        self.assertTrue(rows[2].finished)
+        self.assertIsNone(rows[2].aux_info)
+
+    def test_streaming_aux_and_partial_results_keep_legacy_representation(self):
+        config = self.input.generate_config
+        for field, value in [
+            ("is_streaming", True),
+            ("aux_info", True),
+            ("num_return_sequences", 0),
+        ]:
+            with self.subTest(field=field):
+                old = getattr(config, field)
+                setattr(config, field, value)
+                self.assertIsInstance(
+                    trans_output(self.input, self.pb, StreamState()).generate_outputs,
+                    list,
+                )
+                setattr(config, field, old)
+        self.pb.flatten_output.finished[0] = False
+        self.assertIsInstance(
+            trans_output(self.input, self.pb, StreamState()).generate_outputs, list
+        )
+
+    def test_optional_tensor_and_previous_output_keep_legacy_representation(self):
+        flat = self.pb.flatten_output
+        flat.logits.data_type = TensorPB.FP32
+        flat.logits.shape.extend([4, 1])
+        flat.logits.fp32_data = struct.pack("<4f", 1, 2, 3, 4)
+        rows = trans_output(self.input, self.pb, StreamState()).generate_outputs
+        self.assertIsInstance(rows, list)
+        self.assertEqual(rows[2].logits.tolist(), [3.0])
+        flat.ClearField("logits")
+        state = StreamState()
+        state.seen_output = True
+        self.assertIsInstance(
+            trans_output(self.input, self.pb, state).generate_outputs, list
+        )
+
+    def test_concurrent_consumers_retain_independent_result_storage(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        batches = []
+        for i in range(8):
+            self.pb.flatten_output.output_ids.int32_data = struct.pack(
+                "<8i", *([i] * 8)
+            )
+            batches.append(
+                trans_output(self.input, self.pb, StreamState()).generate_outputs
+            )
+        self.pb.Clear()
+        with ThreadPoolExecutor(4) as pool:
+            values = list(
+                pool.map(lambda rows: rows.output_ids.reshape(-1).tolist(), batches)
+            )
+        self.assertEqual(values, [[i] * 8 for i in range(8)])
+
+    def test_cancel_and_rpc_error_preserve_terminal_result_lifetime(self):
+        class Call:
+            def __init__(self, pb):
+                self.pb, self.count, self.cancelled = pb, 0, False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                self.count += 1
+                if self.count == 1:
+                    return self.pb
+                raise RuntimeError("test transport failure")
+
+            def cancel(self):
+                self.cancelled = True
+
+        async def exercise(fail):
+            client = ModelRpcClient(["127.0.0.1:1"], {})
+            client._channel_pool.get = AsyncMock(return_value=object())
+            call = Call(self.pb)
+            stub = MagicMock()
+            stub.GenerateStreamCall.return_value = call
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ):
+                stream = client.enqueue(self.input)
+                result = await stream.__anext__()
+                if fail:
+                    with self.assertRaisesRegex(RuntimeError, "test transport failure"):
+                        await stream.__anext__()
+                else:
+                    await stream.aclose()
+            self.assertTrue(call.cancelled)
+            self.assertEqual(
+                result.generate_outputs.output_ids.reshape(-1).tolist(), list(range(8))
+            )
+
+        asyncio.run(exercise(False))
+        asyncio.run(exercise(True))
+
+
 class ModelRpcClientTest(TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
@@ -286,6 +460,30 @@ class ModelRpcClientTest(TestCase):
             mm_inputs=[],
             generate_config=generate_config,
         )
+
+    def test_nested_aux_info_survives_rpc_serialization(self):
+        from rtp_llm.structure.request_extractor import RequestExtractor
+
+        for value in (None, False, True):
+            for streaming in (False, True):
+                with self.subTest(aux_info=value, streaming=streaming):
+                    request = json.loads('{"generate_config": {"aux_info": false}}')
+                    if value is None:
+                        request["generate_config"].pop("aux_info")
+                    else:
+                        request["generate_config"]["aux_info"] = value
+                    request["generate_config"]["is_streaming"] = streaming
+                    config, _ = RequestExtractor(
+                        GenerateConfig()
+                    )._format_generate_config(request)
+                    input_pb = trans_input(self._make_generate_input(config))
+                    received = GenerateInputPB.FromString(input_pb.SerializeToString())
+
+                    self.assertTrue(received.generate_config.HasField("aux_info"))
+                    self.assertEqual(
+                        received.generate_config.aux_info.value, value is not False
+                    )
+                    self.assertEqual(received.generate_config.is_streaming, streaming)
 
     def test_thinking_mode_values_match_proto_contract(self):
         cases = (
