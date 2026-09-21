@@ -38,7 +38,7 @@ On macOS, a separate Python 3.9 / PyTorch 2.8 CPU environment ran:
 python -m pytest -q tests/kimi_k3
 ```
 
-Result: 50 passed: 36 model math/checkpoint checks and 14 smoke-harness
+Result: 55 passed: 36 model math/checkpoint checks, five launch-profile checks and 14 smoke-harness
 contract checks. These cover AttnRes against a scalar float64 reference, unused
 residual-bank capacity, output normalization, MTP source-layer and safetensors
 shape/dtype/payload validation, and TP1/2/4/8 fused KDA projection equivalence
@@ -54,18 +54,35 @@ implementation and must be rerun after further edits. The generated
 `libth_transformer_config.pyi` already contains an invalid `None:` enum annotation
 in base main; it is excluded from the Python AST success count (27 files).
 
-A B300 build of source commit `73bfef1109228c57657e11c924345f76f3e04b6f`
-was started on L20D-dev-145 inside `lhc_GPU` as `luohaocheng.lhc`, with
-`--config=cuda13 --config=sm10x --jobs=8`. Source and output are on local ext4
-`/ssd/5`. The last observed state was downloading the NVSHMEM dependency;
-there is no successful compiler/linker result. WebTerminal authentication
-expired before the result could be read. Later changes need a fresh build.
+The native `//:th_transformer` target at commit
+`2de697da70e32a0bcf9841e2f4b26198c77bce02` compiled successfully on
+L20D-dev-145 (exit 0, 512 actions, 629 seconds). It ran inside `lhc_GPU`
+as `luohaocheng.lhc`, with `--config=cuda13 --config=sm10x --jobs=8`.
+Source and Bazel output root are on local `/ssd/5` ext4. Both 144 and 145
+are building the service target at `8e78a72779`; success is not yet established.
+WebTerminal access has recovered. GPU availability must be reprobed before
+launch; no GPU model test has run and no external service was stopped.
 
-The last host probes found no eligible same-cluster pair: 142 had free GPUs
-but neither existing container could execute as the personal user; 144/145
-had external GPU work. In the other cluster only 114 was eligible. No external
-jobs or existing containers were stopped or changed. Authentication and a
-usable pair are pending; no GPU model test has run.
+On 145, the full local `/ssd/5/kimi-k3` checkpoint passed the loader guard:
+96 shards, 497220 tensors. The original MTP checkpoint passed the model-specific
+5400-required-tensor validation but its index total_size included header bytes.
+A task-owned copy at
+`/ssd/5/luohaocheng.lhc/k3-main-mtp-checkpoint-20260921` corrects only this index
+metadata, hard-links unchanged shards, and records provenance. It passed the
+generic loader guard. Original checkpoints remain unchanged. Repeat independent
+validation on each selected host and verify actual FastSafetensors startup logs.
+
+`launch_bf16.py` fixes TP8/EP8/SP, native MTP3, draft/target BF16 and RDMA;
+Decode enables Graph. It records the command, requires new local run storage,
+validates both checkpoints, and checks compute PIDs and service ports. It is
+not yet runtime-validated and does not replace fleet selection or runtime evidence.
+
+A newly confirmed integration gap is whole-model chunk prefill: main's
+`max_batch_tokens_size` is a scheduler constraint, not a chunk executor, and the
+current K3 target has no chunk loop. The 65536 setting in the launch profile
+alone must not be described as chunk support. Port the target/draft round
+coordination and verify KDA/conv/KV continuity before counting any >64K or
+budget+1/+7 case as passed.
 
 ## Text smoke entry point (not yet run against services)
 
