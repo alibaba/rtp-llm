@@ -19,10 +19,9 @@ _LAYER_TYPE_TO_HYBRID_ATTENTION: Dict[str, HybridAttentionType] = {
 }
 
 _SKELETON_WARNING = (
-    "qwen4_exp is incomplete: output will be wrong. The PLE / n-gram layer is "
-    "available only through its restricted correctness path, while QSA supports a "
-    "restricted text-only MTP path in addition to prefill and ordinary decode. See docs/design/"
-    "qwen3.8_flash_next_support_design.md appendix C."
+    "qwen4_exp is experimental and supports only the documented BF16 correctness "
+    "matrix. Unsupported PLE/QSA/MTP, parallelism, quantization and graph modes "
+    "fail fast. See docs/design/qwen3.8_flash_next_support_design.md appendix C."
 )
 
 _EXPERIMENTAL_SERVING_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL"

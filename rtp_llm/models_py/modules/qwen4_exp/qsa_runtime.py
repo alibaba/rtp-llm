@@ -1,6 +1,6 @@
 """Restricted Qwen4 QSA side-cache runtime.
 
-This module wires pure, prefix-free prefill, MTP-draft incremental prefill,
+This module wires pure prefill, page-aligned prefix reuse, MTP-draft incremental prefill,
 ordinary single-token decode and bounded speculative target verification into
 the independent ``indexer_kv`` and ``indexer_state`` pools. Decode is
 deliberately limited to text-only MRoPE, whose three current position axes all
@@ -13,8 +13,8 @@ accepted-length callback only when its width is at most one compression group.
 With ``G <= ratio`` it can complete at most one new compressed entry, while the
 ``2 * ratio`` raw-key ring cannot alias the committed partial group. Rejected
 tail entries therefore remain outside the logical length and are overwritten
-before they can become visible. Prefix-cache reuse, CP, PD, padding and CUDA
-Graph remain unsupported.
+before they can become visible. CP, PD, padding and CUDA Graph remain
+unsupported; prefix-cache reuse is restricted to page-aligned prefixes.
 """
 
 from __future__ import annotations
@@ -444,10 +444,12 @@ class Qwen4ExpQSARuntimeContext:
         prefixes = prefixes.to(
             device=device, dtype=torch.int64, non_blocking=True
         ).contiguous()
-        if bool(torch.any(prefixes <= 0).item()):
+        invalid_prefixes = prefixes <= 0 if draft else prefixes < 0
+        if bool(torch.any(invalid_prefixes).item()):
+            requirement = "nonzero" if draft else "non-negative"
             raise RuntimeError(
-                "qwen4_exp QSA draft incremental prefill requires every prefix "
-                "length to be nonzero"
+                f"qwen4_exp QSA {label} requires every prefix length to be "
+                f"{requirement}"
             )
         sequence_lengths = self.main_inputs.sequence_lengths
         if sequence_lengths.numel() != 0:
@@ -630,18 +632,15 @@ class Qwen4ExpQSARuntimeContext:
                         "to an unallocated or out-of-range physical block"
                     )
 
-        max_visible_tokens = int(visible_ends.max().item())
-        absolute_positions = torch.arange(
-            max_visible_tokens, dtype=torch.int64, device=device
-        )
+        block_starts = logical_positions - logical_positions.remainder(ratio)
         try:
             rope_cos, rope_sin = build_qsa_rope(
-                _transported_logical_positions(absolute_positions, rope_config),
+                _transported_logical_positions(block_starts, rope_config),
                 rope_config,
-                token_count=max_visible_tokens,
+                token_count=token_count,
                 dtype=torch.bfloat16,
                 device=device,
-                logical_positions=absolute_positions,
+                logical_positions=block_starts,
             )
         except ValueError as error:
             raise RuntimeError(
@@ -1188,6 +1187,7 @@ class Qwen4ExpQSARuntimeContext:
             kv_tokens_per_block=int(plan["kv_tokens_per_block"]),
             state_tokens_per_block=int(plan["state_tokens_per_block"]),
             norm_eps=float(indexer.norm_eps),
+            rope_is_token_aligned=True,
         )
 
         rotated_q = apply_partial_rope(
@@ -1376,19 +1376,17 @@ class Qwen4ExpQSARuntimeContext:
             tag=INDEXER_KV_TAG,
         )
 
-        # The strict text-only position contract makes one shared absolute RoPE
-        # table sufficient, including a block start retained from prefill state.
-        max_visible_tokens = int(visible_token_lengths.max().item())
-        absolute_positions = torch.arange(
-            max_visible_tokens, dtype=torch.int32, device=q.device
-        )
+        # Only rows that close a compression group consume these values. Build
+        # one block-start RoPE row per request instead of [0, context_len).
+        block_starts = sequence_lengths.to(torch.int64)
+        block_starts = block_starts - block_starts.remainder(ratio)
         rope_cos, rope_sin = build_qsa_rope(
-            _transported_logical_positions(absolute_positions, rope_config),
+            _transported_logical_positions(block_starts, rope_config),
             rope_config,
-            token_count=max_visible_tokens,
+            token_count=batch_size,
             dtype=raw_keys.dtype,
             device=raw_keys.device,
-            logical_positions=absolute_positions,
+            logical_positions=block_starts,
         )
         cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device)
         self._write_indexer_cache_transactional(
@@ -1406,6 +1404,7 @@ class Qwen4ExpQSARuntimeContext:
             kv_tokens_per_block=kv_tokens_per_block,
             state_tokens_per_block=int(self.indexer_state_cache.seq_size_per_block),
             norm_eps=float(indexer.norm_eps),
+            rope_is_token_aligned=True,
         )
 
         rotated_q = apply_partial_rope(
@@ -1483,17 +1482,24 @@ class Qwen4ExpQSARuntimeContext:
                 "qwen4_exp QSA target-verify paged scoring requires CUDA tensors"
             )
 
-        max_visible_tokens = int(plan["visible_lengths"].max().item())
-        absolute_positions = torch.arange(
-            max_visible_tokens, dtype=torch.int32, device=raw_keys.device
-        )
+        query_positions = plan["visible_lengths"] - 1
+        flat_query_positions = query_positions.reshape(-1).to(torch.int64)
+        block_starts = flat_query_positions - flat_query_positions.remainder(ratio)
         rope_cos, rope_sin = build_qsa_rope(
-            _transported_logical_positions(absolute_positions, rope_config),
+            _transported_logical_positions(block_starts, rope_config),
             rope_config,
-            token_count=max_visible_tokens,
+            token_count=token_count,
             dtype=raw_keys.dtype,
             device=raw_keys.device,
-            logical_positions=absolute_positions,
+            logical_positions=block_starts,
+        )
+        current_cos, current_sin = build_qsa_rope(
+            _transported_logical_positions(flat_query_positions, rope_config),
+            rope_config,
+            token_count=token_count,
+            dtype=raw_keys.dtype,
+            device=raw_keys.device,
+            logical_positions=flat_query_positions,
         )
         self._write_indexer_cache_transactional(
             raw_keys,
@@ -1510,12 +1516,10 @@ class Qwen4ExpQSARuntimeContext:
             kv_tokens_per_block=int(plan["kv_tokens_per_block"]),
             state_tokens_per_block=int(plan["state_tokens_per_block"]),
             norm_eps=float(indexer.norm_eps),
+            rope_is_token_aligned=True,
         )
 
         q = q.view(batch_size, query_len, head_num, head_dim)
-        query_positions = plan["visible_lengths"] - 1
-        current_cos = rope_cos.index_select(0, query_positions.reshape(-1).long())
-        current_sin = rope_sin.index_select(0, query_positions.reshape(-1).long())
         rotated_q = apply_partial_rope(
             q,
             current_cos.view(batch_size, query_len, 1, -1),
