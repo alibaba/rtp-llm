@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 
@@ -194,6 +195,8 @@ CRITICALITY = {
     # -- mock self-reported TPS, steady-window means --
     "mock_tps_steady_context_tps": (CRIT, "rate", "better"),
     "mock_tps_steady_context_tps_with_cache": (CRIT, "rate", "better"),
+    "mock_tps_steady_context_wall_tps": (CRIT, "rate", "better"),
+    "mock_tps_steady_context_wall_tps_with_cache": (CRIT, "rate", "better"),
     "mock_tps_steady_generate_tps": (CRIT, "rate", "better"),
 }
 
@@ -335,6 +338,14 @@ def precheck(run_a, run_b):
     mismatch (different trace / different experiment parameters)."""
     errors, warnings, details = [], [], {}
 
+    tps_a = run_a["meta"].get("prefill_tps_contract", "legacy_or_unknown")
+    tps_b = run_b["meta"].get("prefill_tps_contract", "legacy_or_unknown")
+    details["prefill_tps_contract"] = {"a": tps_a, "b": tps_b, "match": tps_a == tps_b}
+    if tps_a != tps_b:
+        errors.append(f"prefill TPS contract mismatch: A={tps_a} B={tps_b}; recollect both with aligned producers")
+    elif tps_a != "execution_us_v1":
+        warnings.append("prefill TPS is legacy/unknown; not valid for a real-aligned TPS gate")
+
     sha_a = run_a["meta"].get("trace_file_sha256")
     sha_b = run_b["meta"].get("trace_file_sha256")
     if sha_a is None or sha_b is None:
@@ -420,7 +431,12 @@ def steady_mean(rows, lo, hi, keys):
     sel = [r for r in rows if lo <= r["t"] <= hi]
     if not sel:
         return None, 0
-    out = {k: sum(r[k] for r in sel) / len(sel) for k in keys if k in sel[0]}
+    out = {}
+    for key in keys:
+        values = [r[key] for r in sel
+                  if isinstance(r.get(key), (int, float)) and math.isfinite(r[key])]
+        if values:
+            out[key] = sum(values) / len(values)
     return out, len(sel)
 
 
@@ -539,7 +555,8 @@ def _collect_cache_tps(sa, sb, agg_a, agg_b, lo, hi, out):
         sb.get("output_token_tps"),
     )
 
-    keys = ("context_tps", "context_tps_with_cache", "generate_tps")
+    keys = ("context_tps", "context_tps_with_cache", "context_wall_tps",
+            "context_wall_tps_with_cache", "generate_tps")
     mta, _ = steady_mean(agg_a.get("mock_tps_ts") or [], lo, hi, keys)
     mtb, _ = steady_mean(agg_b.get("mock_tps_ts") or [], lo, hi, keys)
     for k in keys:
@@ -1035,6 +1052,8 @@ def build_curve_spec(run_a, run_b, lo, hi):
         ("inflight_ts", None, "decode_reserved", "Decode 预留", "requests", False),
         ("mock_tps_ts", None, "context_tps", "Prefill 计算 TPS", "tokens/s", False),
         ("mock_tps_ts", None, "context_tps_with_cache", "Prefill 含缓存 TPS", "tokens/s", False),
+        ("mock_tps_ts", None, "context_wall_tps", "Prefill 墙钟计算 TPS", "tokens/s", False),
+        ("mock_tps_ts", None, "context_wall_tps_with_cache", "Prefill 墙钟含缓存 TPS", "tokens/s", False),
         ("mock_tps_ts", None, "generate_tps", "Decode 生成 TPS", "tokens/s", False),
         ("cache_hit_ts", None, "engine_token", "引擎 token 命中比例", "ratio", False),
         ("cache_hit_ts", None, "master_routing", "Master 路由命中比例", "ratio", False),
@@ -1191,6 +1210,8 @@ def parse_args(argv=None):
         action="store_true",
         help="also emit a self-contained ab_compare.html table",
     )
+    ap.add_argument("--require-aligned-prefill-tps", action="store_true",
+                    help="fail closed unless both captures use execution_us_v1 prefill TPS")
     ap.add_argument("--archive", default=None,
                     help="also save both runs and comparison outputs in one compressed ZIP")
     ap.add_argument(
@@ -1212,9 +1233,23 @@ def main(argv=None):
         run_a = resolve_run(args.run_a)
         run_b = resolve_run(args.run_b)
         precheck_details, warnings = precheck(run_a, run_b)
+        if args.require_aligned_prefill_tps and any(
+            run["meta"].get("prefill_tps_contract") != "execution_us_v1" for run in (run_a, run_b)
+        ):
+            raise PrecheckError("aligned prefill TPS required; legacy/unknown captures must be recollected")
         lo, hi, src = derive_steady_window(
             run_a["meta"], args.steady_lo, args.steady_hi
         )
+        if args.require_aligned_prefill_tps:
+            for label, run in (("A", run_a), ("B", run_b)):
+                rows = [row for row in run["aggregate"].get("mock_tps_ts", []) if lo <= row["t"] <= hi]
+                for key in ("context_tps", "context_tps_with_cache", "context_wall_tps", "context_wall_tps_with_cache"):
+                    if not any(isinstance(row.get(key), (int, float)) and math.isfinite(row[key]) for row in rows):
+                        raise PrecheckError(f"run {label}: missing steady-window {key} samples")
+                if not any(isinstance(row.get("context_wall_tps_with_cache"), (int, float))
+                           and math.isfinite(row["context_wall_tps_with_cache"])
+                           and row["context_wall_tps_with_cache"] > 0 for row in rows):
+                    raise PrecheckError(f"run {label}: no prefill work in the steady window")
     except PrecheckError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

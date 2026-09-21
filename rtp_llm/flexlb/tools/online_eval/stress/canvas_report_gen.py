@@ -939,6 +939,7 @@ def main():
     # token 聚合对账已整体移除（20260903 用户裁决：fire-and-forget
     # 在途污染使聚合时机有缺陷；正确性验证由逐请求 rid join 覆盖）。
     mock_ctx_tps = mock_ctx_cache_tps = mock_gen_tps = None
+    mock_ctx_wall_tps = mock_ctx_wall_cache_tps = None
     if per_second:
         ps_by_t = {int(p.get("t", 0) or 0): p for p in per_second}
         tsec_vals = rel_ts
@@ -1007,7 +1008,7 @@ def main():
                 ),
             )
         # mock 自报生产口径 TPS（20260901）：rtp_llm_* 集群级行序列
-        # （aggregate mock_tps_ts，完成事件记账，1s scrape 窗口）桶化到
+        # （aggregate mock_tps_ts，P 执行时间与实际 wall 时间分开）桶化到
         # 整秒（桶内均值，与 master arrivals 差分同规则）画上 TSEC——
         # context 对 = P 角色主图、generate = D 角色主图（生产大盘
         # hippo_role 切分同构读法）。全零序列不注册（与 2.2 节
@@ -1025,7 +1026,8 @@ def main():
                 continue
             if _t < 0:
                 continue
-            for _col in ("context_tps", "context_tps_with_cache", "generate_tps"):
+            for _col in ("context_tps", "context_tps_with_cache", "context_wall_tps",
+                         "context_wall_tps_with_cache", "generate_tps"):
                 _v = r.get(_col)
                 if _v is None:
                     continue
@@ -1036,45 +1038,21 @@ def main():
             _b: {c: round(sum(vs) / len(vs), 1) for c, vs in _cols.items()}
             for _b, _cols in _mtps_bucket.items()
         }
-        if any(v for _cols in _mtps_by_t.values() for v in _cols.values()):
-            mock_ctx_tps = const(
-                "mockCtxTps",
-                num_arr(
-                    [
-                        round(
-                            (_mtps_by_t.get(t) or {}).get("context_tps", 0) / tps_p_div,
-                            1,
-                        )
-                        for t in tsec_vals
-                    ]
-                ),
-            )
-            mock_ctx_cache_tps = const(
-                "mockCtxCacheTps",
-                num_arr(
-                    [
-                        round(
-                            (_mtps_by_t.get(t) or {}).get("context_tps_with_cache", 0)
-                            / tps_p_div,
-                            1,
-                        )
-                        for t in tsec_vals
-                    ]
-                ),
-            )
-            mock_gen_tps = const(
-                "mockGenTps",
-                num_arr(
-                    [
-                        round(
-                            (_mtps_by_t.get(t) or {}).get("generate_tps", 0)
-                            / tps_d_div,
-                            1,
-                        )
-                        for t in tsec_vals
-                    ]
-                ),
-            )
+        def tps_curve(column, js_name, divisor):
+            if not any(column in values for values in _mtps_by_t.values()):
+                return None
+            # Real reporters omit long in-flight steps. A missing sample is
+            # not zero; keep the gap instead of biasing charts and gate review.
+            return const(js_name, json.dumps([
+                round(_mtps_by_t[t][column] / divisor, 1)
+                if column in _mtps_by_t.get(t, {}) else None for t in tsec_vals
+            ]))
+
+        mock_ctx_tps = tps_curve("context_tps", "mockCtxTps", tps_p_div)
+        mock_ctx_cache_tps = tps_curve("context_tps_with_cache", "mockCtxCacheTps", tps_p_div)
+        mock_ctx_wall_tps = tps_curve("context_wall_tps", "mockCtxWallTps", tps_p_div)
+        mock_ctx_wall_cache_tps = tps_curve("context_wall_tps_with_cache", "mockCtxWallCacheTps", tps_p_div)
+        mock_gen_tps = tps_curve("generate_tps", "mockGenTps", tps_d_div)
         # client 侧 token 对账序列（per_second.input_tokens /
         # output_tokens / output_tokens_completed）不再构造：IO 对账
         # 面板已移除（20260901 纠偏）；聚合对账断言
@@ -2741,23 +2719,8 @@ def main():
         lines.extend(emit_grid(tok_containers))
         lines.append("")
 
-    # 2.3 TPS P/D 角色主图（20260901，同日纠偏）：mock 自报生产口径
-    # TPS（rtp_llm_*，完成事件记账，1s scrape 窗口）按 P/D 角色切分
-    # 展示——与生产大盘同构读法（引擎自报、hippo_role tag 切分，无
-    # client 侧 TPS 概念）：P 角色（prefill 引擎聚合）= context
-    # with/without cache 双曲线，差值 = cache 复用等效吞吐（KV 容量
-    # 对齐任务的收益面）；D 角色（decode 引擎聚合）= generate 单曲线。
-    # mock_tps_ts 为集群级时序但语义天然按角色切分（context_* 只来自
-    # P 引擎、generate 只来自 D 引擎），无需 role 维度数据改造。
-    # 20260901 呈现口径改版：主图画每引擎平均（集群和 ÷ 引擎数，
-    # tps_p_engines/tps_d_engines 可靠链解析），与生产大盘单实例
-    # series 的读法同构——此前集群和呈现下 12P 求和 p50 3.88M vs
-    # 生产单实例 ~58k，观感差 67 倍。引擎数未知时回退集群和呈现，
-    # caption 明示「集群和（引擎数未知）」+ stderr 告警（标准 run
-    # 引擎数恒可得，回退只是防御）。
-    # 口径提醒：mock TPS 是记账式模拟读数（分母固定 1s 窗口），
-    # 衡量调度组织效率而非 GPU 算力，不可与生产数值直接对表（口径
-    # 语义一一对应）。
+    # Execution TPS and wall TPS are separate charts. The context pair can
+    # have different execution denominators; its difference is not cache gain.
     tps_containers = []
     if mock_ctx_tps is not None:
         if tps_p_engines:
@@ -2767,8 +2730,8 @@ def main():
                 + "，生产大盘单实例 series 同构读法）；集群口径 = 生产同名指标 "
                 "rtp_llm_context_tps* 跨 P 引擎求和"
             )
-            _p_cache_name = "with cache（Σil ÷ N）"
-            _p_compute_name = "compute（(Σil−hit) ÷ N）"
+            _p_cache_name = "with cache（执行 TPS ÷ N）"
+            _p_compute_name = "compute（执行 TPS ÷ N）"
         else:
             sys.stderr.write(
                 TAG + " warning: 2.3 P 角色 TPS 主图 P 引擎数不可得（run_meta "
@@ -2781,20 +2744,20 @@ def main():
                 "回退集群和呈现，与生产大盘单实例 series 不可直接对表；"
                 "集群口径 = 生产同名指标 rtp_llm_context_tps* 跨 P 引擎求和"
             )
-            _p_cache_name = "with cache（Σil）"
-            _p_compute_name = "compute（Σil−hit）"
+            _p_cache_name = "with cache（执行 TPS）"
+            _p_compute_name = "compute（执行 TPS）"
         _ctx_cap = (
             max((p.get("context_tps_with_cache", 0) or 0) for p in mock_tps_rows)
             / tps_p_div
         )
         tps_containers.append(
             emit_container(
-                "P 角色 context TPS：with cache vs compute（cache 复用等效吞吐）",
+                "P 角色执行 TPS：with cache vs compute",
                 "P 角色（prefill，生产大盘同款 hippo_role 切分读法）；"
                 "x = 压测时间（s，1s 窗口）；"
                 + _p_y_scope
-                + "，完成事件记账：compute = "
-                "Σ(il−hit)，with cache = Σil；两线差值 = cache 复用等效吞吐"
+                + "；执行时间口径：各自 Σtokens ÷ 对应非空批次 Σ执行秒。"
+                "两个分母可能不同，两线差值不能解释为缓存收益；缺采样不补零。"
                 + (
                     "；累计复用 cache_saved_tokens = "
                     + fmt_int_trunc(sm.get("cache_saved_tokens"))
@@ -2820,6 +2783,16 @@ def main():
                 ),
             )
         )
+    if mock_ctx_wall_tps is not None and mock_ctx_wall_cache_tps is not None:
+        tps_containers.append(emit_container(
+            "P 角色 wall TPS：实际时间窗吞吐",
+            "同一 elapsed report window 内 Σtokens ÷ 墙钟秒；每引擎平均（集群和 ÷ P 数）。"
+            "with cache 与 compute 共享分母，可用于吞吐/缓存复用分析；长批次完成前不补零。",
+            emit_chart("LineChart", TSEC, 230, [
+                ("mcw", "compute wall TPS", mock_ctx_wall_tps, "info"),
+                ("mcwc", "with cache wall TPS", mock_ctx_wall_cache_tps, "success"),
+            ], suffix=" tok/s"),
+        ))
     if mock_gen_tps is not None:
         if tps_d_engines:
             _d_y_scope = (
@@ -4609,7 +4582,7 @@ def main():
     #    series 同构读法——防集群和当单实例读数的 67 倍量级误读）；
     #    引擎数回退模式必含「集群和（引擎数未知）」回退标注。
     if mock_ctx_tps is not None or mock_gen_tps is not None:
-        assert "完成事件记账" in html_out, (
+        assert "执行时间口径" in html_out or "完成事件记账" in html_out, (
             TAG + " mock TPS series present but accounting-scope annotation missing"
         )
         assert "1s 窗口" in html_out, (
@@ -4619,7 +4592,7 @@ def main():
         assert "P 角色" in html_out, (
             TAG + " context TPS chart present but P-role annotation missing"
         )
-        assert "cache 复用等效吞吐" in html_out, (
+        assert "执行时间口径" in html_out, (
             TAG + " context TPS pair present but cache-reuse annotation missing"
         )
         if tps_p_engines:

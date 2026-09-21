@@ -337,7 +337,7 @@ def cluster_tps(window, names):
         values = []
         for name in names:
             metric = (
-                "rtp_llm_context_tps"
+                "rtp_llm_context_wall_tps"
                 if name.startswith("prefill-")
                 else "rtp_llm_generate_tps"
             )

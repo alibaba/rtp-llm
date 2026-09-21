@@ -15,6 +15,7 @@ final class WhaleMockMonitor implements AutoCloseable {
     private static final class EngineSample {
         final Map<String, Long> previous = new HashMap<>();
         boolean schedulerReported;
+        final PrefillTpsMetrics.Reader prefillTps = new PrefillTpsMetrics.Reader();
         long sampledAt = System.nanoTime();
     }
     private final Map<Map<String, String>, EngineSample> samples = new HashMap<>();
@@ -27,7 +28,6 @@ final class WhaleMockMonitor implements AutoCloseable {
             "rtp_llm_running_stream_size", "rtp_llm_context_batch_size", "rtp_llm_generate_batch_size");
     private static final java.util.Set<String> PREFILL_METRICS = java.util.Set.of(
             "mock_context_compute_tokens_total", "mock_context_tokens_total",
-            "mock_context_compute_ms_total", "mock_context_with_cache_ms_total",
             "mock_prefill_waiting_requests", "mock_prefill_running_requests",
             "mock_cache_key_hits_total", "mock_cache_keys_requested_total",
             "rtp_llm_context_batch_size", "rtp_llm_context_tps",
@@ -72,7 +72,18 @@ final class WhaleMockMonitor implements AutoCloseable {
     WhaleMockMonitor(FlexMonitor monitor) { this.monitor = monitor; }
 
     void sample(JavaMockEngineCluster.FastRpcService service) {
-        sample(service.whaleMetrics(), service.whaleMetricTags(), System.nanoTime(), service.autoFetchEnabled());
+        long now = System.nanoTime();
+        Map<String, String> labels = service.whaleMetricTags();
+        sample(service.whaleMetrics(), labels, now, service.autoFetchEnabled());
+        if ("ROLE_TYPE_PREFILL".equals(labels.get("role")))
+            samplePrefillTps(service.prefillTpsSnapshot(), labels, System.nanoTime());
+    }
+
+    synchronized void samplePrefillTps(PrefillTpsMetrics.Snapshot snapshot,
+                                       Map<String, String> labels, long now) {
+        Map<String, Number> values = new HashMap<>();
+        state(labels).prefillTps.sample(snapshot, now).forEach((name, value) -> values.put("rtp_llm_" + name, value));
+        reportEvent(values, labels, false);
     }
 
     synchronized void reportEvent(Map<String, Number> metrics, Map<String, String> labels) {
@@ -179,32 +190,12 @@ final class WhaleMockMonitor implements AutoCloseable {
             if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
             monitor.report(name, tags, value.doubleValue());
             String rate = switch (name) {
-                case "mock_context_compute_tokens_total" -> "rtp_llm_context_tps";
-                case "mock_context_tokens_total" -> "rtp_llm_context_tps_with_cache";
                 case "mock_decode_step_tokens_total" -> "rtp_llm_generate_tps";
                 default -> null;
             };
             if (rate != null) {
                 if (registered.add(rate)) monitor.register(rate, FlexMetricType.GAUGE);
-                double wallTps = deltas.getOrDefault(name, 0L) / seconds;
-                String duration = switch (name) {
-                    case "mock_context_compute_tokens_total" -> "mock_context_compute_ms_total";
-                    case "mock_context_tokens_total" -> "mock_context_with_cache_ms_total";
-                    default -> null;
-                };
-                long executionMs = duration == null ? 0 : deltas.getOrDefault(duration, 0L);
-                double tps = duration == null ? wallTps : executionMs > 0
-                        ? deltas.getOrDefault(name, 0L) * 1000.0 / executionMs : 0;
-                monitor.report(rate, tags, tps);
-                String wall = switch (name) {
-                    case "mock_context_compute_tokens_total" -> "rtp_llm_context_wall_tps";
-                    case "mock_context_tokens_total" -> "rtp_llm_context_wall_tps_with_cache";
-                    default -> null;
-                };
-                if (wall != null) {
-                    if (registered.add(wall)) monitor.register(wall, FlexMetricType.GAUGE);
-                    monitor.report(wall, tags, wallTps);
-                }
+                monitor.report(rate, tags, deltas.getOrDefault(name, 0L) / seconds);
             }
         });
     }

@@ -339,7 +339,7 @@ class FullTests(unittest.TestCase):
                                 ),
                                 mock_engine_lack_mem_rejects_total=0,
                                 mock_engine_kv_admission_fails_total=0,
-                                rtp_llm_context_tps=10,
+                                rtp_llm_context_wall_tps=10,
                                 rtp_llm_generate_tps=10,
                             )
                         samples.append(dict(time_s=float(t), engines=rows))

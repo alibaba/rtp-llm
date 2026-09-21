@@ -179,42 +179,30 @@ for per-engine series). Configure exactly one scrape target
 (`<host>:<baseGrpcPort - 1>`). The Python-era shard aggregation port formula
 (`base + n_prefill + n_decode + 100 + shard_id`) no longer exists.
 
-**Production-caliber TPS series (`rtp_llm_*`, 20260901)**: `/metrics` reports
-three series under the production metric names so mock dashboards read like
-the real engine's — `rtp_llm_context_tps` (computed context tokens = input −
-cache hits), `rtp_llm_context_tps_with_cache` (input tokens including cache
-hits, the DeepSeek-style "input tokens/s incl. cache hits" caliber) and
-`rtp_llm_generate_tps` (generated output tokens). They are **pure accounting
-on completion events** (prefill completions feed the context pair, decode
-completions feed generate; cancelled completions are excluded — only tokens
-actually accepted and generated count, matching production semantics) and
-every scrape settles the window first, so the window = scrape interval (the
-eval G1 poller is 1s → the value is tokens/s by construction). PD split:
-prefill engines carry the context pair, decode engines the generate series;
-off-role series are absent from both Prometheus and Whale KMonitor. Caliber note: the mock's execution time is itself a
-formula product, so unlike production there is no execute/wall dual
-denominator — the fixed 1s window is the whole denominator. These are
-**accounting-style simulation readings that measure scheduling organization
-efficiency, not GPU compute**: do not compare absolute values against
-production dashboards directly (the caliber semantics map one-to-one, the
-physics does not). `/snapshot` exposes the cumulative `hit_tokens_total`
-per engine (never drained — the `cache_saved_tokens` source via
-`final_snapshot`). The report layer renders these three series as P/D
-role charts at the **per-engine average** (cluster sum ÷ engine count —
-the production dashboard's single-instance-series read, so per-instance
-magnitudes line up; the aggregate's `mock_tps_ts` keeps the raw cluster
-sums and the division is presentation-layer, with a cluster-sum fallback
-caption 「集群和（引擎数未知）」 + stderr warning when the engine count
-is unavailable — chain: `run_meta.json` params > `engine_dist` > mock
-final_snapshot role counts); the client-side token reconciliation is
-not a report panel either — the aggregate validity item
-`token_reconciliation_ok` was removed on 20260903 (fire-and-forget runs
-record ok at schedule success while the engine is still executing, so
-in-flight requests pollute both sides and the aggregate-time in-flight
-compensation cannot close reliably; per-request correctness verification
-is already covered by the client_events × engine_events rid join — the
-same join full_e2e / engine_exec uses — making the aggregate assertion
-redundant).
+**Prefill TPS contract (`execution_us_v1`, 2026-09-21)**: the context pair
+uses the real collector's execution-time denominators:
+`rtp_llm_context_tps = Σcomputed tokens × 1e6 / Σeligible batch execution us`;
+`rtp_llm_context_tps_with_cache` uses input tokens including reuse and its
+own eligible-batch denominator. A zero-compute batch contributes only to
+the latter. These rates cannot be subtracted to infer cache hit rate.
+The `rtp_llm_context_wall_tps` / `rtp_llm_context_wall_tps_with_cache` pair
+uses the same actual report-window denominator and supports throughput and
+window cache-hit analysis; `rtp_llm_wall_tps_report_interval_us` records it.
+
+Token counts are frozen at batch execution start and published atomically
+with measured execution time after dispatch completes. Work cancelled after
+execution starts remains in TPS accounting. Successful-request business
+counters remain separate. HTTP and Whale have independent reporting cursors;
+long in-flight steps without completed samples are silent, and idle engines
+report zero. Mock time includes simulated execution and dispatch overhead;
+this aligns accounting, not GPU performance. See [METRICS.md](METRICS.md)
+for source evidence, scope and gate requirements.
+
+PD split remains: context metrics belong to P, `rtp_llm_generate_tps` to D.
+Decode TPS is unchanged by this migration and is not certified by the
+prefill contract. Reports keep cluster sums in `mock_tps_ts` and display
+per-engine averages when engine counts are known. Snapshot
+`hit_tokens_total` remains the successful-request cumulative counter.
 
 **Whale no-Fetch latency**: `GenerateInputPB.start_time` survives master
 dispatch and the P→D handoff. The production frontend sets it in epoch
@@ -315,7 +303,8 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 | InflightTtlExpiryTest | 1 | TTL cleanup mechanism |
 | MatrixSweepTest | 1 | P/D config × concurrency sweep |
 | MetricsValidationTest | 3 | /metrics + /snapshot validation, KV block-pool tracking + pressure-surface consistency |
-| TpsMetricsAccountingTest | 3 | rtp_llm_* TPS series: completion-event accounting, drain semantics, cancelled exclusion, hit_tokens_total |
+| TpsMetricsAccountingTest | 4 | Execution/wall denominators, role sums, executed cancellations, HTTP/Whale parity |
+| PrefillTpsMetricsTest | 6 | Deterministic real-collector formulas, independent readers, long steps, reset and zero-token gates |
 | BlockPoolMetricsObservabilityTest | 6 | Block-pool series in both /metrics modes: three-state gauges over a request's life, prefill-602 vs decode-terminal-fail counter split, decode reuse accumulation (cumulative, never drained), decode admission-failure terminal semantics, P-enqueue reservation reject/adopt/release lifecycle |
 | CacheKeyHitMetricsTest | 2 | Cache key-hit counters: prefix-match run accumulation (hit/requested key sums across requests, /metrics + /snapshot terminal fields) and empty-block-hash 0/0 contribution |
 | RealisticTimingTest | 1 | Real timing verification |

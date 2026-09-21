@@ -1339,29 +1339,16 @@ public final class JavaMockEngineCluster {
         private final AtomicLong acceptedCount = new AtomicLong();
         private final AtomicLong completedCount = new AtomicLong();
         private final AtomicLong cancelledCount = new AtomicLong();
-        // ── Production-caliber TPS observation (rtp_llm_* /metrics series) ──
-        // Pure accounting on completion events: token sums accumulate into
-        // the *Tokens counters and every /metrics scrape drains them into the
-        // lastWindow* values (window = scrape interval, 1s for the G1 poller
-        // — the value IS tokens-per-second because the window is 1s). Caliber
-        // note: the mock's execution time is itself a formula product, so
-        // unlike production there is no execute/wall dual denominator — the
-        // fixed 1s window is the whole denominator. Only NON-cancelled
-        // completions count (production semantics: tokens actually accepted
-        // and generated). hit_tokens_total is cumulative and never drained
-        // (the cache_saved_tokens source via final_snapshot).
-        private final AtomicLong contextComputeTokens = new AtomicLong();
+        // Successful completion counters are kept separate from execution TPS:
+        // cancellation after execution starts does not undo work done by a batch.
+        private final PrefillTpsMetrics prefillTps = new PrefillTpsMetrics();
+        private final PrefillTpsMetrics.Reader prometheusPrefillTps = new PrefillTpsMetrics.Reader();
         private final LongAdder lifetimeContextComputeTokens = new LongAdder();
         private final LongAdder lifetimeContextTokens = new LongAdder();
         private final LongAdder lifetimeGenerateTokens = new LongAdder();
         private final LongAdder lifetimeDecodeStepTokens = new LongAdder();
-        private final LongAdder lifetimeContextComputeMs = new LongAdder();
-        private final LongAdder lifetimeContextWithCacheMs = new LongAdder();
-        private final AtomicLong contextWithCacheTokens = new AtomicLong();
         private final AtomicLong generateTokens = new AtomicLong();
         private final AtomicLong hitTokensTotal = new AtomicLong();
-        private final AtomicLong lastWindowContextCompute = new AtomicLong();
-        private final AtomicLong lastWindowContextCache = new AtomicLong();
         private final AtomicLong lastWindowGenerate = new AtomicLong();
         private final ExecutorService responseExecutor;
         /**
@@ -3692,15 +3679,25 @@ public final class JavaMockEngineCluster {
             // drop out on mismatch (the late callback cannot be unscheduled).
             final long epoch = crashEpoch.get();
             long startDelayNanos = Math.max(0, startNanos - now);
-            if (startDelayNanos == 0) {
-                startPrefillBatch(members);
-            } else {
-                scheduler.schedule(() -> {
-                    if (crashEpoch.get() == epoch) {
-                        startPrefillBatch(members);
+            var tpsBatch = new java.util.concurrent.atomic.AtomicReference<PrefillTpsMetrics.Batch>();
+            Runnable start = () -> {
+                if (crashEpoch.get() != epoch) return;
+                long compute = 0, input = 0;
+                synchronized (completionLock) {
+                    for (var member : members) {
+                        var shape = member.shape();
+                        if (cancelledRequests.containsKey(shape.input().getRequestId())) continue;
+                        compute += Math.max(0L, shape.inputLen() - shape.hitTokens());
+                        input += shape.inputLen();
                     }
-                }, startDelayNanos, TimeUnit.NANOSECONDS);
-            }
+                    // Freeze executed membership at start, before cancellations
+                    // can turn a completed forward into a failed client request.
+                    tpsBatch.set(prefillTps.begin(compute, input, System.nanoTime()));
+                }
+                startPrefillBatch(members);
+            };
+            if (startDelayNanos == 0) start.run();
+            else scheduler.schedule(start, startDelayNanos, TimeUnit.NANOSECONDS);
 
             if (memoryCache != null) {
                 for (var member : members) {
@@ -3750,7 +3747,6 @@ public final class JavaMockEngineCluster {
                 // One wall-clock stamp for the whole batch: every member shares
                 // the same completion instant (the batch is the execution unit).
                 long doneTsMs = System.currentTimeMillis();
-                boolean computedContext = false, processedContext = false;
                 for (BatchMember member : members) {
                     MockPerformanceModel.RequestShape shape = member.shape();
                     long requestId = shape.input().getRequestId();
@@ -3803,12 +3799,8 @@ public final class JavaMockEngineCluster {
                     writePrefillDoneEvent(shape, requestId, member.batchId(), doneTsMs,
                             executionMs, shapes.size(), alreadyCancelled);
                     if (!alreadyCancelled) {
-                        // rtp_llm_context_tps accounting (production caliber):
-                        // compute = il - hit (actually-computed context tokens,
-                        // the rtp_llm_context_tps numerator — cache reuse is
-                        // excluded), with_cache = il (the
-                        // rtp_llm_context_tps_with_cache numerator, the
-                        // DeepSeek-style "input tokens/s incl. cache hits").
+                        // Successful completion/cache accounting is separate
+                        // from executed-batch TPS (which includes cancelled work).
                         MockCacheDiagnostics diag = cacheDiagnostics;
                         if (!asyncFail && diag != null) diag.completed(engineName, shape.blockKeys());
                         long inputLen = shape.inputLen();
@@ -3826,15 +3818,11 @@ public final class JavaMockEngineCluster {
                                     "rtp_llm_kv_cache_memory_cache_read_latency_us",
                                     0.0));
                         }
-                        computedContext |= inputLen > hitTokens;
-                        processedContext |= inputLen > 0;
-                        contextComputeTokens.addAndGet(Math.max(0L, inputLen - hitTokens));
                         lifetimeContextComputeTokens.add(Math.max(0L, inputLen - hitTokens));
                         lifetimeContextTokens.add(inputLen);
                         reportMetricEvent(Map.of("rtp_llm_input_token_length", inputLen,
                                 "rtp_llm_reuse_length", hitTokens,
                                 "rtp_llm_effective_context_length", Math.max(0L, inputLen - hitTokens)));
-                        contextWithCacheTokens.addAndGet(inputLen);
                         hitTokensTotal.addAndGet(hitTokens);
                     }
                     // Python marks the prefill-side lifecycle entry finished when the
@@ -3885,9 +3873,9 @@ public final class JavaMockEngineCluster {
                         releaseReservedDecode(requestId);
                     }
                 }
-                // Execution duration belongs to the batch, not each member.
-                if (computedContext) lifetimeContextComputeMs.add(executionMs);
-                if (processedContext) lifetimeContextWithCacheMs.add(executionMs);
+                // Real TPS includes scheduler/execution/dispatch elapsed time,
+                // once per batch; never divide by the polling or GPU-model time.
+                prefillTps.finish(tpsBatch.get(), System.nanoTime());
                 activePrefillBatches.decrementAndGet();
                 // Mirror the addAndGet(shapes.size()) made when this batch reserved
                 // its running slot (admission or drain). Cancelled members stay
@@ -5855,12 +5843,9 @@ public final class JavaMockEngineCluster {
             acceptedCount.set(0);
             completedCount.set(0);
             cancelledCount.set(0);
-            contextComputeTokens.set(0);
-            contextWithCacheTokens.set(0);
+            prefillTps.reset(System.nanoTime());
             generateTokens.set(0);
             hitTokensTotal.set(0);
-            lastWindowContextCompute.set(0);
-            lastWindowContextCache.set(0);
             lastWindowGenerate.set(0);
             leakDetected.set(false);
             lastEnqueueTime.set(System.nanoTime());
@@ -5961,8 +5946,6 @@ public final class JavaMockEngineCluster {
                     Map.entry("mock_context_tokens_total", lifetimeContextTokens.sum()),
                     Map.entry("mock_generate_tokens_total", lifetimeGenerateTokens.sum()),
                     Map.entry("mock_decode_step_tokens_total", lifetimeDecodeStepTokens.sum()),
-                    Map.entry("mock_context_compute_ms_total", lifetimeContextComputeMs.sum()),
-                    Map.entry("mock_context_with_cache_ms_total", lifetimeContextWithCacheMs.sum()),
                     Map.entry("mock_kv_total_tokens", getTotalKvTokens()),
                     Map.entry("mock_kv_available_tokens", getAvailableKvTokens()),
                     Map.entry("mock_kv_occupied_tokens", occupiedKvTokens()),
@@ -6452,19 +6435,13 @@ public final class JavaMockEngineCluster {
             }
         }
 
-        /**
-         * Settle the per-scrape TPS windows (rtp_llm_* series): the /metrics
-         * handler calls this on EVERY scrape before reading snapshots, so a
-         * window = one scrape interval (1s for the G1 poller — the drained
-         * value is tokens-per-second by construction). Events landing
-         * between this drain and the snapshot read roll into the next
-         * window via the pending counters added back in getSnapshot().
-         */
+        /** Settle the HTTP reader once per scrape; snapshots themselves are read-only. */
         void drainTpsWindows() {
-            lastWindowContextCompute.set(contextComputeTokens.getAndSet(0));
-            lastWindowContextCache.set(contextWithCacheTokens.getAndSet(0));
             lastWindowGenerate.set(generateTokens.getAndSet(0));
+            prometheusPrefillTps.sample(prefillTps.snapshot(), System.nanoTime());
         }
+
+        PrefillTpsMetrics.Snapshot prefillTpsSnapshot() { return prefillTps.snapshot(); }
 
         int getInflightCount() {
             // pendingRequests already counts both prefill and decode requests
@@ -6607,19 +6584,12 @@ public final class JavaMockEngineCluster {
             snap.put("prefill_batches", prefillBatchesExecuted.sum());
             snap.put("prefill_batch_requests", prefillBatchRequestsExecuted.sum());
             snap.put("max_prefill_batch_size", maxPrefillBatchSizeExecuted.get());
-            // Production-caliber TPS observation: the rtp_llm_* /metrics
-            // series read these. Window value = last settled scrape window +
-            // events since (the /metrics handler drains first, so a scrape
-            // reads exactly its own window; /snapshot sees the in-progress
-            // window too). hit_tokens_total is cumulative cache-reuse
-            // accounting (the cache_saved_tokens source).
+            // Business completion totals stay cumulative. TPS is an execution
+            // window with its own atomic numerator/time ledger (see METRICS.md).
             snap.put("context_compute_tokens_total", lifetimeContextComputeTokens.sum());
             snap.put("context_tokens_total", lifetimeContextTokens.sum());
             snap.put("generate_tokens_total", lifetimeGenerateTokens.sum());
-            snap.put("context_tps",
-                    lastWindowContextCompute.get() + contextComputeTokens.get());
-            snap.put("context_tps_with_cache",
-                    lastWindowContextCache.get() + contextWithCacheTokens.get());
+            snap.putAll(prometheusPrefillTps.last());
             snap.put("generate_tps",
                     lastWindowGenerate.get() + generateTokens.get());
             snap.put("hit_tokens_total", hitTokensTotal.get());

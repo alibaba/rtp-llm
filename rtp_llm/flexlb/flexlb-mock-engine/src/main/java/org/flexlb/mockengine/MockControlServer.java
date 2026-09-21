@@ -968,9 +968,8 @@ final class MockControlServer {
         List<Map<String, Object>> snaps = new ArrayList<>();
         List<JavaMockEngineCluster.FastRpcService> engineServices = orderedServices();
         for (JavaMockEngineCluster.FastRpcService service : engineServices) {
-            // rtp_llm_* TPS series: settle the per-scrape window BEFORE reading
-            // the snapshot so this scrape reads exactly its own token sums
-            // (window = scrape interval; the G1 poller is 1s -> tokens/s).
+            // Decode retains its completion-window accounting. Prefill uses
+            // an independent atomic execution-time reader.
             service.drainTpsWindows();
             snaps.add(service.getMetricsSnapshot());
         }
@@ -1011,12 +1010,13 @@ final class MockControlServer {
                 {"mock_engine_cache_evictions_total", "total cache evictions", "counter"},
                 {"mock_engine_prefill_ms_avg", "average prefill execution time in ms", "gauge"},
                 {"mock_engine_decode_ms_avg", "average decode execution time in ms", "gauge"},
-                // Production-caliber TPS series (pure accounting on completion
-                // events; window = scrape interval, 1s under the G1 poller).
-                // Same metric names as the real engine (RtpLLMMetrics) so mock
-                // dashboards read like the production ones.
-                {"rtp_llm_context_tps", "computed context tokens (input minus cache hits) per scrape window", "gauge"},
-                {"rtp_llm_context_tps_with_cache", "context tokens per scrape window including cache hits", "gauge"},
+                // Real prefill TPS uses batch execution time; wall TPS uses
+                // elapsed reporting time. Never interchange the denominators.
+                {"rtp_llm_context_tps", "computed context tokens per second of corresponding batch execution", "gauge"},
+                {"rtp_llm_context_tps_with_cache", "context tokens including cache hits per second of corresponding batch execution", "gauge"},
+                {"rtp_llm_context_wall_tps", "computed context tokens per elapsed report second", "gauge"},
+                {"rtp_llm_context_wall_tps_with_cache", "context tokens including cache hits per elapsed report second", "gauge"},
+                {"rtp_llm_wall_tps_report_interval_us", "elapsed prefill reporting window in microseconds", "gauge"},
                 {"rtp_llm_generate_tps", "generated output tokens per scrape window", "gauge"},
                 // Block-pool observability (KV capacity model v2): the
                 // three-state block split + the admission/reuse counters.
@@ -1070,8 +1070,7 @@ final class MockControlServer {
                 for (String name : List.of("context_compute_tokens_total", "context_tokens_total")) {
                     sb.append(String.format("mock_%s{%s} %s%n", name, labels, snap.get(name)));
                 }
-                sb.append(String.format("rtp_llm_context_tps{%s} %s%n", labels, snap.get("context_tps")));
-                sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %s%n", labels, snap.get("context_tps_with_cache")));
+                appendPrefillTps(sb, labels, List.of(snap), true);
             } else if ("decode".equalsIgnoreCase(service.getRoleName())) {
                 sb.append(String.format("mock_engine_decode_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_avg"))));
                 sb.append(String.format("mock_generate_tokens_total{%s} %s%n", labels, snap.get("generate_tokens_total")));
@@ -1126,8 +1125,7 @@ final class MockControlServer {
                 for (String name : List.of("context_compute_tokens_total", "context_tokens_total")) {
                     sb.append(String.format("mock_%s{%s} %d%n", name, label, sumLong(group, name)));
                 }
-                sb.append(String.format("rtp_llm_context_tps{%s} %d%n", label, sumLong(group, "context_tps")));
-                sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %d%n", label, sumLong(group, "context_tps_with_cache")));
+                appendPrefillTps(sb, label, group, false);
             } else {
                 sb.append(String.format("mock_generate_tokens_total{%s} %d%n", label, sumLong(group, "generate_tokens_total")));
                 sb.append(String.format("rtp_llm_generate_tps{%s} %d%n", label, sumLong(group, "generate_tps")));
@@ -1149,6 +1147,18 @@ final class MockControlServer {
             }
 
             appendLatencyAggregates(sb, label, group, bucket.getKey());
+        }
+    }
+
+    private static void appendPrefillTps(StringBuilder sb, String labels,
+                                         List<Map<String, Object>> snapshots, boolean perEngine) {
+        for (String name : List.of("context_tps", "context_tps_with_cache", "context_wall_tps",
+                "context_wall_tps_with_cache", "wall_tps_report_interval_us")) {
+            if (!perEngine && name.equals("wall_tps_report_interval_us")) continue;
+            // Long in-flight steps have no sample, rather than a fabricated zero.
+            if (snapshots.stream().noneMatch(snapshot -> snapshot.containsKey(name))) continue;
+            double value = snapshots.stream().mapToDouble(snapshot -> asDouble(snapshot.get(name))).sum();
+            sb.append(String.format(java.util.Locale.ROOT, "rtp_llm_%s{%s} %.6f%n", name, labels, value));
         }
     }
 

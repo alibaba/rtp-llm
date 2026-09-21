@@ -853,7 +853,7 @@ METRICS = {
     "rtp_llm_wait_stream_size",
     "rtp_llm_kv_cache_pool_available_blocks",
     "rtp_llm_kv_cache_pool_total_blocks",
-    "rtp_llm_context_tps",
+    "rtp_llm_context_wall_tps",
     "rtp_llm_generate_tps",
 }
 
@@ -1026,7 +1026,7 @@ def metric_window(data, start, end, survivor=None):
     tps_complete = True
     for rows in by_engine.values():
         metric = (
-            "rtp_llm_context_tps"
+            "rtp_llm_context_wall_tps"
             if rows[0].get("role", "").lower() == "prefill"
             else "rtp_llm_generate_tps"
         )

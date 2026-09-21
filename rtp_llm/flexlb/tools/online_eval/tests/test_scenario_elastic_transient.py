@@ -63,7 +63,7 @@ def metrics(start, end, override=None):
                 rtp_llm_wait_stream_size=1,
                 mock_engine_lack_mem_rejects_total=0,
                 mock_engine_kv_admission_fails_total=0,
-                rtp_llm_context_tps=10,
+                rtp_llm_context_wall_tps=10,
                 rtp_llm_generate_tps=10,
             )
             if override:

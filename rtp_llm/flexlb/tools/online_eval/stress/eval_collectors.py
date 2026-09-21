@@ -37,7 +37,7 @@ import urllib.request
 
 # G1 C whitelist — the analyzer-consumed mock per-engine series: the
 # running/waiting pair (queue depth curves) plus the production-caliber
-# TPS trio (rtp_llm_*, completion-event accounting in 1s scrape windows;
+# TPS families (prefill execution and wall clocks are separate;
 # consumed by aggregate mock_tps_ts and the report-layer 2.3 对账图) and
 # the KV v2 block-pool family (three-state block gauges + admission /
 # reuse / eviction counters; consumed by aggregate kv_blocks_ts_by_role
@@ -49,6 +49,9 @@ MOCK_KEEP_SERIES = {
     "rtp_llm_wait_stream_size",
     "rtp_llm_context_tps",
     "rtp_llm_context_tps_with_cache",
+    "rtp_llm_context_wall_tps",
+    "rtp_llm_context_wall_tps_with_cache",
+    "rtp_llm_wall_tps_report_interval_us",
     "rtp_llm_generate_tps",
     "rtp_llm_kv_cache_pool_total_blocks",
     "rtp_llm_kv_cache_pool_available_blocks",

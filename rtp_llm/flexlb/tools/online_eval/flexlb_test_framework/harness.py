@@ -2061,9 +2061,11 @@ BALANCE_MOCK_SERIES = (
     # exec_ms family (gauge-style per-window stats)
     "mock_engine_prefill_ms_avg",
     "mock_engine_decode_ms_avg",
-    # production-caliber TPS trio (window = scrape interval)
+    # Execution TPS for engine efficiency; wall TPS for throughput recovery.
     "rtp_llm_context_tps",
     "rtp_llm_context_tps_with_cache",
+    "rtp_llm_context_wall_tps",
+    "rtp_llm_context_wall_tps_with_cache",
     "rtp_llm_generate_tps",
 )
 

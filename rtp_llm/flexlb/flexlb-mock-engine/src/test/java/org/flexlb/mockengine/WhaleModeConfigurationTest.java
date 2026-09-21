@@ -477,12 +477,13 @@ class WhaleModeConfigurationTest {
                     return null;
                 });
         var monitor = new WhaleMockMonitor(sink);
-        long now = System.nanoTime();
-        monitor.sample(java.util.Map.of("mock_context_tokens_total", 0L, "mock_context_with_cache_ms_total", 0L), java.util.Map.of(), now);
-        monitor.sample(java.util.Map.of("mock_context_tokens_total", 400L, "mock_context_with_cache_ms_total", 10L), java.util.Map.of(), now + 2_000_000_000L);
+        var tps = new PrefillTpsMetrics(0);
+        monitor.samplePrefillTps(tps.snapshot(), java.util.Map.of(), 1_000_000_000L);
+        tps.finish(tps.begin(200, 400, 1_000_000_000L), 1_010_000_000L);
+        monitor.samplePrefillTps(tps.snapshot(), java.util.Map.of(), 3_000_000_000L);
         assertEquals(200.0, values.get("rtp_llm_context_wall_tps_with_cache"));
         assertEquals(40000.0, values.get("rtp_llm_context_tps_with_cache"));
-        monitor.sample(java.util.Map.of("mock_context_tokens_total", 400L, "mock_context_with_cache_ms_total", 10L), java.util.Map.of(), now + 3_000_000_000L);
+        monitor.samplePrefillTps(tps.snapshot(), java.util.Map.of(), 4_000_000_000L);
         assertEquals(0.0, values.get("rtp_llm_context_wall_tps_with_cache"));
         assertEquals(0.0, values.get("rtp_llm_context_tps_with_cache"));
     }

@@ -459,7 +459,7 @@ class DeviationFixtureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run, real_dir = self._prepare(tmp)
             self._scale_prom_wide_col(
-                real_dir / "prom_export.jsonl", "context_wall_tps_with_cache", 0.5
+                real_dir / "prom_export.jsonl", "rtp_llm_context_tps_with_cache", 0.5
             )
             r = run_cli(
                 "--mock-aggregate",

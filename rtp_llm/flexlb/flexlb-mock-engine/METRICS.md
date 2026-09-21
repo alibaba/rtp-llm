@@ -93,3 +93,73 @@ Validation on 2026-09-21:
 - Maven: `./mvnw -B -P'opensource,!internal' -pl flexlb-mock-engine -am test
   -Dtest=<classes above> -Dsurefire.failIfNoSpecifiedTests=false`.
 - No live Whale deployment or workload benchmark was changed or run.
+
+## Prefill TPS alignment (`execution_us_v1`)
+
+The previous HTTP context pair counted tokens per scrape without dividing by
+elapsed time. Whale used successful-request totals divided by modeled formula
+milliseconds. Neither was the real execution TPS contract.
+
+The source of truth is `rtp_llm/cpp/metrics/RtpLLMMetrics.h`:
+`RtpLLMTokenPSMetricsCollector::addTokenSize` gives each positive numerator
+its own batch execution-time sum. For completed batches i, let C be executed
+context tokens (input minus reuse), I be context input including reuse, and
+E be measured execution microseconds:
+
+- `context_tps = 1e6 × Σ(C_i where C_i>0 and E_i>0) / Σ(E_i for those batches)`.
+- `context_tps_with_cache` applies the same rule independently to I.
+- The wall pair divides the same numerators by actual elapsed report time.
+  `wall_tps_report_interval_us` records that time per engine.
+
+For a fully cached batch, C can be zero while I is positive. Thus execution
+TPS denominators can differ; subtracting the two rates is not a cache-hit
+calculation. Window hit ratios now use the wall pair. A sum across engines
+is a wall-rate-weighted reuse ratio when their report intervals differ;
+it is not an exact pooled token ratio in that case. Successful-request
+snapshot totals remain a separate run-level view.
+
+`RtpLLMMetrics.cc` and the two loop reporters in the header define missing
+versus idle samples: no completed sample while an execution is active is
+silent; a fully idle interval reports zero. Each mock HTTP/Whale reader has
+an independent cursor and retains its wall origin through silent intervals.
+The first completed sample is included. Crash resets start a new generation
+and old completed callbacks cannot add tokens to that generation.
+
+`NormalExecutor.cc` times execution from scheduler handoff through dispatch
+(with process-start fallback); `MtpExecutor.cc` also uses the scheduler
+interval. It is not simply `model_forward_us`. Mock records actual elapsed
+time from batch execution start through simulated completion dispatch,
+including modeled delay and runtime overhead. Batch token membership is
+frozen at start: cancellation before start excludes work; cancellation after
+start does not erase executed work. Both numerator and duration publish
+atomically. Successful-request counters retain their original meaning.
+
+This alignment covers the mock's one-phase prefill batches and engine totals.
+The real `StreamGroups.h` supports execution slices and batch multiplicity;
+mock does not model chunked prefill/beam execution or emit per-priority TPS.
+Compare real engine totals (sum priority buckets where present). Simulated
+execution time is not evidence of absolute GPU throughput. Decode TPS was
+not changed or certified by this prefill migration.
+
+Consumers preserve separate execution and wall curves. Elastic throughput
+checks use wall TPS. `compare_ab.py --require-aligned-prefill-tps` rejects
+legacy/unknown contracts, missing steady-window samples and windows without
+prefill work. Even without this flag, mixed contracts are rejected. Capture
+both versions with aligned producers/collectors and matching workload, and
+use full output fetching; old raw captures cannot be repaired by renaming.
+The aggregator infers the contract from the new measured-window series;
+deploy a single producer revision per experiment rather than mixed fleets.
+
+Verification on 2026-09-21:
+
+- 191 Python tests across collector/runtime/telemetry/migration/cache/twin,
+  elastic scenarios and the prefill contract. These cover deliberately
+  unequal execution denominators, wall hit ratios, missing samples and both
+  accepting and rejecting gate paths.
+- 49 remote Java tests passed on host 111, run `20260921_070951.`, job
+  `tps-final`; after adjusting Whale's wall endpoint to follow its atomic
+  snapshot, the 30 TPS/Whale tests passed again (`tps-clock-final`).
+- Deterministic ledger tests cover ratio-of-sums, zero-compute batches,
+  long-step silence, first sample, independent observers and crash reset.
+  Integration tests cover HTTP role sums, cancellation and Whale parity.
+- No live GPU comparison or production TPS benchmark was run.

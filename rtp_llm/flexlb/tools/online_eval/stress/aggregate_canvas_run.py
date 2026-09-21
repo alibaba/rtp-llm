@@ -918,8 +918,8 @@ else:
 mock_payload = load_json("mock.json") or {}
 # cache_saved_tokens：KV 复用收益量化（20260901）——引擎 final_snapshot
 # 的累计 hit_tokens_total（getSnapshot 累计键，永不 drain；consolidate
-# live fetch 落 mock.json）跨引擎求和。与 mock 自报 context_tps_with_cache
-# − context_tps 的窗口差值互为印证（累计总量 vs 瞬时速率）。旧 run 无
+# live fetch 落 mock.json）跨引擎求和。与 mock 自报 context_wall_tps_with_cache
+# − context_wall_tps 的窗口差值互为印证（累计总量 vs 瞬时速率）。旧 run 无
 # 该键 → None（数据缺失标注，不误报 0）。
 cache_saved_tokens_calc = None
 _fs_snapshot = (
@@ -2230,16 +2230,13 @@ for _side, _role_tag in (("p", "prefill"), ("d", "decode")):
                 "sample_window_s": 5,
             }
 
-# ---- mock 自报生产口径 TPS 集群级时序（mock_tps_ts，20260901）----
-# rtp_llm_* 系列（生产同名指标，纯完成事件记账；/metrics scrape 先
-# drain 再快照 → 窗口 = scrape 间隔，G1 轮询 1s → 值即 tokens/s）经
-# G1 白名单进 per-engine 时序文件。这里按指标名跨引擎同时间戳求和成
-# 集群级行序列：一次 scrape 对全部引擎统一 drain，三指标同 ts；role
-# 不拆（prefill 桶只含 context 对、decode 桶只含 generate，跨引擎
-# 合并即集群口径）。旧 run（白名单未含该系列）→ 空行 → 报告层省略。
+# Prefill execution TPS and wall TPS use different clocks. Preserve both;
+# cache-hit ratios must use the wall pair, which shares one denominator.
 _TPS_COL_NAMES = {
     "rtp_llm_context_tps": "context_tps",
     "rtp_llm_context_tps_with_cache": "context_tps_with_cache",
+    "rtp_llm_context_wall_tps": "context_wall_tps",
+    "rtp_llm_context_wall_tps_with_cache": "context_wall_tps_with_cache",
     "rtp_llm_generate_tps": "generate_tps",
 }
 _tps_by_ts = defaultdict(dict)
@@ -2305,8 +2302,8 @@ kv_blocks_ts_by_role = {
 #     跨引擎同拍求和后同法差分。空 bh 请求 0/0 自然不贡献。只有
 #     prefill 引擎跑准入记账，但两 counter 同记账点，role 不拆。
 #   口径 3｜engine token 级（实际）：ΣhitTokens/Σil（对齐生产 reuse/
-#     input）。时序从 mock_tps_ts 逐窗导出 (context_tps_with_cache −
-#     context_tps)/context_tps_with_cache（P 完成事件记账，两列同窗
+#     input）。时序从 mock_tps_ts 逐窗导出 (context_wall_tps_with_cache −
+#     context_wall_tps)/context_wall_tps_with_cache（P 批执行记账，两列共享 wall 分母
 #     口径自洽）；run 级 = cache_saved_tokens（Σ引擎 hit_tokens_total）
 #     ÷ ok_input_tokens（client ok 行 Σil，完成请求口径）。
 # 差值语义（报告层标注）：master_routing − engine_token = 调度损耗
@@ -2379,8 +2376,8 @@ _engine_key_windows, _engine_key_run = _counter_pair_ratio(
 # 吞吐，差值即复用节省占比）。
 _engine_token_windows = []
 for _tps_row in mock_tps_ts:
-    _wc = _tps_row.get("context_tps_with_cache")
-    _nc = _tps_row.get("context_tps")
+    _wc = _tps_row.get("context_wall_tps_with_cache")
+    _nc = _tps_row.get("context_wall_tps")
     if isinstance(_wc, (int, float)) and isinstance(_nc, (int, float)) and _wc > 0:
         _engine_token_windows.append((_tps_row["t"], max(0.0, _wc - _nc) / _wc))
 _engine_token_run = None
@@ -2909,6 +2906,11 @@ out = {
     "meta": {
         "run_dir": os.path.basename(run_dir),
         "fetch_output_stream": fetch_output_stream,
+        # New HTTP producers expose the measured window. Do not mark legacy
+        # captures aligned merely because they were reprocessed by new code.
+        "prefill_tps_contract": "execution_us_v1" if _ts_role_ip_split(
+            mock_per_engine_ts, "rtp_llm_wall_tps_report_interval_us"
+        ) else "legacy_or_unknown",
         **_meta_conditions,
     },
     "summary": {
@@ -2932,8 +2934,7 @@ out = {
         "error_qps": error_qps_calc,
         "completed_qps": completed_qps_calc,
         # client 侧 token 吞吐（完成请求口径，20260901）：ok 行 Σil/Σol
-        # ÷ elapsed；与 mock 自报 rtp_llm_* 生产口径对表（mock 侧为
-        # 完成事件记账的 1s 窗口值，client 侧为全程平均）。
+        # ÷ elapsed；仅可与 wall TPS 做吞吐趋势对照。执行 TPS 分母不同。
         "input_token_tps": input_token_tps_calc,
         "output_token_tps": output_token_tps_calc,
         # KV 复用收益量化（20260901）：引擎累计 Σhit_tokens_total

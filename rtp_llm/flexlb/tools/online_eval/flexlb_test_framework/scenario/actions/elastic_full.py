@@ -399,7 +399,7 @@ def steady(ctx, params, deadline):
             for n, r in s["engines"].items()
         }.items():
             metric = (
-                "rtp_llm_context_tps" if role == "prefill" else "rtp_llm_generate_tps"
+                "rtp_llm_context_wall_tps" if role == "prefill" else "rtp_llm_generate_tps"
             )
             vals = points(ss, [name], metric, tail)[name]
             total += sum(v for _, v in vals) / len(vals)

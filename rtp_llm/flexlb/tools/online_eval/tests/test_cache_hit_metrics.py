@@ -36,8 +36,8 @@ _ROUTE_TOTAL = (
 )
 _KEY_HITS = "mock_engine_cache_key_hits_total{" + _P1 + "}"
 _KEY_REQ = "mock_engine_cache_keys_requested_total{" + _P1 + "}"
-_CTX_TPS = "rtp_llm_context_tps{" + _P1 + "}"
-_CTX_WC = "rtp_llm_context_tps_with_cache{" + _P1 + "}"
+_CTX_TPS = "rtp_llm_context_wall_tps{" + _P1 + "}"
+_CTX_WC = "rtp_llm_context_wall_tps_with_cache{" + _P1 + "}"
 
 
 def _run(cmd, cwd):
@@ -193,6 +193,12 @@ def _write_full_run(run_dir):
                 },
             }
         )
+    for row in per_engine:
+        row["metrics"].update({
+            "rtp_llm_context_tps{" + _P1 + "}": 3000,
+            "rtp_llm_context_tps_with_cache{" + _P1 + "}": 1000,
+            "rtp_llm_wall_tps_report_interval_us{" + _P1 + "}": 1000000,
+        })
     with gzip.open(run_dir / "mock_per_engine_timeseries.json.gz", "wt") as f:
         json.dump(per_engine, f)
     _write_engine_events(run_dir, 3)

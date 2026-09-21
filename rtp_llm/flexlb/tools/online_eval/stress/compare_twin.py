@@ -94,9 +94,8 @@ DISPATCH_REASONS = ("predicted_execution_cap", "batch_full", "fixed_window_timeo
 # timer suffixes (_count/_sum/_max/_total), in order; wide-format column
 # names and long-format metric names go through the same table.
 PROM_SERIES_CANDIDATES = {
-    "context_tps": ("context_wall_tps", "rtp_llm_context_tps", "context_tps"),
+    "context_tps": ("rtp_llm_context_tps", "context_tps"),
     "context_tps_with_cache": (
-        "context_wall_tps_with_cache",
         "rtp_llm_context_tps_with_cache",
         "context_tps_with_cache",
     ),
@@ -1185,10 +1184,10 @@ def synthesize_real_inputs(side, out_dir):
                 v = v * scale
             wide_rows.setdefault(round(t, 1), {})[name] = round(v, 4)
 
-    # TPS (production wall-caliber names), kv, cache-hit ratio series
+    # TPS (execution denominator for prefill), kv, cache-hit ratio series
     tps_map = {
-        "context_tps": "context_wall_tps",
-        "context_tps_with_cache": "context_wall_tps_with_cache",
+        "context_tps": "rtp_llm_context_tps",
+        "context_tps_with_cache": "rtp_llm_context_tps_with_cache",
         "generate_tps": "generate_wall_tps",
     }
     for internal, col in tps_map.items():

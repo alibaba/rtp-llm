@@ -300,7 +300,7 @@ sources: merged into the component JSON and then deleted, same treatment as
 
 | File (pre-consolidation) | Source | Lands in |
 |---|---|---|
-| `mock_metrics_per_engine.prom` | mock control port (`MOCK_BASE_GRPC_PORT-1`) `/metrics?per_engine=true`; the poller keeps only the analyzer-consumed series per engine — the queue-depth pair (`rtp_llm_running_stream_size` / `rtp_llm_wait_stream_size`), the production-caliber TPS trio (`rtp_llm_context_tps` / `rtp_llm_context_tps_with_cache` / `rtp_llm_generate_tps`), the KV v2 block-pool family (`rtp_llm_kv_cache_pool_total_blocks` / `rtp_llm_kv_cache_pool_available_blocks` / `mock_engine_held_blocks` / `mock_engine_referenced_blocks` + `mock_engine_cache_evictions_total` / `kv_admission_fails_total` / `lack_mem_rejects_total` / `decode_reuse_blocks_total`) and the cache key-hit pair (`mock_engine_cache_key_hits_total` / `mock_engine_cache_keys_requested_total`, mock cumulative key counts) — see `MOCK_KEEP_SERIES` for the current whitelist (aggregate `mock_tps_ts` / `kv_blocks_ts_by_role` / `cache_hit_ts` → the report-layer 2.3 / 5. KV / 5c cache hit-rate panels; no dead keys; bounded whitelist), each sample appended after a `# ts=<epoch_ms>` separator (size depends on engine count and role) | `mock_per_engine_timeseries.json.gz` (A-split) |
+| `mock_metrics_per_engine.prom` | mock control port (`MOCK_BASE_GRPC_PORT-1`) `/metrics?per_engine=true`; the poller keeps only the analyzer-consumed series per engine — the queue-depth pair (`rtp_llm_running_stream_size` / `rtp_llm_wait_stream_size`), the execution TPS trio (`rtp_llm_context_tps` / `rtp_llm_context_tps_with_cache` / `rtp_llm_generate_tps`), the prefill wall TPS pair and report interval (`rtp_llm_context_wall_tps*`, `rtp_llm_wall_tps_report_interval_us`), the KV v2 block-pool family (`rtp_llm_kv_cache_pool_total_blocks` / `rtp_llm_kv_cache_pool_available_blocks` / `mock_engine_held_blocks` / `mock_engine_referenced_blocks` + `mock_engine_cache_evictions_total` / `kv_admission_fails_total` / `lack_mem_rejects_total` / `decode_reuse_blocks_total`) and the cache key-hit pair (`mock_engine_cache_key_hits_total` / `mock_engine_cache_keys_requested_total`, mock cumulative key counts) — see `MOCK_KEEP_SERIES` for the current whitelist (aggregate `mock_tps_ts` / `kv_blocks_ts_by_role` / `cache_hit_ts` → the report-layer 2.3 / 5. KV / 5c cache hit-rate panels; no dead keys; bounded whitelist), each sample appended after a `# ts=<epoch_ms>` separator (size depends on engine count and role) | `mock_per_engine_timeseries.json.gz` (A-split) |
 | `master_prometheus_timeseries.prom` | management port `/actuator/prometheus` (fallback `/prometheus`), whitelisted to the analyzer-consumed series (`flexlb_app_cache_*`, `flexlb_app_flexlb_batcher_queue_size`, `flexlb_app_routing_queue_length`, `flexlb_app_flexlb_inflight_max_age_ms`, `flexlb_app_engine_balancing_master_dispatch_reason_total`, `jvm_memory_used` / `jvm_gc_pause` / `process_cpu` / `system_cpu`), same `# ts=` grouping | `master.json` `prometheus_timeseries` |
 | `master_inflight_timeseries.jsonl` | master HTTP port `/rtp_llm/inflight_status`, one JSON line `{"ts_epoch_ms", "inflight"}` per second | `master.json` `inflight_timeseries` |
 | `process_usage_timeseries.txt` | `ps -o pid,%cpu,rss,etime` over the mock / master / load-client JVM pids (`ts_epoch_ms=... label=... pid=... cpu_pct=... rss_kb=... etime=...` kv lines; exited pids tolerated) | `run_meta.json` `process_usage` |
@@ -501,9 +501,10 @@ flexlb-mock-engine README):
   gauges against a recent-key window, not this counter pair.
 - **engine token-level (actual)** — "ΣhitTokens / Σ input tokens": run
   level = `summary.cache_saved_tokens` ÷ ok-row Σinput_len; the timeline
-  derives `(context_tps_with_cache − context_tps) / context_tps_with_cache`
-  per `mock_tps_ts` window (engine-side P-completion accounting, so numerator
-  and denominator share the window). Aligns with production reuse/input.
+  derives `(context_wall_tps_with_cache − context_wall_tps) / context_wall_tps_with_cache`
+  per `mock_tps_ts` window (executed-batch tokens, including work cancelled
+  after start; both rates share the wall interval). Execution TPS has separate
+  denominators and must not be used for this ratio.
 
 The 5c panels render: (1) "master routing vs engine execution" dual line —
 the gap = **scheduling loss** (the master matched a prefix but the engine did
@@ -565,3 +566,15 @@ authorized real run. The exact same fixed checkout must contain parent and child
 do not bypass the parent or copy files into a running revision. Grade is passed to
 both child listing and execution and recorded in the manifest/results. A mismatched
 grade or an execution/cleanup error cannot be accepted as a green result.
+
+### Prefill TPS version gate
+
+Use `compare_ab.py --run-a <baseline> --run-b <candidate>
+--require-aligned-prefill-tps --steady-lo <seconds> --steady-hi <seconds>`
+with matching trace/configuration and full output fetching. The flag requires
+`meta.prefill_tps_contract=execution_us_v1`, finite steady-window samples
+for both execution and wall pairs, and nonzero prefill work. A mixed old/new
+contract is rejected even without the flag. Recollect legacy captures; simply
+reprocessing old files cannot repair their denominators. Execution TPS measures
+simulated execution efficiency; wall TPS measures delivered engine throughput.
+The flag certifies prefill accounting inputs, not GPU equivalence or decode TPS.
