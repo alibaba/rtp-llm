@@ -206,9 +206,14 @@ def _stream_is_capturing() -> bool:
 
 
 
+from .._dispatch_quant_pack_triton import (
+    dispatch_payload_layout,
+    quant_pack_dispatch_payload,
+    view_dispatch_payload,
+)
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
-from .local_loop import LocalLoopStrategy
 from .grouped_fp4 import GroupedFP4Strategy, _has_fp8_fp4_grouped_kernel
+from .local_loop import LocalLoopStrategy
 
 
 # ACCL-EP's intranode dispatch kernel has a compile-time switch over
@@ -282,6 +287,8 @@ class _A2DeferredHalves:
 @register_strategy
 class DeepEPStrategy(RoutedExpertsStrategy):
     name = "deepep"
+    # Shared across layers: decode AG/AR payload buffers are sequential.
+    _sm120_fixed_ep_ws_cache: dict = {}
 
     def __init__(self, cfg: MoeCfg):
         super().__init__(cfg)
@@ -569,9 +576,60 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             handle,
         )
         return y_combined.float()
+
+    def _ensure_sm120_fixed_ep_workspace(
+        self,
+        n_pad: int,
+        world: int,
+        d: int,
+        topk: int,
+        device: torch.device,
+    ) -> dict:
+        """Reuse AG / ReduceScatter payload buffers so capture bakes stable pointers."""
+        key = (n_pad, world, d, topk, device.index)
+        ws = getattr(self, "_sm120_fixed_ep_ws", None)
+        if getattr(self, "_sm120_fixed_ep_ws_key", None) == key and ws is not None:
+            return ws
+        cached = DeepEPStrategy._sm120_fixed_ep_ws_cache.get(key)
+        if cached is not None:
+            self._sm120_fixed_ep_ws = cached
+            self._sm120_fixed_ep_ws_key = key
+            return cached
+        payload_bytes, packed, _, _, _ = dispatch_payload_layout(d, topk)
+        local_payload = torch.empty(
+            (n_pad, payload_bytes), dtype=torch.uint8, device=device
+        )
+        gathered = torch.empty(
+            (world * n_pad, payload_bytes), dtype=torch.uint8, device=device
+        )
+        partial = torch.empty(
+            (world * n_pad, d), dtype=torch.float32, device=device
+        )
+        local_out = torch.empty((n_pad, d), dtype=torch.float32, device=device)
+        ws = {
+            "packed": packed,
+            "local_payload": local_payload,
+            "gathered": gathered,
+            "local_views": view_dispatch_payload(local_payload, d, topk, packed),
+            "gathered_views": view_dispatch_payload(gathered, d, topk, packed),
+            "partial": partial,
+            "local_out": local_out,
+        }
+        DeepEPStrategy._sm120_fixed_ep_ws_cache[key] = ws
+        self._sm120_fixed_ep_ws = ws
+        self._sm120_fixed_ep_ws_key = key
+        return ws
+
     def _forward_sm120_fixed_ep(
         self, x, weights, indices, pad_floor: int | None = None
     ) -> torch.Tensor:
+        """SM120 decode MoE with DP: AllGather dispatch + ReduceScatter combine.
+
+        Local FP8 quant is fused with pad/pack, then one AllGather moves
+        ``(fp8 x, UE8M0 scale, weights, ids)``. Non-local ids become -1 inside
+        ``recompute_topk_ids_sum_expert_count``. Combine ReduceScatters the
+        fp32 partials so each DP rank receives only its own token rows.
+        """
         if os.environ.get("DSV4_DIAG") and _DIAG_FE[0] < 10:
             try:
                 if int(x.size(0)) > 4:
@@ -584,72 +642,53 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             except Exception:
                 pass
         dist = torch.distributed
-        group = dist.group.WORLD; world = dist.get_world_size(group)
-        rank = dist.get_rank(group)
+        group = dist.group.WORLD
+        world = dist.get_world_size(group)
         n, d = x.shape
         topk = indices.size(1)
-        x_bytes = d * x.element_size()
-        weight_bytes = topk * weights.element_size()
         # Pad every rank's payload to a rank-invariant token count so the
-        # all_reduce shapes always match, even when some ranks execute the
-        # forward during a CUDA graph capture while others run it eagerly
-        # (mismatched collectives would otherwise hang or read garbage).
+        # AllGather / ReduceScatter shapes always match, even when some ranks
+        # execute the forward during a CUDA graph capture while others run it
+        # eagerly (mismatched collectives would otherwise hang or read garbage).
         # pad_floor: capture callers pass a small floor — decode graphs capture
         # with n = bs*(sp+1) rows (4 at bs=1), and padding those to
-        # max_tokens_per_rank (4096) multiplied every replayed MoE into two
-        # ~70/268 MB all-reduces per layer (~43 GB/step) and dominated decode
-        # GPU time. Captured n is uniform across ranks, so a pad derived from
-        # max(floor, n) stays rank-invariant there; the eager fallback (default
-        # floor) keeps the config floor for its mixed-shape safety contract.
+        # max_tokens_per_rank (4096) multiplied every replayed MoE into a
+        # world-sized AllGather plus a world*n_pad ReduceScatter per layer and
+        # dominated decode GPU time. Captured n is uniform across ranks, so a
+        # pad derived from max(floor, n) stays rank-invariant there; the eager
+        # fallback (default floor) keeps the config floor for its mixed-shape
+        # safety contract.
         floor = int(pad_floor) if pad_floor is not None else int(self.cfg.max_tokens_per_rank)
         n_pad = max(floor, n)
-        local_payload = torch.cat((x.contiguous().view(torch.uint8),
-            weights.contiguous().view(torch.uint8).reshape(n, weight_bytes),
-            indices.to(torch.int32).contiguous().view(torch.uint8).reshape(n, topk * 4)), dim=1)
-        if n < n_pad:
-            local_payload = torch.cat((local_payload,
-                local_payload.new_zeros(n_pad - n, local_payload.size(1))), dim=0)
-        # All-gather the rank-ordered payloads directly (was: zero-slot buffer
-        # + AllReduce(SUM) as a gather — the AR moves 2x the bytes of an AG and
-        # needed a world-sized zero-fill + copy_ per layer).
-        gathered = torch.empty((world * n_pad, local_payload.size(1)),
-                               dtype=torch.uint8, device=x.device)
+        ws = self._ensure_sm120_fixed_ep_workspace(
+            n_pad, world, int(d), int(topk), x.device
+        )
+        # Quantize locally and pack ``(fp8 x, UE8M0 scale, weights, ids)``
+        # plus pad rows in one Triton launch, then one AllGather.
+        local_payload = ws["local_payload"]
+        gathered = ws["gathered"]
+        quant_pack_dispatch_payload(
+            x,
+            weights,
+            indices,
+            local_payload,
+            n_valid=n,
+            views=ws["local_views"],
+        )
         dist.all_gather_into_tensor(gathered, local_payload, group=group)
-        all_x = gathered[:, :x_bytes].contiguous().view(x.dtype).reshape(world * n_pad, d)
-        all_w = gathered[:, x_bytes:x_bytes + weight_bytes].contiguous() \
-            .view(weights.dtype).reshape(world * n_pad, topk)
-        all_i = gathered[:, x_bytes + weight_bytes:].contiguous().view(torch.int32) \
-            .to(torch.int64).reshape(world * n_pad, topk)
-        local_i = all_i - self.cfg.local_expert_start
-        valid = (local_i >= 0) & (local_i < self.cfg.n_local_experts)
-        local_w = all_w * valid.to(all_w.dtype)
-        local_i.clamp_(0, self.cfg.n_local_experts - 1)
-        # Tile the grouped GEMM into 512-row chunks so the flashinfer workspace
-        # does not balloon.  With the capture pad floor of 64 the loop runs
-        # ceil(world*64/512) = 1 tile for decode graphs; prefill-fallback pads
-        # still tile at 512-row chunks.  The fused-MoE workspace/tuning capacity
-        # must cover the POST-gather tile (world * n_pad rows), which exceeds the
-        # pre-gather per-rank budget cfg.max_tokens_per_rank for a 4-rank DP+EP decode
-        # capture at bs>=2 (undersizing it aborted cutlass_fused_moe natively).
-        # Declare the max tile bound once so every tile shares one stable workspace
-        # buffer (a single cache entry => a stable pointer baked into the graph).
-        MAX_TILES = 512
-        total_rows = world * n_pad
-        tile_cap = min(MAX_TILES, total_rows)
-        partial = torch.empty(total_rows, d, dtype=torch.float32, device=x.device)
-        for offset in range(0, total_rows, MAX_TILES):
-            end = min(offset + MAX_TILES, total_rows)
-            chunk_x = all_x[offset:end]
-            chunk_w = all_w[offset:end]
-            chunk_i = all_i[offset:end]
-            cli = chunk_i - self.cfg.local_expert_start
-            cv = (cli >= 0) & (cli < self.cfg.n_local_experts)
-            cw = chunk_w * cv.to(chunk_w.dtype)
-            cli.clamp_(0, self.cfg.n_local_experts - 1)
-            partial[offset:end] = self._sm120_grouped._forward_capture_sm120(
-                chunk_x, cw, cli, capacity_tokens=tile_cap).to(x.dtype).contiguous()
-        dist.all_reduce(partial, op=dist.ReduceOp.SUM, group=group)
-        return partial.view(world, n_pad, d)[rank][:n].float()
+        all_x, all_scale, all_w, all_i = ws["gathered_views"]
+        self._sm120_grouped._forward_sm120_deepgemm_masked(
+            all_x,
+            all_w,
+            all_i,
+            input_scale=all_scale,
+            expert_start_id=self.cfg.local_expert_start,
+            out=ws["partial"],
+        )
+        dist.reduce_scatter_tensor(
+            ws["local_out"], ws["partial"], op=dist.ReduceOp.SUM, group=group
+        )
+        return ws["local_out"][:n]
 
     def _forward_sm120_deepep_real(self, x, weights, indices) -> torch.Tensor:
         """Real deep_ep intranode dispatch + grouped FP4 compute + combine.

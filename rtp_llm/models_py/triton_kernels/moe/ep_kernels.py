@@ -530,35 +530,67 @@ def tma_align_input_scale(input_scale: torch.Tensor):
 @triton.jit
 def recompute_topk_ids_triton_kernel(
     topk_ids_ptr,
+    ids_stride0,
+    ids_stride1,
     adjusted_topk_ids_ptr,
+    adj_stride0,
+    adj_stride1,
     expert_count_ptr,
+    weights_ptr,
+    w_stride0,
+    w_stride1,
     current_expert_start_id,
     num_local_experts,
-    num_total,
+    num_tokens,
+    topk,
     BLOCK_SIZE: tl.constexpr,
+    HAS_WEIGHT: tl.constexpr,
 ):
-    token_indices = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(
-        0, BLOCK_SIZE
-    ).to(tl.int64)
-    mask = token_indices < num_total  # Mask out-of-bounds threads
+    flat = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE).to(
+        tl.int64
+    )
+    num_total = num_tokens * topk
+    mask = flat < num_total
+    token = flat // topk
+    k = flat % topk
 
-    # 1. Load
-    expert_id = tl.load(topk_ids_ptr + token_indices, mask=mask, other=-1)
+    # 1. Load (strided so AllGather payload views work)
+    expert_id = tl.load(
+        topk_ids_ptr + token * ids_stride0 + k * ids_stride1,
+        mask=mask,
+        other=-1,
+    )
 
     # 2. Adjust expert index
     adjusted = expert_id - current_expert_start_id
     valid = mask & (adjusted >= 0) & (adjusted < num_local_experts)
+    if HAS_WEIGHT:
+        weight = tl.load(
+            weights_ptr + token * w_stride0 + k * w_stride1,
+            mask=mask,
+            other=0.0,
+        )
+        valid = valid & (weight != 0)
 
     # 3. Store
     out = tl.where(valid, adjusted, -1)
-    tl.store(adjusted_topk_ids_ptr + token_indices, out, mask=mask)
+    tl.store(
+        adjusted_topk_ids_ptr + token * adj_stride0 + k * adj_stride1,
+        out,
+        mask=mask,
+    )
 
     # 4. Atomic add - use scalar value for efficiency
     tl.atomic_add(expert_count_ptr + adjusted, 1, mask=valid)
 
 
 def recompute_topk_ids_sum_expert_count(
-    topk_ids: torch.Tensor, current_expert_start_id: int, num_local_experts: int
+    topk_ids: torch.Tensor,
+    current_expert_start_id: int,
+    num_local_experts: int,
+    weights: torch.Tensor | None = None,
+    adjusted_out: torch.Tensor | None = None,
+    count_out: torch.Tensor | None = None,
 ):
     """
     Recompute topk_ids by subtracting current_expert_start_id and count expert tokens.
@@ -567,6 +599,10 @@ def recompute_topk_ids_sum_expert_count(
         topk_ids: Tensor of shape [num_tokens, topk] containing expert IDs
         current_expert_start_id: Starting expert ID to subtract
         num_local_experts: Number of local experts
+        weights: Optional ``[num_tokens, topk]`` router weights; zero slots
+            are treated as non-local (``-1``) so callers can skip a
+            separate ``torch.where``.
+        adjusted_out / count_out: Optional preallocated outputs.
 
     Returns:
         tuple: (adjusted_topk_ids, expert_count)
@@ -576,8 +612,14 @@ def recompute_topk_ids_sum_expert_count(
     num_total = num_tokens * topk
 
     # Create output tensors
-    adjusted_topk_ids = torch.empty_like(topk_ids)
-    expert_count = torch.zeros(num_local_experts, device=device, dtype=torch.int32)
+    adjusted_topk_ids = (
+        adjusted_out if adjusted_out is not None else torch.empty_like(topk_ids)
+    )
+    if count_out is None:
+        expert_count = torch.zeros(num_local_experts, device=device, dtype=torch.int32)
+    else:
+        expert_count = count_out
+        expert_count.zero_()
 
     # Configure triton kernel parameters
     # Use smaller block size for better vectorization when topk is large
@@ -586,15 +628,25 @@ def recompute_topk_ids_sum_expert_count(
     BLOCK_SIZE = triton.next_power_of_2(base_block_size)
 
     # Launch recompute kernel
+    w = weights if weights is not None else topk_ids
     grid_recompute = (triton.cdiv(num_total, BLOCK_SIZE),)
     recompute_topk_ids_triton_kernel[grid_recompute](
         topk_ids,
+        topk_ids.stride(0),
+        topk_ids.stride(1),
         adjusted_topk_ids,
+        adjusted_topk_ids.stride(0),
+        adjusted_topk_ids.stride(1),
         expert_count,
+        w,
+        w.stride(0),
+        w.stride(1),
         current_expert_start_id,
         num_local_experts,
-        num_total,
+        num_tokens,
+        topk,
         BLOCK_SIZE=BLOCK_SIZE,
+        HAS_WEIGHT=weights is not None,
     )
 
     return adjusted_topk_ids, expert_count

@@ -26,6 +26,7 @@ import torch
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     fp8_fp4_gemm_nt,
     m_grouped_fp8_fp4_gemm_nt_contiguous,
+    m_grouped_fp8_fp4_gemm_nt_masked,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.dsv4.const_cache import cached_zeroed
@@ -34,9 +35,13 @@ from rtp_llm.models_py.modules.dsv4.const_cache import cached_zeroed
 # sf_offsets.item() per layer per forward (each was a pipeline drain).
 # Default off = legacy host-counts path (byte-identical to pre-flag code).
 _GROUPED_FP4_ASYNC = os.environ.get("DSV4_GROUPED_FP4_ASYNC", "0") == "1"
+from rtp_llm.models_py.triton_kernels.common.activation import (
+    create_packed_scale_tensor,
+)
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     ep_gather,
     ep_scatter,
+    ep_scatter_v2,
     recompute_topk_ids_sum_expert_count,
 )
 from rtp_llm.models_py.utils.math import align, ceil_div
@@ -45,6 +50,7 @@ from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from .._silu_mul_fp8_quant_triton import (
     silu_mul_fp8_quant_packed,
     silu_mul_fp8_quant_packed_from_parts,
+    silu_mul_masked_fp8_quant_packed,
 )
 from ..warmup_sync import cuda_graph_warmup_forward_enabled
 from ...quant_layouts import FP4_BLOCK, FP8_BLOCK, prepare_fp4_weight_scale_for_deepgemm
@@ -93,30 +99,16 @@ def _dg_repack_tma_scale(plain, n_rows):
     base = torch.zeros((ncol, aligned_mn), dtype=torch.int32, device=plain.device)
     base[:, :n_rows] = packed.t()
     return base.transpose(-1, -2)[:n_rows, :]
-_SM120_FUSED_MOE_WORKSPACES = {}
 
 
 def _sm120_fused_moe_capacity(
     max_tokens_per_rank: int, input_rows: int, capacity_tokens: int = 0
 ) -> int:
-    """Token capacity for the SM120 fused-MoE workspace AND autotuner ceiling.
+    """Historical cutlass workspace capacity (kept for the CPU regression test).
 
-    flashinfer's ``cutlass_fused_moe`` sizes its workspace monotonically by
-    ``max_num_tokens`` and requires it to cover the largest runtime
-    ``input.shape[0]``; undersizing it (or ``tune_max_num_tokens``) makes the C++
-    runner abort natively during CUDA-graph capture (no Python exception, so it
-    surfaces as a silent rank SIGABRT).
-
-    On the fixed-EP path the kernel sees the POST-gather tile (``world * n_pad``
-    rows), which exceeds the PRE-gather per-rank budget ``max_tokens_per_rank``
-    (= ``max_generate_batch_size * (gen_num_per_cycle + 1)``) whenever
-    ``world * n_pad > budget`` -- e.g. a 4-rank DP+EP MTP-3 decode capture at bs>=2
-    (budget 16 vs a 32/64-row tile). The capacity is therefore the max of the
-    concrete input rows, the caller-declared post-gather tile bound, and the
-    budget-derived floor. The 512 clamp applies only to the budget term (it
-    matches the fixed-EP ``MAX_TILES`` tiling and preserves prefill/grid sizing);
-    ``input_rows``/``capacity_tokens`` are never clamped, so the actual tile is
-    always covered.
+    The SM120 capture path no longer sizes a flashinfer workspace — DeepGEMM
+    masked grouped GEMM is shape-driven. This helper still encodes the
+    post-gather tile contract the old ``cutlass_fused_moe`` path needed.
     """
     budget = min(max(int(max_tokens_per_rank), 1), 512)
     return max(int(input_rows or 0), int(capacity_tokens or 0), budget)
@@ -126,7 +118,8 @@ def _has_fp8_fp4_grouped_kernel() -> bool:
     """True iff the grouped FP4 routed-expert path should be used.
 
     Requires deep_gemm ≥ 2.4 (ships ``m_grouped_fp8_fp4_gemm_nt_contiguous``)
-    and an SM100 device.
+    and an SM100 device. SM120 also accepts the masked grouped kernel used
+    by decode capture, or flashinfer as a last-resort probe.
 
     ``DSV4_USE_GROUPED_FP4`` semantics:
       - unset / "auto": enable when the runtime supports the vLLM-style
@@ -142,6 +135,13 @@ def _has_fp8_fp4_grouped_kernel() -> bool:
         return False
     cap = torch.cuda.get_device_capability()
     if cap[0] == 12:
+        try:
+            import deep_gemm
+            if hasattr(deep_gemm, "m_grouped_fp8_fp4_gemm_nt_masked") or \
+                    hasattr(deep_gemm, "m_grouped_fp8_fp4_gemm_nt_contiguous"):
+                return True
+        except Exception:
+            pass
         try:
             from flashinfer.gemm import group_gemm_mxfp4_nt_groupwise
             from flashinfer import mxfp8_quantize, block_scale_interleave
@@ -215,50 +215,28 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             device=device,
         )
         # Bulk copy from stacked → repacked layout (one slice per dim,
-        # no per-expert iteration). Gate/up row order matters:
-        # - SM120 flashinfer forward splits `up, gate = [:inter], [inter:]`
-        #   (w3/up first).
-        # - The DeepGEMM body's silu_mul_fp8_quant_packed contract is
-        #   "Gate in [:inter], up in [inter:]" (w1/gate first) — so the
-        #   deepgemm backend MUST pack w1 first even on SM120, or gate/up
-        #   silently swap (q5c caught exactly this).
+        # no per-expert iteration). Gate/up row order is gate-first:
+        # DeepGEMM + silu_mul_fp8_quant_packed / masked silu all contract
+        # "Gate in [:inter], up in [inter:]" (w1 then w3). The old SM120
+        # flashinfer/cutlass path packed up-first; that path is gone.
         is_sm120 = torch.cuda.get_device_capability(device)[0] == 12
-        gate_first = (not is_sm120) or _DG_BACKEND == "deepgemm"
-        if gate_first:
-            self._w13[:, :inter].copy_(stacked_w1_w)
-            s13_raw[:, :inter].copy_(stacked_w1_s)
-            self._w13[:, inter:].copy_(stacked_w3_w)
-            s13_raw[:, inter:].copy_(stacked_w3_s)
-        else:
-            self._w13[:, :inter].copy_(stacked_w3_w)
-            s13_raw[:, :inter].copy_(stacked_w3_s)
-            self._w13[:, inter:].copy_(stacked_w1_w)
-            s13_raw[:, inter:].copy_(stacked_w1_s)
+        self._w13[:, :inter].copy_(stacked_w1_w)
+        s13_raw[:, :inter].copy_(stacked_w1_s)
+        self._w13[:, inter:].copy_(stacked_w3_w)
+        s13_raw[:, inter:].copy_(stacked_w3_s)
         self._w2.copy_(stacked_w2_w)
         s2_raw.copy_(stacked_w2_s)
         del stacked_w1_w, stacked_w1_s, stacked_w2_w, stacked_w2_s
         del stacked_w3_w, stacked_w3_s
         if is_sm120:
-            if _DG_BACKEND == "deepgemm":
-                # DeepGEMM backend: build ONLY the DeepGEMM-format scales
-                # (never both formats — HBM law; the flashinfer swizzled
-                # buffers below are unused on this path).
-                self._s13 = prepare_fp4_weight_scale_for_deepgemm(
-                    s13_raw, 2 * inter, D, E
-                )
-                self._s2 = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
-                self._s13_sm120 = self._s2_sm120 = None
-                self._s13_dense_t = self._s2_dense_t = None
-                torch.cuda.empty_cache()
-                return
-            from flashinfer import block_scale_interleave
-            self._s13_sm120 = block_scale_interleave(
-                s13_raw.view(torch.uint8)
-            ).reshape(E, 2 * inter, D // FP4_BLOCK)
-            self._s2_sm120 = block_scale_interleave(
-                s2_raw.view(torch.uint8)
-            ).reshape(E, D, inter // FP4_BLOCK)
-            self._s13 = self._s2 = None
+            # SM120 decode capture uses DeepGEMM masked grouped GEMM, and
+            # eager SM120 uses the contiguous DeepGEMM body. Both need
+            # DeepGEMM-format scales (never both formats — HBM law).
+            self._s13 = prepare_fp4_weight_scale_for_deepgemm(
+                s13_raw, 2 * inter, D, E
+            )
+            self._s2 = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
+            self._s13_sm120 = self._s2_sm120 = None
             self._s13_dense_t = self._s2_dense_t = None
             torch.cuda.empty_cache()
             return
@@ -444,6 +422,155 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         ep_gather(down_out, adjusted_topk_ids, weights, output_index, gather_out)
         return gather_out.float()
 
+    def _ensure_sm120_masked_workspace(
+        self, n: int, topk: int, e: int, d: int, inter: int,
+        alignment: int, device: torch.device,
+    ) -> dict:
+        """Reuse static masked buffers (bench DeepGemmFp4Fp8Experts pattern)."""
+        key = (n, topk, e, d, inter, alignment, device.index)
+        ws = getattr(self, "_sm120_masked_ws", None)
+        if getattr(self, "_sm120_masked_ws_key", None) == key and ws is not None:
+            return ws
+        packed = ceil_div(d // FP8_BLOCK, 4)
+        ws = {
+            "expert_x": torch.empty(
+                (e, alignment, d), dtype=torch.float8_e4m3fn, device=device
+            ),
+            # Zero once so unused TMA scale slots stay valid UE8M0 powers of 2.
+            "expert_x_scale": torch.zeros(
+                (e, packed, alignment), dtype=torch.int32, device=device
+            ).transpose(1, 2),
+            "gate_up": torch.empty(
+                (e, alignment, 2 * inter), dtype=torch.bfloat16, device=device
+            ),
+            "down_in": torch.empty(
+                (e, alignment, inter), dtype=torch.float8_e4m3fn, device=device
+            ),
+            "down_in_scale": create_packed_scale_tensor(
+                expert_num=e,
+                token_num_padded=alignment,
+                hidden_dim=2 * inter,
+                quant_group_size=FP8_BLOCK,
+                device=device,
+            ),
+            "down_out": torch.empty(
+                (e, alignment, d), dtype=torch.bfloat16, device=device
+            ),
+            "start_loc": torch.empty((e,), dtype=torch.int32, device=device),
+            "out_index": torch.empty((n, topk), dtype=torch.int32, device=device),
+            "adjusted": torch.empty((n, topk), dtype=torch.int32, device=device),
+            "masked_m": torch.empty((e,), dtype=torch.int32, device=device),
+            "gather": torch.empty((n, d), dtype=torch.float32, device=device),
+        }
+        self._sm120_masked_ws = ws
+        self._sm120_masked_ws_key = key
+        return ws
+
+    def _forward_sm120_deepgemm_masked(
+        self,
+        x,
+        weights,
+        indices,
+        input_scale: Optional[torch.Tensor] = None,
+        expert_start_id: int = 0,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """SM120 decode/capture MoE: DeepGEMM masked grouped FP8×FP4 GEMM.
+
+        Replaces flashinfer ``cutlass_fused_moe``. Layout matches the bench
+        ``DeepGemmFp4Fp8Experts._apply_masked``: cached ``[E, M_pad, K]``
+        buffers, ``ep_scatter_v2``, masked GEMM, fused SiLU+clamp+quant,
+        ``ep_gather`` into fp32 (no post-gather cast chain).
+        """
+        cfg = self.cfg
+        n, d = x.shape
+        e, inter = cfg.n_routed_experts, cfg.moe_inter_dim
+        device = x.device
+        try:
+            n_int = int(n)
+        except Exception:
+            n_int = 0
+        if n_int == 0:
+            if out is not None:
+                out.zero_()
+                return out
+            return torch.zeros((n, d), dtype=torch.float32, device=device)
+        if self._s13 is None or self._s2 is None:
+            raise RuntimeError(
+                "SM120 DeepGEMM masked MoE requires DeepGEMM-format weight "
+                "scales; setup_weights did not build _s13/_s2"
+            )
+        if input_scale is None:
+            a_fp8, a_scale = sgl_per_token_group_quant_fp8(
+                x if x.is_contiguous() else x.contiguous(),
+                group_size=FP8_BLOCK,
+                eps=1e-4,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=True,
+            )
+        else:
+            a_fp8, a_scale = x, input_scale
+        alignment = align(n_int, _GROUPED_ALIGNMENT)
+        expected_m = min(alignment, ceil_div(n_int * int(indices.size(1)), e))
+        ws = self._ensure_sm120_masked_workspace(
+            n_int, int(indices.size(1)), e, int(d), int(inter), alignment, device
+        )
+        adjusted_ids, masked_m = recompute_topk_ids_sum_expert_count(
+            indices,
+            current_expert_start_id=int(expert_start_id),
+            num_local_experts=e,
+            weights=weights,
+            adjusted_out=ws["adjusted"],
+            count_out=ws["masked_m"],
+        )
+        ep_scatter_v2(
+            a_fp8,
+            a_scale,
+            adjusted_ids,
+            alignment,
+            ws["start_loc"],
+            ws["expert_x"].view(e * alignment, d),
+            ws["expert_x_scale"],
+            ws["out_index"],
+            scale_ue8m0=True,
+        )
+        m_grouped_fp8_fp4_gemm_nt_masked(
+            (ws["expert_x"], ws["expert_x_scale"]),
+            (self._w13, self._s13),
+            ws["gate_up"],
+            masked_m,
+            expected_m,
+            recipe_a=(1, FP8_BLOCK),
+            recipe_b=(1, FP4_BLOCK),
+        )
+        silu_mul_masked_fp8_quant_packed(
+            ws["gate_up"],
+            ws["down_in"],
+            ws["down_in_scale"],
+            masked_m,
+            clamp_limit=cfg.swiglu_limit,
+            group_size=FP8_BLOCK,
+        )
+        m_grouped_fp8_fp4_gemm_nt_masked(
+            (ws["down_in"], ws["down_in_scale"]),
+            (self._w2, self._s2),
+            ws["down_out"],
+            masked_m,
+            expected_m,
+            recipe_a=(1, FP8_BLOCK),
+            recipe_b=(1, FP4_BLOCK),
+        )
+        gather_out = out if out is not None else ws["gather"]
+        ep_gather(
+            ws["down_out"].view(e * alignment, d),
+            adjusted_ids,
+            weights,
+            ws["out_index"],
+            gather_out,
+        )
+        return gather_out
+
     def _forward_sm120_deepgemm(self, x, weights, indices,
                                input_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
         """DSV4_MOE_FP4_BACKEND=deepgemm: SM120 expert compute on DeepGEMM's
@@ -584,7 +711,18 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
 
     def _forward_sm120(self, x, weights, indices,
                        input_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if _DG_BACKEND == "deepgemm":
+        if self._s13 is not None:
+            # Decode-sized eager calls take the same masked path as capture
+            # (no host count sync). Prefill / FP8-wire calls keep contiguous.
+            if input_scale is None:
+                try:
+                    n_int = int(x.size(0))
+                except Exception:
+                    n_int = -1
+                if 0 <= n_int <= 512:
+                    return self._forward_sm120_deepgemm_masked(
+                        x, weights, indices, input_scale=input_scale
+                    )
             return self._forward_sm120_deepgemm(x, weights, indices, input_scale)
         from flashinfer import block_scale_interleave, mxfp8_quantize
         from flashinfer.gemm import group_gemm_mxfp4_nt_groupwise
@@ -673,68 +811,28 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         output = torch.empty((n, d), dtype=torch.float32, device=device)
         ep_gather(down, adjusted_ids, weights, output_index, output)
         return output
-    def _get_sm120_fused_moe_workspace(self, device, capacity_tokens: int = 0) -> torch.Tensor:
-        from flashinfer.fused_moe import cutlass_fused_moe_workspace_size
-        from flashinfer.fused_moe.core import ActivationType
-        cfg = self.cfg
-        # Size for the capacity the caller actually needs (the POST-gather tile on
-        # the fixed-EP path), falling back to the pre-gather per-rank budget. The
-        # cache key carries max_tokens, so each distinct capacity gets its own
-        # stable buffer (one entry per captured batch size => a stable pointer
-        # baked into that graph, retained for replay).
-        max_tokens = _sm120_fused_moe_capacity(
-            cfg.max_tokens_per_rank, capacity_tokens, capacity_tokens)
-        key = (device.index, max_tokens, cfg.dim, cfg.moe_inter_dim,
-               cfg.n_routed_experts, cfg.n_activated_experts)
-        workspace = _SM120_FUSED_MOE_WORKSPACES.get(key)
-        if workspace is None:
-            workspace_bytes = cutlass_fused_moe_workspace_size(
-                max_tokens, cfg.dim, cfg.moe_inter_dim, cfg.n_routed_experts,
-                cfg.n_activated_experts, x_dtype=torch.float8_e4m3fn,
-                weight_dtype=torch.long, output_dtype=torch.bfloat16,
-                activation_type=ActivationType.Swiglu, use_mxfp8_act_scaling=True,
-                use_fused_finalize=False, device=device)
-            workspace = torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
-            _SM120_FUSED_MOE_WORKSPACES[key] = workspace
-        return workspace
-    def _forward_capture_sm120(self, x, weights, indices, capacity_tokens: int = 0) -> torch.Tensor:
-        if _DG_BACKEND == "deepgemm":
-            # The capture path reads the flashinfer-swizzled scale buffers,
-            # which setup_weights does NOT build under the deepgemm backend
-            # (HBM law) — route capture-mode forwards through deepgemm too.
-            return self._forward_sm120_deepgemm(x, weights, indices)
-        from flashinfer import mxfp8_quantize
-        from flashinfer.fused_moe import cutlass_fused_moe
-        from flashinfer.fused_moe.core import ActivationType
-        cfg = self.cfg
-        num_experts = cfg.n_routed_experts
-        # Capacity for BOTH the workspace and the autotuner ceiling must cover the
-        # ACTUAL rows the fused kernel processes (input.shape[0] == the post-gather
-        # tile on the fixed-EP path), not the pre-gather per-rank budget. Undersized
-        # capacity made cutlass_fused_moe abort natively at capture for bs>=2.
-        try:
-            _rows = int(x.shape[0])
-        except Exception:
-            _rows = 0
-        cap_tokens = _sm120_fused_moe_capacity(
-            cfg.max_tokens_per_rank, _rows, capacity_tokens)
-        fake_input_scale = torch.ones(num_experts, dtype=torch.float32, device=x.device)
-        swiglu_limit = torch.full_like(fake_input_scale, cfg.swiglu_limit)
-        output = torch.empty_like(x)
-        kernel_input, input_sf = mxfp8_quantize(x.contiguous(), is_sf_swizzled_layout=True)
-        cutlass_fused_moe(input=kernel_input,
-            token_selected_experts=indices.to(torch.int32).contiguous(),
-            token_final_scales=weights.float().contiguous(),
-            fc1_expert_weights=self._w13.view(torch.uint8).view(torch.long),
-            fc2_expert_weights=self._w2.view(torch.uint8).view(torch.long), output_dtype=torch.bfloat16,
-            quant_scales=[self._s13_sm120.view(torch.int32), fake_input_scale,
-                self._s2_sm120.view(torch.int32), fake_input_scale],
-            input_sf=input_sf, swiglu_limit=swiglu_limit, output=output,
-            use_mxfp8_act_scaling=True, use_fused_finalize=False, enable_pdl=False,
-            workspace_buffer=self._get_sm120_fused_moe_workspace(x.device, cap_tokens),
-            tune_max_num_tokens=cap_tokens,
-            activation_type=ActivationType.Swiglu)
-        return output.float()
+    def _forward_capture_sm120(
+        self,
+        x,
+        weights,
+        indices,
+        capacity_tokens: int = 0,
+        input_scale: Optional[torch.Tensor] = None,
+        expert_start_id: int = 0,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # Decode / CUDA-graph path: DeepGEMM masked grouped GEMM. Static
+        # [E, align(n, 128), K] layout, no host count sync. capacity_tokens is
+        # kept for the fixed-EP caller ABI; masked sizing is shape-driven.
+        del capacity_tokens
+        return self._forward_sm120_deepgemm_masked(
+            x,
+            weights,
+            indices,
+            input_scale=input_scale,
+            expert_start_id=expert_start_id,
+            out=out,
+        )
     def _forward_capture_topk(
         self,
         x: torch.Tensor,
