@@ -4,7 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Native Spring dispatch.* properties; validated at startup. Credentials are read separately. */
+/** Spring dispatch.* properties, including DISPATCH_* environment settings; validated at startup. */
 @Getter
 @Setter
 public class DispatchConfig {

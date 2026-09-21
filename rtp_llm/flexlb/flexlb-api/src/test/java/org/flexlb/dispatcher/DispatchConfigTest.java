@@ -7,6 +7,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.core.env.MapPropertySource;
+import org.springframework.core.env.StandardEnvironment;
 import org.springframework.mock.env.MockEnvironment;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 import uk.org.webcompere.systemstubs.jupiter.SystemStub;
@@ -23,6 +24,52 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DispatchConfigTest {
     @SystemStub
     private EnvironmentVariables credentials = new EnvironmentVariables("DISPATCH_ROUTING_TOKEN", "");
+
+    @Test
+    void dispatcherEnvironmentUsesExistingBindingAndValidation() {
+        credentials.set("DISPATCH_FE_POOL_SERVICE_ID", "fe");
+        credentials.set("DISPATCH_SUB_BATCH", "size:7");
+        credentials.set("DISPATCH_FE_ALLOCATION", "local");
+        credentials.set("DISPATCH_PRE_ASSIGN_BE", "false");
+        credentials.set("DISPATCH_BATCH_TIMEOUT_MS", "1234");
+        credentials.set("DISPATCH_BODY_READ_MARGIN_MS", "5678");
+        credentials.set("DISPATCH_DISCOVERY_FAILURE_GRACE_MS", "0");
+        credentials.set("DISPATCH_PROBE_PATH", "/health");
+        credentials.set("DISPATCH_MAX_AGGREGATE_REQUEST_BYTES", "1000000");
+        credentials.set("DISPATCH_MAX_AGGREGATE_RESPONSE_BYTES", "2000000");
+        credentials.set("DISPATCH_ROUTING_TOKEN", "secret");
+        credentials.set("DISPATCH_CONFIG", "{\"subBatch\":\"count:99\"}");
+        credentials.set("SERVER_PORT", "12345");
+        MockEnvironment env = environment();
+        DispatchConfig cfg = DispatcherConfiguration.loadAndValidate(env);
+        assertEquals("fe", cfg.getFePoolServiceId());
+        assertEquals(new SubBatchSpec(SubBatchSpec.Mode.SIZE, 7), cfg.getSubBatchSpec());
+        assertEquals(FeAllocation.LOCAL, cfg.getFeAllocation());
+        assertFalse(cfg.isPreAssignBe());
+        assertEquals(1234, cfg.getBatchTimeoutMs());
+        assertEquals(5678, cfg.getBodyReadMarginMs());
+        assertEquals(0, cfg.getDiscoveryFailureGraceMs());
+        assertEquals("/health", cfg.getProbePath());
+        assertEquals(1000000, cfg.getMaxAggregateRequestBytes());
+        assertEquals(2000000, cfg.getMaxAggregateResponseBytes());
+        assertEquals("secret", cfg.getTrustedRoutingToken());
+        assertFalse(env.containsProperty("dispatch.routing-token"));
+        assertFalse(env.containsProperty("dispatch.config"));
+        assertFalse(env.containsProperty("server.port"));
+        assertFalse(JsonUtils.toString(cfg).contains("secret"));
+        credentials.set("DISPATCH_BATCH_TIMEOUT_MS", "not-a-number");
+        assertThrows(RuntimeException.class, () -> DispatcherConfiguration.loadAndValidate(environment()));
+        credentials.set("DISPATCH_BATCH_TIMEOUT_MS", "0");
+        assertThrows(IllegalArgumentException.class, () -> DispatcherConfiguration.loadAndValidate(environment()));
+    }
+
+    private MockEnvironment environment() {
+        MockEnvironment env = new MockEnvironment();
+        env.getPropertySources().addFirst(new MapPropertySource(
+                StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME, Map.of()));
+        new DispatchEnvironmentPostProcessor().postProcessEnvironment(env, null);
+        return env;
+    }
 
     @Test
     void nativePropertiesAndEnvironmentCredentialUseOneValidatedConfiguration() {

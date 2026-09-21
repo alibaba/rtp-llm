@@ -1,9 +1,10 @@
 package org.flexlb.dispatcher;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.ServerSocket;
 import java.net.URI;
@@ -22,9 +23,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DispatcherStartupTest {
     @TempDir Path directory;
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     @Timeout(60)
-    void applicationMainUsesNativePropertiesAndAnEnvironmentCredential() throws Exception {
+    void applicationMainUsesEnvironmentSettingsWithCommandLineOverrides(boolean override) throws Exception {
         int port;
         try (var socket = new ServerSocket(0)) {
             port = socket.getLocalPort();
@@ -34,8 +36,13 @@ class DispatcherStartupTest {
                 Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "-cp", System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
                 "org.flexlb.Application", "--server.port=" + port, "--management.server.port=0",
-                "--flexlb.log.path=" + directory, "--dispatch.fe-pool-service-id=fe",
-                "--dispatch.sub-batch=count:2");
+                "--flexlb.log.path=" + directory);
+        if (override) {
+            builder.command().add("--dispatch.sub-batch=count:2");
+        }
+        Path config = directory.resolve("dispatcher.properties");
+        Files.writeString(config, "dispatch.sub-batch=size:99\n");
+        builder.command().add("--spring.config.additional-location=" + config.toUri());
         builder.environment().put("FLEXLB_CONFIG", """
                 {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
                  "grpcServer":{"shutdownQuietPeriodMs":1}}
@@ -46,8 +53,8 @@ class DispatcherStartupTest {
                    {"address":"be","protocol":"http","path":"/"}}],"hosts":{}}
                 """);
         builder.environment().put("DISPATCH_ROUTING_TOKEN", "startup-test-secret");
-        // Application.main deliberately disables Spring environment binding.
-        builder.environment().put("DISPATCH_SUB_BATCH", "size:99");
+        builder.environment().put("DISPATCH_FE_POOL_SERVICE_ID", "fe");
+        builder.environment().put("DISPATCH_SUB_BATCH", "size:1");
         Process process = builder.redirectErrorStream(true).redirectOutput(output.toFile()).start();
         try {
             var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port
@@ -68,8 +75,8 @@ class DispatcherStartupTest {
             assertTrue(response != null, "Application did not become reachable");
             assertEquals(200, response.statusCode(), response.body());
             var preview = new ObjectMapper().readTree(response.body());
-            assertEquals(2, preview.get("chunk_count").asInt());
-            assertEquals(2, preview.get("chunks").get(0).get("prompt_batch").size());
+            assertEquals(override ? 2 : 3, preview.get("chunk_count").asInt());
+            assertEquals(override ? 2 : 1, preview.get("chunks").get(0).get("prompt_batch").size());
             assertFalse(response.body().contains("startup-test-secret"));
         } finally {
             process.destroy();

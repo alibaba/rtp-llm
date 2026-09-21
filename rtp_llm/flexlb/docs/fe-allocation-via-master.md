@@ -17,13 +17,13 @@ Send `{"batch_count":5,"assign_be":true,"assign_fe":false}` for BE-only placemen
 ## HTTP dispatcher configuration
 
 ```sh
+export DISPATCH_FE_POOL_SERVICE_ID=your-fe-discovery-service
+export DISPATCH_SUB_BATCH=count:5
+export DISPATCH_FE_ALLOCATION=master
 export DISPATCH_ROUTING_TOKEN=your-shared-token
-java -jar flexlb-api.jar \
-  --dispatch.fe-pool-service-id=your-fe-discovery-service \
-  --dispatch.sub-batch=count:5 \
-  --dispatch.fe-allocation=master
+java -jar flexlb-api.jar
 ```
-Use native Spring `dispatch.*` command-line or configuration-file properties. FlexLB v3 disables Spring environment binding: `DISPATCH_FE_POOL_SERVICE_ID` and other `DISPATCH_*` setting variables do not configure Master, and `DISPATCH_CONFIG` is not read. Migrate settings to the properties above. The FE discovery name enables `/dispatcher` on the existing listener. The shared credential `DISPATCH_ROUTING_TOKEN` is read directly from the environment on both Master and FE; keep it out of command-line arguments.
+Set these variables in the platform's advanced environment settings. Ordinary Dispatcher settings also support native Spring `dispatch.*` command-line or configuration-file properties. Environment names use `DISPATCH_` followed by the uppercase property name with hyphens replaced by underscores; for example, `DISPATCH_PRE_ASSIGN_BE` and `DISPATCH_BATCH_TIMEOUT_MS`. Command-line properties override environment values, which override configuration-file values; all use the same binding and validation. This support is limited to Dispatcher and does not restore removed Master variables or `DISPATCH_CONFIG`. The FE discovery name enables `/dispatcher` on the existing listener. The shared credential `DISPATCH_ROUTING_TOKEN` is read directly from the environment on both Master and FE; keep it out of command-line arguments, which Master logs at startup.
 
 `count:N` balances at most N nonempty chunks; `size:N` caps items per chunk. `master` uses master FE allocation; `local` uses the local cursor. Discovered FE addresses are deduplicated before publication. Empty discovery can retain the old pool within `discoveryFailureGraceMs` (default 300000; zero disables retention); health probes continue. HTTP input defaults to 5MB via the `spring.codec.max-in-memory-size` property in [application.yml](../flexlb-api/src/main/resources/application.yml); aggregate requests/responses default to 128 MiB each, and each FE response to 16 MiB. Request accounting includes repeated envelopes; aggregate excess returns 413. Invalid allocation returns 400; unavailable master assignments return 503 without local fallback.
 
