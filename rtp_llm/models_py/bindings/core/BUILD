@@ -2,6 +2,22 @@ load("//:def.bzl", "rpm_library", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "gpu_block_copy",
+    srcs = ["GpuBlockCopy.cc"],
+    hdrs = ["GpuBlockCopy.h"],
+    deps = ["//rtp_llm/cpp/utils:profiling_scope"] + torch_deps() + select({
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/common/kernels:block_id_copy",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "types_hdr",
     hdrs = [
         "Types.h",
