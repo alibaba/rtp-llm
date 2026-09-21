@@ -71,9 +71,9 @@ GrammarKeyCpp jsonKey(const std::string& schema) {
 }
 
 const char* kSimpleSchema = R"({"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]})";
-const char* kSchemaA = R"({"type":"object","properties":{"aa":{"type":"integer"}},"required":["aa"]})";
-const char* kSchemaB = R"({"type":"object","properties":{"bb":{"type":"integer"}},"required":["bb"]})";
-const char* kSchemaC = R"({"type":"object","properties":{"cc":{"type":"integer"}},"required":["cc"]})";
+const char* kSchemaA      = R"({"type":"object","properties":{"aa":{"type":"integer"}},"required":["aa"]})";
+const char* kSchemaB      = R"({"type":"object","properties":{"bb":{"type":"integer"}},"required":["bb"]})";
+const char* kSchemaC      = R"({"type":"object","properties":{"cc":{"type":"integer"}},"required":["cc"]})";
 
 class BlockingCompile {
 public:
@@ -125,7 +125,7 @@ public:
     }
 
 private:
-    BlockingCompile&                 compile_;
+    BlockingCompile&                  compile_;
     std::shared_ptr<XGrammarBackend>& backend_;
 };
 
@@ -146,8 +146,7 @@ private:
     std::vector<std::thread>& threads_;
 };
 
-bool waitFor(const std::function<bool()>& predicate,
-             std::chrono::milliseconds budget = std::chrono::seconds(30)) {
+bool waitFor(const std::function<bool()>& predicate, std::chrono::milliseconds budget = std::chrono::seconds(30)) {
     const auto deadline = std::chrono::steady_clock::now() + budget;
     while (std::chrono::steady_clock::now() < deadline) {
         if (predicate()) {
@@ -159,8 +158,8 @@ bool waitFor(const std::function<bool()>& predicate,
 }
 
 std::vector<int64_t> measureEntryBytes(const std::vector<std::string>& schemas) {
-    auto config                 = grammarConfig();
-    config.compiler_cache_bytes = -1;
+    auto config                  = grammarConfig();
+    config.compiler_cache_bytes  = -1;
     auto                 backend = makeBackend(config);
     std::vector<int64_t> bytes;
     int64_t              seen = 0;
@@ -246,6 +245,61 @@ TEST(XGrammarBackendTest, CompileMalformedJsonSchemaIsInvalid) {
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.status().code(), absl::StatusCode::kInvalidArgument);
     EXPECT_FALSE(result.status().message().empty());
+}
+
+TEST(XGrammarBackendTest, InvalidSchemaDiagnosticsAreCachedForJsonAndReasoning) {
+    const std::vector<std::string> schemas = {
+        R"({"type":"String"})",
+        R"({"type":"object","properties":{"a":{"type":"String"}}})",
+        R"({"type":"string","enum":"a"})",
+        R"({"type":"object","properties":{"a":{"enum":1}}})",
+        R"({"type":"object","required":"a"})",
+        R"({"type":"object","required":true})",
+        R"({"type":"object","required":{"a":true}})",
+        R"({"type":"object","properties":{"a":{"type":"object","required":"b"}}})",
+    };
+    for (const auto& schema : schemas) {
+        for (bool reasoning : {false, true}) {
+            SCOPED_TRACE(schema);
+            auto backend = makeBackend();
+            auto key     = jsonKey(schema);
+            if (reasoning) {
+                key = {"structural_tag",
+                       R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
+                       R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":10},"end":"z"},)"
+                       R"({"type":"json_schema","json_schema":)"
+                           + schema + "}]}}"};
+            }
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                auto result = backend->compileNow(key);
+                EXPECT_EQ(result.status.code(), absl::StatusCode::kInvalidArgument) << result.status;
+                EXPECT_FALSE(result.status.message().empty());
+            }
+            EXPECT_EQ(backend->stats().compile_total, 1);
+            EXPECT_EQ(backend->stats().invalid_cache_size, 1);
+        }
+    }
+}
+
+TEST(XGrammarBackendTest, LegacySchemaRuntimeDiagnosticsAreInvalidOnlyForSchemaInputs) {
+    for (const std::string message :
+         {"Unsupported type \"String\"", "enum must be an array", "required must be an array"}) {
+        for (const std::string type : {"json", "structural_tag", "regex"}) {
+            SCOPED_TRACE(type + ": " + message);
+            auto backend = makeBackend();
+            backend->setCompileFnForTest(
+                [&](const GrammarKeyCpp&) -> GrammarCompileResult { throw std::runtime_error(message); });
+            const GrammarKeyCpp key{type, "fixture"};
+            const bool          invalid = type != "regex";
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                const auto result = backend->compileNow(key);
+                EXPECT_EQ(result.status.code(),
+                          invalid ? absl::StatusCode::kInvalidArgument : absl::StatusCode::kUnknown);
+                EXPECT_NE(std::string(result.status.message()).find(message), std::string::npos);
+            }
+            EXPECT_EQ(backend->stats().compile_total, invalid ? 1 : 2);
+        }
+    }
 }
 
 TEST(XGrammarBackendTest, CreateMatcherFromStructuralTagWithBoundedAnyText) {
@@ -371,12 +425,12 @@ TEST(XGrammarBackendTest, ValidAndInvalidVerdictsAreCached) {
 }
 
 TEST(XGrammarBackendTest, NonPositiveBoundedCompileSettingsFailFast) {
-    auto config = grammarConfig();
+    auto config               = grammarConfig();
     config.compile_timeout_ms = 0;
     EXPECT_THROW(makeBackend(config), std::invalid_argument);
 
-    config                      = grammarConfig();
-    config.compile_concurrency  = 0;
+    config                     = grammarConfig();
+    config.compile_concurrency = 0;
     EXPECT_THROW(makeBackend(config), std::invalid_argument);
 
     config                    = grammarConfig();
@@ -394,7 +448,7 @@ TEST(XGrammarBackendTest, TimeoutIsRetryableAndBackgroundCompileWarmsCache) {
     backend->setCompileFnForTest(compile.fn());
     ScopedRelease cleanup(compile, backend);
 
-    const auto key      = jsonKey(kSimpleSchema);
+    const auto key       = jsonKey(kSimpleSchema);
     auto       timed_out = backend->compileNow(key);
     EXPECT_EQ(timed_out.status.code(), absl::StatusCode::kResourceExhausted);
     EXPECT_EQ(backend->stats().compile_timeout, 1);
@@ -462,7 +516,7 @@ TEST(XGrammarBackendTest, InflightGaugeIsOneFromInsertionThroughCompileReport) {
         }
     });
 
-    GrammarCompileResult    result;
+    GrammarCompileResult     result;
     std::vector<std::thread> threads;
     ScopedJoin               cleanup(compile, threads);
     threads.emplace_back([&] { result = backend->compileNow(jsonKey(kSimpleSchema)); });
@@ -492,8 +546,7 @@ TEST(XGrammarBackendTest, FullCompileQueueRejectsWithoutCaching) {
     backend->setCompileFnForTest(compile.fn());
     ScopedRelease cleanup(compile, backend);
 
-    ASSERT_EQ(backend->compileNow(jsonKey("occupy-worker")).status.code(),
-              absl::StatusCode::kResourceExhausted);
+    ASSERT_EQ(backend->compileNow(jsonKey("occupy-worker")).status.code(), absl::StatusCode::kResourceExhausted);
     ASSERT_TRUE(compile.waitForEntered(1));
 
     bool saw_rejection = false;
@@ -510,7 +563,7 @@ TEST(XGrammarBackendTest, FullCompileQueueRejectsWithoutCaching) {
 }
 
 TEST(XGrammarBackendTest, AllocationFailureIsTransientAndNotCached) {
-    auto backend = makeBackend();
+    auto             backend = makeBackend();
     std::atomic<int> attempts{0};
     backend->setCompileFnForTest([&](const GrammarKeyCpp&) -> GrammarCompileResult {
         attempts.fetch_add(1, std::memory_order_relaxed);
@@ -526,7 +579,7 @@ TEST(XGrammarBackendTest, AllocationFailureIsTransientAndNotCached) {
 }
 
 TEST(XGrammarBackendTest, OrdinaryRuntimeFailureIsTransientAndNotCached) {
-    auto backend = makeBackend();
+    auto             backend = makeBackend();
     std::atomic<int> attempts{0};
     backend->setCompileFnForTest([&](const GrammarKeyCpp&) -> GrammarCompileResult {
         attempts.fetch_add(1, std::memory_order_relaxed);
@@ -638,7 +691,7 @@ TEST(XGrammarBackendTest, ByteBudgetEvictsLeastRecentlyUsedVerdict) {
 TEST(XGrammarBackendTest, OversizedVerdictIsNotCachedOrAllowedToExceedSharedBudget) {
     auto config                 = grammarConfig();
     config.compiler_cache_bytes = 1;
-    auto backend                = makeBackend(config);
+    auto             backend    = makeBackend(config);
     std::atomic<int> attempts{0};
     backend->setCompileFnForTest([&](const GrammarKeyCpp&) {
         attempts.fetch_add(1, std::memory_order_relaxed);

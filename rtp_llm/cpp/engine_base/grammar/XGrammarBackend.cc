@@ -39,11 +39,19 @@ bool isTransient(const GrammarCompileResult& result) {
     return !result.compiled && !isInvalid(result);
 }
 
-bool isExplicitGrammarParseError(const std::runtime_error& error) {
+bool isExplicitGrammarParseError(const GrammarKeyCpp& key, const std::runtime_error& error) {
     std::string message = error.what();
     std::transform(message.begin(), message.end(), message.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });
+    // Compatibility with compiler versions that do not use InvalidJSONSchemaError
+    // for these schema diagnostics. Keep unrelated runtime failures transient.
+    if ((key.key_type == "json" || key.key_type == "structural_tag")
+        && (message.find("unsupported type \"") != std::string::npos
+            || message.find("enum must be an array") != std::string::npos
+            || message.find("required must be an array") != std::string::npos)) {
+        return true;
+    }
     constexpr const char* markers[] = {
         "invalid json",
         "json parse",
@@ -106,8 +114,8 @@ std::shared_ptr<XGrammarBackend> XGrammarBackend::create(const std::string&     
         if (tokenizer_info.GetVocabSize() <= 0) {
             throw std::runtime_error("tokenizer vocab is empty");
         }
-        auto backend = std::shared_ptr<XGrammarBackend>(
-            new XGrammarBackend(tokenizer_info, opts, std::move(metrics_reporter)));
+        auto backend =
+            std::shared_ptr<XGrammarBackend>(new XGrammarBackend(tokenizer_info, opts, std::move(metrics_reporter)));
         RTP_LLM_LOG_INFO("XGrammarBackend::create: ready with serialized TokenizerInfo "
                          "(json_bytes=%zu, threads=%d)",
                          tokenizer_info_json.size(),
@@ -150,16 +158,15 @@ XGrammarBackend::Options XGrammarBackend::optionsFromConfig(const GrammarConfig&
         opts.verdict_cache_budget_bytes  = -1;
     } else {
         opts.total_cache_budget_bytes    = cfg.compiler_cache_bytes;
-        opts.compiler_cache_budget_bytes =
-            cfg.compiler_cache_bytes / 2 + cfg.compiler_cache_bytes % 2;
-        opts.verdict_cache_budget_bytes = cfg.compiler_cache_bytes / 2;
+        opts.compiler_cache_budget_bytes = cfg.compiler_cache_bytes / 2 + cfg.compiler_cache_bytes % 2;
+        opts.verdict_cache_budget_bytes  = cfg.compiler_cache_bytes / 2;
     }
     return opts;
 }
 
-XGrammarBackend::XGrammarBackend(const xgrammar::TokenizerInfo& tokenizer_info,
+XGrammarBackend::XGrammarBackend(const xgrammar::TokenizerInfo&  tokenizer_info,
                                  const XGrammarBackend::Options& options,
-                                 kmonitor::MetricsReporterPtr metrics_reporter):
+                                 kmonitor::MetricsReporterPtr    metrics_reporter):
     options_(options),
     metrics_reporter_(std::move(metrics_reporter)),
     tokenizer_info_(tokenizer_info),
@@ -241,8 +248,8 @@ void XGrammarBackend::storeResult(const GrammarKeyCpp& key, const GrammarCompile
         return;
     }
 
-    const auto id = key.id();
-    int64_t    bytes = kEntryOverheadBytes + 2 * static_cast<int64_t>(id.size());
+    const auto  id    = key.id();
+    int64_t     bytes = kEntryOverheadBytes + 2 * static_cast<int64_t>(id.size());
     std::string error_message;
     if (result.compiled) {
         bytes += static_cast<int64_t>(result.compiled->MemorySizeBytes());
@@ -310,8 +317,7 @@ void XGrammarBackend::InflightGuard::release() noexcept {
     try {
         std::lock_guard<std::mutex> lock(owner_.inflight_mutex_);
         owner_.inflight_.erase(id_);
-    } catch (...) {
-    }
+    } catch (...) {}
 }
 
 std::optional<GrammarCompileResult> XGrammarBackend::lookupVerdict(const std::string& id) const {
@@ -376,7 +382,7 @@ GrammarCompileResult XGrammarBackend::compileSync(const GrammarKeyCpp& key) {
     } catch (const std::invalid_argument& e) {
         result.status = absl::InvalidArgumentError(e.what());
     } catch (const std::runtime_error& e) {
-        result.status = isExplicitGrammarParseError(e) ?
+        result.status = isExplicitGrammarParseError(key, e) ?
                             absl::InvalidArgumentError(e.what()) :
                             absl::UnknownError(std::string("grammar compiler runtime failure: ") + e.what());
     } catch (const std::exception& e) {
@@ -490,8 +496,8 @@ GrammarCompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
     if (future.wait_for(std::chrono::milliseconds(options_.compile_timeout_ms)) != std::future_status::ready) {
         compile_timeout_.fetch_add(1, std::memory_order_relaxed);
         GrammarCompileResult timed_out;
-        timed_out.status = absl::ResourceExhaustedError(
-            "grammar compile exceeded " + std::to_string(options_.compile_timeout_ms) + "ms budget");
+        timed_out.status = absl::ResourceExhaustedError("grammar compile exceeded "
+                                                        + std::to_string(options_.compile_timeout_ms) + "ms budget");
         RTP_LLM_LOG_WARNING("xgrammar compile timeout: type=%s, len=%zu, timeout_ms=%d",
                             key.key_type.c_str(),
                             key.key_string.size(),
@@ -514,8 +520,7 @@ GrammarCompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
     } catch (...) {
         GrammarCompileResult broken;
         broken.status = absl::UnknownError("grammar compile aborted");
-        RTP_LLM_LOG_WARNING(
-            "xgrammar compile aborted: type=%s, len=%zu", key.key_type.c_str(), key.key_string.size());
+        RTP_LLM_LOG_WARNING("xgrammar compile aborted: type=%s, len=%zu", key.key_type.c_str(), key.key_string.size());
         reportOverload();
         return broken;
     }
@@ -532,9 +537,8 @@ absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>> XGrammarBackend::comp
 absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>> XGrammarBackend::createMatcherFromKey(const GrammarKeyCpp& key) {
     auto compiled_or = compile(key);
     if (!compiled_or.ok()) {
-        const std::string error = compiled_or.status().message().empty() ?
-                                      "unknown compile error" :
-                                      std::string(compiled_or.status().message());
+        const std::string error = compiled_or.status().message().empty() ? "unknown compile error" :
+                                                                           std::string(compiled_or.status().message());
         return absl::Status(compiled_or.status().code(), "Failed to compile " + key.key_type + " grammar: " + error);
     }
     return createMatcher(std::move(compiled_or.value()));
@@ -556,14 +560,14 @@ XGrammarBackend::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compil
 
 GrammarBackendStats XGrammarBackend::stats() const {
     GrammarBackendStats out;
-    out.compile_total    = compile_total_.load(std::memory_order_relaxed);
-    out.compile_invalid  = compile_invalid_.load(std::memory_order_relaxed);
-    out.compile_timeout  = compile_timeout_.load(std::memory_order_relaxed);
-    out.compile_rejected = compile_rejected_.load(std::memory_order_relaxed);
-    out.compile_dedup    = compile_dedup_.load(std::memory_order_relaxed);
-    out.cache_hit        = cache_hit_.load(std::memory_order_relaxed);
-    out.cache_miss       = cache_miss_.load(std::memory_order_relaxed);
-    out.invalid_hit      = invalid_hit_.load(std::memory_order_relaxed);
+    out.compile_total               = compile_total_.load(std::memory_order_relaxed);
+    out.compile_invalid             = compile_invalid_.load(std::memory_order_relaxed);
+    out.compile_timeout             = compile_timeout_.load(std::memory_order_relaxed);
+    out.compile_rejected            = compile_rejected_.load(std::memory_order_relaxed);
+    out.compile_dedup               = compile_dedup_.load(std::memory_order_relaxed);
+    out.cache_hit                   = cache_hit_.load(std::memory_order_relaxed);
+    out.cache_miss                  = cache_miss_.load(std::memory_order_relaxed);
+    out.invalid_hit                 = invalid_hit_.load(std::memory_order_relaxed);
     out.cache_evicted               = cache_evicted_.load(std::memory_order_relaxed);
     out.cache_oversized             = cache_oversized_.load(std::memory_order_relaxed);
     out.total_cache_budget_bytes    = options_.total_cache_budget_bytes;
@@ -637,7 +641,7 @@ void XGrammarBackend::reportOverload() const {
 }
 
 void XGrammarBackend::fillResidentGauges(RtpLLMGrammarMetricsCollector& collector,
-                                         std::optional<int64_t>          inflight) const {
+                                         std::optional<int64_t>         inflight) const {
     collector.total_cache_budget_bytes    = options_.total_cache_budget_bytes;
     collector.compiler_cache_budget_bytes = options_.compiler_cache_budget_bytes;
     collector.verdict_cache_budget_bytes  = options_.verdict_cache_budget_bytes;

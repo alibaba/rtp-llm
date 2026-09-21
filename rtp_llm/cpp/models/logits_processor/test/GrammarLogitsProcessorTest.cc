@@ -1,6 +1,7 @@
 // Unit tests for GrammarLogitsProcessor over a 128-char ASCII vocab.
 
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
@@ -10,6 +11,8 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -44,6 +47,44 @@ GrammarConfig grammarConfig(bool terminate_without_stop_token = true) {
 std::shared_ptr<XGrammarBackend> makeBackend(bool terminate_without_stop_token = true, int vocab_size = 128) {
     return XGrammarBackend::create(makeAsciiTokenizerInfo(vocab_size).SerializeJSON(),
                                    grammarConfig(terminate_without_stop_token));
+}
+
+TEST(LogitsProcessorFactoryTest, SchemaErrorsRemainInvalidParamsOnColdAndWarmCache) {
+    auto saved_backend = LogitsProcessorFactory::grammarBackend();
+    struct RestoreBackend {
+        std::shared_ptr<XGrammarBackend> saved;
+        ~RestoreBackend() {
+            LogitsProcessorFactory::grammarBackend() = saved;
+        }
+    } restore{saved_backend};
+    auto backend                             = makeBackend();
+    LogitsProcessorFactory::grammarBackend() = backend;
+    for (const std::string schema : {R"({"type":"String"})", R"({"enum":1})", R"({"type":"object","required":"x"})"}) {
+        auto input                          = std::make_shared<GenerateInput>();
+        input->generate_config              = std::make_shared<GenerateConfig>();
+        input->generate_config->json_schema = schema;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            auto result = LogitsProcessorFactory::createLogitsProcessors(input, 1, 1, 0);
+            ASSERT_FALSE(result.ok());
+            EXPECT_EQ(result.status().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_FALSE(result.status().ToString().empty());
+        }
+    }
+    EXPECT_EQ(backend->stats().compile_total, 3);
+    EXPECT_EQ(backend->stats().invalid_cache_size, 3);
+
+    auto input                          = std::make_shared<GenerateInput>();
+    input->generate_config              = std::make_shared<GenerateConfig>();
+    input->generate_config->json_schema = R"({"type":"object"})";
+    backend->setCompileFnForTest([](const GrammarKeyCpp&) -> GrammarCompileResult { throw std::bad_alloc(); });
+    auto result = LogitsProcessorFactory::createLogitsProcessors(input, 1, 1, 0);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::GRAMMAR_COMPILE_OVERLOADED);
+    backend->setCompileFnForTest(
+        [](const GrammarKeyCpp&) -> GrammarCompileResult { throw std::runtime_error("thread creation failed"); });
+    result = LogitsProcessorFactory::createLogitsProcessors(input, 1, 1, 0);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::UNKNOWN_ERROR);
 }
 
 struct ProcessorBundle {
@@ -369,8 +410,7 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusRollsBackEntireRejectedBatch) {
 TEST(GrammarLogitsProcessorTest, DegenerateSelfReferenceMasksEverythingAndRejectsCommit) {
     auto backend = makeBackend(/*terminate_without_stop_token=*/false);
     ASSERT_TRUE(backend);
-    auto proc = makeProcessorFromKey(backend,
-                                     {"json", R"json({
+    auto proc = makeProcessorFromKey(backend, {"json", R"json({
   "$ref": "#/definitions/Self",
   "definitions": {
     "Self": {"$ref": "#/definitions/Self"}
