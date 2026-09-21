@@ -58,7 +58,10 @@ cc_library(
     hdrs = [
         "ProfilingScope.h",
     ],
-    deps = torch_deps(),
+    deps = torch_deps() + select({
+        "//:using_cuda": ["@local_config_cuda//cuda:cuda_headers"],
+        "//conditions:default": [],
+    }),
     copts = copts(),
     visibility = ["//visibility:public"],
 )

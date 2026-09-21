@@ -116,11 +116,7 @@ public:
                    kmonitor::MetricsReporterPtr          metrics_reporter,
                    size_t                                extra_reserve_token_num = 0,
                    bool                                  pert_test               = false);
-    virtual ~GenerateStream() {
-        reportMetricOnce();
-        releaseResource();
-        stream_magic_ = 0;
-    }
+    virtual ~GenerateStream();
 
     bool isStreamAlive() const {
         return stream_magic_ == STREAM_MAGIC;

@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <cstdlib>
 #include <string>
 
@@ -131,6 +132,7 @@ void GenerateStateMachine::handleLoading() {
 }
 
 void GenerateStateMachine::handleRunning() {
+    RTP_LLM_PROFILE_SCOPE("state_machine.handle_running");
     // in pd sep case，kvcache could be released after remote load done.
     if (events_.has(StreamEvents::GenerateDone)) {
         status.store(StreamState::FINISHED, std::memory_order_release);
@@ -181,6 +183,7 @@ void GenerateStateMachine::handleRunning() {
 }
 
 void GenerateStateMachine::releaseResource() {
+    RTP_LLM_PROFILE_SCOPE("state_machine.release_resource");
     if (stream_cache_resource_->isResourceReleased()) {
         return;
     }

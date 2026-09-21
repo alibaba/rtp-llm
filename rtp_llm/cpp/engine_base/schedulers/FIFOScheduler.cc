@@ -97,11 +97,19 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     }
 
     schedule_trigger_ = false;
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("scheduler.active(waiting=%zu,running=%zu)",
+                                  waiting_streams_.size(), running_streams_.size());
 
     // LOADING_CACHE -> DONE/WAITING: error / load cache done
-    evaluateAndUpdateStreams(loading_cache_streams_);
+    {
+        RTP_LLM_PROFILE_SCOPE("scheduler.advance_loading");
+        evaluateAndUpdateStreams(loading_cache_streams_);
+    }
     // RUNNING -> DONE: error / finished
-    evaluateAndUpdateStreams(running_streams_);
+    {
+        RTP_LLM_PROFILE_SCOPE("scheduler.advance_running");
+        evaluateAndUpdateStreams(running_streams_);
+    }
 
     // WAITING -> RUNNING: can run
     // WAITING -> LOADING_CACHE: load cache ok
@@ -109,7 +117,10 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     // evaluateWaitingStreams advances only streams admitted in this round.
     // A pre-existing CanRun event from PD setup must not bypass admission.
     size_t prev_waiting_size = waiting_streams_.size();
-    evaluateWaitingStreams(waiting_streams_);
+    {
+        RTP_LLM_PROFILE_SCOPE("scheduler.admit_waiting");
+        evaluateWaitingStreams(waiting_streams_);
+    }
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
@@ -71,6 +72,7 @@ bool NormalGenerateStream::consumerReadyWithoutLock() const {
 }
 
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
+    RTP_LLM_PROFILE_SCOPE("output.build_generate_output");
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
@@ -219,6 +221,7 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
 }
 
 void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
+    RTP_LLM_PROFILE_SCOPE("output.update_result");
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     // TODO(xinfei.sxf) consider the case of pd-sep first token finished.
 

@@ -12,6 +12,10 @@ sampler_test_copts = [
     "-fno-access-control",
 ] + test_copts
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
 
 cc_library(
     name = "test_headers",
@@ -63,7 +67,10 @@ cc_test(
     copts = sampler_test_copts,
     deps = test_deps + [
         ":test_utils",
-    ],
+    ] + select({
+        "@//:using_cuda13_x86": [":cuda13_torch_nvshmem"],
+        "//conditions:default": [],
+    }),
     env = select({
         "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
