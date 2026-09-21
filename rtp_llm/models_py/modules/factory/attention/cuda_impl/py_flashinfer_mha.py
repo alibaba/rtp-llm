@@ -397,11 +397,14 @@ class PyFlashinferPrefillPagedAttnOp(object):
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
             self.prefill_wrapper._use_cuda_graph = True
             self.prefill_wrapper._qo_indptr_buf = qo_indptr
+            # The native metadata builder changes its tensor shapes to the
+            # active batch on replay. Separate views retain the capture shapes
+            # while sharing the same storage and fixed device addresses.
             self.prefill_wrapper._paged_kv_indptr_buf = (
-                self.fmha_params.decode_page_indptr_d
+                self.fmha_params.decode_page_indptr_d.view(-1)
             )
             self.prefill_wrapper._paged_kv_last_page_len_buf = (
-                self.fmha_params.paged_kv_last_page_len_d
+                self.fmha_params.paged_kv_last_page_len_d.view(-1)
             )
             self.prefill_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
             self.prefill_wrapper._fixed_batch_size = (
@@ -443,11 +446,53 @@ class PyFlashinferPrefillPagedAttnOp(object):
         return self.fmha_params
 
     def _plan_prefill_wrapper(self, qo_indptr: torch.Tensor) -> None:
+        kv_indptr = self.fmha_params.decode_page_indptr_d
+        last_page_len = self.fmha_params.paged_kv_last_page_len_d
+        active_batch_size = last_page_len.numel()
+        batch_size = qo_indptr.numel() - 1
+        if kv_indptr.numel() != active_batch_size + 1:
+            raise ValueError("Paged prefill KV metadata has inconsistent batch sizes")
+
+        if self.enable_cuda_graph:
+            graph_kv_indptr = self.prefill_wrapper._paged_kv_indptr_buf
+            graph_last_page_len = self.prefill_wrapper._paged_kv_last_page_len_buf
+            if (
+                active_batch_size > batch_size
+                or graph_kv_indptr.numel() != batch_size + 1
+                or graph_last_page_len.numel() != batch_size
+            ):
+                raise ValueError(
+                    "Paged prefill metadata exceeds the captured batch size"
+                )
+            if (
+                graph_kv_indptr.data_ptr() != kv_indptr.data_ptr()
+                or graph_last_page_len.data_ptr() != last_page_len.data_ptr()
+            ):
+                raise RuntimeError(
+                    "Paged prefill KV metadata was reallocated after capture"
+                )
+
+            if active_batch_size < batch_size:
+                # FlashInfer derives its batch size from qo_indptr. Inactive
+                # query slots must have empty KV ranges; passing shortened KV
+                # tensors makes the native planner read beyond their bounds.
+                graph_last_page_len[active_batch_size:].zero_()
+                graph_kv_indptr[active_batch_size + 1 :].copy_(
+                    kv_indptr[active_batch_size : active_batch_size + 1].expand(
+                        batch_size - active_batch_size
+                    ),
+                    non_blocking=True,
+                )
+            kv_indptr = graph_kv_indptr
+            last_page_len = graph_last_page_len
+        elif active_batch_size != batch_size:
+            raise ValueError("Paged prefill query and KV batch sizes must match")
+
         self.prefill_wrapper.plan(
             qo_indptr,
-            self.fmha_params.decode_page_indptr_d,
+            kv_indptr,
             self.fmha_params.page_indice_d,
-            self.fmha_params.paged_kv_last_page_len_d,
+            last_page_len,
             self.local_head_num,
             self.local_kv_head_num,
             self.head_dim_qk,
