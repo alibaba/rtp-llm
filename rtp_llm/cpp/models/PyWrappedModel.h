@@ -96,6 +96,9 @@ private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
+    bool sequence_parallel_padding_enabled_ = false;
+    GptModelInputs padSequenceParallelInputs(const GptModelInputs& inputs);
+
     // Helper functions to reduce code duplication
     torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs);
     torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
@@ -346,6 +349,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_                 = py_instance;
+    sequence_parallel_padding_enabled_ = py::hasattr(py_instance, "requires_sequence_parallel_padding")
+        && py_instance.attr("requires_sequence_parallel_padding").cast<bool>();
+    RTP_LLM_CHECK_WITH_INFO(!sequence_parallel_padding_enabled_ || !device_props_.enable_layer_micro_batch,
+                            "K3 SP requires ENABLE_LAYER_MICRO_BATCH=0");
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);
@@ -421,6 +428,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.position_id_len_factor = (description_.attention_conf.rope_config.style == RopeStyle::Mrope) ?
                                                   description_.attention_conf.rope_config.index_factor :
                                                   0;
+        if (py::hasattr(py_instance, "requires_token_position_ids")
+            && py_instance.attr("requires_token_position_ids").cast<bool>()) {
+            graph_params.position_id_len_factor = 1;
+        }
 
         // clang-format off
         // Decision table for num_tokens_per_bs:
@@ -470,6 +481,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
 
+        graph_params.sequence_parallel_size = sequence_parallel_padding_enabled_ ? params.parallelism_config.tp_size : 1;
         auto graph_runner =
             std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
         {

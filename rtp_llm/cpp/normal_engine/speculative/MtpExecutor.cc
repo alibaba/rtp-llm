@@ -360,6 +360,8 @@ void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_inp
 void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output,
                                                        ModelBase&       source,
                                                        int64_t          hidden_rows) {
+    RTP_LLM_CHECK_WITH_INFO(!uses_recurrent_mtp_ || model_output.mtp_target_hidden_states.defined(),
+                            "recurrent MTP requires explicit pre-norm model output");
     if (model_output.mtp_target_hidden_states.defined()) {
         RTP_LLM_CHECK_WITH_INFO(hidden_rows < 0 || model_output.mtp_target_hidden_states.size(0) == hidden_rows,
                                 "MTP target hidden output rows mismatch: got %ld, expected %ld",
@@ -694,6 +696,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     vocab_size_                 = params.model_config_.vocab_size;
     draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
     is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
+    uses_recurrent_mtp_ = propose_params->getEngineInitParams().model_config_.reuse_single_mtp_module;
     dspark_prefill_commit_only_ = is_dspark_ && role_type_ == RoleType::PREFILL;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
@@ -1745,7 +1748,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // DSpARK commit input was bound from the explicit target-forward output
     // above. Re-reading mutable Python model state here is both redundant and
     // invalid for CUDA graph replay, where Python is not executed.
-    if (!is_dspark_) {
+    if (!is_dspark_ && !uses_recurrent_mtp_) {
         maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     }
     broadcastPostRejectionInputs(model_input);

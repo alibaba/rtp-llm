@@ -61,6 +61,7 @@ def fused_recurrent_kda_fwd_kernel(
     SEQ_SIZE_PER_BLOCK: tl.constexpr,
     USE_GATE_IN_KERNEL: tl.constexpr,
     HAS_DT_BIAS: tl.constexpr,
+    LOWER_BOUND: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -136,7 +137,10 @@ def fused_recurrent_kda_fwd_kernel(
                     tl.float32
                 )
                 b_g = b_g + b_bias
-            b_gk = -exp(b_A) * softplus(b_g)
+            if LOWER_BOUND is None:
+                b_gk = -exp(b_A) * softplus(b_g)
+            else:
+                b_gk = LOWER_BOUND * tl.sigmoid(exp(b_A) * b_g)
         else:
             b_gk = b_g
 
@@ -192,6 +196,7 @@ def fused_recurrent_kda_fwd(
     sequence_lengths: Optional[torch.Tensor] = None,
     use_qk_l2norm_in_kernel: bool = False,
     use_gate_in_kernel: bool = False,
+    lower_bound: Optional[float] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -250,6 +255,7 @@ def fused_recurrent_kda_fwd(
         INPLACE_FINAL_STATE=inplace_final_state,
         SEQ_SIZE_PER_BLOCK=seq_size_per_block,
         USE_GATE_IN_KERNEL=use_gate_in_kernel,
+        LOWER_BOUND=lower_bound,
         num_warps=1,
         num_stages=3,
     )
@@ -274,6 +280,7 @@ def fused_recurrent_kda(
     block_map: Optional[torch.Tensor] = None,
     seq_size_per_block: int = 1,
     sequence_lengths: Optional[torch.Tensor] = None,
+    lower_bound: Optional[float] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -296,5 +303,6 @@ def fused_recurrent_kda(
         sequence_lengths=sequence_lengths,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         use_gate_in_kernel=use_gate_in_kernel,
+        lower_bound=lower_bound,
     )
     return o, final_state

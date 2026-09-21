@@ -11,7 +11,8 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.num_layers              = model_config.num_layers;
     model_input_gatherer_config_.vocab_size              = model_config.vocab_size;
     model_input_gatherer_config_.input_vocab_size        = model_config.input_vocab_size;
-    model_input_gatherer_config_.has_positional_encoding = model_config.has_positional_encoding;
+    model_input_gatherer_config_.has_positional_encoding =
+        model_config.has_positional_encoding || model_config.requires_token_position_ids;
     model_input_gatherer_config_.is_multimodal           = model_config.mm_model_config.is_multimodal;
     model_input_gatherer_config_.mm_position_ids_style =
         static_cast<PositionIdsStyle>(model_config.mm_model_config.mm_position_ids_style);

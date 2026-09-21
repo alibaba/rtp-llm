@@ -128,7 +128,13 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ) -> CombineForwardPayload:
-        if activation.lower() not in ("silu", "siglu", "swiglu"):
+        supported = ("silu", "siglu", "swiglu")
+        if (
+            getattr(self, "supports_situ", False)
+            and getattr(self.cfg, "expert_activation", "swiglu") == "situ"
+        ):
+            supported = ("situ",)
+        if activation.lower() not in supported:
             raise ValueError(
                 f"FP8/FP4 MoE requires SiLU activation, got {activation!r}"
             )
