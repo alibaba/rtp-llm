@@ -33,6 +33,8 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Callable, Optional
 
+from .historical_master import MANIFEST as HISTORICAL_MASTER, adapt_env
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -47,7 +49,11 @@ MOCK_JAR = (
     / "target"
     / "flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar"
 )
-API_JAR = FLEXLB_DIR / "flexlb-api" / "target" / "flexlb-api-1.0.0-SNAPSHOT.jar"
+API_JAR = (
+    Path(HISTORICAL_MASTER["jar"])
+    if HISTORICAL_MASTER
+    else FLEXLB_DIR / "flexlb-api" / "target" / "flexlb-api-1.0.0-SNAPSHOT.jar"
+)
 TRACE_FILE = TOOL_DIR / "data" / "online_logs" / "trace_30min.jsonl"
 
 # ---------------------------------------------------------------------------
@@ -1326,7 +1332,7 @@ class EnvManager:
                     separators=(",", ":"),
                 )
             menv.update(mspec.extra_env)  # per-instance overrides come last
-        return menv
+        return adapt_env(env, menv)
 
     def _master_ports_in_use(self, env: FlexEnv) -> list[int]:
         """Master's fixed ports: HTTP / management / gRPC (= http + 2)."""
