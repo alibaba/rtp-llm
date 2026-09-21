@@ -2468,11 +2468,7 @@ bool KVCacheMemoryConnector::checkLayerBlocks(const LayerBlockIds& layer_block_i
 
 LayerAttnBlockIds KVCacheMemoryConnector::resourceLayerRegionBlocks(const KVCacheResource&           resource,
                                                                     const std::vector<LayerTagSlot>& slots) const {
-    if (!resource.layerGroupBlocks().empty()) {
-        return resource.layerGroupBlocks();
-    }
-
-    return {};
+    return resource.layerGroupBlocks();
 }
 
 bool KVCacheMemoryConnector::checkLayerRegionBlocks(const LayerAttnBlockIds&         layer_attn_block_ids,

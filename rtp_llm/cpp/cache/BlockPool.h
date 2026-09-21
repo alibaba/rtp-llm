@@ -23,6 +23,10 @@ class CacheStore;
 
 class BlockPool {
 public:
+    struct RequestRefDelta {
+        BlockIdxType block_id;
+        int          delta;
+    };
     BlockPool(const BlockPoolConfig& config,
               AllocationType         allocation_type         = AllocationType::DEVICE,
               bool                   use_pinned_cpu_backing  = false,
@@ -50,6 +54,14 @@ public:
     size_t notInUseBlocksNum() const;
     void   requestFree(BlockIdxType block_idx);
     void   requestFree(const BlockIndicesType& block_indices);
+    void   requestFreeBatch(const std::vector<const BlockIndicesType*>& blocks);
+    // Deltas must have unique, ascending IDs. Capacity failure changes neither
+    // ownership nor the free set; returned required_free_blocks includes pages
+    // this transaction can reclaim. No KV data is copied by this operation.
+    bool reassignRequestBlocks(const std::vector<RequestRefDelta>& deltas,
+                               int                                 allocate_count,
+                               BlockIndicesType&                   allocated,
+                               int&                                required_free_blocks);
     void   blockCacheFree(BlockIdxType block_idx);
     void   blockCacheFree(const BlockIndicesType& block_indices);
     void   connectorFree(BlockIdxType block_idx);

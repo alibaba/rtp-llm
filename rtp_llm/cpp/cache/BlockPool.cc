@@ -468,6 +468,91 @@ void BlockPool::requestFree(BlockIdxType block_idx) {
     requestFree(block_ids);
 }
 
+bool BlockPool::reassignRequestBlocks(const std::vector<RequestRefDelta>& deltas,
+                                      int                                 allocate_count,
+                                      BlockIndicesType&                   allocated,
+                                      int&                                required_free_blocks) {
+    RTP_LLM_CHECK(allocate_count >= 0);
+    allocated.clear();
+    allocated.reserve(allocate_count);
+    for (size_t i = 0; i < deltas.size(); ++i) {
+        RTP_LLM_CHECK(deltas[i].block_id > 0);
+        RTP_LLM_CHECK(i == 0 || deltas[i - 1].block_id < deltas[i].block_id);
+    }
+    std::unique_lock<std::mutex> refs(ref_mu_, std::defer_lock);
+    std::unique_lock<std::mutex> free(free_mu_, std::defer_lock);
+    {
+        RTP_LLM_PROFILE_SCOPE("kv_pool.wait_locks");
+        std::lock(refs, free);
+    }
+    int reclaimable = 0;
+    {
+        RTP_LLM_PROFILE_SCOPE("kv_pool.validate_refs");
+        for (const auto& item : deltas) {
+            const auto old_request = request_ref_counter_.getRefCounter(item.block_id);
+            const int64_t next = static_cast<int64_t>(old_request) + item.delta;
+            RTP_LLM_CHECK(old_request > 0 && next >= 0 && next <= std::numeric_limits<int>::max());
+            const int64_t next_connector = static_cast<int64_t>(req_con_ref_counter_.getRefCounter(item.block_id)) + item.delta;
+            const int64_t next_cache = static_cast<int64_t>(req_cache_ref_counter_.getRefCounter(item.block_id)) + item.delta;
+            RTP_LLM_CHECK(next_connector >= 0 && next_connector <= std::numeric_limits<int>::max());
+            RTP_LLM_CHECK(next_cache >= 0 && next_cache <= std::numeric_limits<int>::max());
+            if (req_con_ref_counter_.getRefCounter(item.block_id) + static_cast<int64_t>(item.delta) == 0
+                && block_cache_ref_counter_.getRefCounter(item.block_id) == 0) {
+                ++reclaimable;
+            }
+        }
+    }
+    required_free_blocks = std::max(0, allocate_count - reclaimable);
+    if (free_block_ids_.size() < static_cast<size_t>(required_free_blocks)) {
+        return false;
+    }
+    {
+        RTP_LLM_PROFILE_SCOPE("kv_pool.apply_refs");
+        for (const auto& item : deltas) {
+            request_ref_counter_.updateRefCounter(item.block_id, item.delta);
+            req_con_ref_counter_.updateRefCounter(item.block_id, item.delta);
+            req_cache_ref_counter_.updateRefCounter(item.block_id, item.delta);
+            if (req_con_ref_counter_.getRefCounter(item.block_id) == 0
+                && block_cache_ref_counter_.getRefCounter(item.block_id) == 0) {
+                free_block_ids_.insert(item.block_id);
+            }
+        }
+    }
+    {
+        RTP_LLM_PROFILE_SCOPE("kv_pool.allocate_batch");
+        auto first = free_block_ids_.begin();
+        auto last = std::next(first, allocate_count);
+        allocated.assign(first, last);
+        free_block_ids_.erase(first, last);
+        request_ref_counter_.incrementRefCounter(allocated);
+        req_con_ref_counter_.incrementRefCounter(allocated);
+        req_cache_ref_counter_.incrementRefCounter(allocated);
+    }
+    return true;
+}
+
+void BlockPool::requestFreeBatch(const std::vector<const BlockIndicesType*>& blocks) {
+    std::vector<RequestRefDelta> deltas;
+    {
+        RTP_LLM_PROFILE_SCOPE("kv_free.collect_refs");
+        std::unordered_map<BlockIdxType, int> counts;
+        counts.reserve(blocks.size() * 2 + 32);
+        for (const auto* row : blocks) {
+            for (const auto block : *row) {
+                --counts[block];
+            }
+        }
+        deltas.reserve(counts.size());
+        for (const auto& item : counts) {
+            deltas.push_back({item.first, item.second});
+        }
+        std::sort(deltas.begin(), deltas.end(), [](const auto& a, const auto& b) { return a.block_id < b.block_id; });
+    }
+    BlockIndicesType allocated;
+    int required_free_blocks = 0;
+    RTP_LLM_CHECK(reassignRequestBlocks(deltas, 0, allocated, required_free_blocks));
+}
+
 void BlockPool::requestFree(const BlockIndicesType& block_ids) {
     RTP_LLM_PROFILE_FUNCTION();
     std::scoped_lock lock(ref_mu_, free_mu_);
