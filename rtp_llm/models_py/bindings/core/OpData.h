@@ -97,6 +97,7 @@ struct GptModelInputs {
     bool warmup                 = false;
     bool skip_run               = false;
     bool is_fake_stream         = false;
+    bool shutdown               = false;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.

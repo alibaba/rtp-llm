@@ -81,9 +81,10 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::skipRun] = inputs.skip_run;
     shape_hints[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
-    shape_hints[GptModelInputIndex::isFakeStream]   = inputs.is_fake_stream;
-    shape_hints[GptModelInputIndex::isTargetVerify] = inputs.is_target_verify;
-    shape_hints[GptModelInputIndex::pdSeparation]   = inputs.pd_separation;
+    shape_hints[GptModelInputIndex::isFakeStream]     = inputs.is_fake_stream;
+    shape_hints[GptModelInputIndex::isTargetVerify]   = inputs.is_target_verify;
+    shape_hints[GptModelInputIndex::pdSeparation]     = inputs.pd_separation;
+    shape_hints[GptModelInputIndex::shutdownSentinel] = inputs.shutdown;
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
 
@@ -172,6 +173,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     inputs.is_target_verify                = shape_hints_ptr[GptModelInputIndex::isTargetVerify];
     inputs.pd_separation                   = shape_hints_ptr[GptModelInputIndex::pdSeparation];
+    inputs.shutdown                        = shape_hints_ptr[GptModelInputIndex::shutdownSentinel];
     if (inputs.skip_run) {
         return;
     }

@@ -15,7 +15,7 @@ namespace {
 /* Versioned byte stream; readers bounds-check every field. The tensor
    presence flag encodes definedness so defined-but-empty tensors survive;
    host tensors are rebuilt pinned to match gatherModelInput plan tensors. */
-constexpr uint32_t kVersion = 12;
+constexpr uint32_t kVersion = 13;
 
 struct ByteWriter {
     std::vector<uint8_t> buf;
@@ -223,6 +223,7 @@ void writeModelInput(ByteWriter& w, const GptModelInputs& in) {
     w.flag(in.skip_run);
     w.flag(in.is_fake_stream);
     w.flag(in.is_target_verify);
+    w.flag(in.shutdown);
     w.val<int32_t>(static_cast<int32_t>(in.dspark_call_phase));
 }
 
@@ -266,6 +267,7 @@ void readModelInput(ByteReader& r, GptModelInputs& in) {
     in.skip_run                  = r.flag();
     in.is_fake_stream            = r.flag();
     in.is_target_verify          = r.flag();
+    in.shutdown                  = r.flag();
     in.dspark_call_phase         = static_cast<DSparkCallPhase>(r.val<int32_t>());
 }
 
@@ -422,7 +424,6 @@ torch::Tensor serializePlan(const PPExecutionPlan& plan, bool empty_plan) {
         writeSamplingPlan(w, plan.sampling_plan);
         writeOutputConfig(w, plan.output_config);
         w.flag(plan.is_decode);
-        w.flag(plan.shutdown);
         w.tensor(plan.draft_next_position_ids);
         w.val<uint64_t>(plan.finished_request_ids.size());
         for (const auto request_id : plan.finished_request_ids) {
@@ -443,7 +444,6 @@ PPExecutionPlan deserializePlan(const torch::Tensor& buffer) {
     readSamplingPlan(r, plan.sampling_plan);
     readOutputConfig(r, plan.output_config);
     plan.is_decode                  = r.flag();
-    plan.shutdown                   = r.flag();
     plan.draft_next_position_ids    = r.tensor();
     const auto finished_request_num = r.val<uint64_t>();
     plan.finished_request_ids.resize(finished_request_num);

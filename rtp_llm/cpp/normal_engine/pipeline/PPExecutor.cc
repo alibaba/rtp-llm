@@ -112,7 +112,7 @@ void PPExecutor::asyncSendPlan(const PPExecutionPlan& plan, bool empty_plan, PPT
 
 PPExecutionPlan PPExecutor::receivePlan() {
     auto plan = pp_serialization::deserializePlan(receiveObject());
-    if (plan.shutdown) {
+    if (plan.model_input.shutdown) {
         RTP_LLM_LOG_INFO("received pipeline shutdown sentinel from previous stage");
     }
     return plan;
@@ -1007,7 +1007,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         RETURN_IF_STATUS_OR_ERROR(plan_status);
         plan = std::move(plan_status.value());
         if (isStageRoot() && stopping_ && idle_streak_ >= parallelism_config_.pp_size + 1) {
-            plan.shutdown = true;
+            plan.model_input.shutdown = true;
             RTP_LLM_LOG_INFO("pipeline drained, emitting shutdown sentinel to next stage");
         }
     } else {
@@ -1143,13 +1143,13 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         }
     }
 
-    if (isFirstStage() && isStageRoot() && !plan.shutdown) {
+    if (isFirstStage() && isStageRoot() && !plan.model_input.shutdown) {
         // A step counts as idle only when it neither runs a batch nor receives a result.
         const bool no_work   = plan.model_input.skip_run;
         const bool no_result = !received_result_this_step;
         idle_streak_         = (no_work && no_result) ? idle_streak_ + 1 : 0;
     }
-    if (plan.shutdown) {
+    if (plan.model_input.shutdown) {
         shutdown_completed_ = true;
     }
     return absl::OkStatus();

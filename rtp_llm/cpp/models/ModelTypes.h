@@ -103,6 +103,7 @@ enum GptModelInputIndex : size_t {
     // PREFILL-role flag; synced so non-root lanes of a non-first PP stage
     // (which get an empty relayed plan) pack cache_keys like the root.
     pdSeparation,
+    shutdownSentinel,
     gptModelInputLength,
 };
 
