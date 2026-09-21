@@ -158,6 +158,30 @@ class CacheGateTest(unittest.TestCase):
             self.assertIn("缺少监控数据", spec["panels"][0]["caption"])
             self.assertEqual(analyze(e), result)
 
+    def test_report_uses_friendly_monitor_labels_and_audits_missing_series(self):
+        e = self.evidence(0.8)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            telemetry = root / "telemetry" / "1"
+            telemetry.mkdir(parents=True)
+            epoch = e["samples"][0]["epoch_s"]
+            (telemetry / "queries.json").write_text(json.dumps({
+                "missing_queries": ["master-single/completions_qps"],
+                "start": epoch, "end": epoch + 1, "step": 1,
+                "targets": {}, "target_bounds": {}, "errors": [],
+                "queries": {"mock/waiting_avg": {
+                    "promql": "avg by (role) (rtp_llm_wait_stream_size)",
+                    "result": [{"metric": {"role": "prefill"},
+                                "values": [[epoch, "12"]]}],
+                }},
+            }))
+            spec = write_report(root, e, analyze(e))
+            self.assertEqual(spec["panels"][0]["series"][0]["name"], "P Waiting / engine")
+            self.assertNotIn("1/mock/", json.dumps(spec["panels"][0]["series"]))
+            self.assertEqual(spec["kpis"][1]["value"], "INVALID")
+            audit = spec["sections"][0]["rows"]
+            self.assertIn(["Master completion QPS", "0%", "MISSING", "本次归档没有该监控序列"], audit)
+
     def test_ab_requires_aligned_controls(self):
         from flexlb_test_framework.workload.cache_gate_ab import compare
 

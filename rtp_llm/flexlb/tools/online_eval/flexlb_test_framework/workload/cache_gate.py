@@ -13,6 +13,7 @@ from pathlib import Path
 
 from online_eval.reporting import (
     details,
+    table,
     run_meta,
     write_bundle,
 )
@@ -222,75 +223,153 @@ def analyze(evidence):
 
 def build_spec(directory, evidence, result):
     from online_eval.monitoring import archived_series
+    from statistics import median
 
     rows = evidence["samples"]
     anchor = rows[0]["epoch_s"] - rows[0]["t"] if rows else 0
     series, sources, gaps, errors = archived_series(directory, anchor)
     axes = {
-        key: dict(label=label, position=position)
+        key: dict(title=label, position=position)
         for key, label, position in (
-            ("queue", "streams", "left"),
-            ("p", "engines", "right"),
-            ("qps", "requests/s", "right"),
-            ("tokens", "tokens/s", "right"),
-            ("ms", "milliseconds", "right"),
-            ("blocks", "blocks", "right"),
-            ("seconds", "seconds", "right"),
-            ("ratio", "cache hit fraction", "right"),
+            ("queue", "每引擎 streams", "left"),
+            ("count", "数量", "right"),
+            ("p", "引擎数", "right"),
+            ("qps", "请求 / 秒", "right"),
+            ("tokens", "tokens / 秒", "right"),
+            ("ms", "毫秒", "right"),
+            ("blocks", "KV blocks", "right"),
+            ("seconds", "秒", "right"),
+            ("ratio", "命中率", "right"),
         )
     }
+    # Report vocabulary is intentionally explicit. Prometheus identities remain
+    # available in the audit table, but never leak into the visual legend.
+    metric_defs = {
+        ("mock", "running_avg"): ("P Running / engine", "队列", "queue", "streams", "#1677ff", False),
+        ("mock", "running_max"): ("P Running max", "队列", "queue", "streams", "#69b1ff", True),
+        ("mock", "waiting_avg"): ("P Waiting / engine", "队列", "queue", "streams", "#f5222d", False),
+        ("mock", "waiting_max"): ("P Waiting max", "队列", "queue", "streams", "#ff7875", True),
+        ("mock", "engine_count"): ("P engine count", "规模", "count", "engines", "#722ed1", False),
+        ("mock", "cache_hit_ratio"): ("P cache hit ratio", "缓存", "ratio", "", "#13c2c2", False),
+        ("mock", "context_wall_tps"): ("P compute token throughput", "性能", "tokens", "tokens/s", "#52c41a", True),
+        ("mock", "context_execution_tps_avg"): ("P model forward TPS", "性能", "tokens", "tokens/s", "#389e0d", False),
+        ("mock", "context_execution_tps_with_cache_avg"): ("P model forward TPS incl. cache", "性能", "tokens", "tokens/s", "#95de64", True),
+        ("mock", "simulated_prefill_ms_avg"): ("P simulated model forward", "性能", "ms", "ms", "#fa8c16", True),
+        ("mock", "context_completed_qps"): ("P completed QPS", "流量", "qps", "req/s", "#08979c", False),
+        ("mock", "accepted_qps"): ("P accepted QPS", "流量", "qps", "req/s", "#36cfc9", True),
+        ("mock", "rtp_llm_kv_cache_pool_total_blocks"): ("P KV total blocks", "KV", "blocks", "blocks", "#531dab", True),
+        ("mock", "rtp_llm_kv_cache_pool_available_blocks"): ("P KV available blocks", "KV", "blocks", "blocks", "#b37feb", True),
+        ("mock", "mock_engine_held_blocks"): ("P held blocks", "KV", "blocks", "blocks", "#ad6800", True),
+        ("mock", "mock_engine_referenced_blocks"): ("P referenced blocks", "KV", "blocks", "blocks", "#d48806", True),
+        ("client", "actual_send_qps"): ("Client sent QPS", "流量", "qps", "req/s", "#2f54eb", False),
+        ("client", "success_qps"): ("Client success QPS", "流量", "qps", "req/s", "#52c41a", False),
+        ("client", "error_qps"): ("Client error QPS", "流量", "qps", "req/s", "#cf1322", False),
+        ("client", "completed_qps"): ("Client completed QPS", "流量", "qps", "req/s", "#597ef7", True),
+        ("client", "ttft_p99_seconds"): ("TTFT p99", "延迟", "seconds", "s", "#fa541c", True),
+        ("client", "total_p99_seconds"): ("Total latency p99", "延迟", "seconds", "s", "#faad14", True),
+        ("client", "schedule_p99_seconds"): ("Schedule latency p99", "延迟", "seconds", "s", "#d4b106", True),
+        ("master", "arrivals_qps"): ("Master arrival QPS", "流量", "qps", "req/s", "#1d39c4", True),
+        ("master", "completions_qps"): ("Master completion QPS", "流量", "qps", "req/s", "#237804", True),
+        ("master", "flexlb_app_flexlb_batcher_queue_size"): ("Master batcher queue", "Master", "count", "requests", "#c41d7f", True),
+        ("master", "flexlb_app_flexlb_scheduler_inflight_size"): ("Master scheduler inflight", "Master", "count", "requests", "#eb2f96", True),
+        ("master", "flexlb_app_flexlb_inflight_request_count"): ("Master inflight requests", "Master", "count", "requests", "#9e1068", False),
+        ("master", "flexlb_auto_tpm_decode_reserved_count"): ("Master decode reserved", "Master", "count", "requests", "#7cb305", True),
+        ("master", "flexlb_auto_tpm_decode_running_count"): ("Master decode running", "Master", "count", "requests", "#a0d911", True),
+    }
     curves = []
+    audit = []
+    found = set()
     for key, points in series.items():
-        if ("/mock/" not in key and "/client-" not in key) or "/up/" in key:
+        _, source, metric, label_json = key.split("/", 3)
+        if metric == "up":
             continue
-        if '"role": "decode"' in key:
+        labels = json.loads(label_json)
+        if labels.get("role") == "decode":
             continue
-        metric = key.split("/")[2]
-        axis = (
-            "ratio"
-            if "ratio" in metric
-            else (
-                "tokens"
-                if "tps" in metric
-                else (
-                    "qps"
-                    if "qps" in metric
-                    else (
-                        "p"
-                        if "count" in metric
-                        else (
-                            "seconds"
-                            if "seconds" in metric
-                            else (
-                                "ms"
-                                if "_ms_" in metric
-                                else "blocks" if "blocks" in metric else "queue"
-                            )
-                        )
-                    )
-                )
-            )
+        kind = "mock" if source == "mock" else "client" if source.startswith("client-") else "master"
+        definition = metric_defs.get((kind, metric))
+        if not definition:
+            continue
+        name, group, axis, unit, color, hidden = definition
+        qualifiers = [str(value) for label, value in sorted(labels.items()) if label not in {"role"}]
+        if qualifiers:
+            name += " · " + ", ".join(qualifiers)
+        found.add((kind, metric))
+        visible_end = max((r["t"] for r in rows), default=0)
+        valid_points = sum(
+            value is not None and 0 <= timestamp <= visible_end
+            for timestamp, value in points
         )
+        expected = max(1, round((visible_end + 1) / max(sources[key].get("step", 1), 0.001)))
+        coverage = min(1, valid_points / expected)
         curves.append(
             dict(
-                name=key,
+                name=name,
+                group=group,
                 axis=axis,
+                unit=unit,
+                color=color,
                 points=[dict(x=t, y=v) for t, v in points],
-                hidden=metric.endswith(("_sum", "_max")),
+                hidden=hidden,
+                description=sources[key]["promql"],
             )
         )
+        audit.append([name, f"{coverage:.0%}", "OK" if coverage >= 0.8 else "SPARSE", sources[key]["promql"]])
+    for identity, definition in metric_defs.items():
+        if identity not in found and identity in {
+            ("mock", "context_completed_qps"), ("master", "completions_qps")
+        }:
+            audit.append([definition[0], "0%", "MISSING", "本次归档没有该监控序列"])
+
+    by_name = {curve["name"]: curve for curve in curves}
+    def values(name, start=None, end=None):
+        return [
+            point["y"]
+            for point in by_name.get(name, {}).get("points", [])
+            if point["y"] is not None
+            and (start is None or point["x"] >= start)
+            and (end is None or point["x"] <= end)
+        ]
+    baseline_start, baseline_end = evidence.get("baseline_start"), evidence.get("baseline_end")
+    sent = values("Client sent QPS", baseline_start, baseline_end)
+    success = values("Client success QPS", baseline_start, baseline_end)
+    failures = values("Client error QPS", baseline_start, baseline_end)
+    monitor_warnings = [str(error) for error in errors]
+    if sent and success and median(sent) > 0 and median(success) / median(sent) < 0.9:
+        monitor_warnings.append(
+            f"缩容前负载无效：success/send 中位数仅 {median(success) / median(sent):.1%}"
+        )
+    if sent and failures and median(sent) > 0 and median(failures) / median(sent) > 0.05:
+        monitor_warnings.append(
+            f"客户端错误已主导流量：error/send 中位数 {median(failures) / median(sent):.1%}"
+        )
+    monitoring_status = "INVALID" if monitor_warnings else "OK"
+    presets = {
+        "核心": ["P cache hit ratio", "P Waiting / engine", "P Running / engine", "P engine count", "Client sent QPS", "Client success QPS", "Client error QPS", "Master inflight requests"],
+        "队列": [name for name in by_name if "Waiting" in name or "Running" in name or "queue" in name or "inflight" in name],
+        "流量": [curve["name"] for curve in curves if curve["group"] == "流量"],
+        "性能": [curve["name"] for curve in curves if curve["group"] in {"性能", "延迟"}],
+        "KV": [curve["name"] for curve in curves if curve["group"] == "KV"],
+    }
     return dict(
         run_id="cache-scale-in",
         title="P scale-in cache-collapse gate",
-        subtitle=result["verdict"],
+        subtitle=f'{result["verdict"]} · monitoring {monitoring_status}',
         meta=dict(
             params=evidence["criteria"],
             sampling="Prometheus queries only",
-            sources=sources,
+            sources=dict(
+                aggregate="Prometheus queries.json",
+                engineDist="not used",
+                runDir=str(Path(directory).resolve()),
+            ),
         ),
         timeOriginLabel="Seconds since observation began",
         events=evidence.get("events", []),
-        kpis=[dict(label="Verdict", value=result["verdict"])],
+        kpis=[
+            dict(label="Gate verdict", value=result["verdict"]),
+            dict(label="Monitoring / load validity", value=monitoring_status, tone="danger" if monitor_warnings else "success"),
+        ],
         panels=[
             dict(
                 id="cache-overlay",
@@ -298,14 +377,17 @@ def build_spec(directory, evidence, result):
                 overlay=True,
                 axes=axes,
                 series=curves,
+                presets=presets,
                 caption=(
-                    "Prometheus 聚合；waiting/running 默认按存活上报引擎平均。门禁保留组判据见独立证据。"
+                    "全部曲线来自 Prometheus；默认展示关键指标。单击勾选，双击图例可隔离曲线，悬停图例可高亮。waiting/running 使用每引擎平均值。"
                     if curves
                     else "缺少监控数据；不从 snapshot、日志或请求文件补算曲线。"
                 ),
             )
         ],
         sections=[
+            table("监控曲线审计", ["曲线", "覆盖率", "状态", "PromQL / 说明"], audit),
+            details("实验与监控有效性", dict(status=monitoring_status, warnings=monitor_warnings)),
             details("专用门禁判据（非监控曲线）", result),
             details("监控来源与缺采", dict(queries=sources, gaps=gaps, errors=errors)),
         ],

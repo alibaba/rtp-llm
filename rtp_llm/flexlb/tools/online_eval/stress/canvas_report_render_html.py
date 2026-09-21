@@ -204,6 +204,8 @@ def render(spec):
                         "points": s.get("points"),
                         "axis": s.get("axis", "y"),
                         "unit": s.get("unit", ""),
+                        "group": s.get("group", "其他"),
+                        "description": s.get("description", ""),
                         "hidden": s.get("hidden", False),
                         "color": s.get("color") or series_color(s.get("tone"), i),
                     }
@@ -255,6 +257,16 @@ body{margin:0;padding:24px;background:var(--bg);color:var(--fg);
 header{margin-bottom:20px}
 h1{margin:0 0 6px;font-size:22px;overflow-wrap:anywhere}
 .sub{color:var(--sub)}
+.multi-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0}
+.multi-toolbar button{border:1px solid #d9d9d9;background:#fff;border-radius:6px;padding:5px 11px;cursor:pointer}
+.multi-toolbar button:hover{border-color:#1677ff;color:#1677ff}.multi-range{margin-left:auto;color:var(--sub)}
+.multi-range input{margin:0 5px;border:1px solid #d9d9d9;border-radius:5px;padding:4px}
+.multi-choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(225px,1fr));gap:5px 10px;margin:10px 0 14px;padding:10px;border:1px solid var(--border);border-radius:8px;background:#fafafa}
+.multi-group{grid-column:1/-1;color:var(--sub);font-size:12px;font-weight:650;margin-top:4px}
+.multi-choice{display:flex;align-items:center;gap:5px;min-width:0;padding:4px 7px;border-radius:5px;cursor:pointer;transition:opacity .12s,background .12s}
+.multi-choice:hover{background:#eef4ff}.multi-choice i,.multi-hover-row i{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}
+.multi-choice input{margin:0}.multi-hover{position:absolute;right:12px;top:12px;z-index:3;min-width:265px;max-height:520px;overflow:auto;background:rgba(255,255,255,.96);border:1px solid var(--border);border-radius:8px;padding:9px 11px;box-shadow:0 4px 16px rgba(0,0,0,.12);pointer-events:none}
+.multi-hover-row{display:flex;align-items:center;gap:7px;margin-top:4px;white-space:nowrap}
 /* KPI 两行（指标五连 + 结果五连）：wrapper 纵向叠行，每行 grid 随
    行内 chip 数自适应列数（JS 注入 inline grid-template-columns）。 */
 .kpi-stack{display:flex;flex-direction:column;gap:12px;margin:16px 0 12px}

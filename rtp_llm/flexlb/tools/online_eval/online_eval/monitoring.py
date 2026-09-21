@@ -335,6 +335,9 @@ class PrometheusSession:
                 queries["mock/context_wall_tps"] = (
                     f"sum by (role) (rate(mock_context_tokens_total{sel}[{window_ms}ms]))"
                 )
+                queries["mock/context_completed_qps"] = (
+                    f"sum by (role) (rate(mock_context_requests_total{sel}[{window_ms}ms]))"
+                )
                 queries["mock/cache_hit_ratio"] = (
                     f"sum by (role) (rate(mock_hit_tokens_total{sel}[{window_ms}ms])) / sum by (role) (rate(mock_context_tokens_total{sel}[{window_ms}ms]))"
                 )
@@ -504,6 +507,10 @@ def archived_series(directory, anchor):
         data = json.loads(path.read_text())
         epoch = path.parent.name
         errors.extend(dict(source=epoch, **error) for error in data.get("errors", []))
+        errors.extend(
+            dict(source=epoch, query=query, error="monitor series absent")
+            for query in data.get("missing_queries", [])
+        )
         for query_id, query in data["queries"].items():
             source, metric = query_id.split("/", 1)
             for row in query["result"]:

@@ -46,6 +46,21 @@ class ContractTest(unittest.TestCase):
             )
             self.assertEqual(archived_series(tmp, 0), ({}, {}, {}, []))
 
+    def test_missing_query_is_reported_as_monitor_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "telemetry" / "1"
+            directory.mkdir(parents=True)
+            (directory / "queries.json").write_text(json.dumps({
+                "missing_queries": ["master/completions_qps"],
+                "start": 1, "end": 2, "step": 1,
+                "targets": {}, "queries": {}, "errors": [],
+            }))
+            _, _, _, errors = archived_series(tmp, 0)
+            self.assertEqual(errors, [{
+                "source": "1", "query": "master/completions_qps",
+                "error": "monitor series absent",
+            }])
+
     def test_legacy_gate_rejects_monitor_contract(self):
         from stress.compare_ab import PrecheckError, resolve_run
 

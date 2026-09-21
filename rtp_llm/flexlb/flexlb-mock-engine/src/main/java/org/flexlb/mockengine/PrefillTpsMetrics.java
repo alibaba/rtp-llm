@@ -67,10 +67,9 @@ final class PrefillTpsMetrics {
             long input = current.inputTokens() - previous.inputTokens();
             long computeTime = current.computeUs() - previous.computeUs();
             long inputTime = current.inputUs() - previous.inputUs();
-            // Match MetricsLoopReporter: do not invent zero samples while a long
-            // step is in flight. Keep the wall-clock origin until it completes.
+            // Do not invent zero samples while a long step is in flight. Keep
+            // both the last completed gauge and wall-clock origin until it completes.
             if (computeTime == 0 && inputTime == 0 && current.active() > 0) {
-                last = Map.of();
                 return last;
             }
             long wallUs = Math.max(1, (now - reportedAt) / 1000);

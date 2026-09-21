@@ -48,6 +48,22 @@ class PrefillTpsMetricsTest {
     }
 
     @Test
+    void longStepKeepsLastCompletedGaugeWithoutAdvancingWindow() {
+        var metrics = new PrefillTpsMetrics(0);
+        var reader = new PrefillTpsMetrics.Reader();
+        metrics.finish(metrics.begin(100, 200, 0), 100_000_000L);
+        var completed = reader.sample(metrics.snapshot(), 1_000_000_000L);
+        var batch = metrics.begin(400, 1000, 1_000_000_000L);
+        assertEquals(completed, reader.sample(metrics.snapshot(), 2_000_000_000L));
+        assertEquals(completed, reader.sample(metrics.snapshot(), 3_000_000_000L));
+        metrics.finish(batch, 4_000_000_000L);
+        var rates = reader.sample(metrics.snapshot(), 5_000_000_000L);
+        assertEquals(400 / 3.0, rates.get("context_tps"));
+        assertEquals(250.0, rates.get("context_wall_tps_with_cache"));
+        assertEquals(4_000_000.0, rates.get("wall_tps_report_interval_us"));
+    }
+
+    @Test
     void observersDoNotDrainEachOtherOrLoseTheFirstBatch() {
         var metrics = new PrefillTpsMetrics(0);
         var http = new PrefillTpsMetrics.Reader();
