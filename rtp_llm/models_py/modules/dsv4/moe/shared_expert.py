@@ -20,6 +20,16 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 from .warmup_sync import cuda_graph_warmup_forward_enabled
 
+try:
+    from ..utils import V41MXFP8Linear
+    from ._silu_mul_bf16_triton import silu_mul_split_bf16
+
+    _MXFP8_FUSED_SILU_OK = True
+except Exception:  # pragma: no cover — keep V4 importable without Triton
+    V41MXFP8Linear = ()  # sentinel: never matches isinstance
+    silu_mul_split_bf16 = None
+    _MXFP8_FUSED_SILU_OK = False
+
 
 @dataclass(frozen=True)
 class _SharedExpertWorkspaceViews:
@@ -153,6 +163,8 @@ class W13SharedExpert(nn.Module):
     def forward(
         self, x: torch.Tensor, weights: torch.Tensor | None = None
     ) -> torch.Tensor:
+        if weights is None and self._can_run_mxfp8_fused_silu(x):
+            return self._forward_mxfp8_fused_silu(x)
         dtype = x.dtype
         with record_function_range("dsv4.shared_expert.w13"):
             gate_up = self._apply_layer(self.w13, x).float()
@@ -169,6 +181,33 @@ class W13SharedExpert(nn.Module):
             hidden = weights * hidden
         with record_function_range("dsv4.shared_expert.w2"):
             return self._apply_layer(self.w2, hidden.to(dtype))
+
+    def _can_run_mxfp8_fused_silu(self, x: torch.Tensor) -> bool:
+        """V4.1 MXFP8 fused SiLU gate (explicit V4.1-only path).
+
+        The fused kernel reads the merged BF16 gate_up halves in place, so the
+        old ``.float()`` cast, the two ``.contiguous()`` copies of the chunk
+        halves and the ``hidden.to(dtype)`` cast disappear while keeping the
+        FP32 accumulate contract and the single FP32->BF16 rounding step.
+        """
+        return (
+            _MXFP8_FUSED_SILU_OK
+            and x.is_cuda
+            and x.dtype == torch.bfloat16
+            and x.dim() == 2
+            and isinstance(self.w13, V41MXFP8Linear)
+            and isinstance(self.w2, V41MXFP8Linear)
+        )
+
+    def _forward_mxfp8_fused_silu(self, x: torch.Tensor) -> torch.Tensor:
+        with record_function_range("dsv4.shared_expert.w13"):
+            gate_up = self.w13(x)
+        with record_function_range("dsv4.shared_expert.silu_mul"):
+            hidden = silu_mul_split_bf16(
+                gate_up, clamp_limit=self.swiglu_limit
+            )
+        with record_function_range("dsv4.shared_expert.w2"):
+            return self.w2(hidden)
 
 
 class FusedSharedExpertFastPath:
@@ -506,7 +545,10 @@ class MXFP8SharedExpertExecutor(SequentialSharedExpertExecutor):
 
     This is a distinct supported quantization recipe. It does not relax the
     strict-fused policy on the routed FP4 experts or select the block-128
-    shared-expert workspace.
+    shared-expert workspace. The BF16 return skips the standalone FP32 cast:
+    the FP32 accumulate contract is preserved by the consumer
+    (``fused_moe_epilogue`` loads and adds in FP32), matching the old
+    ``.float()`` value bit-for-bit.
     """
 
     name = "mxfp8"
@@ -516,7 +558,7 @@ class MXFP8SharedExpertExecutor(SequentialSharedExpertExecutor):
             self._out = torch.empty_like(x, dtype=torch.float32)
             return
         with record_function_range("dsv41.moe.shared_expert"):
-            self._out = shared_experts(x).float()
+            self._out = shared_experts(x)
 
 
 class OverlapSharedExpertExecutor(SharedExpertExecutor):
