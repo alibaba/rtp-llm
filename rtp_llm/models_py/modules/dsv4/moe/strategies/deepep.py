@@ -211,6 +211,7 @@ from .._dispatch_quant_pack_triton import (
     quant_pack_dispatch_payload,
     view_dispatch_payload,
 )
+from .._nccl_ep_combine_triton import fp32_peer_sum
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from .grouped_fp4 import GroupedFP4Strategy, _has_fp8_fp4_grouped_kernel
 from .local_loop import LocalLoopStrategy
@@ -287,7 +288,7 @@ class _A2DeferredHalves:
 @register_strategy
 class DeepEPStrategy(RoutedExpertsStrategy):
     name = "deepep"
-    # Shared across layers: decode AG/AR payload buffers are sequential.
+    # Shared across layers: decode AG/A2A payload buffers are sequential.
     _sm120_fixed_ep_ws_cache: dict = {}
 
     def __init__(self, cfg: MoeCfg):
@@ -585,8 +586,8 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         topk: int,
         device: torch.device,
     ) -> dict:
-        """Reuse AG / ReduceScatter payload buffers so capture bakes stable pointers."""
-        key = (n_pad, world, d, topk, device.index)
+        """Reuse AG / All-to-All payload buffers so capture bakes stable pointers."""
+        key = (n_pad, world, d, topk, device.index, torch.bfloat16)
         ws = getattr(self, "_sm120_fixed_ep_ws", None)
         if getattr(self, "_sm120_fixed_ep_ws_key", None) == key and ws is not None:
             return ws
@@ -603,7 +604,10 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             (world * n_pad, payload_bytes), dtype=torch.uint8, device=device
         )
         partial = torch.empty(
-            (world * n_pad, d), dtype=torch.float32, device=device
+            (world * n_pad, d), dtype=torch.bfloat16, device=device
+        )
+        a2a_recv = torch.empty(
+            (world * n_pad, d), dtype=torch.bfloat16, device=device
         )
         local_out = torch.empty((n_pad, d), dtype=torch.float32, device=device)
         ws = {
@@ -613,6 +617,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             "local_views": view_dispatch_payload(local_payload, d, topk, packed),
             "gathered_views": view_dispatch_payload(gathered, d, topk, packed),
             "partial": partial,
+            "a2a_recv": a2a_recv,
             "local_out": local_out,
         }
         DeepEPStrategy._sm120_fixed_ep_ws_cache[key] = ws
@@ -623,12 +628,13 @@ class DeepEPStrategy(RoutedExpertsStrategy):
     def _forward_sm120_fixed_ep(
         self, x, weights, indices, pad_floor: int | None = None
     ) -> torch.Tensor:
-        """SM120 decode MoE with DP: AllGather dispatch + ReduceScatter combine.
+        """SM120 decode MoE with DP: AllGather dispatch + All-to-All combine.
 
         Local FP8 quant is fused with pad/pack, then one AllGather moves
         ``(fp8 x, UE8M0 scale, weights, ids)``. Non-local ids become -1 inside
-        ``recompute_topk_ids_sum_expert_count``. Combine ReduceScatters the
-        fp32 partials so each DP rank receives only its own token rows.
+        ``recompute_topk_ids_sum_expert_count``. Combine All-to-Alls the
+        bf16 gather outputs and fp32-sums the world shards so each DP rank
+        keeps only its own token rows.
         """
         if os.environ.get("DSV4_DIAG") and _DIAG_FE[0] < 10:
             try:
@@ -647,13 +653,13 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         n, d = x.shape
         topk = indices.size(1)
         # Pad every rank's payload to a rank-invariant token count so the
-        # AllGather / ReduceScatter shapes always match, even when some ranks
+        # AllGather / All-to-All shapes always match, even when some ranks
         # execute the forward during a CUDA graph capture while others run it
         # eagerly (mismatched collectives would otherwise hang or read garbage).
         # pad_floor: capture callers pass a small floor — decode graphs capture
         # with n = bs*(sp+1) rows (4 at bs=1), and padding those to
         # max_tokens_per_rank (4096) multiplied every replayed MoE into a
-        # world-sized AllGather plus a world*n_pad ReduceScatter per layer and
+        # world-sized AllGather plus a world*n_pad All-to-All per layer and
         # dominated decode GPU time. Captured n is uniform across ranks, so a
         # pad derived from max(floor, n) stays rank-invariant there; the eager
         # fallback (default floor) keeps the config floor for its mixed-shape
@@ -685,9 +691,8 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             expert_start_id=self.cfg.local_expert_start,
             out=ws["partial"],
         )
-        dist.reduce_scatter_tensor(
-            ws["local_out"], ws["partial"], op=dist.ReduceOp.SUM, group=group
-        )
+        dist.all_to_all_single(ws["a2a_recv"], ws["partial"], group=group)
+        fp32_peer_sum(ws["a2a_recv"], world, ws["local_out"])
         return ws["local_out"][:n]
 
     def _forward_sm120_deepep_real(self, x, weights, indices) -> torch.Tensor:

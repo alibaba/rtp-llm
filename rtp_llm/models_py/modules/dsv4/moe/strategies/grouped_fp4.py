@@ -496,7 +496,8 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         Replaces flashinfer ``cutlass_fused_moe``. Layout matches the bench
         ``DeepGemmFp4Fp8Experts._apply_masked``: cached ``[E, M_pad, K]``
         buffers, ``ep_scatter_v2``, masked GEMM, fused SiLU+clamp+quant,
-        ``ep_gather`` into fp32 (no post-gather cast chain).
+        ``ep_gather`` (fp32 acc, store uses ``out`` dtype — bf16 on the
+        decode A2A wire).
         """
         cfg = self.cfg
         n, d = x.shape
