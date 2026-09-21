@@ -146,6 +146,13 @@ py_test(
 )
 
 py_test(
+    name = "server_keepalive_test",
+    srcs = ["test/server_test.py"],
+    main = "test/server_test.py",
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "proxy_servicer_test",
     srcs = ["test/proxy/servicer_test.py"],
     main = "test/proxy/servicer_test.py",

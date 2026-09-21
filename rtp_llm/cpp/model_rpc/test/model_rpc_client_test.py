@@ -1,6 +1,7 @@
 import asyncio
 import struct
 import sys
+from contextlib import asynccontextmanager
 from enum import Enum
 from unittest.mock import MagicMock, patch
 
@@ -149,10 +150,16 @@ class _FakeResponseIterator:
 class _FakeChannelPool:
     def __init__(self):
         self.targets = []
+        self.active_leases = 0
 
-    async def get(self, target_address):
+    @asynccontextmanager
+    async def acquire(self, target_address, *, timeout=None):
         self.targets.append(target_address)
-        return object()
+        self.active_leases += 1
+        try:
+            yield object()
+        finally:
+            self.active_leases -= 1
 
 
 class _RoutingStub:
@@ -625,9 +632,11 @@ class ModelRpcClientTest(TestCase):
 
         self.assertEqual(len(responses), 1)
         self.assertEqual(client._channel_pool.targets, ["prefill-worker:9000"])
+        self.assertEqual(client._channel_pool.active_leases, 0)
         self.assertEqual(len(stub.fetch_calls), 1)
         self.assertEqual(stub.fetch_calls[0][0].request_id, 321)
-        self.assertEqual(stub.fetch_calls[0][1]["timeout"], 1.0)
+        self.assertGreater(stub.fetch_calls[0][1]["timeout"], 0)
+        self.assertLessEqual(stub.fetch_calls[0][1]["timeout"], 1.0)
         self.assertEqual(stub.generate_calls, [])
 
     def test_enqueue_uses_generate_stream_without_master_enqueue(self):
@@ -663,7 +672,9 @@ class ModelRpcClientTest(TestCase):
         async def run_and_close():
             gen = client.enqueue(input_py)
             first = await gen.__anext__()
+            self.assertEqual(client._channel_pool.active_leases, 1)
             await gen.aclose()
+            self.assertEqual(client._channel_pool.active_leases, 0)
             return first
 
         client = ModelRpcClient(

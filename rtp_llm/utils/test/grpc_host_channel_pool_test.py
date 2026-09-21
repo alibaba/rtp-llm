@@ -1,248 +1,258 @@
 import asyncio
-import contextlib
 import unittest
-from unittest import TestCase
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
 
-from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannel, GrpcHostChannelPool
+from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
 
-class GrpcHostChannelPoolTest(TestCase):
-    """Test cases for GrpcHostChannelPool"""
-
+class GrpcHostChannelPoolTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        """Setup test environment"""
-        self.test_host = "localhost:50051"
-        self.test_options = [("grpc.max_receive_message_length", 1000000)]
-        self.pool = GrpcHostChannelPool(options=self.test_options, cleanup_interval=1)
-
-    def tearDown(self):
-        """Cleanup after tests"""
-        # Stop the cleanup task
-        if hasattr(self.pool, "_stopped"):
-            self.pool._stopped = True
-        if hasattr(self.pool, "_cleanup_task") and self.pool._cleanup_task:
-            self.pool._cleanup_task.cancel()
-        # Clear channels
-        if hasattr(self.pool, "_channels"):
-            self.pool._channels.clear()
-
-    async def test_pool_start_stop(self):
-        """Test starting and stopping the pool cleanup task"""
-        # Test start
-        await self.pool.start()
-        self.assertIsNotNone(self.pool._cleanup_task)
-        self.assertFalse(self.pool._cleanup_task.done())
-
-        # Test stop
-        self.pool._stopped = True
-        if self.pool._cleanup_task:
-            self.pool._cleanup_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.pool._cleanup_task
-
-    async def test_get_channel(self):
-        """Test getting a channel from the pool"""
-        # Get a channel for the first time
-        channel = await self.pool.get(self.test_host)
-        self.assertIsNotNone(channel)
-
-        # Verify channel is cached
-        self.assertIn(self.test_host, self.pool._channels)
-        entry = self.pool._channels[self.test_host]
-        self.assertEqual(entry.host, self.test_host)
-        self.assertEqual(entry.channel, channel)
-
-    async def test_get_channel_reuse(self):
-        """Test that getting the same host returns the same channel"""
-        # Get channel twice
-        channel1 = await self.pool.get(self.test_host)
-        channel2 = await self.pool.get(self.test_host)
-
-        # Should be the same channel
-        self.assertIs(channel1, channel2)
-
-        # Should only have one entry in the pool
-        self.assertEqual(len(self.pool._channels), 1)
-        self.assertIn(self.test_host, self.pool._channels)
-
-    async def test_get_multiple_hosts(self):
-        """Test getting channels for multiple hosts"""
-        hosts = [f"localhost:{50051 + i}" for i in range(3)]
-        channels = []
-
-        # Get channels for different hosts
-        for host in hosts:
-            channel = await self.pool.get(host)
-            channels.append(channel)
-
-        # All channels should be different
-        for i in range(len(channels)):
-            for j in range(i + 1, len(channels)):
-                self.assertIsNot(channels[i], channels[j])
-
-        # Should have entries for all hosts
-        self.assertEqual(len(self.pool._channels), 3)
-        for host in hosts:
-            self.assertIn(host, self.pool._channels)
-
-    async def test_channel_closed_recreation(self):
-        """Test that closed channels are recreated"""
-        # Get a channel
-        channel = await self.pool.get(self.test_host)
-        original_entry = self.pool._channels[self.test_host]
-
-        # Simulate closed channel
-        original_entry.channel._state = grpc.ChannelConnectivity.SHUTDOWN
-
-        # Get channel again, should create new one
-        new_channel = await self.pool.get(self.test_host)
-        new_entry = self.pool._channels[self.test_host]
-
-        # Should have new entry
-        self.assertIsNot(original_entry, new_entry)
-        self.assertIsNot(channel, new_channel)
-
-    async def test_is_channel_closed(self):
-        """Test _is_channel_closed method"""
-        # Create a mock entry with closed channel
-        mock_channel = MagicMock()
-        mock_channel.get_state.return_value = grpc.ChannelConnectivity.SHUTDOWN
-        entry = GrpcHostChannel(self.test_host, mock_channel)
-
-        # Should detect closed channel
-        is_closed = await self.pool._is_channel_closed(entry)
-        self.assertTrue(is_closed)
-
-        # Test with active channel
-        mock_channel.get_state.return_value = grpc.ChannelConnectivity.READY
-        is_closed = await self.pool._is_channel_closed(entry)
-        self.assertFalse(is_closed)
-
-        # Test exception handling
-        mock_channel.get_state.side_effect = Exception("Test error")
-        is_closed = await self.pool._is_channel_closed(entry)
-        self.assertTrue(is_closed)  # Should return True on exception
-
-    async def test_cleanup_closed_channels(self):
-        """Test cleanup of closed channels"""
-        # Create multiple channels
-        hosts = [f"localhost:{50051 + i}" for i in range(3)]
-
-        for host in hosts:
-            await self.pool.get(host)
-
-        # Close one channel
-        entry = self.pool._channels[hosts[1]]
-        entry.channel._state = grpc.ChannelConnectivity.SHUTDOWN
-
-        # Run cleanup
-        await self.pool._cleanup_closed()
-
-        # Should have only 2 channels remaining
-        self.assertEqual(len(self.pool._channels), 2)
-        self.assertNotIn(hosts[1], self.pool._channels)
-        self.assertIn(hosts[0], self.pool._channels)
-        self.assertIn(hosts[2], self.pool._channels)
-
-    async def test_cleanup_loop(self):
-        """Test the cleanup loop task"""
-        # Start cleanup with short interval
-        await self.pool.start()
-
-        # Add a channel and mark it as closed
-        await self.pool.get(self.test_host)
-        entry = self.pool._channels[self.test_host]
-        entry.channel._state = grpc.ChannelConnectivity.SHUTDOWN
-
-        # Wait for cleanup to run (interval is 1 second in setUp)
-        await asyncio.sleep(1.5)
-
-        # Channel should be cleaned up
-        self.assertNotIn(self.test_host, self.pool._channels)
-
-        # Stop cleanup
-        self.pool._stopped = True
-        if self.pool._cleanup_task:
-            self.pool._cleanup_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.pool._cleanup_task
-
-    def test_destructor(self):
-        """Test __del__ method"""
-        pool = GrpcHostChannelPool(options=self.test_options)
-        pool._channels[self.test_host] = GrpcHostChannel(self.test_host, MagicMock())
-
-        # Call __del__ manually
-        pool.__del__()
-
-        # Should be marked as stopped
-        self.assertTrue(pool._stopped)
-        # Channels should be cleared
-        self.assertEqual(len(pool._channels), 0)
-
-    async def test_concurrent_get(self):
-        """Test concurrent access to get channels"""
-
-        async def get_channel(host):
-            return await self.pool.get(host)
-
-        # Create multiple concurrent tasks
-        tasks = []
-        for i in range(10):
-            tasks.append(get_channel(self.test_host))
-
-        # Wait for all tasks
-        channels = await asyncio.gather(*tasks)
-
-        # All should get the same channel
-        for channel in channels[1:]:
-            self.assertIs(channels[0], channel)
-
-        # Should only have one entry
-        self.assertEqual(len(self.pool._channels), 1)
-
-    async def test_channel_close_timeout(self):
-        """Test handling of channel close timeout"""
-        # Create a mock channel that times out on close
-        mock_channel = MagicMock()
-        mock_channel.close = AsyncMock(side_effect=asyncio.TimeoutError())
-
-        # Add to pool
-        self.pool._channels[self.test_host] = GrpcHostChannel(
-            self.test_host, mock_channel
+        self.factory = patch(
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=self.make_channel,
         )
+        self.factory.start()
+        self.addCleanup(self.factory.stop)
+        self.pool = GrpcHostChannelPool(idle_ttl=10, max_channels=2)
+        self.addAsyncCleanup(self.pool.close)
 
-        # Mark as closed
-        mock_channel.get_state.return_value = grpc.ChannelConnectivity.SHUTDOWN
+    @staticmethod
+    def make_channel(*args, **kwargs):
+        channel = MagicMock()
+        channel.get_state.return_value = grpc.ChannelConnectivity.READY
+        channel.close = AsyncMock()
+        return channel
 
-        # Cleanup should handle timeout gracefully
+    async def flush_closes(self):
+        tasks = list(self.pool._close_tasks)
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    async def test_shared_leases_and_last_release_starts_idle_timer(self):
+        async with self.pool.acquire("a") as first:
+            entry = self.pool._channels["a"]
+            async with self.pool.acquire("a") as second:
+                self.assertIs(first, second)
+                self.assertEqual(entry.active_calls, 2)
+            self.assertEqual(entry.active_calls, 1)
+            with patch(
+                "rtp_llm.utils.grpc_host_channel_pool.time.monotonic", return_value=100
+            ):
+                await self.pool._cleanup_closed()
+                first.close.assert_not_awaited()
+        self.assertEqual(entry.active_calls, 0)
+        self.assertGreater(entry.idle_since, 100)
+
+    async def test_long_stream_survives_ttl_and_expires_after_release(self):
+        async with self.pool.acquire("a") as channel:
+            self.pool._channels["a"].idle_since = 0
+            await self.pool._cleanup_closed()
+            self.assertIn("a", self.pool._channels)
+            channel.close.assert_not_awaited()
         await self.pool._cleanup_closed()
-
-        # Channel should be removed from pool despite close timeout
-        self.assertNotIn(self.test_host, self.pool._channels)
-
-    async def test_channel_close_exception(self):
-        """Test handling of channel close exception"""
-        # Create a mock channel that raises exception on close
-        mock_channel = MagicMock()
-        mock_channel.close = AsyncMock(side_effect=Exception("Close failed"))
-
-        # Add to pool
-        self.pool._channels[self.test_host] = GrpcHostChannel(
-            self.test_host, mock_channel
-        )
-
-        # Mark as closed
-        mock_channel.get_state.return_value = grpc.ChannelConnectivity.SHUTDOWN
-
-        # Cleanup should handle exception gracefully
+        self.assertIn("a", self.pool._channels)
+        self.pool._channels["a"].idle_since -= 11
         await self.pool._cleanup_closed()
+        await self.flush_closes()
+        self.assertNotIn("a", self.pool._channels)
+        channel.close.assert_awaited_once()
 
-        # Channel should be removed from pool despite close exception
-        self.assertNotIn(self.test_host, self.pool._channels)
+    async def test_transient_failure_recovers_without_replacement_or_close(self):
+        async with self.pool.acquire("a") as channel:
+            channel.get_state.return_value = grpc.ChannelConnectivity.TRANSIENT_FAILURE
+            async with self.pool.acquire("a") as same:
+                self.assertIs(channel, same)
+        await self.pool._cleanup_closed()
+        channel.close.assert_not_awaited()
+        channel.get_state.return_value = grpc.ChannelConnectivity.READY
+        await self.pool._cleanup_closed()
+        async with self.pool.acquire("a") as same:
+            self.assertIs(channel, same)
+        channel.close.assert_not_awaited()
+
+    async def test_transient_failure_idle_channel_expires(self):
+        async with self.pool.acquire("a") as channel:
+            channel.get_state.return_value = grpc.ChannelConnectivity.TRANSIENT_FAILURE
+        self.pool._channels["a"].idle_since -= 11
+        await self.pool._cleanup_closed()
+        await self.flush_closes()
+        channel.close.assert_awaited_once()
+
+    async def test_state_query_error_does_not_evict_active_channel(self):
+        async with self.pool.acquire("a") as channel:
+            channel.get_state.side_effect = RuntimeError("unavailable")
+            async with self.pool.acquire("a") as same:
+                self.assertIs(channel, same)
+            await self.pool._cleanup_closed()
+        channel.close.assert_not_awaited()
+
+    async def test_shutdown_replaced_after_last_lease(self):
+        async with self.pool.acquire("a") as old:
+            old.get_state.return_value = grpc.ChannelConnectivity.SHUTDOWN
+            with self.assertRaises(asyncio.TimeoutError):
+                async with self.pool.acquire("a", timeout=0.01):
+                    self.fail("shutdown channel must not accept a new lease")
+            old.close.assert_not_awaited()
+        async with self.pool.acquire("a") as new:
+            self.assertIsNot(new, old)
+        await self.flush_closes()
+        old.close.assert_awaited_once()
+
+    async def test_capacity_evicts_oldest_idle_only(self):
+        async with self.pool.acquire("a") as a:
+            pass
+        async with self.pool.acquire("b") as b:
+            async with self.pool.acquire("c"):
+                self.assertEqual(set(self.pool._channels), {"b", "c"})
+                b.close.assert_not_awaited()
+        await self.flush_closes()
+        a.close.assert_awaited_once()
+
+    async def test_capacity_wait_wakes_on_release(self):
+        self.pool._max_channels = 1
+        started = asyncio.Event()
+
+        async def waiter():
+            started.set()
+            async with self.pool.acquire("b"):
+                return "acquired"
+
+        async with self.pool.acquire("a"):
+            task = asyncio.create_task(waiter())
+            await started.wait()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+        self.assertEqual(await asyncio.wait_for(task, 1), "acquired")
+
+    async def test_capacity_uses_last_release_order(self):
+        async with self.pool.acquire("a"):
+            pass
+        async with self.pool.acquire("b") as b:
+            pass
+        async with self.pool.acquire("a") as a:
+            pass
+        async with self.pool.acquire("c"):
+            self.assertEqual(set(self.pool._channels), {"a", "c"})
+        await self.flush_closes()
+        a.close.assert_not_awaited()
+        b.close.assert_awaited_once()
+
+    async def test_cancellation_racing_completed_acquire_releases_lease(self):
+        original_take = self.pool._take
+        caller = asyncio.current_task()
+
+        async def take_and_cancel(target):
+            entry = await original_take(target)
+            caller.cancel()
+            return entry
+
+        with patch.object(self.pool, "_take", side_effect=take_and_cancel):
+            with self.assertRaises(asyncio.CancelledError):
+                async with self.pool.acquire("a"):
+                    self.fail("cancelled acquisition")
+        self.assertEqual(self.pool._channels["a"].active_calls, 0)
+
+    async def test_capacity_timeout_does_not_close_active_channel(self):
+        self.pool._max_channels = 1
+        async with self.pool.acquire("a") as channel:
+            with self.assertRaises(asyncio.TimeoutError):
+                async with self.pool.acquire("b", timeout=0.01):
+                    self.fail("capacity exceeded")
+            self.assertEqual(self.pool._channels["a"].active_calls, 1)
+            channel.close.assert_not_awaited()
+
+    async def test_exception_and_cancellation_release_leases(self):
+        with self.assertRaisesRegex(ValueError, "RPC failed"):
+            async with self.pool.acquire("a"):
+                raise ValueError("RPC failed")
+        self.assertEqual(self.pool._channels["a"].active_calls, 0)
+        entered = asyncio.Event()
+
+        async def rpc():
+            async with self.pool.acquire("a"):
+                entered.set()
+                await asyncio.Event().wait()
+
+        task = asyncio.create_task(rpc())
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(self.pool._channels["a"].active_calls, 0)
+
+    async def test_cancelled_capacity_waiter_does_not_leak(self):
+        self.pool._max_channels = 1
+        async with self.pool.acquire("a"):
+
+            async def wait():
+                async with self.pool.acquire("b"):
+                    self.fail("capacity exceeded")
+
+            task = asyncio.create_task(wait())
+            await asyncio.sleep(0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(set(self.pool._channels), {"a"})
+        self.assertEqual(self.pool._channels["a"].active_calls, 0)
+
+    async def test_close_wakes_waiters_and_is_idempotent(self):
+        self.pool._max_channels = 1
+        async with self.pool.acquire("a") as channel:
+
+            async def wait():
+                async with self.pool.acquire("b"):
+                    self.fail("closed pool")
+
+            task = asyncio.create_task(wait())
+            await asyncio.sleep(0)
+            await self.pool.close()
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                await task
+            channel.close.assert_awaited_once()
+        await self.pool.close()
+        channel.close.assert_awaited_once()
+
+    async def test_concurrent_acquire_and_cleanup_protects_leases(self):
+        async def rpc():
+            async with self.pool.acquire("a") as channel:
+                self.pool._channels["a"].idle_since = 0
+                await self.pool._cleanup_closed()
+                await asyncio.sleep(0)
+                channel.close.assert_not_awaited()
+                return channel
+
+        channels = await asyncio.gather(*(rpc() for _ in range(20)))
+        self.assertTrue(all(c is channels[0] for c in channels))
+        self.assertEqual(self.pool._channels["a"].active_calls, 0)
+
+    async def test_cleanup_does_not_connect_idle_channels(self):
+        async with self.pool.acquire("a") as channel:
+            channel.get_state.return_value = grpc.ChannelConnectivity.IDLE
+        channel.get_state.reset_mock()
+        await self.pool._cleanup_closed()
+        channel.get_state.assert_called_once_with()
+
+    async def test_close_failure_does_not_break_pool(self):
+        async with self.pool.acquire("a") as channel:
+            channel.close.side_effect = RuntimeError("close failed")
+        self.pool._channels["a"].idle_since -= 11
+        await self.pool._cleanup_closed()
+        await self.flush_closes()
+        async with self.pool.acquire("a") as new:
+            self.assertIsNot(new, channel)
+
+    def test_invalid_limits(self):
+        for kwargs in (
+            {"idle_ttl": 0},
+            {"max_channels": 0},
+            {"acquire_timeout": -1},
+            {"cleanup_interval": 0},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                GrpcHostChannelPool(**kwargs)
 
 
 if __name__ == "__main__":
