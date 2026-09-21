@@ -34,11 +34,13 @@ class DenseMLP(nn.Module):
         weights: Dict[str, torch.Tensor],
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        enable_w4a16_sm120: bool = False,
     ):
         super().__init__()
 
         self.activation_type = activation_type
         self.parallelism_config = parallelism_config
+        self.enable_w4a16_sm120 = enable_w4a16_sm120
         if self.activation_type not in _ACTIVATION_FUNC_MAP:
             raise ValueError(f"Unsupported activation type: {activation_type}")
         self.act_fn = _ACTIVATION_FUNC_MAP[activation_type]()
@@ -91,16 +93,24 @@ class DenseMLP(nn.Module):
             weight_scale_2_key=W.ffn_w2_s2,
             input_scale_key=W.ffn_w2_i_s,
         )
+        self.w4a16 = None
+        if enable_w4a16_sm120:
+            from .w4a16_dense_mlp import W4A16DenseMLP
+
+            self.w4a16 = W4A16DenseMLP.create(self.up_proj, self.down_proj)
 
     def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
-        if not self.is_gated and self.activation_type == ActivationType.Gelu:
+        if self.w4a16 is not None and 0 < x.shape[0] < 64:
+            output = self.w4a16(x, self.act_fn)
+        elif not self.is_gated and self.activation_type == ActivationType.Gelu:
             activated = self.up_proj.forward_with_bias_gelu(x)
+            output = self.down_proj(activated)
         else:
             up = self.up_proj(x)
             activated = self.act_fn(up)
+            output = self.down_proj(activated)
 
         ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
-        output = self.down_proj(activated)
         if not skip_allreduce and ffn_tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output

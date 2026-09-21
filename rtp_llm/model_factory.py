@@ -456,6 +456,7 @@ class ModelFactory:
         propose_model_config = propose_model_cls._create_config(
             sp_config.checkpoint_path
         )
+        propose_model_config.enable_w4a16_sm120_dense_ffn = False
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
         propose_model_config.quantization = sp_config.quantization

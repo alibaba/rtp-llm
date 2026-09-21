@@ -48,6 +48,10 @@ load("@rtp_deps//:git.bzl", "git_deps")
 
 git_deps()
 
+load("//3rdparty/fast_hadamard_transform:repositories.bzl", "fast_hadamard_transform_deps")
+
+fast_hadamard_transform_deps()
+
 load("//3rdparty/xgrammar:repositories.bzl", "xgrammar_deps")
 
 xgrammar_deps()

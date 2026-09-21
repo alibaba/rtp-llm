@@ -425,9 +425,14 @@ class QuantizationConfig:
     def __init__(self):
         self.int8_mode: int = 0
         self.quantization: str = ""
+        self.enable_w4a16_sm120_dense_ffn: bool = False
 
     def to_string(self):
-        return f"int8_mode: {self.int8_mode}\n" f"quantization: {self.quantization}"
+        return (
+            f"int8_mode: {self.int8_mode}\n"
+            f"quantization: {self.quantization}\n"
+            f"enable_w4a16_sm120_dense_ffn: {self.enable_w4a16_sm120_dense_ffn}"
+        )
 
     def get_quantization(self):
         """Get quantization string with compatibility logic.

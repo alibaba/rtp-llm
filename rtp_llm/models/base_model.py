@@ -171,6 +171,24 @@ class BaseModel(object):
 
     @timer_wrapper(description="load model")
     def load(self, skip_python_model: bool = False):
+        self._enable_w4a16_sm120_dense_ffn = (
+            self.model_config.enable_w4a16_sm120_dense_ffn
+        )
+        logging.info(
+            "Model %s: enable_w4a16_sm120_dense_ffn=%s",
+            self.model_config.model_type,
+            self._enable_w4a16_sm120_dense_ffn,
+        )
+        if self._enable_w4a16_sm120_dense_ffn:
+            if skip_python_model:
+                raise ValueError(
+                    "SM120 W4A16 dense FFN requires Python model construction"
+                )
+            if self.parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate:
+                raise ValueError(
+                    "SM120 W4A16 dense FFN does not support FFN disaggregation"
+                )
+            self.model_config.validate_w4a16_sm120_dense_ffn()
         if (
             self.hw_kernel_config.enable_cuda_graph
             and self.support_cuda_graph() is False
@@ -189,6 +207,7 @@ class BaseModel(object):
             self.weight,
             self.model_weights_loader,
             non_owned_global_weights=self._weight_alias_names,
+            allow_weight_updates=not self._enable_w4a16_sm120_dense_ffn,
         )
         if skip_python_model:
             return
@@ -196,6 +215,38 @@ class BaseModel(object):
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
         self._create_python_model()
+        if self._enable_w4a16_sm120_dense_ffn:
+            from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+
+            if self.py_model is None:
+                raise RuntimeError("SM120 W4A16 dense FFN requires a Python model")
+            dense_ffns = [
+                module
+                for module in self.py_model.modules()
+                if isinstance(module, DenseMLP)
+            ]
+            requested_ffns = [
+                module for module in dense_ffns if module.enable_w4a16_sm120
+            ]
+            if not requested_ffns:
+                raise ValueError(
+                    f"Model {self.model_config.model_type} has no FFN execution "
+                    "path integrated with SM120 W4A16"
+                )
+            enabled_count = sum(module.w4a16 is not None for module in requested_ffns)
+            if enabled_count == 0:
+                raise ValueError(
+                    "All FFNs requested for SM120 W4A16 fell back to BF16 "
+                    "because their local weight shapes are unsupported"
+                )
+            logging.info(
+                "Model %s: SM120 W4A16 dense FFNs: enabled=%d, "
+                "shape_fallback=%d, not_requested=%d; block=128, 0<M<64",
+                self.model_config.model_type,
+                enabled_count,
+                len(requested_ffns) - enabled_count,
+                len(dense_ffns) - len(requested_ffns),
+            )
 
     def _create_python_model(self):
         pass
