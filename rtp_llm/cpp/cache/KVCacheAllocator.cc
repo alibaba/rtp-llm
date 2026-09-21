@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
@@ -315,6 +316,7 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
 }
 
 void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping) {
+    RTP_LLM_PROFILE_SCOPE("kv.prepare_and_copy_blocks");
     if (copy_mapping.empty()) {
         return;
     }
@@ -346,7 +348,10 @@ void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>&
             }
         }
     }
-    execBatchCopy(copy_params);
+    {
+        RTP_LLM_PROFILE_SCOPE("kv.exec_batch_copy");
+        execBatchCopy(copy_params);
+    }
 }
 
 size_t KVCacheAllocator::freeBlocksNum() const {

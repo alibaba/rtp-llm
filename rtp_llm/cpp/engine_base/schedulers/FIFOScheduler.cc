@@ -574,6 +574,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
 
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("scheduler.active(waiting=%zu,running=%zu)", waiting_streams_.size(), running_streams_.size());
     schedule_trigger_                 = false;
     last_admitted_context_batch_size_ = 0;
     last_admitted_context_token_size_ = 0;

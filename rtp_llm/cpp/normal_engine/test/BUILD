@@ -57,8 +57,8 @@ cc_test(
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ],
-    exec_properties = {'gpu':'A10'},
+    ] + cuda13_torch_link_deps,
+    exec_properties = {"gpu": "A10"},
 )
 
 cc_test(

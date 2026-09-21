@@ -3,7 +3,9 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <c10/core/InferenceMode.h>
+#include <exception>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -40,6 +42,7 @@ void syncPinnedCpuCopies(bool need_sync) {
     // Keep D2H waiting explicit here instead of hiding it inside Tensor::cpu().
     // The copy launch returns quickly; only this worker thread blocks on its
     // stream while the main engine thread can continue issuing CUDA work.
+    RTP_LLM_PROFILE_SCOPE("output.wait_d2h");
     cuda_graph::graphGetCurrentStream().synchronize();
 }
 
@@ -115,6 +118,7 @@ bool NormalOutputDispatcher::restoreCurrentTokenIds(const GenerateStreamPtr& str
 
 absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                               const MergedOutput& merge_outputs) const {
+    RTP_LLM_PROFILE_SCOPE("output.dispatch");
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     const auto&  sampler_output       = merge_outputs.sampler_output;
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
@@ -161,14 +165,20 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
         auto task = [&, stream, batch_idx_in, batch_idx_out, token_offset, dispatch_stream]() {
             c10::InferenceMode           inference_guard(true);
             cuda_graph::GraphStreamGuard stream_guard(dispatch_stream);
-            dispatchSingleStream(stream,
-                                 merge_outputs,
-                                 batch_idx_in,
-                                 batch_idx_out,
-                                 token_offset,
-                                 return_all_probs,
-                                 new_tokens_all,
-                                 success_cpu);
+            try {
+                dispatchSingleStream(stream,
+                                     merge_outputs,
+                                     batch_idx_in,
+                                     batch_idx_out,
+                                     token_offset,
+                                     return_all_probs,
+                                     new_tokens_all,
+                                     success_cpu);
+            } catch (const std::exception& e) {
+                stream->reportError(ErrorCode::EXECUTION_EXCEPTION, e.what());
+            } catch (...) {
+                stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "unknown output dispatch exception");
+            }
         };
 
         if (thread_pool_) {
@@ -182,10 +192,19 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
         token_offset += token_size;
     }
 
-    for (auto& future : futures) {
-        future.wait();
+    {
+        RTP_LLM_PROFILE_SCOPE("output.wait_workers");
+        for (auto& future : futures) {
+            future.wait();
+        }
+        // Drain every task before observing exceptions: tasks capture this call's
+        // tensor owners by reference.
+        for (auto& future : futures) {
+            future.get();
+        }
     }
 
+    { RTP_LLM_PROFILE_SCOPE("output.workers_ready"); }
     RTP_LLM_LOG_DEBUG("dispatch done");
     return absl::OkStatus();
 }
@@ -198,6 +217,9 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   bool                 return_all_probs,
                                                   const torch::Tensor& new_tokens_all,
                                                   const torch::Tensor& success_cpu) const {
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("output.stream(id=%ld,step=%zu,in=%d,out=%d)",
+                                  stream->streamId(), stream->outputTokenLen() + 1,
+                                  stream->currentBatchSize(), stream->nextBatchSize());
 
     const auto&  model_output   = merge_outputs.model_output;
     const auto&  sampler_output = merge_outputs.sampler_output;
