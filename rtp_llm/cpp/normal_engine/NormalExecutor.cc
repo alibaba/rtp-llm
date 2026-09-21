@@ -101,9 +101,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                        params.model_config_.num_layers,
                                                        moe_inter_size,
                                                        params.model_config_.hidden_size,
-                                                       params.parallelism_config.ep_rank,
-                                                       params.parallelism_config.ep_size,
-                                                       params.parallelism_config.world_size,
+                                                       params.parallelism_config,
+                                                       std::pair<int64_t, int64_t>{0, params.model_config_.num_layers},
                                                        params.py_eplb,
                                                        moe_weight_type,
                                                        params.model_config_.quant_algo,
@@ -286,7 +285,7 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
+        expert_balancer_->stepForward(*model_, executor_collector, !model_input.is_fake_stream);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 

@@ -97,6 +97,16 @@ struct RankLayout {
     std::pair<int64_t, int64_t> myLayerRange(int64_t total_layers) const {
         return layerRangeOf(pp_rank, total_layers);
     }
+
+    int64_t firstMoeLayer(int64_t total_layers, const std::vector<int64_t>& moe_layer_ids) const {
+        const auto [begin, end] = myLayerRange(total_layers);
+        for (const auto layer_id : moe_layer_ids) {
+            if (layer_id >= begin && layer_id < end) {
+                return layer_id;
+            }
+        }
+        return -1;
+    }
 };
 
 }  // namespace rtp_llm

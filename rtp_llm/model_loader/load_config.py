@@ -50,7 +50,7 @@ class LoadConfig(BaseModel):
     lm_head_tp_rank: int
     ffn_tp_size: int
     ffn_tp_rank: int
-    num_nodes: int
+    num_nodes: int  # Nodes in the EP group used for expert placement.
     bit: int = 16
     merge_lora: bool = False
 
@@ -163,6 +163,7 @@ class LoadConfig(BaseModel):
         num_nodes: int,
         phy2log_path: Optional[str] = None,
     ):
+        """Build the initial expert mapping for an EP group."""
         expert_num = expert_num
         redundant_expert = phy_exp_num - expert_num
         expert_num_per_ep = expert_num // ep_size

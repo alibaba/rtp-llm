@@ -13,8 +13,9 @@ from rtp_llm.config.pp_layout import (
 )
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.loader import ModelLoader
+from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.ops import TaskType
-from rtp_llm.utils.database import BaseDatabase
+from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import W
 
 
@@ -27,7 +28,7 @@ def make_load_config(
     # Fixtures materialize the even split for pp>1 unless a case supplies its own.
     if pp_size > 1 and pp_stage_layer_counts is None:
         pp_stage_layer_counts = even_split_counts(num_layers, pp_size)
-    database = MagicMock(spec=BaseDatabase)
+    database = MagicMock(spec=CkptDatabase)
     return LoadConfig(
         database=database,
         num_layers=num_layers,
@@ -65,14 +66,23 @@ def make_loader(
     load_config: LoadConfig, task_type=TaskType.LANGUAGE_MODEL,
     apply_pp_partition: bool = True,
 ) -> ModelLoader:
-    weights_info = MagicMock(is_attn_model=False)
+    weights_info = MagicMock(
+        is_attn_model=False,
+        pp_size=load_config.pp_size,
+        pp_rank=load_config.pp_rank,
+        pp_stage_layer_counts=load_config.pp_stage_layer_counts,
+    )
     weights_info.create_load_config.return_value = load_config
     # Exercise scope selection in the real constructor without device/EPLB setup.
     with patch.object(ModelLoader, "create_eplb", return_value=(None, None)), patch(
         "rtp_llm.device.get_current_device"
     ):
         return ModelLoader(
-            SimpleNamespace(task_type=task_type, compute_dtype=load_config.compute_dtype),
+            SimpleNamespace(
+                task_type=task_type,
+                compute_dtype=load_config.compute_dtype,
+                num_layers=load_config.num_layers,
+            ),
             weights_info, [], load_config.database,
             apply_pp_partition=apply_pp_partition,
         )
@@ -81,6 +91,161 @@ def make_loader(
 class FakeWeight:
     def __init__(self, name: str):
         self.name = name
+
+
+def make_eplb_loader(cfg, moe_layers, apply_pp_partition=True, enabled=True):
+    """Exercise the real loader and balancer with small metadata and no device I/O."""
+    cfg.moe_layer_index = moe_layers
+    cfg.expert_num = 2
+    cfg.phy_exp_num = 4
+    cfg.enable_eplb = enabled
+    model_config = SimpleNamespace(
+        task_type=TaskType.LANGUAGE_MODEL,
+        compute_dtype=cfg.compute_dtype,
+        num_layers=cfg.num_layers,
+        expert_num=cfg.expert_num,
+        phy2log_path=None,
+        ckpt_path="unused-checkpoint",
+        eplb_config=SimpleNamespace(
+            balance_method="mix", eplb_stats_window_size=2, eplb_force_repack=0
+        ),
+    )
+    weights_info = MagicMock(
+        is_attn_model=False,
+        pp_size=cfg.pp_size,
+        pp_rank=cfg.pp_rank,
+        pp_stage_layer_counts=cfg.pp_stage_layer_counts,
+        expert_num_=cfg.expert_num,
+        phy_exp_num_=cfg.phy_exp_num,
+        ep_size=cfg.ep_size,
+        num_nodes=cfg.num_nodes,
+        moe_layer_index_=moe_layers,
+        moe_style_=1 if moe_layers else 0,
+        enable_eplb_=enabled,
+    )
+
+    def load_config(**kwargs):
+        cfg.phy2log = kwargs["phy2log"]
+        cfg.exported_device = kwargs["exported_device"]
+        return cfg
+
+    weights_info.create_load_config.side_effect = load_config
+    device = SimpleNamespace(support_dio_load=False)
+    with patch("rtp_llm.model_loader.loader.CkptDatabase", return_value=cfg.database), patch(
+        "rtp_llm.device.get_current_device", return_value=device
+    ), patch("rtp_llm.eplb.ep_balancer.get_current_device", return_value=device):
+        return ModelLoader(
+            model_config, weights_info, None, cfg.database,
+            apply_pp_partition=apply_pp_partition,
+        )
+
+
+class PPEplbLoadingTest(unittest.TestCase):
+    def test_balancer_scope_and_mapping_initialization(self):
+        cases = [
+            # Global MoE layers are [1, 3, 5, 7]; stage 0 has none here.
+            (8, 3, 0, [1, 3, 4], True, [1, 3, 5, 7], []),
+            (8, 3, 1, [1, 3, 4], True, [1, 3, 5, 7], [1, 3]),
+            (8, 3, 2, [1, 3, 4], True, [1, 3, 5, 7], [5, 7]),
+            (8, 1, 0, None, True, [1, 3, 5, 7], [1, 3, 5, 7]),
+            (8, 1, 0, None, True, [], []),
+            # A draft owns both of its layers despite the target's PP layout.
+            (2, 3, 2, [1, 3, 4], False, [0, 1], [0, 1]),
+        ]
+        for layers, pp, rank, counts, partition, moe_layers, expected in cases:
+            with self.subTest(layers=layers, pp=pp, rank=rank, partition=partition):
+                cfg = make_load_config(layers, pp, rank, counts)
+                loader = make_eplb_loader(cfg, moe_layers, partition)
+                if expected:
+                    self.assertEqual(loader._py_eplb.moe_layer_index, expected)
+                else:
+                    self.assertIsNone(loader._py_eplb)
+                weights = ModelWeights(layers, "cpu", torch.float32)
+                loader._init_eplb_weight(weights, "cpu")
+                self.assertEqual(
+                    [i for i, row in enumerate(weights.weights) if W.log2phy in row],
+                    expected,
+                )
+                for layer_id in expected:
+                    # EP=1 initial layout is [0, 1, 0, 1].
+                    torch.testing.assert_close(
+                        weights.weights[layer_id][W.logic_expert_cnt],
+                        torch.tensor([2, 2], dtype=torch.int32),
+                    )
+                    torch.testing.assert_close(
+                        weights.weights[layer_id][W.log2phy],
+                        torch.tensor([[0, 2, -1], [1, 3, -1]], dtype=torch.int32),
+                    )
+
+    def test_redundant_mapping_without_dynamic_balancer(self):
+        cfg = make_load_config(8, 2, 1, [4, 4])
+        loader = make_eplb_loader(cfg, [1, 3, 5, 7], enabled=False)
+        self.assertIsNone(loader._py_eplb)
+        weights = ModelWeights(8, "cpu", torch.float32)
+        loader._init_eplb_weight(weights, "cpu")
+        self.assertEqual(
+            [i for i, row in enumerate(weights.weights) if W.log2phy in row], [5, 7]
+        )
+
+    def test_balancer_never_selects_another_stage(self):
+        from rtp_llm.eplb.ep_balancer import SelectLayerMethod
+
+        loader = make_eplb_loader(make_load_config(8, 2, 1), [1, 3, 5, 7])
+        balancer = loader._py_eplb
+        gpu_loads = torch.tensor([[0], [1000], [0], [900], [0], [10], [0], [20]])
+        balancer.select_layer_method = SelectLayerMethod.ROUND
+        self.assertEqual([balancer.get_balanced_layer(gpu_loads) for _ in range(4)], [5, 7, 5, 7])
+        balancer.select_layer_method = SelectLayerMethod.MOST_UNBALANCED_LAYER
+        self.assertEqual(balancer.get_balanced_layer(gpu_loads), 7)
+        for method in (SelectLayerMethod.RANDOM, SelectLayerMethod.MIX):
+            balancer.select_layer_method = method
+            for step in range(8):
+                balancer.update_cnt = step
+                self.assertIn(balancer.get_balanced_layer(gpu_loads), [5, 7])
+
+    def test_static_and_dynamic_use_the_same_ep_node_count(self):
+        for ep_size, num_nodes in ((1, 1), (2, 1), (2, 2)):
+            with self.subTest(ep_size=ep_size, num_nodes=num_nodes):
+                cfg = make_load_config(8, 2, 1)
+                cfg.ep_size = ep_size
+                cfg.num_nodes = num_nodes
+                with patch.object(
+                    LoadConfig, "create_redundant_expert",
+                    wraps=LoadConfig.create_redundant_expert,
+                ) as static_placement:
+                    loader = make_eplb_loader(cfg, [1, 3, 5, 7])
+                self.assertEqual(static_placement.call_args.kwargs["num_nodes"], num_nodes)
+                self.assertEqual(loader._py_eplb.num_nodes, num_nodes)
+                self.assertEqual(loader._py_eplb.num_gpu, ep_size)
+
+    def test_ft_loading_reads_selected_layers_and_globals(self):
+        for pp, rank, partition, expected in (
+            (2, 0, True, [0, 1]),
+            (2, 1, True, list(range(2, 12))),
+            (2, 1, False, list(range(12))),
+            (1, 0, True, list(range(12))),
+        ):
+            with self.subTest(pp=pp, rank=rank, partition=partition):
+                cfg = make_load_config(12, pp, rank, [2, 10] if pp > 1 else None)
+                cfg.exported_device = SimpleNamespace(support_dio_load=False)
+                loader = make_loader(cfg, apply_pp_partition=partition)
+                layer_prefix = ModelWeights.layer_weight_prefix(0, 0, 0)
+                global_prefix = ModelWeights.global_weight_prefix(0, 0, 0)
+                checkpoint = {
+                    f"{layer_prefix}{i}.weight": [torch.tensor([i])] for i in range(12)
+                }
+                checkpoint[f"{global_prefix}{W.embedding}"] = [torch.tensor([99])]
+                checkpoint["rank_01_00_00.layers.0.weight"] = [torch.tensor([-1])]
+                cfg.database.load_tensors_by_prefix.side_effect = (
+                    lambda prefixes, device, direct_io: {
+                        key: value for key, value in checkpoint.items() if key.startswith(prefixes)
+                    }
+                )
+                result = loader._load_from_ft_style("cpu")
+                self.assertEqual([i for i, row in enumerate(result.weights) if row], expected)
+                for i in expected:
+                    self.assertEqual(result.weights[i]["weight"].item(), i)
+                self.assertEqual(result.global_weights[W.embedding].item(), 99)
 
 
 class PPLayerRangeTest(unittest.TestCase):

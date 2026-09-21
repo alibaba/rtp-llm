@@ -185,7 +185,6 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     RTP_LLM_CHECK_WITH_INFO(params.sp_config.type == SP_TYPE_NONE || params.sp_config.type == SP_TYPE_MTP
                                 || params.sp_config.type == SP_TYPE_EAGLE || params.sp_config.type == SP_TYPE_DSPARK,
                             "pipeline parallelism only supports MTP, EAGLE and DSpARK speculative decoding");
-    RTP_LLM_CHECK_WITH_INFO(!params.eplb_config.enable_eplb(), "pipeline parallelism does not support EPLB");
     RTP_LLM_CHECK_WITH_INFO(!params.ffn_disaggregate_config.enable_ffn_disaggregate,
                             "pipeline parallelism does not support FFN disaggregation");
     RTP_LLM_CHECK_WITH_INFO(!parallelism_config_.enable_sp && parallelism_config_.ffn_sp_size == 1,
@@ -228,26 +227,28 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     }
 
     if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
-        int         first_moe_layer = params.model_config_.moe_layer_index.front();
-        const auto& moe_kernel      = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
-        auto        moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
-        bool        is_gated_activation = params.model_config_.isGatedActivation();
-        auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
+        const auto first_moe_layer =
+            pp_layout_.firstMoeLayer(params.model_config_.num_layers, params.model_config_.moe_layer_index);
+        if (first_moe_layer >= 0) {
+            const auto& moe_kernel = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
+            auto        moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
+            bool        is_gated_activation = params.model_config_.isGatedActivation();
+            auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
 
-        expert_balancer_ =
-            std::make_shared<ExpertBalancer>(params.model_config_.expert_num,
-                                             params.eplb_config.phy_exp_num(params.model_config_.expert_num),
-                                             params.model_config_.num_layers,
-                                             moe_inter_size,
-                                             params.model_config_.hidden_size,
-                                             params.parallelism_config.ep_rank,
-                                             params.parallelism_config.ep_size,
-                                             params.parallelism_config.world_size,
-                                             params.py_eplb,
-                                             moe_weight_type,
-                                             params.model_config_.quant_algo,
-                                             metrics_reporter_,
-                                             params.eplb_config);
+            expert_balancer_ =
+                std::make_shared<ExpertBalancer>(params.model_config_.expert_num,
+                                                 params.eplb_config.phy_exp_num(params.model_config_.expert_num),
+                                                 params.model_config_.num_layers,
+                                                 moe_inter_size,
+                                                 params.model_config_.hidden_size,
+                                                 params.parallelism_config,
+                                                 pp_layout_.myLayerRange(params.model_config_.num_layers),
+                                                 params.py_eplb,
+                                                 moe_weight_type,
+                                                 params.model_config_.quant_algo,
+                                                 metrics_reporter_,
+                                                 params.eplb_config);
+        }
     }
 
     if (!warm_up_ && isLastStage() && isStageRoot()) {
@@ -1037,7 +1038,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
 
         if (expert_balancer_) {
             RtpLLMExecutorMetricsCollector collector;
-            expert_balancer_->stepForward(*model_, collector);
+            expert_balancer_->stepForward(*model_, collector, !local_model_input.is_fake_stream);
         }
 
         auto forward_done = cuda_graph::makeGraphEvent();

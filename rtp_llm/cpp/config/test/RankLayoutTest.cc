@@ -143,6 +143,17 @@ TEST(RankLayoutTest, MaterializedSingleStage) {
     EXPECT_EQ(layout.myLayerRange(/*total_layers=*/64), (std::pair<int64_t, int64_t>{0, 64}));
 }
 
+TEST(RankLayoutTest, FirstMoeLayerUsesStageOwnership) {
+    // Stage 0 [0,2) is dense; layers on either side of the boundaries must
+    // remain global IDs, including the first MoE on the last stage.
+    const std::vector<int64_t> moe_layers{2, 4, 5, 7};
+    EXPECT_EQ(makeMaterialized({2, 3, 3}, 0).firstMoeLayer(8, moe_layers), -1);
+    EXPECT_EQ(makeMaterialized({2, 3, 3}, 1).firstMoeLayer(8, moe_layers), 2);
+    EXPECT_EQ(makeMaterialized({2, 3, 3}, 2).firstMoeLayer(8, moe_layers), 5);
+    EXPECT_EQ(makeMaterialized({8}, 0).firstMoeLayer(8, moe_layers), 2);
+    EXPECT_EQ(makeMaterialized({8}, 0).firstMoeLayer(8, {}), -1);
+}
+
 TEST(RankLayoutTest, MaterializedRejectsInconsistentCounts) {
     auto layout    = makeMaterialized({8, 8}, 0);
     layout.pp_size = 3;  // size/pp_size mismatch

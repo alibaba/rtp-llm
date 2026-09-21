@@ -231,6 +231,7 @@ cc_library(
         ":models",
         ":dfa_utils",
         "//rtp_llm/cpp/config:eplb_config",
+        "//rtp_llm/cpp/config:rank_layout",
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/cache:cache_types",

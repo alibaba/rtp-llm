@@ -227,9 +227,8 @@ class ModelDeployWeightInfo:
         # Materialized layer partition from startup; absent only at pp_size=1 or in test mocks.
         pp_counts = getattr(parallelism_config, "pp_stage_layer_counts", None)
         self.pp_stage_layer_counts = list(pp_counts) if pp_counts else None
-        self.num_nodes: int = (
-            parallelism_config.world_size // parallelism_config.local_world_size
-        )
+        # EP ranks belong to one PP stage. Placement uses nodes in this EP group.
+        self.num_nodes = max(self.ep_size // parallelism_config.local_world_size, 1)
         self.ffn_tp_rank = parallelism_config.get_ffn_tp_rank()
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
 

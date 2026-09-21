@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.pp_layout import stage_layer_range
 from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
 from rtp_llm.lora.lora_weights import LoRAWeights
 from rtp_llm.model_loader.ffn_weight import iter_stacked_moe_weights
@@ -72,6 +73,18 @@ class ModelLoader:
 
         # Get is_attn_model flag from weights_info (calculated in ModelDeployWeightInfo constructor)
         self._is_attn_model = weights_info.is_attn_model
+        # Initial expert placement is needed by LoadConfig and weight loading.
+        # Resolve ownership first without depending on either of them.
+        self._layer_ids = (
+            stage_layer_range(
+                model_config.num_layers,
+                weights_info.pp_size,
+                weights_info.pp_rank,
+                weights_info.pp_stage_layer_counts,
+            )
+            if apply_pp_partition
+            else range(model_config.num_layers)
+        )
         self._py_eplb, self._phy2log = self.create_eplb()
         self._load_config: LoadConfig = self._weights_info.create_load_config(
             compute_dtype=compute_dtype,
@@ -83,11 +96,9 @@ class ModelLoader:
         )
         # Resolve layer and global-weight ownership once for both loading paths.
         if apply_pp_partition:
-            self._layer_ids = self._load_config.pp_layer_range()
             self._load_embedding = self._load_config.has_pp_embedding
             self._load_lm_head = self._load_config.has_pp_lm_head
         else:
-            self._layer_ids = range(self._load_config.num_layers)
             self._load_embedding = True
             self._load_lm_head = True
 
@@ -240,8 +251,11 @@ class ModelLoader:
         weights = [{} for _ in range(num_layers)]
         global_weights = dict(self._global_weight_aliases)
         # 重新构建权重
+        prefixes = tuple(
+            f"{layer_weight_prefix}{layer_id}." for layer_id in self._layer_ids
+        ) + (global_weight_prefix,)
         all_tensors = self._load_config.database.load_tensors_by_prefix(
-            (layer_weight_prefix, global_weight_prefix), device, direct_io=direct_io
+            prefixes, device, direct_io=direct_io
         )
         for key, tensor in all_tensors.items():
             if key.startswith(layer_weight_prefix):
@@ -826,31 +840,48 @@ class ModelLoader:
         ep_lb_database = CkptDatabase(model_path)
         compute_dtype = self.model_config.compute_dtype
 
+        moe_layer_index = [
+            layer_id
+            for layer_id in weights_info.moe_layer_index_
+            if layer_id in self._layer_ids
+        ]
         py_eplb = None
-        if weights_info.enable_eplb_:
+        if (
+            weights_info.enable_eplb_
+            and weights_info.moe_style_ != 0
+            and moe_layer_index
+        ):
             py_eplb = ExpertBalancer(
                 weights_info=weights_info,
                 compute_dtype=compute_dtype,
                 phy2log=phy2log,
                 database=ep_lb_database,
                 model_config=self.model_config,
+                layer_ids=self._layer_ids,
             )
         return py_eplb, phy2log
 
     def _init_eplb_weight(self, weight: ModelWeights, device: str):
+        weights_info = self._weights_info
         expert_num = self._load_config.expert_num
         redundant_expert = self._load_config.phy_exp_num - expert_num
-        layer_num = self._load_config.num_layers
         phy2log = self._load_config.phy2log
 
-        if expert_num == 0 or (
-            not self._weights_info.enable_eplb_ and redundant_expert == 0
+        if (
+            weights_info.moe_style_ == 0
+            or expert_num == 0
+            or (not weights_info.enable_eplb_ and redundant_expert == 0)
         ):
             logging.info("don't need to init eplb weight, skip...")
             return
 
+        moe_layer_index = [
+            layer_id
+            for layer_id in weights_info.moe_layer_index_
+            if layer_id in self._layer_ids
+        ]
         # init logic_expert_cnt and log2phy
-        for layer_id in range(layer_num):
+        for layer_id in moe_layer_index:
             logic_expert_cnt = torch.zeros((expert_num,), dtype=torch.int32)
             log2phy = torch.empty(
                 (expert_num, redundant_expert + 1), dtype=torch.int32

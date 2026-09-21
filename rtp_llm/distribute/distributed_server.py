@@ -18,7 +18,7 @@ from rtp_llm.config.py_config_modules import (
     ServerConfig,
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
-from rtp_llm.models_py.distributed.rank_layout import RankLayout
+from rtp_llm.models_py.distributed.rank_layout import Coord, RankLayout
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 
@@ -126,6 +126,54 @@ def get_dp_addrs_from_world_info(
         f"using addresses from world_info: {addresses}"
     )
     return addresses
+
+
+def get_eplb_stage_root_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
+    """Resolve one control root (DP=0, TP=0) per stage, including remote nodes.
+
+    Called on a config update, after backend bootstrap has registered its ranks.
+    Frontend WorldInfo contains only local ranks; missing roots come from the
+    existing bootstrap registry, without registering another worker.
+    """
+    pc = py_env_configs.parallelism_config
+    layout = RankLayout.from_parallelism_config(pc)
+    root_ranks = [
+        layout.world_rank_of(Coord(pp=stage)) for stage in range(layout.pp_size)
+    ]
+    world_info = get_world_info(
+        py_env_configs.server_config, py_env_configs.distribute_config, pc
+    )
+    roots = {
+        member.world_rank: f"{member.ip}:{member.rpc_server_port}"
+        for member in world_info.members
+        if member.world_rank in root_ranks
+    }
+    missing = [rank for rank in root_ranks if rank not in roots]
+    if missing:
+        master_ip, master_port = get_master(py_env_configs.distribute_config, pc)
+        master_port = int(master_port or py_env_configs.server_config.start_port)
+        store = TCPStore(
+            host_name=master_ip,
+            port=master_port - 1,
+            is_master=False,
+            wait_for_workers=False,
+            timeout=timedelta(seconds=3),
+        )
+        for rank in missing:
+            address = store.get(
+                DistributedServer.REGISTRY_RANK_ADDRESS_KEY + str(rank)
+            ).decode()
+            ip, server_port = split_ip_port(address)
+            member = WorkerInfo(
+                ip=ip,
+                local_rank=rank % pc.local_world_size,
+                world_rank=rank,
+                name="",
+                server_port=server_port,
+                worker_info_port_num=0,  # Registered port already includes the local-rank offset.
+            )
+            roots[rank] = f"{member.ip}:{member.rpc_server_port}"
+    return [roots[rank] for rank in root_ranks]
 
 
 def get_local_world_info(
