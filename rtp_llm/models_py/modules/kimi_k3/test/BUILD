@@ -1,6 +1,23 @@
 load("@rules_python//python:defs.bzl", "py_test")
 
 py_test(
+    name = "custom_all_gather_test",
+    srcs = ["test_custom_all_gather.py"],
+    main = "test_custom_all_gather.py",
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "custom_all_gather_gpu_test",
+    srcs = ["test_custom_all_gather_gpu.py"],
+    main = "test_custom_all_gather_gpu.py",
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    timeout = "long",
+    tags = ["manual", "B300"],
+    exec_properties = {"gpu": "B300", "gpu_count": "8"},
+)
+
+py_test(
     name = "chunkwise_rdma_publisher_test",
     srcs = ["test_chunkwise_rdma_publisher.py"],
     main = "test_chunkwise_rdma_publisher.py",

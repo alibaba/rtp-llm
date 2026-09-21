@@ -58,10 +58,40 @@ class KimiK3MLA(MlaAttention):
         latent_norm_eps: float = _MLA_LATENT_NORM_EPS,
     ) -> None:
         q_replicated = bool(parallelism_config.decode_cp_q_replicated)
+        quant_config = getattr(config, "k3_attention_quant_config", None)
+        fp8_input_fused = quant_config is not None and all(
+            weights[key].dtype == torch.int32
+            for key in (W.mla_fusedqkrope_s, W.attn_gate_s)
+        )
+        projection_weights = weights
+        if fp8_input_fused:
+            qkv_rows = weights[W.mla_fusedqkrope_w].shape[0]
+            packed_weight = torch.cat(
+                (weights[W.mla_fusedqkrope_w], weights[W.attn_gate_w]), dim=0
+            )
+            # Final UE8M0 scales are per output row. Concatenating the original
+            # 128x128 scale blocks would misalign the N=2112 boundary.
+            # Preserve the MN-major, TMA-aligned layout required by DeepGEMM.
+            packed_scale = (
+                torch.cat(
+                    (weights[W.mla_fusedqkrope_s].T, weights[W.attn_gate_s].T), dim=1
+                )
+                .contiguous()
+                .T
+            )
+            # The decoder retains this dictionary. Share the large weights;
+            # keep the small original scales with each source GEMM's own pitch.
+            weights[W.mla_fusedqkrope_w] = packed_weight[:qkv_rows]
+            weights[W.attn_gate_w] = packed_weight[qkv_rows:]
+            projection_weights = {
+                **weights,
+                W.mla_fusedqkrope_w: packed_weight,
+                W.mla_fusedqkrope_s: packed_scale,
+            }
         super().__init__(
             config.attn_config,
             parallelism_config,
-            weights,
+            projection_weights,
             layer_idx,
             latent_norm_eps,
             getattr(config, "k3_attention_quant_config", None) or config.quant_config,
@@ -103,8 +133,8 @@ class KimiK3MLA(MlaAttention):
 
         self._q_a_norm = weights[W.mla_q_a_ln_gamma]
         self._kv_a_norm = weights[W.mla_kv_a_ln_gamma]
-        quant_config = getattr(config, "k3_attention_quant_config", None)
         self._fp8_enabled = quant_config is not None
+        self._fp8_input_fused = fp8_input_fused
         self._perf_accepts_strided_latent = (
             self._fp8_enabled and parallelism_config.role_type == RoleType.PREFILL
         )
@@ -112,7 +142,7 @@ class KimiK3MLA(MlaAttention):
             LinearFactory.create_linear_from_weights(
                 weights, W.attn_gate_w, W.attn_gate_s, None, quant_config=quant_config
             )
-            if self._fp8_enabled
+            if self._fp8_enabled and not self._fp8_input_fused
             else None
         )
         self.kv_b_proj = LinearFactory.create_linear_from_weights(
@@ -145,6 +175,8 @@ class KimiK3MLA(MlaAttention):
         if self.parallel_mode is not KimiK3ParallelMode.TP_SP:
             raise RuntimeError("MLA TP projection weights require TP-SP mode")
         if self._fp8_enabled:
+            if self._fp8_input_fused:
+                return [self.fused_qkv_a_proj]
             return [self.fused_qkv_a_proj, self._fp8_gate]
         return [self._packed_qkv_gate_w]
 
@@ -165,7 +197,10 @@ class KimiK3MLA(MlaAttention):
                     "K3 TP-SP MLA requires its input projection from the decoder "
                     "parallel orchestrator"
                 )
-            expected = 2 if getattr(self, "_fp8_enabled", False) else 1
+            separate_fp8 = (
+                getattr(self, "_fp8_enabled", False) and not self._fp8_input_fused
+            )
+            expected = 2 if separate_fp8 else 1
             if len(projected) != expected:
                 raise ValueError(
                     f"K3 MLA expected {expected} projected tensors, got {len(projected)}"
@@ -177,7 +212,7 @@ class KimiK3MLA(MlaAttention):
                 raise ValueError(
                     "K3 MLA projected rows do not match the physical token layout"
                 )
-            if getattr(self, "_fp8_enabled", False):
+            if separate_fp8:
                 return projected[0], projected[1]
             packed = projected[0]
             return torch.split(
@@ -189,7 +224,7 @@ class KimiK3MLA(MlaAttention):
                 dim=-1,
             )
 
-        if getattr(self, "_fp8_enabled", False):
+        if getattr(self, "_fp8_enabled", False) and not self._fp8_input_fused:
             quantized = self.fused_qkv_a_proj.quantize_input(hidden_states)
             qkv = self.fused_qkv_a_proj.forward_quantized(*quantized)
             gate = self._fp8_gate.forward_quantized(*quantized)

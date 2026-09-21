@@ -203,7 +203,9 @@ class KimiK3Fp8NcclTest(unittest.TestCase):
             with self.subTest(ag_size=size):
                 group = Mock(size=Mock(return_value=size))
                 payload = Mock(shape=(1, 512), device=device)
-                state = SimpleNamespace(max_m=32, k=512, device=device, use_fused=True)
+                state = SimpleNamespace(
+                    max_m=32, k=512, device=device, use_fused=True, custom=None
+                )
                 with patch.object(
                     ag, "get_process_group", return_value=group
                 ), patch.dict(ag._STATES, {(group, 0, True): state}), patch.object(

@@ -28,6 +28,18 @@ cuda_deps = [
 ]
 
 cc_library(
+    name = "custom_all_gather",
+    srcs = ["custom_all_gather.cu"],
+    hdrs = ["custom_all_gather.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts() + sm103_cuda_copts,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "push_reduce_scatter",
     srcs = ["push_reduce_scatter.cu"],
     hdrs = ["push_reduce_scatter.h"],

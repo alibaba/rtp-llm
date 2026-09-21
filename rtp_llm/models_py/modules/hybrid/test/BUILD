@@ -18,11 +18,26 @@ py_test_deps = [
 py_test(
     name = "kimi_k3_mla_projection_fusion_unit_test",
     srcs = ["kimi_k3_mla_projection_fusion_unit_test.py"],
+    args = ["KimiK3MLAProjectionFusionUnitTest"],
     deps = [
         "//rtp_llm/models_py:models",
         "//rtp_llm:testlib",
     ],
     timeout = "short",
+)
+
+py_test(
+    name = "kimi_k3_mla_projection_fusion_gpu_test",
+    srcs = ["kimi_k3_mla_projection_fusion_unit_test.py"],
+    main = "kimi_k3_mla_projection_fusion_unit_test.py",
+    args = ["KimiK3MLAFp8ProjectionGpuTest"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "long",
+    tags = ["manual", "B300"],
+    exec_properties = {"gpu": "B300", "gpu_count": "1"},
 )
 
 py_test(

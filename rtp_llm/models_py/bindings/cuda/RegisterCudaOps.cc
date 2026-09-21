@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/cuda/RegisterAttnOpBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/push_reduce_scatter.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/custom_all_gather.h"
 
 #if defined(ENABLE_FP4)
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
@@ -15,6 +16,51 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("custom_all_gather_staging",
+                  &custom_all_gather_staging,
+                  py::arg("input"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("counters"),
+                  py::arg("workspace_mc_ptr"),
+                  py::arg("rank"),
+                  py::arg("blocks"),
+                  py::arg("threads"));
+    rtp_ops_m.def("custom_all_gather_direct",
+                  &custom_all_gather_direct,
+                  py::arg("input"),
+                  py::arg("output"),
+                  py::arg("semaphores"),
+                  py::arg("output_mc_ptr"),
+                  py::arg("semaphore_mc_ptr"),
+                  py::arg("rank"),
+                  py::arg("blocks"),
+                  py::arg("threads"));
+    rtp_ops_m.def("custom_all_gather_fp8_staging",
+                  &custom_all_gather_fp8_staging,
+                  py::arg("values"),
+                  py::arg("scales"),
+                  py::arg("output_values"),
+                  py::arg("output_scales"),
+                  py::arg("workspace"),
+                  py::arg("counters"),
+                  py::arg("workspace_mc_ptr"),
+                  py::arg("rank"),
+                  py::arg("blocks"),
+                  py::arg("threads"));
+    rtp_ops_m.def("custom_all_gather_fp8_direct",
+                  &custom_all_gather_fp8_direct,
+                  py::arg("values"),
+                  py::arg("scales"),
+                  py::arg("output_values"),
+                  py::arg("output_scales"),
+                  py::arg("semaphores"),
+                  py::arg("output_values_mc_ptr"),
+                  py::arg("output_scales_mc_ptr"),
+                  py::arg("semaphore_mc_ptr"),
+                  py::arg("rank"),
+                  py::arg("blocks"),
+                  py::arg("threads"));
     rtp_ops_m.def("push_reduce_scatter",
                   &push_reduce_scatter,
                   py::arg("input"),
