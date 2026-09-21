@@ -170,6 +170,40 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
         .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params)
         .def_readwrite("headwise_config", &PyAttentionInputs::headwise_config)
+        .def("for_prefill_chunk",
+             [](const PyAttentionInputs& self,
+                torch::Tensor input_lengths,
+                torch::Tensor prefix_lengths,
+                torch::Tensor input_lengths_device,
+                torch::Tensor prefix_lengths_device) {
+                 TORCH_CHECK(self.is_prefill && !self.is_target_verify && !self.is_cuda_graph
+                                 && !self.context_parallel_info.has_value(),
+                             "chunk metadata requires eager context-only prefill without CP");
+                 const auto batch = input_lengths.numel();
+                 TORCH_CHECK(input_lengths.dim() == 1 && prefix_lengths.dim() == 1
+                                 && input_lengths_device.dim() == 1 && prefix_lengths_device.dim() == 1
+                                 && batch > 0 && prefix_lengths.numel() == batch
+                                 && input_lengths_device.numel() == batch && prefix_lengths_device.numel() == batch,
+                             "chunk length mirrors must have matching nonempty batch dimensions");
+                 TORCH_CHECK(input_lengths.device().is_cpu() && prefix_lengths.device().is_cpu()
+                                 && input_lengths.scalar_type() == torch::kInt32
+                                 && prefix_lengths.scalar_type() == torch::kInt32
+                                 && input_lengths_device.scalar_type() == torch::kInt32
+                                 && prefix_lengths_device.scalar_type() == torch::kInt32
+                                 && input_lengths_device.device() == prefix_lengths_device.device(),
+                             "chunk lengths require int32 host/device mirrors");
+                 auto chunk = self;
+                 chunk.input_lengths = std::move(input_lengths);
+                 chunk.prefix_lengths = std::move(prefix_lengths);
+                 chunk.input_lengths_device = std::move(input_lengths_device);
+                 chunk.prefix_lengths_device = std::move(prefix_lengths_device);
+                 // A partial round must not publish the outer request's full cache descriptor.
+                 // The caller publishes only after every round has completed successfully.
+                 chunk.cache_store_inputs.reset();
+                 chunk.cache_store_writer.reset();
+                 chunk.prefill_cuda_graph_copy_params.reset();
+                 return chunk;
+             })
         .def("__copy__", [](const PyAttentionInputs& self) { return PyAttentionInputs(self); });
 
     pybind11::class_<BertEmbeddingInputs>(m, "BertEmbeddingInputs")

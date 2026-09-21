@@ -38,8 +38,8 @@ On macOS, a separate Python 3.9 / PyTorch 2.8 CPU environment ran:
 python -m pytest -q tests/kimi_k3
 ```
 
-Result: 71 passed: 36 model math/checkpoint checks, 16 chunk-planning checks,
-five launch-profile checks and 14 smoke-harness
+Result: 77 passed: 36 model math/checkpoint checks, 16 chunk-planning checks,
+six chunk-input/controller checks, five launch-profile checks and 14 smoke-harness
 contract checks. These cover AttnRes against a scalar float64 reference, unused
 residual-bank capacity, output normalization, MTP source-layer and safetensors
 shape/dtype/payload validation, and TP1/2/4/8 fused KDA projection equivalence
@@ -78,15 +78,24 @@ Decode enables Graph. It records the command, requires new local run storage,
 validates both checkpoints, and checks compute PIDs and service ports. It is
 not yet runtime-validated and does not replace fleet selection or runtime evidence.
 
-A newly confirmed integration gap is whole-model chunk prefill: main's
-`max_batch_tokens_size` is a scheduler constraint, not a chunk executor, and the
-current K3 target has no chunk loop. A CPU planner now splits real requests at
-ordinary checkpoint boundaries; tests cover budget+1/+7, reused prefixes and
-random batch 1/2/3/7/8/9 with exact token coverage. It is not wired into model
-execution and does not establish chunk correctness. The 65536 setting in the launch profile
-alone must not be described as chunk support. Port the target/draft round
-coordination and verify KDA/conv/KV continuity before counting any >64K or
-budget+1/+7 case as passed.
+K3 now has an eager whole-model chunk loop shared by target and native draft.
+It plans real rows at ordinary joint-cache checkpoint boundaries, rebuilds
+main's group-local attention inputs, adds per-round SP padding and restores
+outputs to their original token order. A new binding copies host/device length
+mirrors together and removes full-request cache publication from partial rounds.
+The original group descriptors are published only after every round succeeds.
+
+The implementation preserves main's target-then-draft prefill order and retains
+full-request logits-input and recurrent-feature tensors. It does not implement
+an interleaved target/draft round callback or optimize those retained buffers.
+Capacity must be established with the unchanged full smoke workload. CPU tests
+cover packing, deterministic stateful round execution, separate output features
+and no publication on an injected failure. They substitute a binding stub and
+a toy recurrence: native binding compilation, real KDA/conv/MLA continuity,
+CacheStore completion and GPU memory use remain unverified.
+
+`max_batch_tokens_size` remains main's scheduler limit; the actual K3 loop uses
+`KIMI_K3_PREFILL_CHUNK_TOKENS=65536`, now fixed in the BF16 launcher.
 
 ## Text smoke entry point (not yet run against services)
 

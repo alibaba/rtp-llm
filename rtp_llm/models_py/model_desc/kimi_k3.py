@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from math import gcd
 import logging
+import os
 
 import torch
 from torch import nn
@@ -152,6 +153,11 @@ class KimiK3Model(GptModelBase):
             parallelism_config.tp_size,
             parallelism_config.tp_rank,
         )
+        self.chunk_prefill_budget = int(
+            os.environ.get("KIMI_K3_PREFILL_CHUNK_TOKENS", "65536")
+        )
+        if self.chunk_prefill_budget <= 0 or self.chunk_prefill_budget % self.tp_size:
+            raise ValueError("K3 chunk budget must be positive and divisible by TP")
         # The scheduler bound is global; SP routes only the local token shard.
         global_prefill = model_config.moe_prefill_max_tokens_per_rank
         if global_prefill is None:
@@ -279,6 +285,21 @@ class KimiK3Model(GptModelBase):
         return all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
 
     def forward(self, inputs, fmha_impl=None):
+        primary = get_primary_attention_inputs(inputs, self.kv_cache)
+        if (
+            primary.is_prefill
+            and not primary.is_target_verify
+            and not primary.is_mtp_draft_update
+            and inputs.input_ids.shape[0] > self.chunk_prefill_budget
+        ):
+            from rtp_llm.models_py.modules.kimi_k3.chunk_forward import (
+                forward_prefill_chunks,
+            )
+
+            return forward_prefill_chunks(self, inputs)
+        return self._forward_single(inputs, fmha_impl)
+
+    def _forward_single(self, inputs, fmha_impl=None):
         hidden = self._forward_layers(
             self.embed_tokens(inputs.input_ids), inputs, fmha_impl
         )

@@ -16,7 +16,7 @@ class KimiK3MtpModel(KimiK3Model):
         self.hnorm = RMSNorm(weights["kimi_k3.mtp.hnorm"], eps)
         self.eh_proj = linear(weights, "kimi_k3.mtp.eh_proj", self.py_hw_kernel_config)
 
-    def forward(self, inputs, fmha_impl=None):
+    def _forward_single(self, inputs, fmha_impl=None):
         embedded = self.embed_tokens(inputs.input_ids)
         positions = inputs.combo_position_ids
         if positions is None or positions.numel() != embedded.shape[0]:

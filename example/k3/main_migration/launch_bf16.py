@@ -37,6 +37,7 @@ def launch_config(args):
         "SP_CHECKPOINT_PATH": str(draft),
         "SP_ACT_TYPE": "BF16",
         "GEN_NUM_PER_CIRCLE": "3",
+        "KIMI_K3_PREFILL_CHUNK_TOKENS": "65536",
         "FP8_GEMM": "0",
         "FP8_MLA": "0",
         "FP8_KV_CACHE": "0",
