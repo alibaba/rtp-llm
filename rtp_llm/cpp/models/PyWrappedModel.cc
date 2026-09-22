@@ -1090,6 +1090,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             buffer_holder_.hold_host(inputs.engram_token_windows);
             py_model_inputs.engram_token_windows = inputs.engram_token_windows.to(torch::kCUDA, /*non_blocking=*/true);
         }
+        if (inputs.combo_tokens.defined() && inputs.combo_tokens.device().is_cpu()) {
+            py_model_inputs.input_ids_host = inputs.combo_tokens;
+        }
+        if (inputs.text_tokens_mask.defined() && inputs.text_tokens_mask.device().is_cpu()) {
+            py_model_inputs.text_tokens_mask_host = inputs.text_tokens_mask;
+        }
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
