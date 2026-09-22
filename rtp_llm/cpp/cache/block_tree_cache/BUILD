@@ -84,7 +84,10 @@ cc_library(
         "block_pool/AlignedHostMemory.cc",
         "block_pool/HostBlockPool.cc",
         "block_pool/HostStagingBlockPool.cc",
-    ],
+    ] + select({
+        "@//:using_cuda": ["block_pool/CudaHostMemoryRegistration.cc"],
+        "//conditions:default": ["block_pool/UnsupportedHostMemoryRegistration.cc"],
+    }),
     hdrs = [
         "BlockTree.h",
         "BlockTreeCache.h",
@@ -128,6 +131,7 @@ cc_library(
         "block_pool/AlignedHostMemory.h",
         "block_pool/HostBlockPool.h",
         "block_pool/HostStagingBlockPool.h",
+        "block_pool/HostMemoryRegistration.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
