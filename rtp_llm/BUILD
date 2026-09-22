@@ -156,6 +156,12 @@ _JIT_CACHE_SRCS = [
 ]
 
 py_library(
+    name = "w8a8_int8_quant",
+    srcs = ["utils/w8a8_int8_quant.py"],
+    deps = [":torch"],
+)
+
+py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
