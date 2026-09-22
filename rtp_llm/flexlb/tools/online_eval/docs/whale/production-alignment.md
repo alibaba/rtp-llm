@@ -57,7 +57,8 @@ VIPServer 调整只限测试部署实际引用的域名，保留其他注册参�
 | Batch size | 150 query、122 context、123 generate；Master batch size 另列 | 区分调度批与实际执行批 |
 | P waiting / D waiting | 对应角色 `wait_stream_size` 面板及队列深度 | 区分 engine waiting、Master queue 和 cache loading |
 | 成功 / 失败 QPS | frontend 完成口径、Master 按 code 分组分别保留 | Master 调度成功不能代替端到端成功；所有错误码、超时与未完成请求都要计入 |
-| Model forward | 9101 中 `rtp_llm_model_forward_us`，统一转 ms | 验证 P/D 执行性能与批大小的关系 |
+| Model forward | 9101 中 `rtp_llm_model_forward_us`，按 panel 的 `global_avg` 聚合，统一转 ms | P forward 对照；同时保留逐引擎分布和有效实例数 |
+| MTP Decode step | 真实 D 使用 speculative decoding 时核对 `rtp_llm_sp_step_latency_us` 及 `mtp_model_type` 标签 | 普通 D forward 为零不代表执行无耗时，不用零值拟合 D 性能 |
 | Context batch size | 122 均值与 10099 max 同看 | 排查组批不足或异常大批，不能只看请求数 |
 
 同一测试/生产窗口保留逐引擎曲线、引擎均值与合理的集群总量。真实 D 保留 dp_rank；寄生 Mock 全在一 Pod，必须按 engine / engine_port 拆分。逐引擎 TPS 与 Pod 总和不可比较；吞吐总量不能由混有 standby 的平均值替代。保留零负载点；监控缺点与零值分开处理。priority 的归并严格按 panel transformation 执行。
@@ -67,3 +68,11 @@ VIPServer 调整只限测试部署实际引用的域名，保留其他注册参�
 先检查流量画像、实际 worker 数、配置生效、指标标签与窗口，再分析调度行为。使用 asish 实时解析测试 Master Pod 并打开终端，定位实际运行目录和启动进程，查看 Master / Mock 日志、已实现的只读 debug/metrics 接口。关联请求 ID、P/D worker、batch、cache 命中与等待时间，不仅依赖汇总曲线推断原因。
 
 每轮只改变已明确的参数，记录前后配置与监控窗口。A/B 仅用于观察差异；绝对门禁独立判断 TPS、延迟护栏及 100% 成功率。流量不一致、未校准的模型参数、指标缺失或回放不达速均应标记待校准/无效，不能宣布生产门禁通过。
+
+### 满缓存后的 Mock 宿主机开销
+
+验收窗口必须覆盖 Memory pool 填满并持续驱逐的阶段。2026-09-22 在 48P/192D、每 P 52,295 个 Memory blocks 的测试部署中，旧实现每次驱逐遍历整个缓存并搜索后代；30 秒 JFR 的主要采样集中在 `MockMemoryBlockCache.hasResidentDescendant -> evictOne -> beginWrite`，Mock JVM 长时间消耗约 30 个 CPU 核。重启后的短暂恢复不能作为校准成功证据。
+
+修复 `30b0b8a387` 用可驱逐叶子的 LRU 索引及前缀子树计数维护候选，避免逐块全表扫描。发布后需要验证实际执行镜像、持续驱逐计数、CPU、成功/失败 QPS 和 TPS，不能以单元测试或 CI 成功替代运行验收。
+
+当前 Mock P 的 `rtp_llm_model_forward_us` 上报性能公式计算的 `executionMs`，context TPS 的计时还包含实际回调与缓存处理开销。因此 forward 均值接近生产、TPS 却显著偏低时，应先排查宿主机 CPU、回调延迟、缓存操作和 GC，不能直接缩短公式耗时来掩盖执行开销。输出长度校准同样需要成功请求分布，不能仅通过缩短 EOS 抬高成功 QPS。
