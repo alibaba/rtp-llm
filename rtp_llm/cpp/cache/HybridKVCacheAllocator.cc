@@ -6,6 +6,7 @@
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -319,6 +320,21 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     const int   batch_size   = kv_resource->batchSize();
     const int   raw_seq_len  = malloc_info.incrSeqLen();
     const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
+
+    if (malloc_info.computed_prefix_len >= 0) {
+        // Reclaim obsolete states before allocating another boundary. This is
+        // safe even if allocation fails: the committed prefix state survives.
+        for (int b = 0; b < batch_size; ++b) {
+            for (int group_id = 0; group_id < kv_resource->groupNums(); ++group_id) {
+                if (config_.typeForGroup(group_id) == CacheGroupType::LINEAR) {
+                    auto& group = static_cast<LinearKVCacheGroup&>(*kv_cache_groups_[group_id]);
+                    group.removeSkippedBlocksBefore(kv_resource->mutableBlockIds(b, group_id),
+                                                    malloc_info.computed_prefix_len,
+                                                    malloc_info.reuse_cache);
+                }
+            }
+        }
+    }
 
     std::vector<std::vector<size_t>>              original_sizes(static_cast<size_t>(batch_size));
     std::vector<std::vector<std::vector<size_t>>> backfilled_positions(static_cast<size_t>(batch_size));

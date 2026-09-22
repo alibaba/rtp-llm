@@ -31,6 +31,8 @@ def h20_oss_suites():
     native.test_suite(
         name = "smoke_h20_mla",
         tests = [
+            # Generated small MLA checkpoint; no external weights.
+            ":chunked_mla_engine_tp2_test",
             smoke_test(
                 name="mla_kernel_block_size",
                 task_info="data/model/glm5/glm_5_fp8_q_r_h20.json",

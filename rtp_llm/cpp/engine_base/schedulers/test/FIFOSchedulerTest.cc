@@ -121,14 +121,23 @@ struct ChunkSchedulerTestConfig {
     int         max_batch_tokens_size = 1024;
     int         prefill_chunk_size    = 16;
     std::string decode_prefill_ratio;
+    bool        hybrid = false;
 };
 
 template<typename SchedulerType>
 class ChunkSchedulerTestEnv {
 public:
     explicit ChunkSchedulerTestEnv(const ChunkSchedulerTestConfig& config):
-        cache_manager(std::make_shared<KVCacheManager>(rtp_llm::test::makeSimpleMhaCacheConfig(
-            1, config.block_num, config.seq_size_per_block, rtp_llm::DataType::TYPE_FP16, 1, 4))) {
+        cache_manager(std::make_shared<KVCacheManager>(
+            config.hybrid ? rtp_llm::test::makeSimpleHybridMhaCacheConfig(
+                                2, config.block_num, config.seq_size_per_block, rtp_llm::DataType::TYPE_FP16, 1) :
+                            rtp_llm::test::makeSimpleMhaCacheConfig(
+                                1, config.block_num, config.seq_size_per_block, rtp_llm::DataType::TYPE_FP16, 1, 4))) {
+        if (config.hybrid) {
+            model_config.hybrid_attention_config.enable_hybrid_attention = true;
+            model_config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::LINEAR,
+                                                                            HybridAttentionType::NONE};
+        }
         resource_context.cache_manager = cache_manager;
         resource_context.role_type     = config.role_type;
 
@@ -4395,6 +4404,71 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
     ASSERT_EQ(scheduler.runningStreamsSize(), 4);
 }
 
+TEST_F(FIFOSchedulerTest, testHybridChunkGrantsMaterializeAndPreserveStateBoundaries) {
+    ChunkSchedulerTestConfig config;
+    config.hybrid             = true;
+    config.role_type          = RoleType::PDFUSION;
+    config.prefill_chunk_size = 8;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto&            scheduler    = env.scheduler();
+    auto             short_stream = env.makeStream({1, 2, 3, 4}, 4);
+    std::vector<int> prompt(18);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto stream = env.makeStream(prompt, 4);
+    ASSERT_TRUE(enqueueIndividually(scheduler, {short_stream, stream}));
+    auto first = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(first, {short_stream, stream}, {4, 4}));
+    const auto first_state = stream->kvCache().blocks(0, 0)[0];
+    ASSERT_FALSE(isNullBlockIdx(first_state));
+    short_stream->update(makeSingleTokenUpdate(101));
+    stream->update(makeSingleTokenUpdate(102));
+    EXPECT_EQ(stream->seqLength(), 18);
+    short_stream->reportError(ErrorCode::CANCELLED, "cancel during interleaved chunk prefill");
+
+    auto second = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(second, {stream}, {8}));
+    EXPECT_EQ(stream->reuseLength(), 4);
+    EXPECT_EQ(stream->kvCache().blocks(0, 0)[0], first_state);
+    const auto second_state = stream->kvCache().blocks(0, 0)[2];
+    ASSERT_FALSE(isNullBlockIdx(second_state));
+    stream->update(makeSingleTokenUpdate(103));
+
+    auto tail = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(tail, {stream}, {6}));
+    EXPECT_EQ(stream->reuseLength(), 12);
+    EXPECT_EQ(stream->kvCache().blocks(0, 0)[2], second_state);
+    ASSERT_FALSE(isNullBlockIdx(stream->kvCache().blocks(0, 0)[4]));
+    stream->update(makeSingleTokenUpdate(104));
+    auto decode = scheduler.schedule();
+    ASSERT_TRUE(decode.ok());
+    ASSERT_EQ(decode->size(), 1u);
+    EXPECT_FALSE(stream->isContextStream());
+    EXPECT_EQ(stream->seqLength(), 19);
+    stream->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler.schedule().ok());
+
+    auto fresh = env.makeStream(prompt, 4);
+    ASSERT_TRUE(scheduler.enqueue(fresh).ok());
+    auto restarted = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(restarted, {fresh}, {8}));
+    EXPECT_EQ(fresh->reuseLength(), 0);
+    ASSERT_FALSE(isNullBlockIdx(fresh->kvCache().blocks(0, 0)[1]));
+    fresh->update(makeSingleTokenUpdate(105));
+    EXPECT_TRUE(fresh->isContextStream());
+    EXPECT_EQ(fresh->reuseLength(), 8);
+    fresh->reportError(ErrorCode::CANCELLED, "cancel an unfinished prefill");
+    ASSERT_TRUE(scheduler.schedule().ok());
+    auto after_cancel = env.makeStream(prompt, 4);
+    ASSERT_TRUE(scheduler.enqueue(after_cancel).ok());
+    auto after_cancel_batch = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(after_cancel_batch, {after_cancel}, {8}));
+    EXPECT_EQ(after_cancel->reuseLength(), 0);
+    ASSERT_FALSE(isNullBlockIdx(after_cancel->kvCache().blocks(0, 0)[1]));
+    after_cancel->reportError(ErrorCode::CANCELLED, "test finished");
+    ASSERT_TRUE(scheduler.schedule().ok());
+}
+
 TEST_F(FIFOSchedulerTest, testChunkedPrefillNeverReturnsMixedContextAndDecodeBatch) {
     ChunkSchedulerTestConfig config;
     config.role_type          = RoleType::PDFUSION;
@@ -4643,6 +4717,10 @@ static void verifyGlobalChunkBudgetFourRoundPrefix(RoleType role_type, const std
     auto s3 = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21});
     auto s4 = env.makeStream({20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
                               36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50});
+    // Inject the simulated cache result after allocation, just as a completed
+    // cache load does; initial allocation publishes its own reuse length.
+    ASSERT_TRUE(s3->initKVBlock().ok());
+    s3->reportEvent(StreamEvents::LoadInitiated);
     s3->setReuseLength(4);
     ASSERT_TRUE(scheduler.enqueue(s1).ok());
     ASSERT_TRUE(scheduler.enqueue(s2).ok());
@@ -4689,6 +4767,8 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetDefersFanoutProgressCheckUntilReu
 
     // Cache allocation/loading happens after enqueue in production. Set the resulting
     // block-aligned reuse here to exercise the scheduler boundary directly.
+    ASSERT_TRUE(cached_stream->initKVBlock().ok());
+    cached_stream->reportEvent(StreamEvents::LoadInitiated);
     cached_stream->setReuseLength(4);
 
     auto batch = scheduler.schedule();
@@ -4714,6 +4794,8 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetValidatesFanoutReuseAndShortFinal
     ASSERT_EQ(env.cache_manager->freeBlocksNum(), free_blocks_before);
 
     auto unaligned_stream = env.makeStream({6, 7, 8, 9, 10, 11, 12, 13, 14});
+    ASSERT_TRUE(unaligned_stream->initKVBlock().ok());
+    unaligned_stream->reportEvent(StreamEvents::LoadInitiated);
     unaligned_stream->setReuseLength(1);
     ASSERT_TRUE(scheduler.enqueue(unaligned_stream).ok());
 

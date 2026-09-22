@@ -74,6 +74,6 @@ py_test(
         "//:th_transformer_config",
     ],
     deps = [
-        "//rtp_llm:config_ops",
+        "//rtp_llm:testlib",
     ],
 )

@@ -23,9 +23,12 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.device.device_type import is_hip
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import (
+    HybridAttentionType,
+    KvCacheDataType,
     ProfilingDebugLoggingConfig,
     SpeculativeType,
     TaskType,
@@ -108,6 +111,9 @@ class ModelFactory:
             force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
             loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
             moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
+        )
+        ModelFactory._validate_hybrid_chunked_prefill_impl(
+            engine_config, model_config, model.py_model
         )
         return model
 
@@ -416,13 +422,22 @@ class ModelFactory:
         finalize_scheduler_config(
             fifo_scheduler_config=engine_config.runtime_config.fifo_scheduler_config,
             max_seq_len=model_config.max_seq_len,
-            use_mla=model_config.attn_config.use_mla,
             use_hybrid_attention=model_config.hybrid_attention_config.enable_hybrid_attention,
             role_type=engine_config.pd_sep_config.role_type,
             use_batch_decode_scheduler=engine_config.runtime_config.use_batch_decode_scheduler,
             seq_size_per_block=model_config.attn_config.tokens_per_block,
         )
+        ModelFactory._validate_hybrid_chunked_prefill(engine_config, model_config)
         scheduler_config = engine_config.runtime_config.fifo_scheduler_config
+        if (
+            model_config.attn_config.use_mla
+            and scheduler_config.prefill_chunk_size > 0
+            and isinstance(model_config.quant_config, Fp8BlockWiseQuantConfig)
+        ):
+            # Keep FP8 KV-B activation quantization consistent across chunks.
+            # BF16 absorb skips that quantization; preserve native routing when
+            # chunked prefill is disabled.
+            engine_config.fmha_config.absorb_opt_len = 0
         # Generic MoE executors allocate their fixed-capacity communication
         # buffers while the Python model is constructed. Preserve the finalized
         # scheduler prefill bound on the model config so those buffers cover a
@@ -435,6 +450,75 @@ class ModelFactory:
 
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name
+
+    @staticmethod
+    def _validate_hybrid_chunked_prefill(
+        engine_config: EngineConfig, model_config: ModelConfig
+    ) -> None:
+        if (
+            not model_config.hybrid_attention_config.enable_hybrid_attention
+            or engine_config.runtime_config.fifo_scheduler_config.prefill_chunk_size
+            <= 0
+        ):
+            return
+
+        from rtp_llm.device.device_type import is_cuda
+
+        attn = model_config.attn_config
+        # Validate the shared state-cache path independently of model names.
+        requirements = (
+            (is_cuda(), "the CUDA backend"),
+            (attn.kv_cache_dtype == KvCacheDataType.BASE, "BASE KV cache"),
+        )
+        for supported, requirement in requirements:
+            if not supported:
+                raise ValueError(
+                    f"Hybrid chunked prefill requires {requirement}; "
+                    "adjust this configuration or set prefill_chunk_size=0."
+                )
+
+    @staticmethod
+    def _validate_hybrid_chunked_prefill_impl(
+        engine_config: EngineConfig, model_config: ModelConfig, py_model: Any
+    ) -> None:
+        if (
+            not model_config.hybrid_attention_config.enable_hybrid_attention
+            or engine_config.runtime_config.fifo_scheduler_config.prefill_chunk_size
+            <= 0
+        ):
+            return
+
+        layer_types = model_config.hybrid_attention_config.hybrid_attention_types
+        layers = getattr(py_model, "layers", None)
+        if (
+            len(layer_types) != model_config.num_layers
+            or not isinstance(layers, (torch.nn.ModuleList, list, tuple))
+            or len(layers) != len(layer_types)
+        ):
+            raise ValueError(
+                "Hybrid chunked prefill cannot match the constructed layers to "
+                "hybrid_attention_types; set prefill_chunk_size=0."
+            )
+
+        from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNet
+
+        for layer_idx, layer_type in enumerate(layer_types):
+            if layer_type != HybridAttentionType.LINEAR:
+                continue
+            attention = getattr(layers[layer_idx], "self_attn", None)
+            # Admit the integrated implementation itself, not arbitrary
+            # subclasses that may replace its state handling or computation.
+            if type(attention) is not Qwen3NextGatedDeltaNet:
+                implementation = (
+                    type(attention).__name__
+                    if attention is not None
+                    else "missing self_attn"
+                )
+                raise ValueError(
+                    f"Hybrid chunked prefill layer {layer_idx} uses {implementation}; "
+                    "only the Qwen3NextGatedDeltaNet implementation is currently "
+                    "enabled. Set prefill_chunk_size=0 for this implementation."
+                )
 
     @staticmethod
     def create_propose_model_config(

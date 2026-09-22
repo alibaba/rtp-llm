@@ -1,5 +1,5 @@
 """
-Unit test for IndexerOp._get_topk_ragged_cp.
+Unit tests for IndexerOp ragged TopK with and without context parallel.
 
 Tests the CP path for computing TopK indices in prefill with context parallel:
 single rank with one chunk so that generate_q_indices yields valid indices
@@ -46,6 +46,61 @@ class GetTopkRaggedCPTest(TestCase):
         self.device = torch.device("cuda:0")
         torch.cuda.set_device(self.device)
         torch.manual_seed(42)
+
+    def test_get_topk_ragged_batched_chunk_with_history(self):
+        # The first request exceeds the native top-k threshold; its new keys
+        # score below the history. The second request has a short, separate prefix.
+        prefixes, lengths = [2048, 64], [2, 2]
+        blocks = [list(range(34, 1, -1)), [0, 1] + [0] * 31]
+        op = IndexerOp(32, 128, 2048, 64, blocksize=64)
+        inputs = PyAttentionInputs()
+        inputs.is_prefill = True
+        inputs.prefix_lengths = torch.tensor(prefixes, dtype=torch.int32)
+        inputs.input_lengths = torch.tensor(lengths, dtype=torch.int32)
+        inputs.sequence_lengths = torch.empty(0, dtype=torch.int32)
+        inputs.kv_cache_kernel_block_id = torch.tensor(blocks, dtype=torch.int32)
+        inputs.kv_cache_kernel_block_id_device = inputs.kv_cache_kernel_block_id.to(
+            self.device
+        )
+        inputs.context_total_kv_length = 2116
+        inputs.cu_kv_seqlens_device = torch.tensor(
+            [0, 2050, 2116], dtype=torch.int32, device=self.device
+        )
+        params = rtp_llm_ops.SparseMlaParams()
+        params.fill_params(inputs, 64)
+        cache = LayerKVCache()
+        cache.kv_scale_base = torch.full(
+            (36, 64, 132), 0xA5, dtype=torch.uint8, device=self.device
+        )
+        for row, (prefix, length) in enumerate(zip(prefixes, lengths)):
+            for start, end in ((0, prefix), (prefix, prefix + length)):
+                slots = torch.tensor(
+                    [
+                        blocks[row][pos // 64] * 64 + pos % 64
+                        for pos in range(start, end)
+                    ],
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+                keys = torch.full(
+                    (end - start, 128),
+                    0 if row == 0 and start == prefix else 1,
+                    dtype=torch.bfloat16,
+                    device=self.device,
+                )
+                op.quant_k_only(keys, cache, slots)
+        q = torch.ones((4, 32, 128), device=self.device).to(torch.float8_e4m3fn)
+        weights = torch.ones((4, 32, 1), device=self.device)
+        result = op._get_topk_ragged(q, weights, cache, params, inputs)
+        for row, visible in enumerate((2048, 2048, 65, 66)):
+            valid = result[row][result[row] >= 0].sort().values
+            torch.testing.assert_close(
+                valid,
+                torch.arange(visible, dtype=torch.int32, device=self.device),
+                rtol=0,
+                atol=0,
+            )
+            self.assertTrue(torch.all(result[row][result[row] < 0] == -1).item())
 
     def test_get_topk_ragged_cp_shape_and_no_crash(self):
         """

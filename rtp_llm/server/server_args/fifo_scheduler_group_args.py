@@ -77,7 +77,13 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         type=int,
         default=0,
         help="chunked prefill 单次 PREFILL forward 的总 token 预算，由所有真实 context row 共享。"
-            ">0 时启用，并自动按 KV cache block 大小对齐。"
-            "仅支持 PREFILL / PDFUSION 角色，且不支持 MLA 或线性注意力模型。"
-            "使用 force_batch、beam、logits、loss、hidden_states、all_probs 或多模态输入的请求将被拒绝。",
+        ">0 时启用，并自动按 KV cache block 大小对齐。"
+        "仅支持 PREFILL / PDFUSION 角色，支持普通 attention、MLA 和使用已接通 GatedDeltaNet 实现的 hybrid。"
+        "Hybrid 按各 LINEAR 层的实际实现检查，当前不开放 KDA 及其他未接通实现。"
+        "MLA 的计算类型、稀疏 attention、KV 类型、CP 和设备支持由原生 attention backend 决定；"
+        "权重量化沿用模型/backend 的原生约束。"
+        "TP 和 KV block 遵循模型/backend 的原生约束；"
+        "Hybrid 的 CP 沿用原生 backend 支持；MLA/hybrid 投机解码沿用原生模型/引擎约束。"
+        "MLA/hybrid prefill 使用 eager，decode 可用 CUDA Graph，仍须满足模型/MoE/backend 的原生 Graph 条件。"
+        "使用 force_batch、beam、logits、loss、hidden_states、all_probs 或多模态输入的请求将被拒绝。",
     )

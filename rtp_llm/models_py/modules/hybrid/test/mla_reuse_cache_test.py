@@ -22,7 +22,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wr
     MlaFlashInferPrefillImpl,
 )
 from rtp_llm.models_py.modules.hybrid.test.mla_attention_ref import attention_ref
-from rtp_llm.ops import ParallelismConfig, compute_ops
+from rtp_llm.ops import FMHAConfig, ParallelismConfig, compute_ops
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -359,6 +359,395 @@ class MLATest(TestCase):
                 reuse_len=params[3],
             ):
                 self._run_mla_test(*params)
+
+    @staticmethod
+    def _chunk_inputs(lengths, prefixes, blocks):
+        inputs = PyAttentionInputs()
+        inputs.is_prefill = True
+        inputs.input_lengths = torch.tensor(lengths, dtype=torch.int32, device="cpu")
+        inputs.prefix_lengths = torch.tensor(prefixes, dtype=torch.int32, device="cpu")
+        inputs.sequence_lengths = torch.empty(0, dtype=torch.int32, device="cpu")
+        inputs.kv_cache_block_id = torch.tensor(blocks, dtype=torch.int32, device="cpu")
+        inputs.kv_cache_block_id_device = inputs.kv_cache_block_id.to(device)
+        inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id
+        inputs.kv_cache_kernel_block_id_device = inputs.kv_cache_block_id_device
+        return inputs
+
+    def _chunk_fixture(self):
+        config = ModelConfig()
+        attn = config.attn_config
+        attn.head_num = 16
+        attn.nope_head_dim = 128
+        attn.rope_head_dim = 64
+        attn.kv_lora_rank = 512
+        attn.v_head_dim = 128
+        attn.size_per_head = 192
+        attn.tokens_per_block = attn.kernel_tokens_per_block = 64
+        attn.use_mla = True
+        config.hidden_size = 2048
+        torch.manual_seed(17)
+        weights = self._create_weights(config, config.hidden_size)
+        # Fan-in scaling keeps logits and raw outputs in the usual BF16 range.
+        for name in (W.mla_kv_b_w, W.mla_kc, W.mla_vc):
+            weights[name] = weights[name] / math.sqrt(attn.kv_lora_rank)
+        cos_sin = create_cos_sin_cache()
+        return attn, weights, cos_sin
+
+    @staticmethod
+    def _sentinel_cache(num_pages, block_size):
+        # The -7 fill makes writes to unowned slots visible.
+        cache = LayerKVCache()
+        cache.kv_cache_base = torch.full(
+            (num_pages, block_size, 576), -7, dtype=torch.bfloat16, device=device
+        )
+        return cache
+
+    @staticmethod
+    def _written_mask(shape, segments, block_size):
+        """Mask of the cache slots touched by (blocks, start, end) segments."""
+        mask = torch.zeros(shape, dtype=torch.bool, device=device)
+        for blocks, start, end in segments:
+            for pos in range(start, end):
+                mask[blocks[pos // block_size], pos % block_size] = True
+        return mask
+
+    def _assert_cache_isolation(self, cache, before, reference_cache, written):
+        # Slots outside the chunk must stay untouched; written slots must match
+        # the full-prefill reference bit for bit.
+        torch.testing.assert_close(
+            cache.kv_cache_base[~written], before[~written], rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            cache.kv_cache_base[written],
+            reference_cache.kv_cache_base[written],
+            rtol=0,
+            atol=0,
+        )
+
+    def _chunked_replay(
+        self,
+        attn,
+        weights,
+        cos_sin,
+        fmha,
+        blocks,
+        block_size,
+        q,
+        ckv,
+        kpe,
+        budget,
+        quant_config=None,
+        reference_fmha=None,
+        check_chunk=None,
+    ):
+        """Replay one prefill in budget-sized chunks against a full-prefill reference.
+
+        check_chunk(impl, start, end) runs before each chunk's forward; every
+        chunk's cache writes are checked for isolation, and the concatenated
+        outputs must match the reference in raw amplitude.
+        """
+        length = q.shape[0]
+        reference_cache = self._sentinel_cache(max(blocks) + 2, block_size)
+        reference_impl = MlaFlashInferPrefillImpl(
+            attn,
+            self._chunk_inputs([length], [0], [blocks]),
+            [weights],
+            cos_sin,
+            fmha_config=reference_fmha or fmha,
+            quant_config=quant_config,
+        )
+        reference = reference_impl.forward(
+            q.clone(), ckv, kpe.clone(), reference_cache, 0
+        )
+        chunk_cache = self._sentinel_cache(max(blocks) + 2, block_size)
+        outputs = []
+        for start in range(0, length, budget):
+            end = min(start + budget, length)
+            impl = MlaFlashInferPrefillImpl(
+                attn,
+                self._chunk_inputs([end - start], [start], [blocks]),
+                [weights],
+                cos_sin,
+                fmha_config=fmha,
+                quant_config=quant_config,
+            )
+            if check_chunk is not None:
+                check_chunk(impl, start, end)
+            before = chunk_cache.kv_cache_base.clone()
+            outputs.append(
+                impl.forward(
+                    q[start:end].clone(),
+                    ckv[start:end],
+                    kpe[start:end].clone(),
+                    chunk_cache,
+                    0,
+                )
+            )
+            written = self._written_mask(
+                chunk_cache.kv_cache_base.shape[:2],
+                [(blocks, start, end)],
+                block_size,
+            )
+            self._assert_cache_isolation(chunk_cache, before, reference_cache, written)
+        # Compare raw values, including amplitude, not normalized directions.
+        torch.testing.assert_close(torch.cat(outputs), reference, rtol=0.01, atol=0.01)
+
+    def test_chunked_forward(self):
+        attn, weights, cos_sin = self._chunk_fixture()
+        length, budget = 130, 64
+        blocks = [5, 2, 9]
+        q = torch.randn(length, 16, 192, dtype=torch.bfloat16, device=device)
+        ckv = torch.randn(length, 512, dtype=torch.bfloat16, device=device)
+        kpe = torch.randn(length, 64, dtype=torch.bfloat16, device=device)
+        # The same short-tail case exercises both expanded and absorbed suffixes.
+        for absorb_len in (0, 1024):
+            with self.subTest(absorb_len=absorb_len):
+                fmha = FMHAConfig()
+                fmha.absorb_opt_len = absorb_len
+
+                def check_chunk(impl, start, end, absorb_len=absorb_len):
+                    self.assertEqual(
+                        impl.absorb_fmha is not None,
+                        start > 0 and end - start < absorb_len,
+                    )
+
+                self._chunked_replay(
+                    attn,
+                    weights,
+                    cos_sin,
+                    fmha,
+                    blocks,
+                    64,
+                    q,
+                    ckv,
+                    kpe,
+                    budget,
+                    check_chunk=check_chunk,
+                )
+
+    def test_fp8_weight_prefill_keeps_quantized_kv_projection(self):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.config.quant_config import init_quant_config
+        from rtp_llm.model_factory import ModelFactory
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            is_deep_gemm_e8m0_used,
+        )
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
+        from rtp_llm.ops import RoleType
+        from rtp_llm.test.utils.numeric_util import per_block_cast_to_fp8
+
+        attn, weights, cos_sin = self._chunk_fixture()
+        quant = init_quant_config("FP8_PER_BLOCK")
+        # Match load-time quantization: KV-B is quantized, while the absorbed
+        # matrices keep the original BF16 checkpoint values.
+        weight = weights[W.mla_kv_b_w].t().contiguous()
+        quant_weight, scales = per_block_cast_to_fp8(weight, use_ue8m0=False)
+        if is_deep_gemm_e8m0_used():
+            quant_weight, scales = requant_weight_ue8m0(quant_weight, scales)
+        else:
+            quant_weight = quant_weight.reshape(weight.shape[1], weight.shape[0])
+            scales = scales.reshape(scales.shape[1], scales.shape[0])
+        weights[W.mla_kv_b_w] = quant_weight
+        weights[W.mla_kv_b_s] = scales
+
+        def finalized_fmha(budget):
+            engine = EngineConfig.create(PyEnvConfigs())
+            engine.pd_sep_config.role_type = RoleType.PDFUSION
+            engine.runtime_config.fifo_scheduler_config.prefill_chunk_size = budget
+            engine.fmha_config.absorb_opt_len = 4096
+            model = ModelConfig()
+            model.max_seq_len = 2048
+            model.data_type = "bf16"
+            model.attn_config = attn
+            model.quant_config = quant
+            ModelFactory.update_engine_config_from_model_config(engine, model)
+            return engine.fmha_config
+
+        native_fmha = finalized_fmha(0)
+        length, budget = 130, 64
+        chunk_fmha = finalized_fmha(budget)
+        self.assertEqual(chunk_fmha.absorb_opt_len, 0)
+        blocks = [5, 2, 9]
+        q = torch.randn(length, 16, 192, dtype=torch.bfloat16, device=device)
+        ckv = torch.randn(length, 512, dtype=torch.bfloat16, device=device)
+        kpe = torch.randn(length, 64, dtype=torch.bfloat16, device=device)
+
+        def check_chunk(impl, _start, _end):
+            self.assertIsNone(impl.absorb_fmha)
+
+        self._chunked_replay(
+            attn,
+            weights,
+            cos_sin,
+            chunk_fmha,
+            blocks,
+            64,
+            q,
+            ckv,
+            kpe,
+            budget,
+            quant_config=quant,
+            reference_fmha=native_fmha,
+            check_chunk=check_chunk,
+        )
+
+    def test_chunked_batched_forward(self):
+        attn, weights, cos_sin = self._chunk_fixture()
+        lengths = (130, 193)
+        blocks = ([5, 2, 9, 0], [1, 4, 8, 7])
+        queries = [
+            torch.randn(n, 16, 192, dtype=torch.bfloat16, device=device)
+            for n in lengths
+        ]
+        compressed = [
+            torch.randn(n, 512, dtype=torch.bfloat16, device=device) for n in lengths
+        ]
+        keys = [
+            torch.randn(n, 64, dtype=torch.bfloat16, device=device) for n in lengths
+        ]
+        fmha = FMHAConfig()
+        fmha.absorb_opt_len = 0
+        cache = self._sentinel_cache(11, 64)
+        reference_cache = self._sentinel_cache(11, 64)
+        references = []
+        for row, length in enumerate(lengths):
+            impl = MlaFlashInferPrefillImpl(
+                attn,
+                self._chunk_inputs([length], [0], [blocks[row]]),
+                [weights],
+                cos_sin,
+                fmha_config=fmha,
+            )
+            references.append(
+                impl.forward(
+                    queries[row].clone(),
+                    compressed[row],
+                    keys[row].clone(),
+                    reference_cache,
+                    0,
+                )
+            )
+        prefixes = [0, 0]
+        # Vary grants and batch membership; the third call has different prefixes.
+        for batch in (
+            [(0, 64), (1, 64)],
+            [(1, 128)],
+            [(1, 1), (0, 64)],
+            [(0, 2)],
+        ):
+            batch_lengths = [n for _, n in batch]
+            batch_prefixes = [prefixes[row] for row, _ in batch]
+            inputs = self._chunk_inputs(
+                batch_lengths,
+                batch_prefixes,
+                [blocks[row] for row, _ in batch],
+            )
+            impl = MlaFlashInferPrefillImpl(
+                attn, inputs, [weights], cos_sin, fmha_config=fmha
+            )
+            params = impl.fmha_params
+            kv_lengths = [p + n for p, n in zip(batch_prefixes, batch_lengths)]
+            self.assertEqual(
+                params.qo_indptr_h.tolist(),
+                [0] + list(itertools.accumulate(batch_lengths)),
+            )
+            self.assertEqual(params.kvlen_h.tolist(), kv_lengths)
+            self.assertEqual(
+                params.positions_h.tolist(),
+                [
+                    pos
+                    for prefix, length in zip(batch_prefixes, batch_lengths)
+                    for pos in range(prefix, prefix + length)
+                ],
+            )
+            slices = [
+                (row, slice(prefixes[row], prefixes[row] + n)) for row, n in batch
+            ]
+            before = cache.kv_cache_base.clone()
+            output = impl.forward(
+                torch.cat([queries[row][s] for row, s in slices]),
+                torch.cat([compressed[row][s] for row, s in slices]),
+                torch.cat([keys[row][s] for row, s in slices]),
+                cache,
+                0,
+            )
+            expected = torch.cat([references[row][s] for row, s in slices])
+            torch.testing.assert_close(output, expected, atol=0.01, rtol=0.01)
+            written = self._written_mask(
+                cache.kv_cache_base.shape[:2],
+                [(blocks[row], prefixes[row], prefixes[row] + n) for row, n in batch],
+                64,
+            )
+            for row, n in batch:
+                prefixes[row] += n
+            self._assert_cache_isolation(cache, before, reference_cache, written)
+
+    def test_fp8_kv_chunked_batched_gather(self):
+        from rtp_llm.ops import KvCacheDataType
+
+        attn, weights, cos_sin = self._chunk_fixture()
+        attn.kv_cache_dtype = KvCacheDataType.FP8
+        lengths, blocks = [130, 65], [[5, 2, 9], [1, 4, 0]]
+        ckv = [torch.randn(n, 512, dtype=torch.bfloat16) for n in lengths]
+        kpe = [torch.randn(n, 64, dtype=torch.bfloat16) for n in lengths]
+        cache, reference_cache = LayerKVCache(), LayerKVCache()
+        for target in (cache, reference_cache):
+            # Native layout: 512 CKV bytes, four FP32 scales, 64 BF16 KPE values.
+            target.kv_cache_base = torch.full((11, 64, 656), 0xA5, dtype=torch.uint8)
+        full = MlaFlashInferPrefillImpl(
+            attn, self._chunk_inputs(lengths, [0, 0], blocks), [weights], cos_sin
+        )
+        full.kv_cache_write_op.forward(
+            torch.cat(ckv), torch.cat(kpe), reference_cache, full.fmha_params
+        )
+        prefixes = [0, 0]
+        for batch in ([(0, 64)], [(1, 64), (0, 64)], [(0, 2), (1, 1)]):
+            inputs = self._chunk_inputs(
+                [n for _, n in batch],
+                [prefixes[row] for row, _ in batch],
+                [blocks[row] for row, _ in batch],
+            )
+            impl = MlaFlashInferPrefillImpl(attn, inputs, [weights], cos_sin)
+            slices = [
+                (row, slice(prefixes[row], prefixes[row] + n)) for row, n in batch
+            ]
+            current_ckv = torch.cat([ckv[row][s] for row, s in slices])
+            current_kpe = torch.cat([kpe[row][s] for row, s in slices])
+            before = cache.kv_cache_base.clone()
+            impl.kv_cache_write_op.forward(
+                current_ckv, current_kpe, cache, impl.fmha_params
+            )
+            written = self._written_mask(
+                cache.kv_cache_base.shape[:2],
+                [(blocks[row], prefixes[row], prefixes[row] + n) for row, n in batch],
+                64,
+            )
+            self._assert_cache_isolation(cache, before, reference_cache, written)
+            gathered_ckv, gathered_kpe = impl.fmha_impl._reuse_kv_cache_indexed_batched(
+                current_ckv, current_kpe, cache
+            )
+            if any(prefixes[row] for row, _ in batch):
+                slots = [
+                    blocks[row][pos // 64] * 64 + pos % 64
+                    for row, n in batch
+                    for pos in range(prefixes[row] + n)
+                ]
+                packed = reference_cache.kv_cache_base.view(-1, 656)[slots]
+                quantized = packed[:, :512].contiguous().view(torch.float8_e4m3fn)
+                scales = packed[:, 512:528].contiguous().view(torch.float32)
+                expected_ckv = (
+                    (quantized.float().reshape(-1, 4, 128) * scales.unsqueeze(-1))
+                    .reshape(-1, 512)
+                    .to(torch.bfloat16)
+                )
+                expected_kpe = packed[:, 528:].contiguous().view(torch.bfloat16)
+            else:
+                expected_ckv, expected_kpe = current_ckv, current_kpe
+            torch.testing.assert_close(gathered_ckv, expected_ckv, rtol=0, atol=0)
+            torch.testing.assert_close(gathered_kpe, expected_kpe, rtol=0, atol=0)
+            for row, n in batch:
+                prefixes[row] += n
 
 
 if __name__ == "__main__":

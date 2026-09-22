@@ -69,15 +69,13 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
         new_lengths: List[int],
         cp_size: int,
         rank: int,
-        prefix_lengths: List[int] | None = None,
         device: torch.device = torch.device("cuda"),
     ) -> torch.Tensor:
-        if prefix_lengths is None:
-            prefix_lengths = [0] * len(new_lengths)
         indices: List[int] = []
-        for new_len, pl in zip(new_lengths, prefix_lengths):
+        # Match the C++ CP planner: shuffle indices are window-relative.
+        for new_len in new_lengths:
             positions = zigzag_positions_for_rank(new_len, cp_size, rank)
-            indices.extend(p + pl for p in positions)
+            indices.extend(positions)
         return torch.tensor(indices, dtype=torch.int32, device=device)
 
     # ---- mock builders ----
@@ -345,7 +343,6 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
                 new_lengths,
                 cp_size,
                 r,
-                prefix_lengths=prefix_lengths,
                 device=self.device,
             )
             for r in range(cp_size)
@@ -442,6 +439,56 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
     # ==================================================================
     # Case 2: With-prefix cp_size=4
     # ==================================================================
+
+    def test_chunk_append_positions_exclude_padding(self):
+        attn_cfg, par_cfg = make_configs(cp_size=4, cp_rank=0)
+        inputs = build_cp_attn_inputs(
+            [65, 131], [2, 2], 4, 16, prefix_lengths=[64, 128], device=self.device
+        )
+        all_shuffle = [
+            self._build_shuffle_indices([8, 8], 4, rank, device=self.device)
+            for rank in range(4)
+        ]
+        inputs.context_parallel_info.prefill_shuffle_indices = all_shuffle[0]
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                patch(f"{_A2A_MODULE}.all_gather", return_value=torch.cat(all_shuffle))
+            )
+            stack.enter_context(
+                patch(f"{_A2A_MODULE}.get_user_buffers_communicator", return_value=None)
+            )
+            stack.enter_context(
+                patch(
+                    f"{_A2A_MODULE}.get_py_flashinfer_workspace_buffer",
+                    return_value=torch.empty(1, device=self.device),
+                )
+            )
+            stack.enter_context(
+                patch(f"{_A2A_MODULE}.BatchPrefillWithPagedKVCacheWrapper")
+            )
+            stack.enter_context(
+                patch(f"{_A2A_MODULE}.BatchPrefillWithRaggedKVCacheWrapper")
+            )
+            append = stack.enter_context(patch(f"{_A2A_MODULE}.append_paged_kv_cache"))
+            op = PCPAll2AllAttnOp(attn_cfg, inputs, par_cfg)
+            params = op.prepare(inputs)
+            k = torch.arange(4, device=self.device).reshape(4, 1, 1)
+            for rank in range(4):
+                op._append_kv_cache(k, -k, rank, object(), params)
+
+        # Ranks 0/1/2 own valid rows; rank 3 has padding only for both requests.
+        self.assertEqual(append.call_count, 3)
+        positions = []
+        for call in append.call_args_list:
+            args = call.kwargs
+            batches = args["batch_indices"].tolist()
+            positions.extend(zip(batches, args["positions"].tolist()))
+            expected_rows = torch.tensor(
+                [2 * batch for batch in batches], device=self.device
+            )
+            self.assertTrue(torch.equal(args["append_key"], k[expected_rows]))
+            self.assertTrue(torch.equal(args["append_value"], -k[expected_rows]))
+        self.assertEqual(sorted(positions), [(0, 64), (1, 128), (1, 129), (1, 130)])
 
     def test_prefix_cp4_rank0(self):
         self.run_with_prefix(
