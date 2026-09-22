@@ -76,3 +76,13 @@ VIPServer 调整只限测试部署实际引用的域名，保留其他注册参�
 修复 `30b0b8a387` 用可驱逐叶子的 LRU 索引及前缀子树计数维护候选，避免逐块全表扫描。发布后需要验证实际执行镜像、持续驱逐计数、CPU、成功/失败 QPS 和 TPS，不能以单元测试或 CI 成功替代运行验收。
 
 当前 Mock P 的 `rtp_llm_model_forward_us` 上报性能公式计算的 `executionMs`，context TPS 的计时还包含实际回调与缓存处理开销。因此 forward 均值接近生产、TPS 却显著偏低时，应先排查宿主机 CPU、回调延迟、缓存操作和 GC，不能直接缩短公式耗时来掩盖执行开销。输出长度校准同样需要成功请求分布，不能仅通过缩短 EOS 抬高成功 QPS。
+
+### 2026-09-22 Flash 测试部署校准记录
+
+此记录是一次部署观测，不是生产门禁阈值。测试 deployment `6aa3b6979ffe080d001c3dbb` 使用模板 v10 / biz 170，CI 75163186 构建源码 `30b0b8a387` 的 mock-bundle；legacy Master 仍为 `ab73d2b6931d11dd5bc35993042f74fa53e54814`。48P / 192D（12×DP16），CP4，P/D block 为 512/128，Device pool 为 21553/221484，P Memory pool 为 52295。保持生产 BATCH 配置及 `FETCH_OUTPUT_STREAM=1`。
+
+P 执行公式来自已记录的生产预测公式，`prefill.scale=1.23`；只缩放 Mock 执行耗时，不改 Master 预测公式。D 保持 `tokens_per_step=2.6`、`step_base_ms=19.5`、`step_per_running_ms=0.175`；几何 EOS `mean_tokens=400`、seed 20260922。输出长度分布仍需继续核对，此参数不是生产常量。22:00:39 重启后读回全部 48P 的 scale=1.23、runtime_override=false。
+
+22:10–22:12:59 CST，按 panel 9101 的 global_avg 查询，P forward 时序点均值：生产 380.3 ms，Mock 382.1 ms；frontend 完成 QPS 为 1542.2 / 1535.9。22:02–22:12:59 的 12 个 Mock 错误码序列共 11 个分钟点均为零。22:10 有效 Memory 占用样本均值 98.6%，44 个 P 已发生驱逐，写入拒绝为零。这些是监控观测，不替代固定请求集合的 100% 完成核账。
+
+仍未完全对齐：同窗 P context TPS 约 64893 / 58613，with-cache TPS 126681 / 112470（按 priority 分组后求和的角色均值，不能当集群 TPS）；实际 reuse/input 比例 48.4% / 45.6%，context batch 16.45 / 15.02。生产缺测/standby 实例需保留 coverage，不能填成零掩盖差异。frontend readiness 仍为 0/20，测试 VIP 探针修复未执行，Whale 状态仍 PUBLISHING；不宣布整体部署或绝对门禁通过。
