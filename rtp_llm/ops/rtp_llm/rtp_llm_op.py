@@ -45,6 +45,10 @@ class RtpLLMOp:
             defer_service_start,
         )
 
+    def gpu_cache_tensors(self):
+        """Return all owning GPU KV allocations, including speculative caches."""
+        return self.ft_op.gpu_cache_tensors()
+
     def start_service(self):
         """Start serving sockets after a control-plane pre-service barrier."""
         self.ft_op.start_rpc_server()  # type: ignore

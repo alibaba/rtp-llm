@@ -378,6 +378,7 @@ void BlockPool::validateConfig() const {
 }
 
 void BlockPool::initializeCacheBuffer() {
+    gpu_cache_tensors_.clear();
     cache_buffer_registered_host_ = false;
     if (allocation_type_ == AllocationType::HOST) {
         config_.mla_tiered_cache = false;
@@ -438,11 +439,8 @@ void BlockPool::initializeCacheBuffer() {
         markHostBlockPoolDontDump(cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
     } else if (use_pinned_cpu_backing_) {
         initializePinnedCpuBuffer("device block pool pinned CPU backing");
-    } else if (use_cuda_malloc_backing_) {
-        cache_aligned_buffer_ = allocateCudaBuffer(config_.total_size_bytes);
     } else {
-        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        cache_aligned_buffer_ = allocateGpuCacheBuffer(config_.total_size_bytes);
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
@@ -479,6 +477,18 @@ void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
     } catch (const std::exception& e) {
         RTP_LLM_FAIL("%s pin failed, total_size=%zu bytes, error=%s", log_context, config_.total_size_bytes, e.what());
     }
+}
+
+torch::Tensor BlockPool::allocateGpuCacheBuffer(size_t size_bytes) {
+    auto tensor = use_cuda_malloc_backing_ ?
+                      allocateCudaBuffer(size_bytes) :
+                      torch::empty({static_cast<int64_t>(size_bytes)},
+                                   torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    // Track at allocation time so new KV layouts cannot silently miss SCR registration.
+    if (tensor.numel() > 0) {
+        gpu_cache_tensors_.push_back(tensor);
+    }
+    return tensor;
 }
 
 torch::Tensor BlockPool::allocateCudaBuffer(size_t size_bytes) {
@@ -573,10 +583,7 @@ void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full
         if (config_.mla_tiered_cache) {
             // RDMA requires the same legacy CUDA allocation for the separate
             // Indexer buffer as for an ordinary HBM block pool.
-            kv_scale_tensor = use_cuda_malloc_backing_ ?
-                                  allocateCudaBuffer(layout_cfg.kv_scale_pool_size_bytes) :
-                                  torch::empty({static_cast<int64_t>(layout_cfg.kv_scale_pool_size_bytes)},
-                                               torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+            kv_scale_tensor = allocateGpuCacheBuffer(layout_cfg.kv_scale_pool_size_bytes);
             layout_indexer_buffers_[layout_idx] = kv_scale_tensor;
         } else {
             kv_scale_tensor = createTensor(full_tensor,
@@ -588,10 +595,7 @@ void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full
     }
 
     if (config_.mla_tiered_cache) {
-        layout_hbm_buffers_[layout_idx] = use_cuda_malloc_backing_ ?
-            allocateCudaBuffer(layout_cfg.mla_hbm_size_bytes) :
-            torch::empty({static_cast<int64_t>(layout_cfg.mla_hbm_size_bytes)},
-                         torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        layout_hbm_buffers_[layout_idx] = allocateGpuCacheBuffer(layout_cfg.mla_hbm_size_bytes);
     }
     // 初始化内存布局策略
     initializeLayoutStrategy(layout_idx, layout_cfg, kv_cache_tensor, kv_scale_tensor);
