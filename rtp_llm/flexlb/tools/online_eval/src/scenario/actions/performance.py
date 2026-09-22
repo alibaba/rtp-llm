@@ -77,7 +77,7 @@ def observe(ctx, p, deadline):
         evidence["provenance"] = provenance(ctx, flow, c)
         while True:
             deadline.check()
-            state = flow.status()
+            state = flow.control_status()
             epoch = time.time() * 1000
             evidence["samples"].append(
                 dict(

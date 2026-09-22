@@ -7,6 +7,9 @@
 P 公式及 1.23 scale、D step 模型、EOS400 和差异范围。
 `config/scenarios/master_performance_frozen.yaml` 用此画像做单请求 / batch 配置 A/B；
 两个 profile 的独立绝对结论不受比较结果影响。
+这里只冻结引擎画像与容量：当前 Master 并非 Whale legacy Master 的相同二进制。两个 profile
+保留当前框架的每 P inflight=2；batch 采用 maxRequests=32、collection wait=10ms、
+predicted execution=550ms。它们是本轮显式比较对象，不能称为线上 Master 配置的完整复刻。
 
 该场景使用较早采集的 Flash 前缀轨迹，在播放时过滤 0–32k；不能说它来自用户最后一次复制源调整。
 数据不提交仓库；运行前须提供该 YAML 指定 SHA256 的 `data/traffic_models/local_flash_20260922_v3.xz`。
@@ -23,6 +26,8 @@ P 公式及 1.23 scale、D step 模型、EOS400 和差异范围。
 `criteria.engine_tps` 声明三项完整下界后，finish阶段直接归档 Prometheus 原始抓取时间点。
 先按同一引擎、同一时间点求 priority 之和，再计算引擎均值；不相加成集群 TPS。
 缺引擎、缺 priority 点、超过 max_gap_s 的断档、引擎 incarnation 改变都判 INVALID；零TPS保留并判 FAIL。
+采集只查询这三项原始 range-vector 指标。终态证据在分析前原子落盘，保留全部请求的判定字段，
+详细 RPC 信息留在原始 journal，并归档其路径与 SHA256。按完成时间建立索引后分桶，避免逐秒全表扫描。
 旧场景未声明此字段时保留客户端合同，不能称为引擎 TPS 门禁。
 
 暂不生成 HTML 时，离线门禁及 A/B 命令均支持 `--json-only`，保存 evidence、analysis.json 和指标差值。

@@ -10,6 +10,22 @@ from traffic.realistic import write_trace
 
 
 class JavaFlowTest(unittest.TestCase):
+    def test_control_observation_does_not_parse_request_journal(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as d:
+            flow = JavaFlowGroup(None, d, run_id="r", group_id="g", phase_id="p", poll_s=1)
+            flow.control.mkdir()
+            path = flow.control / "status.json"
+            path.write_text(json.dumps(dict(**flow.identity, state="SENDING")))
+            flow.journal.read = Mock(side_effect=ValueError("journal corrupt"))
+            self.assertEqual(flow.control_status()["state"], "SENDING")
+            flow.journal.read.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "journal corrupt"):
+                flow.status()
+            path.write_text(json.dumps(dict(run_id="other", group_id="g", phase_id="p")))
+            with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                flow.control_status()
+
     def test_large_flow_event_budget_is_explicit_and_bounded(self):
         flow = JavaFlowGroup(
             None,
