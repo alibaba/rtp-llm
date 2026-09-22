@@ -1,7 +1,7 @@
 import unittest
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 import torch.nn as nn
@@ -9,6 +9,7 @@ import torch.nn as nn
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
+from rtp_llm.models_py.modules.dsv4.hc.delayed import DelayedHCUnit
 from rtp_llm.models_py.modules.dsv4.prefill import forward as prefill_forward
 from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
 
@@ -799,6 +800,304 @@ class PrefillFastPathTest(unittest.TestCase):
             out,
             torch.tensor([[124.0, 124.5], [125.0, 125.5]]),
         )
+
+
+def _normal_path_rms(x, weight, eps):
+    value = x.float()
+    return (
+        value
+        * torch.rsqrt(value.square().mean(-1, keepdim=True) + eps)
+        * weight.float()
+    ).to(x.dtype)
+
+
+class _NormalPathNorm(nn.Module):
+    def __init__(self, weight, eps):
+        super().__init__()
+        self.weight = weight
+        self.variance_epsilon = eps
+        self.inputs = []
+
+    def forward(self, x):
+        self.inputs.append(x.clone())
+        return _normal_path_rms(x, self.weight, self.variance_epsilon)
+
+
+class _NormalPathAttention(AttentionFP8):
+    """CPU operator boundary; the real Block and delayed HC remain unmocked."""
+
+    def __init__(self, *, supported=True, config=True):
+        nn.Module.__init__(self)
+        if config is not False:
+            self.v41_config = {} if config is True else None
+        self.supported = supported
+        self.gate_calls = []
+        self.fused_calls = []
+        self.shared_calls = []
+        self.ordinary_calls = []
+        self.pair = (
+            torch.tensor([17], dtype=torch.uint8),
+            torch.tensor([23], dtype=torch.int32),
+        )
+
+    def can_fuse_prefill_attn_norm_input_quant(self, x, weight):
+        self.gate_calls.append((x.clone(), weight))
+        # This isolates Block dispatch using small CPU shapes. GPU shape/device
+        # eligibility is tested separately by the norm/quant kernel tests.
+        return self.supported and x.dtype == weight.dtype == torch.bfloat16
+
+    def prefill_fused_attn_norm_input_quant(self, x, weight, eps):
+        self.fused_calls.append((x.clone(), weight, eps))
+        x.copy_(_normal_path_rms(x, weight, eps))
+        return x, self.pair
+
+    def forward_with_shared_input_quant(
+        self, x, positions, shared_input_quant, **kwargs
+    ):
+        self.shared_calls.append((x.clone(), positions, shared_input_quant, kwargs))
+        return (x.float() * 0.375 + 0.25).to(x.dtype)
+
+    def forward(self, x, positions, **kwargs):
+        self.ordinary_calls.append((x.clone(), positions, kwargs))
+        return (x.float() * 0.375 + 0.25).to(x.dtype)
+
+
+class _NormalPathEngram(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def forward(self, hidden, hashes, mask):
+        self.calls.append((hidden.clone(), hashes, mask))
+        lane_delta = hidden.new_tensor([0.25, -0.5, 0.75, 1.0]).view(1, 4, 1)
+        return hidden + lane_delta * mask[:, None, None]
+
+
+class _NormalPathFFN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.inputs = []
+
+    def forward(self, x, ids):
+        self.inputs.append((x.clone(), ids, getattr(self, "_dbg_positions", None)))
+        return (x.float() * 0.25 - 0.125).to(x.dtype)
+
+
+class NormalBlockNormQuantTest(unittest.TestCase):
+    @staticmethod
+    def hc(pre_bias):
+        base = torch.linspace(-0.7, 0.9, 24)
+        base[:4] = torch.tensor(pre_bias)
+        return DelayedHCUnit(
+            torch.zeros(24, 12),
+            base,
+            torch.ones(3),
+            dim=3,
+            hc_mult=4,
+            hc_sinkhorn_iters=4,
+            norm_eps=1e-6,
+            hc_eps=1e-6,
+        )
+
+    def case(
+        self,
+        *,
+        engram=False,
+        previous=True,
+        dtype=torch.bfloat16,
+        weight_dtype=torch.bfloat16,
+        supported=True,
+        config=True,
+    ):
+        layer = Block.__new__(Block)
+        nn.Module.__init__(layer)
+        layer.layer_id = 14 if engram else 0
+        layer.attn = _NormalPathAttention(supported=supported, config=config)
+        layer.attn_hc = self.hc([-3.0, -1.0, 1.0, 3.0])
+        layer.ffn_hc = self.hc([3.0, 1.0, -1.0, -3.0])
+        layer.ffn_hc.set_previous(layer.attn_hc)
+        layer.attn_norm = _NormalPathNorm(
+            torch.tensor([0.5, 1.25, -1.75], dtype=weight_dtype), 3e-5
+        )
+        layer.ffn_norm = _NormalPathNorm(
+            torch.tensor([1.5, -0.75, 0.25], dtype=weight_dtype), 7e-5
+        )
+        layer.ffn = _NormalPathFFN()
+        layer.engram = _NormalPathEngram() if engram else None
+        layer.engram_hashes = torch.arange(6).view(3, 2)
+        layer.engram_token_mask = torch.tensor([True, False, True])
+        # Only optional GPU mega-mHC fusion is stubbed; pre/post are real HC.
+        layer._try_mega_mhc = Mock(return_value=None)
+        layer._sync_after_first_cp_prefill_attention = Mock()
+        hidden = (torch.arange(36).reshape(3, 4, 3).float() / 11 - 1.0).to(dtype)
+        predecessor = self.hc([-2.0, 0.0, 2.0, 4.0]) if previous else None
+        if predecessor is not None:
+            predecessor.pre(hidden * 0.5)
+            layer.attn_hc.set_previous(predecessor)
+        return SimpleNamespace(
+            layer=layer,
+            hidden=hidden,
+            previous=predecessor,
+            ids=torch.tensor([11, 13, 17]),
+            positions=torch.tensor([7, 8, 9]),
+            cu=torch.tensor([0, 3]),
+            cache=object(),
+            tables={0: object()},
+        )
+
+    def exercise(self, case, *, fused, debug=False):
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor
+
+        c, layer = case, case.layer
+        original = c.hidden.clone()
+        gamma = layer.attn_norm.weight.clone()
+        injected = original.clone()
+        if layer.engram is not None:
+            delta = original.new_tensor([0.25, -0.5, 0.75, 1.0]).view(1, 4, 1)
+            injected += delta * layer.engram_token_mask[:, None, None]
+        expected_pre = (
+            injected[:, 0].contiguous()
+            if c.previous is None
+            else (injected.float() * c.previous.pre_mix_out.unsqueeze(-1))
+            .sum(-2)
+            .to(injected.dtype)
+        )
+        expected_norm = _normal_path_rms(
+            expected_pre, gamma, layer.attn_norm.variance_epsilon
+        )
+        with patch.object(
+            _record_tensor, "should_record_layer", return_value=debug
+        ), patch.object(
+            _record_tensor, "_DBG_GLOBAL_POS", 8 if debug else -1
+        ), patch.object(
+            _record_tensor, "record_if_level"
+        ) as record, patch.object(
+            layer.attn_hc, "post", wraps=layer.attn_hc.post
+        ) as attn_post, patch.object(
+            layer.ffn_hc, "post", wraps=layer.ffn_hc.post
+        ) as ffn_post:
+            # nn.Module.__call__ executes the actual, complete Block.forward.
+            out = layer(
+                c.hidden,
+                c.ids,
+                c.positions,
+                c.cu,
+                kv_cache=c.cache,
+                block_tables_by_type=c.tables,
+            )
+        self.assertEqual(len(layer.attn.fused_calls), int(fused))
+        self.assertEqual(len(layer.attn.shared_calls), int(fused))
+        self.assertEqual(len(layer.attn.ordinary_calls), int(not fused))
+        self.assertEqual(len(layer.attn_norm.inputs), int(not fused))
+        self.assertEqual(len(layer.ffn_norm.inputs), 1)
+        self.assertTrue(
+            torch.equal(c.hidden, original), "HC residual was overwritten by norm"
+        )
+        self.assertTrue(torch.equal(layer.attn_norm.weight, gamma))
+        self.assertEqual(attn_post.call_count, 1)
+        attn_value, attn_residual, post, comb = attn_post.call_args.args
+        self.assertTrue(torch.equal(attn_residual, injected))
+        expected_attn = (expected_norm.float() * 0.375 + 0.25).to(injected.dtype)
+        self.assertTrue(torch.equal(attn_value, expected_attn))
+        middle = (
+            post.float() * expected_attn.float().unsqueeze(-2)
+            + comb.float().transpose(-1, -2) @ injected.float()
+        ).to(injected.dtype)
+        # FFN reads the attention sublayer's pre_mix, not its newly computed own mix.
+        expected_ffn_pre = (
+            (middle.float() * layer.attn_hc.pre_mix_out.unsqueeze(-1))
+            .sum(-2)
+            .to(middle.dtype)
+        )
+        self.assertTrue(torch.equal(layer.ffn_norm.inputs[0], expected_ffn_pre))
+        wrong_mix = (
+            (middle.float() * layer.ffn_hc.pre_mix_out.unsqueeze(-1))
+            .sum(-2)
+            .to(middle.dtype)
+        )
+        self.assertFalse(torch.equal(expected_ffn_pre, wrong_mix))
+        ff_norm = _normal_path_rms(
+            expected_ffn_pre, layer.ffn_norm.weight, layer.ffn_norm.variance_epsilon
+        )
+        self.assertTrue(torch.equal(layer.ffn.inputs[0][0], ff_norm))
+        self.assertIs(layer.ffn.inputs[0][1], c.ids)
+        ff_value, ff_residual, ff_post, ff_comb = ffn_post.call_args.args
+        self.assertTrue(torch.equal(ff_residual, middle))
+        expected_value = (ff_norm.float() * 0.25 - 0.125).to(middle.dtype)
+        self.assertTrue(torch.equal(ff_value, expected_value))
+        expected = (
+            ff_post.float() * expected_value.float().unsqueeze(-2)
+            + ff_comb.float().transpose(-1, -2) @ middle.float()
+        ).to(middle.dtype)
+        self.assertTrue(torch.equal(out, expected))
+        if fused:
+            raw, weight, eps = layer.attn.fused_calls[0]
+            self.assertTrue(torch.equal(raw, expected_pre))
+            self.assertEqual(weight.data_ptr(), layer.attn_norm.weight.data_ptr())
+            self.assertEqual(eps, 3e-5)
+            norm, positions, pair, kwargs = layer.attn.shared_calls[0]
+            self.assertIs(pair, layer.attn.pair)
+            self.assertIs(positions, c.positions)
+        else:
+            self.assertTrue(torch.equal(layer.attn_norm.inputs[0], expected_pre))
+            norm, positions, kwargs = layer.attn.ordinary_calls[0]
+        self.assertTrue(torch.equal(norm, expected_norm))
+        self.assertIs(kwargs["kv_cache"], c.cache)
+        self.assertIs(kwargs["block_tables_by_type"], c.tables)
+        if layer.engram is not None:
+            self.assertEqual(len(layer.engram.calls), 1)
+            self.assertIs(layer.engram.calls[0][1], layer.engram_hashes)
+            self.assertIs(layer.engram.calls[0][2], layer.engram_token_mask)
+        if debug:
+            self.assertFalse(layer.attn.gate_calls)
+            layer._try_mega_mhc.assert_not_called()
+            self.assertIn(
+                f"L{layer.layer_id:02d}_attn_in_pos8",
+                [call.args[1] for call in record.call_args_list],
+            )
+            self.assertIsNone(layer.ffn._dbg_positions)
+        else:
+            record.assert_not_called()
+            layer._try_mega_mhc.assert_called_once()
+        layer._sync_after_first_cp_prefill_attention.assert_called_once()
+
+    def test_normal_v41_fuses_with_engram_and_without_engram(self):
+        for engram in (False, True):
+            for previous in (False, True):
+                with self.subTest(engram=engram, previous=previous):
+                    self.exercise(
+                        self.case(engram=engram, previous=previous), fused=True
+                    )
+
+    def test_engram_disables_whole_fast_stack_but_normal_blocks_still_fuse(self):
+        plain, engram = self.case(), self.case(engram=True)
+        model = SimpleNamespace(fp8_kv_cache=True, layers=[plain.layer, engram.layer])
+        self.assertIsNotNone(plain.layer.prefill_fast_callable())
+        self.assertIsNone(engram.layer.prefill_fast_callable())
+        self.assertIsNone(prefill_forward._prefill_fast_path_layer_calls(model))
+        self.exercise(plain, fused=True)
+        self.exercise(engram, fused=True)
+
+    def test_v4_and_missing_v41_config_preserve_ordinary_norm(self):
+        for config in (None, False):
+            with self.subTest(config=config):
+                c = self.case(config=config)
+                self.exercise(c, fused=False)
+                self.assertFalse(c.layer.attn.gate_calls)
+
+    def test_small_gate_rejection_and_float_inputs_or_gamma_keep_ordinary_norm(self):
+        for kwargs in (
+            {"supported": False},
+            {"dtype": torch.float32},
+            {"weight_dtype": torch.float32},
+        ):
+            with self.subTest(kwargs=kwargs):
+                c = self.case(**kwargs)
+                self.exercise(c, fused=False)
+                self.assertEqual(len(c.layer.attn.gate_calls), 1)
+
+    def test_debug_preserves_norm_recording_and_delayed_hc(self):
+        self.exercise(self.case(engram=True), fused=False, debug=True)
 
 
 if __name__ == "__main__":

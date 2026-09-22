@@ -38,7 +38,8 @@ the slot indices we produce here are ``r * stride + offset_in_request``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -188,6 +189,7 @@ class DSv4DecodeAttnMetadataFP8:
     # identical). When non-None the per-layer body skips the triton
     # translator call and reads this directly.
     swa_global_slots: Optional[torch.Tensor] = None
+    decoder_swa_metadata: Optional["DSv4DecodeAttnMetadataFP8"] = None
 
     # Iter3.3: cached ``hca_cmp_global_slots`` = translate_local_to_global_slots(
     # req_id, hca_pool_bt, hca_cmp_local, hca_eb). Shape [T, K_h] int32.
@@ -238,6 +240,90 @@ class DSv4DecodeAttnMetadataFP8:
     compressed_topk_length_by_ratio: Dict[int, torch.Tensor] = field(
         default_factory=dict
     )  # ratio -> [B] int32
+
+
+def update_decoder_swa_metadata(meta, entries_per_block, *, batch_size=None):
+    """Share global metadata, with stable, physically distinct decoder SWA indices.
+
+    A missing batch_size only allocates the graph buffers. Later updates copy
+    into these buffers; encoder and decoder never share SWA slot addresses.
+    """
+    from rtp_llm.models_py.modules.dsv4.attn_type import DECODER_SWA_KV, SWA_KV
+
+    if DECODER_SWA_KV not in meta.pool_block_tables:
+        return
+    region = DECODER_SWA_KV
+    child = meta.decoder_swa_metadata
+    if child is None:
+        slots = meta.pool_write_slot_mappings.get(region)
+        if slots is None:
+            slots = torch.zeros_like(meta.pool_write_slot_mappings[SWA_KV])
+            meta.pool_write_slot_mappings[region] = slots
+        child = replace(
+            meta,
+            pool_block_tables={
+                **meta.pool_block_tables,
+                SWA_KV: meta.pool_block_tables[region],
+            },
+            pool_write_slot_mappings={**meta.pool_write_slot_mappings, SWA_KV: slots},
+            paged_pool_tokens_per_block={
+                **meta.paged_pool_tokens_per_block,
+                SWA_KV: meta.paged_pool_tokens_per_block[region],
+            },
+            swa_global_slots=torch.full_like(meta.swa_global_slots, -1),
+        )
+        meta.decoder_swa_metadata = child
+    if batch_size is None:
+        return
+    from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
+        translate_local_to_global_slots,
+    )
+    from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
+        compute_kv_pool_slot_mapping,
+    )
+
+    count = batch_size * meta.q_len_per_req
+    eb = entries_per_block[region]
+    tpb = meta.paged_pool_tokens_per_block[region]
+    table = meta.pool_block_tables[region][:batch_size]
+    if meta.start_pos.is_cuda:
+        # Reuse the existing fused planner and its stable specialization;
+        # do not expand this additional pool into many eager CUDA launches.
+        from rtp_llm.models_py.modules.dsv4.fp8.decode._fused_prepare_meta_triton import (
+            fused_phase2b_pool_slot_mapping,
+        )
+
+        fused_phase2b_pool_slot_mapping(
+            # Only SWA needs a second physical slot map. The generic planner's
+            # global ratios are V4's 4/128, whereas V4.1 uses 2/1; never rewrite
+            # the shared global metadata through this additional SWA call.
+            SimpleNamespace(
+                q_len_per_req=meta.q_len_per_req,
+                pool_block_tables={SWA_KV: child.pool_block_tables[SWA_KV]},
+                pool_write_slot_mappings={
+                    SWA_KV: child.pool_write_slot_mappings[SWA_KV]
+                },
+            ),
+            meta.start_pos,
+            batch_size,
+            {SWA_KV: eb},
+            {SWA_KV: tpb},
+        )
+    else:
+        writes = compute_kv_pool_slot_mapping(
+            table, meta.position_ids[:count], eb, tpb, eb
+        )
+        child.pool_write_slot_mappings[SWA_KV][:count].copy_(writes)
+    reads = translate_local_to_global_slots(
+        meta.req_id_per_token[:count],
+        table,
+        meta.swa_abs_idx[:batch_size].reshape(count, meta.window_size),
+        eb,
+        tpb,
+    )
+    child.swa_global_slots[:count].copy_(reads)
+    child.batch_size = batch_size
+    child.total_tokens = count
 
 
 def get_or_build_sched_meta(
@@ -850,9 +936,11 @@ def allocate_decode_metadata_fp8(
     pool_block_tables: Dict[int, torch.Tensor] = {}
     pool_write_slot_mappings: Dict[int, torch.Tensor] = {}
     compressor_state_slot_mappings: Dict[int, torch.Tensor] = {}
-    paged_entries_from_specs, paged_tokens_from_specs, paged_max_blocks = (
-        _parse_paged_pool_specs(paged_pool_specs)
-    )
+    (
+        paged_entries_from_specs,
+        paged_tokens_from_specs,
+        paged_max_blocks,
+    ) = _parse_paged_pool_specs(paged_pool_specs)
     if paged_pool_specs:
         from rtp_llm.models_py.modules.dsv4.attn_type import (
             CSA_STATE,
@@ -922,7 +1010,7 @@ def allocate_decode_metadata_fp8(
         (B * q_len, hca_dense_width), -1, dtype=torch.int32, device=device
     )
 
-    return DSv4DecodeAttnMetadataFP8(
+    meta = DSv4DecodeAttnMetadataFP8(
         batch_size=B,
         q_len_per_req=q_len,
         total_tokens=T_total,
@@ -957,6 +1045,8 @@ def allocate_decode_metadata_fp8(
         swa_topk_length=swa_topk_length,
         compressed_topk_length_by_ratio=compressed_topk_length_by_ratio,
     )
+    update_decoder_swa_metadata(meta, paged_entries_from_specs)
+    return meta
 
 
 def update_decode_metadata_in_place_fp8(
@@ -1213,6 +1303,9 @@ def update_decode_metadata_in_place_fp8(
                 f"update_decode_metadata_in_place_fp8(forbid_realloc=True) "
                 f"reallocated buffer '{k}': before={hex(p_before)} after={hex(cur[k])}"
             )
+
+    if paged_block_tables and paged_pool_entries_per_block:
+        update_decoder_swa_metadata(meta, paged_pool_entries_per_block, batch_size=bs)
 
 
 def build_decode_metadata_fp8(
@@ -1515,7 +1608,7 @@ def build_decode_metadata_fp8(
                 tokens_per_block_for_block_table=hca_tokens_per_block,
             )
 
-    return DSv4DecodeAttnMetadataFP8(
+    meta = DSv4DecodeAttnMetadataFP8(
         batch_size=B,
         q_len_per_req=q_len,
         total_tokens=T_total,
@@ -1550,3 +1643,6 @@ def build_decode_metadata_fp8(
         swa_topk_length=swa_topk_length,
         compressed_topk_length_by_ratio=compressed_topk_length_by_ratio,
     )
+    if paged_pool_entries_per_block:
+        update_decoder_swa_metadata(meta, paged_pool_entries_per_block, batch_size=B)
+    return meta

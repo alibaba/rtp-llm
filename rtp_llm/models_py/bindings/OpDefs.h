@@ -57,7 +57,7 @@ struct KVCache {
 
     // Flat version of kv_cache_base_by_layer_region for pybind11 compatibility.
     // Layout: [layer_0_type_0, layer_0_type_1, ..., layer_0_type_7, layer_1_type_0, ...]
-    // Size = layer_num * REGION_COUNT (8). Use region_name_count=8 to index.
+    // Size = layer_num * REGION_COUNT. Use region_name_count to index.
     std::vector<torch::Tensor> kv_cache_base_by_layer_region_flat;
 
     LayerKVCache getLayerCache(int idx) {
@@ -151,7 +151,15 @@ struct KVCache {
         }
 
         const auto layer = static_cast<size_t>(idx);
-        const auto attn  = static_cast<size_t>(region_name);
+        const auto decoder_swa = static_cast<size_t>(rtp_llm::KVCacheRegionName::DECODER_SWA_KV);
+        // Logical SWA access stays stable for model kernels; the descriptor
+        // reports the physical region/group so callers choose its own table.
+        if (region_name == rtp_llm::KVCacheRegionName::SWA_KV && idx >= 0 && layer < layer_region_to_group_id.size()
+            && decoder_swa < layer_region_to_group_id[layer].size()
+            && layer_region_to_group_id[layer][decoder_swa] >= 0) {
+            region_name = rtp_llm::KVCacheRegionName::DECODER_SWA_KV;
+        }
+        const auto attn = static_cast<size_t>(region_name);
         if (idx < 0 || layer >= kv_cache_base_by_layer_region.size()) {
             throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
         }

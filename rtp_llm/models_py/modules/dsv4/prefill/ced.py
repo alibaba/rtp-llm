@@ -1,8 +1,11 @@
-"""Exact, checkpoint-aware V4.1 decoder prefill compaction.
+"""V4.1 decoder prefill compaction with an optional bounded replay domain.
 
 L0--L20 retain the complete fresh input and decoder global KV. L21--L39
 only evaluate the dependency windows of allocated SWA checkpoints and the
 request end. The original cache geometry and wire format stay unchanged.
+In opt-in bounded replay, only the final 128 rows are evaluated, with SWA
+truncated to that domain. Those approximate decoder/draft pools are private
+live state, excluded from prefix caching by the native cache policy.
 Query rows are redistributed within CP; fresh KV is scattered back before
 ordinary cache writes. No omitted row may be exposed as a prompt output.
 
@@ -21,7 +24,7 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group
-from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+from rtp_llm.models_py.modules.dsv4.attn_type import DECODER_SWA_KV, SWA_KV
 from rtp_llm.models_py.modules.dsv4.cp import CPContext
 
 _CP_SIZE = 4
@@ -29,6 +32,7 @@ _TAIL_TOKENS = 3072
 _MIN_TOKENS = 32768
 _DERIVED_KEYS = (
     "prefill_chunk_meta",
+    "prefill_kv_workspace",
     "prefill_index_plan",
     "prefill_candidate_mask",
     "candidate_mask",
@@ -232,7 +236,7 @@ def _query_layout(original, selected, group):
 
 @dataclass
 class CEDPlan:
-    """One forward's exact query domain and reversible CP transport."""
+    """One forward's query domain and reversible CP transport."""
 
     original_context: CPContext
     context: CPContext
@@ -245,14 +249,23 @@ class CEDPlan:
 
     @classmethod
     @torch.inference_mode()
-    def create(cls, v4, cp_ctx, attn_inputs, kv_cache, *, prepare_hidden_fn=None):
+    def create(
+        cls,
+        v4,
+        cp_ctx,
+        attn_inputs,
+        kv_cache,
+        *,
+        prepare_hidden_fn=None,
+        bounded_replay=False,
+    ):
         # Host metadata and the request gate are broadcast by the engine to all
         # TP ranks. No extra device->host voting in the prefill critical path.
         if (
             not isinstance(cp_ctx, CPContext)
             or cp_ctx.cp_size != _CP_SIZE
             or not cp_ctx.kv_cache_sharded
-            or cp_ctx.seq_len_full < _MIN_TOKENS
+            or cp_ctx.seq_len_full < (128 if bounded_replay else _MIN_TOKENS)
             or cp_ctx.input_lengths_global_host != (cp_ctx.seq_len_full,)
             or cp_ctx.prefix_lengths_host != (cp_ctx.prefix_length,)
             or cp_ctx.chunk_lengths_per_req != (cp_ctx.chunk_length,)
@@ -268,7 +281,10 @@ class CEDPlan:
         ):
             return None
         regions = tuple(getattr(kv_cache, "group_region_names", ()))
-        groups = [i for i, r in enumerate(regions) if int(r) == int(SWA_KV)]
+        region = DECODER_SWA_KV if bounded_replay else SWA_KV
+        groups = [i for i, r in enumerate(regions) if int(r) == int(region)]
+        if bounded_replay and len(groups) != 1:
+            raise ValueError("bounded replay requires a native decoder SWA pool")
         host = getattr(attn_inputs, "kv_cache_block_id_host", None)
         spans = tuple(getattr(kv_cache, "group_seq_size_per_block", ()))
         if (
@@ -293,15 +309,25 @@ class CEDPlan:
         # AttentionV41FP8._swa_entries_per_block, which excludes that padding.
         if full_stride < 528:
             return None
-        selected = checkpoint_positions(
-            cp_ctx.prefix_length,
-            cp_ctx.seq_len_full,
-            host[group_id, 0].tolist(),
-            spans[group_id],
-            full_stride // 528,
-        )
-        # Avoid transport when dense checkpoints leave little work to omit.
-        if selected.numel() * 2 >= cp_ctx.seq_len_full:
+        if bounded_replay:
+            # Only live decode state is produced. Native cache policy must
+            # exclude these decoder/draft SWA pools from prefix reuse.
+            selected = torch.arange(
+                cp_ctx.seq_len_full - 128, cp_ctx.seq_len_full, dtype=torch.int64
+            )
+        else:
+            selected = checkpoint_positions(
+                cp_ctx.prefix_length,
+                cp_ctx.seq_len_full,
+                host[group_id, 0].tolist(),
+                spans[group_id],
+                full_stride // 528,
+            )
+        # Exact CED avoids transport for dense checkpoints. Approximate replay
+        # uses the same 128-row domain even immediately above that boundary.
+        if selected.numel() == cp_ctx.seq_len_full or (
+            not bounded_replay and selected.numel() * 2 >= cp_ctx.seq_len_full
+        ):
             return None
         group = collective_torch._get_group(Group.TP)
         if (
@@ -310,6 +336,8 @@ class CEDPlan:
         ):
             raise ValueError("CED CP metadata does not match its process group")
         context, exchange, indexer_groups = _query_layout(cp_ctx, selected, group)
+        if bounded_replay:
+            context.swa_replay_start = cp_ctx.seq_len_full - 128
         return cls(
             cp_ctx,
             context,
@@ -334,7 +362,9 @@ class CEDPlan:
         compact_ids = self.exchange.compact(input_ids)
         v4.layers[20].ffn_hc.pre_mix_out = self.exchange.compact(pre_mix)
         shared["topk"] = {20: self.exchange.compact(topk)}
-        shared["candidates"] = self.exchange.compact(candidates)
+        shared["candidates"] = (
+            self.exchange.compact(candidates) if candidates is not None else None
+        )
         shared["ced_indexer_projection"] = self.project_indexer_weights
         for key in _DERIVED_KEYS:
             shared.pop(key, None)

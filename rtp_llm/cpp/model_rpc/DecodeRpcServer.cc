@@ -685,7 +685,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     };
     auto isCpSlicedFixedRegion = [](KVCacheRegionName region_name) {
         return region_name == KVCacheRegionName::INDEXER_STATE || region_name == KVCacheRegionName::CSA_STATE
-               || region_name == KVCacheRegionName::HCA_STATE || region_name == KVCacheRegionName::SWA_KV;
+               || region_name == KVCacheRegionName::HCA_STATE || isSwaCacheRegion(region_name);
     };
     auto shouldLoadGroupFromPeer = [&](CacheGroupType group_type, KVCacheRegionName region_name, int peer_idx) {
         if (!is_page_level_rr) {
@@ -715,7 +715,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 gid,
                                 spec->debugString().c_str());
         const size_t cp_size = static_cast<size_t>(load_context.prefill_cp_size);
-        if (state_spec->cache_type == KVCacheRegionName::SWA_KV) {
+        if (isSwaCacheRegion(state_spec->cache_type)) {
             const size_t full_block_bytes = state_spec->block_size_bytes();
             RTP_LLM_CHECK_WITH_INFO(full_block_bytes % cp_size == 0,
                                     "CP byte-sliced SWA_KV block bytes %zu not divisible by cp_size %zu",

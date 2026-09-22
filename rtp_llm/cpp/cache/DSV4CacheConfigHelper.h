@@ -8,6 +8,8 @@ namespace rtp_llm {
 
 class DSV4CacheConfigHelper {
 public:
+    static bool swaBoundedReplayEnabled(const ModelConfig& model_config, const ParallelismConfig& parallelism_config);
+
     static void applyConfig(CacheConfig&             config,
                             const ModelConfig&       model_config,
                             const ParallelismConfig& parallelism_config,

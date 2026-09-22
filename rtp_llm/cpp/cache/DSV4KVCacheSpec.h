@@ -176,7 +176,7 @@ struct DSV4StateSpec: public KVCacheSpec {
         if (state_dim == DSV4_FP8_KV_ENTRY_BYTES && entries_per_block >= DSV4_SWA_WINDOW_ENTRIES) {
             return alignDsv4Fp8KvBlockBytes(natural);
         }
-        if (cache_type == KVCacheRegionName::SWA_KV && state_dim == DSV41_FP8_SWA_ENTRY_BYTES) {
+        if (isSwaCacheRegion(cache_type) && state_dim == DSV41_FP8_SWA_ENTRY_BYTES) {
             return alignDsv41Fp8KvBlockBytes(natural);
         }
         return natural;

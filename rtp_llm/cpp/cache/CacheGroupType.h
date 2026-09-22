@@ -26,8 +26,13 @@ enum class KVCacheRegionName : int8_t {
     CSA_STATE     = 5,
     HCA_STATE     = 6,
     SWA_KV        = 7,
-    REGION_COUNT  = 8,
+    DECODER_SWA_KV = 8,  // Live request state only; never a reusable prefix.
+    REGION_COUNT   = 9,
 };
+
+inline bool isSwaCacheRegion(KVCacheRegionName region_name) {
+    return region_name == KVCacheRegionName::SWA_KV || region_name == KVCacheRegionName::DECODER_SWA_KV;
+}
 
 inline bool isStateRegion(KVCacheRegionName region_name) {
     return region_name == KVCacheRegionName::INDEXER_STATE || region_name == KVCacheRegionName::CSA_STATE
@@ -35,11 +40,11 @@ inline bool isStateRegion(KVCacheRegionName region_name) {
 }
 
 inline bool isDsv4FixedRegion(KVCacheRegionName region_name) {
-    return isStateRegion(region_name) || region_name == KVCacheRegionName::SWA_KV;
+    return isStateRegion(region_name) || isSwaCacheRegion(region_name);
 }
 
 inline bool skipReuseCacheRegion(KVCacheRegionName region_name) {
-    return region_name == KVCacheRegionName::HCA_STATE;
+    return region_name == KVCacheRegionName::HCA_STATE || region_name == KVCacheRegionName::DECODER_SWA_KV;
 }
 
 }  // namespace rtp_llm

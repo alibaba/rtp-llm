@@ -128,6 +128,7 @@ class KVCacheRegionName:
       CSA_STATE
       HCA_STATE
       SWA_KV
+      DECODER_SWA_KV
     """
 
     DEFAULT: typing.ClassVar[KVCacheRegionName]
@@ -138,6 +139,7 @@ class KVCacheRegionName:
     CSA_STATE: typing.ClassVar[KVCacheRegionName]
     HCA_STATE: typing.ClassVar[KVCacheRegionName]
     SWA_KV: typing.ClassVar[KVCacheRegionName]
+    DECODER_SWA_KV: typing.ClassVar[KVCacheRegionName]
     __members__: typing.ClassVar[dict[str, KVCacheRegionName]]
     def __eq__(self, other: typing.Any) -> bool: ...
     def __getstate__(self) -> int: ...

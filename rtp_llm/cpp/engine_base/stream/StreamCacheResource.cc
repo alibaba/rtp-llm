@@ -71,9 +71,7 @@ public:
         if (!generate_stream_ || !generate_stream_->isContextStream()) {
             return true;
         }
-        const int block_tokens = generate_stream_->streamCacheResource().reuseBlockTokens();
-        return generate_stream_->completeTokenIdsPtr()->isValidReuseLength(static_cast<int>(block_count)
-                                                                           * block_tokens);
+        return generate_stream_->streamCacheResource().validPrefixReuseBlockCount(block_count);
     }
 
     // P2P routing context: cached at construction time, read-only access thereafter
@@ -648,6 +646,24 @@ bool StreamCacheResource::enableDeviceCache() const {
 
 bool StreamCacheResource::enableTieredMemoryCache() const {
     return resource_context_.enable_tiered_memory_cache && enableMemoryCache() && enableDeviceCache();
+}
+
+bool StreamCacheResource::validPrefixReuseBlockCount(size_t block_count) const {
+    // A live P/D handoff is not a new prefill cache hit. In particular the
+    // decoder must receive all current SWA state, including replay-only pools.
+    if (!stream_->isContextStream()) {
+        return true;
+    }
+    const auto& config = resource_context_.cache_manager->cacheConfig();
+    if (config.swaBoundedReplay() && resource_context_.role_type == RoleType::DECODE) {
+        return true;
+    }
+    const int64_t tokens = static_cast<int64_t>(block_count) * reuseBlockTokens();
+    if (config.swaBoundedReplay() && tokens > stream_->completeTokenIdsPtr()->seqLength()) {
+        return false;
+    }
+    return stream_->completeTokenIdsPtr()->isValidReuseLength(static_cast<int>(tokens),
+                                                              config.swaBoundedReplay() ? 128 : 0);
 }
 
 void StreamCacheResource::loadCacheSync() {

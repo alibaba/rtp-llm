@@ -10,6 +10,7 @@ Lookup helpers that actually read ``attn_inputs`` / ``kv_cache`` live in
 
 # Canonical attn_type ids (mirror C++ KVCacheRegionName enum).
 SWA_KV = 7
+DECODER_SWA_KV = 8
 CSA_KV = 1
 HCA_KV = 2
 INDEXER_KV = 3

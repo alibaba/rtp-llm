@@ -125,7 +125,8 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     for (; pos >= 0; --pos) {
         // Select a legal image boundary before restoring any group's snapshot.
         // CP candidates are virtual blocks; a physical-block rewind can have no matching tail state.
-        if (!complete_token_ids.isValidReuseLength((pos + 1) * reuse_unit_tokens)) {
+        if (!complete_token_ids.isValidReuseLength((pos + 1) * reuse_unit_tokens,
+                                                   config_.swaBoundedReplay() ? 128 : 0)) {
             continue;
         }
         bool                          all_tail_groups_matched = true;
@@ -193,6 +194,14 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     }
     for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
         const int gid             = swa_group_ids_[i];
+        if (static_cast<size_t>(gid) < config_.group_region_names.size()
+            && config_.group_region_names[gid] == KVCacheRegionName::DECODER_SWA_KV) {
+            // No prefix state exists in this private region. Start allocation
+            // from zero so BOTH live tail slots needed by P/D are allocated,
+            // including the slot immediately before a short fresh suffix.
+            kv_resource.mutableBlockIds(0, gid).assign(BlockIndicesType{});
+            continue;
+        }
         const int group_reuse_len = cpCompactSwaGroup(gid, cp_mapper) ? reuse_blocks_len : logical_reuse_len;
         kv_resource.mutableBlockIds(0, gid).assign(
             BlockIndicesType(static_cast<size_t>(group_reuse_len), NULL_BLOCK_IDX));
@@ -231,7 +240,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         CacheKeysType match_keys = cpEffectiveCacheKeys(cp_mapper, cache_keys);
         // CP subsampling may already exclude the partial tail. Keep every complete
         // virtual block that still leaves at least one token for prefill.
-        const size_t max_reuse_blocks = static_cast<size_t>(std::max(seq_len - 1, 0) / reuse_unit_tokens);
+        const size_t max_reuse_blocks = static_cast<size_t>(config_.maxPrefixReuseTokens(seq_len) / reuse_unit_tokens);
         match_keys.resize(std::min(match_keys.size(), max_reuse_blocks));
         auto begin_us          = currentTimeUs();
         reuse_blocks           = reuseCache(match_keys, *kv_resource, *malloc_info.complete_token_ids, cp_mapper);

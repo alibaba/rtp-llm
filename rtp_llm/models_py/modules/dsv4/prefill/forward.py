@@ -550,6 +550,7 @@ def forward_layers(
                     attn_inputs,
                     kv_cache,
                     prepare_hidden_fn=prepare_hidden_fn,
+                    bounded_replay=v4.swa_bounded_replay,
                 )
         with record_range_ctx():
             # Two callable chains intentionally coexist:
@@ -783,6 +784,8 @@ def forward_prefill(
     Returns ``PyModelOutputs`` with ``[T_total, dim]`` pre-lm-head hidden.
     """
     attn = inputs.attention_inputs
+    if getattr(v4, "swa_bounded_replay", False) and not permits_ced(inputs):
+        raise ValueError("bounded SWA replay does not support full-prompt outputs")
 
     # Context-Parallel setup must precede the per-layer loop because
     # forward_layers reads v4._cp_info to build the CP context.

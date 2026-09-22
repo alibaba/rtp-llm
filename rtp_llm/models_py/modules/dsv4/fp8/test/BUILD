@@ -91,6 +91,8 @@ _DSV4_FP8_CPU_TESTS = [
         "test_v41_prefill_global",
         "test_v41_prefill_metadata",
         "test_v41_prefill_q_memory",
+        "test_v41_prefill_index_plan",
+        "test_v41_norm_quant",
     ]
 ]
 

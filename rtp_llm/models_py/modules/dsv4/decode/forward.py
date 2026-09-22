@@ -29,6 +29,7 @@ from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.attn_type import (
     CSA_KV,
     CSA_STATE,
+    DECODER_SWA_KV,
     HCA_KV,
     HCA_STATE,
     INDEXER_KV,
@@ -38,6 +39,7 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import swa_region_for_layer
 
 
 def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
@@ -127,6 +129,10 @@ def build_paged_pool_specs(
     # the layers that own it.
     specs: Dict[int, Tuple[int, int, int]] = {}
     saved_kv: Dict[int, Any] = {}
+    has_decoder_swa = any(
+        int(region) == DECODER_SWA_KV
+        for region in getattr(kv_cache, "group_region_names", ())
+    )
     try:
         # #50: STATE pool block tables must also flow through metadata so
         # compressor/indexer can gather their fp32 state on each decode
@@ -134,6 +140,7 @@ def build_paged_pool_specs(
         # the KV pools.
         for attn_type in (
             SWA_KV,
+            DECODER_SWA_KV,
             HCA_KV,
             INDEXER_KV,
             CSA_KV,
@@ -141,12 +148,19 @@ def build_paged_pool_specs(
             HCA_STATE,
             INDEXER_STATE,
         ):
+            if attn_type == DECODER_SWA_KV and not has_decoder_swa:
+                continue
             for layer in v4.layers:
                 attn = layer.attn
                 if id(attn) not in saved_kv:
                     saved_kv[id(attn)] = (attn, attn._kv_cache)
                     attn._kv_cache = kv_cache
-                entries_per_block = attn._pool_entries_per_block(attn_type)
+                if has_decoder_swa and attn_type in (SWA_KV, DECODER_SWA_KV):
+                    if swa_region_for_layer(kv_cache, attn.layer_id) != attn_type:
+                        continue
+                    entries_per_block = attn._pool_entries_per_block(SWA_KV)
+                else:
+                    entries_per_block = attn._pool_entries_per_block(attn_type)
                 if entries_per_block > 0:
                     tokens_per_block = _dsv4_pool_tokens_per_block(
                         kv_cache,

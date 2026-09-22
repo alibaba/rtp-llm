@@ -60,6 +60,8 @@ const char* cacheRegionName(KVCacheRegionName region_name) {
             return "HCA_STATE";
         case KVCacheRegionName::SWA_KV:
             return "SWA_KV";
+        case KVCacheRegionName::DECODER_SWA_KV:
+            return "DECODER_SWA_KV";
         case KVCacheRegionName::REGION_COUNT:
             return "REGION_COUNT";
     }

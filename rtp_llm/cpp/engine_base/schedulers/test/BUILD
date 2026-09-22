@@ -41,11 +41,23 @@ cc_test(
     ],
     data = [],
     copts = copts() + ["-fno-access-control"],
-    deps = test_deps,
+    deps = test_deps + ["//rtp_llm/cpp/cache/test/mock:mock_allocator_lib"],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
     exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "fifo_scheduler_admission_test",
+    srcs = ["FIFOSchedulerTest.cc"],
+    args = ["--gtest_filter=FIFOBoundedReplayAdmissionTest.*"],
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps + ["//rtp_llm/cpp/cache/test/mock:mock_allocator_lib"],
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "TEST_USING_DEVICE": "CPU",
+    },
 )
 
 cc_test(

@@ -128,6 +128,9 @@ class CPContext:
     # CED only: gathered selected query rows scatter into the original fresh
     # KV view before cache writes. None retains ordinary full CP execution.
     gather_restore_positions: Optional[torch.Tensor] = None
+    # Approximate decoder replay only: SWA may not read rows before this
+    # fresh-input offset. Global KV visibility retains absolute positions.
+    swa_replay_start: Optional[int] = None
     # CSA, HCA, and the nested indexer consume identical full-sequence
     # positions during one forward. Cache the tensors after the first build.
     _full_prefill_positions_cache: Optional[
@@ -835,6 +838,7 @@ def cp_all_gather_full_varlen(
     cp_ctx: CPContext,
     *,
     profile_name: Optional[str] = None,
+    replay_only: bool = False,
 ) -> torch.Tensor:
     """**Varlen B>=1 path**:
     all-gather a flat ``[chunk_length, *F]`` rank-local tensor across the
@@ -849,15 +853,28 @@ def cp_all_gather_full_varlen(
     treats this as a single virtual sequence (matching the existing
     non-CP B>1 behaviour documented in
     ``prefill/forward.py::forward_layers``).
+    ``replay_only`` keeps the bounded decoder's canonical 128-row KV domain
+    compact. Its caller must slice write slots and retain absolute positions.
     """
     profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.varlen"
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
+    if replay_only and (
+        cp_ctx.swa_replay_start is None
+        or cp_ctx.gather_restore_positions is None
+        or cp_ctx.seq_len_full - cp_ctx.swa_replay_start != 128
+        or cp_ctx.unpad_restore.numel() != 128
+    ):
+        raise ValueError("compact KV gather requires a complete bounded replay domain")
     with record_function_range(f"{profile_name}.launch"):
         gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
     with record_function_range(f"{profile_name}.restore"):
-        full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
-    return full.view((cp_ctx.seq_len_full,) + trailing)
+        full = (
+            gathered.index_select(0, cp_ctx.unpad_restore)
+            if replay_only
+            else _cp_restore_gathered_full_2d(gathered, cp_ctx)
+        )
+    return full.view((full.shape[0],) + trailing)
 
 
 def cp_gather_last_by_request(

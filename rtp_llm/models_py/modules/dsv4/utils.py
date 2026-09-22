@@ -67,6 +67,60 @@ class V41MXFP8Linear(torch.nn.Module):
         )
         return output
 
+    def forward_quantized(self, x_q: torch.Tensor, x_s: torch.Tensor, out=None):
+        """Consume flat group32 E4M3/packed UE8M0 without another quantization.
+
+        Deliberately no quantize_input method: the V4 input-reuse gate must
+        remain closed for this linear. The caller owns the BF16 norm tensor.
+        """
+        if (
+            x_q.ndim != 2
+            or x_q.shape[1] != self.K
+            or x_q.dtype != torch.float8_e4m3fn
+            or not x_q.is_cuda
+            or x_q.device != self.weight.device
+            or not x_q.is_contiguous()
+        ):
+            raise ValueError("expected contiguous CUDA E4M3 [M,K] input")
+        m = x_q.shape[0]
+        if (
+            x_s.dtype != torch.int32
+            or x_s.device != x_q.device
+            or x_s.shape != (m, (self.K + 127) // 128)
+            or x_s.stride() != (1, max(1, (m + 3) // 4 * 4))
+        ):
+            raise ValueError("expected group32 column-major TMA packed UE8M0 scales")
+        shape = (m, self.N)
+        if out is not None and any(
+            torch._C._overlaps(out, source)
+            for source in (x_q, x_s, self.weight, self.weight_scales)
+        ):
+            raise ValueError(
+                "out must not share storage with quantized inputs or weights"
+            )
+        if out is not None and (
+            out.shape != shape
+            or out.dtype != torch.bfloat16
+            or out.device != x_q.device
+            or not out.is_contiguous()
+        ):
+            raise ValueError("out must be contiguous BF16 [M,N] on the input device")
+        output = (
+            out
+            if out is not None
+            else torch.empty(shape, device=x_q.device, dtype=torch.bfloat16)
+        )
+        if m:
+            import deep_gemm
+
+            deep_gemm.fp8_fp4_gemm_nt(
+                (x_q, x_s),
+                (self.weight, self.weight_scales),
+                output,
+                recipe=(1, 1, 32),
+            )
+        return output
+
 
 def _is_v41_fp8_scale(w: torch.Tensor, s: torch.Tensor) -> bool:
     return s.dtype == torch.float8_e8m0fnu and s.shape == (

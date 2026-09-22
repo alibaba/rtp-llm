@@ -12,6 +12,54 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.attn_type import DECODER_SWA_KV, SWA_KV
+
+
+def swa_region_for_layer(kv_cache: Any, layer_id: int) -> int:
+    """Resolve the physical pool from the native layer map, including draft IDs."""
+    regions = getattr(kv_cache, "group_region_names", ())
+    if not any(int(region) == DECODER_SWA_KV for region in regions):
+        return SWA_KV
+    mapping = kv_cache.layer_region_to_group_id
+    row = mapping[layer_id]
+    if len(row) > DECODER_SWA_KV and row[DECODER_SWA_KV] >= 0:
+        return DECODER_SWA_KV
+    if len(row) > SWA_KV and row[SWA_KV] >= 0:
+        return SWA_KV
+    raise RuntimeError(f"Layer {layer_id} has no native SWA pool")
+
+
+def cached_swa_region(owner: Any, kv_cache: Any, layer_id: int) -> int:
+    """Resolve once per stable cache object, without copying pybind maps per layer."""
+    binding = getattr(owner, "_swa_region_binding", None)
+    if binding is None or binding[0] is not kv_cache:
+        regions = getattr(kv_cache, "group_region_names", ())
+        resolved = None
+        if any(int(region) == DECODER_SWA_KV for region in regions):
+            resolved = []
+            for row in kv_cache.layer_region_to_group_id:
+                if len(row) > DECODER_SWA_KV and row[DECODER_SWA_KV] >= 0:
+                    resolved.append(DECODER_SWA_KV)
+                elif len(row) > SWA_KV and row[SWA_KV] >= 0:
+                    resolved.append(SWA_KV)
+                else:
+                    resolved.append(None)
+        binding = (kv_cache, resolved)
+        owner._swa_region_binding = binding
+    region = SWA_KV if binding[1] is None else binding[1][layer_id]
+    if region is None:
+        raise RuntimeError(f"Layer {layer_id} has no native SWA pool")
+    return region
+
+
+def bind_swa_table(block_tables: Any, region: int) -> Any:
+    """Give logical SWA consumers the table of their actual physical pool."""
+    if block_tables is None or region == SWA_KV:
+        return block_tables
+    if region not in block_tables:
+        raise RuntimeError(f"Missing physical SWA block table for region {region}")
+    return {**block_tables, SWA_KV: block_tables[region]}
+
 
 def build_block_tables(
     kv_cache: Optional[Any],

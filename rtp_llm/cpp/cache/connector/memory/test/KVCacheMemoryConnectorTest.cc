@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <execinfo.h>
 #include <string>
+#include <optional>
 #include <thread>
 #include <unistd.h>
 
@@ -16,6 +17,11 @@
 
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
@@ -203,11 +209,13 @@ public:
 
     bool isValidReuseBlockCount(size_t block_count) const override {
         return !complete_token_ids_
-               || complete_token_ids_->isValidReuseLength(static_cast<int>(block_count) * reuse_block_tokens_);
+               || complete_token_ids_->isValidReuseLength(static_cast<int>(block_count) * reuse_block_tokens_,
+                                                          min_fresh_tokens_);
     }
 
     CompleteTokenIdsPtr complete_token_ids_;
     int                 reuse_block_tokens_ = 1;
+    int                 min_fresh_tokens_   = 0;
 
 private:
     bool                 enable_memory_cache_{false};
@@ -3644,6 +3652,315 @@ private:
         }
     }
 };
+
+// Actual host checkpoint search, without creating a CUDA device or RPC service.
+class KVCacheBoundedReplayHostTest: public KVCacheMemoryConnectorDualPoolTest {
+protected:
+    void SetUp() override {
+        for (const char* name : {"DSV41_SWA_BOUNDED_REPLAY", "DSV41_CED", "RTP_LLM_PIN_HOST_BLOCK_POOL"}) {
+            const char* value = std::getenv(name);
+            env_.push_back({name, value ? std::optional<std::string>(value) : std::nullopt});
+        }
+        setenv("DSV41_SWA_BOUNDED_REPLAY", "1", 1);
+        setenv("DSV41_CED", "1", 1);
+        setenv("RTP_LLM_PIN_HOST_BLOCK_POOL", "0", 1);
+    }
+    void TearDown() override {
+        for (const auto& item : env_) {
+            if (item.second) {
+                setenv(item.first.c_str(), item.second->c_str(), 1);
+            } else {
+                unsetenv(item.first.c_str());
+            }
+        }
+    }
+    std::vector<std::pair<std::string, std::optional<std::string>>> env_;
+};
+
+TEST_F(KVCacheBoundedReplayHostTest, TargetAndDraftKeepSafeH2DAndLegacyHostPools) {
+    ModelConfig target;
+    target.model_type          = "deepseek_v41";
+    target.num_layers          = 40;
+    target.hidden_size         = 4096;
+    auto& a                    = target.attn_config;
+    a.head_num                 = 64;
+    a.kv_head_num              = 1;
+    a.size_per_head            = 512;
+    a.rope_head_dim            = 64;
+    a.sliding_window           = 128;
+    a.indexer_head_dim         = 128;
+    a.indexer_head_num         = 64;
+    a.indexer_topk             = 512;
+    a.o_groups                 = 8;
+    a.o_lora_rank              = 1024;
+    a.kv_cache_dtype           = KvCacheDataType::FP8;
+    a.layer_compress_ratios    = std::vector<int>(40, 1);
+    a.layer_compress_ratios[0] = a.layer_compress_ratios[1] = 0;
+    for (int layer = 2; layer < 20; ++layer) {
+        a.layer_compress_ratios[layer] = 2;
+    }
+    a.v41_kv_source_layer_ids               = {2, 8, 14, 20};
+    auto draft                              = target;
+    draft.model_type                        = "deepseek_v41_dspark";
+    draft.num_layers                        = 3;
+    draft.attn_config.layer_compress_ratios = {0, 0, 0};
+    draft.attn_config.v41_kv_source_layer_ids.clear();
+    ParallelismConfig pc;
+    pc.role_type = RoleType::PREFILL;
+    pc.tp_size = pc.ep_size               = 4;
+    pc.dp_size                            = 1;
+    pc.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    pc.prefill_cp_config.prefill_cp_size  = 4;
+    pc.prefill_cp_config.kv_cache_sharded = true;
+    KVCacheConfig kv;
+    kv.seq_size_per_block = kv.kernel_seq_size_per_block = 128;
+    kv.test_block_num                                    = 128;
+    kv.dsv4_fixed_pool_blocks                            = 16;
+    kv.linear_step                                       = 32;
+    kv.memory_cache_size_mb                              = 64;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size                      = 1;
+    runtime.fifo_scheduler_config.max_context_batch_size = 1;
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_DSPARK;
+    sp.gen_num_per_cycle = 5;
+    auto       cfg  = CacheConfigCreator::createSpConfig(target, draft, pc, runtime, kv, sp, std::nullopt, true, false);
+    auto       conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv, nullptr, server_addrs_);
+    const auto slots = conn->layerRegionSlots();
+    EXPECT_TRUE(conn->isDsv4TypedCacheLayout(slots, true));
+    EXPECT_FALSE(conn->isDsv4TypedCacheLayout(slots, false));
+    EXPECT_TRUE(conn->canUseStagedMemoryCopy(slots, KVCacheMemoryConnector::CopyDirection::H2D));
+    EXPECT_FALSE(conn->canUseStagedMemoryCopy(slots, KVCacheMemoryConnector::CopyDirection::D2H));
+    for (const auto& slot : slots) {
+        EXPECT_NE(slot.region_name, KVCacheRegionName::DECODER_SWA_KV);
+        EXPECT_LT(slot.layer_id, 21);  // Decoder and draft have no reusable payload.
+    }
+    EXPECT_EQ(cfg.layer_region_to_group_id[40][8], 7);
+    conn->initBlockPool();
+    EXPECT_TRUE(conn->isDualPool());
+    EXPECT_FALSE(conn->usePrefixTreeMemoryCache());
+    // The broadened gate remains strict; overlapping or misidentified pools fail.
+    cfg.layer_region_to_group_id[21][7] = 6;
+    auto invalid                        = std::make_shared<KVCacheMemoryConnector>(cfg, kv, nullptr, server_addrs_);
+    EXPECT_FALSE(invalid->isDsv4TypedCacheLayout(invalid->layerRegionSlots(), true));
+}
+
+TEST_F(KVCacheBoundedReplayHostTest, MinimumFreshSelectsExistingSnapshot) {
+    // Tiny payloads; each CP4 key still represents 512 original prompt tokens.
+    auto cfg  = createHybridCacheConfig(1, 128, 1, 32);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cache_config_, nullptr, server_addrs_);
+    conn->initBlockPool();
+    conn->block_cache_ = std::make_shared<MemoryDiskBlockCache>();
+    ASSERT_TRUE(conn->isDualPool());
+    CacheKeysType             keys;
+    std::vector<BlockIdxType> full(65, 1), swa(65, NULL_BLOCK_IDX);
+    for (int i = 0; i < 65; ++i) {
+        keys.push_back(190000 + i);
+    }
+    swa[31] = swa[63] = swa[64] = 1;
+    auto resource               = makeHybridResource(cfg, keys, {full}, {swa});
+    for (int i = 0; i < 64; ++i) {
+        const bool complete = i == 31 || i == 63;
+        auto       pool     = complete ? conn->complete_pool_ : conn->incomplete_pool_;
+        auto       blocks   = pool->malloc(1);
+        ASSERT_EQ(blocks.size(), 1u);
+        MemoryDiskBlockCache::CacheItem item;
+        item.cache_key    = keys[i];
+        item.backing_type = CacheBackingType::MEMORY;
+        item.block_index  = blocks[0];
+        item.is_complete  = complete;
+        conn->block_cache_->putCommitted(item);
+        pool->blockCacheReference(blocks);
+        pool->requestFree(blocks);
+    }
+    for (int fresh : {0, 1, 127, 128, 129}) {
+        SCOPED_TRACE(fresh);
+        auto input                = std::make_shared<GenerateInput>();
+        input->input_ids          = torch::zeros({32768 + fresh}, torch::kInt32);
+        input->generate_config    = std::make_shared<GenerateConfig>();
+        auto meta                 = std::make_shared<TestReadMeta>(true);
+        meta->complete_token_ids_ = std::make_shared<CompleteTokenIds>(1, 1, 33000, 128);
+        meta->complete_token_ids_->init(input);
+        meta->reuse_block_tokens_ = 512;
+        meta->min_fresh_tokens_   = 128;
+        auto match = std::dynamic_pointer_cast<MemoryAsyncMatchContext>(conn->asyncMatch(resource, meta));
+        ASSERT_NE(match, nullptr);
+        const int expected = fresh < 128 ? 32 : 64;
+        EXPECT_EQ(match->matchedBlockCount(), expected);
+        EXPECT_EQ(match->startReadBlockIndex(), 0);
+        EXPECT_EQ(match->readBlockNum(), expected);
+        EXPECT_NE(match->matchedBlockCount(), 63u);  // No invented 31.5K state.
+    }
+}
+
+TEST_F(KVCacheBoundedReplayHostTest, GeneratedKeysThroughCpCoordinatorPreserveHostBoundary) {
+    class ReadContext final: public KVCacheConnectorReadWriteContext {
+    public:
+        ReadContext(const KVCacheResource& resource, std::shared_ptr<Meta> meta):
+            resource_(resource), meta_(std::move(meta)) {}
+        const std::shared_ptr<Meta>& meta() const override {
+            return meta_;
+        }
+        const KVCacheResource& kvCacheResource() const override {
+            return resource_;
+        }
+
+    private:
+        const KVCacheResource& resource_;
+        std::shared_ptr<Meta>  meta_;
+    };
+    const auto make_tokens = [](int count) {
+        auto input             = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::arange(count, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        auto tokens            = std::make_shared<CompleteTokenIds>(1, 1, count + 128, 128);
+        tokens->init(input);
+        return tokens;
+    };
+
+    for (int cp_size : {1, 4}) {
+        for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+            SCOPED_TRACE(cp_size);
+            SCOPED_TRACE(static_cast<int>(role));
+            // Small CPU payloads; real 128-token physical key geometry and
+            // CP-compact SWA tables. Full tables are local on P, global on D.
+            auto cfg               = createHybridCacheConfig(1, 320, 1, 32);
+            cfg.seq_size_per_block = cfg.kernel_seq_size_per_block = 128;
+            cfg.group_seq_size_per_block                           = {128, static_cast<size_t>(128 * cp_size)};
+            auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(cfg, AllocationType::HOST);
+            ASSERT_TRUE(allocator->init());
+            ParallelismConfig pc;
+            pc.role_type = role;
+            pc.tp_size   = role == RoleType::PREFILL ? cp_size : 1;
+            pc.dp_size   = role == RoleType::DECODE ? cp_size : 1;
+            pc.ep_size   = cp_size;
+            pc.prefill_cp_config.method =
+                role == RoleType::PREFILL ? CPRotateMethod::ALL_GATHER : CPRotateMethod::PREFILL_CP;
+            pc.prefill_cp_config.prefill_cp_size  = cp_size;
+            pc.prefill_cp_config.kv_cache_sharded = cp_size > 1;
+            auto host = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cache_config_, pc, allocator, server_addrs_);
+            host->initBlockPool();
+            host->block_cache_ = std::make_shared<MemoryDiskBlockCache>();
+            ASSERT_TRUE(host->isDualPool());
+            auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
+                cfg, kv_cache_config_, RuntimeConfig{}, pc, SpeculativeExecutionConfig{}, allocator);
+            coordinator->connectors_ = {host};  // No RPC or background update thread.
+            const int unit           = 128 * cp_size;
+
+            auto seed = std::make_shared<BatchKVCacheResource>();
+            seed->resetBatchSize(1);
+            initCacheKeys(seed, make_tokens(32769), 128);
+            const auto& seed_keys = seed->cacheKeys(0);
+            for (int end = unit; end <= 32768; end += unit) {
+                const bool complete = end == 16384 || end == 32768;
+                auto       pool     = complete ? host->complete_pool_ : host->incomplete_pool_;
+                auto       blocks   = pool->malloc(1);
+                ASSERT_EQ(blocks.size(), 1u);
+                MemoryDiskBlockCache::CacheItem item;
+                item.cache_key    = seed_keys.at(static_cast<size_t>(end / 128 - 1));
+                item.backing_type = CacheBackingType::MEMORY;
+                item.block_index  = blocks.front();
+                item.is_complete  = complete;
+                host->block_cache_->putCommitted(item);
+                pool->blockCacheReference(blocks);
+                pool->requestFree(blocks);
+            }
+
+            for (int fresh : {0, 1, 127, 128, 129, 256, 384, 511, 512}) {
+                SCOPED_TRACE(fresh);
+                const int prompt  = 32768 + fresh;
+                auto      tokens  = make_tokens(prompt);
+                auto      request = std::make_shared<BatchKVCacheResource>();
+                request->resetBatchSize(1);
+                request->initGroups(
+                    2, cfg.layer_all_num, cfg.layer_to_group_id, 1, cfg.group_types, cfg.layer_region_to_group_id);
+                initCacheKeys(request, tokens, 128);
+                const auto&  original_keys = request->cacheKeys(0);
+                const size_t rows          = static_cast<size_t>((prompt + unit - 1) / unit);
+                const size_t full_rows     = role == RoleType::PREFILL ? rows : original_keys.size();
+                auto         full          = allocator->getBlockPools()[0]->malloc(full_rows);
+                auto         swa           = allocator->getBlockPools()[1]->malloc(3);
+                ASSERT_EQ(full.size(), full_rows);
+                ASSERT_EQ(swa.size(), 3u);
+                request->mutableBlockIds(0, 0).assign(full);
+                BlockIndicesType swa_table(rows, NULL_BLOCK_IDX);
+                swa_table.at(static_cast<size_t>(16384 / unit - 1)) = swa[0];
+                swa_table.at(static_cast<size_t>(32768 / unit - 1)) = swa[1];
+                if (rows > static_cast<size_t>(32768 / unit)) {
+                    swa_table.back() = swa[2];
+                }
+                request->mutableBlockIds(0, 1).assign(swa_table);
+
+                // A tempting but unusable trailing key must still be excluded
+                // even if the host claims it is complete and has all slots.
+                if (fresh > 0) {
+                    auto blocks = host->complete_pool_->malloc(1);
+                    ASSERT_EQ(blocks.size(), 1u);
+                    MemoryDiskBlockCache::CacheItem item;
+                    item.cache_key    = original_keys.back();
+                    item.backing_type = CacheBackingType::MEMORY;
+                    item.block_index  = blocks.front();
+                    item.is_complete  = true;
+                    host->block_cache_->putCommitted(item);
+                    host->complete_pool_->blockCacheReference(blocks);
+                    host->complete_pool_->requestFree(blocks);
+                }
+
+                // Zero checks tail exclusion independently from the new guard;
+                // 128 exercises the actual bounded replay request predicate.
+                for (int min_fresh : {0, 128}) {
+                    SCOPED_TRACE(min_fresh);
+                    auto meta                 = std::make_shared<TestReadMeta>(true);
+                    meta->complete_token_ids_ = tokens;
+                    meta->reuse_block_tokens_ = unit;
+                    meta->min_fresh_tokens_   = min_fresh;
+                    auto input                = std::make_shared<ReadContext>(request->cacheResource(0), meta);
+                    auto context = std::dynamic_pointer_cast<FusedAsyncReadContext>(coordinator->asyncRead(input));
+                    ASSERT_NE(context, nullptr);
+                    const auto   selected        = context->resource();
+                    const auto&  selected_keys   = selected->cacheKeys();
+                    const size_t canonical_count = original_keys.size() / static_cast<size_t>(cp_size);
+                    const bool   dummy = cp_size > 1 && original_keys.size() % static_cast<size_t>(cp_size) != 0;
+                    ASSERT_EQ(selected_keys.size(), canonical_count + (dummy ? 1 : 0));
+                    for (size_t i = 0; i < canonical_count; ++i) {
+                        EXPECT_EQ(selected_keys.at(i), original_keys.at((i + 1) * cp_size - 1));
+                    }
+                    if (dummy) {
+                        EXPECT_FALSE(selected->lastBlockAligned());
+                        EXPECT_EQ(selected_keys.back(), original_keys.back());
+                        for (int gid : {0, 1}) {
+                            ASSERT_EQ(selected->blocks(gid).size(), selected_keys.size());
+                            EXPECT_TRUE(isNullBlockIdx(selected->blocks(gid).back()));
+                        }
+                    } else {
+                        EXPECT_EQ(selected->lastBlockAligned(), request->lastBlockAligned());
+                    }
+                    const auto& matches = context->fusedMatchContext()->contexts();
+                    ASSERT_EQ(matches.size(), 1u);
+                    auto match = std::dynamic_pointer_cast<MemoryAsyncMatchContext>(matches.front());
+                    ASSERT_NE(match, nullptr);
+                    const int expected_tokens = fresh == 0 || (min_fresh == 128 && fresh < 128) ? 16384 : 32768;
+                    EXPECT_EQ(match->matchedBlockCount() * unit, expected_tokens);
+                    EXPECT_EQ(match->startReadBlockIndex(), 0);
+                    EXPECT_EQ(match->readBlockNum(), expected_tokens / unit);
+                    auto plan = std::static_pointer_cast<KVCacheMemoryConnector::CopyPlan>(match->readCopyPlan());
+                    ASSERT_NE(plan, nullptr);
+                    ASSERT_EQ(plan->copy_infos.size(), static_cast<size_t>(expected_tokens / unit));
+                    ASSERT_LT(plan->copy_infos.size(), selected_keys.size());
+                    for (size_t i = 0; i < plan->copy_infos.size(); ++i) {
+                        EXPECT_EQ(plan->copy_infos.at(i).cache_key, selected_keys.at(i));
+                    }
+                    EXPECT_TRUE(plan->copy_infos.back().is_complete);
+                    EXPECT_EQ(plan->copy_infos.back().cache_key,
+                              seed_keys.at(static_cast<size_t>(expected_tokens / 128 - 1)));
+                    coordinator->fused_async_read_context_list_.clear();
+                }
+                allocator->getBlockPools()[0]->requestFree(full);
+                allocator->getBlockPools()[1]->requestFree(swa);
+            }
+        }
+    }
+}
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_CreatesDualPools) {
     auto cfg   = createHybridCacheConfig();

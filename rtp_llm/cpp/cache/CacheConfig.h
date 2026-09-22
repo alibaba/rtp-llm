@@ -99,6 +99,23 @@ struct CacheConfig {
 
     CacheConfig() {}
 
+    bool swaBoundedReplay() const {
+        return std::find(group_region_names.begin(), group_region_names.end(), KVCacheRegionName::DECODER_SWA_KV)
+               != group_region_names.end();
+    }
+
+    // Apply to prefix reuse, never to a live P/D handoff. Cold short prompts
+    // remain valid: they simply cannot reuse a prefix.
+    int maxPrefixReuseTokens(int prompt_tokens) const {
+        return std::max(0, prompt_tokens - (swaBoundedReplay() ? 128 : 1));
+    }
+
+    int64_t cacheKeySeed() const {
+        // Versioned layout identity: encoder through L20, decoder/draft live
+        // SWA only, 128-token replay. P and D use the same canonical seed.
+        return swaBoundedReplay() ? INT64_C(0x4453563431525031) : 0;
+    }
+
     int groupNums() const {
         return std::max<int>(1, static_cast<int>(cache_specs.size()));
     }

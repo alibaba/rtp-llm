@@ -53,6 +53,7 @@ from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
 # Validated by test_fused_rmsnorm_rope.py (bf16 <=1-ULP + 1.25-1.75x).
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     FLASH_MLA_SPARSE_Q_CHUNK as _FLASH_MLA_SPARSE_Q_CHUNK,
 )
@@ -121,6 +122,7 @@ def _build_attn_type_enum_map() -> Dict[int, "KVCacheRegionName"]:
     from rtp_llm.models_py.modules.dsv4.attn_type import (
         CSA_KV,
         CSA_STATE,
+        DECODER_SWA_KV,
         HCA_KV,
         HCA_STATE,
         INDEXER_KV,
@@ -128,7 +130,7 @@ def _build_attn_type_enum_map() -> Dict[int, "KVCacheRegionName"]:
         SWA_KV,
     )
 
-    return {
+    result = {
         CSA_KV: KVCacheRegionName.CSA_KV,
         HCA_KV: KVCacheRegionName.HCA_KV,
         INDEXER_KV: KVCacheRegionName.INDEXER_KV,
@@ -137,6 +139,9 @@ def _build_attn_type_enum_map() -> Dict[int, "KVCacheRegionName"]:
         HCA_STATE: KVCacheRegionName.HCA_STATE,
         SWA_KV: KVCacheRegionName.SWA_KV,
     }
+    if hasattr(KVCacheRegionName, "DECODER_SWA_KV"):
+        result[DECODER_SWA_KV] = KVCacheRegionName.DECODER_SWA_KV
+    return result
 
 
 _ATTN_TYPE_ENUM_BY_INT: Dict[int, KVCacheRegionName] = _build_attn_type_enum_map()
@@ -374,21 +379,31 @@ def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_
     view onto ``attn``, restoring the previous binding on exit.  ``None`` for
     the cache/table arguments keeps the current binding; pass ``cp_ctx`` only
     when it should be replaced."""
+    from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+        bind_swa_table,
+        cached_swa_region,
+    )
+
     prev_kv = attn._kv_cache
     prev_bt = attn._block_tables_by_type
     prev_cp = attn._cp_ctx
-    if kv_cache is not None:
-        attn._kv_cache = kv_cache
-    if block_tables_by_type is not None:
-        attn._block_tables_by_type = block_tables_by_type
-    if cp_ctx is not BIND_KEEP:
-        attn._cp_ctx = cp_ctx
+    prev_region = getattr(attn, "_swa_cache_region", SWA_KV)
     try:
+        if kv_cache is not None:
+            attn._kv_cache = kv_cache
+        attn._swa_cache_region = cached_swa_region(attn, attn._kv_cache, attn.layer_id)
+        if block_tables_by_type is not None:
+            attn._block_tables_by_type = bind_swa_table(
+                block_tables_by_type, attn._swa_cache_region
+            )
+        if cp_ctx is not BIND_KEEP:
+            attn._cp_ctx = cp_ctx
         yield attn
     finally:
         attn._kv_cache = prev_kv
         attn._block_tables_by_type = prev_bt
         attn._cp_ctx = prev_cp
+        attn._swa_cache_region = prev_region
 
 
 _DSV4_FP8_INDEXER_ENTRY_BYTES = 132
@@ -2130,13 +2145,24 @@ class AttentionFP8(nn.Module):
         )
         return out.view(orig_shape)
 
-    def _try_fused_qr_kv(self, x: torch.Tensor):
+    def _try_fused_qr_kv(
+        self,
+        x: torch.Tensor,
+        shared_input_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ):
         linear = getattr(self, "wq_a_wkv", None)
         if linear is None:
             return None
         from rtp_llm.models_py.modules.dsv4._v41_fused_qkv import try_project_qr_kv
 
-        return try_project_qr_kv(linear, x, self.q_norm, self.q_lora_rank, self.eps)
+        return try_project_qr_kv(
+            linear,
+            x,
+            self.q_norm,
+            self.q_lora_rank,
+            self.eps,
+            quantized_input=shared_input_quant,
+        )
 
     def _lin(
         self,
@@ -2239,6 +2265,10 @@ class AttentionFP8(nn.Module):
         ``self._block_tables_by_type`` here so Compressor / Indexer pool
         context resolution shares one code path with prefill."""
         with bind_attn_cache(self, kv_cache, attn_metadata.pool_block_tables):
+            if self._swa_cache_region != SWA_KV:
+                attn_metadata = attn_metadata.decoder_swa_metadata
+                if attn_metadata is None:
+                    raise RuntimeError("Missing decoder SWA decode metadata")
             self._set_compressor_pool_context()
             try:
                 return self._forward_decode_body(x, attn_metadata)
@@ -2680,13 +2710,7 @@ class AttentionFP8(nn.Module):
         # (``_prefill_write_swa_fp8_paged``, ``_attn_fp8_swa_via_kv_full``,
         # ``_attn_via_workspace``) hard-assumes FP8 KV-cache pools. Hoist
         # downstream can be removed entirely.
-        prev_kv = self._kv_cache
-        prev_bt = self._block_tables_by_type
-        if kv_cache is not None:
-            self._kv_cache = kv_cache
-        if block_tables_by_type is not None:
-            self._block_tables_by_type = block_tables_by_type
-        try:
+        with bind_attn_cache(self, kv_cache, block_tables_by_type):
             with record_function_range("dsv4.fp8.attn.set_pool_context"):
                 self._set_compressor_pool_context()
             try:
@@ -2697,9 +2721,6 @@ class AttentionFP8(nn.Module):
             finally:
                 with record_function_range("dsv4.fp8.attn.clear_pool_context"):
                     self._clear_compressor_pool_context()
-        finally:
-            self._kv_cache = prev_kv
-            self._block_tables_by_type = prev_bt
 
     def forward_with_shared_input_quant(
         self,
@@ -2709,13 +2730,7 @@ class AttentionFP8(nn.Module):
         kv_cache: Optional[Any] = None,
         block_tables_by_type: Optional[Dict[int, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        prev_kv = self._kv_cache
-        prev_bt = self._block_tables_by_type
-        if kv_cache is not None:
-            self._kv_cache = kv_cache
-        if block_tables_by_type is not None:
-            self._block_tables_by_type = block_tables_by_type
-        try:
+        with bind_attn_cache(self, kv_cache, block_tables_by_type):
             with record_function_range("dsv4.fp8.attn.set_pool_context"):
                 self._set_compressor_pool_context()
             try:
@@ -2728,9 +2743,6 @@ class AttentionFP8(nn.Module):
             finally:
                 with record_function_range("dsv4.fp8.attn.clear_pool_context"):
                     self._clear_compressor_pool_context()
-        finally:
-            self._kv_cache = prev_kv
-            self._block_tables_by_type = prev_bt
 
     # ------------------------------------------------------------------
     # CP-overlap orchestration helpers (Phase-Z; env-default-off)
@@ -5124,8 +5136,28 @@ class AttentionFP8(nn.Module):
         """
         x_3d = x.unsqueeze(0)
         rd = common.rd
-        fused_qkv = self._try_fused_qr_kv(x_3d) if shared_input_quant is None else None
-        if self._can_reuse_qkv_input_quant():
+        # Consume V4.1's group32 tuple before the V4 reuse gate can clear it.
+        fused_qkv = self._try_fused_qr_kv(x_3d, shared_input_quant)
+        if fused_qkv is not None:
+            # Only this successful merged projection consumes D's fresh tuple.
+            # Rebind the tensors, so Block's references cannot retain storage.
+            if (
+                shared_input_quant is not None
+                and x.shape[0] >= 32768
+                and x.shape[1] == 5120
+                and torch.is_inference_mode_enabled()
+                and all(
+                    t.is_inference() and t._base is None for t in shared_input_quant
+                )
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                from rtp_llm.utils.hot_hook_runtime import runtime as hot_hook_runtime
+
+                if not hot_hook_runtime().enabled:
+                    for tensor in shared_input_quant:
+                        dispose_tensor(tensor)
+            shared_input_quant = None
+        elif self._can_reuse_qkv_input_quant():
             if shared_input_quant is None:
                 with record_function_range("dsv4.fp8.attn.qkv.shared_input_quant"):
                     x_2d = x_3d.reshape(-1, x_3d.shape[-1])
@@ -5176,6 +5208,7 @@ class AttentionFP8(nn.Module):
                     kv_full_flat = cp_all_gather_full_varlen(
                         kv_flat,
                         common.cp_ctx,
+                        replay_only=common.cp_ctx.swa_replay_start is not None,
                         profile_name=(
                             f"dsv4.cp.all_gather.L{self.layer_id:02d}."
                             "swa_kv_full.varlen"

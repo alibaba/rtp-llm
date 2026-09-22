@@ -5,12 +5,14 @@ encoder state, while only local SWA propagates dependencies between tokens.
 It also demonstrates why replaying just one SWA window is not exact.
 """
 
+import ast
 import importlib
 import sys
 import tempfile
 import time
 import types
 import unittest
+import weakref
 from contextlib import ExitStack
 from dataclasses import fields, replace
 from datetime import timedelta
@@ -32,6 +34,7 @@ def _load_helpers():
         "rtp_llm.models_py.modules",
         "rtp_llm.models_py.modules.dsv4",
         "rtp_llm.models_py.modules.dsv4.prefill",
+        "rtp_llm.models_py.modules.dsv4.fp8",
     ):
         module = types.ModuleType(name)
         module.__path__ = [str(root.joinpath(*name.split(".")))]
@@ -46,10 +49,81 @@ def _load_helpers():
     with mock.patch.dict(sys.modules, packages):
         cp = importlib.import_module("rtp_llm.models_py.modules.dsv4.cp")
         ced = importlib.import_module("rtp_llm.models_py.modules.dsv4.prefill.ced")
-    return cp, ced, collective
+        bounded = importlib.import_module(
+            "rtp_llm.models_py.modules.dsv4.bounded_replay"
+        )
+        index_plan = importlib.import_module(
+            "rtp_llm.models_py.modules.dsv4.fp8._v41_prefill_index_plan"
+        )
+        kv_workspace = importlib.import_module(
+            "rtp_llm.models_py.modules.dsv4.fp8._v41_prefill_kv_workspace"
+        )
+        prefill_meta = importlib.import_module(
+            "rtp_llm.models_py.modules.dsv4.fp8.prefill_meta"
+        )
+    return cp, ced, collective, bounded, index_plan, kv_workspace, prefill_meta
 
 
-_CP, _CED, _COLLECTIVE = _load_helpers()
+_CP, _CED, _COLLECTIVE, _BOUNDED, _INDEX_PLAN, _KV_WORKSPACE, _PREFILL_META = (
+    _load_helpers()
+)
+
+
+def _swa_owner(bounded):
+    """Run complete production methods, isolating unrelated GPU boundaries.
+
+    Importing attention_v41 needs native/CUDA packages unavailable to this CPU
+    suite. Compile its unchanged methods, not a copied SWA planner algorithm.
+    """
+    path = Path(_CED.__file__).parent.parent / "fp8/attention_v41.py"
+    tree = ast.parse(path.read_text())
+    cls = next(
+        n
+        for n in tree.body
+        if isinstance(n, ast.ClassDef) and n.name == "AttentionV41FP8"
+    )
+    names = {
+        "_host_prefill_lengths",
+        "_host_prefill_prefixes",
+        "_swa_prefill_workspace",
+        "_prefill_chunk_meta",
+        "_forward_prefill",
+    }
+    methods = [
+        n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names
+    ]
+    assert {n.name for n in methods} == names
+    namespace = {
+        "torch": torch,
+        "F": F,
+        "_use_small_cp_x_gather": lambda ctx: False,
+        "prefill_index_plan": _INDEX_PLAN,
+        "prefill_kv_workspace": _KV_WORKSPACE,
+    }
+    exec(
+        compile(ast.Module(body=methods, type_ignores=[]), str(path), "exec"), namespace
+    )
+    owner = types.SimpleNamespace(
+        swa_bounded_replay=bounded,
+        window_size=128,
+        compress_ratio=1,
+        layer_id=21,
+        kv_source_layer_id=20,
+        is_kv_source=False,
+        _kv_cache=object(),
+        _shared_attention={},
+        _begin_forward=mock.Mock(),
+        _source_pool=mock.Mock(return_value=object()),
+        _global_region=lambda: 2,
+        _swa_prefill_concat=mock.Mock(
+            side_effect=AssertionError("unexpected cached prefix read")
+        ),
+        _prefill_write_swa_fp8_paged=mock.Mock(),
+        _prefill_sparse_attention=mock.Mock(),
+    )
+    for name in names:
+        setattr(owner, name, types.MethodType(namespace[name], owner))
+    return owner
 
 
 def _cp4_layout(length):
@@ -156,10 +230,12 @@ def _plan(
     return plan, positions
 
 
-def _cache_fixture(length, prefix=0, *, ring=136, dtype=torch.uint8):
+def _cache_fixture(length, prefix=0, *, ring=136, dtype=torch.uint8, region=None):
+    region = _CED.SWA_KV if region is None else region
     columns = (prefix + length + 511) // 512 + 4
     ids = torch.zeros((2, 1, columns), dtype=torch.int32)
-    # Group 0 is deliberately dense and is NOT SWA. Only actual SWA IDs count.
+    # Group 0 is deliberately dense but belongs to another pool (encoder SWA
+    # for bounded mode). Only the requested region's host IDs may be used.
     ids[0] = 99
     for column in range(31, columns, 32):
         ids[1, 0, column] = 1000 + column
@@ -170,7 +246,10 @@ def _cache_fixture(length, prefix=0, *, ring=136, dtype=torch.uint8):
     full_stride_bytes = ((ring * 528 + 511) // 512) * 512
     base = torch.empty((2, full_stride_bytes // (4 * element_size)), dtype=dtype)
     cache = types.SimpleNamespace(
-        group_region_names=(int(_CED.SWA_KV) + 17, _CED.SWA_KV),
+        group_region_names=(
+            int(_CED.SWA_KV) + 17 if region == _CED.SWA_KV else _CED.SWA_KV,
+            region,
+        ),
         group_seq_size_per_block=(512, 512),
         get_layer_cache=mock.Mock(
             return_value=types.SimpleNamespace(kv_cache_base=base)
@@ -395,6 +474,118 @@ class CedCreationTest(_SingleThreadTest):
                     136,
                 )
 
+    def test_bounded_policy_default_off_preserves_exact_plan(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertIs(_BOUNDED.enabled(), False)
+        for value in ("0", "false", "off", "no", "1", "true", "yes", "on"):
+            with self.subTest(value=value), mock.patch.dict(
+                "os.environ", {"DSV41_SWA_BOUNDED_REPLAY": value}, clear=True
+            ):
+                self.assertEqual(
+                    _BOUNDED.enabled(), value in ("1", "true", "yes", "on")
+                )
+        for rank in range(4):
+            self.rank = rank
+            args = self.fixture(prefix=16387)
+            default = _CED.CEDPlan.create(*args)
+            explicit = _CED.CEDPlan.create(*args, bounded_replay=False)
+            self.assertIsNone(default.context.swa_replay_start)
+            self.assertIsNone(explicit.context.swa_replay_start)
+            self.assertTrue(
+                torch.equal(
+                    default.context.gather_restore_positions,
+                    explicit.context.gather_restore_positions,
+                )
+            )
+            self.assertGreater(default.context.gather_restore_positions.numel(), 128)
+            for field in ("send_indices", "receive_positions"):
+                self.assertTrue(
+                    torch.equal(
+                        getattr(default.exchange, field),
+                        getattr(explicit.exchange, field),
+                    )
+                )
+            self.assertEqual(default.exchange.send_sizes, explicit.exchange.send_sizes)
+            self.assertEqual(
+                default.exchange.receive_sizes, explicit.exchange.receive_sizes
+            )
+
+    def test_bounded_final128_uses_fresh_offset_and_true_absolute_positions(self):
+        for length, prefix in (
+            (129, 16387),
+            (257, 16387),
+            (32768, 0),
+            (32769, 16387),
+            (131072, 32768),
+            (131073, 0),
+        ):
+            for rank in range(4):
+                self.rank = rank
+                with self.subTest(length=length, prefix=prefix, rank=rank):
+                    model, original, attn, cache = self.fixture(
+                        length, prefix, region=8
+                    )
+                    # Bounded mode deliberately does not preserve checkpoints;
+                    # native policy must make decoder/draft pools non-reusable.
+                    attn.kv_cache_block_id_host[1].fill_(9)
+                    with mock.patch.object(
+                        _CED,
+                        "checkpoint_positions",
+                        side_effect=AssertionError(
+                            "checkpoint plan used in bounded mode"
+                        ),
+                    ):
+                        plan = _CED.CEDPlan.create(
+                            model, original, attn, cache, bounded_replay=True
+                        )
+                    self.assertIsNotNone(plan)
+                    cache.get_layer_cache.assert_called_once_with(21, 8)
+                    self.assertEqual(plan.context.swa_replay_start, length - 128)
+                    self.assertIsNone(original.swa_replay_start)
+                    self.assertEqual(plan.context.chunk_length, 32)
+                    self.assertEqual(plan.context.seq_len_full, length)
+                    self.assertEqual(plan.context.prefix_length, prefix)
+                    self.assertTrue(plan.context.local_is_real.all())
+                    selected = torch.arange(length - 128, length)
+                    self.assertTrue(
+                        torch.equal(plan.context.gather_restore_positions, selected)
+                    )
+                    expected_rows, _ = _cp4_layout(128)
+                    self.assertTrue(
+                        torch.equal(
+                            plan.context.global_positions,
+                            expected_rows[rank] + prefix + length - 128,
+                        )
+                    )
+
+    def test_bounded_minimum_does_not_inherit_exact_half_cost_gate(self):
+        # A None plan means no CP compaction, not permission to read decoder
+        # prefix cache. The separately tested bounded SWA consumer handles it.
+        for length in (127, 128):
+            with self.subTest(length=length):
+                args = self.fixture(length=length, prefix=16387, region=8)
+                self.assertIsNone(_CED.CEDPlan.create(*args, bounded_replay=True))
+                self.assertIsNone(args[1].swa_replay_start)
+        for length in (129, 255, 256, 257):
+            with self.subTest(length=length):
+                plan = _CED.CEDPlan.create(
+                    *self.fixture(length=length, prefix=16387, region=8),
+                    bounded_replay=True
+                )
+                self.assertIsNotNone(plan)
+                self.assertEqual(plan.context.chunk_length, 32)
+                self.assertEqual(plan.context.swa_replay_start, length - 128)
+
+    def test_bounded_requires_exactly_one_native_decoder_region(self):
+        self.assertEqual(_CED.DECODER_SWA_KV, 8)
+        for regions in ((24, 7), (8, 8)):
+            with self.subTest(regions=regions):
+                args = self.fixture()
+                args[3].group_region_names = regions
+                with self.assertRaisesRegex(ValueError, "native decoder SWA pool"):
+                    _CED.CEDPlan.create(*args, bounded_replay=True)
+                args[3].get_layer_cache.assert_not_called()
+
     def test_aligned_byte_stride_uses_element_size_and_excludes_padding(self):
         # Above the 3072 halo floor, one extra/missing ring entry changes
         # selected rows. int32 also detects ignoring base.element_size().
@@ -614,6 +805,290 @@ class CedLayoutTest(_SingleThreadTest):
                 plan.restore_aux(model)
 
 
+class V41KVWorkspaceTest(_SingleThreadTest):
+    def test_same_global_reuses_buffer_and_only_updates_swa(self):
+        shared = {}
+        global_kv = torch.arange(15).reshape(5, 3).bfloat16()
+        original = global_kv.clone()
+        swa = torch.full((4, 3), -1.0, dtype=global_kv.dtype)
+        output = _KV_WORKSPACE.combine_kv(shared, [(global_kv, None)], [swa])
+        pointer = output.data_ptr()
+        self.assertNotEqual(pointer, global_kv.data_ptr())
+        for value in (7.0, -3.0, 11.0):
+            swa.fill_(value)
+            updated = _KV_WORKSPACE.combine_kv(shared, [(global_kv, None)], [swa])
+            self.assertIs(updated, output)
+            self.assertEqual(updated.data_ptr(), pointer)
+            self.assertTrue(torch.equal(updated[:5], original))
+            self.assertTrue(torch.equal(updated[5:], swa))
+            self.assertTrue(torch.equal(global_kv, original))
+
+    def test_equal_shape_new_global_rebuilds_and_releases_old_source(self):
+        shared = {}
+        global_kv = torch.full((5, 3), 2.0, dtype=torch.bfloat16)
+        swa = torch.full((4, 3), -1.0, dtype=global_kv.dtype)
+        output = _KV_WORKSPACE.combine_kv(shared, [(global_kv, None)], [swa])
+        source_ref, output_ref = weakref.ref(global_kv), weakref.ref(output)
+        del global_kv, output
+        self.assertIsNotNone(source_ref())
+        self.assertIsNotNone(output_ref())
+
+        new_global = torch.full((5, 3), 19.0, dtype=torch.bfloat16)
+        swa.fill_(7.0)
+        output = _KV_WORKSPACE.combine_kv(shared, [(new_global, None)], [swa])
+        self.assertIsNone(source_ref())
+        self.assertIsNone(output_ref())
+        self.assertTrue(torch.equal(output, torch.cat((new_global, swa))))
+        self.assertTrue(torch.equal(new_global, torch.full_like(new_global, 19.0)))
+
+    def test_swa_shape_change_rebuilds_and_releases_old_buffer(self):
+        shared = {}
+        global_kv = torch.arange(15).reshape(5, 3).bfloat16()
+        original = global_kv.clone()
+        output = _KV_WORKSPACE.combine_kv(
+            shared, [(global_kv, None)], [torch.zeros(4, 3, dtype=global_kv.dtype)]
+        )
+        for rows in (2, 7):
+            with self.subTest(rows=rows):
+                output_ref = weakref.ref(output)
+                del output
+                self.assertIsNotNone(output_ref())
+                swa = torch.full((rows, 3), -rows, dtype=global_kv.dtype)
+                output = _KV_WORKSPACE.combine_kv(shared, [(global_kv, None)], [swa])
+                self.assertIsNone(output_ref())
+                self.assertEqual(output.shape, (5 + rows, 3))
+                self.assertTrue(torch.equal(output, torch.cat((original, swa))))
+                self.assertTrue(torch.equal(global_kv, original))
+
+    def test_release_drops_workspace_at_last_consumer_and_forward_exit(self):
+        for last_layer in (2, None):
+            with self.subTest(last_layer=last_layer):
+                layers = {
+                    i: types.SimpleNamespace(kv_source_layer_id=1) for i in (1, 2)
+                }
+                global_kv = torch.ones(5, 3, dtype=torch.bfloat16)
+                shared = {"layers": layers, "global": {1: [(global_kv, None)]}}
+                output = _KV_WORKSPACE.combine_kv(
+                    shared,
+                    shared["global"][1],
+                    [torch.zeros(4, 3, dtype=global_kv.dtype)],
+                )
+                source_ref, output_ref = weakref.ref(global_kv), weakref.ref(output)
+                del global_kv, output
+                _PREFILL_META.release_v41_prefill_shared(shared, 1)
+                self.assertIsNotNone(source_ref())
+                self.assertIsNotNone(output_ref())
+
+                _PREFILL_META.release_v41_prefill_shared(shared, last_layer)
+                self.assertIsNone(source_ref())
+                self.assertIsNone(output_ref())
+                self.assertNotIn("prefill_kv_workspace", shared)
+                self.assertFalse(shared.get("global"))
+                self.assertIs(shared["layers"], layers)
+
+
+class BoundedSwaConsumerTest(_SingleThreadTest):
+    def test_writer_keeps_slot_alignment_and_only_writes_replay_rows(self):
+        path = Path(_CED.__file__).parent.parent / "fp8/attention_v41.py"
+        cls = next(
+            n
+            for n in ast.parse(path.read_text()).body
+            if isinstance(n, ast.ClassDef) and n.name == "AttentionV41FP8"
+        )
+        method = next(
+            n
+            for n in cls.body
+            if isinstance(n, ast.FunctionDef)
+            and n.name == "_prefill_write_swa_fp8_paged"
+        )
+        codec = mock.Mock()
+        namespace = {"torch": torch, "swa_codec": codec}
+        exec(
+            compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"),
+            namespace,
+        )
+        from collections import namedtuple
+
+        Compaction = namedtuple("Compaction", "unique_blocks compact_slots")
+        owner = types.SimpleNamespace(
+            head_dim=2,
+            window_size=128,
+            _swa_cp_byte_sliced=lambda: True,
+            _pool_raw_u8=lambda region: object(),
+            _swa_entries_per_block=lambda: 136,
+        )
+        namespace["SWA_KV"] = 7
+        for length in (129, 512, 513, 32768):
+            slots = torch.arange(length, dtype=torch.int64) + 1000
+            compact_slots = torch.arange(length, dtype=torch.int64) + 2000
+            blocks = torch.tensor([17, 31])
+            meta = types.SimpleNamespace(
+                slot_mapping=slots, slot_compaction=Compaction(blocks, compact_slots)
+            )
+            cp = types.SimpleNamespace(
+                swa_replay_start=length - 128, cp_rank=2, cp_size=4
+            )
+            common = types.SimpleNamespace(cp_ctx=cp, swa_meta=meta)
+            kv = torch.arange(256).reshape(128, 2).bfloat16()
+            namespace[method.name](owner, common, kv)
+            call = codec.quantize_and_insert_k_cache_cp_byte_sliced.call_args
+            self.assertEqual(call.args[0].data_ptr(), kv.data_ptr())
+            torch.testing.assert_close(call.args[0], kv, rtol=0, atol=0)
+            self.assertEqual(
+                call.args[2].tolist(), list(range(1000 + length - 128, 1000 + length))
+            )
+            actual = call.kwargs["compaction"]
+            self.assertIs(actual.unique_blocks, blocks)
+            self.assertEqual(
+                actual.compact_slots.tolist(),
+                list(range(2000 + length - 128, 2000 + length)),
+            )
+            self.assertIs(meta.slot_mapping, slots)
+            self.assertIs(meta.slot_compaction.compact_slots, compact_slots)
+            with self.assertRaisesRegex(ValueError, "exactly 128"):
+                namespace[method.name](owner, common, kv[:-1])
+
+    def fixture(self, *, length=385, prefix=16387, compact=True, bounded=True):
+        selected = torch.arange(length - 128, length)
+        if compact:
+            plan, _ = _plan(length, 0, selected, prefix)
+            ctx = replace(plan.context, swa_replay_start=length - 128)
+        else:
+            ctx, _ = _context(length, 0, prefix)
+        common = types.SimpleNamespace(
+            cp_ctx=ctx,
+            cp_on=True,
+            any_cont=prefix > 0,
+            batch_size=1,
+            prefix_lengths=ctx.prefix_lengths,
+            req_id_per_token=ctx.req_id_per_token,
+        )
+        full = torch.full((length, 2), torch.nan, dtype=torch.float64)
+        real_rows = 128 if compact else length
+        full[-real_rows:] = (
+            torch.arange(real_rows * 2, dtype=torch.float64).reshape(real_rows, 2) / 32
+            + 1
+        )
+        owner = _swa_owner(bounded)
+        qkv = types.SimpleNamespace(
+            kv_full=full[-128:].clone() if compact else full,
+            qr=torch.zeros(ctx.chunk_length, 2),
+        )
+        return owner, common, qkv
+
+    def test_actual_workspace_keeps_compact_storage_and_absolute_origin(self):
+        owner, common, qkv = self.fixture()
+        buffers, starts = owner._swa_prefill_workspace(qkv, common)
+        self.assertEqual(starts, [16387 + 385 - 128])
+        self.assertEqual(buffers[0].shape, (128, 2))
+        self.assertIs(buffers[0], qkv.kv_full)
+        self.assertTrue(torch.isfinite(buffers[0]).all())
+        owner._swa_prefill_concat.assert_not_called()
+
+    def test_actual_sparse_indices_exclude_missing_history_and_keep_global_kv(self):
+        owner, common, qkv = self.fixture()
+        ctx = common.cp_ctx
+        end, origin = ctx.seq_len_total, ctx.prefix_length + ctx.swa_replay_start
+        global_kv = torch.full((end, 2), 2.0, dtype=torch.float64)
+        selected = (
+            torch.tensor([0, end // 2, -1], dtype=torch.int32)
+            .expand(ctx.chunk_length, -1)
+            .clone()
+        )
+        owner._shared_attention["global"] = {20: [(global_kv, None)]}
+        # L20's cached plan is stale once the SWA domain changes at L21.
+        owner._shared_attention["prefill_chunk_meta"] = object()
+        owner._shared_attention["prefill_index_plan"] = object()
+        owner._prefill_common_setup = mock.Mock(return_value=common)
+        owner._prefill_compute_qkv = mock.Mock(return_value=qkv)
+        owner._select_indices = mock.Mock(return_value=selected)
+        marker = object()
+        owner._prefill_sparse_attention.return_value = marker
+        result = owner._forward_prefill(
+            torch.zeros(ctx.chunk_length, 2), ctx.global_positions
+        )
+        self.assertIs(result, marker)
+        launch = owner._prefill_sparse_attention.call_args.kwargs
+        kv, indices, lengths = (
+            launch["kv"].squeeze(1),
+            launch["indices"].squeeze(1),
+            launch["topk_length"],
+        )
+        self.assertEqual(kv.shape, (end + 128, 2))
+        self.assertTrue(torch.equal(kv[:end], global_kv))
+        self.assertEqual(indices.shape[1] % 64, 0)
+        for row, position in enumerate(ctx.global_positions.tolist()):
+            expected_swa = list(range(max(origin, position - 127), position + 1))
+            expected = [0, end // 2] + [end + p - origin for p in expected_swa]
+            self.assertEqual(lengths[row].item(), len(expected))
+            self.assertEqual(indices[row, : len(expected)].tolist(), expected)
+            self.assertTrue((indices[row, len(expected) :] == -1).all())
+            self.assertTrue(
+                torch.isfinite(kv[indices[row, : len(expected)].long()]).all()
+            )
+        # Writer receives compact KV and slices both original/compacted slots.
+        self.assertIs(owner._prefill_write_swa_fp8_paged.call_args.args[1], qkv.kv_full)
+
+    def test_noncompacted_bounded_path_never_reads_decoder_prefix_cache(self):
+        for length in (128, 256):
+            owner, common, qkv = self.fixture(length=length, compact=False)
+            buffers, starts = owner._swa_prefill_workspace(qkv, common)
+            self.assertEqual(starts, [common.cp_ctx.prefix_length])
+            self.assertEqual(buffers[0].data_ptr(), qkv.kv_full.data_ptr())
+            self.assertEqual(buffers[0].shape[0], length)
+            owner._swa_prefill_concat.assert_not_called()
+        owner, common, qkv = self.fixture(length=127, compact=False)
+        with self.assertRaisesRegex(ValueError, "128 fresh"):
+            owner._swa_prefill_workspace(qkv, common)
+        for length in (127, 128):
+            cold, common, qkv = self.fixture(length=length, prefix=0, compact=False)
+            buffers, starts = cold._swa_prefill_workspace(qkv, common)
+            self.assertEqual(starts, [0])
+            self.assertEqual(len(buffers[0]), length)
+            cold._swa_prefill_concat.assert_not_called()
+
+    def test_disabled_workspace_keeps_cached_prefix_and_cold_paths(self):
+        owner, common, qkv = self.fixture(compact=False, bounded=False)
+        prefix = common.cp_ctx.prefix_length
+        merged = torch.ones(1, 385 + 127, 2)
+        owner._swa_prefill_concat = mock.Mock(return_value=merged)
+        buffers, starts = owner._swa_prefill_workspace(qkv, common)
+        self.assertEqual(starts, [prefix - 127])
+        self.assertEqual(buffers[0].shape[0], 385 + 127)
+        owner._swa_prefill_concat.assert_called_once_with(qkv, common)
+        cold, common, qkv = self.fixture(prefix=0, compact=False, bounded=False)
+        buffers, starts = cold._swa_prefill_workspace(qkv, common)
+        self.assertEqual(starts, [0])
+        self.assertEqual(buffers[0].data_ptr(), qkv.kv_full.data_ptr())
+        cold._swa_prefill_concat.assert_not_called()
+
+    def test_noncompacted_batched_chunk_offsets_use_fresh_lengths_only(self):
+        owner = _swa_owner(True)
+        common = types.SimpleNamespace(
+            cp_ctx=None,
+            cp_on=False,
+            any_cont=True,
+            batch_size=2,
+            input_lengths=torch.tensor([128, 256]),
+            prefix_lengths=torch.tensor([511, 1024]),
+        )
+        full = torch.arange(384 * 2).reshape(384, 2)
+        swa, starts = owner._swa_prefill_workspace(
+            types.SimpleNamespace(kv_full=full), common
+        )
+        self.assertEqual([len(rows) for rows in swa], [128, 256])
+        self.assertEqual(starts, [511, 1024])
+        globals_by_req = [(torch.zeros(639, 2), None), (torch.zeros(1280, 2), None)]
+        requests = torch.tensor([1, 0, 1, 0])
+        offsets, sizes, origins = owner._prefill_chunk_meta(
+            globals_by_req, swa, starts, requests, full.device, common=common
+        )
+        self.assertEqual(offsets.flatten().tolist(), [767, 0, 767, 0])
+        self.assertEqual(sizes.flatten().tolist(), [1280, 639, 1280, 639])
+        self.assertEqual(origins.flatten().tolist(), [1024, 511, 1024, 511])
+        owner._swa_prefill_concat.assert_not_called()
+
+
 def _transport_cases():
     # A single selected row leaves three ranks with zero receives; [0..4]
     # leaves three ranks with zero sends. All still join every collective.
@@ -627,6 +1102,19 @@ def _transport_cases():
             prefix, length, attn.kv_cache_block_id_host[1, 0].tolist(), 512, 136
         )
         yield length, prefix, selected, False
+    # Final128 transport geometry; create/marker semantics are tested above.
+    for length, prefix, permuted in (
+        (129, 0, False),
+        (512, 0, False),
+        (16384, 0, False),
+        (16385, 0, False),
+        (129, 16387, False),
+        (257, 16387, False),
+        (32769, 16387, False),
+        (32769, 0, True),
+        (131073, 0, False),
+    ):
+        yield length, prefix, torch.arange(length - 128, length), permuted
 
 
 def _exercise_transport(rank, device, group):
@@ -659,14 +1147,20 @@ def _exercise_transport(rank, device, group):
         topk = torch.stack(
             (positions.int(), -torch.ones_like(positions, dtype=torch.int32)), dim=1
         )
-        candidates = (positions // 8).int()[:, None]
+        # The real candidate producer skips pruning when all global blocks
+        # fit its top-8 selection. None is a valid cross-layer shared value.
+        candidates = (
+            None
+            if (prefix + length + 2047) // 2048 <= 8
+            else (positions // 8).int()[:, None]
+        )
         payloads = (hidden, ids, pre_mix, topk, candidates)
         model.layers[20].ffn_hc.pre_mix_out = pre_mix[rows]
         global_kv = object()
         shared = {
             "global": {20: global_kv},
             "topk": {20: topk[rows]},
-            "candidates": candidates[rows],
+            "candidates": candidates[rows] if candidates is not None else None,
         }
         for key in _CED._DERIVED_KEYS:
             shared[key] = object()
@@ -679,6 +1173,9 @@ def _exercise_transport(rank, device, group):
             shared["candidates"],
         )
         for value, full in zip(actual, payloads):
+            if full is None:
+                assert value is None
+                continue
             torch.testing.assert_close(
                 value, _compact_oracle(full, selected, rank), rtol=0, atol=0
             )
@@ -736,6 +1233,22 @@ def _exercise_transport(rank, device, group):
         torch.testing.assert_close(
             restored_kv, expected_h[:length].flatten(1), rtol=0, atol=0
         )
+        if len(selected) == 128 and torch.equal(
+            selected, torch.arange(length - 128, length)
+        ):
+            replay_ctx = replace(plan.context, swa_replay_start=length - 128)
+            with mock.patch.object(_COLLECTIVE, "_get_group", return_value=group):
+                compact_result = _CP.cp_all_gather_full_varlen(
+                    compact_kv, replay_ctx, replay_only=True
+                )
+            torch.testing.assert_close(
+                compact_result, hidden[selected_device].flatten(1), rtol=0, atol=0
+            )
+            assert compact_result.shape == (128, 12)
+            assert (
+                compact_result.untyped_storage().nbytes()
+                == compact_result.numel() * compact_result.element_size()
+            )
         # Detect a skipped zero-count participant or mismatched collective order.
         heartbeat = torch.tensor([rank + 1], device=device)
         torch.distributed.all_reduce(heartbeat, group=group)
@@ -812,6 +1325,149 @@ def _toy_decoder(encoder, window, layers, start=0):
         hidden = 0.6 * hidden + 0.3 * local_out + 0.1 * torch.tanh(global_out)
         outputs.append(hidden)
     return outputs
+
+
+def _explicit_truncated_swa_decoder(
+    encoder, window, layers, start, *, include_zero_holes=False
+):
+    """Independent scalar-row oracle: enumerate only materialized SWA keys.
+
+    The adversarial option models the incorrect zero-filled full-KV domain.
+    Global encoder keys remain fully visible up to each absolute query row.
+    """
+    state = {row: encoder[row].clone() for row in range(start, len(encoder))}
+    zero = torch.zeros_like(encoder[0])
+    outputs = []
+    for _ in range(layers):
+        following = {}
+        for row, query in state.items():
+            global_keys = encoder[: row + 1]
+            scores = global_keys @ query / encoder.shape[1] ** 0.5
+            global_out = scores.softmax(0) @ global_keys
+            left = max(0 if include_zero_holes else start, row - window + 1)
+            local_keys = torch.stack(
+                [state.get(key, zero) for key in range(left, row + 1)]
+            )
+            following[row] = (
+                0.6 * query + 0.3 * local_keys.mean(0) + 0.1 * global_out.tanh()
+            )
+        state = following
+        outputs.append(torch.stack(list(state.values())))
+    return outputs
+
+
+class BoundedReplayApproximationTest(_SingleThreadTest):
+    def test_actual_dspark_indices_read_only_live128_and_current_queries(self):
+        path = Path(_CP.__file__).parents[2] / "model_desc/deepseek_v4_dspark_model.py"
+        tree = ast.parse(path.read_text())
+        cls = next(
+            n
+            for n in tree.body
+            if isinstance(n, ast.ClassDef) and n.name == "DeepSeekV4DSparkModel"
+        )
+        methods = [
+            n
+            for n in cls.body
+            if isinstance(n, ast.FunctionDef)
+            and n.name in ("_global_pool_slots", "_build_noncausal_indices")
+        ]
+        namespace = {"torch": torch, "Tuple": tuple}
+        exec(
+            compile(ast.Module(body=methods, type_ignores=[]), str(path), "exec"),
+            namespace,
+        )
+        owner = types.SimpleNamespace(
+            _gen_num_per_cycle=7,
+            _v4_args=types.SimpleNamespace(window_size=128),
+            _global_pool_slots=namespace["_global_pool_slots"].__func__,
+        )
+        build = types.MethodType(namespace["_build_noncausal_indices"], owner)
+        for end in (131072, 131073, 131199, 131200):
+            with self.subTest(end=end):
+                table = torch.zeros(1, 260, dtype=torch.int32)
+                table[0, 255:258] = torch.tensor([13, 37, 5])
+                indices, lengths = build(
+                    torch.tensor([end]), torch.tensor([True]), table, 136, 512
+                )
+                expected = [
+                    int(table[0, p // 512]) * 136 + p % 136
+                    for p in range(end - 128, end + 7)
+                ]
+                self.assertEqual(lengths.tolist(), [135])
+                self.assertEqual(indices.shape, (7, 256))
+                expected_tensor = torch.tensor(expected, dtype=torch.int32)
+                self.assertTrue(
+                    torch.equal(indices[:, :135], expected_tensor.expand(7, -1))
+                )
+                self.assertTrue((indices[:, 135:] == -1).all())
+                # All physical cells except actual context/query writes remain
+                # poisoned. Do not assert equality of unused ring slack.
+                pool = torch.full((38 * 136,), torch.nan)
+                pool[expected_tensor.long()] = torch.arange(135).float()
+                self.assertTrue(torch.isfinite(pool[indices[:, :135].long()]).all())
+
+    def test_final128_matches_explicit_truncated_oracle_not_full_decoder(self):
+        encoder = torch.zeros(384, 2, dtype=torch.float64)
+        encoder[:256, 0] = 1
+        encoder[256:, 1] = 0.25
+        full = _toy_decoder(encoder, 128, 19)
+        replay = _toy_decoder(encoder, 128, 19, start=256)
+        explicit = _explicit_truncated_swa_decoder(encoder, 128, 19, 256)
+        for got, expected in zip(replay, explicit):
+            torch.testing.assert_close(got, expected, rtol=1e-12, atol=1e-12)
+        self.assertGreater((replay[-1][-1] - full[-1][-1]).abs().max().item(), 1e-3)
+        # All three target captures are approximate; layout equality does not
+        # imply equality with the full model or with exact CED.
+        for got, expected in zip(replay[-3:], full[-3:]):
+            self.assertGreater((got - expected[-128:]).abs().max().item(), 1e-3)
+
+    def test_zero_filled_omitted_history_is_not_a_masked_key(self):
+        encoder = torch.ones(384, 2, dtype=torch.float64)
+        replay = _explicit_truncated_swa_decoder(encoder, 128, 19, 256)
+        contaminated = _explicit_truncated_swa_decoder(
+            encoder, 128, 19, 256, include_zero_holes=True
+        )
+        # Even zero-valued omitted keys change the attention denominator.
+        self.assertGreater((replay[0][0] - contaminated[0][0]).abs().max().item(), 0.1)
+        self.assertGreater(
+            (replay[-1][-1] - contaminated[-1][-1]).abs().max().item(), 1e-3
+        )
+
+    def test_live128_survives_two_block_crossings_and_speculative_rollback(self):
+        window, span, ring, gamma = 128, 512, 136, 7
+
+        def write(cache, positions):
+            for position in positions:
+                cache[(position // span, position % ring)] = position
+
+        def check(cache, positions):
+            for position in positions:
+                self.assertEqual(
+                    cache.get((position // span, position % ring)), position
+                )
+
+        for residue in (0, 1, 7, 127, 128, 135, 136, 255, 505, 511):
+            end = 131072 + residue
+            initial = {}
+            write(initial, range(end - window, end))
+            draft, target = initial.copy(), initial.copy()
+            write(draft, range(end, end + gamma))
+            check(draft, range(end - window, end + gamma))
+            write(target, range(end, end + gamma + 1))
+            for query in range(end, end + gamma + 1):
+                check(target, range(query - window + 1, query + 1))
+            write(draft, range(end, end + gamma + 1))
+            for advance in range(1, gamma + 2):
+                with self.subTest(residue=residue, accepted_advance=advance):
+                    committed = end + advance
+                    next_draft = draft.copy()
+                    write(next_draft, range(committed, committed + gamma))
+                    check(next_draft, range(committed - window, committed + gamma))
+        # Replay length 128 does NOT permit shrinking physical ring capacity.
+        end, bad_ring = 4096 + 256, 128
+        slots = {p % bad_ring: p for p in range(end - window, end)}
+        slots.update({p % bad_ring: p for p in range(end, end + gamma)})
+        self.assertNotEqual(slots[(end - window) % bad_ring], end - window)
 
 
 class CedDependencyConeTest(unittest.TestCase):

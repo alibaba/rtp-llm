@@ -10,6 +10,7 @@ import torch.nn as nn
 from rtp_llm.models_py.modules.dsv4.attn_type import (
     CSA_KV,
     CSA_STATE,
+    DECODER_SWA_KV,
     HCA_KV,
     HCA_STATE,
     INDEXER_KV,
@@ -19,6 +20,7 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
 
 _PHYSICAL_ROW_REGIONS = {
     int(SWA_KV),
+    int(DECODER_SWA_KV),
     int(CSA_STATE),
     int(HCA_STATE),
     int(INDEXER_STATE),
@@ -168,7 +170,9 @@ class PoolBackedModule(nn.Module):
         self._kv_eb = kv_eb
         self._kv_tokens_per_block = kv_tokens_per_block
         self._kv_owner_tokens_per_block = (
-            kv_owner_tokens_per_block if kv_owner_tokens_per_block > 0 else kv_tokens_per_block
+            kv_owner_tokens_per_block
+            if kv_owner_tokens_per_block > 0
+            else kv_tokens_per_block
         )
 
         if state_pool_view is not None:

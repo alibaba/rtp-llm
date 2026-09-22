@@ -108,6 +108,16 @@ int64_t FIFOScheduler::lastScheduleTime() {
 }
 
 bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
+    if (cache_manager_->cacheConfig().swaBoundedReplay()) {
+        const auto& generate_config = *stream->generateConfig();
+        if (generate_config.calculate_loss || generate_config.return_all_hidden_states) {
+            // Reject before cache lookup/allocation: keeping all fresh rows does
+            // not restore the decoder prefix SWA omitted by bounded replay.
+            stream->reportError(ErrorCode::INVALID_PARAMS,
+                                "SWA bounded replay does not support calculate_loss or return_all_hidden_states");
+            return false;
+        }
+    }
     const auto input_length = static_cast<size_t>(stream->inputLength());
     const auto reserve_step = stream->reserveStep();
     if (reserve_step > 0 && !(input_length <= max_seq_len_ && reserve_step <= max_seq_len_ - input_length)) {

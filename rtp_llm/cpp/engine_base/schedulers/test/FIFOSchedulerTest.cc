@@ -14,6 +14,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 
 using namespace std;
 
@@ -32,6 +33,111 @@ class FIFOSchedulerTest: public DeviceTestBase {
 public:
     FIFOSchedulerTest() {}
 };
+
+// Admission needs only cache policy/capacity and CPU request tensors. Do not
+// inherit DeviceTestBase or initialize a KV pool in this suite.
+class FIFOBoundedReplayAdmissionTest: public ::testing::Test {
+protected:
+    class AdmissionAllocator: public MockKVCacheAllocator {
+    public:
+        using MockKVCacheAllocator::MockKVCacheAllocator;
+        MOCK_METHOD(size_t, maxAvailableTokensNum, (), (const, override));
+    };
+
+    void SetUp() override {
+        initLogger();
+        model_config_.max_seq_len                                   = 8192;
+        runtime_config_.max_generate_batch_size                     = 8;
+        runtime_config_.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        auto config                = test::makeSimpleMhaCacheConfig(1, 4, 8, DataType::TYPE_FP16, 1, 4);
+        cache_manager_             = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
+        allocator_                 = std::make_shared<testing::StrictMock<AdmissionAllocator>>(config);
+        cache_manager_->allocator_ = allocator_;
+        setBoundedReplay(true);
+        scheduler_ = std::make_unique<FIFOScheduler>(
+            runtime_config_, model_config_, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager_);
+    }
+
+    void setBoundedReplay(bool enabled) {
+        cache_manager_->config_.group_region_names = {enabled ? KVCacheRegionName::DECODER_SWA_KV :
+                                                                KVCacheRegionName::SWA_KV};
+    }
+
+    GenerateStreamPtr makeStream(int calculate_loss, bool all_hidden, int input_length = 257, bool reuse = true) {
+        auto input                                       = std::make_shared<GenerateInput>();
+        input->input_ids                                 = torch::ones({input_length}, torch::kInt32);
+        input->generate_config                           = std::make_shared<GenerateConfig>();
+        input->generate_config->calculate_loss           = calculate_loss;
+        input->generate_config->return_all_hidden_states = all_hidden;
+        input->generate_config->reuse_cache              = reuse;
+        // No cache manager on the request: any admission-time attempt to allocate
+        // request KV would fail. The scheduler has the policy/capacity mock above.
+        return std::make_shared<NormalGenerateStream>(
+            input, model_config_, runtime_config_, ResourceContext{}, nullptr);
+    }
+
+    ModelConfig                                              model_config_;
+    RuntimeConfig                                            runtime_config_;
+    std::shared_ptr<KVCacheManager>                          cache_manager_;
+    std::shared_ptr<testing::StrictMock<AdmissionAllocator>> allocator_;
+    std::unique_ptr<FIFOScheduler>                           scheduler_;
+};
+
+TEST_F(FIFOBoundedReplayAdmissionTest, RejectsFullOutputsBeforeCacheAccess) {
+    EXPECT_CALL(*allocator_, maxAvailableTokensNum()).Times(0);
+    for (int length : {1, 257}) {
+        for (int loss : {0, 1, 2}) {
+            for (bool hidden : {false, true}) {
+                if (!loss && !hidden) {
+                    continue;
+                }
+                for (bool reuse : {false, true}) {
+                    SCOPED_TRACE(testing::Message() << length << "/" << loss << "/" << hidden << "/" << reuse);
+                    auto stream = makeStream(loss, hidden, length, reuse);
+                    EXPECT_EQ(scheduler_->enqueue(stream).code(), absl::StatusCode::kInvalidArgument);
+                    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                    EXPECT_NE(stream->stopReason().find("SWA bounded replay"), std::string::npos);
+                    EXPECT_EQ(stream->curBlocksNum(), 0);
+                    EXPECT_TRUE(scheduler_->empty());
+                }
+            }
+        }
+    }
+}
+
+TEST_F(FIFOBoundedReplayAdmissionTest, GroupRejectsFullOutputsAndKeepsGeneration) {
+    EXPECT_CALL(*allocator_, maxAvailableTokensNum()).WillOnce(testing::Return(8192));
+    auto loss       = makeStream(1, false);
+    auto generation = makeStream(0, false);
+    auto hidden     = makeStream(0, true);
+    EXPECT_EQ(scheduler_->enqueueGroup({loss, generation, hidden}).first, std::vector<bool>({false, true, false}));
+    EXPECT_EQ(loss->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(hidden->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_FALSE(generation->hasError());
+    EXPECT_EQ(scheduler_->onflightStreams(), 1);
+    EXPECT_EQ(generation->curBlocksNum(), 0);
+}
+
+TEST_F(FIFOBoundedReplayAdmissionTest, DisabledPreservesExistingOutputAdmission) {
+    setBoundedReplay(false);
+    EXPECT_CALL(*allocator_, maxAvailableTokensNum()).Times(6).WillRepeatedly(testing::Return(8192));
+    for (int loss : {0, 1, 2}) {
+        auto stream = makeStream(loss, true);
+        EXPECT_TRUE(scheduler_->enqueue(stream).ok());
+        EXPECT_FALSE(stream->hasError());
+        auto grouped = makeStream(loss, false);
+        EXPECT_EQ(scheduler_->enqueueGroup({grouped}).first, std::vector<bool>({true}));
+        EXPECT_FALSE(grouped->hasError());
+    }
+}
+
+TEST_F(FIFOBoundedReplayAdmissionTest, KeepsShortColdGeneration) {
+    EXPECT_CALL(*allocator_, maxAvailableTokensNum()).WillOnce(testing::Return(8192));
+    auto stream = makeStream(0, false, /*input_length=*/1, /*reuse=*/false);
+    EXPECT_TRUE(scheduler_->enqueue(stream).ok());
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_EQ(stream->curBlocksNum(), 0);
+}
 
 TEST(SchedulerPollIntervalTest, DefaultsAndEnvironmentValidation) {
     const std::string env_name = "RTP_LLM_SCHEDULER_POLL_INTERVAL_MS";

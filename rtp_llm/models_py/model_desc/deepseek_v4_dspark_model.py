@@ -55,6 +55,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.decode.output_proj import decode_output_proj
 from rtp_llm.models_py.modules.dsv4.fp8.decode.write_swa import decode_write_swa_fp8
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import cached_swa_region
 from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
@@ -275,8 +276,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             raise RuntimeError(
                 "DSpark requires per-group KV block tables and group region names"
             )
+        swa_region = cached_swa_region(self, self.kv_cache, 0)
         for group_id, region in enumerate(regions):
-            if int(region) != int(SWA_KV) or group_id >= len(by_group):
+            if int(region) != swa_region or group_id >= len(by_group):
                 continue
             table = by_group[group_id]
             if table is not None and table.numel() > 0:
@@ -428,7 +430,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         with bind_attn_cache(
             attn,
             self.kv_cache,
-            {int(SWA_KV): block_table},
+            {cached_swa_region(self, self.kv_cache, layer_idx): block_table},
             cp_ctx=cp_ctx if cp_ctx is not None else BIND_KEEP,
         ):
             attn._ensure_freqs_cis_bound()
@@ -621,7 +623,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         attention_inputs = inputs.attention_inputs
         block_table = self._swa_block_table(attention_inputs, batch_size)
         tokens_per_block = int(
-            require_pool_tokens_per_block(self.kv_cache, region=int(SWA_KV))
+            require_pool_tokens_per_block(
+                self.kv_cache, region=cached_swa_region(self, self.kv_cache, 0)
+            )
         )
         write_cache_store_impl = create_write_cache_store_impl(
             attention_inputs, self.kv_cache
@@ -795,7 +799,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             else None
         )
         tokens_per_block = int(
-            require_pool_tokens_per_block(self.kv_cache, region=int(SWA_KV))
+            require_pool_tokens_per_block(
+                self.kv_cache, region=cached_swa_region(self, self.kv_cache, 0)
+            )
         )
 
         # Eager forwards get a fresh owner each round, while CUDA graph capture

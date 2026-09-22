@@ -208,11 +208,17 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     bool       cache_keys_initialized_now = false;
     if (is_first_malloc) {
         if (!effective->batch_kv_cache_resource->cacheKeysInitialized()) {
-            initCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block);
+            initCacheKeys(effective->batch_kv_cache_resource,
+                          effective->complete_token_ids,
+                          seq_size_per_block,
+                          config_.cacheKeySeed());
             cache_keys_initialized_now = true;
         }
     } else {
-        updateCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block);
+        updateCacheKeys(effective->batch_kv_cache_resource,
+                        effective->complete_token_ids,
+                        seq_size_per_block,
+                        config_.cacheKeySeed());
     }
     reportPrefillCacheHitMetrics(*effective, cache_keys_initialized_now);
 

@@ -578,7 +578,20 @@ class Block(nn.Module):
             x,
             dbg_tag=f"L{self.layer_id:02d}_attn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], [T, hc, 1], [T, hc, hc]
-        x_pre = self.attn_norm(x_pre)  # [T, dim]
+        shared_input_quant = None
+        if (
+            not _dbg_layer
+            and isinstance(self.attn, AttentionFP8)
+            and getattr(self.attn, "v41_config", None) is not None
+            and self.attn.can_fuse_prefill_attn_norm_input_quant(
+                x_pre, self.attn_norm.weight.data
+            )
+        ):
+            x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
+                x_pre, self.attn_norm.weight.data, self.attn_norm.variance_epsilon
+            )
+        else:
+            x_pre = self.attn_norm(x_pre)  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_in", x_pre)
             if dbg_pos_mask is not None:
@@ -593,12 +606,21 @@ class Block(nn.Module):
         # be false while this branch still constructs AttentionFP8, so dispatch
         # on the module type instead of only the cache config.
         if isinstance(self.attn, AttentionFP8):
-            attn_out = self.attn(
-                x_pre,  # [T, dim]
-                positions,  # [T] int64 absolute positions
-                kv_cache=kv_cache,
-                block_tables_by_type=block_tables_by_type,
-            )  # [T, dim]
+            if shared_input_quant is not None:
+                attn_out = self.attn.forward_with_shared_input_quant(
+                    x_pre,
+                    positions,
+                    shared_input_quant,
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                )
+            else:
+                attn_out = self.attn(
+                    x_pre,  # [T, dim]
+                    positions,  # [T] int64 absolute positions
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                )  # [T, dim]
         else:
             # Present flat [T, dim] as [B, S, dim] for Attention.  The common
             # prefill layouts (single request, or dense equal-length batch) are

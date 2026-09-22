@@ -20,6 +20,9 @@ from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.block import Block
+from rtp_llm.models_py.modules.dsv4.bounded_replay import (
+    enabled as bounded_replay_enabled,
+)
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head
 
@@ -196,6 +199,16 @@ class V4Transformer(nn.Module):
         # ``prefill/forward.py`` and ``DeepSeekV4Model.prepare_fmha_impl``
         # can dispatch via ``v4.fp8_kv_cache`` without reading args.
         self.fp8_kv_cache = args.fp8_kv_cache
+        self.swa_bounded_replay = bounded_replay_enabled()
+        if self.swa_bounded_replay and (
+            args.v41_config is None
+            or not args.fp8_kv_cache
+            or os.environ.get("DSV41_CED", "0").lower()
+            not in ("1", "true", "yes", "on")
+        ):
+            raise ValueError(
+                "DSV41_SWA_BOUNDED_REPLAY requires V4.1 FP8 and DSV41_CED=1"
+            )
 
         from rtp_llm.utils.model_weight import W
 

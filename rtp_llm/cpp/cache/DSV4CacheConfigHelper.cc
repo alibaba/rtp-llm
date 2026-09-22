@@ -1,5 +1,10 @@
 #include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <string>
+
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -42,6 +47,8 @@ struct DSV4LayerSets {
     std::vector<int> all_layers;
     std::vector<int> indexer_layers;
     std::vector<int> empty_layers;
+    std::vector<int> encoder_swa_layers;
+    std::vector<int> decoder_swa_layers;
 };
 
 struct DSV4PoolDesc {
@@ -80,6 +87,8 @@ const char* dsv4RegionName(KVCacheRegionName region_name) {
             return "HCA_STATE";
         case KVCacheRegionName::SWA_KV:
             return "SWA_KV";
+        case KVCacheRegionName::DECODER_SWA_KV:
+            return "DECODER_SWA_KV";
         case KVCacheRegionName::REGION_COUNT:
             return "REGION_COUNT";
     }
@@ -353,6 +362,37 @@ KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool) {
 
 }  // namespace
 
+bool DSV4CacheConfigHelper::swaBoundedReplayEnabled(const ModelConfig&       model_config,
+                                                    const ParallelismConfig& parallelism_config) {
+    auto enabled = [](const char* name) {
+        const char* raw   = std::getenv(name);
+        std::string value = raw == nullptr ? "0" : raw;
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    };
+    if (!enabled("DSV41_SWA_BOUNDED_REPLAY")) {
+        return false;
+    }
+    const bool is_v41 = !model_config.attn_config.v41_kv_source_layer_ids.empty()
+                        || model_config.model_type == "deepseek_v41"
+                        || model_config.model_type == "deepseek_v41_dspark";
+    RTP_LLM_CHECK_WITH_INFO(is_v41 && enabled("DSV41_CED"),
+                            "DSV41_SWA_BOUNDED_REPLAY requires V4.1 and DSV41_CED=1 at startup");
+    const auto& cp      = parallelism_config.prefill_cp_config;
+    const bool  cp4     = cp.prefill_cp_size == 4;
+    const bool  prefill = parallelism_config.role_type == RoleType::PREFILL && parallelism_config.tp_size == 4
+                         && parallelism_config.dp_size == 1 && cp.is_enabled();
+    const bool decode = parallelism_config.role_type == RoleType::DECODE && parallelism_config.tp_size == 1
+                        && parallelism_config.dp_size == 4 && cp.is_prefill_enabled();
+    RTP_LLM_CHECK_WITH_INFO(cp4 && parallelism_config.ep_size == 4
+                                && parallelism_config.prefill_cp_config.kv_cache_sharded && (prefill || decode),
+                            "DSV41_SWA_BOUNDED_REPLAY requires EP4, sharded CP4, "
+                            "P TP4/DP1 with CP communication or D TP1/DP4 with PREFILL_CP");
+    RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8,
+                            "DSV41_SWA_BOUNDED_REPLAY requires FP8 KV cache");
+    return true;
+}
+
 void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
                                         const ModelConfig&       model_config,
                                         const ParallelismConfig& parallelism_config,
@@ -409,19 +449,43 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
             sets.indexer_layers.push_back(layer);
         }
     }
-    const auto pools = is_v41 ? buildDSV41PoolDescs(sets,
-                                                    model_config,
-                                                    kernel_tokens_per_block,
-                                                    physical_tokens_per_block,
-                                                    parallelism_config,
-                                                    gen_num_per_cycle) :
-                                buildDSV4PoolDescs(sets,
-                                                   model_config,
-                                                   kernel_tokens_per_block,
-                                                   physical_tokens_per_block,
-                                                   parallelism_config,
-                                                   gen_num_per_cycle);
+    const bool bounded_replay = swaBoundedReplayEnabled(model_config, parallelism_config);
+    if (bounded_replay) {
+        RTP_LLM_CHECK_WITH_INFO(
+            !kv_cache_config.enable_remote_cache,
+            "bounded SWA replay does not support remote prefix-cache publication; live P/D remains enabled");
+    }
+    auto pools = is_v41 ? buildDSV41PoolDescs(sets,
+                                              model_config,
+                                              kernel_tokens_per_block,
+                                              physical_tokens_per_block,
+                                              parallelism_config,
+                                              gen_num_per_cycle) :
+                          buildDSV4PoolDescs(sets,
+                                             model_config,
+                                             kernel_tokens_per_block,
+                                             physical_tokens_per_block,
+                                             parallelism_config,
+                                             gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(pools.size() == kDsv4PoolNum, "DSV4 must produce %zu pools", kDsv4PoolNum);
+    if (bounded_replay) {
+        const bool draft = sets.all_layers.size() == 3 && model_config.attn_config.v41_kv_source_layer_ids.empty()
+                           && std::all_of(model_config.attn_config.layer_compress_ratios.begin(),
+                                          model_config.attn_config.layer_compress_ratios.end(),
+                                          [](int ratio) { return ratio == 0; });
+        RTP_LLM_CHECK_WITH_INFO(draft || sets.all_layers.size() == 40,
+                                "bounded SWA replay requires the 40-layer V4.1 target or 3-layer SWA-only draft");
+        for (int layer : sets.all_layers) {
+            (draft || layer >= 21 ? sets.decoder_swa_layers : sets.encoder_swa_layers).push_back(layer);
+        }
+        auto decoder_pool        = pools[6];
+        pools[6].layer_ids       = &sets.encoder_swa_layers;
+        decoder_pool.region_name = KVCacheRegionName::DECODER_SWA_KV;
+        decoder_pool.layer_ids   = &sets.decoder_swa_layers;
+        // Keep identical group positions in score and draft configs, including
+        // the draft's empty encoder SWA group, for createSpConfig's merge.
+        pools.push_back(decoder_pool);
+    }
 
     config.layer_num                                = static_cast<uint32_t>(sets.all_layers.size());
     config.layer_all_num                            = config.layer_num;

@@ -8,7 +8,8 @@ namespace rtp_llm {
 
 void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                    CompleteTokenIdsPtr     complete_token_ids,
-                   int                     seq_size_per_block) {
+                   int                     seq_size_per_block,
+                   int64_t                 initial_hash) {
     const int batch_size = batch_kv_cache_resource->batchSize();
     const int seq_len    = complete_token_ids->seqLength();
 
@@ -18,7 +19,7 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
     for (int i = 0; i < batch_size; ++i) {
         batch_kv_cache_resource->clearCacheKeys(i);
 
-        int64_t rolling_hash = 0;
+        int64_t rolling_hash = initial_hash;
         auto*   token_ids    = complete_token_ids->data(i);
         for (int index = 0; index < desired_blocks; ++index) {
             const int pos       = index * seq_size_per_block;
@@ -42,7 +43,8 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
 
 void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                      CompleteTokenIdsPtr     complete_token_ids,
-                     int                     seq_size_per_block) {
+                     int                     seq_size_per_block,
+                     int64_t                 initial_hash) {
     const int batch_size = batch_kv_cache_resource->batchSize();
     const int seq_len    = complete_token_ids->seqLength();
 
@@ -57,7 +59,7 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
         }
 
         auto*   token_ids = complete_token_ids->data(i);
-        int64_t hash      = keys.empty() ? 0 : keys.back();
+        int64_t hash      = keys.empty() ? initial_hash : keys.back();
         int     start_idx = static_cast<int>(keys.size());
 
         for (int index = start_idx; index < total_blocks; ++index) {

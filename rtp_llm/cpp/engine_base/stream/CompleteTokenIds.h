@@ -57,7 +57,7 @@ public:
     std::vector<int32_t> imageCacheIdentity(int begin, int count) const;
 
     // A reused prefix must not split an image in this token view.
-    bool isValidReuseLength(int reuse_length) const;
+    bool isValidReuseLength(int reuse_length, int min_fresh_tokens = 0) const;
 
     int32_t* data(int batch_id);
 

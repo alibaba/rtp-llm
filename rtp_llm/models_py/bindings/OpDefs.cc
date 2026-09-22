@@ -18,6 +18,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .value("CSA_STATE", rtp_llm::KVCacheRegionName::CSA_STATE)
         .value("HCA_STATE", rtp_llm::KVCacheRegionName::HCA_STATE)
         .value("SWA_KV", rtp_llm::KVCacheRegionName::SWA_KV)
+        .value("DECODER_SWA_KV", rtp_llm::KVCacheRegionName::DECODER_SWA_KV)
         .export_values();
 
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")

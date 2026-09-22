@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <vector>
@@ -7,6 +8,8 @@
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
@@ -917,6 +920,283 @@ static ModelConfig makeV41ModelConfig() {
     mc.attn_config.v41_kv_source_layer_ids = {2, 8, 14, 20};
     mc.attn_config.kv_cache_dtype          = KvCacheDataType::FP8;
     return mc;
+}
+
+class V41BoundedReplayPolicyTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        for (const char* name : {"DSV41_SWA_BOUNDED_REPLAY", "DSV41_CED", "RTP_LLM_PIN_HOST_BLOCK_POOL"}) {
+            const char* value = std::getenv(name);
+            env_.push_back({name, value ? std::optional<std::string>(value) : std::nullopt});
+        }
+        setenv("DSV41_SWA_BOUNDED_REPLAY", "1", 1);
+        setenv("DSV41_CED", "1", 1);
+        setenv("RTP_LLM_PIN_HOST_BLOCK_POOL", "0", 1);
+    }
+    void TearDown() override {
+        for (const auto& item : env_) {
+            if (item.second) {
+                setenv(item.first.c_str(), item.second->c_str(), 1);
+            } else {
+                unsetenv(item.first.c_str());
+            }
+        }
+    }
+    ParallelismConfig parallel(RoleType role = RoleType::PREFILL) {
+        ParallelismConfig pc;
+        pc.role_type = role;
+        pc.tp_size   = role == RoleType::PREFILL ? 4 : 1;
+        pc.dp_size   = role == RoleType::DECODE ? 4 : 1;
+        pc.ep_size   = 4;
+        pc.prefill_cp_config.method =
+            role == RoleType::PREFILL ? CPRotateMethod::ALL_GATHER : CPRotateMethod::PREFILL_CP;
+        pc.prefill_cp_config.prefill_cp_size  = 4;
+        pc.prefill_cp_config.kv_cache_sharded = true;
+        return pc;
+    }
+    CompleteTokenIdsPtr tokens(int count) {
+        auto input             = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::arange(count, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        auto result            = std::make_shared<CompleteTokenIds>(1, 1, count + 256, 128);
+        result->init(input);
+        return result;
+    }
+    std::vector<std::pair<std::string, std::optional<std::string>>> env_;
+};
+
+TEST_F(V41BoundedReplayPolicyTest, RegionSplitPreservesCpBytesAndLiveTransfer) {
+    auto   mc      = makeV41ModelConfig();
+    size_t p_bytes = 0;
+    for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        auto config = HybridPoolConfigCreator::createConfig(mc, parallel(role), makeDsv4KvCacheConfig(), false, 5);
+        ASSERT_EQ(config.groupNums(), 8);
+        EXPECT_TRUE(config.swaBoundedReplay());
+        EXPECT_EQ(config.global_layer_ids[6].size(), 21u);
+        EXPECT_EQ(config.global_layer_ids[7].size(), 19u);
+        EXPECT_EQ(config.global_layer_ids[7].front(), 21);
+        EXPECT_EQ(config.layer_region_to_group_id[20][7], 6);
+        EXPECT_EQ(config.layer_region_to_group_id[21][7], -1);
+        EXPECT_EQ(config.layer_region_to_group_id[21][8], 7);
+        auto spec = dynamic_cast<DSV4StateSpec*>(config.cache_specs[7].get());
+        ASSERT_NE(spec, nullptr);
+        EXPECT_EQ(spec->entries_per_block, 136u);
+        EXPECT_EQ(spec->state_dim, 528u);
+        if (role == RoleType::PREFILL) {
+            p_bytes = spec->block_size_bytes();
+            EXPECT_EQ(p_bytes, 18048u);
+        } else {
+            EXPECT_EQ(spec->block_size_bytes(), 4 * p_bytes);
+            EXPECT_EQ(spec->block_size_bytes(), 72192u);
+        }
+        EXPECT_TRUE(skipReuseCacheRegion(config.group_region_names[7]));
+        EXPECT_FALSE(skipReuseCacheRegion(config.group_region_names[6]));
+        EXPECT_EQ(config.group_types[7], CacheGroupType::SWA);
+        EXPECT_EQ(blockPositionsForCacheTransfer(64, 32, true, config.group_types[7], false),
+                  std::vector<size_t>({62, 63}));
+        EXPECT_NE(layerRegionCacheTransferKey(1, 21, KVCacheRegionName::SWA_KV),
+                  layerRegionCacheTransferKey(1, 21, KVCacheRegionName::DECODER_SWA_KV));
+    }
+    mc.model_type                        = "deepseek_v41_dspark";
+    mc.num_layers                        = 3;
+    mc.attn_config.layer_compress_ratios = {0, 0, 0};
+    mc.attn_config.v41_kv_source_layer_ids.clear();
+    auto draft = HybridPoolConfigCreator::createConfig(mc, parallel(), makeDsv4KvCacheConfig(), true, 5);
+    ASSERT_EQ(draft.groupNums(), 8);
+    EXPECT_TRUE(draft.global_layer_ids[6].empty());
+    EXPECT_EQ(draft.global_layer_ids[7], std::vector<int>({0, 1, 2}));
+}
+
+TEST_F(V41BoundedReplayPolicyTest, PublicationExcludesDecoderButRetainsEncoder) {
+    auto config =
+        HybridPoolConfigCreator::createConfig(makeV41ModelConfig(), parallel(), makeDsv4KvCacheConfig(8), false, 5);
+    config.block_num = 8;
+    config.finalizeBlockNums(8, RuntimeConfig{});
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    auto shared    = std::make_shared<SharedBlockCache>();
+    allocator->setSharedBlockCache(shared);
+    ASSERT_TRUE(allocator->init());
+    auto batch = std::make_shared<BatchKVCacheResource>();
+    batch->resetBatchSize(1);
+    batch->initGroups(8,
+                      config.layer_all_num,
+                      config.layer_to_group_id,
+                      config.kernelBlocksPerKvBlock(),
+                      config.group_types,
+                      config.layer_region_to_group_id);
+    batch->setBatchCacheKeys(0, CacheKeysType{300, 301, 302, 303});
+    const auto pools = allocator->getBlockPools();
+    for (int gid = 0; gid < 8; ++gid) {
+        auto blocks = pools[gid]->malloc(3);
+        ASSERT_EQ(blocks.size(), 3u);
+        batch->mutableBlockIds(0, gid).assign(blocks);
+    }
+    allocator->insertIntoCache(InsertInfo{batch, tokens(3 * config.seq_size_per_block + 1), false});
+    for (int key : {300, 301, 302}) {
+        EXPECT_FALSE(isNullBlockIdx(shared->matchGroup(key, 0)));
+        EXPECT_FALSE(isNullBlockIdx(shared->matchGroup(key, 6)));
+        EXPECT_TRUE(isNullBlockIdx(shared->matchGroup(key, 7)));
+    }
+    allocator->free(FreeInfo{batch});
+}
+
+TEST_F(V41BoundedReplayPolicyTest, CpGpuHitPublishesBothDecoderAndDraftLiveTails) {
+    auto target                             = makeV41ModelConfig();
+    auto draft                              = target;
+    draft.model_type                        = "deepseek_v41_dspark";
+    draft.num_layers                        = 3;
+    draft.attn_config.layer_compress_ratios = {0, 0, 0};
+    draft.attn_config.v41_kv_source_layer_ids.clear();
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size                      = 1;
+    runtime.fifo_scheduler_config.max_context_batch_size = 1;
+    auto kv                                              = makeDsv4KvCacheConfig(16);
+    kv.kernel_seq_size_per_block                         = 128;
+    kv.test_block_num                                    = 512;
+    kv.linear_step                                       = 32;
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_DSPARK;
+    sp.gen_num_per_cycle = 5;
+    auto pconfig =
+        CacheConfigCreator::createSpConfig(target, draft, parallel(), runtime, kv, sp, std::nullopt, true, false);
+    auto dconfig = CacheConfigCreator::createSpConfig(
+        target, draft, parallel(RoleType::DECODE), runtime, kv, sp, std::nullopt, true, false);
+    ASSERT_EQ(pconfig.groupNums(), 8);
+    ASSERT_EQ(pconfig.global_layer_ids[7].size(), 22u);  // L21..39 + three draft layers
+    auto p      = std::make_shared<HybridPoolKVCacheAllocator>(pconfig, AllocationType::HOST);
+    auto d      = std::make_shared<HybridPoolKVCacheAllocator>(dconfig, AllocationType::HOST);
+    auto shared = std::make_shared<SharedBlockCache>();
+    p->setSharedBlockCache(shared);
+    auto mapper = std::make_shared<CPSlotMapper>(0, 4, 128);
+    p->setCPSlotMapper(mapper);
+    ASSERT_TRUE(p->init());
+    ASSERT_TRUE(d->init());
+    const auto make_resource = [&](const CacheConfig& cfg, const CompleteTokenIdsPtr& ids) {
+        auto result = std::make_shared<BatchKVCacheResource>();
+        result->resetBatchSize(1);
+        result->initGroups(cfg.groupNums(),
+                           cfg.layer_all_num,
+                           cfg.layer_to_group_id,
+                           cfg.kernelBlocksPerKvBlock(),
+                           cfg.group_types,
+                           cfg.layer_region_to_group_id);
+        initCacheKeys(result, ids, 128, cfg.cacheKeySeed());
+        return result;
+    };
+    // A completed max1 prime includes the generated token when publishing:
+    // its complete cacheable prefix is exactly 32768 tokens.
+    auto       seed_ids = tokens(32769);
+    auto       seed     = make_resource(pconfig, seed_ids);
+    MallocInfo seed_info{seed, seed_ids};
+    seed_info.enable_device_cache = false;
+    seed_info.cp_slot_mapper      = mapper;
+    ASSERT_TRUE(p->malloc(seed_info).success);
+    p->insertIntoCache(InsertInfo{seed, seed_ids, false, mapper});
+    EXPECT_TRUE(isNullBlockIdx(shared->matchGroup(seed->cacheKeys(0)[255], 7)));
+    p->free(FreeInfo{seed});
+    // Distinct physical D IDs demonstrate that the protocol compares keys,
+    // not allocator IDs. These blocks are released at the end of the test.
+    auto held_d = d->getBlockPools()[7]->malloc(8);
+    ASSERT_EQ(held_d.size(), 8u);
+    for (int fresh : {128, 129, 511, 512, 513}) {
+        SCOPED_TRACE(fresh);
+        auto       ids = tokens(32768 + fresh);
+        auto       pr  = make_resource(pconfig, ids);
+        auto       dr  = make_resource(dconfig, ids);
+        MallocInfo pi{pr, ids};
+        pi.cp_slot_mapper = mapper;
+        auto pm           = p->malloc(pi);
+        ASSERT_TRUE(pm.success);
+        ASSERT_EQ(pm.reuse_len, 32768);
+        MallocInfo di{dr, ids};
+        di.enable_device_cache = false;
+        ASSERT_TRUE(d->malloc(di).success);
+        const auto& pblocks = pr->blocks(0, 7);
+        const auto& dblocks = dr->blocks(0, 7);
+        ASSERT_EQ(pblocks.size(), dblocks.size());
+        EXPECT_EQ(std::count_if(pblocks.begin(), pblocks.end(), [](auto b) { return !isNullBlockIdx(b); }), 2);
+        const auto plan  = buildCacheStoreBlockPlan(pr->cacheKeys(0).size(), 256, true, CacheGroupType::SWA, 0, 4);
+        const auto loads = blockPositionsForCacheTransfer(dblocks.size(), 0, true, CacheGroupType::SWA, false);
+        ASSERT_EQ(plan.size(), loads.size());
+        for (size_t i = 0; i < plan.size(); ++i) {
+            EXPECT_EQ(plan[i].offset_index, loads[i]);
+            EXPECT_FALSE(isNullBlockIdx(pblocks[plan[i].offset_index]));
+            EXPECT_FALSE(isNullBlockIdx(dblocks[loads[i]]));
+            EXPECT_NE(pblocks[plan[i].offset_index], dblocks[loads[i]]);
+            EXPECT_EQ(pr->cacheKeys(0)[plan[i].key_index], dr->cacheKeys(0)[plan[i].key_index]);
+            for (int layer : {21, 39, 40, 41, 42}) {
+                EXPECT_EQ(pconfig.layer_region_to_group_id[layer][8], 7);
+                EXPECT_EQ(dconfig.layer_region_to_group_id[layer][8], 7);
+            }
+        }
+        p->free(FreeInfo{pr});
+        d->free(FreeInfo{dr});
+    }
+    d->getBlockPools()[7]->requestFree(held_d);
+}
+
+TEST_F(V41BoundedReplayPolicyTest, StartupEligibilityAndDefaultOff) {
+    auto mc = makeV41ModelConfig();
+    auto pc = parallel();
+    EXPECT_TRUE(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, pc));
+    pc.prefill_cp_config.prefill_cp_size = 2;
+    EXPECT_ANY_THROW(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, pc));
+    pc         = parallel();
+    pc.ep_size = 1;
+    EXPECT_ANY_THROW(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, pc));
+    auto remote                = makeDsv4KvCacheConfig();
+    remote.enable_remote_cache = true;
+    EXPECT_ANY_THROW(HybridPoolConfigCreator::createConfig(mc, parallel(), remote, false, 5));
+    setenv("DSV41_CED", "0", 1);
+    EXPECT_ANY_THROW(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, parallel()));
+    setenv("DSV41_SWA_BOUNDED_REPLAY", "0", 1);
+    auto config = HybridPoolConfigCreator::createConfig(mc, ParallelismConfig{}, makeDsv4KvCacheConfig(), false, 5);
+    EXPECT_EQ(config.groupNums(), 7);
+    EXPECT_EQ(config.cacheKeySeed(), 0);
+    EXPECT_EQ(config.maxPrefixReuseTokens(32769), 32768);
+}
+
+TEST_F(V41BoundedReplayPolicyTest, StartupRequiresRoleSpecificCpMode) {
+    auto mc = makeV41ModelConfig();
+    for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        auto pc = parallel(role);
+        EXPECT_TRUE(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, pc));
+        for (auto method : {CPRotateMethod::DISABLED,
+                            CPRotateMethod::UNKNOWN,
+                            role == RoleType::PREFILL ? CPRotateMethod::PREFILL_CP : CPRotateMethod::ALL_GATHER}) {
+            pc.prefill_cp_config.method = method;
+            EXPECT_ANY_THROW(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, pc));
+        }
+    }
+}
+
+TEST_F(V41BoundedReplayPolicyTest, FreshBoundaryAndVersionedIncrementalKeys) {
+    auto config =
+        HybridPoolConfigCreator::createConfig(makeV41ModelConfig(), parallel(), makeDsv4KvCacheConfig(), false, 5);
+    for (int fresh : {0, 1, 127, 128, 129}) {
+        auto ids = tokens(32768 + fresh);
+        EXPECT_EQ(ids->isValidReuseLength(32768, 128), fresh >= 128);
+        EXPECT_TRUE(ids->isValidReuseLength(16384, 128));
+        EXPECT_EQ(config.maxPrefixReuseTokens(32768 + fresh), 32768 + fresh - 128);
+    }
+    EXPECT_TRUE(tokens(1)->isValidReuseLength(0, 128));
+    EXPECT_EQ(config.maxPrefixReuseTokens(1), 0);
+    auto ids         = tokens(256);
+    auto full        = std::make_shared<BatchKVCacheResource>();
+    auto incremental = std::make_shared<BatchKVCacheResource>();
+    auto old         = std::make_shared<BatchKVCacheResource>();
+    for (auto batch : {full, incremental, old}) {
+        batch->resetBatchSize(1);
+    }
+    initCacheKeys(full, ids, 128, config.cacheKeySeed());
+    initCacheKeys(old, ids, 128);
+    updateCacheKeys(incremental, ids, 128, config.cacheKeySeed());
+    EXPECT_EQ(full->cacheKeys(0), incremental->cacheKeys(0));
+    EXPECT_NE(full->cacheKeys(0), old->cacheKeys(0));
+    // Dropping the sole partial key must resume with the same version seed.
+    initCacheKeys(incremental, tokens(1), 128, config.cacheKeySeed());
+    updateCacheKeys(incremental, ids, 128, config.cacheKeySeed());
+    EXPECT_EQ(full->cacheKeys(0), incremental->cacheKeys(0));
 }
 
 TEST(HybridPoolConfigCreatorTest, V41AllocatesGlobalPoolsOnlyOnSources) {

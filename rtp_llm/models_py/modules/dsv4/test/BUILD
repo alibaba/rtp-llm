@@ -4,6 +4,13 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_bounded_replay_cache",
+    srcs = ["test_bounded_replay_cache.py"],
+    deps = _DSV4_TEST_DEPS,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_silu_mul_bf16",
     srcs = ["test_silu_mul_bf16.py"],
     deps = _DSV4_TEST_DEPS,

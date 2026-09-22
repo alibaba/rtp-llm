@@ -594,10 +594,11 @@ bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegio
         || seq_size % kernel_size != 0) {
         return false;
     }
-    if (cache_config_.cache_specs.size() != kDsv4PoolNum || cache_config_.group_region_names.size() != kDsv4PoolNum
-        || cache_config_.group_types.size() != kDsv4PoolNum
-        || cache_config_.group_kv_block_stride_bytes.size() < kDsv4PoolNum
-        || cache_config_.group_kv_scale_stride_bytes.size() < kDsv4PoolNum
+    const bool   bounded_replay = cache_config_.swaBoundedReplay();
+    const size_t pool_num       = kDsv4PoolNum + (bounded_replay ? 1 : 0);
+    if (cache_config_.cache_specs.size() != pool_num || cache_config_.group_region_names.size() != pool_num
+        || cache_config_.group_types.size() != pool_num || cache_config_.group_kv_block_stride_bytes.size() < pool_num
+        || cache_config_.group_kv_scale_stride_bytes.size() < pool_num
         || cache_config_.layer_region_to_group_id.size() < cache_config_.layer_all_num) {
         return false;
     }
@@ -610,6 +611,11 @@ bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegio
     });
     // Shared-global layouts are eligible for staged copy, but retain their existing memory-pool policy.
     if (v41_layout && !allow_shared_global) {
+        return false;
+    }
+    if (bounded_replay
+        && (!v41_layout || cache_config_.group_region_names[7] != KVCacheRegionName::DECODER_SWA_KV
+            || cache_config_.group_types[7] != CacheGroupType::SWA || group_stride(7) == 0)) {
         return false;
     }
     for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
@@ -629,7 +635,11 @@ bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegio
         if (row.size() < regionIndex(KVCacheRegionName::REGION_COUNT)) {
             return false;
         }
-        if (row[regionIndex(KVCacheRegionName::DEFAULT)] >= 0 || row[regionIndex(KVCacheRegionName::SWA_KV)] != 6) {
+        const bool encoder_swa =
+            row[regionIndex(KVCacheRegionName::SWA_KV)] == 6 && row[regionIndex(KVCacheRegionName::DECODER_SWA_KV)] < 0;
+        const bool decoder_swa = bounded_replay && row[regionIndex(KVCacheRegionName::SWA_KV)] < 0
+                                 && row[regionIndex(KVCacheRegionName::DECODER_SWA_KV)] == 7;
+        if (row[regionIndex(KVCacheRegionName::DEFAULT)] >= 0 || !(encoder_swa || decoder_swa)) {
             return false;
         }
 

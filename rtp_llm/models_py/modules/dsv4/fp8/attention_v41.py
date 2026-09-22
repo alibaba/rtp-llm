@@ -22,6 +22,9 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     INDEXER_KV,
     SWA_KV,
 )
+from rtp_llm.models_py.modules.dsv4.bounded_replay import (
+    enabled as bounded_replay_enabled,
+)
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     FLASH_MLA_SPARSE_Q_CHUNK as _FLASH_MLA_SPARSE_Q_CHUNK,
 )
@@ -32,7 +35,13 @@ from rtp_llm.models_py.modules.dsv4.fp8 import (
     _v41_prefill_candidates as prefill_candidates,
 )
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_global as prefill_global
+from rtp_llm.models_py.modules.dsv4.fp8 import (
+    _v41_prefill_index_plan as prefill_index_plan,
+)
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_indexer as prefill_indexer
+from rtp_llm.models_py.modules.dsv4.fp8 import (
+    _v41_prefill_kv_workspace as prefill_kv_workspace,
+)
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_metadata as prefill_metadata
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_topk as prefill_topk
 from rtp_llm.models_py.modules.dsv4.fp8 import (
@@ -410,6 +419,8 @@ class AttentionV41FP8(AttentionFP8):
         self.compress_ratio = ratio
         self.skip_post_q_norm = True
         self.v41_config = v41_config
+        # Read once: changing this policy in a running cache namespace is unsafe.
+        self.swa_bounded_replay = bounded_replay_enabled() and self.layer_id >= 21
         # Store a plain dict: registering source modules would create cycles.
         self._shared_attention = shared_attention
         shared_attention.setdefault("layers", {})[self.layer_id] = self
@@ -472,6 +483,36 @@ class AttentionV41FP8(AttentionFP8):
                 )
             )
 
+    def can_fuse_prefill_attn_norm_input_quant(self, x, norm_weight) -> bool:
+        # Small eager inputs regressed in the standalone wrapper benchmark.
+        if x.ndim != 2 or x.shape[0] < 32768 or x.shape[1] != 5120:
+            return False
+        linear = getattr(self, "wq_a_wkv", None)
+        if linear is None:
+            return False
+        from rtp_llm.models_py.modules.dsv4._v41_fused_qkv import (
+            is_supported as projection_supported,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8._v41_norm_quant import (
+            is_supported as norm_supported,
+        )
+
+        return norm_supported(x, norm_weight) and projection_supported(
+            linear, x, self.q_norm, self.q_lora_rank
+        )
+
+    def prefill_fused_attn_norm_input_quant(self, x, norm_weight, norm_eps):
+        from rtp_llm.models_py.modules.dsv4.fp8._v41_norm_quant import (
+            rmsnorm_group32_quant,
+        )
+
+        with record_function_range("dsv41.prefill.qkv.fused_attn_norm_input_quant"):
+            result = rmsnorm_group32_quant(x, norm_weight, norm_eps, out_norm=x)
+        if result is None:
+            raise ValueError("V4.1 norm/quant requires the supported prefill gate")
+        norm, quantized, scales = result
+        return norm, (quantized, scales)
+
     def _project_output(self, o, freqs, out=None):
         from rtp_llm.models_py.modules.dsv4.fp8 import _v41_output_projection
 
@@ -523,22 +564,32 @@ class AttentionV41FP8(AttentionFP8):
         if meta is None or meta.slot_mapping is None:
             return
         kv = kv_full.reshape(-1, self.head_dim).to(torch.bfloat16)
+        slots, compaction = meta.slot_mapping, meta.slot_compaction
+        replay_start = getattr(common.cp_ctx, "swa_replay_start", None)
+        if replay_start is not None:
+            if kv.shape[0] != self.window_size:
+                raise ValueError("bounded decoder KV must contain exactly 128 rows")
+            slots = slots[replay_start:]
+            if compaction is not None:
+                compaction = compaction._replace(
+                    compact_slots=compaction.compact_slots[replay_start:]
+                )
         if self._swa_cp_byte_sliced():
             raw = self._pool_raw_u8(SWA_KV)
             if raw is not None:
                 swa_codec.quantize_and_insert_k_cache_cp_byte_sliced(
                     kv,
                     raw,
-                    meta.slot_mapping,
+                    slots,
                     full_entries_per_block=self._swa_entries_per_block(),
                     cp_rank=common.cp_ctx.cp_rank,
                     cp_size=common.cp_ctx.cp_size,
-                    compaction=meta.slot_compaction,
+                    compaction=compaction,
                 )
         else:
             pool = self._pool_view_3d_fp8(SWA_KV)
             if pool is not None:
-                swa_codec.quantize_and_insert_swa_k_cache(kv, pool, meta.slot_mapping)
+                swa_codec.quantize_and_insert_swa_k_cache(kv, pool, slots)
 
     def _v41_prefill_meta_cache_key(self, ratio: int, args, kwargs):
         """Per-forward cache key for the broadcast V4.1 prefill meta build.
@@ -600,6 +651,7 @@ class AttentionV41FP8(AttentionFP8):
         block_tables = getattr(self, "_block_tables_by_type", None)
         return (
             rope_key,
+            getattr(self, "_swa_cache_region", SWA_KV),
             int(x.shape[0]) if x is not None else -1,
             str(x.device) if x is not None else "",
             int(positions) if isinstance(positions, int) else id(positions),
@@ -687,6 +739,7 @@ class AttentionV41FP8(AttentionFP8):
             # the duration of one forward; drop them with the rest of the
             # per-forward shared state.
             self._shared_attention.pop("prefill_chunk_meta", None)
+            self._shared_attention.pop("prefill_kv_workspace", None)
             # The layer-invariant sparse index plan (global/SWA gather indices
             # + per-row lengths) is cached per index-source group and dropped
             # with the rest of the per-forward shared state.
@@ -1419,6 +1472,23 @@ class AttentionV41FP8(AttentionFP8):
     def _swa_prefill_workspace(self, qkv, common):
         """Return BF16 [request, prefix tail + new tokens] for sparse prefill."""
         lengths_host = self._host_prefill_lengths(common)
+        if self.swa_bounded_replay:
+            prefixes = self._host_prefill_prefixes(common)
+            if any(
+                p > 0 and n < self.window_size for p, n in zip(prefixes, lengths_host)
+            ):
+                raise ValueError(
+                    "bounded replay cache reuse must leave 128 fresh tokens"
+                )
+            replay_start = getattr(common.cp_ctx, "swa_replay_start", None)
+            if replay_start is not None:
+                if qkv.kv_full.shape[0] != self.window_size:
+                    raise ValueError("bounded decoder KV must contain exactly 128 rows")
+                return [qkv.kv_full], [prefixes[0] + replay_start]
+            # Non-compacted paths recompute the fresh suffix. They must never
+            # consume decoder state from a previous request's approximate cache.
+            # Native prefix matching leaves at least one complete SWA window.
+            return list(qkv.kv_full.split(lengths_host)), prefixes
         if not common.any_cont:
             return list(qkv.kv_full.split(lengths_host)), [0] * len(lengths_host)
         buf = self._swa_prefill_concat(qkv, common)
@@ -1506,7 +1576,11 @@ class AttentionV41FP8(AttentionFP8):
                     else common.input_lengths
                 ).long()
                 prefixes = common.prefix_lengths.long()
-                tails = prefixes.clamp(max=self.window_size - 1)
+                tails = (
+                    torch.zeros_like(prefixes)
+                    if self.swa_bounded_replay
+                    else prefixes.clamp(max=self.window_size - 1)
+                )
                 sizes = (prefixes + lengths) // self.compress_ratio
                 chunk_sizes = sizes + lengths + tails
                 offsets_d = chunk_sizes.cumsum(0) - chunk_sizes
@@ -1521,6 +1595,10 @@ class AttentionV41FP8(AttentionFP8):
 
     def _forward_prefill(self, x, positions, shared_input_quant=None):
         self._begin_forward()
+        if self.swa_bounded_replay and self.layer_id == 21:
+            # L20 has exact cached SWA; decoder replay starts a new SWA domain.
+            self._shared_attention.pop("prefill_chunk_meta", None)
+            self._shared_attention.pop("prefill_index_plan", None)
         common = self._prefill_common_setup(x, positions)
         qkv = self._prefill_compute_qkv(
             x, common, shared_input_quant=shared_input_quant
@@ -1653,9 +1731,6 @@ class AttentionV41FP8(AttentionFP8):
         offsets, ns, swstart = self._prefill_chunk_meta(
             globals_by_req, swa, swa_starts, req_ids, x.device, common=common
         )
-        chunks = []
-        for (g, _), sw in zip(globals_by_req, swa):
-            chunks.extend((g, sw))
         # Cross-layer index plan cache: within one index-source group every
         # layer consumes the same ``selected`` tensor against the same
         # per-forward positions / chunk offsets / SWA starts, so the sparse
@@ -1668,25 +1743,37 @@ class AttentionV41FP8(AttentionFP8):
         if plan is not None and plan[0] is selected:
             indices, lens = plan[1], plan[2]
         else:
-            swpos = (
-                positions[:, None]
-                - self.window_size
-                + 1
-                + torch.arange(self.window_size, device=x.device)[None]
+            fused_plan = prefill_index_plan.try_build_index_plan(
+                selected, positions, offsets, ns, swstart, self.window_size
             )
-            swidx = torch.where(swpos >= swstart, offsets + ns + swpos - swstart, -1)
-            global_idx = torch.where(selected >= 0, offsets + selected, -1)
-            indices = torch.cat((global_idx, swidx), -1).int()
-            # FlashMLA's length bounds count a compact valid prefix.
-            indices = indices.gather(1, torch.argsort(indices < 0, dim=-1, stable=True))
-            lens = (indices >= 0).sum(-1).int()
-            if indices.shape[1] % 64:
-                indices = F.pad(indices, (0, 64 - indices.shape[1] % 64), value=-1)
+            if fused_plan is not None:
+                indices, lens = fused_plan
+            else:
+                swpos = (
+                    positions[:, None]
+                    - self.window_size
+                    + 1
+                    + torch.arange(self.window_size, device=x.device)[None]
+                )
+                swidx = torch.where(
+                    swpos >= swstart, offsets + ns + swpos - swstart, -1
+                )
+                global_idx = torch.where(selected >= 0, offsets + selected, -1)
+                indices = torch.cat((global_idx, swidx), -1).int()
+                # FlashMLA's length bounds count a compact valid prefix.
+                indices = indices.gather(
+                    1, torch.argsort(indices < 0, dim=-1, stable=True)
+                )
+                lens = (indices >= 0).sum(-1).int()
+                if indices.shape[1] % 64:
+                    indices = F.pad(indices, (0, 64 - indices.shape[1] % 64), value=-1)
             self._shared_attention["prefill_index_plan"] = (selected, indices, lens)
         return self._prefill_sparse_attention(
             qkv,
             common,
-            kv=torch.cat(chunks).unsqueeze(1),
+            kv=prefill_kv_workspace.combine_kv(
+                self._shared_attention, globals_by_req, swa
+            ).unsqueeze(1),
             indices=indices.unsqueeze(1),
             topk_length=lens,
             profile_name="dsv41.prefill.shared_global",

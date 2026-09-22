@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 import torch
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import cached_swa_region
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from rtp_llm.models_py.modules.dsv4.fp8.attention import PrefillMeta
@@ -49,6 +50,7 @@ def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> 
             "prefill_sparse_plans",
             "prefill_score_bounds",
             "prefill_chunk_meta",
+            "prefill_kv_workspace",
             "prefill_index_plan",
             "prefill_meta_common",
         ):
@@ -57,7 +59,11 @@ def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> 
 
     remaining = [attn for index, attn in shared["layers"].items() if index > layer_id]
     for key, source_attr, dependent_keys in (
-        ("global", "kv_source_layer_id", ("prefill_chunk_meta",)),
+        (
+            "global",
+            "kv_source_layer_id",
+            ("prefill_chunk_meta", "prefill_kv_workspace"),
+        ),
         ("topk", "index_source_layer_id", ("prefill_index_plan",)),
     ):
         values = shared.get(key, {})
@@ -122,23 +128,26 @@ def build_and_propagate_prefill_meta_fp8(
     position_ids = _flat_optional(position_ids)
     req_id_per_token = _flat_optional(req_id_per_token)
 
-    representatives: Dict[int, Any] = {}
+    def bucket(attn):
+        return (
+            int(attn.compress_ratio),
+            cached_swa_region(v4, kv_cache, attn.layer_id),
+        )
+
+    representatives: Dict[tuple, Any] = {}
     for layer in v4.layers:
         attn = getattr(layer, "attn", None)
         if attn is not None:
-            representatives.setdefault(int(attn.compress_ratio), attn)
+            representatives.setdefault(bucket(attn), attn)
 
     # SWA-only owns the superset metadata (common + SWA Group-1 + Group-2),
     # so build it first whenever the model has one. Compressed-only models use
     # their first ratio as the common source; later ratios still reuse the
     # ratio-independent tensors and SWA write metadata.
-    ordered_ratios = list(representatives)
-    if 0 in representatives:
-        ordered_ratios.remove(0)
-        ordered_ratios.insert(0, 0)
+    ordered_ratios = sorted(representatives, key=lambda key: key[0] != 0)
 
-    meta_by_ratio: Dict[int, "PrefillMeta"] = {}
-    reusable_common: Optional["PrefillMeta"] = None
+    meta_by_ratio: Dict[tuple, "PrefillMeta"] = {}
+    reusable_common: Dict[int, "PrefillMeta"] = {}
     reusable_freqs_by_rope_kind: Dict[bool, "PrefillMeta"] = {}
     # V4.1 buckets (ratios 0/2/1) build through ``AttentionV41FP8``'s SWA
     # planner override, which caches the built meta per (rope kind, input
@@ -152,14 +161,15 @@ def build_and_propagate_prefill_meta_fp8(
         first_shared.pop("prefill_meta_common", None)
     try:
         with record_function_range("dsv4.fp8.prefill_meta.build_all_ratios"):
-            for r in ordered_ratios:
-                attn = representatives[r]
+            for key in ordered_ratios:
+                r, swa_region = key
+                attn = representatives[key]
                 compressed_rope = r != 0
                 from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
 
                 with bind_attn_cache(attn, kv_cache, block_tables_by_type):
                     with record_function_range(f"dsv4.fp8.prefill_meta.ratio_{r}"):
-                        meta_by_ratio[r] = attn._build_shared_prefill_meta(
+                        meta_by_ratio[key] = attn._build_shared_prefill_meta(
                             x_first_layer,
                             start_pos,
                             sp_per_req=sp_per_req,
@@ -170,15 +180,14 @@ def build_and_propagate_prefill_meta_fp8(
                             position_ids=position_ids,
                             req_id_per_token=req_id_per_token,
                             max_seqlen_q=max_seqlen_q,
-                            reuse_common_meta=reusable_common,
+                            reuse_common_meta=reusable_common.get(swa_region),
                             reuse_freqs_meta=reusable_freqs_by_rope_kind.get(
                                 compressed_rope
                             ),
                         )._replace(workspace=workspace)
-                if reusable_common is None:
-                    reusable_common = meta_by_ratio[r]
+                reusable_common.setdefault(swa_region, meta_by_ratio[key])
                 reusable_freqs_by_rope_kind.setdefault(
-                    compressed_rope, meta_by_ratio[r]
+                    compressed_rope, meta_by_ratio[key]
                 )
 
         with record_function_range("dsv4.fp8.prefill_meta.propagate"):
@@ -190,9 +199,7 @@ def build_and_propagate_prefill_meta_fp8(
                 # be bound per-layer (not just on the rep). Cheap idempotent
                 # is-None set.
                 attn._ensure_freqs_cis_bound()
-                attn._set_prefill_meta_shared(
-                    meta_by_ratio.get(int(attn.compress_ratio))
-                )
+                attn._set_prefill_meta_shared(meta_by_ratio.get(bucket(attn)))
     except BaseException:
         clear_prefill_meta_shared_fp8(v4)
         raise

@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
+#include <algorithm>
 #include <cstring>
 #include <sstream>
 
@@ -94,7 +95,10 @@ std::vector<int32_t> CompleteTokenIds::imageCacheIdentity(int begin, int count) 
     return result;
 }
 
-bool CompleteTokenIds::isValidReuseLength(int reuse_length) const {
+bool CompleteTokenIds::isValidReuseLength(int reuse_length, int min_fresh_tokens) const {
+    if (min_fresh_tokens > 0 && reuse_length > std::max(0, seqLength() - min_fresh_tokens)) {
+        return false;
+    }
     if (!v41_inputs_) {
         return true;
     }
