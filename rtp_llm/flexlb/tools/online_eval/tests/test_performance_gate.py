@@ -63,6 +63,12 @@ class PerformanceGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = report(d, e)
             self.assertTrue((path / "report.html").is_file())
+            spec = json.loads((path / "report-spec.json").read_text())
+            self.assertEqual(len(spec["panels"]), 3)
+            for panel in spec["panels"]:
+                self.assertTrue(panel["overlay"])
+                self.assertTrue(panel["series"][0]["points"])
+                self.assertIn(panel["series"][0]["axis"], panel["axes"])
             self.assertEqual(
                 analyze(
                     json.loads((Path(d) / "performance-gate-evidence.json").read_text())

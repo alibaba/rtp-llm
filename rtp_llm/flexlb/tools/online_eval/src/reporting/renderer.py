@@ -129,7 +129,7 @@ def render_context(spec):
         rendered.append(f'<article class="context-card"><h3>{title}</h3><pre>{data}</pre></article>')
     if not rendered:
         return ""
-    return '<section class="report-context"><h2>运行信息</h2><div class="context-grid">' + "".join(rendered) + "</div></section>"
+    return '<details class="report-context"><summary>运行信息（制品与配置）</summary><div class="context-grid">' + "".join(rendered) + "</div></details>"
 
 
 def render_sections(sections):

@@ -356,7 +356,16 @@ def report(directory, evidence, result=None):
         title="Master 性能绝对门禁",
         subtitle=result["verdict"],
         timeAxis=dict(min=0, max=evidence.get("criteria", {}).get("measure_s", 1)),
-        panels=[dict(id="performance", title="测量窗口", series=curves)],
+        panels=[
+            dict(
+                id=curve["name"],
+                title=title,
+                overlay=True,
+                axes={curve["axis"]: dict(title=curve["unit"])},
+                series=[curve],
+            )
+            for curve, title in zip(curves, ["输入 TPS", "输出 TPS", "未完成请求数"])
+        ],
         sections=[
             table(
                 "绝对标准",

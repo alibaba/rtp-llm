@@ -68,11 +68,16 @@ def compare(left, right, output, allowed=()):
     for label, e, r in [("left", left, a), ("right", right, b)]:
         path = report(output / label, e, r)
         spec = json.loads((path / "report-spec.json").read_text())
-        panel = copy.deepcopy(spec["panels"][0])
-        for s in panel["series"]:
-            s["name"] = label + " · " + s["name"]
-            s["dash"] = [6, 4] if label == "left" else []
-        panels.extend(panel["series"])
+        for index, source_panel in enumerate(spec["panels"]):
+            panel = copy.deepcopy(source_panel)
+            for series in panel["series"]:
+                series["name"] = label + " · " + series["name"]
+                series["dash"] = [6, 4] if label == "left" else []
+            if label == "left":
+                panel["caption"] = "left 虚线 / right 实线；时间按各自测量起点对齐"
+                panels.append(panel)
+            else:
+                panels[index]["series"].extend(panel["series"])
         runs[label] = spec["run_meta"]
     rows = []
     for key in sorted(a["metrics"].keys() | b["metrics"].keys()):
@@ -88,7 +93,7 @@ def compare(left, right, output, allowed=()):
         dict(
             title="Master 性能 A/B 观察",
             subtitle=f"left {a['verdict']} / right {b['verdict']} · controls {aligned['status']}",
-            panels=[dict(id="overlay", title="按测量起点对齐", series=panels)],
+            panels=panels,
             timeAxis=dict(
                 min=0,
                 max=max(left["criteria"]["measure_s"], right["criteria"]["measure_s"]),
