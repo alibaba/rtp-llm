@@ -604,16 +604,18 @@ LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& 
                         request_log_tag.c_str(),
                         ErrorCodeToString(error_info.code()).c_str(),
                         error_msg.c_str());
+    const std::string public_msg =
+        error_info.code() == ErrorCode::DEADLINE_EXCEEDED ? "Deadline Exceeded" : error_msg;
     auto           grpc_error_code = transErrorCodeToGrpc(error_info.code());
     ErrorDetailsPB error_details;
     error_details.set_error_code(static_cast<int>(error_info.code()));
-    error_details.set_error_message(error_msg);
+    error_details.set_error_message(public_msg);
     std::string error_details_serialized;
     if (error_details.SerializeToString(&error_details_serialized)) {
-        return grpc::Status(grpc_error_code, error_msg, error_details_serialized);
+        return grpc::Status(grpc_error_code, public_msg, error_details_serialized);
     } else {
         RTP_LLM_LOG_WARNING("%s error details serialize to string failed", request_log_tag.c_str());
-        return grpc::Status(grpc_error_code, error_msg);
+        return grpc::Status(grpc_error_code, public_msg);
     }
 }
 
