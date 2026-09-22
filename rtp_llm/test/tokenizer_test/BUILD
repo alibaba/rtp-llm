@@ -7,6 +7,12 @@ filegroup(
 )
 
 py_test(
+    name = "bert_tokenizer_casing_test",
+    srcs = ["bert_tokenizer_casing_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "chatglm3_tokenizer_test",
     srcs = [
         "chatglm3_tokenizer_test.py"
