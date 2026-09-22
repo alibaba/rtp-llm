@@ -39,6 +39,8 @@ def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> 
     """
     if layer_id is None:
         for key in (
+            "ced_swa_start",
+            "ced_indexer_layout",
             "global",
             "topk",
             "candidates",

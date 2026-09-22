@@ -1203,7 +1203,20 @@ class AttentionV41FP8(AttentionFP8):
             q = self._lin(self.index_wq, qr).view(
                 -1, self.index_n_heads, self.index_head_dim
             )
-            raw_weights = F.linear(x, self.index_weights)
+            ced_layout = shared.get("ced_indexer_layout")
+            if ced_layout is None:
+                raw_weights = F.linear(x, self.index_weights)
+            else:
+                # Keep this narrow GEMM's cuBLAS reduction/rounding identical to
+                # full prefill. A one-ULP BF16 head-weight change can change
+                # Top-K membership. This temporary is released before scoring.
+                original_rows, original_indices = ced_layout
+                full_x = x.new_zeros((original_rows, x.shape[-1]))
+                full_x.index_copy_(0, original_indices, x)
+                raw_weights = F.linear(full_x, self.index_weights).index_select(
+                    0, original_indices
+                )
+                del full_x
             fused_indexer = isinstance(
                 globals_by_req[0][1], prefill_indexer.PrefillIndexerKeys
             )
@@ -1440,6 +1453,13 @@ class AttentionV41FP8(AttentionFP8):
 
     def _swa_prefill_workspace(self, qkv, common):
         """Return BF16 [request, prefix tail + new tokens] for sparse prefill."""
+        ced_start = self._shared_attention.get("ced_swa_start")
+        if ced_start is not None:
+            # CED replay has absolute positions but no computed SWA prefix.
+            # Its leading halo is discarded by the generation-only caller;
+            # reading historical pool entries here would contaminate it.
+            assert common.batch_size == 1 and self.layer_id > 20
+            return [qkv.kv_full], [ced_start]
         lengths_host = self._host_prefill_lengths(common)
         if not common.any_cont:
             return list(qkv.kv_full.split(lengths_host)), [0] * len(lengths_host)

@@ -114,6 +114,13 @@ py_test(
 )
 
 py_test(
+    name = "test_ced",
+    srcs = ["test_ced.py"],
+    deps = _DSV4_TEST_DEPS,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_cp_topk_idxs_align",
     srcs = ["test_cp_topk_idxs_align.py"],
     deps = _DSV4_TEST_DEPS,

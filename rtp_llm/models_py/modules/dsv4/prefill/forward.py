@@ -112,6 +112,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     release_v41_prefill_shared,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import build_block_tables_batched
+from rtp_llm.models_py.modules.dsv4.prefill.ced import CEDTail
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import (
     PrefillWorkspace,
     prefill_q_workspace_rows,
@@ -539,7 +540,34 @@ def forward_layers(
             )
 
     layer_forward_range = _profiler.make_layer_forward_range()
+    ced_tail = None
+    original_cp_ctx = cp_ctx
     try:
+        if _env_flag("DSV41_EXPERIMENTAL_CED"):
+            # Python currently cannot observe the engine's all-logits/all-hidden
+            # request flags. This experiment requires a dedicated generation-only
+            # endpoint and disabled historical prefix reuse.
+            if (
+                os.environ.get("DSV41_CED_GENERATION_ONLY") != "1"
+                or os.environ.get("DSV41_CED_LOCAL_ONLY") != "1"
+                or os.environ.get("REUSE_CACHE") != "0"
+                or _env_flag("ENABLE_MEMORY_CACHE")
+                or _env_flag("ENABLE_GPU_PREFIX_TREE")
+            ):
+                raise RuntimeError(
+                    "Experimental CED requires DSV41_CED_GENERATION_ONLY=1, "
+                    "DSV41_CED_LOCAL_ONLY=1, "
+                    "REUSE_CACHE=0, and disabled memory/prefix-tree caches"
+                )
+            if shared_prefill is not None and not _rt_on and not _fwd_dbg.enabled():
+                ced_tail = CEDTail.create(
+                    v4,
+                    cp_ctx,
+                    attn_inputs,
+                    prepare_hidden_fn=prepare_hidden_fn,
+                    cache_store_active=write_cache_store_impl is not None,
+                    allow_local_cache_store=True,
+                )
         with record_range_ctx():
             # Two callable chains intentionally coexist:
             #   * normal ``Block.forward`` keeps debug checks and fallback layouts;
@@ -552,6 +580,33 @@ def forward_layers(
                 else v4.layers
             )
             for layer_idx, layer_call in enumerate(layer_calls):
+                if layer_idx == 21 and ced_tail is not None:
+                    with _profiler.record_function_range("dsv41.ced.compact"):
+                        h, input_ids = ced_tail.compact(
+                            v4, h, input_ids, shared_prefill
+                        )
+                        cp_ctx = ced_tail.context
+                        positions = cp_ctx.global_positions
+                        cu_seqlens = ced_tail.cu_seqlens
+                        v4._propagate_cp_ctx(cp_ctx)
+                        shared_prefill["ced_swa_start"] = cp_ctx.prefix_length
+                        clear_prefill_meta_shared_fp8(v4)
+                        build_and_propagate_prefill_meta_fp8(
+                            v4,
+                            h,
+                            cp_ctx.prefix_length,
+                            kv_cache,
+                            block_tables_by_type,
+                            sp_per_req=cp_ctx.prefix_lengths,
+                            cu_seqlens=cu_seqlens,
+                            batch_size=1,
+                            input_lengths=cu_seqlens[1:],
+                            prefix_lengths=cp_ctx.prefix_lengths,
+                            position_ids=positions,
+                            req_id_per_token=cp_ctx.req_id_per_token,
+                            max_seqlen_q=cp_ctx.chunk_length,
+                            workspace=ws,
+                        )
                 with layer_forward_range(layer_idx):
                     h = layer_call(
                         h,  # [T, hc, dim]
@@ -613,12 +668,16 @@ def forward_layers(
             clear_prefill_meta_shared_fp8(v4)
         if shared_prefill is not None:
             release_v41_prefill_shared(shared_prefill)
+        if ced_tail is not None:
+            v4._propagate_cp_ctx(original_cp_ctx)
 
     if v4._mtp_hidden_buffer is not None:
         if capture_aux:
             # DSpARK mode: the buffer already holds this forward's aux rows
             # (written per selected layer above); only account for them.
             v4._note_aux_hidden_rows(h.size(0), is_cuda_graph=False)
+            if ced_tail is not None:
+                ced_tail.restore_aux(v4)
         else:
             _pre_hc_flat = h.flatten(-2)
             v4._write_mtp_hidden_buffer(_pre_hc_flat, is_cuda_graph=False)
@@ -710,6 +769,9 @@ def forward_layers(
     # forward (which runs right after the main model on a near-full card) can
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
+    if ced_tail is not None:
+        with _profiler.record_function_range("dsv41.ced.restore"):
+            h = ced_tail.restore_rows(h)
     return h  # [T, dim]
 
 
