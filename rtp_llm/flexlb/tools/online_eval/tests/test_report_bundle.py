@@ -21,6 +21,21 @@ from workload.report import write_report
 
 
 class ReportBundleTest(unittest.TestCase):
+    def test_overlay_preserves_old_new_line_styles(self):
+        html = render({
+            "title": "A/B",
+            "panels": [{
+                "id": "ab", "title": "A/B", "overlay": True,
+                "axes": {"ratio": {"title": "命中率"}},
+                "series": [
+                    {"name": "old · hit", "axis": "ratio", "color": "#123456", "dash": [6, 4], "points": [{"x": 0, "y": 0.9}]},
+                    {"name": "new · hit", "axis": "ratio", "color": "#654321", "dash": [], "points": [{"x": 0, "y": 0.9}]},
+                ],
+            }],
+        })
+        self.assertIn('"dash": [6, 4]', html)
+        self.assertIn('"dash": []', html)
+
     def test_relocated_bundle_renders_without_evidence_or_mutation(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
