@@ -1,0 +1,39 @@
+{
+  "version": 2,
+  "block_size": 512,
+  "count": 587711,
+  "realism": "EMPIRICAL_PREFIX_STRUCTURE",
+  "tail": "BLOCK_ALIGNED_LOSSY_TOKENS",
+  "arrival": "TRUE_TIMESTAMPS_PACED_BY_CLIENT",
+  "provenance": {
+    "missing_pod_indices": [
+      7,
+      13,
+      15
+    ],
+    "source_start": 1789997160021,
+    "source_end": 1790007899990,
+    "expected_pods": 20,
+    "source_pods": 17,
+    "v1_sha256": "ffd36e4dfae3974c069582a1958cb12368e6a5ed8e41910f1ea920026b3e3ee8",
+    "fit_report_sha256": "85ee368cfab94805dfdf7d64b7569ba832356cb4bf54f6c7887238e6170fd513"
+  },
+  "token_adjustment": {
+    "original_tokens": 41582281204,
+    "aligned_tokens": 41437407232,
+    "removed_tokens": 147921443,
+    "added_tokens": 3047471,
+    "short_requests": 10362,
+    "relative_change": -0.003484031366371114
+  },
+  "allocation_bitmap": "reserve discarded v1 partial-block labels; no tail lengths retained",
+  "bytes": 2525748,
+  "sha256": "241ac71c5bde834afd9dc656fefae6462c6f99767a203b54bba21059e9948f04",
+  "manifest_schema_version": 1,
+  "codec": {
+    "name": "prefix_lineage",
+    "version": 2
+  },
+  "capture_source": "frontend",
+  "capture_deployment": "na130_L20C_4TP"
+}

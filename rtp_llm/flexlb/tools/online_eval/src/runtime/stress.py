@@ -19,7 +19,8 @@ from runtime.harness import (API_JAR, FLEXLB_DIR, MOCK_JAR, TOOL_DIR, ClientOps,
                              http_get_json, http_post_json, port_in_use,
                              resolve_java21, wait_for)
 from runtime.load_client import LOAD_CLIENT_ENV_VARS
-from traffic.traffic_source import materialize, sha256_file
+from traffic.catalog import catalog, verify_model
+from traffic.traffic_source import materialize
 
 # Producer-side whitelist from the retired stress launcher. Prometheus stores
 # all series exposed by these families; no log or API samples become curves.
@@ -74,7 +75,10 @@ def parse_args(argv=None):
     p.add_argument("--performance", type=Path,
                    default=Path(os.environ["PERFORMANCE_FILE"]) if os.environ.get("PERFORMANCE_FILE")
                    else TOOL_DIR / "data/performance/dsv4_flash_performance.fast_ab.json")
-    p.add_argument("--traffic-source-spec", type=Path)
+    traffic = p.add_mutually_exclusive_group()
+    traffic.add_argument("--traffic-source-spec", type=Path)
+    traffic.add_argument("--traffic-model", choices=tuple(catalog()["models"]),
+                         help="versioned trace model registered in data/catalog.json")
     p.add_argument("--traffic-output-tokens", type=int, default=420)
     p.add_argument("--limit", type=int, default=1000)
     p.add_argument("--send-mode", choices=("replay", "uniform"))
@@ -161,12 +165,10 @@ def _traffic(a, output: Path):
         spec = json.loads(a.traffic_source_spec.read_text())
         base = a.traffic_source_spec.resolve().parent
     else:
-        from traffic.catalog import model_entry
-        model = model_entry()[1]["model"]
-        manifest = json.loads(model.with_suffix(".manifest.json").read_text())
-        if model.stat().st_size != manifest["bytes"] or sha256_file(model) != manifest["sha256"]:
-            raise ValueError("lineage model differs from its pinned manifest")
-        spec = dict(kind="trace", model="prefix_lineage", version="2", parameters=dict(
+        selected = a.traffic_model or catalog()["default_trace"]
+        entry, paths, manifest, _ = verify_model(selected)
+        model = paths["model"]
+        spec = dict(kind="trace", model=entry["codec"], version=str(entry["codec_version"]), parameters=dict(
             path=model.name, sha256=manifest["sha256"], count=manifest["count"],
             output_tokens=a.traffic_output_tokens, priority=50))
         base = model.parent

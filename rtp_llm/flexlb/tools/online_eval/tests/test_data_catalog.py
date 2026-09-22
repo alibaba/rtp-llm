@@ -36,6 +36,7 @@ class DataCatalogTest(unittest.TestCase):
                     data_catalog.verify_default_model()
 
     def test_data_and_config_classification_and_binary_admission(self):
+        from scenario.loader import load_document
         config_roots = {path.name for path in (ROOT / "config").iterdir()}
         self.assertEqual({"README.md", "load_client_env.txt", "mode_profiles.yaml",
                           "perf_presets", "report_views", "scale_cases", "scenarios", "suites.yaml"},
@@ -70,15 +71,30 @@ class DataCatalogTest(unittest.TestCase):
             ["git", "ls-files", "--cached", "--", "data/traffic_models/*.xz"],
             cwd=ROOT, text=True).splitlines()
         self.assertEqual(listed, set(tracked), "tracked captures require catalog registration")
-        for model in listed:
-            name = Path(model).name
-            matching = [path for path in (ROOT / "config/scale_cases").glob("*.yaml")
-                        if name in path.read_text(encoding="utf-8")]
-            self.assertTrue(matching, f"{name}: no consuming scale case")
-            digest = json.loads((ROOT / model).with_suffix(".manifest.json").read_text())["sha256"]
-            for path in matching:
-                self.assertIn(digest, path.read_text(encoding="utf-8"),
-                              f"{path}: model path is not paired with its pinned SHA256")
+
+        def sources(node):
+            if isinstance(node, dict):
+                if node.get("kind") == "trace" and isinstance(node.get("parameters"), dict):
+                    yield node
+                for value in node.values():
+                    yield from sources(value)
+            elif isinstance(node, list):
+                for value in node:
+                    yield from sources(value)
+
+        for case in (ROOT / "config/scale_cases").glob("*.yaml"):
+            for source in sources(load_document(case)):
+                params = source["parameters"]
+                model_path = (case.parent / params["path"]).resolve()
+                relative = str(model_path.relative_to(ROOT)) if model_path.is_relative_to(ROOT) else None
+                self.assertIn(relative, listed, f"{case}: trace model is not registered")
+                manifest = json.loads(model_path.with_suffix(".manifest.json").read_text())
+                self.assertEqual(manifest["sha256"], params["sha256"],
+                                 f"{case}: trace SHA differs from its manifest")
+                self.assertEqual(manifest["count"], params["count"],
+                                 f"{case}: trace count differs from its manifest")
+        # Every catalog entry is selectable by run_stress; scale cases may also
+        # pin a model, but admitting a capture does not require a new case.
 
     def test_unregistered_capture_is_ignored_at_stage_boundary(self):
         candidate = ROOT / "data/traffic_models/prefix_lineage_v2_unregistered.xz"
@@ -100,6 +116,22 @@ class DataCatalogTest(unittest.TestCase):
                              hashlib.sha256(path.read_bytes()).hexdigest())
             manifest = json.loads(data_catalog.model_entry()[1]["manifest"].read_text())
             self.assertEqual(manifest["provenance"], semantics["calibration"]["provenance"])
+
+    def test_catalog_models_are_selectable_and_materialize(self):
+        from runtime import stress
+        from traffic.traffic_source import validate_plan
+
+        with tempfile.TemporaryDirectory() as directory:
+            for name in data_catalog.catalog()["models"]:
+                with self.subTest(name=name):
+                    args = stress.parse_args(["--dry-run", "--traffic-model", name,
+                                              "--limit", "8"])
+                    self.assertEqual(name, args.traffic_model)
+                    output = Path(directory) / f"{name}.jsonl"
+                    stress._traffic(args, output)
+                    self.assertEqual(8, validate_plan(output))
+                    evidence = json.loads(output.with_suffix(".manifest.json").read_text())
+                    self.assertEqual(8, evidence["request_count"])
 
 
 if __name__ == "__main__":

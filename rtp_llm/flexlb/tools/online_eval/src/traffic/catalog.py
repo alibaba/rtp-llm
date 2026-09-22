@@ -54,6 +54,13 @@ def verify_model(name):
         raise ValueError(f"{name}: manifest schema/codec identity disagrees")
     if manifest.get("capture_source") != entry.get("source"):
         raise ValueError(f"{name}: capture source disagrees with manifest")
+    from traffic.prefix_lineage import decode
+    metadata, events = decode(raw)
+    for field in ("version", "block_size", "count", "provenance"):
+        if manifest.get(field) != metadata.get(field):
+            raise ValueError(f"{name}: manifest {field} disagrees with model contents")
+    if manifest["count"] != len(events):
+        raise ValueError(f"{name}: event count disagrees with manifest")
     if paths["manifest"].name != paths["model"].stem + ".manifest.json":
         raise ValueError(f"{name}: model and manifest must share a prefix")
     if not digest.startswith(paths["model"].stem.rsplit("_", 1)[-1]):

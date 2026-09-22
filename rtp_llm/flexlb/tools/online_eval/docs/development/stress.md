@@ -20,6 +20,11 @@ python3 tools/online_eval/scripts/commands/run_stress.py \
 及其 manifest，Java 只读取这份临时计划。模型有 141113 个事件、原始跨度约
 900 秒；`--replay-speed 4` 对应全量模型平均约 627 名义 QPS。改变目标 QPS 时按下式重算：
 
+要选用其他已登记的采集模型，在同一命令中加入 `--traffic-model prefix_lineage_v2_0fcf5c31`
+（白天）或 `--traffic-model prefix_lineage_v2_241ac71c`（夜间）。无需增加 case；
+`--traffic-model` 与 `--traffic-source-spec` 互斥。默认仍使用 0921 固定模型。
+新采集源尚未标定门禁，切换数据后应记录模型 SHA 和发送节奏，不直接沿用旧基线结论。
+
 ```text
 speed = round(target_qps × (max(valid_ts)-min(valid_ts)) / valid_request_count)
 ```
