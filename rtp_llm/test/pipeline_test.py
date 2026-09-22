@@ -2,14 +2,18 @@ import unittest
 from typing import List
 
 import torch
-
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import DecodingState
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
 from rtp_llm.ops import PDSepConfig, SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
-from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    BatchedTerminalOutputs,
+    GenerateOutput,
+    GenerateOutputs,
+    GenerateResponse,
+)
 
 
 class MockTokenizer(BaseTokenizer):
@@ -57,6 +61,46 @@ class MockTokenizer(BaseTokenizer):
 
 
 class PipelineDecodeTest(unittest.TestCase):
+
+    def test_batched_terminal_matches_legacy_without_materializing_rows(self):
+        from unittest.mock import patch
+
+        from rtp_llm.frontend.frontend_worker import FrontendWorker
+
+        ids = torch.tensor([[[1, 2, 0]], [[3, 4, 5]], [[0, 0, 0]]], dtype=torch.int32)
+        self.pipeline._special_tokens.eos_token_id = 0
+        legacy = GenerateOutputs(
+            [GenerateOutput(output_ids=row, finished=True) for row in ids]
+        )
+        batch = GenerateOutputs(BatchedTerminalOutputs(ids, torch.tensor([[9]])))
+        for ignore_eos in [False, True]:
+            for print_stop_words in [False, True]:
+                config = GenerateConfig(
+                    num_beams=3,
+                    num_return_sequences=3,
+                    aux_info=False,
+                    ignore_eos=ignore_eos,
+                    print_stop_words=print_stop_words,
+                    out_prefix="prefix:",
+                    stop_words_str=["E"],
+                    stop_words_list=[[2]],
+                )
+                args = (config, legacy, ["E"], ["E"], [[2]], [[2]], [])
+                expected = self.pipeline.decode_non_incremental_tokens(*args)
+                with patch.object(
+                    BatchedTerminalOutputs,
+                    "__getitem__",
+                    side_effect=AssertionError("materialized"),
+                ):
+                    actual = self.pipeline.decode_non_incremental_tokens(
+                        config, batch, *args[2:]
+                    )
+                    response = FrontendWorker.__new__(
+                        FrontendWorker
+                    )._format_response_new(GenerateResponse(batch, actual[0]), config)
+                self.assertEqual(expected, actual)
+                self.assertTrue(response.finished)
+                self.assertEqual(response.response, expected[0])
 
     def setUp(self):
         """Set up test fixtures"""
