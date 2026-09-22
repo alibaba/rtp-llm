@@ -36,4 +36,14 @@ class JavaLoadClientStreamCompletionTest {
         assertEquals("business", result.errorKind);
         assertTrue(result.error.contains("8211"));
     }
+    @Test void observedLengthComesFromTerminalAuxNotRequestedLength() {
+        var terminal = frame(true).toBuilder().setFlattenOutput(
+                EngineRpcService.FlattenOutputPB.newBuilder().addFinished(true)
+                    .addAuxInfo(EngineRpcService.AuxInfoPB.newBuilder().setOutputLen(3))).build();
+        var r = consume(frame(false), terminal);
+        r.outputLen = 100;
+        assertEquals(3, r.observedOutputTokens);
+        assertEquals(3, JavaLoadClient.perRequestNode(r).get("observed_output_tokens").asInt());
+        assertFalse(JavaLoadClient.perRequestNode(consume(frame(true))).has("observed_output_tokens"));
+    }
 }

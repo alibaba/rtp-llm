@@ -30,6 +30,7 @@ MASTER_METRIC_WHITELIST = (
     "flexlb_app_engine_balancing_master_dispatch_reason_total",
     "flexlb_app_engine_balancing_master_batch_size", "flexlb_auto_tpm_request_count",
     "flexlb_app_engine_balancing_master_all_qps",
+    "flexlb_auto_tpm_schedule_latency_ms",
     "flexlb_app_flexlb_scheduler_inflight_size",
     "flexlb_app_flexlb_inflight_batch_count",
     "flexlb_app_flexlb_inflight_request_count",

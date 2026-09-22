@@ -20,6 +20,17 @@ from monitoring.telemetry import http_text, shared_samples_since
 
 
 class ContractTest(unittest.TestCase):
+    def test_schedule_response_query_uses_current_api_timer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = PrometheusSession(tmp, {"master": "http://unused/prometheus"})
+            session.started = time.time() - 1
+            with patch.object(session, "api", return_value={"result": [{"metric": {}, "values": []}]}):
+                session.archive()
+            queries = json.loads((Path(tmp) / "queries.json").read_text())["queries"]
+            self.assertNotIn("master/completions_qps", queries)
+            self.assertEqual(queries["master/schedule_responses_qps"]["promql"],
+                'sum by (result) (rate(flexlb_auto_tpm_schedule_latency_ms_seconds_count{job="master"}[10000ms]))')
+
     def test_running_is_execution_not_unfinished_tasks(self):
         values = dict.fromkeys(ENGINE_FIELDS, 10)
         values.update(running=2, waiting=128)

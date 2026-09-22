@@ -379,9 +379,12 @@ class PrometheusSession:
                 for label, metric, group in (
                     ("arrivals_qps", "flexlb_auto_tpm_request_count_total", "priority"),
                     (
-                        "completions_qps",
-                        "flexlb_app_engine_balancing_master_all_qps_total",
-                        "code",
+                        # Current Schedule API always records this timer; the legacy
+                        # balancing counter requires a populated BalanceContext response.
+                        # This measures scheduling responses, not inference completion.
+                        "schedule_responses_qps",
+                        "flexlb_auto_tpm_schedule_latency_ms_seconds_count",
+                        "result",
                     ),
                     (
                         "dispatch_qps",

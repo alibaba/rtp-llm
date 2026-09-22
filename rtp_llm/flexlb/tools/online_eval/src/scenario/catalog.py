@@ -1,5 +1,6 @@
 """Explicit builtin adapter registration. Scenario data never imports Python."""
 
+from scenario.actions.performance import HANDLERS as PERFORMANCE_HANDLERS
 from scenario.actions.admission import HANDLERS as ADMISSION_HANDLERS
 from scenario.actions.balance import HANDLERS as BALANCE_HANDLERS
 from scenario.actions.cache_scale_in import HANDLERS as CACHE_SCALE_IN_HANDLERS
@@ -30,6 +31,7 @@ from scenario.actions.status_protocol import HANDLERS as STATUS_PROTOCOL_HANDLER
 def handlers():
     result = {}
     for descriptor in [
+        *PERFORMANCE_HANDLERS,
         *LATE_COMPLETION_HANDLERS,
         *ADMISSION_HANDLERS,
         *BALANCE_HANDLERS,

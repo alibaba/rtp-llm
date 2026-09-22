@@ -1,6 +1,7 @@
 """Registered Python case programs. YAML can only select entries in this registry."""
 
 PROGRAMS = {
+    "master_performance": "cases.programs.master_performance",
     "cache_scale_in": "cases.programs.cache_scale_in",
     "trace_scale_out": "cases.programs.trace_scale_out",
     "balance_distribution": "cases.programs.balance_distribution",

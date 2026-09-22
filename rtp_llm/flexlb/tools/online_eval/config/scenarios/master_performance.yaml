@@ -1,0 +1,85 @@
+schema_version: 2
+case: master_performance
+profiles:
+- single-nonbatch
+- batch-window
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  perf_preset: fault_env
+  metric_whitelist: flexlb_app_cache_,flexlb_app_flexlb_,flexlb_app_engine_balancing_master_,flexlb_auto_tpm_
+execution:
+  timeout_s: 300
+  stage_timeout_s: 60
+  cleanup_timeout_s: 90
+metadata:
+  description: Synthetic absolute performance contract; not a calibrated V4 production SLO.
+  category: master
+variants:
+- id: synthetic_steady
+  program: steady
+parameters:
+  criteria:
+    benchmark_id: synthetic-100ms-10qps-v1
+    warmup_s: 5
+    measure_s: 30
+    sample_s: 1
+    max_gap_s: 3
+    qps: 10
+    qps_tolerance: 0.1
+    min_requests: 250
+    max_pacing_lag_ms: 100
+    min_input_tps: 9000
+    min_output_tps: 70
+    min_goodput_rps: 9
+    min_slo_fraction: 0.95
+    max_error_rate: 0
+    max_ttft_p99_ms: 1000
+    max_e2e_p99_ms: 2000
+    max_tpot_p99_ms: 150
+    slo_ttft_ms: 1000
+    slo_e2e_ms: 2000
+    slo_tpot_ms: 150
+    max_inflight_growth_rps: 0.2
+  flow:
+    group_id: performance
+    phase_id: continuous
+    poll_s: 0.1
+    jvm_xms: 1g
+    jvm_xmx: 1g
+    source:
+      kind: synthetic
+      model: realistic
+      version: '1'
+      parameters:
+        seed: 20260922
+        count: 600
+        block_size: 1024
+        families: 1
+        prefix_blocks: 0
+        suffix_blocks: 1
+        zipf_alpha: 0
+        cold_fraction: 1
+        output_tokens: 8
+        priority: 50
+    client:
+      DURATION_S: '60'
+      MAX_CONCURRENCY: '256'
+      TIMEOUT_MS: '10000'
+      RESPONSE_TIMEOUT: '30'
+      REPLAY_UNIQUE_PREFIX: 'false'
+      FETCH_OUTPUT_STREAM: 'true'
+      N_CHANNELS: '2'
+      EVENT_LOOP_THREADS: '4'
+      SKIP_SERVER_LATENCY: 'true'
+      PRIORITY: '50'
+      playback:
+        mode: uniform
+        qps: 10.0
+        max_laps: 1
+        identity: structural-relabel
+test:
+  kind: workload
+  description: Fixed synthetic traffic, absolute throughput and SLO checks with complete request evidence
+  collection: request

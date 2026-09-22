@@ -20,8 +20,9 @@ class StressRuntimeTest(unittest.TestCase):
             self.assertEqual(Path("/tmp/from-cli.json"),
                              stress.parse_args(["--dry-run", "--performance", "/tmp/from-cli.json"]).performance)
 
-    def test_metric_whitelist_is_exactly_the_prior_producer_contract(self):
-        self.assertEqual(13, len(stress.MASTER_METRIC_WHITELIST))
+    def test_metric_whitelist_includes_current_schedule_response_counter(self):
+        self.assertEqual(14, len(stress.MASTER_METRIC_WHITELIST))
+        self.assertIn("flexlb_auto_tpm_schedule_latency_ms", stress.MASTER_METRIC_WHITELIST)
         self.assertEqual(len(stress.MASTER_METRIC_WHITELIST),
                          len(set(stress.MASTER_METRIC_WHITELIST)))
         self.assertEqual("flexlb_app_cache_", stress.MASTER_METRIC_WHITELIST[0])
@@ -45,7 +46,7 @@ class StressRuntimeTest(unittest.TestCase):
             self.assertIn("filename=" + str(Path(tmp).resolve() / "flexlb_profile.jfr"),
                           spec.master_jvm_args[0])
             self.assertEqual(4, stress.shard_concurrency(10, 3))
-            self.assertEqual(13, len(spec.master_env["FLEXLB_MONITOR_METRIC_WHITELIST"].split(",")))
+            self.assertEqual(14, len(spec.master_env["FLEXLB_MONITOR_METRIC_WHITELIST"].split(",")))
             diagnostic = stress._env_spec(stress.parse_args([
                 "--run-dir", tmp, "--collection-profile", "diagnostic", "--dry-run"]))
             self.assertTrue(diagnostic.diagnostic_events)
