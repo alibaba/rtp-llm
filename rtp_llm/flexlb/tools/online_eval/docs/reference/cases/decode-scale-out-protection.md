@@ -20,7 +20,7 @@ YAML 可调整 PD 数量、容量、并发数、输出长度和观测时间；�
 完成开发机前置条件后，从 `online_eval` 目录执行：
 
 ```bash
-python3 parallel_runner.py --parallel 1 --profile batch-window \
+python3 scripts/commands/run_cases.py --parallel 1 --profile batch-window \
   --instances elastic_lifecycle::decode_scale_out_protection::batch-window \
   --out-dir /tmp/decode-scale-out
 ```

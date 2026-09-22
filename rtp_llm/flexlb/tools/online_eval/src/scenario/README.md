@@ -7,7 +7,7 @@ A schema-version-2 configuration selects a registered Python case program. YAML 
 counts. Existing Python cases remain registered until independent contract mapping
 and execution evidence establish replacement coverage.
 
-`scenario_runner.py --source config/scenarios --list-json` validates files and lists
+`scripts/commands/list_cases.py --source config/scenarios --list-json` validates files and lists
 metadata without importing the Java process harness or starting services.
 `--instances` selects exact IDs; empty, duplicate and missing IDs fail with exit 2.
 The compile-only module also renders the core configuration for review.

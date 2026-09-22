@@ -17,7 +17,7 @@ from runtime.harness import (
 )
 
 
-class ShellFlexlbConfigTest(unittest.TestCase):
+class MasterConfigContractTest(unittest.TestCase):
     def assert_v3(self, config):
         self.assertEqual(3, config["schemaVersion"])
         prefill = config["router"]["roles"]["prefill"]
@@ -44,12 +44,12 @@ class ShellFlexlbConfigTest(unittest.TestCase):
         ):
             self.assertNotIn(key, config["router"]["roles"]["decode"])
 
-    def test_shell_and_shipped_master_use_complete_v3_contract(self):
-        script = (SCRIPT_DIR / "scripts/stress/run_online_eval.sh").read_text()
-        self.assertNotIn("DEFAULT_FLEXLB_CONFIG=", script)
+    def test_stress_and_shipped_master_use_complete_v3_contract(self):
         from flexlb_cfg import STRESS_PROFILE, render_env, render_process_config
+        from runtime.stress import _config, parse_args
 
         self.assert_v3(json.loads(render_env(STRESS_PROFILE)))
+        self.assert_v3(json.loads(_config(parse_args(["--dry-run"]))))
         master = json.loads(render_process_config(STRESS_PROFILE))
         env = dict(master["zone_process_setting"]["process_info"]["envs"])
         self.assert_v3(json.loads(env["FLEXLB_CONFIG"]))

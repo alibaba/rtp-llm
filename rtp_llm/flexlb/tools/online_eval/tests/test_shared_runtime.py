@@ -60,23 +60,15 @@ class SharedRuntimeTests(unittest.TestCase):
         for name in ("FORCE_PRIORITY", "RAMP_UP_SECONDS", "REPLAY_UNIQUE_PREFIX"):
             self.assertEqual(env[name], "")
 
-    def test_shell_and_python_use_identical_contract_through_both_entries(self):
-        env = dict(os.environ, FLEXLB_DIR=str(ROOT.parents[1]))
-        for entry in ("scripts/stress/lib/load_client.sh",):
-            result = subprocess.run(
-                [
-                    "bash",
-                    "-c",
-                    'source "$1" || exit; printf "%s\\n" "${JAVA_LOAD_CLIENT_ENV_VARS[@]}"',
-                    "test",
-                    str(ROOT / entry),
-                ],
-                env=env,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.splitlines(), LOAD_CLIENT_ENV_VARS)
+    def test_case_and_stress_clients_share_environment_isolation(self):
+        from runtime.stress import _client_base, parse_args
+        args = parse_args(["--dry-run"])
+        values = _client_base(args, ROOT / "traffic-plan.jsonl", 123)
+        env = ClientOps(None)._base_env(values)
+        self.assertEqual(env["START_AT_EPOCH_MS"], "123")
+        self.assertEqual(env["SKIP_SERVER_LATENCY"], "true")
+        self.assertEqual(env["PRIORITY"], "")
+        self.assertTrue(set(values) - {"CLIENT_PACING_LAG_P99_LIMIT_MS"} <= set(LOAD_CLIENT_ENV_VARS))
 
     def test_java_environment_reads_are_all_isolated(self):
         source = (

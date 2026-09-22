@@ -5,8 +5,8 @@ ProcessOps owns subprocess handles; ClientOps drives JavaLoadClient and reads
 its request events. EngineOps provides mock control-plane and gRPC operations
 from engine_ops.py. Shared helpers provide bounded waits and observations.
 
-Functional cases run through scenario_runner.py. Performance traffic and
-metric collection live in the separate stress/ pipeline.
+Functional cases and runtime.stress both use this Java process and client layer.
+Prometheus collection and stress pacing live in runtime.stress.
 
 Uses the Python standard library plus grpc and grpc_tools.
 """
@@ -64,8 +64,8 @@ API_JAR = (
 # functional profile axes, the stress-na130 render profile (the retired
 # data/config/master_fixed_window.json), the strict schema-v2 builders
 # and the ConfigOverride layering.  It lives on sys.path in every
-# supported entrypoint (scenario_runner.py, the tests/, the
-# run_online_eval.sh generator call) — the insert below makes the bare
+# supported entrypoint (scripts/commands/list_cases.py, tests,
+# and runtime.stress) — the insert below makes the bare
 # import robust regardless of how runtime.harness itself was imported.
 #
 # Re-exported for the scenario runner, backend and action implementations.
@@ -134,7 +134,7 @@ DEFAULT_MASTER_MANAGEMENT_PORT = int(
 MASTER_PORT_STRIDE = 10
 MASTER_PORT_MAX_SHIFTS = 50
 
-# Shared with the shell stress launcher; case values still come from YAML.
+# Shared with the Python stress launcher; case values still come from YAML.
 from runtime.load_client import LOAD_CLIENT_ENV_VARS
 from monitoring.metrics import parse_prometheus_samples
 
@@ -204,6 +204,9 @@ def resolve_java21() -> str:
             candidates.append(f"{home}/bin/java")
     candidates.append(f"{Path.home()}/java21/bin/java")
     candidates.append("/opt/homebrew/opt/openjdk@21/bin/java")
+    path_java = shutil.which("java")
+    if path_java:
+        candidates.append(path_java)
     for cand in candidates:
         if (
             os.path.isfile(cand)
@@ -818,6 +821,7 @@ class EnvSpec:
     """Declarative description of a full mock + master environment."""
 
     label: str = "env"
+    run_dir: Optional[Path] = None
     runtime_mode: str = "functional"
     diagnostic_events: bool = True
     n_prefill: int = 2
@@ -856,6 +860,10 @@ class EnvSpec:
     prefill_cache_blocks: int = DEFAULT_PREFILL_CACHE_BLOCKS
     decode_cache_blocks: int = DEFAULT_DECODE_CACHE_BLOCKS
     master_extra_args: list = field(default_factory=list)
+    master_jvm_args: list = field(default_factory=list)
+    master_log_name: Optional[str] = None
+    master_jvm_heap: Optional[str] = None
+    master_pv_log: Optional[bool] = None
     event_loop_threads: int = DEFAULT_MOCK_EVENT_LOOP_THREADS
     completion_threads: int = DEFAULT_MOCK_COMPLETION_THREADS
     mock_auto_fetch: bool = False
@@ -889,12 +897,17 @@ class EnvSpec:
     def fingerprint(self) -> str:
         return json.dumps(
             {
+                "run_dir": str(self.run_dir) if self.run_dir is not None else None,
                 "n_prefill": self.n_prefill,
                 "runtime_mode": self.runtime_mode,
                 "n_decode": self.n_decode,
                 "perf": self.perf,
                 "mock_extra_args": self.mock_extra_args,
                 "mock_heap": self.mock_heap,
+                "master_jvm_args": self.master_jvm_args,
+                "master_log_name": self.master_log_name,
+                "master_jvm_heap": self.master_jvm_heap,
+                "master_pv_log": self.master_pv_log,
                 "master_profile": self.master_profile,
                 "master_env": self.master_env,
                 # config axes: overrides serialized field-by-field (OMIT as
@@ -966,6 +979,7 @@ def _write_master_config(env: "FlexEnv") -> Path:
         render_process_config(
             spec.master_profile,
             spec.config_overrides,
+            jvm_heap=spec.master_jvm_heap,
             raw_config=spec.raw_config,
         ),
         encoding="utf-8",
@@ -1110,7 +1124,7 @@ class EnvManager:
 
     def _build(self, spec: EnvSpec) -> FlexEnv:
         self._env_seq += 1
-        run_dir = self.run_root / f"env{self._env_seq}_{spec.label}"
+        run_dir = spec.run_dir or self.run_root / f"env{self._env_seq}_{spec.label}"
         run_dir.mkdir(parents=True, exist_ok=True)
         base = self._pick_base_grpc_port(spec.n_prefill, spec.n_decode)
         env = FlexEnv(spec, run_dir, base)
@@ -1138,7 +1152,7 @@ class EnvManager:
                     self.start_master_instance(env, mspec)
             elif spec.master_profile != "none":
                 # master
-                self.start_master(env)
+                self.start_master(env, log_name=spec.master_log_name)
         except Exception:
             # Build failed before self.current was assigned: teardown()
             # would see None and leak the mock/master JVMs already started.
@@ -1376,6 +1390,7 @@ class EnvManager:
         )
         argv = [
             java,
+            *spec.master_jvm_args,
             *JAVA_MODULE_OPTS,
             "-jar",
             str(API_JAR),
@@ -1383,7 +1398,7 @@ class EnvManager:
             f"--management.server.port={env.master_management_port}",
             f"--spring.profiles.active={spec.spring_profile}",
         ]
-        if not spec.diagnostic_events:
+        if not (spec.master_pv_log if spec.master_pv_log is not None else spec.diagnostic_events):
             argv.append("--logging.level.pvLogger=WARN")
         if spec.master_debug_log:
             argv.append("--logging.level.org.flexlb=DEBUG")

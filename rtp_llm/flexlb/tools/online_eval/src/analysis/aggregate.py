@@ -209,8 +209,7 @@ def classify_error(status, err):
 # ---- Phase A 共享统计原语（analysis/consolidate.py 经 sentinel 受限 ----
 # ---- exec 复用同一份实现；本块只能依赖其上方定义，不得引用其后名字） ----
 # percentile/rate/peak/summary 四族在全仓库统一为 nearest-rank 口径，
-# 公式逐字搬 run_online_eval.sh 多 worker 合并段（L1397-1448）与
-# JavaLoadClient.LatencySummary 形状。
+# 这是 Python 聚合的唯一实现；形状与 JavaLoadClient.LatencySummary 对齐。
 
 
 def percentile_nr(values, p, nd=1):
@@ -776,7 +775,7 @@ prefill_wait_latency_ms = (
 decode_wait_latency_ms = latency_summary(decode_wait_all) if decode_wait_all else None
 
 # ---- Phase A 派生统计：validity / quick-stats / 全程分位（统一聚合侧） ----
-# 公式逐字搬 run_online_eval.sh 多 worker 合并段（L1253-1362）。rows 是
+# 统计和有效性判断只在此处计算。rows 是
 # 唯一指标源（no-backward-compat；client_events.jsonl 已 fail-closed，
 # rows 恒非空，_have_rows 仅保留为防御）；仅 schedule 双源的 server 口径
 # 与 server_* 直读键不依赖 rows（server_latency 是当前格式正式输入）。
@@ -806,7 +805,7 @@ _pacing_dist = latency_summary(pacing_lag_samples, nd=3)
 _e2e_summary_calc = latency_summary(e2e_samples)
 
 # pacing limit：client_env 快照（run_meta.client_env，字符串值）；缺省
-# 100.0（run_online_eval.sh 的 CLIENT_PACING_LAG_P99_LIMIT_MS 默认值）。
+# 100.0（run_stress.py 的 CLIENT_PACING_LAG_P99_LIMIT_MS 默认值）。
 _pacing_limit_raw = (run_meta.get("client_env") or {}).get(
     "CLIENT_PACING_LAG_P99_LIMIT_MS"
 )

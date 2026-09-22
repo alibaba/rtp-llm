@@ -243,7 +243,7 @@ def parse_env_file(path: Path) -> dict[str, str]:
 def parse_grouped_prometheus_timeseries(path: Path) -> list[dict]:
     """Grouped prom text (``# ts=<epoch_ms>`` separators) -> [{ts, metrics}].
 
-    The per-second pollers (run_online_eval.sh) append each HTTP sample after
+    Legacy grouped Prometheus evidence appended each HTTP sample after
     a ``# ts=`` comment line. Samples inside a group are parsed with
     PROMETHEUS_SAMPLE_RE into a flat ``{name{labels}: value}`` dict (later
     lines win on key collision, same rule as parse_prometheus_file); HELP/

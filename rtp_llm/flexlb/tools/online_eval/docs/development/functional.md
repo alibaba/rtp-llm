@@ -7,7 +7,7 @@
 ## 选择实例
 
 ```bash
-python3 tools/online_eval/scripts/scenario_runner.py \
+python3 tools/online_eval/scripts/commands/list_cases.py \
   --source tools/online_eval/config/scenarios \
   --profile batch-window --suite core --list-json > /tmp/flexlb-core.json
 ```
@@ -19,7 +19,7 @@ python3 tools/online_eval/scripts/scenario_runner.py \
 ## 预览资源计划
 
 ```bash
-python3 tools/online_eval/scripts/test_runner.py \
+python3 tools/online_eval/scripts/commands/run_cases.py \
   --suite core \
   --instances 'request_completion::immediate::batch-window' \
   --parallel 1 --dry-run
@@ -31,7 +31,7 @@ python3 tools/online_eval/scripts/test_runner.py \
 
 ```bash
 OUT=/path/to/new-output/functional
-python3 tools/online_eval/scripts/test_runner.py \
+python3 tools/online_eval/scripts/commands/run_cases.py \
   --suite core \
   --profile batch-window \
   --parallel 4 \

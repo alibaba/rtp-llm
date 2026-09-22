@@ -60,10 +60,10 @@ Prefill 总容量为 4 块，Mock 保留 1 块作为 reserve，因此单次请�
 完成开发机前置条件后，从 `online_eval/` 运行：
 
 ```bash
-python3 parallel_runner.py --parallel 3 --profile batch-window \
+python3 scripts/commands/run_cases.py --parallel 3 --profile batch-window \
   --instances 'client_fallback_failback::wraparound::batch-window,cache_churn::lru_affinity::batch-window,cache_churn::referenced_occupancy::batch-window' \
   --out-dir /path/to/new-output
 ```
 
-`parallel_runner.py` 每次选择一个 profile。其余三个 profile 分别运行；同时运行时端口区间必须分离。
+`run_cases.py` 每次选择一个 profile。其余三个 profile 分别运行；同时运行时端口区间必须分离。
 每个检查点的 JSON 原始快照、请求明细和最终对账随实例输出保留。

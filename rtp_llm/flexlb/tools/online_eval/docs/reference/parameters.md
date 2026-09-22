@@ -1,53 +1,49 @@
 # 参数参考
 
-本页集中解释三个开发机 runbook 共用的公开参数。更细的 case 数据以 `config/scenarios/*.yaml` 和命令 `--help` 为准。
+这是三个开发机 runbook 的公开参数入口。命令均位于 `scripts/commands/`；以 `--help` 查看完整可执行词表。场景数据细节见 `config/scenarios/*.yaml`。
 
-## Master 形态
+## 运行形态
 
-| 参数 | 含义 |
+| CLI 参数 | 含义 |
 |---|---|
-| `--profile` / `FLEXLB_PROFILE` | 完整 Master 配置名称 |
-| `--master-mode` / `FLEXLB_MASTER_MODE` | `sb/sn/wb/wn` 简写；映射见 `config/mode_profiles.yaml` |
-| `FLEXLB_CONFIG_OVERRIDE` | 对 profile 的受校验字段覆盖，格式为 `k=v,...` |
-| `FLEXLB_CONFIG` | 完整配置逃生口；设置后必须保存并审查最终值 |
+| `--master-mode sb\|sn\|wb\|wn` | 功能、场景、压测共用的 Master 形态缩写；映射在 `config/mode_profiles.yaml` |
+| `--profile` | 完整配置名；和显式 mode 不一致时失败 |
+| `--config-override k=v,...` | 压测专用的受校验配置覆盖；最终渲染写入 `master_config.json` |
+| `--suite core\|functional\|workload\|all` | 功能/场景实例集合；`run_cases.py` 默认 core |
+| `--parallel` | 功能/场景 lane 数；性能比较和故障场景通常为 1 |
+| `--dry-run` | 不启动服务，显示资源或压测计划 |
 
-profile 与显式 master mode 不一致应直接失败，不能静默选一个。
+## 压测拓扑与负载
 
-## 拓扑与端口
-
-| 参数 | 含义 |
+| CLI 参数 | 含义和默认值 |
 |---|---|
-| `N_PREFILL` / `N_DECODE` | 压测的 P/D 引擎数 |
-| `MOCK_BASE_GRPC_PORT` | 压测 Mock gRPC 连续端口区间起点；控制口为它减一 |
-| `FLEXLB_HTTP_ADDR` | 压测 Master HTTP 地址；management 另占一个端口 |
-| `FLEXLB_FT_PARALLEL_MASTER_BASE` | 功能/场景 lane 0 的 Master 端口组起点 |
-| `FLEXLB_FT_PARALLEL_MOCK_BASE` | 功能/场景 lane 0 的 Mock 端口窗口起点 |
-| `--parallel` | 同时运行的 lane 数；功能测试可并行，性能和场景比较通常为 1 |
-| `--mock-stride` | lane 间 Mock 端口跨度，必须覆盖每 lane 的最大窗口 |
-
-## 负载
-
-| 参数 | 含义 |
-|---|---|
-| `SEND_MODE=replay|uniform` | 按 trace 时间回放，或按目标速率合成 |
-| `REPLAY_SPEED` | replay 时间缩放；不是直接 QPS |
-| `SEND_MODE_QPS` | uniform 的目标发送速率 |
-| `DURATION_S` | 发压时间 |
-| `LOOP=1` | trace 结束后循环，直到时长结束 |
-| `FLEXLB_WARMUP_SECONDS` | 从统计稳态窗口排除的预热时间 |
-| `FETCH_OUTPUT_STREAM` | `1` 获取完整输出；`0` 为 schedule-only 形态 |
-| `MAX_CONCURRENCY` | 客户端整请求并发上限，包括 Schedule 和结果消费 |
+| `--n-prefill` / `--n-decode` | 逻辑引擎数，默认 12/40 |
+| `--mock-base-grpc-port` | Mock 连续 gRPC 端口起点，默认 61000；控制口为起点减一；功能测试自动端口窗口不进入该 band |
+| `--master-http-port` / `--master-management-port` | 默认 7001/7002；gRPC 另占 HTTP+2 |
+| `--traffic-source-spec` | 注册流量源 JSON；省略时用 pinned 匿名 prefix DAG 模型；拒绝外部 `TRACE_FILE` |
+| `--limit` | 物化计划的请求数上限，0 表示无上限；默认 1000 |
+| `--send-mode replay\|uniform` | trace 默认 replay，synthetic 默认 uniform；合成源不得 replay |
+| `--replay-speed` | replay 时间倍率，默认 10；不是直接 QPS |
+| `--send-mode-qps` / `--ramp-up-s` | uniform 目标速率默认 650 QPS，以及从 0 上升的 30 秒 ramp |
+| `--duration-s` / `--loop` | 客户端持续时间默认 120 秒；默认单次遍历，循环需显式开启 |
+| `--warmup-s` / `--client-start-delay-s` | Master 启动后无流量预热默认 10 秒；所有 shard 共用客户端起始时间，默认再延迟 10 秒 |
+| `--workers` / `--max-concurrency` | 客户端 shard 默认 8；整请求并发上限按 `ceil(total/workers)` 分给各 shard |
+| `--fetch-output-stream 0\|1` | 默认 1，读完整输出；0 仅调度/引擎执行，不用于正式端到端 A/B |
+| `--force-priority` | 默认 50；0 允许逐记录 priority |
+| `--client-option KEY=VALUE` | 高级 JavaLoadClient 参数，可重复；键必须在 `config/load_client_env.txt`，且不能覆盖上述编排参数 |
 
 ## 证据与输出
 
-| 参数 | 含义 |
+| CLI 参数 | 含义 |
 |---|---|
-| `RUN_ROOT` / `RUN_ID` | 压测输出根和本次身份 |
-| `--out-dir` / `--json` | 功能与场景的实例目录和汇总 JSON |
-| `--archive` / `EXPERIMENT_ARCHIVE_PATH` | 可选的单文件实验包 |
-| `COLLECTION_PROFILE` | `aggregate`、`request` 或 `diagnostic`；越靠后证据越多 |
-| `PROMETHEUS_BIN` | Prometheus 可执行文件路径 |
+| `--run-root` / `--run-id` / `--run-dir` | 输出目录，默认 `run/<时间戳>`；`--run-dir` 直接指定完整路径 |
+| `--collection-profile aggregate\|request\|diagnostic` | 默认 aggregate；diagnostic 才写事件与完整 pv.log |
+| `--monitor-interval-s` | Prometheus 采样周期，默认 1 秒；需在 PATH 或 `PROMETHEUS_BIN` 提供可执行文件 |
+| `--jfr-duration` | Master JFR 上限，默认 300s；文件为运行目录的 `flexlb_profile.jfr` |
+| `--master-pv-log` | 显式保留逐请求 Master pv.log；默认关闭，即使选择 diagnostic 采集档 |
+| `--archive` | 可选单文件实验包；失败运行保存为 incomplete |
+| `--out-dir` / `--json` | 功能和场景实例目录及汇总 JSON |
 
 ## Mock 性能模型
 
-性能 JSON 负责模拟 P/D 时间、KV 容量、并发和可选噪声。核心参数的实现说明见 [`flexlb-mock-engine/README.md`](../../../../flexlb-mock-engine/README.md)。修改性能模型后，报告必须记录文件内容或摘要；同一名称不保证内容相同。
+`--performance` 读取 P/D 时间、KV 容量和可选噪声 JSON，默认 `data/performance/dsv4_flash_performance.fast_ab.json`。`--mock-heap`、`--master-heap`、`--client-heap` 设置 JVM heap；`--decode-max-concurrency`、`--prefill-cache-blocks`、`--decode-cache-blocks` 设置 mock 资源。性能模型说明见 [`flexlb-mock-engine/README.md`](../../../../flexlb-mock-engine/README.md)。修改模型后，报告必须记录文件内容或摘要；同名文件不保证内容相同。

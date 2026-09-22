@@ -55,7 +55,7 @@ flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar
 test -f flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar
 test -f flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar
 test -x "${PROMETHEUS_BIN:-$(command -v prometheus)}"
-python3 tools/online_eval/scripts/scenario_runner.py \
+python3 tools/online_eval/scripts/commands/list_cases.py \
   --source tools/online_eval/config/scenarios --list-json >/tmp/flexlb-case-catalog.json
 ```
 

@@ -40,7 +40,7 @@ The real cache-hit evidence is `PrefillCacheHitMetricsReporter.cc`:
 `input_token_count`; `record` matches a recent-key window. The mock already
 has a separate `WhalePrefillMatchMetrics` implementation for that real
 contract. Reusing its name for the lifetime key counters would collide with
-an existing, different measurement. `compare_twin.py` no longer treats
+an existing, different measurement. `scripts/probes/check_mock_fidelity.py` no longer treats
 recent-cache-key gauge names as cumulative key-counter aliases.
 
 ## Removed Prometheus families
@@ -142,7 +142,7 @@ execution time is not evidence of absolute GPU throughput. Decode TPS was
 not changed or certified by this prefill migration.
 
 Consumers preserve separate execution and wall curves. Elastic throughput
-checks use wall TPS. The existing `compare_ab.py` command automatically
+checks use wall TPS. The existing `scripts/commands/compare_runs.py` command automatically
 rejects mixed prefill contracts; no extra TPS option is needed. Capture
 both versions with aligned producers/collectors and matching workload, and
 use full output fetching; old raw captures cannot be repaired by renaming.

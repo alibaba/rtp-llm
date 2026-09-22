@@ -15,7 +15,7 @@ at base+10, worker capacity 700 needs through base+712):
 
 ```sh
 export FLEXLB_FT_WORKER_PORT_CAPACITY=700
-python3 parallel_runner.py --parallel 1 --mock-stride 704 --profile single-nonbatch \
+python3 scripts/commands/run_cases.py --parallel 1 --mock-stride 704 --profile single-nonbatch \
   --case-dir scale_cases/cache_scale_in_online.yaml --suite workload \
   --out-dir "$FLEXLB_RUN_DIR/cache-scale-in"
 ```

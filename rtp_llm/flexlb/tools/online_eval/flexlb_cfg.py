@@ -6,7 +6,7 @@ One module renders every FLEXLB_CONFIG document this repo produces:
   * ``render_process_config(profile, overrides, jvm_heap)`` — the
     zone_process_setting envelope (FLEXLB_CONFIG + FLEXLB_JVM_HEAP_SIZE
     envs) consumed by the Java mock engine's ``--master-config`` and by
-    run_online_eval.sh.  The env string inside the envelope is derived
+    run_stress.py.  The env string inside the envelope is derived
     from the SAME render call, so the file and the env can never drift
     apart (single render, two projections).
 
@@ -834,7 +834,7 @@ def render_process_config(
 
 
 # ===========================================================================
-# Shell-facing override parsing (run_online_eval.sh FLEXLB_CONFIG_OVERRIDE)
+# CLI override parsing (run_stress.py FLEXLB_CONFIG_OVERRIDE)
 # ===========================================================================
 
 _INT_FIELDS = frozenset(

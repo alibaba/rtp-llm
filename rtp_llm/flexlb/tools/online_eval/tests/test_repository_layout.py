@@ -11,14 +11,14 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import parallel_runner
+from scripts.pipeline import execute_cases as parallel_runner
 from runtime import instance_runner
 
 
 class RepositoryLayoutTest(unittest.TestCase):
     def test_default_routes_to_bundled_python_programs(self):
         with tempfile.TemporaryDirectory() as cwd, mock.patch.object(
-            sys, "argv", ["parallel_runner.py", "--dry-run"]
+            sys, "argv", ["scripts/pipeline/execute_cases.py", "--dry-run"]
         ), mock.patch.object(
             instance_runner, "run_structured", return_value=0
         ) as run, mock.patch.object(
@@ -37,16 +37,19 @@ class RepositoryLayoutTest(unittest.TestCase):
         with mock.patch.object(
             sys,
             "argv",
-            ["parallel_runner.py", "--source", "legacy", "--case-dir", "config/scenarios"],
+            ["scripts/pipeline/execute_cases.py", "--source", "legacy", "--case-dir", "config/scenarios"],
         ), self.assertRaises(SystemExit) as error:
             parallel_runner.main()
         self.assertEqual(error.exception.code, 2)
 
     def test_commands_work_outside_repository(self):
         commands = [
-            ("scripts/compare_ab.py", ["--help"]),
-            ("scripts/compare_twin.py", ["--help"]),
-            ("scripts/render_report.py", ["--help"]),
+            ("scripts/commands/run_stress.py", ["--help"]),
+            ("scripts/commands/run_cases.py", ["--help"]),
+            ("scripts/commands/list_cases.py", ["--help"]),
+            ("scripts/commands/compare_runs.py", ["--help"]),
+            ("scripts/probes/check_mock_fidelity.py", ["--help"]),
+            ("scripts/commands/render_stress_report.py", ["--help"]),
         ]
         with tempfile.TemporaryDirectory() as cwd:
             for command, arguments in commands:
@@ -96,35 +99,14 @@ class RepositoryLayoutTest(unittest.TestCase):
         self.assertFalse((ROOT / "scenarios").exists())
         self.assertTrue((ROOT / "config/scenarios").is_dir())
 
-    def test_stress_shell_resolves_roots_before_starting_services(self):
-        # Stop before sourcing the Java helper, after the real path assignments.
-        script = r"""
-set -T
-trap 'if [[ "$BASH_COMMAND" == source\ *load_client.sh* ]]; then
-  printf "%s\n" "$SCRIPT_DIR" "$ONLINE_EVAL_DIR" "$FLEXLB_DIR" "$REPO_ROOT"
-  exit 0
-fi' DEBUG
-source "$1"
-"""
+    def test_stress_entry_resolves_roots_outside_repository(self):
         with tempfile.TemporaryDirectory() as cwd:
-            for entry in ("scripts/stress/run_online_eval.sh",):
-                result = subprocess.run(
-                    ["bash", "-c", script, "layout-check", str(ROOT / entry)],
-                    cwd=cwd,
-                    text=True,
-                    capture_output=True,
-                    timeout=10,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(
-                    result.stdout.splitlines(),
-                    [
-                        str(ROOT / "scripts/stress"),
-                        str(ROOT),
-                        str(ROOT.parents[1]),
-                        str(ROOT.parents[3]),
-                    ],
-                )
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/commands/run_stress.py"), "--dry-run"],
+                cwd=cwd, text=True, capture_output=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["mode"]["runtime"], "stress")
 
 
 if __name__ == "__main__":

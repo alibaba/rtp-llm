@@ -7,11 +7,11 @@ Port leasing and lane planning remain in the existing parallel runner.
 """
 import sys
 from pathlib import Path as _Path
-sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
-import parallel_runner
+sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from scripts.pipeline import execute_cases
 
 if __name__ == "__main__":
     if not any(arg == "--suite" or arg.startswith("--suite=") for arg in sys.argv[1:]):
         sys.argv.extend(["--suite", "core"])
-    raise SystemExit(parallel_runner.main())
+    raise SystemExit(execute_cases.main())

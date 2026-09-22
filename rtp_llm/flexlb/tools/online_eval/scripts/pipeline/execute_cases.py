@@ -9,8 +9,8 @@ import re
 import sys
 from pathlib import Path
 from pathlib import Path as _Path
-sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 from typing import IO
 
 from runtime.harness import PROBE_BIND_HOST, port_in_use
@@ -27,7 +27,7 @@ MOCK_PORT_STRIDE = 500
 MOCK_PORT_WINDOW_LAST = MOCK_WINDOW_LAST  # lane footprint [base-1 .. base+151]
 
 # Stress/lease port band on the shared dev container: online_eval
-# (run_online_eval.sh MOCK_BASE_GRPC_PORT:-61000) and the flexlb lease
+# (run_stress.py MOCK_BASE_GRPC_PORT:-61000) and the flexlb lease
 # ledger (port_base=61000) both allocate from here upward, so FT port
 # matrices must stay strictly below it.  Hard bound for auto-shift
 # candidates; an EXPLICIT base crossing it only warns — a leased-but-
@@ -692,7 +692,7 @@ def main() -> int:
     else:
         args.profile = args.profile or "batch-window"
     if args.case_dir is None:
-        args.case_dir = str(Path(__file__).resolve().parents[1] / "config/scenarios")
+        args.case_dir = str(Path(__file__).resolve().parents[2] / "config/scenarios")
     elif not args.case_dir:
         parser.error("--case-dir must not be empty")
 

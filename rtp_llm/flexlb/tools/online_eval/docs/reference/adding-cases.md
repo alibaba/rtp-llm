@@ -18,10 +18,10 @@
 ## 验证
 
 ```bash
-python3 tools/online_eval/scripts/scenario_runner.py \
+python3 tools/online_eval/scripts/commands/list_cases.py \
   --source tools/online_eval/config/scenarios --list-json
 
-python3 tools/online_eval/scripts/parallel_runner.py \
+python3 tools/online_eval/scripts/commands/run_cases.py \
   --instances '<exact-instance-id>' --parallel 1 --dry-run
 
 python3 -m unittest discover -s tools/online_eval/tests -p 'test_*.py'

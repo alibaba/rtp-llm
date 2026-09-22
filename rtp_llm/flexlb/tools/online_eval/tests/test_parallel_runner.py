@@ -16,9 +16,9 @@ from unittest import mock
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 
-import parallel_runner
+from scripts.pipeline import execute_cases as parallel_runner
 
-PARALLEL_RUNNER = TOOLS_DIR / "parallel_runner.py"
+PARALLEL_RUNNER = TOOLS_DIR / "scripts/pipeline/execute_cases.py"
 
 
 DEFAULT_LANES = parallel_runner.max_lanes(
@@ -597,7 +597,7 @@ class WindowLockTest(unittest.TestCase):
         code = (
             "import sys\nfrom pathlib import Path\n"
             f"sys.path.insert(0, {str(TOOLS_DIR / 'src')!r})\n"
-            "import parallel_runner as p\n"
+            "from scripts.pipeline import execute_cases as p\n"
             f"p.PORT_WINDOW_LOCK_DIR = Path({str(self.lockdir)!r})\n"
             "print('READY', flush=True)\nsys.stdin.readline()\n"
             "h = p._try_window_lock(int(sys.argv[1]), int(sys.argv[2]), 500, int(sys.argv[3]))\n"

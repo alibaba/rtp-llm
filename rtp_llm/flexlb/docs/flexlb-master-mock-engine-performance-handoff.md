@@ -4,6 +4,8 @@
 > 显式设置单机 uncached-token 容量、完整请求超时和决策 lifetime 系数。
 > 带 `slo` 的历史产物名仅用于查找测量记录。
 
+本文是历史测量记录。旧 shell 启动命令和环境变量接口已退役；复测请按 [当前压测 runbook](../tools/online_eval/docs/development/stress.md) 使用 Python CLI，不要直接执行下文历史命令。
+
 本文用于交接 FlexLB Master 的 batch 调度性能测试。目标是让接手人能够复现测试、逐级寻找容量拐点，并判断瓶颈在发压端、FlexLB Master 还是 mock engine。
 
 ## 1. 测试目标和边界
@@ -108,7 +110,7 @@ cd "$RTP_LLM_OPEN_SOURCE/rtp_llm/flexlb"
 
 test -s flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar
 test -s flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar
-bash -n tools/online_eval/scripts/stress/run_online_eval.sh
+python3 tools/online_eval/scripts/commands/run_stress.py --help
 ```
 
 重新编译后再压测，避免代码和旧 jar 不一致。功能测试和两组性能门禁使用独立 Maven invocation：
@@ -162,7 +164,7 @@ E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 
 -Dflexlb.perf.e2e.token-id-remap-seed=1592652261
 ```
 
-该 UT 使用单个高容量 mock prefill/decode，目的是让 mock worker 不先成为瓶颈。750/500 拓扑、匿名 prefix DAG 模型的真实相对到达间隔和长时间稳态仍由 `run_online_eval.sh` 验证，不能用 UT 结果替代正式容量报告。
+该 UT 使用单个高容量 mock prefill/decode，目的是让 mock worker 不先成为瓶颈。750/500 拓扑、匿名 prefix DAG 模型的真实相对到达间隔和长时间稳态仍由 `run_stress.py` 验证，不能用 UT 结果替代正式容量报告。
 
 同一个 E2E 类还包含 engine scale 回归矩阵：
 
@@ -178,7 +180,7 @@ E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 
 
 这里的排队数据是 Master 的 `batch_wait_ms`（路由提交到 batch dispatch），用于观察 engine 数量减少后每个 batcher 的聚合与等待；它不是 engine 内部计算队列延迟。2000 QPS 场景要求 batch wait P95 非零，并默认要求 P99 不超过 50 ms。输出同时提供 `batch_full` / `fixed_window_timeout` / `predicted_execution_cap` 次数和 `dispatch_ack`，用于区分“成功凑满后发送”“等待窗口到期”“预测执行时间到顶”和“mock worker ACK 变慢”。回归门禁还会根据 `QPS * fixed_window / prefill_count` 推导平均 batch 下限，默认要求达到理论值的 80%。
 
-这个矩阵回答的是“Master 在不同 engine 数量和请求压力下是否退化”，不能单独推导真实 GPU 机器数。真实机器数还依赖单机 batch 处理时间、并发上限、KV 容量和请求完成状态更新；这些参数必须通过 Java mock engine 的处理模型或真实 engine 容量结果输入 `run_online_eval.sh`。
+这个矩阵回答的是“Master 在不同 engine 数量和请求压力下是否退化”，不能单独推导真实 GPU 机器数。真实机器数还依赖单机 batch 处理时间、并发上限、KV 容量和请求完成状态更新；这些参数必须通过 Java mock engine 的处理模型或真实 engine 容量结果输入 `run_stress.py`。
 
 矩阵门禁可覆盖：
 
@@ -280,7 +282,7 @@ FLEXLB_JVM_HEAP_SIZE=32g \
 FLEXLB_JVM_XMS=32g \
 FLEXLB_JVM_XMX=32g \
 JFR_DURATION=120s \
-bash run_online_eval.sh
+# 历史命令已退役；按当前压测 runbook 转换为 CLI 参数
 ```
 
 同时设置 `FLEXLB_JVM_HEAP_SIZE` 和 `FLEXLB_JVM_XMS/XMX`：前者进入 FlexLB 运行配置，后两者确保启动命令实际使用 32 GiB 堆。
@@ -323,7 +325,7 @@ run_case() {
     "RUN_ID=$run_id" \
     "LOAD_CLIENT_WORKERS=$workers" \
     "REPLAY_SPEED=$speed" \
-    bash run_online_eval.sh
+    # 历史命令已退役；按当前压测 runbook 转换为 CLI 参数
 }
 
 run_case 1 13 100
@@ -374,7 +376,7 @@ FLEXLB_JVM_XMS=32g \
 FLEXLB_JVM_XMX=32g \
 SLO_BATCH_DRAIN_SECONDS=10 \
 JFR_DURATION=120s \
-bash run_online_eval.sh
+# 历史命令已退役；按当前压测 runbook 转换为 CLI 参数
 ```
 
 做容量矩阵时只修改 `REPLAY_SPEED`，按 14、130、650、1400 依次运行，分别对应约 100、1K、5K、10K QPS。比较不同压力时不要改变 Master/load worker 数。
@@ -383,7 +385,7 @@ bash run_online_eval.sh
 
 ## 9. 读取和校验结果
 
-每个 run 的关键文件（`run_online_eval.sh` 收尾时会把 run 目录收编成每个组件一份 JSON + 一份日志，见 `tools/online_eval/README.md` 的 Run output layout 一节）：
+每个 run 的关键文件（`run_stress.py` 收尾时会把 run 目录收编成每个组件一份 JSON + 一份日志，见 `tools/online_eval/README.md` 的 Run output layout 一节）：
 
 | 文件 | 用途 |
 |---|---|
@@ -511,7 +513,7 @@ curl -s -X POST http://127.0.0.1:7001/rtp_llm/server_latency/reset
 
 ## 13. Profile 方法
 
-`run_online_eval.sh` 默认给 FlexLB 开启 JFR，并将结果写到 `flexlb_profile.jfr`。对容量拐点至少保留一份 JFR：
+`run_stress.py` 默认给 FlexLB 开启 JFR，并将结果写到 `flexlb_profile.jfr`。对容量拐点至少保留一份 JFR：
 
 ```bash
 jfr summary run/<run_id>/flexlb_profile.jfr

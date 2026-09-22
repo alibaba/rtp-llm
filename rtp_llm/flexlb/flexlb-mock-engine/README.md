@@ -58,11 +58,10 @@ alignment does not change the master's handling of late or lost completions.
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@21
-export JAVA_MOCK_ENGINE_HEAP_SIZE=2g
-export MOCK_BASE_GRPC_PORT=62000
-export N_PREFILL=2 N_DECODE=4 DURATION_S=30 REPLAY_SPEED=10
-cd tools/online_eval
-bash run_online_eval.sh
+cd rtp_llm/flexlb
+python3 tools/online_eval/scripts/commands/run_stress.py \
+  --mock-heap 2g --mock-base-grpc-port 62000 \
+  --n-prefill 2 --n-decode 4 --duration-s 30 --replay-speed 10
 ```
 
 ## Configuration
@@ -145,7 +144,7 @@ timeout. This gate is batch-level and independent of the request-level fault-inj
 
 **Queue metrics — four-state naming and units**: the periodic `java_mock_stats` log
 line (interval configurable via `--stats-interval-ms`, default 5000 ms; the
-`run_online_eval.sh` env passthrough is `JAVA_MOCK_STATS_INTERVAL_MS`) reports
+`run_stress.py` option is `--mock-stats-interval-ms`) reports
 symmetric P/D queue states:
 
 | Field | Unit | Meaning |
@@ -330,7 +329,7 @@ entirely through environment variables (`Config.fromEnv`):
 | LIMIT | 0 | Max requests to replay (0 = all) |
 | TIMEOUT_MS | 3600000 | Global run timeout in ms |
 | SLA_TTFT_MS | 500.0 | TTFT SLA threshold for the report |
-| FETCH_OUTPUT_STREAM | true | Client reads output streams. With `0/false`, `run_online_eval.sh` also sets Mock `--auto-fetch true`; direct launchers must set both ends explicitly (BATCH only). |
+| FETCH_OUTPUT_STREAM | true | Client reads output streams. With `0/false`, `run_stress.py` also sets Mock `--auto-fetch true`; direct launchers must set both ends explicitly (BATCH only). |
 | LOOP | false | Loop the trace |
 | N_CHANNELS | 8 | gRPC channels |
 | EVENT_LOOP_THREADS | 32 | Netty event-loop threads |
@@ -505,7 +504,7 @@ master-side curves are indistinguishable from production:
   from token capacity). The old names `--prefill-cache-blocks` /
   `--decode-cache-blocks` were removed outright — passing either one now fails
   fast with an unknown-argument error. The 6000/3000 defaults still
-  passed by `run_online_eval.sh` / `lib_load_client.sh` / `harness.py` remain
+  passed by `run_stress.py` / `harness.py` remain
   valid — they size the pools (6,000 blocks = 6,144,000 tokens prefill;
   3,000 = 3,072,000 decode) instead of capping key counts.
 - **Surface alignment**: `block_size` in snapshots now reports the actual spb (was
@@ -678,15 +677,13 @@ The Python mock engine / Python load client implementations have been
 `flexlb_load_client.py`, `run_single_engine.py`, `test_resolve_decode.py` and
 `tests/test_mock_engine.py`), together with `tools/online_eval/run_batch_smoke_only.sh`
 (a matrix subset with no CI references — its coverage is subsumed by
-`run_online_eval.sh`) and the stale
+`run_stress.py`) and the stale
 `tools/online_eval/BUILD` filegroup that still referenced the deleted Python
 files: nine files in total. The `MOCK_ENGINE_IMPL` / `LOAD_CLIENT_IMPL`
 orchestration switches and their Python branches are gone as well, so the
 Java stack described in this README is the only implementation.
 
-`run_online_eval.sh` drives JavaLoadClient through the shared
-`tools/online_eval/scripts/stress/lib/load_client.sh` helper `run_java_load_client`
-(the single source of truth for the JavaLoadClient env-var mapping).
+`run_stress.py` uses `runtime.harness.ClientOps` for JavaLoadClient; `config/load_client_env.txt` is the shared environment inventory.
 
 The Python **smoke client family** has been retired and removed (it was
 tooling, not the mock engine): `flexlb_smoke_base.py`,

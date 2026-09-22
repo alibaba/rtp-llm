@@ -16,7 +16,7 @@ sys.path.insert(0, str(TOOLS))
 from scenario.backend import JavaMockBackend
 from scenario.loader import ScenarioError
 from scenario.runtime import Deadline, RuntimeContext
-from scenario_runner import instance_directory, select, summarize
+from scripts.commands.list_cases import instance_directory, select, summarize
 
 
 class ChildTest(unittest.TestCase):
@@ -48,7 +48,7 @@ class ChildTest(unittest.TestCase):
         proc = subprocess.run(
             [
                 sys.executable,
-                "scenario_runner.py",
+                "scripts/commands/list_cases.py",
                 "--source",
                 "config/scenarios/core/request_completion.yaml",
                 "--list-json",
@@ -82,7 +82,7 @@ class ChildTest(unittest.TestCase):
             proc = subprocess.run(
                 [
                     sys.executable,
-                    "scenario_runner.py",
+                    "scripts/commands/list_cases.py",
                     "--source",
                     "config/scenarios/core/request_completion.yaml",
                     "--out-dir",

@@ -17,8 +17,8 @@ from traffic.prefix_lineage import encode
 
 class TrafficEntrypointTest(unittest.TestCase):
     def test_stress_rejects_raw_trace_and_synthetic_replay(self):
-        script = ROOT / "scripts/stress/run_online_eval.sh"
-        raw = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+        script = ROOT / "scripts/commands/run_stress.py"
+        raw = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
                              env=dict(os.environ, TRACE_FILE="/tmp/raw.jsonl"))
         self.assertEqual(2, raw.returncode)
         self.assertIn("TRACE_FILE is generated", raw.stderr)
@@ -26,9 +26,8 @@ class TrafficEntrypointTest(unittest.TestCase):
             spec = Path(tmp) / "source.json"
             spec.write_text(json.dumps(dict(kind="synthetic", model="realistic", version="1",
                 parameters=dict(seed=1, count=2))))
-            replay = subprocess.run(["bash", str(script)], capture_output=True, text=True,
-                                    env=dict(os.environ, TRAFFIC_SOURCE_SPEC=str(spec),
-                                             SEND_MODE="replay", PROMETHEUS_BIN="python3"))
+            replay = subprocess.run([sys.executable, str(script), "--traffic-source-spec", str(spec),
+                                     "--send-mode", "replay", "--dry-run"], capture_output=True, text=True)
             self.assertEqual(2, replay.returncode)
             self.assertIn("synthetic traffic has ordinal timestamps", replay.stderr)
 
@@ -42,7 +41,7 @@ class TrafficEntrypointTest(unittest.TestCase):
                 sha256=hashlib.sha256(model.read_bytes()).hexdigest(), count=2,
             )))
             lineage = directory / "lineage.jsonl"
-            subprocess.run([sys.executable, str(ROOT / "scripts/materialize_traffic.py"),
+            subprocess.run([sys.executable, str(ROOT / "scripts/pipeline/materialize_traffic.py"),
                             "--lineage-model", str(model), "--namespace", "check",
                             "--max-requests", "2", "--out", str(lineage)], check=True, capture_output=True)
             rows = [json.loads(line) for line in lineage.read_text().splitlines()]
@@ -60,19 +59,19 @@ class TrafficEntrypointTest(unittest.TestCase):
                     suffix_blocks=1, zipf_alpha=1, cold_fraction=0,
                     output_tokens=4))))
             synthetic = directory / "synthetic.jsonl"
-            subprocess.run([sys.executable, str(ROOT / "scripts/materialize_traffic.py"),
+            subprocess.run([sys.executable, str(ROOT / "scripts/pipeline/materialize_traffic.py"),
                             "--spec", str(spec), "--namespace", "check",
                             "--max-requests", "2", "--out", str(synthetic)], check=True, capture_output=True)
             self.assertEqual(2, len(synthetic.read_text().splitlines()))
             model.write_bytes(model.read_bytes() + b"tampered")
-            failed = subprocess.run([sys.executable, str(ROOT / "scripts/materialize_traffic.py"),
+            failed = subprocess.run([sys.executable, str(ROOT / "scripts/pipeline/materialize_traffic.py"),
                                      "--lineage-model", str(model), "--namespace", "bad",
                                      "--out", str(directory / "bad.jsonl")], capture_output=True)
             self.assertNotEqual(0, failed.returncode)
             self.assertFalse((directory / "bad.jsonl").exists())
 
     def test_java_templates_are_reproducible_from_model(self):
-        from scripts.derive_master_templates import derive
+        from scripts.pipeline.derive_master_templates import derive
 
         model = ROOT / "data/traffic_models/frontend_20260921.xz"
         stored = json.loads((ROOT / "data/traffic_models/master_batch_templates.json").read_text())

@@ -29,7 +29,7 @@ from runtime.instance_plan import (
 )
 from runtime.resource_plan import ResourcePlanError, plan_lane_leases
 
-SCENARIO_RUNNER = Path(__file__).resolve().parents[2] / "scripts/scenario_runner.py"
+SCENARIO_RUNNER = Path(__file__).resolve().parents[2] / "scripts/commands/list_cases.py"
 STATUSES = {"PASS", "FAIL", "ERROR", "TIMEOUT", "FINDING-CONFIRMED", "FINDING-RESOLVED"}
 
 
@@ -95,7 +95,7 @@ def _catalog(args):
     instances = []
     if not SCENARIO_RUNNER.is_file():
         raise InstancePlanError(
-            "scenario_runner.py is unavailable; install the scenario compiler/runner before selecting YAML"
+            "list_cases.py is unavailable; install the scenario compiler/runner before selecting YAML"
         )
     proc = subprocess.run(
         [

@@ -1,1 +1,1 @@
-"""Developer-facing command entrypoints."""
+"""Commands, internal pipeline steps, and low-frequency probes."""

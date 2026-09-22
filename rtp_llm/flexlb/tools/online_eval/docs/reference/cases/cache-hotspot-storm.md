@@ -72,7 +72,7 @@ P 系列对比必须同时报告命中率最低值、扩散引擎数、复制份
 完成开发机前置条件后，从 `online_eval` 目录执行：
 
 ```bash
-python3 parallel_runner.py --parallel 1 --profile single-batch \
+python3 scripts/commands/run_cases.py --parallel 1 --profile single-batch \
   --instances 'cache_affinity::leader_spill_p2::single-batch,cache_affinity::leader_spill_p3::single-batch,cache_affinity::leader_spill_p4::single-batch' \
   --out-dir /path/to/new-run
 ```

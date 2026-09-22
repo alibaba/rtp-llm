@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import parallel_runner as ports
+from scripts.pipeline import execute_cases as ports
 from runtime import instance_runner as runner
 from runtime.instance_plan import parse_catalog
 from test_instance_plan import catalog
@@ -27,7 +27,8 @@ class InstanceRunnerTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.child = self.root / "scenario_runner.py"
+        self.child = self.root / "scripts/commands/list_cases.py"
+        self.child.parent.mkdir(parents=True)
         self.child.touch()
         self.data = catalog()
         patches = [
@@ -142,7 +143,7 @@ class InstanceRunnerTest(unittest.TestCase):
             + ")\n"
             + """
 from types import SimpleNamespace, ModuleType
-import scenario_runner as child
+from scripts.commands import list_cases as child
 import scenario.backend as backend
 from scenario.contracts import StageHandler, StageOutput, CheckResult
 class FixtureBackend:

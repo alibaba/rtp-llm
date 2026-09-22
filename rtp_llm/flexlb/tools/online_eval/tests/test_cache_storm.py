@@ -26,7 +26,7 @@ from scenario.contracts import (
     StageOutput,
 )
 from scenario.runtime import execute_instance
-from scenario_runner import summarize as suite_summary
+from scripts.commands.list_cases import summarize as suite_summary
 from test_scenario_runtime import Backend, Clock, source
 
 
