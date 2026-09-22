@@ -201,7 +201,7 @@ def ts_step_values(pts, times):
 
 
 def fmt_int_trunc(v):
-    """QPS 取整口径：向零截断（与 v4 报告一致：7968.684 -> 7968）。"""
+    """QPS 取整口径：向零截断（7968.684 -> 7968）。"""
     try:
         return str(int(float(v)))
     except (TypeError, ValueError):
