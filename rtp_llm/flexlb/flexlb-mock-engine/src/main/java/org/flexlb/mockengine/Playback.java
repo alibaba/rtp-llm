@@ -6,6 +6,7 @@ import java.util.Map;
 
 /** Shared playback policy; token remapping is stable across requests and shards. */
 final class Playback {
+    final PlaybackControls controls;
     final int maxLaps;
     final String identity;
     final double retain;
@@ -19,6 +20,7 @@ final class Playback {
         identity = text(env,"LAP_IDENTITY", "structural-relabel");
         if (!List.of("none", "structural-relabel", "partial").contains(identity))
             throw new IllegalArgumentException("invalid lap identity");
+        controls = new PlaybackControls(env, identity);
         retain = number(env, "LAP_RETAIN_PROBABILITY", 0, 0, 1);
         seed = Long.parseLong(text(env,"PLAYBACK_SEED", "0"));
         burstFactor = number(env, "BURST_FACTOR", 1, 1, Double.MAX_VALUE);
@@ -42,11 +44,13 @@ final class Playback {
     boolean more(int completedLap) { return maxLaps == 0 || completedLap + 1 < maxLaps; }
 
     Map<String,Object> manifest() {
-        return Map.ofEntries(Map.entry("max_laps",maxLaps),Map.entry("identity",identity),
+        Map<String,Object> result = new java.util.LinkedHashMap<>(Map.ofEntries(Map.entry("max_laps",maxLaps),Map.entry("identity",identity),
             Map.entry("retain_probability",retain),Map.entry("seed",seed),
             Map.entry("burst_factor",burstFactor),Map.entry("burst_period_seconds",burstPeriod),
             Map.entry("burst_duty",burstDuty),Map.entry("diurnal_amplitude",diurnalAmplitude),
-            Map.entry("diurnal_period_seconds",diurnalPeriod));
+            Map.entry("diurnal_period_seconds",diurnalPeriod)));
+        controls.snapshot(result);
+        return result;
     }
 
     /** Disjoint token ranges per fresh lap; fail instead of silently colliding. */
@@ -59,7 +63,9 @@ final class Playback {
             int generation = lap;
             if (identity.equals("partial")) {
                 long key = b < originalKeys.size() ? originalKeys.get(b) : tokens.hashCode();
-                while (generation > 0 && unit(mix(key ^ seed ^ (generation * 0x9e3779b97f4a7c15L))) < retain)
+                if (controls.schedule != null) {
+                    generation = unit(mix(key ^ seed)) < controls.retention(lap) ? 0 : lap;
+                } else while (generation > 0 && unit(mix(key ^ seed ^ (generation * 0x9e3779b97f4a7c15L))) < retain)
                     generation--;
             }
             if ((generation+1L)*tokenStride-1 > Integer.MAX_VALUE)
@@ -87,8 +93,22 @@ final class Playback {
      * Unmodulated uniform/ramp use the existing exact inverse.
      */
     final class Clock {
-        private double cursor, count;
+        private double cursor, count, randomIntensity;
+        private long randomIndex = -1;
         double due(long index, double qps, double ramp) {
+            if (controls.curve != null || controls.arrival.equals("poisson")) {
+                double intensity = index;
+                if (controls.arrival.equals("poisson")) {
+                    if (index < randomIndex) throw new IllegalArgumentException("arrival indices must increase");
+                    while (randomIndex < index) {
+                        randomIndex++;
+                        double u = unit(mix(randomIndex + (seed ^ 0xd1b54a32d192ed03L) + 0x9e3779b97f4a7c15L));
+                        randomIntensity += u == 0 ? 0x1.0p-53 : -Math.log1p(-u);
+                    }
+                    intensity = randomIntensity;
+                }
+                return controls.inverse(intensity/qps);
+            }
             if (burstFactor == 1 && diurnalAmplitude == 0)
                 return JavaLoadClient.uniformDueSeconds(index,qps,ramp);
             if (index < count) throw new IllegalArgumentException("arrival indices must increase");

@@ -1,9 +1,11 @@
 """Scenario client playback parameters. Sources never decide when to send."""
 import math
+import json
+from traffic import playback_controls as controls
 
 FIELDS={'mode','qps','speed','max_laps','identity','retain_probability','seed',
         'ramp_up_seconds','burst_factor','burst_period_seconds','burst_duty',
-        'diurnal_amplitude','diurnal_period_seconds'}
+        'diurnal_amplitude','diurnal_period_seconds'} | controls.FIELDS
 
 
 def normalize(client):
@@ -11,7 +13,7 @@ def normalize(client):
     p=env.pop('playback',None)
     if p is None:
         # Existing raw client controls are still accepted; LOOP must be explicit.
-        return env,dict(mode=env.get('SEND_MODE','replay'),
+        return env,dict(**controls.from_env(env),mode=env.get('SEND_MODE','replay'),
             qps=float(env.get('SEND_MODE_QPS',0)),speed=float(env.get('REPLAY_SPEED',1)),
             max_laps=int(env.get('MAX_LAPS',0 if env.get('LOOP')=='true' else 1)),
             identity=env.get('LAP_IDENTITY','structural-relabel'),
@@ -25,7 +27,7 @@ def normalize(client):
         raise ValueError('unknown playback fields')
     raw={'SEND_MODE','SEND_MODE_QPS','REPLAY_SPEED','LOOP','MAX_LAPS','LAP_IDENTITY',
          'LAP_RETAIN_PROBABILITY','PLAYBACK_SEED','RAMP_UP_SECONDS','GRADIENT',
-         'BURST_FACTOR','BURST_PERIOD_SECONDS','BURST_DUTY','DIURNAL_AMPLITUDE','DIURNAL_PERIOD_SECONDS'}
+         'BURST_FACTOR','BURST_PERIOD_SECONDS','BURST_DUTY','DIURNAL_AMPLITUDE','DIURNAL_PERIOD_SECONDS'} | controls.RAW
     if set(env)&raw:
         raise ValueError('playback cannot be combined with raw pacing/loop controls')
     mode=p.get('mode','uniform')
@@ -54,6 +56,9 @@ def normalize(client):
         raise ValueError('gradient requires ramp_up_seconds')
     if type(p.get('seed',0)) is not int:
         raise ValueError('playback seed must be integer')
+    advanced = controls.validate(p, mode=mode, identity=identity,
+        scalar_present='retain_probability' in p, legacy_pacing=(mode in ('burst','gradient')
+            or ramp != 0 or p.get('burst_factor',1) != 1 or p.get('diurnal_amplitude',0) != 0))
     env.update(SEND_MODE='replay' if mode=='true-ts' else 'uniform',SEND_MODE_QPS=str(qps),
         REPLAY_SPEED=str(speed),MAX_LAPS=str(laps),LOOP='true' if laps!=1 else 'false',
         LAP_IDENTITY=identity,LAP_RETAIN_PROBABILITY=str(probability),PLAYBACK_SEED=str(p.get('seed',0)),
@@ -66,6 +71,11 @@ def normalize(client):
         raise ValueError('burst mode requires burst_factor > 1')
     if mode=='true-ts' and any(k in p for k in ('qps','ramp_up_seconds','burst_factor','diurnal_amplitude')):
         raise ValueError('true-ts uses only source timestamps and replay speed')
+    for key, raw_key in [('rate_curve','RATE_CURVE'),('arrival','ARRIVAL_PROCESS'),('retain_schedule','LAP_RETAIN_SCHEDULE')]:
+        if key in advanced:
+            env[raw_key] = advanced[key] if key == 'arrival' else json.dumps(advanced[key], separators=(',',':'))
+    if 'retain_schedule' in advanced:
+        env.pop('LAP_RETAIN_PROBABILITY')
     return env,dict(p,mode=mode,max_laps=laps,identity=identity,retain_probability=probability,seed=p.get('seed',0))
 
 
@@ -74,9 +84,13 @@ def comparison_notice(a,b):
     differences=[k for k in fields if a.get(k)!=b.get(k)]
     if a.get('source',{}).get('kind')!=b.get('source',{}).get('kind'):
         differences.append('source kind')
-    for k in ('identity','retain_probability'):
+    for k in ('identity','retain_probability','seed','rate_curve','arrival','retain_schedule'):
         if a.get('playback',{}).get(k)!=b.get('playback',{}).get(k):differences.append(k)
-    return ('不可直比命中率绝对值 / cache-hit absolute values are not directly comparable: '+', '.join(differences)) if differences else None
+    for k in ('output_distribution','output_semantics','output_cap'):
+        if a.get(k)!=b.get(k): differences.append(k)
+    if a.get('source',{}).get('parameters',{}).get('output_distribution') != b.get('source',{}).get('parameters',{}).get('output_distribution'):
+        differences.append('source.output_distribution')
+    return ('DIFFERENT / 不可直比命中率绝对值 / cache-hit absolute values are not directly comparable: '+', '.join(differences)) if differences else None
 
 
 def iteration_windows(rows):

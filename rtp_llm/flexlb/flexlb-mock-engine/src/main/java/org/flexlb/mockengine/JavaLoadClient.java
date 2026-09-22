@@ -237,6 +237,11 @@ public final class JavaLoadClient implements AutoCloseable {
                 || config.replayUniquePrefix || config.forcePriority > 0)) {
             throw new IllegalArgumentException("controlled traces forbid truncation, prefix salting and priority overrides");
         }
+        if (playback.controls.enabled() && (config.maxInputLen > 0 || config.maxOutputLen > 0
+                || config.replayUniquePrefix || config.forcePriority > 0 || config.gradient))
+            throw new IllegalArgumentException("advanced playback requires canonical trace without runtime overrides");
+        if (playback.controls.curve != null && !config.isUniform() && config.replaySpeed <= 0)
+            throw new IllegalArgumentException("replay rate_curve requires positive REPLAY_SPEED");
         List<TraceRecord> records = loadTrace(config.traceFile);
         if (records.isEmpty()) {
             throw new RuntimeException("no replayable requests loaded from " + config.traceFile);
@@ -247,7 +252,7 @@ public final class JavaLoadClient implements AutoCloseable {
         // Playback owns wall duration and explicit laps. Source timestamps
         // must not be truncated before replay-speed scaling or sharding.
         boolean cyclic = playback.maxLaps != 1;
-        records = filterAndShard(records,
+        if (!playback.controls.enabled()) records = filterAndShard(records,
                 0,
                 cyclic ? 0 : config.limit,
                 config.numShards, config.shardIndex);
@@ -288,6 +293,18 @@ public final class JavaLoadClient implements AutoCloseable {
         playbackManifest.put("qps", config.sendModeQps);
         playbackManifest.put("speed", config.replaySpeed);
         playbackManifest.put("ramp_up_seconds", config.rampUpSeconds);
+        // Additive evidence also covers output-only trace transformations; scheduling is unchanged.
+        playbackManifest.putIfAbsent("planner_version", "PLAYBACK_LEGACY_V1");
+        playbackManifest.put("trace_sha256", PlaybackPlan.sha256(Path.of(config.traceFile)));
+        playbackManifest.put("num_shards", config.numShards);
+        playbackManifest.put("shard_index", config.shardIndex);
+        playbackManifest.put("duration_seconds", config.durationS);
+        playbackManifest.put("limit", config.limit);
+        playbackManifest.put("trace_first_ts_ms", sourceFirstTsMs);
+        playbackManifest.put("trace_span_ms", sourceSpanMs);
+        playbackManifest.put("token_stride", tokenStride);
+        playbackManifest.put("offline_plan_supported", config.maxInputLen == 0 && config.maxOutputLen == 0
+                && config.forcePriority == 0 && !config.gradient);
         MAPPER.writeValue(Path.of(config.outputDir,"playback.json").toFile(), playbackManifest);
         String controlDirectory = System.getenv("FLOW_CONTROL_DIR");
         if (controlDirectory != null && !controlDirectory.isBlank()) {
@@ -360,7 +377,15 @@ public final class JavaLoadClient implements AutoCloseable {
         if (flowControl != null) flowControl.publish("SENDING", 0, 0, 0);
         sending:
         while (true) {
+            int sourceIndex = -1;
             for (TraceRecord record : records) {
+                sourceIndex++;
+                long globalIndex = playback.controls.enabled() ? (long)loopIdx*records.size()+sourceIndex
+                        : (long)sentCount*config.numShards+config.shardIndex;
+                if (playback.controls.enabled()) {
+                    if (config.limit > 0 && globalIndex >= config.limit) break sending;
+                    if (globalIndex % config.numShards != config.shardIndex) continue;
+                }
                 if (flowControl != null && flowControl.stopRequested()) break sending;
                 if (config.durationS > 0) {
                     if ((System.nanoTime() - replayStartedNanos) / 1_000_000_000L >= config.durationS) {
@@ -398,7 +423,7 @@ public final class JavaLoadClient implements AutoCloseable {
                     // linear-QPS-climb schedule (see uniformDueSeconds):
                     // pacing lag keeps measuring send_start against the
                     // ramped ideal schedule, so it is not polluted by ramp.
-                    dueSeconds = playbackClock.due((long)sentCount * config.numShards + config.shardIndex,
+                    dueSeconds = playbackClock.due(globalIndex,
                             config.sendModeQps, config.rampUpSeconds);
                     if (config.durationS > 0 && dueSeconds >= config.durationS) break sending;
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
@@ -412,7 +437,7 @@ public final class JavaLoadClient implements AutoCloseable {
                     }
                 } else if (currentSpeed > 0) {
                     long loopOffsetMs = (long) loopIdx * traceSpanMs;
-                    dueSeconds = (record.tsMs - firstTsMs + loopOffsetMs) / 1000.0 / currentSpeed;
+                    dueSeconds = playback.controls.inverse((record.tsMs - firstTsMs + loopOffsetMs) / 1000.0 / currentSpeed);
                     if (config.durationS > 0 && dueSeconds >= config.durationS) break sending;
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
@@ -1261,6 +1286,8 @@ public final class JavaLoadClient implements AutoCloseable {
     private List<TraceRecord> loadTrace(String path) throws IOException {
         List<TraceRecord> records = new ArrayList<>();
         java.util.Set<Long> controlledIds = new java.util.HashSet<>();
+        boolean strict = !System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()
+                || (playback != null && playback.controls.enabled());
         try (java.io.BufferedReader reader = Files.newBufferedReader(Path.of(path))) {
             String line;
             while ((line = reader.readLine()) != null) {
@@ -1269,17 +1296,16 @@ public final class JavaLoadClient implements AutoCloseable {
                 }
                 try {
                     JsonNode raw = MAPPER.readTree(line);
-                    if (!System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()) validateControlledTrace(raw);
+                    if (strict) validateControlledTrace(raw);
                     TraceRecord record = parseTraceRecord(raw);
                     if (record != null) {
-                        if (!System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()
-                                && !controlledIds.add(record.requestId)) {
+                        if (strict && !controlledIds.add(record.requestId)) {
                             throw new IOException("duplicate controlled trace request identity");
                         }
                         records.add(record);
                     }
                 } catch (Exception e) {
-                    if (!System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()) {
+                    if (strict) {
                         throw new IOException("invalid controlled trace; no rows may be silently filtered", e);
                     }
                     System.err.println("skipping malformed trace line: " + e.getMessage());

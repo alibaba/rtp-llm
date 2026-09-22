@@ -11,6 +11,8 @@
 3. [功能测试](development/functional.md)：功能合同的选择、执行和判定。
 4. [场景测试](development/scenario.md)：持续负载、干预、恢复和证据完整性。
 
+5. [播放调节与复现](development/playback-controls.md)：时变曲线、Poisson 到达、输出分布、逐轮保留计划及离线证据复原。
+
 ### Whale
 
 1. [CI 与部署](whale/README.md)：完整 CPU bundle、独立引擎镜像及验收链路。
