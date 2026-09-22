@@ -514,9 +514,14 @@ class QuantizationConfig:
     def __init__(self):
         self.int8_mode: int = 0
         self.quantization: str = ""
+        self.w8a8_quant_chunk_rows: int = 1024
 
     def to_string(self):
-        return f"int8_mode: {self.int8_mode}\n" f"quantization: {self.quantization}"
+        return (
+            f"int8_mode: {self.int8_mode}\n"
+            f"quantization: {self.quantization}\n"
+            f"w8a8_quant_chunk_rows: {self.w8a8_quant_chunk_rows}"
+        )
 
     def get_quantization(self):
         """Get quantization string with compatibility logic.
@@ -525,12 +530,21 @@ class QuantizationConfig:
         or weight_type is INT8 (from environment variable).
         """
         if self.quantization:
+            if self.quantization.upper() == "W8A8_INT8_PER_CHANNEL":
+                weight_type = os.environ.get("WEIGHT_TYPE", "").upper()
+                if self.int8_mode == 1 or weight_type == "INT8":
+                    conflict = (
+                        "INT8_MODE=1" if self.int8_mode == 1 else "WEIGHT_TYPE=INT8"
+                    )
+                    raise ValueError(
+                        "QUANTIZATION=W8A8_INT8_PER_CHANNEL conflicts with "
+                        f"{conflict}; clear the legacy INT8 setting before "
+                        "requesting online W8A8 quantization"
+                    )
             return self.quantization
         if self.int8_mode == 1:
             return "INT8"
         # Check weight_type from environment variable (compatibility logic)
-        import os
-
         weight_type = os.environ.get("WEIGHT_TYPE", "").upper()
         if weight_type == "INT8":
             return "INT8"

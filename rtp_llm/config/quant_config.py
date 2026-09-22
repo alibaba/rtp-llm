@@ -217,9 +217,7 @@ class QuantizationConfig(ABC):
                 group_size = weight_block[0]
                 quant_method = Fp8BlockWiseQuantConfig.get_method()
         if quant_method == "compressed-tensors":
-            group_name, group_config = _pick_config_group(
-                quant_config["config_groups"]
-            )
+            group_name, group_config = _pick_config_group(quant_config["config_groups"])
             weights_config = group_config["weights"]
             # Absent or explicitly null when the checkpoint quantizes weights
             # only. Legacy FP8 per-channel checkpoints accept that shape, while
@@ -229,11 +227,7 @@ class QuantizationConfig(ABC):
             weight_type = weights_config.get("type")
             weight_strategy = weights_config.get("strategy")
             weight_dynamic = weights_config.get("dynamic", False)
-            if (
-                weight_type == "float"
-                and bits == 8
-                and weight_strategy == "channel"
-            ):
+            if weight_type == "float" and bits == 8 and weight_strategy == "channel":
                 if activation_config is None:
                     logging.getLogger(__name__).warning(
                         "compressed-tensors group %s has no input_activations; "
@@ -292,17 +286,11 @@ class QuantizationConfig(ABC):
                         "ignore_patterns": ignore_patterns,
                     }
                 )
-            elif (
-                weight_type == "int"
-                and bits == 4
-                and weight_strategy == "group"
-            ):
+            elif weight_type == "int" and bits == 4 and weight_strategy == "group":
                 # Kimi-K2.5 routed-expert MoE: int4 g32 symmetric, dyn fp8 act.
                 group_size = int(weights_config.get("group_size", 32))
                 ignore_patterns = quant_config.get("ignore", [])
-                quant_method = (
-                    CompressedW4A8Int4PerChannelQuantConfig.get_method()
-                )
+                quant_method = CompressedW4A8Int4PerChannelQuantConfig.get_method()
                 return CompressedW4A8Int4PerChannelQuantConfig.from_config(
                     {
                         "bits": bits,
@@ -334,12 +322,12 @@ class QuantizationConfig(ABC):
             ):
                 quant_method = Fp8PerChannelQuarkQuantConfig.get_method()
             if (
-                quark_weights_config["dtype"] == "fp4" 
+                quark_weights_config["dtype"] == "fp4"
                 and quark_weights_config["qscheme"] == "per_group"
             ):
                 quant_method = MXFp4QuarkQuantConfig.get_method()
                 group_size = quark_weights_config["group_size"]
-                
+
         if quant_method == "modelopt":
             config_groups = quant_config["config_groups"]
             weights_config = config_groups["group_0"]["weights"]
@@ -349,14 +337,17 @@ class QuantizationConfig(ABC):
             group_size = weights_config["group_size"]
             if (
                 weights_config["type"] == "float"
-                and bits == 4 and activation_bits == 4
+                and bits == 4
+                and activation_bits == 4
                 and group_size == 16
             ):
                 quant_method = ModelOptFp4Config.get_method()
                 mixed_attention = False
                 text_config = config_json.get("text_config", None)
                 if text_config is not None:
-                    full_attention_interval = text_config.get("full_attention_interval", 0)
+                    full_attention_interval = text_config.get(
+                        "full_attention_interval", 0
+                    )
                     if full_attention_interval != 0:
                         mixed_attention = True
                 return ModelOptFp4Config.from_config(
@@ -368,7 +359,6 @@ class QuantizationConfig(ABC):
                         "mixed_attention": mixed_attention,
                     }
                 )
-            
 
         result = cls.from_config(
             {
@@ -594,7 +584,11 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
 
 class QuarkQuantConfig(QuantizationConfig):
     def __init__(
-        self, bits: int = 0, group_size: int = 0, is_quanted: bool = False, **kwargs: Any
+        self,
+        bits: int = 0,
+        group_size: int = 0,
+        is_quanted: bool = False,
+        **kwargs: Any,
     ):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
 
@@ -638,6 +632,7 @@ class Fp8PerChannelQuarkQuantConfig(QuarkQuantConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerChannelQuarkQuantConfig(**config)
+
 
 class MXFp4QuarkQuantConfig(QuarkQuantConfig):
     def __init__(
@@ -794,7 +789,7 @@ class ModelOptFp4Config(QuantizationConfig):
 
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
-        self.mixed_attention = kwargs.get('mixed_attention', False)
+        self.mixed_attention = kwargs.get("mixed_attention", False)
 
     @classmethod
     def get_method(cls) -> str:
@@ -909,7 +904,7 @@ class CompressedW4A8Int4PerChannelQuantConfig(QuantizationConfig):
 
 
 class CompressedW8A8Int8PerChannelQuantConfig(QuantizationConfig):
-    """Pre-quantized compressed-tensors W8A8 INT8 configuration.
+    """Compressed-tensors W8A8 INT8 configuration.
 
     Weights are static symmetric INT8 per output channel and activations are
     dynamically quantized to symmetric INT8 per token.
@@ -921,6 +916,7 @@ class CompressedW8A8Int8PerChannelQuantConfig(QuantizationConfig):
         group_size: int = 0,
         is_quanted: bool = True,
         ignore_patterns: Optional[Sequence[str]] = None,
+        load_chunk_rows: int = 1024,
     ):
         assert (
             bits == 8 and group_size == 0
@@ -929,6 +925,7 @@ class CompressedW8A8Int8PerChannelQuantConfig(QuantizationConfig):
         # Every parameter is named and there is no kwargs sink, so a misspelled
         # key raises instead of silently leaving the exclude set empty.
         self._ignore_patterns: List[str] = list(ignore_patterns or [])
+        self.load_chunk_rows = load_chunk_rows
         # WeightModule support checks use exclude_modules for checkpoint paths and
         # {i}-templated model weight definitions. Concrete layer entries are
         # allowed here because compressed-tensors checkpoints also list ignored
@@ -937,11 +934,22 @@ class CompressedW8A8Int8PerChannelQuantConfig(QuantizationConfig):
         # fast when it intersects a quantizable template.
         self.exclude_modules = set(self._ignore_patterns)
 
+    @property
+    def load_chunk_rows(self) -> int:
+        return self._load_chunk_rows
+
+    @load_chunk_rows.setter
+    def load_chunk_rows(self, value: int) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(
+                f"load_chunk_rows must be a positive integer, got {value!r}"
+            )
+        self._load_chunk_rows = value
+
     @classmethod
     def get_method(cls) -> str:
-        # Not registered in preset_quant_config: this scheme is recognised from
-        # the checkpoint's own quantization_config, not selected by hand through
-        # --quantization.
+        # Keep the runtime identifier shared by checkpoint and load-time
+        # weights. W8A8_INT8_PER_CHANNEL is the user-facing online alias.
         return "W8A8_INT8_PER_CHANNEL_COMPRESSED"
 
     @classmethod
@@ -971,6 +979,7 @@ class CompressedW8A8Int8PerChannelQuantConfig(QuantizationConfig):
             "group_size",
             "is_quanted",
             "ignore_patterns",
+            "load_chunk_rows",
         }
         unknown_keys = set(config) - allowed_keys
         if unknown_keys:
@@ -982,6 +991,7 @@ class CompressedW8A8Int8PerChannelQuantConfig(QuantizationConfig):
             group_size=config.get("group_size", 0),
             is_quanted=config.get("is_quanted", True),
             ignore_patterns=config.get("ignore_patterns"),
+            load_chunk_rows=config.get("load_chunk_rows", 1024),
         )
 
 
@@ -1004,9 +1014,7 @@ DEFAULT_MODELOPT_FP4_QUANT_CONFIG = ModelOptFp4Config(
 )
 
 DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = W4a8Int4PerChannelQuantConfig(
-    bits=4,
-    group_size=128,
-    is_quanted=False
+    bits=4, group_size=128, is_quanted=False
 )
 
 DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = (
@@ -1030,6 +1038,11 @@ preset_quant_config = {
 
 
 def init_quant_config(quantization: str):
+    if quantization.upper() == "W8A8_INT8_PER_CHANNEL":
+        # This is deliberately constructed per request. Quantization configs
+        # carry mutable loader state, so an online preset must not share a
+        # process-wide instance with another model startup.
+        return CompressedW8A8Int8PerChannelQuantConfig(is_quanted=False)
     try:
         quant_config_dict = json.loads(quantization)
         quant_config: QuantizationConfig = QuantizationConfig.from_config(

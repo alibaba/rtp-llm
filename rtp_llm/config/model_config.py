@@ -5,9 +5,9 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
-
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
+    CompressedW8A8Int8PerChannelQuantConfig,
     Fp8BlockWiseQuantConfig,
     QuantizationConfig,
     W4a8Int4PerChannelQuantConfig,
@@ -104,6 +104,7 @@ class ModelConfig(CppModelConfig):
         "template_type",
         "model_name",
         "quant_config",
+        "w8a8_quant_chunk_rows",
         "inter_size",
         "dense_inter_size",
         "moe_inter_size",
@@ -597,6 +598,7 @@ class ModelConfig(CppModelConfig):
         self.quantization: str = (
             ""  # Quantization method string (e.g., "INT8", "FP8", etc.)
         )
+        self.w8a8_quant_chunk_rows: int = 1024
         self.src_quantization_bit: int = 0
         self.config_dtype: Optional[str] = None
 
@@ -656,9 +658,42 @@ class ModelConfig(CppModelConfig):
         Args:
             kv_cache_config: Optional KVCacheConfig to set attn_config.kv_cache_dtype
         """
-        # Load quant_config
+        explicit_online_w8a8 = (
+            self.quantization or ""
+        ).upper() == "W8A8_INT8_PER_CHANNEL"
+
+        # Load quant_config. An explicit online W8A8 request is intentionally
+        # handled before the legacy checkpoint-first path: it may reuse a W8A8
+        # checkpoint, but it must never silently turn into another scheme.
         quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
-        if not quant_config:
+        if explicit_online_w8a8:
+            if quant_config is None:
+                # Qwen3.5 and Qwen3.6 share RTP-LLM's qwen35_moe model
+                # implementation. Check that resolved runtime model identity
+                # rather than checkpoint model_type/version metadata.
+                if self.model_type != "qwen35_moe":
+                    raise ValueError(
+                        "QUANTIZATION=W8A8_INT8_PER_CHANNEL online quantization "
+                        "is supported only for the qwen35_moe model family; "
+                        f"got model_type={self.model_type!r}"
+                    )
+                quant_config = CompressedW8A8Int8PerChannelQuantConfig(
+                    is_quanted=False,
+                    load_chunk_rows=self.w8a8_quant_chunk_rows,
+                )
+                logging.info("need online W8A8 quantization")
+            elif isinstance(quant_config, CompressedW8A8Int8PerChannelQuantConfig):
+                # Retain pre-quantized weights but apply the requested loading
+                # chunking policy to the configuration passed to the loader.
+                quant_config.load_chunk_rows = self.w8a8_quant_chunk_rows
+                logging.info("using checkpoint W8A8 quantization")
+            else:
+                raise ValueError(
+                    "QUANTIZATION=W8A8_INT8_PER_CHANNEL requests W8A8, but "
+                    f"checkpoint quantization is {quant_config.get_method()}; "
+                    "use a non-quantized or W8A8 checkpoint"
+                )
+        elif not quant_config:
             if self.quantization:
                 quant_config = init_quant_config(self.quantization)
                 logging.info(f"need_load_quant by {quant_config.get_method()}")
@@ -953,6 +988,7 @@ def build_model_config(
     # Set quantization from quantization_config
     if quantization_config is not None:
         model_config.quantization = quantization_config.get_quantization()
+        model_config.w8a8_quant_chunk_rows = quantization_config.w8a8_quant_chunk_rows
 
     # Initialize precision configuration (uses self.ckpt_path and self.quantization)
     # This will initialize data_type from act_type (or config_dtype), set attn_config.kv_cache_dtype
