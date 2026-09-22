@@ -34,6 +34,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         cu_seqlens: torch.LongTensor | None = None,
         return_intermediate_states: bool = False,
         lower_bound: float | None = None,
+        intermediate_states_in_fp32: bool = False,
     ):
         chunk_size = 64
 
@@ -69,6 +70,7 @@ class ChunkKDAFunction(torch.autograd.Function):
                 dt_bias=dt_bias,
                 disable_recompute=False,
                 return_intermediate_states=return_intermediate_states,
+                intermediate_states_in_fp32=intermediate_states_in_fp32,
             )
         )
 
@@ -93,6 +95,7 @@ def chunk_kda(
     cu_seqlens: torch.LongTensor | None = None,
     return_intermediate_states: bool = False,
     lower_bound: float | None = None,
+    intermediate_states_in_fp32: bool = False,
     **kwargs,
 ):
     r"""
@@ -163,4 +166,5 @@ def chunk_kda(
         cu_seqlens,
         return_intermediate_states,
         lower_bound,
+        intermediate_states_in_fp32,
     )

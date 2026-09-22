@@ -273,6 +273,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
             return_intermediate_states=True,
+            intermediate_states_in_fp32=getattr(self, "intermediate_states_in_fp32", False),
             A_log=self.alog,
             dt_bias=self.dt_bias,
             lower_bound=self.gate_lower_bound,

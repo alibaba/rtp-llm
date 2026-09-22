@@ -47,6 +47,8 @@ class KimiK3KDA(nn.Module):
         )
         self.prefill = KimiLinearKDAPrefill(cfg, parallelism, weights)
         self.decode = KimiLinearKDADecode(cfg, parallelism, weights)
+        # Preserve FP32 recurrence in block checkpoints instead of widening BF16 snapshots.
+        self.prefill.intermediate_states_in_fp32 = True
         self.prefill.gate_lower_bound = runtime.kda_gate_lower_bound
         self.decode.gate_lower_bound = runtime.kda_gate_lower_bound
 
