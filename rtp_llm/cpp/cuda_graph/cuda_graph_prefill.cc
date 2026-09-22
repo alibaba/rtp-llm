@@ -119,17 +119,13 @@ void CudaGraphRunner::capturePrefill() {
         }
         // Prefill reshapes common metadata after prepareCaptureInputs synchronized the tag map.
         refreshTaggedAttentionInputs(inputs);
-        const int output_capacity           = isGenerationPrefillCudaGraph() ? seq_len : max_bs_ * num_tokens_per_bs_;
+        // Both logits input and recurrent hidden must use the bucket's output
+        // shape. Only HC draft prefill produces fixed-capacity outputs.
+        const int output_capacity =
+            usesFixedCapacityMtpDraftPrefillCudaGraph() ? max_bs_ * num_tokens_per_bs_ : seq_len;
         graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, output_capacity);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             prepareFmhaImpl(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
-        // HC-shaped MTP draft prefill keeps its output at fixed graph capacity.
-        // Other paths produce the real flattened seq_len and must keep their
-        // metadata shapes aligned.
-        if (!usesFixedCapacityMtpDraftPrefillCudaGraph()) {
-            graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
-                graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
-        }
         capturePrefillOneSeqLen(seq_len);
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(seq_len, "seq len");
