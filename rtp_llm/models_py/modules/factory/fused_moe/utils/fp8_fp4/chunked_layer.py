@@ -65,9 +65,14 @@ def resolve_moe_max_tokens_per_rank(
         # regressing decode TPOT ~2x on 2-host EP8 topologies. Keep the
         # V4Args pre-resolve floor for the buffer: the module-level buffer
         # cache means one allocation, not per-layer.
-        floor = int(current_max_tokens_per_rank or 0)
-        if floor > resolved:
-            return floor
+        # Opt-in via MOE_DECODE_BUFFER_FLOOR: set on multi-host EP topologies
+        # (GB200/EP8) where the old package's large buffer selected a faster
+        # deep_gemm tiling. On single-host EP (B300/EP4) the large buffer
+        # selects a SLOWER tiling — keep the resolved value there.
+        import os as _os
+        _floor_env = int(_os.environ.get("MOE_DECODE_BUFFER_FLOOR", "0") or 0)
+        if _floor_env > 0:
+            return max(resolved, _floor_env)
         return resolved
 
     budget = int(current_max_tokens_per_rank)
