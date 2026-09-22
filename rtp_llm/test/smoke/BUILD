@@ -109,6 +109,26 @@ custom_smoke_test(
     gpu_type = ["H20"],
 )
 
+# PP=2 MTP multi-task system prompt: build stream is a pure prefill (max_new_tokens=1),
+# SP dispatch enforces accepted_length==1 for context streams, pump loop exits normally.
+custom_smoke_test(
+    name = "qwen35_multi_task_prompt_pp2_mtp_test",
+    main = "pp_test.py",
+    args = ["--cases=multi_task_prompt_pp2_mtp"],
+    smoke_args = "--tp_size 1 --dp_size 1 --world_size 2 --act_type BF16 --max_seq_len 8192 --seq_size_per_block 2048 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
+    gpu_type = ["H20"],
+)
+
+# PP=2 PD separation + MTP: P and D each build resident KV through their own PP pipelines
+# with speculative decoding enabled; D-side prefix reuse skips KV transfer for resident blocks.
+custom_smoke_test(
+    name = "qwen35_multi_task_prompt_pp2_pd_mtp_test",
+    main = "pp_test.py",
+    args = ["--cases=multi_task_prompt_pp2_pd_mtp"],
+    smoke_args = "--tp_size 1 --dp_size 1 --world_size 4 --act_type BF16 --max_seq_len 8192 --seq_size_per_block 2048 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
+    gpu_type = ["H20"],
+)
+
 # The same entry supports model overrides and --cases / PP_TEST_CASES.
 # Keep the original target available for existing PD smoke commands.
 test_suite(

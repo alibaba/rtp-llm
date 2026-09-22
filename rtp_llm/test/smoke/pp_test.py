@@ -184,6 +184,23 @@ VARIANTS.update(
             "pd": True,
             "decode_tp": 2,
         },
+        "multi_task_prompt_pp2_mtp": {
+            "pp": 2,
+            "tp": 1,
+            "dp": 1,
+            "ep": 1,
+            "sp": 1,
+            "block_size": 2048,
+        },
+        "multi_task_prompt_pp2_pd_mtp": {
+            "pp": 2,
+            "tp": 1,
+            "dp": 1,
+            "ep": 1,
+            "sp": 1,
+            "block_size": 2048,
+            "pd": True,
+        },
     }
 )
 
@@ -989,6 +1006,35 @@ MULTI_TASK_CASES = [
     ("counter", "Count the positive integers in order: 1, 2, 3,", 16),
 ]
 
+# Long prompts for models requiring large seq_size_per_block (e.g. Qwen3.5 MTP needs 2048).
+# Each prompt must exceed block_size tokens so at least one complete block is registered
+# as resident KV after dropLastPartialBlock.
+_LONG_TRANSLATOR = (
+    "You are a professional translator specializing in technical and literary texts. "
+    "Translate the user's text into French while preserving the original meaning, tone, "
+    "and punctuation as faithfully as possible. Output only the translation without any "
+    "explanation or extra commentary. Maintain formal register unless the source is clearly "
+    "informal. Keep proper nouns untranslated unless a standard French equivalent exists. "
+    "Preserve paragraph structure and line breaks from the original text. When encountering "
+    "ambiguous phrases choose the interpretation that best fits the surrounding context. "
+)
+_LONG_COUNTER = (
+    "You are a precise sequence assistant that continues numeric or patterned sequences "
+    "exactly without skipping repeating or reordering any element. Output only the "
+    "continuation with no surrounding words or explanation. Verify each element against "
+    "the established pattern before emitting it. If the pattern is arithmetic maintain "
+    "the common difference. If geometric maintain the common ratio. For alternating or "
+    "composite patterns identify all sub-patterns and extend each one correctly. "
+)
+MULTI_TASK_PROMPTS_LONG = [
+    {"task_id": "translator", "prompt": _LONG_TRANSLATOR * 30},
+    {"task_id": "counter", "prompt": _LONG_COUNTER * 30},
+]
+MULTI_TASK_CASES_LONG = [
+    ("translator", "The capital of France is", 8),
+    ("counter", "Count the positive integers in order: 1, 2, 3,", 16),
+]
+
 
 class MultiTaskPromptPPTest(unittest.TestCase):
     """PP multi-task system prompt: build resident KV at startup, reuse it per request.
@@ -1008,19 +1054,22 @@ class MultiTaskPromptPPTest(unittest.TestCase):
     def shortDescription(self):
         return self.case_name
 
-    def start_server(self, checkpoint, gpu_ids, pp, tp, dp, ep, role_name, cp=1):
+    def start_server(
+        self, checkpoint, gpu_ids, pp, tp, dp, ep, role_name, cp=1, sp=0, block_size=16
+    ):
         world_size = pp * tp * dp
         self.assertGreaterEqual(
             len(gpu_ids), world_size, f"need {world_size} GPUs, got {gpu_ids}"
         )
         output_dir = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "."))
         output_dir.mkdir(parents=True, exist_ok=True)
+        prompts = MULTI_TASK_PROMPTS_LONG if block_size > 16 else MULTI_TASK_PROMPTS
         prompt_file = output_dir / f"{role_name}_multi_task_prompt.json"
         prompt_file.write_text(
-            json.dumps(MULTI_TASK_PROMPTS, ensure_ascii=False), encoding="utf-8"
+            json.dumps(prompts, ensure_ascii=False), encoding="utf-8"
         )
         args = (
-            base_smoke_args()
+            base_smoke_args(default_seq_size_per_block=block_size)
             + [
                 "--pp_size",
                 str(pp),
@@ -1039,7 +1088,7 @@ class MultiTaskPromptPPTest(unittest.TestCase):
                 "--multi_task_prompt",
                 str(prompt_file.resolve()),
             ]
-            + speculative_args(checkpoint, 0)
+            + speculative_args(checkpoint, sp)
         )
         if cp > 1:
             args += ["--prefill_cp_size", str(cp), "--cp_rotate_method", "ALL_GATHER"]
@@ -1087,20 +1136,41 @@ class MultiTaskPromptPPTest(unittest.TestCase):
         self.assertEqual(len(result["output_ids"][0]), max_new_tokens, result)
         return result
 
-    def run_with_prompt(self, checkpoint, gpu_ids, pp, tp, dp, ep, role_name, cp=1):
+    def run_with_prompt(
+        self, checkpoint, gpu_ids, pp, tp, dp, ep, role_name, cp=1, sp=0, block_size=16
+    ):
         server = self.start_server(
-            checkpoint, gpu_ids, pp, tp, dp, ep, role_name, cp=cp
+            checkpoint,
+            gpu_ids,
+            pp,
+            tp,
+            dp,
+            ep,
+            role_name,
+            cp=cp,
+            sp=sp,
+            block_size=block_size,
         )
+        cases = MULTI_TASK_CASES_LONG if block_size > 16 else MULTI_TASK_CASES
         try:
             return [
                 self.generate_with_task(server, task_id, prompt, tokens)
-                for task_id, prompt, tokens in MULTI_TASK_CASES
+                for task_id, prompt, tokens in cases
             ]
         finally:
             server.stop_server()
 
     def run_pd_with_prompt(
-        self, checkpoint, gpu_ids, pp, tp, role_name, cp=1, decode_tp=None
+        self,
+        checkpoint,
+        gpu_ids,
+        pp,
+        tp,
+        role_name,
+        cp=1,
+        decode_tp=None,
+        sp=0,
+        block_size=16,
     ):
         """Start separate PREFILL and DECODE servers (both PP>1) with multi_task_prompt."""
         if decode_tp is None:
@@ -1111,9 +1181,10 @@ class MultiTaskPromptPPTest(unittest.TestCase):
         self.assertGreaterEqual(len(gpu_ids), total_gpus, f"PD needs {total_gpus} GPUs")
         output_dir = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "."))
         output_dir.mkdir(parents=True, exist_ok=True)
+        prompts = MULTI_TASK_PROMPTS_LONG if block_size > 16 else MULTI_TASK_PROMPTS
         prompt_file = output_dir / f"{role_name}_multi_task_prompt.json"
         prompt_file.write_text(
-            json.dumps(MULTI_TASK_PROMPTS, ensure_ascii=False), encoding="utf-8"
+            json.dumps(prompts, ensure_ascii=False), encoding="utf-8"
         )
         prefill_port = MagaServerManager.get_free_port()
         decode_port = MagaServerManager.get_free_port()
@@ -1164,12 +1235,12 @@ class MultiTaskPromptPPTest(unittest.TestCase):
             port=prefill_port,
             role_name=f"{role_name}_prefill",
             smoke_args_str=shlex.join(
-                base_smoke_args()
+                base_smoke_args(default_seq_size_per_block=block_size)
                 + shlex.split(common)
                 + ["--tp_size", str(tp), "--world_size", str(prefill_ws)]
                 + ["--role_type", "PREFILL"]
                 + cp_args
-                + speculative_args(checkpoint, 0)
+                + speculative_args(checkpoint, sp)
             ),
         )
         decode = MagaServerManager(
@@ -1185,12 +1256,12 @@ class MultiTaskPromptPPTest(unittest.TestCase):
             port=decode_port,
             role_name=f"{role_name}_decode",
             smoke_args_str=shlex.join(
-                base_smoke_args()
+                base_smoke_args(default_seq_size_per_block=block_size)
                 + shlex.split(common)
                 + ["--tp_size", str(decode_tp), "--world_size", str(decode_ws)]
                 + ["--role_type", "DECODE"]
                 + (["--cp_rotate_method", "PREFILL_CP"] if cp > 1 else [])
-                + speculative_args(checkpoint, 0)
+                + speculative_args(checkpoint, sp)
             ),
         )
         try:
@@ -1244,7 +1315,10 @@ class MultiTaskPromptPPTest(unittest.TestCase):
         pp, tp, dp = variant["pp"], variant["tp"], variant.get("dp", 1)
         ep = variant.get("ep", 1)
         cp = variant.get("cp", 1)
+        sp = variant.get("sp", 0)
+        block_size = variant.get("block_size", 16)
         is_pd = variant.get("pd", False)
+        cases = MULTI_TASK_CASES_LONG if block_size > 16 else MULTI_TASK_CASES
         gpu_ids = [str(x) for x in get_gpu_ids()]
         baseline = self.run_with_prompt(
             checkpoint,
@@ -1255,6 +1329,8 @@ class MultiTaskPromptPPTest(unittest.TestCase):
             ep,
             f"{self.case_name}_pp1_baseline",
             cp=1 if is_pd else cp,
+            sp=sp,
+            block_size=block_size,
         )
         if is_pd:
             actual = self.run_pd_with_prompt(
@@ -1265,10 +1341,21 @@ class MultiTaskPromptPPTest(unittest.TestCase):
                 self.case_name,
                 cp=cp,
                 decode_tp=variant.get("decode_tp"),
+                sp=sp,
+                block_size=block_size,
             )
         else:
             actual = self.run_with_prompt(
-                checkpoint, gpu_ids, pp, tp, dp, ep, self.case_name, cp=cp
+                checkpoint,
+                gpu_ids,
+                pp,
+                tp,
+                dp,
+                ep,
+                self.case_name,
+                cp=cp,
+                sp=sp,
+                block_size=block_size,
             )
         report = {
             "case": self.case_name,
@@ -1280,15 +1367,13 @@ class MultiTaskPromptPPTest(unittest.TestCase):
             "passed": False,
         }
         try:
-            for (task_id, prompt, _), base, got in zip(
-                MULTI_TASK_CASES, baseline, actual
-            ):
+            for (task_id, prompt, _), base, got in zip(cases, baseline, actual):
                 got_reuse = got["aux_info"]["reuse_len"]
                 base_reuse = base["aux_info"]["reuse_len"]
                 self.assertGreaterEqual(
                     got_reuse,
-                    16,
-                    f"task {task_id!r}: reuse_len={got_reuse} < one full block (16); "
+                    block_size,
+                    f"task {task_id!r}: reuse_len={got_reuse} < one full block ({block_size}); "
                     f"resident prefix was not reused",
                 )
                 self.assertEqual(
@@ -1323,6 +1408,8 @@ def load_tests(loader, tests, pattern):
             "multi_task_prompt_pp2_dp2",
             "multi_task_prompt_pp2_pd",
             "multi_task_prompt_pp2_cp2",
+            "multi_task_prompt_pp2_mtp",
+            "multi_task_prompt_pp2_pd_mtp",
         ):
             case = MultiTaskPromptPPTest("test_pp_multi_task_prompt_matches_pp1")
             case.case_name = name

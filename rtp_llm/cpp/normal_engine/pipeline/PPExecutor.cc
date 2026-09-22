@@ -233,12 +233,6 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                             "DECODE imports CP KV with cp_rotate_method=PREFILL_CP");
     RTP_LLM_CHECK_WITH_INFO(!params.runtime_config.use_batch_decode_scheduler,
                             "pipeline parallelism does not support BatchDecodeScheduler");
-    const bool has_multi_task_prompt = !params.kv_cache_config.multi_task_prompt.empty()
-                                       || !params.kv_cache_config.multi_task_prompt_tokens.empty()
-                                       || !params.kv_cache_config.multi_task_prompt_str.empty();
-    RTP_LLM_CHECK_WITH_INFO(
-        !has_multi_task_prompt || params.sp_config.type == SP_TYPE_NONE,
-        "pipeline parallelism multi-task system prompts currently require SP_NONE speculative decoding");
     const char* device_input = std::getenv("RTP_LLM_DEVICE_INPUT");
     RTP_LLM_CHECK_WITH_INFO(device_input == nullptr || std::strcmp(device_input, "1") != 0,
                             "pipeline parallelism does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
